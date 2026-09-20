@@ -1,6 +1,6 @@
--- Migration 081: the fleet-health doors — the seven reads behind /health/scheduling and
--- /health/posting as SECURITY DEFINER functions owned by svc_maintenance (#751; `07` §24).
--- Statements appended to the advertised stream.
+-- Migration 081: the fleet-health doors — the estate-wide reads behind /health/scheduling,
+-- /health/posting and the Meta deauthorize callback as SECURITY DEFINER functions owned by
+-- svc_maintenance (#751; `07` §24). Statements appended to the advertised stream.
 --
 -- THE GAP, MET IN PRODUCTION. Both surfaces count across every workspace — stalled cursors, active
 -- destinations, landings, the debited cap ledger, the ready lanes, the pending outbox — and both
@@ -10,45 +10,49 @@
 -- answered never-posted for an estate with 104 landings and /health/scheduling no-signal for two
 -- active accounts, and the fleet monitors — whose whole design is that a permanent no-signal must
 -- not excuse an outage — went blind while nothing else changed. The API was rolled back the same
--- hour; this file is what lets the switch be repeated.
+-- hour; this file is what lets the switch be repeated. The review found the third tenant-less read
+-- on the API: the Meta deauthorize callback's account lookup (meta_callbacks.py), which under
+-- svc_ingress would find nothing and leave a credential Meta had already invalidated in play.
 --
--- SEVEN DOORS, ONE PER READ, EACH THE MODULE'S OWN QUERY MOVED VERBATIM. Owned by svc_maintenance,
--- which already holds USING (true) on post_intents, jobs, channel_outbox, daily_post_counts and
--- rate_counters (058) and SELECT on each of them (057); ig_accounts is the one table it lacked, so
--- this file grants that SELECT and that policy. EXECUTE goes to svc_ingress on all seven, and on
--- the three backpressure reads to svc_worker as well (the worker's own status line renders the
--- same snapshot); the four posting and lag reads are the API's alone. The reads a
--- policy already admits without a tenant — the system lane's jobs (workspace_id IS NULL, p_jobs)
--- and the tg_global rate counter (p_rate USING (true)) — stay direct: a door for a read the policy
--- answers would be a second authority. Nothing identifying leaves a door but
--- fn_health_oldest_tenant_wait's workspace id, which the worker's log renders and the
--- unauthenticated surface never does (backpressure.py's `identify` gate, unchanged).
+-- NINE DOORS, EACH THE MODULE'S OWN QUERY MOVED VERBATIM. Owned by svc_maintenance, which already
+-- holds USING (true) on post_intents, jobs, channel_outbox, daily_post_counts and rate_counters
+-- (058) and SELECT on each of them (057); ig_accounts is the one table it lacked, so this file
+-- grants that SELECT and that policy. EXECUTE goes to svc_ingress on the eight reads it serves; on
+-- the three backpressure reads to svc_worker as well (the worker's own status line renders the same
+-- snapshot); and on the one read that NAMES a tenant — the longest-waiting workspace, for the
+-- worker's log — to svc_worker alone, so the API's login never holds a foreign workspace id. The
+-- reads a policy already admits without a tenant — the system lane's jobs (workspace_id IS NULL,
+-- p_jobs) and the tg_global rate counter (p_rate USING (true)) — stay direct: a door for a read the
+-- policy answers would be a second authority. The one parameterised door takes a bound text value
+-- into an equality and nothing else.
 --
 -- The CREATE bracket is 062's, for the reason it gave: ALTER FUNCTION … OWNER TO needs the incoming
 -- owner to hold CREATE on the schema, and the steady state never leaves it there.
 --
 -- DEPLOY ORDER: the consumers call the doors unconditionally. Every deploy's predeploy applies this
--- file before the code that reads through it starts — the ordinary order, nothing to schedule.
+-- file before the code that reads through it starts — the ordinary order, nothing to schedule. The
+-- owner login the services still connect as holds EXECUTE on every door through its memberships
+-- (measured 2026-09-20: it executes 059's and 064's the same way), so the deploy changes nothing
+-- until the switch.
 --
 -- Adoption evidence + post-apply verification. Catalog-only: has_*_privilege probes RAISE when their
 -- role is absent and the runner treats a raising probe as a hard failure. Four reads, one per
--- structural thing this file does — the seven doors by NAME (a later fn_health_* door must not flip
--- this file's probe: an applied file is immutable) and the EXECUTE rows as a floor a later grant
--- may raise.
--- runner:postcondition SELECT count(*) = 7 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner WHERE n.nspname = 'public' AND p.proname IN ('fn_health_posting_freshness', 'fn_health_publish_attempts', 'fn_health_destinations', 'fn_health_scheduling_lag', 'fn_health_ready_lanes', 'fn_health_outbox_pending', 'fn_health_oldest_tenant_wait') AND r.rolname = 'svc_maintenance' AND p.prosecdef
--- runner:postcondition SELECT count(*) >= 10 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, aclexplode(p.proacl) a JOIN pg_roles g ON g.oid = a.grantee WHERE n.nspname = 'public' AND p.proname IN ('fn_health_posting_freshness', 'fn_health_publish_attempts', 'fn_health_destinations', 'fn_health_scheduling_lag', 'fn_health_ready_lanes', 'fn_health_outbox_pending', 'fn_health_oldest_tenant_wait') AND a.privilege_type = 'EXECUTE' AND g.rolname IN ('svc_ingress', 'svc_worker')
+-- structural thing this file does — the nine doors by NAME (a later door must not flip this file's
+-- probe: an applied file is immutable) and the EXECUTE rows as a floor a later grant may raise.
+-- runner:postcondition SELECT count(*) = 9 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner WHERE n.nspname = 'public' AND p.proname IN ('fn_health_posting_freshness', 'fn_health_publish_attempts', 'fn_health_destinations', 'fn_health_scheduling_lag', 'fn_health_ready_lanes', 'fn_health_outbox_pending', 'fn_health_oldest_tenant_wait', 'fn_health_oldest_tenant_wait_named', 'fn_meta_accounts_for_ref') AND r.rolname = 'svc_maintenance' AND p.prosecdef
+-- runner:postcondition SELECT count(*) >= 12 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, aclexplode(p.proacl) a JOIN pg_roles g ON g.oid = a.grantee WHERE n.nspname = 'public' AND p.proname IN ('fn_health_posting_freshness', 'fn_health_publish_attempts', 'fn_health_destinations', 'fn_health_scheduling_lag', 'fn_health_ready_lanes', 'fn_health_outbox_pending', 'fn_health_oldest_tenant_wait', 'fn_health_oldest_tenant_wait_named', 'fn_meta_accounts_for_ref') AND a.privilege_type = 'EXECUTE' AND g.rolname IN ('svc_ingress', 'svc_worker')
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'ig_accounts' AND policyname = 'p_maint_accts')
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a JOIN pg_roles r ON r.oid = a.grantee WHERE n.nspname = 'public' AND r.rolname = 'svc_maintenance' AND a.privilege_type = 'CREATE')
 
--- [§24 the fleet-health doors: the two health surfaces read the estate through svc_maintenance]
+-- [§24 the fleet-health doors: the two health surfaces and the Meta callback read the estate through svc_maintenance]
 -- /health/scheduling and /health/posting count across every workspace, and both rested on the
 -- owner login's BYPASSRLS: under svc_ingress with no tenant set every policy-covered table reads
 -- empty, the surfaces answer never-posted / no-signal for a live estate, and the fleet monitors go
--- blind (met in production on 2026-09-20, #751). Seven definer doors, one per read, each the
--- module's own query moved verbatim; owned by svc_maintenance, which held USING (true) on every
--- table but ig_accounts. EXECUTE for svc_ingress on all seven; the three backpressure reads also
--- for svc_worker, whose status line renders the same snapshot — the four posting and lag reads
--- are the API's alone.
+-- blind (met in production on 2026-09-20, #751). The Meta deauthorize callback's account lookup
+-- names no tenant either. Nine definer doors, each the module's own query moved verbatim; owned by
+-- svc_maintenance, which held USING (true) on every table but ig_accounts. EXECUTE for svc_ingress
+-- on the eight it serves; the three backpressure reads also for svc_worker, whose status line
+-- renders the same snapshot; the one read that NAMES a tenant for svc_worker only.
 -- The CREATE bracket is 062's, for the reason it gave.
 GRANT SELECT ON ig_accounts TO svc_maintenance;
 
@@ -160,6 +164,23 @@ REVOKE ALL ON FUNCTION fn_health_outbox_pending() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fn_health_outbox_pending() TO svc_ingress, svc_worker;
 
 CREATE FUNCTION fn_health_oldest_tenant_wait()
+RETURNS TABLE (o_wait numeric)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT EXTRACT(EPOCH FROM now() - min(run_at))
+    FROM jobs WHERE state = 'ready' AND run_at <= now() AND workspace_id IS NOT NULL
+   GROUP BY workspace_id ORDER BY 1 DESC LIMIT 1
+$$;
+
+COMMENT ON FUNCTION fn_health_oldest_tenant_wait() IS
+  'The backpressure signal''s longest tenant wait, in seconds, naming no tenant: the shape the unauthenticated surface may hold. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (081, #751).';
+
+ALTER FUNCTION fn_health_oldest_tenant_wait() OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_oldest_tenant_wait() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_oldest_tenant_wait() TO svc_ingress, svc_worker;
+
+CREATE FUNCTION fn_health_oldest_tenant_wait_named()
 RETURNS TABLE (o_workspace_id uuid, o_wait numeric)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
   SELECT workspace_id, EXTRACT(EPOCH FROM now() - min(run_at))
@@ -167,13 +188,28 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
    GROUP BY workspace_id ORDER BY 2 DESC LIMIT 1
 $$;
 
-COMMENT ON FUNCTION fn_health_oldest_tenant_wait() IS
-  'The backpressure signal''s longest-waiting tenant: the workspace and its wait. The worker''s log names the workspace; the unauthenticated surface never does (backpressure.py''s identify gate). Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (081, #751).';
+COMMENT ON FUNCTION fn_health_oldest_tenant_wait_named() IS
+  'The backpressure signal''s longest-waiting tenant, NAMED — for the worker''s own log and nothing else: EXECUTE for svc_worker only, so the API''s login never holds a foreign workspace id. Owned by svc_maintenance (081, #751).';
 
-ALTER FUNCTION fn_health_oldest_tenant_wait() OWNER TO svc_maintenance;
+ALTER FUNCTION fn_health_oldest_tenant_wait_named() OWNER TO svc_maintenance;
 
-REVOKE ALL ON FUNCTION fn_health_oldest_tenant_wait() FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_health_oldest_tenant_wait_named() FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_health_oldest_tenant_wait() TO svc_ingress, svc_worker;
+GRANT EXECUTE ON FUNCTION fn_health_oldest_tenant_wait_named() TO svc_worker;
+
+CREATE FUNCTION fn_meta_accounts_for_ref(p_ref text)
+RETURNS TABLE (o_ig_account_id uuid, o_workspace_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT id, workspace_id FROM ig_accounts WHERE provider_account_ref = p_ref
+$$;
+
+COMMENT ON FUNCTION fn_meta_accounts_for_ref(p_ref text) IS
+  'The accounts a Meta callback''s subject names, across every workspace: a deauthorize or data-deletion request carries no tenant, so p_tenant would hide every row from the API''s login. A parameterised SECURITY DEFINER read owned by svc_maintenance, an equality on one bound value; EXECUTE for svc_ingress (081, #751).';
+
+ALTER FUNCTION fn_meta_accounts_for_ref(p_ref text) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_meta_accounts_for_ref(p_ref text) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_meta_accounts_for_ref(p_ref text) TO svc_ingress;
 
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;

@@ -1242,33 +1242,37 @@ ALTER TABLE service_tokens ADD CONSTRAINT ck_service_token_subject CHECK ((user_
 CREATE INDEX ix_service_tokens_user ON service_tokens (user_id) WHERE user_id IS NOT NULL;
 ```
 
-### §24. The fleet-health doors: the two health surfaces read the estate through svc_maintenance (081, #751)
+### §24. The fleet-health doors: the two health surfaces and the Meta callback read the estate through svc_maintenance (081, #751)
 
 **Why:** `/health/scheduling` and `/health/posting` are the surfaces the fleet monitors poll, and
 each counts across every workspace — stalled cursors and active destinations, landings and the
 debited cap ledger, the ready lanes and the pending outbox. Their reads went at the tenant tables
 with no tenant set, which worked only because the login production connects as — the database
-owner — bypasses row-level security; both modules said so and named #751 as the place a door would have to close
-it. The first switch of the API to `svc_ingress` (2026-09-20) proved them right: every
-policy-covered table read empty, `/health/posting` answered *never-posted* for an estate with 104
-landings, `/health/scheduling` *no-signal* for two active accounts, and the monitors — built on the
-rule that a permanent no-signal must not excuse an outage — went blind while nothing else changed.
-Seven SECURITY DEFINER doors, one per read and each the module's own query moved verbatim, owned by
-`svc_maintenance`, which already held `USING (true)` on every table involved but `ig_accounts`;
-`EXECUTE` for `svc_ingress` and for `svc_worker`, whose own status line renders the same
-backpressure snapshot. The two reads a policy already answers without a tenant — the system lane's
-jobs (`workspace_id IS NULL`, `p_jobs`) and the `tg_global` rate counter (`p_rate`) — stay direct.
+owner — bypasses row-level security; both modules said so and named #751 as the place a door would
+have to close it. The first switch of the API to `svc_ingress` (2026-09-20) proved them right:
+every policy-covered table read empty, `/health/posting` answered *never-posted* for an estate with
+104 landings, `/health/scheduling` *no-signal* for two active accounts, and the monitors — built on
+the rule that a permanent no-signal must not excuse an outage — went blind while nothing else
+changed. The review of the fix found the third tenant-less read on the API: the Meta deauthorize
+callback's account lookup, which names no workspace and would leave a credential Meta had already
+invalidated in play. Nine SECURITY DEFINER doors, each the module's own query moved verbatim, owned
+by `svc_maintenance`, which already held `USING (true)` on every table involved but `ig_accounts`;
+`EXECUTE` for `svc_ingress` on the eight it serves, for `svc_worker` on the three backpressure
+reads its own status line renders, and on the one read that names a tenant — the longest-waiting
+workspace, for the worker's log — for `svc_worker` alone, so the API's login never holds a foreign
+workspace id. The two reads a policy already answers without a tenant — the system lane's jobs
+(`workspace_id IS NULL`, `p_jobs`) and the `tg_global` rate counter (`p_rate`) — stay direct.
 
 ```sql
--- [§24 the fleet-health doors: the two health surfaces read the estate through svc_maintenance]
+-- [§24 the fleet-health doors: the two health surfaces and the Meta callback read the estate through svc_maintenance]
 -- /health/scheduling and /health/posting count across every workspace, and both rested on the
 -- owner login's BYPASSRLS: under svc_ingress with no tenant set every policy-covered table reads
 -- empty, the surfaces answer never-posted / no-signal for a live estate, and the fleet monitors go
--- blind (met in production on 2026-09-20, #751). Seven definer doors, one per read, each the
--- module's own query moved verbatim; owned by svc_maintenance, which held USING (true) on every
--- table but ig_accounts. EXECUTE for svc_ingress on all seven; the three backpressure reads also
--- for svc_worker, whose status line renders the same snapshot — the four posting and lag reads
--- are the API's alone.
+-- blind (met in production on 2026-09-20, #751). The Meta deauthorize callback's account lookup
+-- names no tenant either. Nine definer doors, each the module's own query moved verbatim; owned by
+-- svc_maintenance, which held USING (true) on every table but ig_accounts. EXECUTE for svc_ingress
+-- on the eight it serves; the three backpressure reads also for svc_worker, whose status line
+-- renders the same snapshot; the one read that NAMES a tenant for svc_worker only.
 -- The CREATE bracket is 062's, for the reason it gave.
 GRANT SELECT ON ig_accounts TO svc_maintenance;
 
@@ -1380,6 +1384,23 @@ REVOKE ALL ON FUNCTION fn_health_outbox_pending() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fn_health_outbox_pending() TO svc_ingress, svc_worker;
 
 CREATE FUNCTION fn_health_oldest_tenant_wait()
+RETURNS TABLE (o_wait numeric)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT EXTRACT(EPOCH FROM now() - min(run_at))
+    FROM jobs WHERE state = 'ready' AND run_at <= now() AND workspace_id IS NOT NULL
+   GROUP BY workspace_id ORDER BY 1 DESC LIMIT 1
+$$;
+
+COMMENT ON FUNCTION fn_health_oldest_tenant_wait() IS
+  'The backpressure signal''s longest tenant wait, in seconds, naming no tenant: the shape the unauthenticated surface may hold. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (081, #751).';
+
+ALTER FUNCTION fn_health_oldest_tenant_wait() OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_oldest_tenant_wait() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_oldest_tenant_wait() TO svc_ingress, svc_worker;
+
+CREATE FUNCTION fn_health_oldest_tenant_wait_named()
 RETURNS TABLE (o_workspace_id uuid, o_wait numeric)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
   SELECT workspace_id, EXTRACT(EPOCH FROM now() - min(run_at))
@@ -1387,14 +1408,29 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
    GROUP BY workspace_id ORDER BY 2 DESC LIMIT 1
 $$;
 
-COMMENT ON FUNCTION fn_health_oldest_tenant_wait() IS
-  'The backpressure signal''s longest-waiting tenant: the workspace and its wait. The worker''s log names the workspace; the unauthenticated surface never does (backpressure.py''s identify gate). Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (081, #751).';
+COMMENT ON FUNCTION fn_health_oldest_tenant_wait_named() IS
+  'The backpressure signal''s longest-waiting tenant, NAMED — for the worker''s own log and nothing else: EXECUTE for svc_worker only, so the API''s login never holds a foreign workspace id. Owned by svc_maintenance (081, #751).';
 
-ALTER FUNCTION fn_health_oldest_tenant_wait() OWNER TO svc_maintenance;
+ALTER FUNCTION fn_health_oldest_tenant_wait_named() OWNER TO svc_maintenance;
 
-REVOKE ALL ON FUNCTION fn_health_oldest_tenant_wait() FROM PUBLIC;
+REVOKE ALL ON FUNCTION fn_health_oldest_tenant_wait_named() FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION fn_health_oldest_tenant_wait() TO svc_ingress, svc_worker;
+GRANT EXECUTE ON FUNCTION fn_health_oldest_tenant_wait_named() TO svc_worker;
+
+CREATE FUNCTION fn_meta_accounts_for_ref(p_ref text)
+RETURNS TABLE (o_ig_account_id uuid, o_workspace_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT id, workspace_id FROM ig_accounts WHERE provider_account_ref = p_ref
+$$;
+
+COMMENT ON FUNCTION fn_meta_accounts_for_ref(p_ref text) IS
+  'The accounts a Meta callback''s subject names, across every workspace: a deauthorize or data-deletion request carries no tenant, so p_tenant would hide every row from the API''s login. A parameterised SECURITY DEFINER read owned by svc_maintenance, an equality on one bound value; EXECUTE for svc_ingress (081, #751).';
+
+ALTER FUNCTION fn_meta_accounts_for_ref(p_ref text) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_meta_accounts_for_ref(p_ref text) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_meta_accounts_for_ref(p_ref text) TO svc_ingress;
 
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 ```

@@ -29,7 +29,12 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target import (
+    backpressure,
+    meta_callbacks,
+    posting_health,
+    scheduling_health,
+)
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -89,6 +94,12 @@ def world(admin_conn, owner_actor):
                     (ws, f"publish:{uuid.uuid4()}"),
                 )
                 cur.execute(
+                    "INSERT INTO oauth_credentials (workspace_id, ig_account_id,"
+                    " provider, state, encrypted_payload)"
+                    " VALUES (%s, %s, 'ig_login', 'active', 'x')",
+                    (ws, iga),
+                )
+                cur.execute(
                     "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
                     " VALUES (%s, 'telegram_group', '-1000000000001') RETURNING id",
                     (ws,),
@@ -104,6 +115,8 @@ def world(admin_conn, owner_actor):
         finally:
             conn.close()
         yield {
+            "ws": str(ws),
+            "iga": str(iga),
             "ingress": as_user(db, "svc_ingress"),
             "worker": as_user(db, "svc_worker"),
             # The database-owner actor: the login production still connects as,
@@ -153,17 +166,60 @@ async def _worker_signal(dsn: str) -> dict:
         await engine.dispose()
 
 
-_TABLES = ("post_intents", "ig_accounts", "daily_post_counts", "jobs", "channel_outbox")
+_TABLES = (
+    "post_intents",
+    "ig_accounts",
+    "daily_post_counts",
+    "jobs",
+    "channel_outbox",
+    "oauth_credentials",
+)
 
 
 async def _plain_counts(dsn: str) -> dict:
     engine = create_async_engine(_async_url(dsn))
     try:
         async with engine.connect() as c:
-            return {
+            counts = {
                 t: (await c.execute(text(f"SELECT count(*) FROM {t}"))).scalar()
                 for t in _TABLES
             }
+            counts["jobs_ready"] = (
+                await c.execute(
+                    text(
+                        "SELECT count(*) FROM jobs WHERE state = 'ready' AND run_at <= now()"
+                    )
+                )
+            ).scalar()
+            return counts
+    finally:
+        await engine.dispose()
+
+
+async def _deauthorize(dsn: str, subject: str) -> tuple[int, int]:
+    """The deauthorize route's two calls, as one login, in one transaction."""
+    engine = create_async_engine(_async_url(dsn))
+    try:
+        async with engine.begin() as c:
+            accounts = await meta_callbacks.resolve_ig_accounts(c, subject)
+            revoked = await meta_callbacks.revoke_for_accounts(c, accounts)
+            return len(accounts), revoked
+    finally:
+        await engine.dispose()
+
+
+async def _credential_state(dsn: str, iga: str) -> str:
+    engine = create_async_engine(_async_url(dsn))
+    try:
+        async with engine.connect() as c:
+            return (
+                await c.execute(
+                    text(
+                        "SELECT state FROM oauth_credentials WHERE ig_account_id = :iga"
+                    ),
+                    {"iga": iga},
+                )
+            ).scalar()
     finally:
         await engine.dispose()
 
@@ -189,10 +245,12 @@ def test_the_plain_reads_are_hidden_from_the_ingress_login(world):
     doors would prove nothing. It cannot — every table a door reads is
     policy-covered and no tenant is set (the seeded job carries a workspace,
     so `p_jobs` hides it too). The owner sees the estate."""
-    assert _run(_plain_counts(world["ingress"])) == {t: 0 for t in _TABLES}
+    hidden = _run(_plain_counts(world["ingress"]))
+    assert hidden == {**{t: 0 for t in _TABLES}, "jobs_ready": 0}
     seen = _run(_plain_counts(world["owner"]))
     assert seen["post_intents"] == 2 and seen["ig_accounts"] == 1
     assert seen["jobs"] == 1 and seen["channel_outbox"] == 1
+    assert seen["oauth_credentials"] == 1
 
 
 def test_the_posting_surfaces_see_the_estate_as_svc_ingress(world):
@@ -234,14 +292,16 @@ def test_the_doors_answer_what_a_direct_read_by_the_owner_answers(world):
     assert doors["attempts"]["ledger_days"] == direct["daily_post_counts"]
     assert doors["pressure"]["outbox_pending"] == direct["channel_outbox"]
     ready = sum(lane["ready"] for lane in doors["pressure"]["lanes"].values())
-    assert ready == direct["jobs"]
+    assert ready == direct["jobs_ready"]
 
 
 def test_the_owner_login_executes_the_doors_it_deploys(world):
     """Production still connects as the owner; 081 lands under that login and
     the consumers call the doors unconditionally. The owner holds EXECUTE only
-    through its memberships (the bootstrap's grants) — proved here on the
-    owner actor, not on a superuser."""
+    through membership of the door's owner — here the bootstrap's chain
+    (`owner → svc_migration → svc_maintenance`, `step0_bootstrap.sql`), in
+    production `neondb_owner`'s direct membership of every service role
+    (measured 2026-09-20). Proved on the owner actor, not on a superuser."""
     got = _run(_surfaces(world["owner"]))
     assert got["posting"]["posted_ever"] == 1
     assert got["destinations"]["accounts_active"] == 1
@@ -256,3 +316,45 @@ def test_the_live_door_filters_landings_as_the_monitor_documents(world):
     DROP+CREATE with another filter would pass a file pin and fail this one."""
     src = _run(_door_source(world["owner"]))
     assert src.count("published_via NOT IN ('legacy_backfill', 'dry_run')") == 2
+
+
+def test_the_api_login_never_holds_a_foreign_workspace_id_but_the_worker_may(world):
+    """081's one read that NAMES a tenant — the longest-waiting workspace, for
+    the worker's log — is the worker's door alone; the API's login reads the
+    wait through a door that names nothing, and asks for no name."""
+    api = _run(_worker_signal(world["ingress"]))
+    assert api["ws_oldest_wait"] is not None
+    assert "workspace_id" not in api["ws_oldest_wait"]
+
+    async def named(dsn: str) -> dict:
+        engine = create_async_engine(_async_url(dsn))
+        try:
+            async with engine.connect() as c:
+                return await backpressure.snapshot(
+                    c,
+                    now=dt.datetime.now(dt.timezone.utc),
+                    global_limit=30,
+                    global_window_seconds=1,
+                    identify=True,
+                )
+        finally:
+            await engine.dispose()
+
+    worker = _run(named(world["worker"]))
+    assert worker["ws_oldest_wait"]["workspace_id"] == world["ws"]
+    with pytest.raises(Exception, match="permission denied"):
+        _run(named(world["ingress"]))
+
+
+def test_a_meta_deauthorize_revokes_the_credential_as_svc_ingress(world):
+    """The third tenant-less read the switch would have blinded. A Meta
+    callback names no workspace: the account lookup goes through
+    `fn_meta_accounts_for_ref`, and the revoke claims each account's own
+    tenant before its UPDATE — so under `svc_ingress` the credential Meta
+    already invalidated is actually marked revoked, not silently kept."""
+    assert _run(_credential_state(world["owner"], world["iga"])) == "active"
+    assert _run(_deauthorize(world["ingress"], "nobody-we-hold")) == (0, 0)
+    assert _run(_deauthorize(world["ingress"], "acct-fleet")) == (1, 1)
+    assert _run(_credential_state(world["owner"], world["iga"])) == "revoked"
+    # a second deauthorize is the completed no-op the route promises Meta
+    assert _run(_deauthorize(world["ingress"], "acct-fleet")) == (1, 0)

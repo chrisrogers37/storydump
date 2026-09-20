@@ -25,11 +25,15 @@ each step below is verified rather than assumed.
   `curl -s https://api.storydump.app/health` shows the field (today it reads
   `neondb_owner` / `bypassrls: true`).
 - Migration 081 is applied (`storydump doctor` reads the ledger head at 81 or
-  above): the fleet health surfaces read the estate through its doors. Before
-  it, `/health/scheduling` and `/health/posting` read the tenant tables
-  directly and answered `no-signal` / `never-posted` under `svc_ingress` — the
-  monitors went blind on the first switch (2026-09-20) and the API was rolled
-  back the same hour.
+  above): the fleet health surfaces and the Meta deauthorize callback read the
+  estate through its doors. Before it, `/health/scheduling` and
+  `/health/posting` read the tenant tables directly and answered `no-signal` /
+  `never-posted` under `svc_ingress` — the monitors went blind on the first
+  switch (2026-09-20) and the API was rolled back the same hour — and the
+  deauthorize callback's account lookup, which names no workspace, would have
+  found nothing and kept a credential Meta had already invalidated. Those are
+  the three tenant-less reads the API makes; everything else it reads names
+  its tenant or goes through a door built before 081.
 - Both roles exist and can log in. In the Neon SQL editor, as the project
   owner:
 

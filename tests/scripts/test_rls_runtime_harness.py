@@ -358,7 +358,9 @@ DOORS = {
     # /health/posting and /health/scheduling, each the module's former query.
     # The four posting/lag reads are the API's alone; the three backpressure
     # reads are shared with the worker, whose status line renders the same
-    # snapshot — the one place a door has TWO permitted logins.
+    # snapshot — the one place a door has TWO permitted logins; the read that
+    # NAMES the waiting tenant is the worker's alone; the Meta callback's
+    # account lookup (the third tenant-less read on the API) is the API's.
     "fn_health_posting_freshness": (
         "svc_ingress",
         "SELECT * FROM fn_health_posting_freshness()",
@@ -386,6 +388,14 @@ DOORS = {
     "fn_health_oldest_tenant_wait": (
         ("svc_ingress", "svc_worker"),
         "SELECT * FROM fn_health_oldest_tenant_wait()",
+    ),
+    "fn_health_oldest_tenant_wait_named": (
+        "svc_worker",
+        "SELECT * FROM fn_health_oldest_tenant_wait_named()",
+    ),
+    "fn_meta_accounts_for_ref": (
+        "svc_ingress",
+        "SELECT * FROM fn_meta_accounts_for_ref('no-such-ref')",
     ),
 }
 

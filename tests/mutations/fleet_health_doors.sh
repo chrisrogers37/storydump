@@ -84,6 +84,11 @@ check "the ready lanes go direct again (the worker's own signal too)" src/servic
 # The landing filter is pinned on the LIVE door in the replayed world: mutating the plan's block (what
 # the gates replay) and re-classifying it in the manifest, then reading pg_proc, is the one honest kill.
 check2 "the live door's landing filter loses the dry-run exclusion" "  SELECT count(*) FILTER (WHERE state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run'))," "  SELECT count(*) FILTER (WHERE state = 'posted' AND published_via <> 'legacy_backfill')," "$GATE -k live_door_filters_landings"
+# The Meta deauthorize path under the ingress role: the lookup through its door, the revoke under the claimed tenant.
+check "the callback's account lookup goes direct again" src/services/target/meta_callbacks.py '" FROM fn_meta_accounts_for_ref(:ref)"' '" FROM (SELECT id AS o_ig_account_id, workspace_id AS o_workspace_id FROM ig_accounts WHERE provider_account_ref = :ref) t"' "$GATE -k meta_deauthorize_revokes"
+check "the revoke forgets to claim the account's tenant" src/services/target/meta_callbacks.py '                "SELECT set_config('"'"'app.tenant_id'"'"', :ws, true),"' '                "SELECT :ws,"' "$GATE -k meta_deauthorize_revokes"
+# The named-tenant door is the worker's alone: widening its grant in the plan's replayed block is caught by the harness's catalog test.
+check2 "the API's login gains the door that names a tenant" "GRANT EXECUTE ON FUNCTION fn_health_oldest_tenant_wait_named() TO svc_worker;" "GRANT EXECUTE ON FUNCTION fn_health_oldest_tenant_wait_named() TO svc_ingress, svc_worker;" "tests/scripts/test_rls_runtime_harness.py -k catalog_agrees_on_every_door"
 # The file's own adoption probes: the runner refuses a file that does not leave what it claims.
 check "the one policy svc_maintenance lacked is not created" scripts/migrations/081_fleet_health_doors.sql 'CREATE POLICY p_maint_accts ON ig_accounts FOR SELECT TO svc_maintenance USING (true);' '-- (no policy)' "$LANE"
 check "the worker loses EXECUTE on a backpressure door" scripts/migrations/081_fleet_health_doors.sql 'GRANT EXECUTE ON FUNCTION fn_health_ready_lanes() TO svc_ingress, svc_worker;' 'GRANT EXECUTE ON FUNCTION fn_health_ready_lanes() TO svc_ingress;' "$LANE"

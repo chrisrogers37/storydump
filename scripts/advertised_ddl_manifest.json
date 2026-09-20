@@ -279,9 +279,9 @@
       "ordinal": 21
     },
     {
-      "sha256": "20ec448850afdb265ef795193fd21b74828a3df88504c7e2f185705d8a0fa5fd",
+      "sha256": "139b936fd3e4f7d5d74bf47783e7f3d01edc8292c4ea663dd11f351663f4ee0f",
       "class": "normative",
-      "label": "§24 the fleet-health doors: the two health surfaces read the estate through svc_maintenance (081, #751)",
+      "label": "§24 the fleet-health doors: the two health surfaces and the Meta callback read the estate through svc_maintenance (081, #751)",
       "doc": "07-security-model.md",
       "ordinal": 22
     }

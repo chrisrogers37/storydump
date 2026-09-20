@@ -833,8 +833,8 @@ def create_app(
         # A DIRECT CONNECTION, not a unit of work, for the reason the route
         # above records: `UnitOfWork.__init__` refuses a blank tenant at
         # construction, and this aggregate is estate-wide and has no tenant.
-        # Its cross-tenant reach rests on the owner bypassing RLS (#751), the
-        # same footing and the same door to build when that is closed.
+        # Its cross-tenant reach is 081's doors, the same footing as the route
+        # above.
         async with engine.connect() as conn:
             posting = await posting_health.posting_freshness(conn)
             attempts = await posting_health.publish_attempts(conn)
