@@ -64,9 +64,10 @@ async def deauthorize(request: Request, signed_request: str = Form(default="")):
 
     Answers 200 even when nothing matched. Meta retries non-2xx and there is
     nothing to retry: a subject we hold no credential for is a completed no-op.
-    **A miss is logged as "not established" rather than "none"**, because
-    `ig_accounts` is tenant-scoped under RLS and a tenant-less read returns
-    zero rows whatever is stored — see `resolve_ig_accounts`.
+    **A miss is logged as "not established" rather than "none"**: the lookup
+    reads every workspace through its door (081), but the subject Meta sends
+    names a person while `provider_account_ref` names an account — sometimes a
+    provisional `manual:<handle>` no Meta id equals — see `resolve_ig_accounts`.
     """
     subject, _ = _verified_subject(signed_request)
     engine = require_engine(request)
@@ -74,8 +75,9 @@ async def deauthorize(request: Request, signed_request: str = Form(default="")):
         accounts = await meta_callbacks.resolve_ig_accounts(conn, subject)
         revoked = await meta_callbacks.revoke_for_accounts(conn, accounts)
     logger.info(
-        "meta deauthorize: %d account(s) visible, %d credential(s) revoked"
-        " (a zero here is NOT established as 'no such account' — see RLS bound)",
+        "meta deauthorize: %d account(s) matched, %d credential(s) revoked"
+        " (a zero here is NOT established as 'no such account': the subject"
+        " names a person, the stored reference an account)",
         len(accounts),
         revoked,
     )
