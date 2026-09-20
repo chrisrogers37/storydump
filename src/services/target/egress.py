@@ -128,7 +128,6 @@ TIMEOUT_CLASSES = {
 DEFAULT_ALLOWED_HOSTS = frozenset(
     {
         "graph.instagram.com",
-        "graph.facebook.com",
         "api.instagram.com",
         "api.telegram.org",
         "www.googleapis.com",

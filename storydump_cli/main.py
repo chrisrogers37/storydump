@@ -64,7 +64,7 @@ FIXES: Mapping[str, str] = {
     "not_a_member": "check the workspace id, and this token's workspaces with storydump whoami",
     # the command port's refusals (phase 03): the fixing verb, named
     "manual_mode": "turn Instagram API posting on under Settings › General, or approve on the web",
-    "not_connected": "connect the Instagram account under Settings › Integrations",
+    "not_connected": "connect the Instagram account under Settings › Accounts",
     "may_have_posted": (
         "look at Instagram, then storydump resolve <story> retry --not-posted"
         " or storydump resolve <story> posted"

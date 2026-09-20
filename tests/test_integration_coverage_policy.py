@@ -291,8 +291,9 @@ class TestTheSkipCeiling:
         eleven were legacy tests (`test_media_repository`, `test_telegram_service`)
         deleted with the tier, two more went with them, and CI measured exactly
         one skip on the deletion (run 35285172203: the live-drift audit). A
-        clock-of-day skip in `test_l5_pipeline_gate.py` (23:55–23:59 local) can
-        still breach any ceiling set to the baseline — queued for its own fix.
+        clock-of-day skip in `test_l5_pipeline_gate.py` (23:55–23:59 local) used
+        to breach any ceiling set to the baseline — fixed in #1317 (the cap-wait
+        test gives its account a noon timezone).
         """
         assert MAX_EXPECTED_SKIPS == 1
 

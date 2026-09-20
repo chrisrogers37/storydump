@@ -151,6 +151,15 @@ describe("refusal copy", () => {
     expect(refusalCopy("may_have_posted")).toMatch(/It posted/);
   });
 
+  it("sends a not_connected refusal to the Accounts tab, where Instagram is connected", () => {
+    // The Instagram connect control is the Accounts tab's
+    // (`components/dashboard/settings/accounts-tab.tsx`, "Connect Instagram");
+    // Integrations holds the Drive folders and the Telegram link. This copy
+    // once sent people to Integrations, as the CLI's hint did.
+    expect(refusalCopy("not_connected")).toMatch(/Settings › Accounts/);
+    expect(refusalCopy("not_connected")).not.toMatch(/Integrations/);
+  });
+
   it("turns the matrix's normal 409 answers into a sentence, never a raw code", () => {
     expect(refusalCopy("illegal_transition")).toMatch(/already/i);
     expect(refusalCopy("manual_mode")).toMatch(/Posted myself/);

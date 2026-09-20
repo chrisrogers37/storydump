@@ -1338,6 +1338,83 @@ to this session, the owner's to run; production — the owner's window.
    `status:` and its goal condition with the owner's pasted gate output — one small documentation PR —
    and the epic's issue (#1216) and #941 close on the owner's word.
 
+## After the epic — the residue PR (#1324)
+
+Phase 05's documentation pass left a list of things it found in code and config, out of its own scope
+(prose-only). They are one PR, `chore/post-tear-out-residue`, under the same process: a red-first test
+per behaviour, two review lenses on a detached snapshot, a fold per round with the class swept, a
+fresh re-verify lens, the battery on the committed tree, CI, the owner's admin squash.
+
+**Measured before asserting.** `src/config/constants.py`: five of seven constants read by nothing
+(`grep -rn` over `src/ storydump_cli/ scripts/ tests/`); `src/config/defaults.py`: twelve of
+fourteen (the readers of the two survivors: `command_executors.py:468`, `intent_ledger.py:222`, both
+NULL fallbacks for 053:144-145's nullable TTL columns; the "starting values" the docstring claimed
+are 053:129-140's DDL defaults, which the constants disagreed with — hours 9-22 New York against
+14-2 UTC). `landing/src`'s environment reads: eight names by `process.env.NAME`, no bracket or
+destructured reads; the example omitted `TARGET_API_URL` (read before its `BACKEND_URL` fallback) and
+named two that nothing reads (`JWT_SECRET`, `NEXT_PUBLIC_SITE_URL`). The `not_connected` hint:
+five sites said Integrations (the CLI, the web's `refusalCopy`, the API's refusal detail, the
+worker's two notices); the Instagram connect control is `accounts-tab.tsx`'s. `graph.facebook.com`:
+on the egress allow-list, called by nothing in `src/`.
+
+**Round 1 — structural + simplify** (`713e4d6`): the hint test I wrote pinned the FOLDER sentence
+(correctly Integrations), was red on the base tree, and the battery reported 5/5 kills — a red
+baseline "kills" every mutation pointed at it. Folded in `9e5651d`: the test reverted and a real
+not_connected test added; the hint corrected at the API and worker sites (the class: every
+`Settings ›` hint, swept); `constants.py`'s rewritten comment claimed a false reader — the five
+unread constants deleted with their test file; `check()` runs each selector on the clean tree first
+and prints `BASELINE RED (bad)`. CI on `9e5651d`: success (run 35474200444; 3666 passed, 1 skipped,
+5 deselected). Lesson recorded in memory.
+
+**Round 2 — adversarial** (on `9e5651d`): its two blockers were round 1's, already folded; the rest —
+the web's copy (`intents.ts:221`), `defaults.py`'s docstring and its twelve unread constants, the
+landing example's missing `TARGET_API_URL` and a stale Login Widget comment, `channel_bind.py:168`'s
+"beside `link-` and `inv-`", two battery labels, the Makefile's `./venv/bin/pytest`. Folded in
+`c32885d`: everything but the Makefile — declined, AGENTS.md:163-167 documents `venv` as the
+checkout's convention and says the Makefile assumes it. Three red-first tests: the vitest test on
+`refusalCopy("not_connected")`, `tests/src/config/test_defaults.py` (every declared constant has a
+reader under `src/`; a positive control on the finder), `tests/test_landing_env_example.py` (the
+example and `landing/src` in agreement both ways, `NODE_ENV` excepted — the platform's). Local:
+242 passed (the affected no-database suites), 64 passed (the executor gate suite against the Docker
+Postgres), vitest 378 passed in 36 files, ruff clean.
+
+**The battery on the committed tree** (`c32885d`, its own worktree): 11 of 11 killed, every verdict
+a real `N failed` summary — none `NO TEST SELECTED`, none `BASELINE RED`, none `NOT APPLIED`. The
+battery gained `checkv` for the landing's vitest tests (the same baseline-first discipline; a run
+that selects no test is `NO TEST SELECTED`).
+
+**Round 3 — the fresh re-verify lens on `c32885d`:** every fold claim VERIFIED by command (the ten
+findings of rounds 1 and 2, each with the line that proves it; the CHANGELOG's `### Fixed` clauses
+traced one by one to hunks; `facebook.com` called by no code under `src/`, `storydump_cli/`,
+`scripts/` or `landing/src`; `meta_callbacks.py` untouched; no deleted test pinned anything still
+live; on the snapshot 548 passed, ruff clean, vitest 378 passed). Its verdict: ready to mark for
+merge. Four new findings, none blocking: (A, minor) `checkv` read a vitest `-t` pattern that
+matches nothing as SURVIVED — vitest exits 0 with every test skipped; (B, nit) `check` read an
+unmatched `-k` (pytest exit 5) as BASELINE RED with an empty bracket; (C, minor) the landing pin
+scanned `landing/src` only, and `drizzle.config.ts` reads `DATABASE_URL` outside it; (D, nit,
+outside the diff) the `delete process.env.GOOGLE_*` lines in `google-login-button.test.tsx`.
+Folded in `77cda3f`: A and B — both verdicts print `NO TEST SELECTED`, probed with a selector that
+selects nothing in each runner and a real one that still kills; C — the finder takes the root
+`*.ts`/`*.mjs` configs, a positive control sees `drizzle.config.ts`, two mutations. D declined:
+those lines are a documented negative-setup guard (the button must render with nothing configured
+in this tier), not dead setup. No fourth lens: the third round's findings were the battery's own
+verdict vocabulary and a pin's scan set, verified mechanically — the battery on `77cda3f`
+(13 of 13 killed in its own worktree, every verdict a real `N failed` summary) and CI (success on the second attempt, run 35479368263 — 3674 passed, 1 skipped, 5 deselected in 6:08, all nine checks green; the first attempt's one failure is the flake below).
+
+**CI on `c32885d`:** success (run 35474615664; 3673 passed, 1 skipped, 5 deselected in 6m10s; all nine checks green — Changelog, the FC-2 Telegram ratchet, Front End, GitGuardian, Lint, Security Scan, Test, Vercel).
+
+**A CI flake, re-run not chased:** the first Test job on `77cda3f` (run 35479368263, 10:23 against
+the usual ~6:00) failed one test, `test_l8_webhook_admission.py::TestManyDistinctDeliveriesAtOnce::
+test_200_distinct_updates_admit_with_zero_errors_within_the_pool`, with `QueuePool limit of size 10
+overflow 0 reached, connection timed out, timeout 1.00` — 200 concurrent admissions on the
+ingress-shaped pool with the production 1 s wait, on a slow runner. The commit touched the battery
+script and a pin test, nothing near admission. The same test failed the same way on `main` at
+`53ca6d6` (2026-09-16, run 35164360834) and on the phase-04 branch (2026-09-18, run 35379540927):
+a load-sensitive tolerance, queued for the owner (the queue below), re-run with `--failed`.
+
+**Not touched — the owner's rulings, queued above:** the Facebook app-secret fallback in
+`meta_callbacks.py` (#739), the `/webapp/onboarding` redirect shim, the dead Railway variables.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
@@ -1410,6 +1487,13 @@ to this session, the owner's to run; production — the owner's window.
   (the callback signature accepts either app secret, the Facebook one annotated legacy) — a ruling on
   those, not a close. #1216 itself closes with phase 05. Phase 04's PR body is worded so that no issue
   closes by keyword at the merge (its first draft would have auto-closed #1202).
+- **The residue PR #1324 (2026-09-20):** ready for the owner's admin squash (the prepared message in
+  the session's `residue_squash.md`; no issue closes by keyword). Both services deploy it on merge;
+  the API only once `main`'s CI on the merge is green — read `storydump deploys` for both.
+- **A load-sensitive test's tolerance:** `test_l8_webhook_admission.py`'s 200-concurrent admission
+  test trips the production 1 s pool wait on a slow CI runner (three times in four days, on `main`,
+  the phase-04 branch and #1324; green on every re-run). Re-run, not chased; the fix — a
+  runner-aware wait, or a smaller burst — is the owner's call, outside the tear-out.
 - **After the window (2026-09-19):** the marker branch `pre-3g-20260919-2134` is retired a day after
   the worker has run clean (`neonctl branches delete pre-3g-20260919-2134 --project-id … --org-id …`);
   `WORKER_IMPL` on the worker service is what made a stale redeploy harmless — remove it only once

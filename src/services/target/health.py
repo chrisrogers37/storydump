@@ -1,19 +1,21 @@
 """The target composition root's ``/health`` endpoint (#942 parity gap).
 
 `railway.toml` sets ``healthcheckPath = "/health"`` for both services. The
-LEGACY root serves it from `src/main.py`; the target root shipped without it,
-so Railway probed a port nothing listened on, timed out, and marked three
-consecutive deploys FAILED while the worker itself was healthy — keeping an
-older, pre-cutover build serving.
+legacy root served it from `src/main.py`; the target root first shipped
+without it, so Railway probed a port nothing listened on, timed out, and
+marked three consecutive deploys FAILED while the worker itself was healthy —
+keeping an older, pre-cutover build serving. (The legacy root is gone since
+the tear-out, #1216; `src/main.py` only dispatches here now.)
 
-`src/main.py` already carries the lesson from the previous occurrence of this
-exact trap: start the listener BEFORE the slow steps, because Railway is timing
-the socket, not the program. This module is that rule applied to the other root.
+The lesson from the previous occurrence of this exact trap: start the
+listener BEFORE the slow steps, because Railway is timing the socket, not
+the program. This module is that rule applied to the target root.
 
-## What 200 means here, which is NOT what it means for legacy
+## What 200 means here, which is NOT what it meant for the legacy root
 
-Legacy reports per-loop staleness against `LOOP_EXPECTED_INTERVALS` and 503s on
-a stale loop, because its loops can go quiet while the process lives.
+The legacy root reported per-loop staleness against a table of expected
+intervals and 503ed on a stale loop, because its loops could go quiet while
+the process lived.
 
 The target root is fail-fast instead: `supervise()` turns ANY supervised task
 death into `WorkerTaskDied`, and `main()` turns that into `SystemExit(1)`. A
@@ -32,9 +34,10 @@ would raise them on a worker that is going to recover, and 503-ing would spend
 `restartPolicyMaxRetries` restarting through an outage no restart can fix. They
 are diagnostic here, not a gate.
 
-**No startup grace constant, and that is derived rather than copied.** Legacy
-needs one because it reports tick-based staleness that reads stale before the
-first tick. This endpoint's staleness clock starts at the first observation of a
+**No startup grace constant, and that is derived rather than copied.** The
+legacy root needed one because it reported tick-based staleness that read
+stale before the first tick. This endpoint's staleness clock starts at the first
+observation of a
 STARTED clock, so a booting worker is healthy by construction — there is no
 window to paper over. The listener also binds before the first database
 connection, so it answers during startup regardless of how slow that is.
@@ -50,8 +53,8 @@ from time import monotonic
 from src.utils.logger import logger
 
 #: Multiple of the clock interval after which a non-advancing clock is stale.
-#: Legacy uses the same 2x-expected-interval rule in
-#: `services/core/loops/heartbeat.py`; this is that precedent, not a new number.
+#: The legacy root used the same 2x-expected-interval rule in its heartbeat
+#: loop (deleted with the tier, #1216); this is that precedent, not a new number.
 STALE_INTERVAL_MULTIPLE = 2.0
 
 

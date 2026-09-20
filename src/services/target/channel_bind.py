@@ -165,5 +165,5 @@ async def handle_bind(conn, ctx: StartContext) -> StartResult:
 
 
 def register(router) -> None:
-    """Wire this lane into the shared door, beside `link-` and `inv-`."""
+    """Wire this lane into the shared door, beside `link-` (the `inv-` lane is designed, not registered)."""
     router.register(PREFIX, handle_bind)

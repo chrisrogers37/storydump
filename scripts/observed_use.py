@@ -83,7 +83,8 @@ from src.services.target.vocabulary import RAILWAY_PROJECT_ID  # noqa: E402
 # ---------------------------------------------------------------------------
 # The dispatch surface is DERIVED FROM SOURCE, never listed here.
 #
-# m1_preflight states the rule this obeys: "a second enumeration of the same
+# The M.1 preflight (deleted with the abandoned transform, #1046) stated the rule
+# this obeys: "a second enumeration of the same
 # predicates is exactly the fork that would drift." A hand-kept copy of the
 # dispatch table goes stale the first time someone adds a callback, and the
 # reader who then trusts a zero is hitting the exact defect this script exists

@@ -460,6 +460,25 @@ def test_a_refusal_prints_the_reason_sentence_and_the_fixing_verb_exit_2(tmp_pat
     assert "fix:" in result.stderr
 
 
+def test_a_not_connected_refusal_points_at_the_accounts_tab(tmp_path):
+    """The Instagram connect control lives under Settings › Accounts
+    (`landing/src/components/dashboard/settings/accounts-tab.tsx`, "Connect
+    Instagram"); the Integrations tab holds the Drive folders and the Telegram
+    link. The hint once sent people to Integrations."""
+    api = write_api(
+        {
+            route(WS, "approve"): (
+                409,
+                {"reason": "not_connected", "detail": "the adapter's own words"},
+            )
+        }
+    )
+    result = run(write_runtime(tmp_path, api), "approve", INTENT, "--workspace", WS)
+    assert result.exit_code == EXIT_REFUSED, result.output
+    fix = result.stderr.split("fix:", 1)[1]
+    assert "Settings › Accounts" in fix and "Integrations" not in fix
+
+
 def test_a_lost_publish_answer_names_the_resolve_verb(tmp_path):
     api = write_api(
         {
