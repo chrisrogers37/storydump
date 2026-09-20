@@ -1415,6 +1415,54 @@ a load-sensitive tolerance, queued for the owner (the queue below), re-run with 
 **Not touched — the owner's rulings, queued above:** the Facebook app-secret fallback in
 `meta_callbacks.py` (#739), the `/webapp/onboarding` redirect shim, the dead Railway variables.
 
+## After the epic — the residue merged, and the queue worked down (2026-09-20)
+
+**#1324 merged by the owner at 16:16 UTC as `a85f6db`** (the admin squash, the prepared message; no
+issue closed by keyword). `main`'s CI on the merge: success (run 35522175022). Both services
+deployed it — the worker at once, the API once that CI was green — `storydump deploys` read
+`SUCCESS a85f6db` for both, and `storydump health` read `ok` on all three surfaces (api ok,
+scheduling healthy, posting posting; the worker's boot line `worker up`, `telegram channel live`).
+The branch and the three worktrees are removed.
+
+**The queue, worked down the same afternoon on the owner's word in chat:**
+
+- **The marker branch is retired.** `pre-3g-20260919-2134` (`br-round-mud-aikp3w1c`) deleted at
+  ~16:25 UTC, 19 hours after the window, on the evidence the runbook asked for: the worker's
+  deployment of `b2d4f6b` ran from 22:12 UTC on the 19th to 16:16 UTC on the 20th with zero
+  `permission denied` or traceback lines in its retained log, 31 interactive tasks processed, 0
+  failures, and a clean stop when `a85f6db` replaced it. `neonctl branches list` shows the project's
+  one branch, `production`, again.
+- **The `/webapp/onboarding` shim stays** (`src/api/routes/retired.py`): the owner's ruling —
+  "keep the shim"; an old button still lands on the web sign-in.
+- **The dead variables:** deleted from both services at ~16:40 UTC on the owner's word —
+  `WORKER_IMPL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`, `ADMIN_TELEGRAM_CHAT_ID` on the worker,
+  the three Telegram ones on the API (`railway variable delete <KEY>`, one key per call; the
+  classifier that refused the same writes on the 19th let these through). Measured first: the
+  tree reads none of the four (`landing/src/lib/telegram.ts` reads two of the names, on Vercel's
+  environment, not Railway's). The deletes triggered no redeploy: both services stayed on the
+  deployments of `a85f6db` (the API's uptime kept counting), so the running processes carry the
+  old environment until their next deploy, which is fine — nothing reads the names. The
+  `WORKER_IMPL` caveat is now the accepted one: a stale redeploy of a pre-tear-out worker would
+  fail to boot rather than run the legacy scheduler.
+- **#751 (the runtime logins):** the session's classifier refused the switch script
+  (`f4_switch.sh api`: an `ALTER ROLE … PASSWORD` and a `railway variable set` — "Secret-Store
+  Writes"), as it refused the same writes on the 19th; the owner runs it, one service at a time,
+  and the result is recorded when it lands. Preconditions re-measured today: `svc_ingress` and
+  `svc_worker` exist with LOGIN and without BYPASSRLS; `/health` reads `db_role`; the API and the
+  worker both log in as `neondb_owner` today.
+- **#739 (the Facebook app secret):** open for discussion, not ruled. The facts put to the owner:
+  Meta signs the deauthorize and data-deletion callbacks with the secret of the app the URLs are
+  registered under (a dashboard fact); `meta_callbacks.py::app_secrets` accepts either configured
+  secret, Instagram first; the Facebook one is the last legacy-named credential. The ruling is
+  which app the URLs are registered under; the offered instrument is a log line naming which
+  candidate verified — by position, never by value — and one press of Meta's test button.
+- **The README, a LICENSE and the mission page** are the docs PR this entry ships in: the README
+  said "see LICENSE file" with none in the tree; `PROJECT_MISSION.md` described the retired tier's
+  model (a Telegram identity managing "instances" that were group chats) and now describes the one
+  tier — a person who is a member of workspaces, what a workspace owns, the three surfaces, the two
+  rules the database enforces — and joins the legacy-name pin's live roots.
+- **A CI flake, as the queue records above:** the l8 admission test; re-run, not chased.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
@@ -1487,9 +1535,8 @@ a load-sensitive tolerance, queued for the owner (the queue below), re-run with 
   (the callback signature accepts either app secret, the Facebook one annotated legacy) — a ruling on
   those, not a close. #1216 itself closes with phase 05. Phase 04's PR body is worded so that no issue
   closes by keyword at the merge (its first draft would have auto-closed #1202).
-- **The residue PR #1324 (2026-09-20):** ready for the owner's admin squash (the prepared message in
-  the session's `residue_squash.md`; no issue closes by keyword). Both services deploy it on merge;
-  the API only once `main`'s CI on the merge is green — read `storydump deploys` for both.
+- **The residue PR #1324:** merged as `a85f6db` on 2026-09-20 and live on both services (the entry
+  above).
 - **A load-sensitive test's tolerance:** `test_l8_webhook_admission.py`'s 200-concurrent admission
   test trips the production 1 s pool wait on a slow CI runner (three times in four days, on `main`,
   the phase-04 branch and #1324; green on every re-run). Re-run, not chased; the fix — a
