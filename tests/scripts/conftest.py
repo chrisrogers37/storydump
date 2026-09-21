@@ -1285,3 +1285,37 @@ async def in_tenant(dsn, ws, user, fn):
             who = (await session.execute(text("SELECT current_user"))).scalar()
             assert who == "svc_ingress", who
             return await fn(session)
+
+
+async def in_user_plane(dsn, fn, *, actor_user_id=None):
+    """Run *fn(conn)* in one committed transaction as `svc_ingress`, with the
+    USER-plane GUC only — no tenant.
+
+    `in_tenant`'s sibling, for the writers that run BEFORE any workspace
+    exists. Identity upsert and session mint are user/auth-plane
+    (`058` class 3: role-scoped `USING (true)`), so there is no tenant to
+    claim, and `unit_of_work` cannot be borrowed for them: its constructor
+    raises `TenantContextRequired` on an empty tenant id by design (`02` §7 —
+    a tenant-less unit of work would be a widened query). Production opens
+    exactly the shape below — `src/api/routes/auth.py`'s Google callback and
+    `src/api/principal.py`'s session resolve both run
+    ``async with engine.begin() as conn`` with no GUCs at all.
+
+    The role is ASSERTED for the same reason it is asserted in `in_tenant`: a
+    driver that quietly connected as the owner would bypass RLS and every
+    isolation claim built on it would be vacuous while still reading green.
+
+    *actor_user_id* claims the caller in `app.actor_user_id` — the user-plane
+    GUC `workspaces.list_for_user` sets — for the reads that go through a
+    door. Left unset by default, because the sign-in writers set nothing.
+    """
+    async with ingress_engine(dsn) as engine:
+        async with engine.begin() as conn:
+            who = (await conn.execute(text("SELECT current_user"))).scalar()
+            assert who == "svc_ingress", who
+            if actor_user_id is not None:
+                await conn.execute(
+                    text("SELECT set_config('app.actor_user_id', :u, true)"),
+                    {"u": str(actor_user_id)},
+                )
+            return await fn(conn)

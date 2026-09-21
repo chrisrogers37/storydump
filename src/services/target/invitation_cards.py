@@ -44,6 +44,9 @@ the minting side, so neither half of the seam claims a completeness the pair
 does not have — the failure this repeats otherwise is a surface that is built,
 reachable in principle, and connected to nothing.
 
+Still true 2026-09-20 (#1325 audit, TD-A16): the caller would be the invitation
+write in `invitations.create`, beside the outbox row it already mints.
+
 ## The empty case is a quiet beat, not `UNDELIVERABLE`
 
 `outbox.UNDELIVERABLE` exists because "reached no delivery surface" was being

@@ -41,10 +41,19 @@ def window_start(now: datetime, window_seconds: int) -> datetime:
 
 
 async def count(session, *, scope: str, key: str, window_start: datetime) -> int:
-    """The window's committed count, or 0 — a READ for a check that must not
-    spend (an admission check before the flip, `02` §6 / F12). The debit that
-    follows still goes through :func:`increment`, whose `WHERE rc.count <
-    :limit` is the backstop when two callers race this read."""
+    """The window's committed count, or 0 — a READ that spends nothing.
+
+    **Nothing under `src/` calls it**, and that is the point: tap admission
+    (`02` §6 / F12) debits inside the flip and never reads first, which
+    `tests/src/services/target/test_telegram_dispatch.py`'s admission tests
+    assert by scripting this name as a tripwire and requiring it stay
+    untouched ("no read before the flip", R6). Kept as that tripwire's subject
+    and as the one spelling of the read, should a check that must not spend
+    ever want one (#1325 audit, TD-A16 — the finding called this dead; the
+    tripwire is a reference). A caller would still debit through
+    :func:`increment`, whose `WHERE rc.count < :limit` is the backstop when
+    two callers race this read.
+    """
     row = (
         await session.execute(
             text(

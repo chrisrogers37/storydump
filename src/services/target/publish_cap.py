@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import enum
 from datetime import date
-from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -312,22 +311,3 @@ async def resolve_cancel(session, *, intent_id: str) -> bool:
         )
     ).fetchone()
     return flipped is not None
-
-
-async def current_day_debit(
-    session, *, workspace_id: str, ig_account_id: str, local_date: date
-) -> Optional[int]:
-    """The recorded `count` for a (workspace, account, day), or None. Read
-    door for tests and the usage pre-check — never a pre-validation of a flip
-    (the flip's own atomic denial is the authority)."""
-    row = (
-        await session.execute(
-            text(
-                "SELECT count FROM daily_post_counts"
-                " WHERE workspace_id = :ws AND ig_account_id = :acct"
-                "   AND local_date = :local_date"
-            ),
-            {"ws": workspace_id, "acct": ig_account_id, "local_date": local_date},
-        )
-    ).fetchone()
-    return int(row[0]) if row else None

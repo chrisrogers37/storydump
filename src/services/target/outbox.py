@@ -1033,6 +1033,10 @@ async def deliver(
     returns an external ref, or raises to signal a lost response. The floor is
     about send-state, not about Telegram, and a real client here would make
     every gate test a network test.
+
+    Production runs :meth:`OutboxPoller.tick`; this is the same sequence as ONE
+    transaction, kept as the seam the settle-taxonomy tests drive (#1325 audit,
+    TD-A16 — not a second production path).
     """
     row = await pace_and_claim(
         session,
@@ -1388,7 +1392,6 @@ class OutboxPoller:
         #: Set by a 429: how long the provider asked this sender to wait.
         self.held_for_s = 0.0
         self.consecutive_failures = 0
-        self._task = None
 
     async def tick(self) -> Optional[dict]:
         """One poll, transaction-per-checkpoint (`02:1254`; phase 1 of the
@@ -1475,23 +1478,3 @@ class OutboxPoller:
             self.deferred += 1
             self.held_for_s = float(result.get("retry_after_s") or 0.0)
         return result
-
-    async def start(self) -> None:
-        import asyncio
-
-        async def _loop():
-            while True:
-                await self.tick()
-                await asyncio.sleep(self._interval)
-
-        self._task = asyncio.create_task(_loop())
-
-    async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._task.cancel()
-        try:
-            await self._task
-        except BaseException:  # noqa: BLE001 — cancellation is the happy path
-            pass
-        self._task = None

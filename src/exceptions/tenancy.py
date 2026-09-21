@@ -78,26 +78,3 @@ class TokenRefused(RefusalError):
         if reason not in self.REASONS:
             raise ValueError(f"not a token refusal: {reason!r}")
         super().__init__(reason, detail)
-
-
-class TenantProvisioningError(RefusalError):
-    """A tenant MINT was refused — provisioning, deliberately not resolution.
-
-    A separate type rather than a new ``TenantResolutionError`` reason: the
-    resolution vocabulary is a closed contract shared across the two tiers,
-    and a mint precondition failing is not an identity failing to resolve.
-    Edges that map resolution reasons must not learn provisioning by accident.
-
-    ``reason``: unknown_user (the caller asked to provision for a user row
-    that does not exist) | missing_owner (no owner was named at all — a
-    different fact from a user that does not exist, and an edge rendering
-    "no such user" for a blank form field is why they are not one
-    reason) | invalid_name (a blank or whitespace-only workspace name).
-
-    Deliberately NOT here: an autocommit connection. That is a caller misusing
-    the transaction substrate rather than a provisioning refusal, and it has
-    its own type (``sync_tx.TransactionRequired``) so an edge mapping these
-    reasons cannot render it as one.
-    """
-
-    _prefix = "tenant provisioning refused"

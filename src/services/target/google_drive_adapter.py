@@ -5,24 +5,17 @@ without a real door ("building it now creates an untestable-until-M.3 path that
 reads as coverage"). M.3 landed 2026-08-24, so that bound is spent and this is
 the real door.
 
-## It implements `list_changes`, NOT `list_files` — the seam is forked
-
-The stub in `drive_adapter.py` provides ``list_files`` / ``fetch_bytes``. The
-consumer whose two kinds are parked — :mod:`src.services.target.media_sync` —
-calls ``deps.drive.list_changes`` and NOTHING else. Measured, not read:
-
-    StubDriveAdapter.list_changes  present=False
-    media_sync calls deps.drive.list_changes -> 1 site
-    media_sync calls deps.drive.list_files   -> 0 sites
+## `list_changes` is the tier's one listing verb
 
 `01-target-architecture.md` :76 is normative and specifies
-``list_changes(config, checkpoint) → (items, checkpoint')``; `media_sync` landed
-2026-08-22 against it, `drive_adapter` landed 2026-08-21 against the other
-shape. The doc and the live consumer agree, so this door is theirs. Wiring the
-stub instead would unpark both kinds and then fail every job on ``AttributeError``
-— a park counter falling is NOT evidence the leg works.
+``list_changes(config, checkpoint) → (items, checkpoint')``; the consumer whose
+two kinds are parked — :mod:`src.services.target.media_sync` — calls
+``deps.drive.list_changes`` and NOTHING else. `drive_adapter.py` once shipped a
+scripted stub against a second, differently-shaped listing protocol that no
+consumer ever called; it went with the tech-debt fold (#1325 audit, TD-B5), and
+this is the only listing door left.
 
-`drive_adapter.py` is reused rather than forked again: :func:`validate_source_config`
+`drive_adapter.py` is reused rather than forked: :func:`validate_source_config`
 is explicitly "part of the seam contract, every implementation calls it first",
 and its typed errors are the ladder's routing vocabulary.
 
@@ -38,13 +31,15 @@ ownership the schema already settled.
 `source_id` is therefore keyword-only and additive: one call site moves, the
 two-argument shape stays legible, and no existing caller of the port breaks.
 
-## The token arrives injected — Drive has no refresh door yet
+## The token arrives injected
 
-`credential_lifecycle` ships `ig_refresh` and nothing for Google, so a Drive
-access token cannot yet be refreshed inside the tier. :class:`GoogleDriveAdapter`
-takes an async ``token_provider(source_id) -> str`` instead of reading
-`oauth_credentials` itself. That is the seam a Google refresh door lands behind,
-and it keeps this module free of decryption and of the credential state machine.
+:class:`GoogleDriveAdapter` takes an async ``token_provider(source_id) -> str``
+instead of reading `oauth_credentials` itself; the live provider is
+:func:`src.services.target.drive_credentials.provider_from_engine`, and the
+refresh it mints behind that seam is `drive_credentials._refresh` — on the READ
+path, because the refresh clock is fenced to `ig_login` (`063`) and gdrive rows
+carry `next_refresh_at = NULL` (P5, #1247). The seam keeps this module free of
+decryption and of the credential state machine.
 
 A provider that raises :class:`DriveCredentialDead` routes to the source state
 machine; anything else it raises rides the ladder unchanged.
@@ -85,11 +80,9 @@ from src.services.target.egress import EgressPolicy
 from src.services.target.drive_adapter import (
     DriveMediaGone,
     DriveMediaTooLarge,
-    DriveError,
     DriveLostResponse,
     DriveRetryableError,
     DriveTerminalError,
-    ProbeResult,
     validate_source_config,
 )
 from src.services.target.media_sync import DriveCredentialDead, DriveSourceGone
@@ -775,66 +768,6 @@ class GoogleDriveAdapter:
             if len(folders) == FOLDER_LIST_CAP:
                 return FolderPage(folders, truncated=True)
 
-    async def probe(
-        self,
-        config: Mapping[str, Any],
-        *,
-        source_id: str,
-        workspace_id: str,
-    ) -> ProbeResult:
-        """`01`:78's third port verb — can this source be used, yes or why not.
-
-        Connect/repair validation for `02` §2's `media_sources` state machine.
-        Returns :class:`ProbeResult`; see its docstring for why a refusal is a
-        result rather than a raise, and why the error class is the transport's
-        own exception instead of a probe-specific vocabulary.
-
-        **It exercises the door production actually uses.** The request is the
-        same `files.list` `list_changes` issues, through the same
-        `_refuse_unsupported_config` → token → `_get` path, with `pageSize=1`
-        because the question is reachability rather than contents. A probe that
-        asked a cheaper question — `files.get` on the folder id, say — would
-        pass a config whose LISTING query is broken, which is the failure it
-        exists to catch.
-
-        **An EMPTY folder is `ok`.** Zero files is a legitimate answer from a
-        reachable folder, and the state machine's question is whether the source
-        can be listed, not whether anyone has put anything in it yet. Treating
-        empty as a failure would refuse every correctly-configured new source.
-
-        **`DriveLostResponse` is NOT converted to a result and propagates.** It
-        means no answer exists, and the taxonomy is explicit that "we do not
-        know" must not be catchable as "it failed" — collapsing it into
-        ``ok=False`` would let a network blip flip a healthy source to `error`
-        through a caller that reasonably branches on `ok`. A probe returns a
-        verdict; when the provider never answered there is no verdict to return.
-
-        **Today every gdrive source probes `DriveCredentialDead`**, because
-        nothing writes a gdrive credential yet (`drive_credentials`). That is
-        the honest reading of the current system, not a defect in this verb.
-        """
-        try:
-            _refuse_unsupported_config(config)
-            token = await self._token_provider(source_id, workspace_id=workspace_id)
-            params = {
-                "q": _listing_query(str(config["folder_ref"])),
-                "fields": f"files({FILE_FIELDS})",
-                "pageSize": "1",
-                "spaces": "drive",
-                "supportsAllDrives": "true",
-                "includeItemsFromAllDrives": "true",
-            }
-            await self._get(
-                f"{FILES_URL}?{urlencode(params)}", token, source_id=source_id
-            )
-        except (DriveError, DriveSourceGone, DriveCredentialDead) as exc:
-            # Deliberately NOT `except Exception`. An error outside the
-            # taxonomy is a bug in this module, and the pipeline's discipline
-            # is that a crashed run must look crashed rather than be reported
-            # as a tidy negative verdict.
-            return ProbeResult(ok=False, error=exc)
-        return ProbeResult(ok=True)
-
     def _item_for(self, entry: Mapping[str, Any]) -> Optional[dict]:
         file_id = entry.get("id")
         if not file_id:
@@ -946,11 +879,6 @@ class GoogleDriveAdapter:
             return await self._get_response(
                 url, box.value, source_id=label, policy=policy
             )
-
-    async def _get(self, url: str, token: str, *, source_id: str) -> dict:
-        """One floored GET whose 200 body is JSON (the listing calls)."""
-        response = await self._get_response(url, token, source_id=source_id)
-        return _json_body(response)
 
     async def _get_response(
         self,
