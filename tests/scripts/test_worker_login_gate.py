@@ -65,12 +65,7 @@ def world(admin_conn, owner_actor):
         conn = psycopg2.connect(stream)
         try:
             chain = seed_workspace_chain(conn, "wl")
-            ws, iga, src, media = (
-                chain["ws"],
-                chain["iga"],
-                chain["src"],
-                chain["media"],
-            )
+            ws, iga, src = chain["ws"], chain["iga"], chain["src"]
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
