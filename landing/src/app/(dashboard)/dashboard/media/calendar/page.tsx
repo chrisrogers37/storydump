@@ -9,6 +9,7 @@ import {
   type WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
 import type { Intent, IntentsResponse } from "@/lib/intents";
+import { postingIntervalMinutes } from "@/lib/schedule";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -112,15 +113,19 @@ export default async function CalendarPage() {
 
   // Derived from the workspace's own config rather than served: the posting
   // window divided by the daily target. Null config means no answer, not zero.
+  //
+  // Through `schedule.ts`, which mirrors `fn_next_slot` — the function that
+  // actually decides when posts go out. This page used to do the arithmetic
+  // itself as a bare `end - start` guarded on `> 0`, and so had no answer for
+  // the two shapes that function handles: a window that wraps midnight reads
+  // negative, and a 24-hour window reads zero. Both fell through to "interval
+  // not set", and 14 → 2 is the schema default (#1367).
   const perDay = config.posts_per_day;
-  const windowHours =
-    config.posting_hours_start !== null && config.posting_hours_end !== null
-      ? config.posting_hours_end - config.posting_hours_start
-      : null;
-  const intervalMinutes =
-    perDay && perDay > 0 && windowHours && windowHours > 0
-      ? Math.round((windowHours * 60) / perDay)
-      : null;
+  const intervalMinutes = postingIntervalMinutes(
+    config.posting_hours_start,
+    config.posting_hours_end,
+    perDay,
+  );
 
   return (
     <div className="space-y-6">
