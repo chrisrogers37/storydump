@@ -50,6 +50,12 @@ from tests.scripts.conftest import (
 from tests.scripts.legacy_inventory import HAND_MADE, LEGACY_TABLES
 
 SNAPSHOT_VERSION = 78
+#: The last file a plain `apply` takes — 078 when this gate was written; files
+#: past the window (081, the fleet-health doors) ride the same deploy, so the
+#: ledger's last row by version is this, with 078's row among them.
+LAST_DEPLOYABLE = max(
+    m.version for m in discover_migrations(MIGRATIONS_DIR) if not m.manual
+)
 
 
 def _snapshot_file():
@@ -178,7 +184,8 @@ class TestAsTheOwnerActor:
         _stand_up_to_077(as_owner)
         _seed(as_owner)
         apply_pending(as_owner, MIGRATIONS_DIR)
-        assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+        versions = [row[0] for row in fetch_ledger(as_owner)]
+        assert SNAPSHOT_VERSION in versions and versions[-1] == LAST_DEPLOYABLE
         _assert_snapshotted(as_owner)
         # the second deploy: a no-op, the snapshots untouched
         before = _snapshots(as_owner)
@@ -211,7 +218,8 @@ class TestAsTheWindowActor:
         apply_pending(as_svc, MIGRATIONS_DIR, SNAPSHOT_VERSION - 1)
         _seed(as_owner)
         apply_pending(as_svc, MIGRATIONS_DIR)
-        assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+        versions = [row[0] for row in fetch_ledger(as_owner)]
+        assert SNAPSHOT_VERSION in versions and versions[-1] == LAST_DEPLOYABLE
         _assert_snapshotted(as_owner)
 
 

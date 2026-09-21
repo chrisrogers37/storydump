@@ -31,6 +31,7 @@ from scripts.migration_runner import (
     MigrationRunnerError,
     apply_manual,
     apply_pending,
+    discover_migrations,
     status,
 )
 from tests.scripts.conftest import (
@@ -54,6 +55,14 @@ from tests.scripts.test_legacy_snapshots import (
 DROP_VERSION = 79
 STAND_DOWN_VERSION = 80
 DATE = "20260917"
+#: The last file a plain `apply` may take: the highest non-manual version in the
+#: corpus. 078 was that file when this gate was written; files past the window
+#: (081, the fleet-health doors) are applied by the same deploy that OWES 079
+#: and 080, so "the deploy applied nothing gated" is asserted against this, not
+#: against 078 — the corpus grows, the window stays owed.
+LAST_DEPLOYABLE = max(
+    m.version for m in discover_migrations(MIGRATIONS_DIR) if not m.manual
+)
 
 
 def _world_through_078(admin_conn, owner_actor, owner_window_db) -> str:
@@ -160,7 +169,9 @@ class TestTheDeployCannotDropLegacy:
         report = apply_pending(as_owner, MIGRATIONS_DIR)
         assert report.applied == []
         assert [m.version for m in report.owed] == [DROP_VERSION, STAND_DOWN_VERSION]
-        assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+        versions = [row[0] for row in fetch_ledger(as_owner)]
+        assert SNAPSHOT_VERSION in versions and versions[-1] == LAST_DEPLOYABLE
+        assert DROP_VERSION not in versions and STAND_DOWN_VERSION not in versions
         assert _schema_present(as_owner, "legacy")
         assert len(_snapshots(as_owner)) == len(LEGACY_TABLES)
 
@@ -197,8 +208,8 @@ class TestTheDropAsTheOwnerActor:
         assert set(_snapshots(as_owner).values()) == {"svc_maintenance"}
         for t in LEGACY_TABLES:
             assert _count(as_owner, "archive", f"{t}_pre_cutover_{DATE}") == before[t]
-        rows = fetch_ledger(as_owner)
-        assert rows[-1][0] == DROP_VERSION and rows[-1][4] == "applied"
+        rows = {row[0]: row for row in fetch_ledger(as_owner)}
+        assert rows[DROP_VERSION][4] == "applied"
         # uuid-ossp rode into `legacy` (051's note) and went with it; the
         # target needs no extension for gen_random_uuid()
         assert (
@@ -235,7 +246,7 @@ class TestTheDropAsTheOwnerActor:
                 " AND c.relkind = 'r'",
             )
         ) == len(LEGACY_TABLES)
-        assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+        assert DROP_VERSION not in [row[0] for row in fetch_ledger(as_owner)]
 
     @pytest.mark.parametrize(
         "writer, names",
@@ -282,7 +293,7 @@ class TestTheDropAsTheOwnerActor:
         for name in names:
             assert name in str(exc.value)
         assert _schema_present(as_owner, "legacy")
-        assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+        assert DROP_VERSION not in [row[0] for row in fetch_ledger(as_owner)]
 
     def test_079_refuses_a_relation_in_legacy_that_is_not_in_the_inventory(
         self, admin_conn, owner_actor, owner_window_db
@@ -319,7 +330,7 @@ class TestTheDropAsTheOwnerActor:
         assert fetch_one(
             as_owner, "SELECT to_regclass('public.v_over_legacy') IS NOT NULL"
         )[0]
-        assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+        assert DROP_VERSION not in [row[0] for row in fetch_ledger(as_owner)]
 
 
 @pytest.mark.integration
@@ -346,7 +357,7 @@ class TestTheStandDownAsTheOwnerActor:
             )[0]
             is True
         )
-        assert [row[0] for row in fetch_ledger(as_owner)][-1] == SNAPSHOT_VERSION
+        assert DROP_VERSION not in [row[0] for row in fetch_ledger(as_owner)]
 
     def test_080_refuses_when_legacy_reappears_after_079(
         self, admin_conn, owner_actor, owner_window_db
@@ -389,7 +400,7 @@ class TestTheStandDownAsTheOwnerActor:
         report = apply_manual(as_owner, MIGRATIONS_DIR, STAND_DOWN_VERSION)
 
         assert [m.version for m in report.applied] == [STAND_DOWN_VERSION]
-        assert [row[0] for row in fetch_ledger(as_owner)][-1] == STAND_DOWN_VERSION
+        assert STAND_DOWN_VERSION in [row[0] for row in fetch_ledger(as_owner)]
         q = lambda sql: fetch_one(as_owner, sql)[0]  # noqa: E731 — the gate's lines
         # identity: the target present, legacy gone, the door gone
         assert q(
@@ -484,4 +495,5 @@ class TestTheStandDownAsTheOwnerActor:
         assert report.applied == [] and report.owed == []
         after = status(as_owner, MIGRATIONS_DIR)
         assert after.pending == [] and after.owed == []
-        assert after.applied[-1][0].version == STAND_DOWN_VERSION
+        applied = {m.version for m, _ in after.applied}
+        assert {DROP_VERSION, STAND_DOWN_VERSION, LAST_DEPLOYABLE} <= applied
