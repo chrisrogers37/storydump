@@ -150,11 +150,14 @@ def webhook() -> None:' "$UNIT" "$TH -k json_before_the_group"
 TV2=tests/src/services/target/test_vocabulary.py
 TI=tests/storydump_cli/test_import_boundary.py
 AP=src/api/app.py
+#: The API's startup registration moved into the channel it belongs to
+#: (#1335, TD-C11), and the anchor below moved with it.
+RG=src/channels/telegram_webhook_registration.py
 ST=src/services/target/service_tokens.py
 OV=src/services/target/ops_views.py
-check "the API reads a Telegram variable by a literal" $AP '    token = env.get(reg.TOKEN_VAR)
-    secret = env.get(reg.SECRET_VAR)' '    token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
-    secret = env.get(reg.SECRET_VAR)' "$UNIT" "$TV2 -k literal_outside_the_vocabulary"
+check "the startup registration reads a Telegram variable by a literal" $RG '    token = env.get(TOKEN_VAR)
+    secret = env.get(SECRET_VAR)' '    token = env.get("TARGET_TELEGRAM_BOT_TOKEN")
+    secret = env.get(SECRET_VAR)' "$UNIT" "$TV2 -k literal_outside_the_vocabulary"
 check "an undocumented reason passes the envelope check" $VO '        if error["reason"] not in CLI_REASONS:' '        if False:' "$UNIT" "$TV2 -k refuses_an_undocumented_reason"
 check "a CLI reason leaves the closed set" $VO '    "interrupted",
     "refused",

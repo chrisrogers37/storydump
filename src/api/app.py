@@ -40,7 +40,6 @@ at nothing and on a misconfigured one would point at a legacy-shaped database
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import os
 from contextlib import asynccontextmanager
 from typing import Mapping, Optional
@@ -154,9 +153,10 @@ class DropAmbiguousForwardedForMiddleware:
         await self.app(scope, receive, send)
 
 
-#: How often `_sample_webhook_live` re-reads what Telegram holds. The CLI's
-#: `storydump health` reads the cached sample and states this bound in its
-#: help; the number should be findable from both ends.
+#: How often `_sample_webhook_live` re-reads what Telegram holds — the cadence
+#: is the API's to choose, so it is stated here and handed to the channel's
+#: `live_samples`. The CLI's `storydump health` reads the cached sample and
+#: states this bound in its help; the number should be findable from both ends.
 WEBHOOK_LIVE_SAMPLE_SECONDS = 60
 
 #: `TenantResolutionError.reason` → status, for the reasons the web surface can
@@ -413,105 +413,30 @@ def _ingress_workers(env: Mapping[str, str]) -> int:
 
 
 async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
-    """Register the bot's webhook on this API at startup — idempotent, on
-    every deploy — and cache the report for `/health`. Never raises.
-
-    The API holds the token and the secret already; a human step that must
-    follow every deploy is a step that will be missed (the tap's first blocker
-    was exactly that: a registration asking for `message` updates only).
-    Skipped, with the reason in the report, when the token or the secret is
-    absent, or when `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` switches it off.
-    """
+    """Cache the startup registration's report on `app.state.webhook` for
+    `/health` — `reg.register_at_startup` decides it and never raises, so this
+    is the whole of the API's part: hand it the bot transport this process
+    speaks with, and keep what it says."""
     from src.channels import telegram_webhook_registration as reg
 
-    token = env.get(reg.TOKEN_VAR)
-    secret = env.get(reg.SECRET_VAR)
-    if not reg.autoregister_enabled(
-        env.get(reg.AUTOREGISTER_VAR), environment=env.get(reg.ENVIRONMENT_VAR)
-    ):
-        switched_off = (
-            env.get(reg.AUTOREGISTER_VAR) or ""
-        ).strip().lower() in reg.OFF_WORDS
-        app.state.webhook = {
-            "ok": False,
-            "skipped": (
-                f"autoregister switched off ({reg.AUTOREGISTER_VAR})"
-                if switched_off
-                else "autoregister off (not the production environment)"
-            ),
-        }
-        return
-    if not token or not secret:
-        app.state.webhook = {
-            "ok": False,
-            "skipped": "bot token or webhook secret not set",
-        }
-        return
-    transport = None
-    try:
-        max_connections = reg.max_connections_from(env.get(reg.MAX_CONNECTIONS_VAR))
-        transport = _telegram_transport(env)
-        app.state.webhook = await reg.register(
-            transport,
-            url=env.get(reg.URL_VAR) or reg.DEFAULT_WEBHOOK_URL,
-            secret=secret,
-            expected_bot=env.get(reg.BOT_VAR),
-            max_connections=max_connections,
-        )
-    except reg.BadMaxConnections as exc:
-        # Names the variable and the value, never a secret.
-        app.state.webhook = {"ok": False, "error": str(exc)}
-        logger.error("telegram webhook not registered: %s", exc)
-    except Exception as exc:  # noqa: BLE001 — diagnostic; never fails startup
-        app.state.webhook = {"ok": False, "error": type(exc).__name__}
-        logger.warning(
-            "telegram webhook not registered at startup: %s", type(exc).__name__
-        )
-    finally:
-        if transport is not None:
-            try:
-                await transport.aclose()
-            except Exception:  # noqa: BLE001
-                pass
+    app.state.webhook = await reg.register_at_startup(
+        env, transport_factory=_telegram_transport
+    )
 
 
 async def _sample_webhook_live(app: FastAPI, env: Mapping[str, str]) -> None:
-    """Every minute: what Telegram holds for the bot's webhook RIGHT NOW —
-    `getWebhookInfo`'s backlog and last delivery error — cached on
-    `app.state.webhook_live` for `/health`. Read-only, so it runs wherever a
-    token exists; a failure is a report, never a raise. This is the signal
-    that tells "Telegram is not delivering" from "our route is failing": the
-    former shows as a growing backlog with no error, the latter as
-    `last_error_message` naming our response code."""
+    """Cache each live webhook sample on `app.state.webhook_live` for `/health`.
+    The loop, its cadence and its never-raise rule are `reg.live_samples`; this
+    task exists to hold the latest one where the probe can read it, and is
+    cancelled at shutdown like the other two."""
     from src.channels import telegram_webhook_registration as reg
 
-    if not env.get(reg.TOKEN_VAR):
-        return
-    transport = _telegram_transport(env)
-    try:
-        while True:
-            try:
-                info = await transport.webhook_info()
-                app.state.webhook_live = {
-                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    "url": info.get("url"),
-                    "pending_update_count": info.get("pending_update_count"),
-                    "last_error_date": info.get("last_error_date"),
-                    "last_error_message": info.get("last_error_message"),
-                    "max_connections": info.get("max_connections"),
-                    "allowed_updates": info.get("allowed_updates"),
-                }
-            except Exception as exc:  # noqa: BLE001 — a report, never a failed loop
-                app.state.webhook_live = {
-                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    "error": type(exc).__name__,
-                }
-            await asyncio.sleep(WEBHOOK_LIVE_SAMPLE_SECONDS)
-    finally:
-        try:
-            await transport.aclose()
-        except Exception:  # noqa: BLE001
-            pass
+    async for sample in reg.live_samples(
+        env,
+        transport_factory=_telegram_transport,
+        interval=WEBHOOK_LIVE_SAMPLE_SECONDS,
+    ):
+        app.state.webhook_live = sample
 
 
 async def _sample_db_role(app: FastAPI) -> None:
