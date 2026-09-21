@@ -89,6 +89,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
@@ -512,10 +513,27 @@ async def _admit(
 ) -> Optional[str]:
     """The admission gate for an `approved` intent: cancel honor, the §8
     advisory pre-check, then the §4 flip. Returns an outcome to stop with,
-    or None to continue into the ladder."""
+    or None to continue into the ladder.
+
+    Those three are the three helpers below it: the docstring already named
+    the seams, and now the code is cut along them (the tech-debt audit,
+    2026-09-20). Each stage still owns its own transaction — none was moved
+    across a commit boundary, and the pre-check's provider read stays outside
+    every one of them."""
     if ctx.intent["cancel_requested"]:
         return await _honour_cancel(uow, ctx, transit)
+    stop = await _advisory_precheck(uow, ctx, meta, precheck, backoff_seconds, now_fn)
+    if stop is not None:
+        return stop
+    return await _flip_to_publishing(uow, ctx, backoff_seconds, now_fn, transit)
 
+
+async def _advisory_precheck(
+    uow, ctx: _Ctx, meta, precheck, backoff_seconds, now_fn
+) -> Optional[str]:
+    """The `02` §8 advisory pre-check, immediately before the §4 flip:
+    Meta's own answer about the account's remaining quota. Returns
+    `DEFERRED_META_CAP` to stop with, or None to go on to the flip."""
     # A story re-entering from a wait (the float, plan 03 D3) carries its
     # debit; the advisory pre-check would send it to the next slot with an
     # asset the sweep reaps — it was admitted once, and that answer stands.
@@ -551,7 +569,18 @@ async def _admit(
                     # the card (plan 03, UX principle 1).
                     await _say_waiting(session, ctx, next_run_at=slot)
             return DEFERRED_META_CAP
+    return None
 
+
+async def _flip_to_publishing(
+    uow, ctx: _Ctx, backoff_seconds, now_fn, transit
+) -> Optional[str]:
+    """The `02` §4 flip — `approved → publishing` with the cap debit and key
+    4 — and the routing of every answer it can give: proceed (None, into the
+    ladder), a cancel the flip itself refused, or a deferral (busy, cap) that
+    reschedules and says so. `IntentNotApproved` is the race that moved the
+    intent while we held the job; the UoW rolled back and the route is
+    whatever it became."""
     try:
         async with _leased_tx(uow, ctx.job) as session:
             flip = await publish_cap.flip_to_publishing(
@@ -709,6 +738,29 @@ async def _park(uow, ctx: _Ctx, op_id) -> str:
     return PARKED_AMBIGUOUS
 
 
+@dataclass(frozen=True)
+class _Wait:
+    """How a float is audited: its class, its rung index and the story's
+    counters (plan 03 D3). Five parameters travelled together through the
+    thirteen call sites of `_retry_or_poison` the audit counted — ten now
+    that the two readiness rungs share `_route_readiness` — and one object
+    is the same data with one name (the tech-debt audit, 2026-09-20).
+
+    *kind* is the class recorded on the wait (today's `wait=` string).
+    *attempt* is the count that indexes the rung (a class's own, e.g.
+    `fetch_waits`; the job's attempts when None), *spent* says the class's
+    ladder is exhausted (the job's budget when None), *counters* merge into
+    `attempts_by_step`, and *restore_attempt* keeps the job's attempt for the
+    classes whose bound is their own ladder.
+    """
+
+    kind: str = "retry"
+    attempt: Optional[int] = None
+    spent: Optional[bool] = None
+    counters: Optional[dict] = None
+    restore_attempt: bool = False
+
+
 async def _retry_or_poison(
     uow,
     ctx: _Ctx,
@@ -720,11 +772,7 @@ async def _retry_or_poison(
     step_back_to: Optional[str] = None,
     error: Optional[dict] = None,
     poison_now: bool = False,
-    attempt: Optional[int] = None,
-    spent: Optional[bool] = None,
-    wait: str = "retry",
-    counters: Optional[dict] = None,
-    restore_attempt: bool = False,
+    wait: _Wait = _Wait(),
 ) -> str:
     """R8's retryable-failure edge: reschedule on the ladder while the budget
     holds; G5 poison (`publishing → review_required`, debit retained) when it
@@ -734,16 +782,15 @@ async def _retry_or_poison(
 
     The float (plan 03): every wait STEPS BACK — `publishing → approved` in
     this same transaction, progress and debit kept, so the account's slot is
-    free while the story waits — and is audited with its class (*wait*), its
-    rung and the story's counters. *attempt* is the count that indexes the
-    rung (a class's own, e.g. `fetch_waits`; the job's attempts when None),
-    *spent* says the class's ladder is exhausted (the job's budget when None),
-    *counters* merge into `attempts_by_step`, and *restore_attempt* keeps the
-    job's attempt for the classes whose bound is their own ladder.
+    free while the story waits — and is audited with its class, its rung and
+    the story's counters. That description is *wait*, a `_Wait`; the outcome
+    keywords above it say what happened, which is a different thing and stays
+    spelled out.
     """
     attempts = int(ctx.job["attempts"])
     # *poison_now*: the failure cannot be retried into success (a dead
     # credential) — skip the ladder, hand the intent to a human at once.
+    spent = wait.spent
     if spent is None:
         spent = attempts >= int(ctx.job["max_attempts"])
     exhausted = poison_now or spent
@@ -766,8 +813,8 @@ async def _retry_or_poison(
                 outcome="failed",
                 response_ref=resolve_response,
             )
-        if counters:
-            await _bump(session, ctx, **counters)
+        if wait.counters:
+            await _bump(session, ctx, **wait.counters)
         # `step_back_to` is the caller saying the artifacts BEYOND that rung are
         # abandoned — the dead- and gone-container paths. So it is also the
         # signal for whether `ig_container_id` still points at anything, and
@@ -839,7 +886,7 @@ async def _retry_or_poison(
                 ),
                 {"step": step_back_to, "intent": ctx.intent_id},
             )
-        index = (attempt if attempt is not None else attempts) - 1
+        index = (wait.attempt if wait.attempt is not None else attempts) - 1
         rung = backoff_seconds[max(0, min(index, len(backoff_seconds) - 1))]
         run_at = now + timedelta(seconds=rung)
         await reschedule_job(
@@ -847,7 +894,7 @@ async def _retry_or_poison(
             ctx.job["id"],
             ctx.job["lease_token"],
             run_at=run_at,
-            restore_attempt=restore_attempt,
+            restore_attempt=wait.restore_attempt,
         )
         # The wait itself (plan 03 D3): out of the slot, on the record.
         await _step_back(session, ctx)
@@ -856,7 +903,7 @@ async def _retry_or_poison(
         await _audit_wait(
             session,
             ctx,
-            wait=wait,
+            wait=wait.kind,
             rung=index + 1,
             seconds=rung,
             next_run_at=run_at,
@@ -984,6 +1031,56 @@ async def _permit(engine, ctx: _Ctx, *, op_kind: str, generation: int) -> dict:
             op_kind=op_kind,
             generation=generation,
         )
+
+
+async def _route_readiness(
+    uow, ctx: _Ctx, meta, sleep, backoff_seconds, now_fn
+) -> Optional[str]:
+    """One bounded readiness segment, routed. Returns the outcome to stop
+    with, or None when the container is ready and the caller continues.
+
+    Both rungs that poll a container — `container_created` and
+    `publish_called` — routed the verdict through identical code, the
+    `ContainerDead` error dict included (the tech-debt audit, 2026-09-20).
+    A verdict that means one thing on one rung and another on the next is
+    exactly the drift a second copy produces, so the routing lives once.
+
+    No transaction is open across the poll: `_await_ready` is the provider
+    call and every branch below opens its own (`02` §5).
+    """
+    verdict = await _await_ready(ctx, meta, sleep)
+    if verdict == "dead":
+        # The container is definitively gone; a NEW one needs a fresh
+        # create (and a fresh generation) from the still-valid transit
+        # asset — step back, retry on the ladder.
+        return await _retry_or_poison(
+            uow,
+            ctx,
+            backoff_seconds,
+            now_fn,
+            step_back_to="transit_uploaded",
+            error={
+                "v": 1,
+                "error": {
+                    "type": "ContainerDead",
+                    "code": None,
+                    "message": "Meta reported the container ERROR or EXPIRED —"
+                    " the media at the delivery URL could not be processed",
+                },
+            },
+        )
+    if verdict == "unauthorized":
+        return await _retry_or_poison(
+            uow,
+            ctx,
+            backoff_seconds,
+            now_fn,
+            error=_error_of(ctx.poll_error),
+            poison_now=True,
+        )
+    if verdict == "pending":
+        return await _retry_or_poison(uow, ctx, backoff_seconds, now_fn)
+    return None
 
 
 async def _ladder(
@@ -1210,14 +1307,16 @@ async def _ladder(
                         resolve_op_id=permit["id"],
                         resolve_response=record,
                         error=_error_of(exc),
-                        attempt=waits,
-                        spent=waits > len(FETCH_RETRY_SECONDS),
-                        wait="fetch",
-                        counters={
-                            "fetch_refusals": refusals,
-                            "fetch_waits": min(waits, len(FETCH_RETRY_SECONDS)),
-                        },
-                        restore_attempt=True,
+                        wait=_Wait(
+                            kind="fetch",
+                            attempt=waits,
+                            spent=waits > len(FETCH_RETRY_SECONDS),
+                            counters={
+                                "fetch_refusals": refusals,
+                                "fetch_waits": min(waits, len(FETCH_RETRY_SECONDS)),
+                            },
+                            restore_attempt=True,
+                        ),
                     )
                 return await _fail_terminal(
                     uow,
@@ -1303,38 +1402,9 @@ async def _ladder(
             break
 
     if step == "container_created":
-        verdict = await _await_ready(ctx, meta, sleep)
-        if verdict == "dead":
-            # The container is definitively gone; a NEW one needs a fresh
-            # create (and a fresh generation) from the still-valid transit
-            # asset — step back, retry on the ladder.
-            return await _retry_or_poison(
-                uow,
-                ctx,
-                backoff_seconds,
-                now_fn,
-                step_back_to="transit_uploaded",
-                error={
-                    "v": 1,
-                    "error": {
-                        "type": "ContainerDead",
-                        "code": None,
-                        "message": "Meta reported the container ERROR or EXPIRED —"
-                        " the media at the delivery URL could not be processed",
-                    },
-                },
-            )
-        if verdict == "unauthorized":
-            return await _retry_or_poison(
-                uow,
-                ctx,
-                backoff_seconds,
-                now_fn,
-                error=_error_of(ctx.poll_error),
-                poison_now=True,
-            )
-        if verdict == "pending":
-            return await _retry_or_poison(uow, ctx, backoff_seconds, now_fn)
+        stop = await _route_readiness(uow, ctx, meta, sleep, backoff_seconds, now_fn)
+        if stop is not None:
+            return stop
         async with _leased_tx(uow, ctx.job) as session:
             await session.execute(
                 text(
@@ -1357,35 +1427,9 @@ async def _ladder(
                 f"intent {ctx.intent_id}: publish permit succeeded but step "
                 "is still publish_called — the terminal tx writes both"
             )
-        verdict = await _await_ready(ctx, meta, sleep)
-        if verdict == "dead":
-            return await _retry_or_poison(
-                uow,
-                ctx,
-                backoff_seconds,
-                now_fn,
-                step_back_to="transit_uploaded",
-                error={
-                    "v": 1,
-                    "error": {
-                        "type": "ContainerDead",
-                        "code": None,
-                        "message": "Meta reported the container ERROR or EXPIRED —"
-                        " the media at the delivery URL could not be processed",
-                    },
-                },
-            )
-        if verdict == "unauthorized":
-            return await _retry_or_poison(
-                uow,
-                ctx,
-                backoff_seconds,
-                now_fn,
-                error=_error_of(ctx.poll_error),
-                poison_now=True,
-            )
-        if verdict == "pending":
-            return await _retry_or_poison(uow, ctx, backoff_seconds, now_fn)
+        stop = await _route_readiness(uow, ctx, meta, sleep, backoff_seconds, now_fn)
+        if stop is not None:
+            return stop
         step = "container_ready"
 
     if step == "container_ready":
@@ -1458,13 +1502,17 @@ async def _ladder(
                     ),
                     error=_error_of(exc),
                     step_back_to="transit_uploaded",
-                    attempt=gone,
-                    spent=gone > len(CONTAINER_GONE_RETRY_SECONDS),
-                    wait="container",
-                    counters={
-                        "container_gone": min(gone, len(CONTAINER_GONE_RETRY_SECONDS))
-                    },
-                    restore_attempt=True,
+                    wait=_Wait(
+                        kind="container",
+                        attempt=gone,
+                        spent=gone > len(CONTAINER_GONE_RETRY_SECONDS),
+                        counters={
+                            "container_gone": min(
+                                gone, len(CONTAINER_GONE_RETRY_SECONDS)
+                            )
+                        },
+                        restore_attempt=True,
+                    ),
                 )
             logger.warning(
                 "publish_pipeline intent %s: %s code=%s — %s",
