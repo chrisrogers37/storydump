@@ -158,10 +158,23 @@ class TestTheBackfillExclusion:
     Both posting aggregates must carry the filter. Testing only the count would
     pass while the AGE went unfiltered, which is the half that manufactures the
     false recovery.
+
+    Since 081 the query is the body of `fn_health_posting_freshness`, a door the
+    module reads through, so the property is read from the migration file here
+    (the doors gate reads it from the LIVE function in the replayed world);
+    the module's own statement is pinned to the door.
     """
 
     @staticmethod
-    async def _statement():
+    def _door_body() -> str:
+        from scripts.migration_runner import MIGRATIONS_DIR
+
+        ddl = (MIGRATIONS_DIR / "081_fleet_health_doors.sql").read_text()
+        body = ddl.split("CREATE FUNCTION fn_health_posting_freshness()", 1)[1]
+        body = body.split("AS $$", 1)[1].split("$$;", 1)[0]
+        return " ".join(body.split())
+
+    async def test_the_module_reads_through_the_door(self):
         fake = FakeExecutor(
             {
                 "posted_ever": 0,
@@ -171,10 +184,12 @@ class TestTheBackfillExclusion:
             }
         )
         await posting_freshness(fake)
-        return " ".join(fake.statements[0].split())
+        sql = " ".join(fake.statements[0].split())
+        assert "FROM fn_health_posting_freshness()" in sql
+        assert "FROM post_intents" not in sql
 
-    async def test_both_posting_aggregates_exclude_backfilled_rows(self):
-        sql = await self._statement()
+    def test_both_posting_aggregates_exclude_backfilled_rows(self):
+        sql = self._door_body()
         predicate = (
             "state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')"
         )
@@ -182,22 +197,23 @@ class TestTheBackfillExclusion:
         # occurrence means one of the two is reading the unfiltered population.
         assert sql.count(predicate) == 2
 
-    async def test_no_posting_aggregate_is_filtered_on_state_alone(self):
+    def test_no_posting_aggregate_is_filtered_on_state_alone(self):
         """The mutation this guards against is dropping the second conjunct,
         which leaves a `state = 'posted'` filter that looks entirely correct."""
-        sql = await self._statement()
+        sql = self._door_body()
         assert "state = 'posted' AND" in sql
         assert "FILTER (WHERE state = 'posted')" not in sql
 
-    async def test_the_intent_anchor_is_deliberately_NOT_filtered(self):
+    def test_the_intent_anchor_is_deliberately_NOT_filtered(self):
         """`oldest_intent_age_seconds` counts every intent ever created,
         backfilled rows included, and that is correct: it measures how long the
         estate has had something to post. Excluding them could only make the
         grace clock start LATER, which is the direction that suppresses alerts.
+        The two anchors close the select list with no FILTER between them and
+        the table.
         """
-        sql = await self._statement()
+        sql = self._door_body()
         assert (
-            "max(EXTRACT(EPOCH FROM now() - created_at)) "
-            "AS oldest_intent_age_seconds" in sql
+            "count(*), max(EXTRACT(EPOCH FROM now() - created_at)) FROM post_intents"
+            in sql
         )
-        assert "count(*) AS intents_ever" in sql
