@@ -12,7 +12,7 @@ lanes accumulated exactly this work).
 
 "A database transaction never spans a provider call." The refresh executor is
 three phases — load+commit, provider call, write+commit — each phase on its
-own transaction from :func:`work_loop.poller_session_factory` (the same shape
+own transaction from :func:`unit_of_work.poller_session_factory` (the same shape
 `deliver_outbox` uses: the lane's session is for the job row; the work rides
 tenant-GUC'd sessions of its own). The egress floor enforces this structurally:
 a provider call inside an open UoW transaction raises, so getting this wrong
@@ -54,6 +54,7 @@ from src.services.target import (
     google_drive_oauth,
     google_oidc,
     outbox,
+    unit_of_work,
 )
 from src.services.target import ig_login_oauth as oauth
 
@@ -161,12 +162,10 @@ async def revoke_workspace_credentials(deps, session, job) -> str:
 
     It reads the token only to spend it, never logs it, and never returns it.
     """
-    from src.services.target.work_loop import poller_session_factory
-
     payload = job.get("payload") or {}
     credential_id = str(payload["credential_id"])
     workspace_id = str(job["workspace_id"])
-    factory = poller_session_factory(deps.engine, workspace_id)
+    factory = unit_of_work.poller_session_factory(deps.engine, workspace_id)
 
     # Phase 1 — read and decrypt in its own transaction, committed before any
     # provider talk. Same ordering as `refresh_credential` and for the same
@@ -240,11 +239,9 @@ async def _audit_revoke_failed(factory, workspace_id, credential_id, reason) -> 
 
 async def refresh_credential(deps, session, job) -> str:
     """Executor for the clock's `refresh_credential` mints (`02` §5 :1162)."""
-    from src.services.target.work_loop import poller_session_factory
-
     payload = job.get("payload") or {}
     credential_id = str(payload["credential_id"])
-    factory = poller_session_factory(deps.engine, str(job["workspace_id"]))
+    factory = unit_of_work.poller_session_factory(deps.engine, str(job["workspace_id"]))
 
     # Phase 1 — load, own transaction, committed before any provider talk.
     try:
@@ -317,11 +314,10 @@ async def reauth_prompt(deps, session, job) -> str:
     single transaction covers the check and the enqueue together.
     """
     from src.services.target import prompts
-    from src.services.target.work_loop import poller_session_factory
 
     payload = job.get("payload") or {}
     account_id = str(payload["ig_account_id"])
-    factory = poller_session_factory(deps.engine, str(job["workspace_id"]))
+    factory = unit_of_work.poller_session_factory(deps.engine, str(job["workspace_id"]))
 
     async with factory() as s:
         row = (

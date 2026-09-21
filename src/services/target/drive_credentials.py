@@ -58,7 +58,7 @@ from src.services.target import egress, google_drive_oauth
 from src.services.target.drive_adapter import DriveLostResponse, DriveRetryableError
 from src.services.target.ig_login_oauth import ring
 from src.services.target.media_sync import DriveCredentialDead
-from src.services.target.unit_of_work import unit_of_work
+from src.services.target.unit_of_work import poller_session_factory, unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -98,8 +98,6 @@ async def token_for_workspace(engine, workspace_id: str, *, fresh: bool = False)
     # so without the tenant GUC the read returns nothing and "no credential"
     # becomes indistinguishable from "cannot see the credential" — the
     # unreachable-vs-empty collapse, inside a security boundary.
-    from src.services.target.work_loop import poller_session_factory
-
     session_factory = poller_session_factory(engine, str(workspace_id))
     async with session_factory() as session:
         row = (

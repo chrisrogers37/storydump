@@ -140,9 +140,9 @@ class TestTheReadDoorResolvesByWorkspace:
 
             return _Factory()
 
-        from src.services.target import work_loop
-
-        monkeypatch.setattr(work_loop, "poller_session_factory", poller_session_factory)
+        monkeypatch.setattr(
+            drive_credentials, "poller_session_factory", poller_session_factory
+        )
         monkeypatch.setattr(drive_credentials, "ring", lambda: _Ring())
         return holder
 
@@ -242,9 +242,9 @@ class TestAnExpiredAccessTokenIsMintedOnTheReadPath:
 
                 return _Ctx()
 
-        from src.services.target import work_loop
-
-        monkeypatch.setattr(work_loop, "poller_session_factory", poller_session_factory)
+        monkeypatch.setattr(
+            drive_credentials, "poller_session_factory", poller_session_factory
+        )
         monkeypatch.setattr(drive_credentials, "ring", lambda: _Ring())
         monkeypatch.setattr(
             google_drive_oauth, "refresh_access_token", refresh_access_token
