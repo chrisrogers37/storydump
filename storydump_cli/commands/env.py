@@ -514,23 +514,18 @@ def _storage_name(runtime: Any) -> str:
     return type(runtime.backend()).__name__.replace("Backend", "").lower()
 
 
-@click.command()
-@global_options
-@click.pass_context
-def doctor(ctx: click.Context) -> int:
-    """Check the token, the API, the token store, the local configuration,
-    the Railway login and link, and the migration ledger against this
-    checkout; each line ok, wrong, missing or skipped, with its fix. Exit 0
-    when everything is ok, else the first wrong check's own code.
+#: One `doctor` check's answer: the rows it decided, keyed the way `doctor`
+#: orders them. A dict rather than a bare row because the token check decides
+#: TWO — its own, and `api` when it learns that `/health` answered and
+#: `/me/principal` did not — and one shape for all six beats a special case.
+Rows = dict[str, tuple[str, str, str]]
 
-    \b
-    Example:
-      storydump doctor
-    """
-    runtime = begin(ctx, "doctor")
-    checks: dict[str, tuple[str, str, str]] = {}
 
-    # --- the API first: the token can only be checked through it ---------------
+def _check_api(runtime: Any) -> tuple[Rows, bool]:
+    """The API, first: the token can only be checked through it. Also answers
+    whether `/health` was reached at all, which is what tells the token check
+    "refused" from "not checked"."""
+    checks: Rows = {}
     api_client = runtime.client(None)
     api_up = False
     try:
@@ -562,8 +557,17 @@ def doctor(ctx: click.Context) -> int:
             f"{runtime.api_url} answered {exc.status}: {exc.detail}",
             "check STORYDUMP_API",
         )
+    return checks, api_up
 
-    # --- the token -----------------------------------------------------------------
+
+def _check_token(
+    runtime: Any, *, api_up: bool
+) -> tuple[Rows, Optional[str], Optional[dict[str, Any]]]:
+    """The token, and what it resolves to. Decides the `token` row — and
+    REPLACES the `api` row when `/health` answered and `/me/principal` did not,
+    because a doctor that says "ok" over an unchecked token is lying. Hands
+    back the token and the principal the ledger check needs."""
+    checks: Rows = {}
     token: Optional[str] = None
     principal: Optional[dict[str, Any]] = None
     try:
@@ -628,12 +632,22 @@ def doctor(ctx: click.Context) -> int:
                     f" {str(facts.get('expires_at') or '?')[:10]})",
                     "",
                 )
+    return checks, token, principal
 
-    # --- the store and the config ----------------------------------------------------
+
+def _check_storage(runtime: Any) -> Rows:
+    """Where the token is kept."""
+    checks: Rows = {}
     try:
         checks["storage"] = ("ok", _storage_name(runtime), "")
     except StorageUnavailable as exc:
         checks["storage"] = ("missing", exc.detail, exc.fix)
+    return checks
+
+
+def _check_config(runtime: Any) -> Rows:
+    """The local configuration file, or the defaults standing in for it."""
+    checks: Rows = {}
     try:
         config = runtime.config()
         path = runtime.config_dir / CONFIG_FILE
@@ -650,8 +664,12 @@ def doctor(ctx: click.Context) -> int:
             str(exc),
             DEFAULT_CONFIG_FIX,
         )
+    return checks
 
-    # --- railway ---------------------------------------------------------------------
+
+def _check_railway(runtime: Any) -> Rows:
+    """The Railway CLI: installed, logged in, and linked to this project."""
+    checks: Rows = {}
     rail = Railway(runtime.run_process)
     try:
         version = rail.version()
@@ -667,8 +685,15 @@ def doctor(ctx: click.Context) -> int:
         # another project, or a binary answering badly, is WRONG
         missing = "not installed" in exc.detail or "not logged in" in exc.detail
         checks["railway"] = ("missing" if missing else "wrong", exc.detail, exc.fix)
+    return checks
 
-    # --- the ledger against the checkout -----------------------------------------------
+
+def _check_ledger(
+    runtime: Any, *, token: Optional[str], principal: Optional[dict[str, Any]]
+) -> Rows:
+    """The migration ledger the API reports, against this checkout. Skipped
+    without a token and a reachable API — there is nothing to compare to."""
+    checks: Rows = {}
     if principal is None or token is None:
         checks["ledger"] = ("skipped", "needs a valid token and a reachable API", "")
     else:
@@ -728,6 +753,38 @@ def doctor(ctx: click.Context) -> int:
                         f" matching the checkout{note}",
                         "",
                     )
+    return checks
+
+
+@click.command()
+@global_options
+@click.pass_context
+def doctor(ctx: click.Context) -> int:
+    """Check the token, the API, the token store, the local configuration,
+    the Railway login and link, and the migration ledger against this
+    checkout; each line ok, wrong, missing or skipped, with its fix. Exit 0
+    when everything is ok, else the first wrong check's own code.
+
+    \b
+    Example:
+      storydump doctor
+    """
+    runtime = begin(ctx, "doctor")
+    checks: Rows = {}
+
+    # Six checks, in the order they must RUN rather than the order they are
+    # reported: the API first because the token can only be checked through it,
+    # the token before the ledger because the ledger needs the principal it
+    # resolves. Each returns the rows it decided; only the token check decides
+    # more than its own.
+    api_rows, api_up = _check_api(runtime)
+    checks.update(api_rows)
+    token_rows, token, principal = _check_token(runtime, api_up=api_up)
+    checks.update(token_rows)
+    checks.update(_check_storage(runtime))
+    checks.update(_check_config(runtime))
+    checks.update(_check_railway(runtime))
+    checks.update(_check_ledger(runtime, token=token, principal=principal))
 
     ordered = [
         {"check": name, "state": state, "value": value, "fix": fix}
