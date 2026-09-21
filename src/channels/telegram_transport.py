@@ -41,13 +41,13 @@ from typing import Awaitable, Callable, Optional
 
 import httpx
 
-from src.services.target import egress
+from src.services.target import egress, vocabulary
 from src.services.target.egress import EgressPolicy
 from src.services.target.outbox import ChannelPaced, ChannelRefused, DestinationGone
 
 logger = logging.getLogger("channels.telegram")
 
-_API_BASE = "https://api.telegram.org"
+_API_BASE = vocabulary.TELEGRAM_BOT_API_BASE
 
 
 _CHAT_GONE_MARKERS = (
@@ -599,7 +599,9 @@ def transport_from_env(token: str, env, **kwargs) -> "TelegramTransport":
     base = (env.get(API_BASE_VAR) or "").strip()
     if not base:
         return TelegramTransport(token, **kwargs)
-    if (env.get("RAILWAY_ENVIRONMENT_NAME") or "").strip().lower() == "production":
+    if (env.get(vocabulary.RAILWAY_ENVIRONMENT_VAR) or "").strip().lower() == (
+        vocabulary.PRODUCTION_ENVIRONMENT
+    ):
         raise ApiBaseRefused(f"{API_BASE_VAR} is not honoured in production")
     host = httpx.URL(base).host
     if host not in _LOOPBACK:

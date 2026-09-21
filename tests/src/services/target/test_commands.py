@@ -90,6 +90,14 @@ class TestVocabularyIsTheDocs:
     def test_no_duplicates_and_stable_order(self):
         assert len(port.VOCABULARY) == len(set(port.VOCABULARY))
 
+    def test_the_webhook_route_reads_the_vocabularys_header(self):
+        """The route READS the header the CLI SENDS. Two literals and
+        `storydump webhook status` reports a refusal Telegram never sees."""
+        from src.api.routes import webhooks
+        from src.services.target import vocabulary
+
+        assert webhooks.SECRET_HEADER is vocabulary.WEBHOOK_SECRET_HEADER
+
 
 class TestEveryCommandHasAFloorAndAnExecutorSlot:
     def test_role_floor_is_total(self):

@@ -44,6 +44,9 @@ RW=storydump_cli/railway.py
 WA=storydump_cli/watch.py
 OU=storydump_cli/output.py
 MA=storydump_cli/main.py
+#: The fix sentences moved to the package both `main` and `env` import
+#: (#1325 audit, TD-C14); `main` re-exports them, so the verbs are unchanged.
+FX=storydump_cli/commands/__init__.py
 CL=storydump_cli/client.py
 VO=src/services/target/vocabulary.py
 RG=src/channels/telegram_webhook_registration.py
@@ -58,7 +61,7 @@ check "the key forgets the story" $WR '    parts = [command, intent_id]' '    pa
 check "resolve forgets the resolution" $WR '        parts.append(resolution)' '        pass' "$UNIT" "$TW -k deterministic_key_is_a_function"
 check "resolve forgets the episode" $WR '        parts.append(str(episode))' '        pass' "$UNIT" "$TW -k later_review_of_the_same_story"
 check "the workspace verbs share one key" $WR '    return f"{command}:{workspace_id}:{identity}"' '    return f"{command}:{workspace_id}"' "$UNIT" "$TW -k second_pause_after_a_resume"
-check "a conflict names no way out" $MA '    "admission_conflict": "pass --idempotency-key <a new key> to send a different command",' '    "admission_conflict": "see storydump --help",' "$UNIT" "$TW -k conflicting_key_names_the_override"
+check "a conflict names no way out" $FX '    "admission_conflict": "pass --idempotency-key <a new key> to send a different command",' '    "admission_conflict": "see storydump --help",' "$UNIT" "$TW -k conflicting_key_names_the_override"
 check "the key never reaches the port" $CL '            headers={IDEMPOTENCY_HEADER: idempotency_key},' '            headers={},' "$UNIT" "$TW -k posts_its_command_with_the_deterministic_key"
 check "a shared name picks the first workspace" $WR '    if len(ids) > 1:' '    if False:' "$UNIT" "$TW -k shared_by_two_workspaces_needs_the_id"
 check "a long key reaches the port" $WR '    if not key or len(key) > IDEMPOTENCY_KEY_MAX:' '    if not key:' "$UNIT" "$TW -k over_the_ports_limit"
@@ -66,7 +69,7 @@ check "the verdict rides every retry" $WR '    if not_posted:
         args["verdict"] = NOT_POSTED' '    if True:
         args["verdict"] = NOT_POSTED' "$UNIT" "$TW -k verdict_only_when_asked"
 check "the override is ignored" $WR '    if key is None:' '    if True:' "$UNIT" "$TW -k option_is_the_deliberate_second_execution"
-check "a lost answer names no fixing verb" $MA '    "may_have_posted": (
+check "a lost answer names no fixing verb" $FX '    "may_have_posted": (
         "look at Instagram, then storydump resolve <story> retry --not-posted"
         " or storydump resolve <story> posted"
     ),' '    "may_have_posted": "look at Instagram",' "$UNIT" "$TW -k names_the_resolve_verb"

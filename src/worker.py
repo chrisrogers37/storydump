@@ -504,7 +504,9 @@ class SenderSweeper:
                             await unit_of_work.apply_gucs(
                                 session, tenant_id="", actor_kind="system"
                             )
-                            self.mints += await ensure_sender_jobs(session)
+                            self.mints += await ensure_sender_jobs(
+                                session, limit=self._app.config.sender_mint_limit
+                            )
                 except Exception:  # noqa: BLE001 — outlive a blip, loudly
                     logger.exception("sender-job sweep failed; retrying on cadence")
             await jobs.wait_or_stop(stop, self._app.config.sender_sweep_seconds)
@@ -534,7 +536,9 @@ class PromptSweeper:
                         await unit_of_work.apply_gucs(
                             session, tenant_id="", actor_kind="system"
                         )
-                        counts = await prompts_mod.sweep_due_prompts(session, limit=50)
+                        counts = await prompts_mod.sweep_due_prompts(
+                            session, limit=self._app.config.prompt_sweep_limit
+                        )
                 self.prompted += counts["prompted"]
                 self.advanced += counts["advanced"]
             except Exception:  # noqa: BLE001 — outlive a blip, loudly
@@ -675,7 +679,8 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
     )
     await apply_transport_probe(app)
     status_task = asyncio.create_task(
-        _status_reporter(app, stop, 60.0), name="status-reporter"
+        _status_reporter(app, stop, app.config.status_interval_seconds),
+        name="status-reporter",
     )
     app.sweeper = SenderSweeper(app)
     sweep_task = asyncio.create_task(app.sweeper.run(stop), name="sender-job-sweeper")

@@ -18,6 +18,7 @@ from src.services.target import (
     google_drive_oauth,
     media_sync,
     provisioning,
+    vocabulary,
     workspaces,
 )
 from src.services.target.drive_adapter import DriveRetryableError
@@ -376,8 +377,10 @@ class TestAReconnectRearmsEveryFolder:
         assert await media_sync.rearm_after_connect(ex, workspace_id=WS) == 3
         ((sql, params),) = ex.calls
         assert "SET state = 'active', alerted_at = NULL, next_sync_at = now()" in sql
-        assert "provider = 'gdrive'" in sql and "workspace_id = :ws" in sql
-        assert "id = :s" not in sql and params == {"ws": WS}
+        assert "provider = :provider" in sql and "workspace_id = :ws" in sql
+        assert "id = :s" not in sql
+        assert params == {"ws": WS, "provider": vocabulary.PROVIDER_GDRIVE}
+        assert vocabulary.PROVIDER_GDRIVE == "gdrive"
         # A REMOVED folder stays removed: only what a dead grant or a
         # disconnect paused comes back.
         assert "NOT COALESCE((config->>'removed')::boolean, false)" in sql
@@ -464,7 +467,12 @@ class TestRemovingAFolderPausesIt:
         assert sql.lstrip().upper().startswith("UPDATE media_sources".upper())
         assert "state = 'paused'" in sql and "DELETE" not in sql.upper()
         assert '"removed": true' in sql, "a removal is marked, so a reconnect skips it"
-        assert "workspace_id = :ws" in sql and params == {"s": SRC, "ws": WS}
+        assert "workspace_id = :ws" in sql and "provider = :provider" in sql
+        assert params == {
+            "s": SRC,
+            "ws": WS,
+            "provider": vocabulary.PROVIDER_GDRIVE,
+        }
         # The folder's media retires with it — an UPDATE too, never a DELETE
         # (owner ruling 2026-09-09: the row is the item, history hangs off it).
         assert media_sql.lstrip().upper().startswith("UPDATE media_items".upper())

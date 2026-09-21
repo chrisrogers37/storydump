@@ -76,6 +76,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 
 from src.config.settings import settings
+from src.services.target import vocabulary
 from src.services.target.webhook_ingress import (
     AdmissionConflict,
     DeliveryReplayed,
@@ -87,9 +88,13 @@ from src.utils.logger import logger
 
 router = APIRouter(tags=["webhooks"])
 
-#: The header Telegram echoes back the registered secret in. Named once so the
-#: route and its tests cannot drift apart on the spelling.
-SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
+#: The header Telegram echoes back the registered secret in. The vocabulary
+#: owns the spelling — the CLI's `webhook status` SENDS it and this route
+#: READS it, so a second literal here is how `storydump webhook status`
+#: starts reporting a refusal the live deliveries never see (#1325, TD-C2).
+#: The name stays, so the route's tests' import is unchanged. Precedent:
+#: `v1.py:124`, `IDEMPOTENCY_HEADER = vocabulary.IDEMPOTENCY_HEADER`.
+SECRET_HEADER = vocabulary.WEBHOOK_SECRET_HEADER
 
 
 @dataclass(frozen=True)

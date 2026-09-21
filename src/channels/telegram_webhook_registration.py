@@ -32,6 +32,10 @@ from src.services.target.vocabulary import (  # noqa: E402
     max_connections_from,
 )
 from src.services.target.vocabulary import WEBHOOK_URL_VAR as URL_VAR  # noqa: E402
+from src.services.target.vocabulary import (  # noqa: E402
+    RAILWAY_ENVIRONMENT_VAR as ENVIRONMENT_VAR,
+)
+from src.services.target.vocabulary import PRODUCTION_ENVIRONMENT  # noqa: E402
 from src.services.target.vocabulary import TELEGRAM_BOT_VAR as BOT_VAR  # noqa: E402
 from src.services.target.vocabulary import TELEGRAM_SECRET_VAR as SECRET_VAR  # noqa: E402
 from src.services.target.vocabulary import TELEGRAM_TOKEN_VAR as TOKEN_VAR  # noqa: E402
@@ -46,6 +50,9 @@ __all__ = [
     "DEFAULT_WEBHOOK_URL",
     "ENVIRONMENT_VAR",
     "MAX_CONNECTIONS_VAR",
+    "OFF_WORDS",
+    "ON_WORDS",
+    "PRODUCTION_ENVIRONMENT",
     "URL_VAR",
     "BadMaxConnections",
     "autoregister_enabled",
@@ -60,7 +67,11 @@ __all__ = [
 #: production's webhook at itself with its own secret. `0`/`false`/`no`
 #: switches it off in production too (an operator driving the CLI by hand).
 AUTOREGISTER_VAR = "TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER"
-ENVIRONMENT_VAR = "RAILWAY_ENVIRONMENT_NAME"
+
+#: An explicit "no". The API's skip reason names WHICH no it was, so the
+#: words live here rather than being re-derived by the caller (#1325, TD-C7).
+OFF_WORDS: tuple[str, ...] = ("0", "false", "no", "off")
+ON_WORDS: tuple[str, ...] = ("1", "true", "yes", "on")
 
 
 def autoregister_enabled(raw: Optional[str], *, environment: Optional[str]) -> bool:
@@ -68,11 +79,11 @@ def autoregister_enabled(raw: Optional[str], *, environment: Optional[str]) -> b
     in Railway's `production` environment (the one deployment that owns the
     bot's webhook)."""
     value = (raw or "").strip().lower()
-    if value in ("0", "false", "no", "off"):
+    if value in OFF_WORDS:
         return False
-    if value in ("1", "true", "yes", "on"):
+    if value in ON_WORDS:
         return True
-    return (environment or "").strip().lower() == "production"
+    return (environment or "").strip().lower() == PRODUCTION_ENVIRONMENT
 
 
 async def register(

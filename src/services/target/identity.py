@@ -20,10 +20,10 @@ from typing import Optional
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import readers
+from src.services.target import readers, vocabulary
 
-PROVIDER_GOOGLE = "google"
-PROVIDER_TELEGRAM = "telegram"
+PROVIDER_GOOGLE = vocabulary.PROVIDER_GOOGLE
+PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
 
 
 class IdentityCollision(StorydumpError):

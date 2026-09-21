@@ -103,8 +103,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
+from src.services.target import vocabulary
+
 #: Provider string, matching `ck_sources_provider` / `ck_credentials_provider`.
-PROVIDER = "gdrive"
+PROVIDER = vocabulary.PROVIDER_GDRIVE
 
 #: Default page bound. A page bound, never a traversal bound — see the header.
 DEFAULT_PAGE_SIZE = 100

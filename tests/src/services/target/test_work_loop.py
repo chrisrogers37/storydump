@@ -1642,3 +1642,85 @@ class TestADeadPublishJobParksItsStory:
             {"id": "j1", "kind": "publish_pipeline", "workspace_id": "ws"},
         )
         assert parked == ["j1"] and fanned == []
+
+
+class TestTheSenderMintReadsItsOwners:
+    """TD-A4/TD-A11 (#1325 audit): the sweep's INSERT hand-spelled the
+    interactive lane's budget, the `tg:` key prefix and the push-binding
+    predicate. Each now reads the module that declares it, so retuning the
+    lane or adding a second push channel cannot miss this statement."""
+
+    async def test_the_mint_binds_the_interactive_lane_budget(self):
+        from src.services.target import jobs
+
+        class _Result:
+            rowcount = 0
+
+        class _Session:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, statement, params=None):
+                self.calls.append((str(statement), params))
+                return _Result()
+
+        session = _Session()
+        assert await work_loop.ensure_sender_jobs(session) == 0
+        sql, params = session.calls[0]
+        attempts, deadline = jobs.LANE_BUDGETS["interactive"]
+        assert params["attempts"] == attempts
+        assert params["deadline"] == deadline
+        assert params["prefix"] == jobs.SENDER_KEY_PREFIX
+        assert params["lim"] == WorkerConfig.sender_mint_limit
+        # The literals the statement used to carry are gone from it.
+        assert "'tg:'" not in sql and "LIMIT 200" not in sql
+        assert "interval '10 minutes'" not in sql
+
+    async def test_the_caller_may_bound_the_sweep(self):
+        class _Result:
+            rowcount = 0
+
+        class _Session:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, statement, params=None):
+                self.calls.append((str(statement), params))
+                return _Result()
+
+        session = _Session()
+        await work_loop.ensure_sender_jobs(session, limit=7)
+        assert session.calls[0][1]["lim"] == 7
+
+    def test_the_four_push_statements_read_the_one_predicate(self):
+        """ "Where can we say this" is `bindings`' fragment at every site."""
+        import inspect
+
+        from src.services.target import bindings, outbox, prompts
+
+        assert (
+            inspect.getsource(work_loop.ensure_sender_jobs).count(
+                "bindings.push_binding_where('b')"
+            )
+            == 1
+        )
+        assert (
+            inspect.getsource(prompts.push_bindings).count(
+                "bindings.PUSH_BINDING_WHERE"
+            )
+            == 1
+        )
+        for door in (
+            outbox.supersede_everywhere_touched,
+            outbox.restate_everywhere_touched,
+        ):
+            assert inspect.getsource(door).count("bindings.PUSH_BINDING_WHERE") == 1, (
+                door.__name__
+            )
+        # And the fragment is what it always was.
+        assert bindings.PUSH_BINDING_WHERE == (
+            "state = 'active' AND channel LIKE 'telegram%'"
+        )
+        assert bindings.push_binding_where("b") == (
+            "b.state = 'active' AND b.channel LIKE 'telegram%'"
+        )

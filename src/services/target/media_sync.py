@@ -49,6 +49,7 @@ from typing import Optional, Any
 
 from sqlalchemy import text
 
+from src.services.target import vocabulary
 from src.services.target.drive_adapter import checkpoint_incomplete
 from src.services.target.workspaces import CONNECTED_FLAG_SQL
 
@@ -142,10 +143,10 @@ async def rearm_after_connect(
             text(
                 "UPDATE media_sources"
                 "   SET state = 'active', alerted_at = NULL, next_sync_at = now()"
-                " WHERE workspace_id = :ws AND provider = 'gdrive'"
+                " WHERE workspace_id = :ws AND provider = :provider"
                 "   AND NOT COALESCE((config->>'removed')::boolean, false)"
             ),
-            {"ws": str(workspace_id)},
+            {"ws": str(workspace_id), "provider": vocabulary.PROVIDER_GDRIVE},
         )
     else:
         # Picked (or picked again): the removal marker clears with the re-arm,

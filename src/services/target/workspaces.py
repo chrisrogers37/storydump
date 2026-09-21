@@ -192,6 +192,8 @@ async def list_for_user(executor, *, user_id: str) -> list[dict]:
     `fn_memberships_for_caller()` door (module docstring). *user_id* is the
     authenticated principal's and is claimed as `app.actor_user_id` for this
     transaction; the door never takes it as an argument."""
+    # Not `apply_gucs`: that door's `tenant_id` is mandatory and this is the
+    # user-plane read, which has no tenant yet (#1325 audit, TD-B20).
     await executor.execute(
         text("SELECT set_config('app.actor_user_id', :u, true)"), {"u": str(user_id)}
     )
@@ -239,9 +241,7 @@ async def list_members(executor, *, workspace_id: str) -> list[dict]:
 #: `drive_credentials` / the refresh leg ENFORCE (usable iff `state = 'active'`
 #: and `expires_at` has not passed), and two copies of it could drift apart.
 #: The Instagram credential provider, as `ig_login_oauth.PROVIDER` spells it.
-#: A local name rather than an import: that module's import graph must not
-#: grow a dependency on this one.
-IG_LOGIN_PROVIDER = "ig_login"
+IG_LOGIN_PROVIDER = vocabulary.PROVIDER_IG_LOGIN
 
 _CREDENTIAL_STATUS_SQL = (
     "CASE"
@@ -279,9 +279,8 @@ async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
     )
 
 
-#: The Drive credential provider, as `google_drive_oauth.PROVIDER` spells it —
-#: a local name for the same reason `IG_LOGIN_PROVIDER` is one.
-GDRIVE_PROVIDER = "gdrive"
+#: The Drive credential provider, as `google_drive_oauth.PROVIDER` spells it.
+GDRIVE_PROVIDER = vocabulary.PROVIDER_GDRIVE
 
 
 async def drive_status(executor, *, workspace_id: str) -> dict:

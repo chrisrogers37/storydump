@@ -65,6 +65,34 @@ class TestTheClosedSets:
     ):
         assert values == _check_values(migration, constraint)
 
+    def test_the_provider_names_are_the_migrations_check_lists(self):
+        """`"ig_login"` and `"gdrive"` had a hand copy in seven modules and
+        four inline SQL literals; one copy's import-cycle excuse was false
+        (#1325 audit, TD-B6). One spelling, pinned against the DDL."""
+        assert vocabulary.PROVIDER_IG_LOGIN == "ig_login"
+        assert vocabulary.PROVIDER_GDRIVE == "gdrive"
+        assert vocabulary.PROVIDER_GOOGLE == "google"
+        assert vocabulary.PROVIDER_TELEGRAM == "telegram"
+        credentials = _check_values(
+            "054_accounts_sources_media_tables.sql", "ck_credentials_provider"
+        )
+        sources = _check_values(
+            "054_accounts_sources_media_tables.sql", "ck_sources_provider"
+        )
+        oauth_states = _check_values(
+            "060_auth_plane_tables.sql", "ck_oauth_state_provider"
+        )
+        assert vocabulary.PROVIDER_IG_LOGIN in credentials
+        assert vocabulary.PROVIDER_GDRIVE in credentials
+        assert vocabulary.PROVIDER_GDRIVE in sources
+        for name in (
+            vocabulary.PROVIDER_IG_LOGIN,
+            vocabulary.PROVIDER_GDRIVE,
+            vocabulary.PROVIDER_GOOGLE,
+            vocabulary.PROVIDER_TELEGRAM,
+        ):
+            assert name in oauth_states
+
     def test_the_command_port_re_exports_the_module(self):
         assert commands.VOCABULARY is vocabulary.COMMANDS
         assert commands.REASONS is vocabulary.REASONS
@@ -434,6 +462,9 @@ class TestTheWebhookSpellings:
             vocabulary.DEFAULT_WEBHOOK_URL
             == "https://api.storydump.app/webhooks/telegram"
         )
+        assert vocabulary.RAILWAY_ENVIRONMENT_VAR == "RAILWAY_ENVIRONMENT_NAME"
+        assert vocabulary.PRODUCTION_ENVIRONMENT == "production"
+        assert vocabulary.TELEGRAM_BOT_API_BASE == "https://api.telegram.org"
 
     @pytest.mark.parametrize(
         "raw,expected", [(None, 10), ("", 10), (" 20 ", 20), ("1", 1), ("100", 100)]

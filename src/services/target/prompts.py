@@ -46,7 +46,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
 
-from src.services.target import intent_ledger, outbox
+from src.services.target import bindings, intent_ledger, outbox
 from src.services.target.callback_tokens import ACTIONS, token as _token
 
 logger = logging.getLogger(__name__)
@@ -348,8 +348,7 @@ async def push_bindings(session, workspace_id: str) -> list[str]:
             await session.execute(
                 text(
                     "SELECT id FROM channel_bindings"
-                    " WHERE workspace_id = :ws AND state = 'active'"
-                    "   AND channel LIKE 'telegram%'"
+                    f" WHERE workspace_id = :ws AND {bindings.PUSH_BINDING_WHERE}"
                 ),
                 {"ws": str(workspace_id)},
             )
@@ -382,14 +381,16 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
                     "  JOIN workspaces w ON w.id = i.workspace_id"
                     " WHERE o.kind = 'approval_prompt'"
                     "   AND o.state IN ('pending', 'sending', 'sent', 'ambiguous')"
-                    "   AND i.state IN ('posted','skipped','rejected','expired',"
-                    "                   'failed','cancelled')"
+                    "   AND i.state = ANY(CAST(:terminal AS text[]))"
                     " GROUP BY o.intent_id, o.workspace_id, o.binding_id, i.state,"
                     "          i.entered_state_at, w.tz"
                     " ORDER BY since"
                     " LIMIT :lim"
                 ),
-                {"lim": int(limit)},
+                {
+                    "lim": int(limit),
+                    "terminal": list(intent_ledger.TERMINAL_STATES),
+                },
             )
         )
         .mappings()

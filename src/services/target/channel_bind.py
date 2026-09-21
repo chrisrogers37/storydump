@@ -34,9 +34,9 @@ from src.services.target.start_router import StartContext, StartResult
 logger = logging.getLogger(__name__)
 
 PREFIX = "bind-"
-PROVIDER = "telegram"
+PROVIDER = identity.PROVIDER_TELEGRAM
 PURPOSE = "bind"
-GROUP_CHAT_TYPES = ("group", "supergroup")
+GROUP_CHAT_TYPES = bindings.GROUP_CHAT_TYPES
 
 
 def deep_link(bot_username: str, state: str) -> str:

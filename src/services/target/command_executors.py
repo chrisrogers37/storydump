@@ -116,7 +116,7 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
         "       EXISTS (SELECT 1 FROM oauth_credentials c"
         "                WHERE c.workspace_id = i.workspace_id"
         "                  AND c.ig_account_id = i.ig_account_id"
-        "                  AND c.provider = 'ig_login' AND c.state = 'active')"
+        "                  AND c.provider = :ig_provider AND c.state = 'active')"
         "         AS has_ig_credential"
         "  FROM post_intents i"
         "  JOIN workspaces w ON w.id = i.workspace_id"
@@ -125,6 +125,7 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
         " FOR UPDATE OF i",
         id=intent_id,
         ws=command.workspace_id,
+        ig_provider=vocabulary.PROVIDER_IG_LOGIN,
     )
     if row is None:
         raise CommandRefused("not_found", f"intent {intent_id}")
@@ -929,10 +930,11 @@ async def disable_account(session, command: Command) -> CommandResult:
         "  JOIN workspaces w ON w.id = i.workspace_id"
         "  JOIN ig_accounts a ON a.id = i.ig_account_id"
         " WHERE i.workspace_id = :ws AND i.ig_account_id = :acct"
-        "   AND i.cancel_requested AND i.state NOT IN"
-        "   ('posted','skipped','rejected','expired','failed','cancelled')",
+        "   AND i.cancel_requested"
+        "   AND i.state <> ALL(CAST(:terminal AS text[]))",
         ws=command.workspace_id,
         acct=account_id,
+        terminal=list(TERMINAL_STATES),
     )
     for row in live:
         line = prompts.outcome_line(
@@ -1009,9 +1011,10 @@ async def disconnect_account(session, command: Command) -> CommandResult:
     paused = await session.execute(
         text(
             "UPDATE media_sources SET state = 'paused', alerted_at = NULL"
-            " WHERE workspace_id = :ws AND provider = 'gdrive' AND state <> 'paused'"
+            " WHERE workspace_id = :ws AND provider = :provider"
+            "   AND state <> 'paused'"
         ),
-        {"ws": command.workspace_id},
+        {"ws": command.workspace_id, "provider": vocabulary.PROVIDER_GDRIVE},
     )
     # The remote half (#1083), enqueued rather than called. Everything above
     # is the atomic pair; this rides a separate transaction so a Google that

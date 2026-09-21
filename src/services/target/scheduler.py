@@ -78,7 +78,7 @@ from typing import Optional, Union
 
 from sqlalchemy import text
 
-from src.services.target import category_mix, workspaces
+from src.services.target import category_mix, intent_ledger, workspaces
 
 from src.exceptions.base import StorydumpError
 
@@ -378,8 +378,7 @@ async def execute_plan_slot(
         "                   WHERE p.workspace_id = m.workspace_id"
         "                     AND p.media_item_id = m.id"
         "                     AND p.ig_account_id = :acct"
-        "                     AND p.state NOT IN ('posted','skipped','rejected',"
-        "                                         'expired','failed','cancelled'))"
+        "                     AND p.state <> ALL(CAST(:terminal AS text[])))"
         "   AND NOT EXISTS (SELECT 1 FROM post_locks l"
         "                   WHERE l.workspace_id = m.workspace_id"
         "                     AND l.media_item_id = m.id"
@@ -419,7 +418,11 @@ async def execute_plan_slot(
                     + eligible
                     + " GROUP BY m.source_id"
                 ),
-                {"ws": workspace_id, "acct": ig_account_id},
+                {
+                    "ws": workspace_id,
+                    "acct": ig_account_id,
+                    "terminal": list(intent_ledger.TERMINAL_STATES),
+                },
             )
         )
         .mappings()
@@ -467,7 +470,12 @@ async def execute_plan_slot(
                     + "   AND m.source_id = CAST(:source_id AS uuid)"
                     + order
                 ),
-                {"ws": workspace_id, "acct": ig_account_id, "source_id": chosen},
+                {
+                    "ws": workspace_id,
+                    "acct": ig_account_id,
+                    "source_id": chosen,
+                    "terminal": list(intent_ledger.TERMINAL_STATES),
+                },
             )
         ).first()
     if media is None:

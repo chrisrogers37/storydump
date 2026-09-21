@@ -31,7 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from src.exceptions.base import StorydumpError
-from src.services.target import jobs, sessions
+from src.services.target import identity, jobs, sessions, tenant_resolution
 from src.services.target._dbapi import driver_candidates
 
 logger = logging.getLogger(__name__)
@@ -79,10 +79,15 @@ async def accept(executor, *, token: str, user_id: str, channel: str) -> dict[st
             await executor.execute(
                 text(
                     "SELECT o_workspace_id, o_granted_role, o_matched"
-                    "  FROM fn_invitation_accept(:h, :u, 'google',"
+                    "  FROM fn_invitation_accept(:h, :u, :provider,"
                     "       (SELECT primary_email FROM users WHERE id = :u), NULL, :ch)"
                 ),
-                {"h": sessions.token_hash(token), "u": user_id, "ch": channel},
+                {
+                    "h": sessions.token_hash(token),
+                    "u": user_id,
+                    "ch": channel,
+                    "provider": identity.PROVIDER_GOOGLE,
+                },
             )
         ).first()
     except DBAPIError as exc:
@@ -136,7 +141,7 @@ async def create(
     must commit together or not at all, the `02` §4 same-tx rule the prompt
     edge already follows.
     """
-    if role not in ("admin", "member"):
+    if role not in tenant_resolution.INVITABLE_ROLES:
         raise InvitationRefused(
             "invalid_role", f"role must be admin or member, not {role!r}"
         )

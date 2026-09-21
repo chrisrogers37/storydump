@@ -95,6 +95,7 @@ from sqlalchemy import text
 from src.exceptions.base import StorydumpError
 from src.services.target import (
     intent_ledger,
+    jobs,
     outbox,
     prompts,
     provider_ops,
@@ -120,8 +121,13 @@ from src.services.target.usage_precheck import DEFER
 
 logger = logging.getLogger(__name__)
 
-#: `05` row 8, bulk lane: backoff 1/5/15/60 min for retryable failures.
-DEFAULT_BACKOFF_SECONDS = (60.0, 300.0, 900.0, 3600.0)
+#: `05` row 8, bulk lane: backoff 1/5/15/60 min for retryable failures — the
+#: ladder `jobs.BACKOFF_SECONDS` owns, as floats because this pipeline's rungs
+#: go straight into `timedelta(seconds=…)` (#1325 audit, TD-A5).
+DEFAULT_BACKOFF_SECONDS = tuple(float(s) for s in jobs.BACKOFF_SECONDS["bulk"])
+
+#: For rendering a retention window in days.
+SECONDS_PER_DAY = 86400
 
 #: Readiness poll: bounded segments so a lease (bulk 120 s) never covers an
 #: unbounded wait — "container poll segments ≤ 60 s" is `05`'s lease rationale.
@@ -281,15 +287,7 @@ async def run_publish_pipeline(
     state = ctx.intent["state"]
 
     # -- routing by intent state ------------------------------------------------
-    if state in (
-        "posted",
-        "failed",
-        "cancelled",
-        "expired",
-        "skipped",
-        "rejected",
-        "review_required",
-    ):
+    if state in (*intent_ledger.TERMINAL_STATES, "review_required"):
         # Terminal, or operator-owned (review_required): this job has nothing
         # to execute. finalize_job's own token CAS is the fence here.
         async with uow.begin() as session:
@@ -615,14 +613,7 @@ async def _admit(
                     {"intent": ctx.intent_id},
                 )
             ).one()
-            if row.state in (
-                "posted",
-                "failed",
-                "cancelled",
-                "expired",
-                "skipped",
-                "rejected",
-            ):
+            if row.state in intent_ledger.TERMINAL_STATES:
                 await finalize_job(
                     session, ctx.job["id"], ctx.job["lease_token"], "cancelled"
                 )
@@ -1903,7 +1894,10 @@ async def park_exhausted(session, job: dict) -> bool:
     )
     if row is None or row["state"] not in ("publishing", "approved"):
         return False
-    tries = int(job.get("attempts") or job.get("max_attempts") or 0) or 5
+    tries = (
+        int(job.get("attempts") or job.get("max_attempts") or 0)
+        or jobs.LANE_BUDGETS["bulk"][0]
+    )
     return await park_for_review(
         session,
         workspace_id=str(row["workspace_id"]),
@@ -1956,7 +1950,7 @@ async def park_stale_approved(session, *, older_than_seconds: int, limit: int) -
         )
     ).one()
     before_tenant, before_actor = before[0] or "", before[1] or None
-    days = max(1, round(int(older_than_seconds) / 86400))
+    days = max(1, round(int(older_than_seconds) / SECONDS_PER_DAY))
     moved = 0
     for intent_id, workspace_id in rows:
         try:

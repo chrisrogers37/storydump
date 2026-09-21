@@ -53,13 +53,18 @@ from typing import Optional
 from sqlalchemy import text
 
 from src.exceptions.tenancy import TenantResolutionError
+from src.services.target import bindings
 from src.services.target.unit_of_work import apply_gucs
 
-#: Channel vocabulary — must match ck_bindings_channel (`02` §1).
-CHAT_CHANNELS = ("telegram_group", "telegram_dm")
+#: Channel vocabulary — `bindings.CHANNELS` is `ck_bindings_channel` verbatim
+#: and this module routes on the same set (#1325 audit, TD-B20).
+CHAT_CHANNELS = bindings.CHANNELS
 
 #: workspace_members role ladder, least to greatest (`02` §1).
 ROLE_ORDER = ("member", "admin", "owner")
+
+#: The roles an invitation may grant: `owner` is `transfer_ownership`'s edge.
+INVITABLE_ROLES: tuple[str, ...] = tuple(r for r in ROLE_ORDER if r != "owner")
 
 
 @dataclass(frozen=True)

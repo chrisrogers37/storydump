@@ -135,6 +135,19 @@ class TestTheKnobs:
         for off in ("0", "false", "no", "OFF"):
             assert reg.autoregister_enabled(off, environment="production") is False
 
+    def test_the_named_words_are_the_words_the_body_asks(self):
+        """`create_app` words its skip reason from `OFF_WORDS` rather than
+        re-deriving the body's private tuple (#1325 audit, TD-C7). The pin
+        reddens the day the tuples and the body separate again."""
+        assert reg.OFF_WORDS == ("0", "false", "no", "off")
+        assert reg.ON_WORDS == ("1", "true", "yes", "on")
+        for word in reg.OFF_WORDS:
+            assert reg.autoregister_enabled(word, environment="production") is False
+            assert reg.autoregister_enabled(word.upper(), environment=None) is False
+        for word in reg.ON_WORDS:
+            assert reg.autoregister_enabled(word, environment=None) is True
+            assert reg.autoregister_enabled(word.upper(), environment=None) is True
+
     def test_bot_matching_ignores_the_at_sign_and_case(self):
         assert reg.bot_matches("Storydump_App_Bot", "@storydump_app_bot")
         assert reg.bot_matches("x", None)

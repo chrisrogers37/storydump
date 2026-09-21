@@ -32,7 +32,13 @@ from src.services.target.vocabulary import (
 )
 from storydump_cli import webhook as webhook_tool
 from storydump_cli.client import ApiError, Unreachable
-from storydump_cli.commands import begin, global_options
+from storydump_cli.commands import (
+    DEFAULT_CONFIG_FIX,
+    FIXES,
+    UNREACHABLE_FIX,
+    begin,
+    global_options,
+)
 from storydump_cli.config import CONFIG_FILE, ConfigError
 from storydump_cli.output import emit
 from storydump_cli.railway import (
@@ -548,7 +554,7 @@ def doctor(ctx: click.Context) -> int:
             checks["api"] = (
                 "missing",
                 f"unreachable: {exc.detail}",
-                "check STORYDUMP_API and the network",
+                UNREACHABLE_FIX,
             )
     except ApiError as exc:
         checks["api"] = (
@@ -608,7 +614,7 @@ def doctor(ctx: click.Context) -> int:
                 checks["token"] = (
                     "wrong",
                     f"the API refuses it ({exc.reason or exc.status})",
-                    "run storydump login with a token minted on the web under Settings › API tokens",
+                    FIXES["not_authorized"],
                 )
             else:
                 facts = (
@@ -642,7 +648,7 @@ def doctor(ctx: click.Context) -> int:
         checks["config"] = (
             "wrong",
             str(exc),
-            "fix the config file, or delete it and run storydump login again",
+            DEFAULT_CONFIG_FIX,
         )
 
     # --- railway ---------------------------------------------------------------------

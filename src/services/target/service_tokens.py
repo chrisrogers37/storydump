@@ -39,6 +39,7 @@ from sqlalchemy import text
 from src.exceptions import StorydumpError
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import vocabulary
+from src.services.target.unit_of_work import apply_gucs
 
 #: The prefix every secret carries; the resolver routes on it.
 TOKEN_PREFIX = vocabulary.TOKEN_PREFIX
@@ -180,12 +181,14 @@ _RESOLVE = text(
 
 #: A service identity's workspace, read under its own tenant claim (the
 #: transaction-local GUC `p_tenant` filters on); two statements, because a
-#: `set_config` in the same WHERE would run after the policy's quals. Its
-#: stamp comes after that read passes: `last_used_at` means "authenticated".
-#: A refused attempt never persists a stamp either way — the resolver runs
-#: inside the authentication transaction, which rolls back on refusal — and
-#: the guards make that reading visible in the statements themselves.
-_CLAIM_TENANT = text("SELECT set_config('app.tenant_id', :ws, true)")
+#: `set_config` in the same WHERE would run after the policy's quals — and
+#: `apply_gucs` issues its own statement, so that reasoning holds with the
+#: claim read from the one home instead of hand-rolled here (#1325, TD-B20).
+#: Its stamp comes after that read passes: `last_used_at` means
+#: "authenticated". A refused attempt never persists a stamp either way — the
+#: resolver runs inside the authentication transaction, which rolls back on
+#: refusal — and the guards make that reading visible in the statements
+#: themselves.
 _WORKSPACE_STATE = text("SELECT state FROM workspaces WHERE id = :ws")
 _STAMP = text(
     "UPDATE service_tokens SET last_used_at = now()"
@@ -221,7 +224,7 @@ async def resolve(executor, *, token_hash: str) -> TokenPrincipal:
         raise TenantResolutionError("disabled_user")
     if row["workspace_id"] is not None:
         ws = str(row["workspace_id"])
-        await executor.execute(_CLAIM_TENANT, {"ws": ws})
+        await apply_gucs(executor, tenant_id=ws)
         state = (
             (await executor.execute(_WORKSPACE_STATE, {"ws": ws})).mappings().first()
         )
