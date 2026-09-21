@@ -510,3 +510,111 @@ class TestWaitingLine:
             self.NOW + timedelta(hours=2), tz="Mars/Olympus", now=self.NOW
         )
         assert line == "✅ Approved · posts today 22:00"
+
+
+class TestTheDueDoorReadsTheCardSelect:
+    def test_fn_prompts_due_carries_the_card_select_verbatim(self):
+        """`_CARD_SELECT` is the one spelling of what a card is rendered from.
+        Since 082 the prompt sweep's first card comes from `fn_prompts_due`,
+        whose body spells the same columns and joins — a door cannot call the
+        Python — so the fragment is pinned to the door's body verbatim, and the
+        sweep's alias list to every column: a column added for `render_card`
+        cannot reach the resend and not the sweep (#1349 re-verify). An
+        applied file is immutable: a column change means a fix-forward door,
+        and this pin moves to the new file with it."""
+        import inspect
+
+        from scripts.migration_runner import MIGRATIONS_DIR
+        from src.services.target import prompts
+
+        ddl = (MIGRATIONS_DIR / "082_worker_doors.sql").read_text()
+        body = ddl.split("CREATE FUNCTION fn_prompts_due(", 1)[1].split("$$;", 1)[0]
+        assert " ".join(prompts._CARD_SELECT.split()) in " ".join(body.split())
+        select_list = prompts._CARD_SELECT.split("SELECT", 1)[1].split("FROM", 1)[0]
+        names = [c.strip().split(".")[-1] for c in select_list.split(",")]
+        sweep = inspect.getsource(prompts.sweep_due_prompts)
+        for name in names:
+            assert f"o_{name} AS {name}" in sweep, f"the sweep does not read {name}"
+
+
+class _SweepResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.rows
+
+    def one(self):
+        return ("", "system")  # the caller's scope, read by the first claim
+
+
+class _SweepSession:
+    """The prompt sweep's session double: the two doors answer, every
+    statement is recorded, a savepoint is offered and its rollback counted."""
+
+    def __init__(self, *, due=(), pending=()):
+        self.due, self.pending = list(due), list(pending)
+        self.statements = []
+        self.savepoints = self.rolled_back = 0
+
+    def begin_nested(self):
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _sp():
+            self.savepoints += 1
+            try:
+                yield self
+            except Exception:
+                self.rolled_back += 1
+                raise
+
+        return _sp()
+
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        self.statements.append((sql, params))
+        if "fn_prompts_due" in sql:
+            return _SweepResult(self.due)
+        if "fn_prompts_pending" in sql:
+            return _SweepResult(self.pending)
+        return _SweepResult([])
+
+
+class TestTheAdvancePhaseSurvivesARefusal:
+    async def test_a_refused_transition_rolls_back_its_savepoint_and_the_sweep_goes_on(
+        self, monkeypatch
+    ):
+        """`IntentTransitionRefused` is a Postgres check_violation, which
+        aborts the transaction: without a savepoint the next statement — the
+        next row's transition, or the hand-back of the caller's scope — raises
+        `InFailedSqlTransaction`, and one raced row fails the whole sweep
+        (#1349 re-verify)."""
+        from src.services.target import intent_ledger, prompts
+
+        pending = [
+            {"id": "i-1", "workspace_id": "ws-1"},
+            {"id": "i-2", "workspace_id": "ws-2"},
+        ]
+        session = _SweepSession(pending=pending)
+        calls = []
+
+        async def transition(s, intent_id, to_state):
+            calls.append(intent_id)
+            if intent_id == "i-1":
+                raise intent_ledger.IntentTransitionRefused("raced by the fast path")
+
+        monkeypatch.setattr(prompts.intent_ledger, "transition", transition)
+        counts = await prompts.sweep_due_prompts(session, limit=5)
+        assert counts == {"prompted": 0, "advanced": 1}
+        assert calls == ["i-1", "i-2"], "the sweep goes on after a refusal"
+        assert (session.savepoints, session.rolled_back) == (2, 1), (
+            "each transition rides its own savepoint; the refused one rolls back"
+        )
+        last_sql, last_params = session.statements[-1]
+        assert (
+            "set_config('app.tenant_id'" in last_sql and "" in last_params.values()
+        ), "the caller's scope is handed back after the refusal"

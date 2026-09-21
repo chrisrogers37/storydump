@@ -286,8 +286,9 @@ class TestAgainstTheRealDocs:
         # lost-answer resolution (075, #1297) makes it 33; §22's two float
         # edges and the reaper's withdrawn approved leg (076, plan 03) make
         # it 34; §23's person-bound token subject (077, the v2 CLI plan,
-        # phase 01) makes it 35; §24's fleet-health doors (081, #751) make it 36.
-        assert classes.count("normative") == 36
+        # phase 01) makes it 35; §24's fleet-health doors (081, #751) make it 36;
+        # §25's worker doors (082, #751 part 2) make it 37.
+        assert classes.count("normative") == 37
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

@@ -132,6 +132,25 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_maintenance",),
     ): "door:fn_health_destinations",
+    # 082: the three tables svc_maintenance lacked for the worker's doors.
+    (
+        "p_maint_bindings",
+        "channel_bindings",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_sender_sweep",
+    (
+        "p_maint_media",
+        "media_items",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_prompts_due",
+    (
+        "p_maint_sources",
+        "media_sources",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_stranded_sources",
     ("p_tenant", "provider_quarantine", "ALL", T): "matrix",
     (
         "p_claim_quar",
@@ -396,6 +415,31 @@ DOORS = {
     "fn_meta_accounts_for_ref": (
         "svc_ingress",
         "SELECT * FROM fn_meta_accounts_for_ref('no-such-ref')",
+    ),
+    # The worker's doors (082, `07` §25, #751 part 2): the tenant-less
+    # sweeps' reads. The sender sweep is one door (its INSERT … SELECT is one
+    # statement); the other four return rows with their workspace ids and the
+    # worker writes per workspace under that tenant.
+    "fn_sender_sweep": (
+        "svc_worker",
+        # a bound of 0: the probe proves EXECUTE, it must not mint a job
+        "SELECT fn_sender_sweep('tg:', 3, 600, 30, 0)",
+    ),
+    "fn_prompts_due": (
+        "svc_worker",
+        "SELECT * FROM fn_prompts_due(50)",
+    ),
+    "fn_prompts_pending": (
+        "svc_worker",
+        "SELECT * FROM fn_prompts_pending(50)",
+    ),
+    "fn_settled_cards": (
+        "svc_worker",
+        "SELECT * FROM fn_settled_cards(ARRAY['posted'], 50)",
+    ),
+    "fn_stranded_sources": (
+        "svc_worker",
+        "SELECT * FROM fn_stranded_sources(0, 10)",
     ),
 }
 
@@ -743,7 +787,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 59
+        assert len(POLICY_CENSUS) == 62
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -761,8 +805,8 @@ class TestRuntimeTenantIsolationMatrix:
         # Exact split, so a re-tagged disposition is a visible diff:
         assert len(by_kind["matrix"]) == 16
         assert (
-            len(by_kind["door"]) == 30
-        )  # 081: p_maint_accts under fn_health_destinations
+            len(by_kind["door"]) == 33
+        )  # 081: p_maint_accts; 082: the three maintenance reads
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():

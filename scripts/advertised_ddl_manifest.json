@@ -284,6 +284,13 @@
       "label": "§24 the fleet-health doors: the two health surfaces and the Meta callback read the estate through svc_maintenance (081, #751)",
       "doc": "07-security-model.md",
       "ordinal": 22
+    },
+    {
+      "sha256": "b2ea26c48b5c6f5e197bf746420b3c9a66b4d88541655c010d76bed1d756ed25",
+      "class": "normative",
+      "label": "§25 the worker's doors: the tenant-less sweeps read the estate through svc_maintenance (082, #751 part 2)",
+      "doc": "07-security-model.md",
+      "ordinal": 23
     }
   ],
   "policy_expansion": {

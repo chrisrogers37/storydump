@@ -84,6 +84,7 @@ def world(admin_conn, owner_actor):
         yield {
             "stream": stream,
             "ingress": as_user(db, "svc_ingress"),
+            "worker": as_user(db, "svc_worker"),
             "ws": str(chain["ws"]),
             "user": str(chain["user"]),
             "iga": str(chain["iga"]),
@@ -652,15 +653,30 @@ class TestATapNeverWaitsOnASend:
         assert elapsed < 5.0, f"the tap waited {elapsed:.1f}s — on what?"
 
 
+def _sweep_settled(world) -> int:
+    """`prompts.sweep_settled_cards` the way the reaper runs it: as the
+    worker's login, in its own session with the EMPTY tenant and the `system`
+    actor. The selection is a door the worker reads through (082); each row
+    is healed under its own workspace, and the caller's scope handed back."""
+    from src.services.target import prompts, unit_of_work
+
+    async def go() -> int:
+        engine = create_async_engine(asyncpg_url(world["worker"]), poolclass=NullPool)
+        try:
+            async with engine.begin() as conn:
+                await unit_of_work.apply_gucs(conn, tenant_id="", actor_kind="system")
+                return await prompts.sweep_settled_cards(conn, limit=50)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(go())
+
+
 class TestCardsEndInEveryTerminalState:
     def test_the_settled_card_sweep_retires_cards_of_intents_anyone_ended(self, world):
         """Whoever ended the intent — the reaper's expiry here, the pipeline's
         `posted`, a cancellation — its live cards lose their buttons and gain
         the terminal line on the sweep's beat (phase 1 step 7)."""
-        from sqlalchemy.ext.asyncio import async_sessionmaker
-
-        from src.services.target import prompts
-
         i = _intent(world, "expired-1", state="awaiting_approval")
         _write(
             world,
@@ -668,26 +684,7 @@ class TestCardsEndInEveryTerminalState:
             (i["id"],),
         )
         assert set(_card_states(world, i["id"]).values()) == {"sent"}
-
-        async def sweep():
-            engine = create_async_engine(
-                asyncpg_url(world["ingress"]), poolclass=NullPool
-            )
-            try:
-                maker = async_sessionmaker(engine, expire_on_commit=False)
-                async with maker() as session:
-                    from src.services.target import unit_of_work
-
-                    await unit_of_work.apply_gucs(
-                        session, tenant_id=world["ws"], actor_kind="system"
-                    )
-                    healed = await prompts.sweep_settled_cards(session, limit=50)
-                    await session.commit()
-                    return healed
-            finally:
-                await engine.dispose()
-
-        assert asyncio.run(sweep()) >= 1
+        assert _sweep_settled(world) >= 1
         assert set(_card_states(world, i["id"]).values()) == {"superseded"}
         lines = [p["outcome_text"] for _, p in _supersedes(world, i["id"])]
         assert len(lines) == 2 and all(
@@ -697,10 +694,6 @@ class TestCardsEndInEveryTerminalState:
     def test_a_revoked_bindings_cards_do_not_starve_the_sweep(self, world):
         """A revoked group's cards cannot be edited and are not selected; the
         second beat finds nothing left to heal (structural review of #1271)."""
-        from sqlalchemy.ext.asyncio import async_sessionmaker
-
-        from src.services.target import prompts, unit_of_work
-
         i = _intent(world, "revoked-1", state="awaiting_approval")
         ((revoked,),) = _write(
             world,
@@ -720,29 +713,12 @@ class TestCardsEndInEveryTerminalState:
         _write(
             world, "UPDATE post_intents SET state = 'expired' WHERE id = %s", (i["id"],)
         )
-
-        async def sweep():
-            engine = create_async_engine(
-                asyncpg_url(world["ingress"]), poolclass=NullPool
-            )
-            try:
-                maker = async_sessionmaker(engine, expire_on_commit=False)
-                async with maker() as session:
-                    await unit_of_work.apply_gucs(
-                        session, tenant_id=world["ws"], actor_kind="system"
-                    )
-                    healed = await prompts.sweep_settled_cards(session, limit=50)
-                    await session.commit()
-                    return healed
-            finally:
-                await engine.dispose()
-
-        first = asyncio.run(sweep())
+        first = _sweep_settled(world)
         assert first >= 2  # the two active groups' cards of this intent
         states = _card_states(world, i["id"])
         assert states["30001"] == "sent", "the revoked group's card is left alone"
         assert all(v == "superseded" for r, v in states.items() if r != "30001")
-        assert asyncio.run(sweep()) == 0, "nothing left to heal — no starvation"
+        assert _sweep_settled(world) == 0, "nothing left to heal — no starvation"
 
 
 class TestTapAdmissionOnTheLedger:

@@ -78,7 +78,8 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
   and `/health`'s `db_role` report the live answer. So every query names its
   tenant: an explicit `workspace_id = :ws` predicate on each table it touches,
   as `ops_views.py` and `command_executors._intent_row` do — and an
-  estate-wide read that has no tenant is a door (081's fleet-health doors),
+  estate-wide read that has no tenant is a door (081's fleet-health doors,
+  082's for the worker's sweeps),
   unless a policy already admits it with no tenant set (`p_jobs`'s
   `workspace_id IS NULL` rows, `p_rate`'s `USING (true)`), never a direct read
   that happens to work as the owner.

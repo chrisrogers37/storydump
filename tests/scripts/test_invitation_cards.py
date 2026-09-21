@@ -17,10 +17,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.services.target import bindings, invitation_cards, invitations, work_loop
+from src.services.target import bindings, invitation_cards, invitations
 from src.services.target.invitation_cards import CardRefused
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
+    sweep_as_worker,
     _scratch,
     as_user,
     fetch_one,
@@ -45,7 +46,15 @@ def world(admin_conn, owner_actor):
             b = seed_workspace_chain(conn, "card-b")
         finally:
             conn.close()
-        yield {"stream": stream, "ingress": as_user(db, "svc_ingress"), "a": a, "b": b}
+        yield {
+            "stream": stream,
+            "ingress": as_user(db, "svc_ingress"),
+            # the sender sweep is the worker's (082: a door granted to
+            # svc_worker alone), run here the way the worker runs it
+            "worker": as_user(db, "svc_worker"),
+            "a": a,
+            "b": b,
+        }
     finally:
         gen.close()
 
@@ -247,20 +256,20 @@ class TestItReachesTheBuiltChain:
         inv, token = _mint(world, hint="someone")
         before = _cards(world)
 
-        async def announce_and_sweep(session):
-            n = await invitation_cards.announce(
+        async def announce(session):
+            return await invitation_cards.announce(
                 session,
                 workspace_id=str(world["a"]["ws"]),
                 invitation=inv,
                 token=token,
             )
-            minted = await work_loop.ensure_sender_jobs(session)
-            return n, minted
 
-        n, minted = run(world, announce_and_sweep)
+        n = run(world, announce)
         assert n >= 2, "one card per binding"
         assert _cards(world) == before + n
-        assert minted >= 1
+        # The sweep is the worker's (082): its own session, the worker's
+        # login, after the announcing transaction has committed.
+        assert sweep_as_worker(world["worker"]) >= 1
         (jobs,) = fetch_one(
             world["stream"],
             "SELECT count(*) FROM jobs WHERE kind = 'deliver_outbox'"

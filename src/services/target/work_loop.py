@@ -353,7 +353,10 @@ def build_registry(deps: WorkerDeps) -> dict:
             # so these writes were invisible to `p_tenant` already. Reading the
             # reason tag also makes the tenant VARY across one sweep, so
             # asserting it per row is what keeps a ladder row from inheriting
-            # the scope of whichever notify row preceded it.
+            # the scope of whichever notify row preceded it. The ladder's
+            # count is read AFTER the claim for the same reason: `post_intents`
+            # is policy-covered, and a read with no tenant answers 0 for every
+            # row — a ladder that never exhausts (#1349 review).
             await unit_of_work.apply_gucs(
                 session,
                 tenant_id=str(op["workspace_id"]),
@@ -364,7 +367,9 @@ def build_registry(deps: WorkerDeps) -> dict:
                 intent_id=op["intent_id"],
                 workspace_id=op["workspace_id"],
                 poll=deps.poll,
-                checks=op.get("checks", 0),
+                checks=await reconciler.checks_so_far(
+                    session, intent_id=op["intent_id"]
+                ),
             )
         if ladder_skipped:
             # Loud, per the module docstring: the deployment cannot do this
@@ -1048,35 +1053,20 @@ async def ensure_sender_jobs(
     one always has exactly one live sender per binding.
     """
     attempts, deadline_seconds = jobs.LANE_BUDGETS["interactive"]
+    # The statement is `fn_sender_sweep`'s body (082): one INSERT … SELECT whose
+    # NOT EXISTS live-job check is its idempotence, a SECURITY DEFINER door
+    # because the sweep runs with no tenant and every table it reads is
+    # policy-covered. The key prefix, the lane budget and the bound stay
+    # spelled once here; the binding predicate is `bindings.push_binding_where`,
+    # pinned to the door's body by a test.
     result = await session.execute(
-        text(
-            "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
-            " run_at, max_attempts, deadline_at, payload)"
-            " SELECT 'deliver_outbox', b.workspace_id, 'interactive',"
-            "        :prefix || b.id, now(), :attempts,"
-            "        now() + make_interval(secs => :deadline),"
-            "        jsonb_build_object('v', 1, 'binding_id', b.id)"
-            "   FROM channel_bindings b"
-            f"  WHERE {bindings.push_binding_where('b')}"
-            # Two EXISTS, not one OR: each arm rides its own partial index
-            # (`ix_outbox_due` on pending, `ix_outbox_ambiguous_age`, 075).
-            "    AND (EXISTS (SELECT 1 FROM channel_outbox o"
-            "                  WHERE o.binding_id = b.id AND o.state = 'pending')"
-            "         OR EXISTS (SELECT 1 FROM channel_outbox o"
-            "                     WHERE o.binding_id = b.id AND o.state = 'ambiguous'"
-            "                       AND o.updated_at <= now() - make_interval(secs => :age)))"
-            "    AND NOT EXISTS (SELECT 1 FROM jobs j"
-            "                     WHERE j.serialization_key = :prefix || b.id"
-            "                       AND j.state IN ('ready', 'leased'))"
-            # H5: a sweep is bounded; the next one takes the rest.
-            "  LIMIT :lim"
-        ),
+        text("SELECT fn_sender_sweep(:prefix, :attempts, :deadline, :age, :lim)"),
         {
-            "age": outbox.AMBIGUOUS_RESOLVE_AFTER_SECONDS,
             "prefix": jobs.SENDER_KEY_PREFIX,
             "attempts": attempts,
             "deadline": deadline_seconds,
+            "age": outbox.AMBIGUOUS_RESOLVE_AFTER_SECONDS,
             "lim": int(limit),
         },
     )
-    return result.rowcount
+    return int(result.scalar() or 0)
