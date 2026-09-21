@@ -2,7 +2,7 @@
 
 How the suite is laid out, how to run it, what needs a PostgreSQL, and the
 patterns the tests follow. What is covered and how coverage is measured is
-[`TEST_COVERAGE.md`](TEST_COVERAGE.md) (3,675 tests in 156 files on
+[`TEST_COVERAGE.md`](TEST_COVERAGE.md) (3,709 tests in 158 files on
 2026-09-20; that page has the command that re-counts them).
 
 The suite tests the target tier only. The legacy tier's tests — the

@@ -363,9 +363,10 @@ CI (`.github/workflows/ci.yml`) runs six jobs on every push and PR: Lint (ruff
 check + format over the whole repository), the FC-2 Telegram ratchet
 (`scripts/telegram_ratchet.py`), Test (Python 3.10 against a PostgreSQL 15
 service with `REQUIRE_TEST_DATABASE=1`, coverage of `src` and `storydump_cli`),
-Security Scan (pip-audit and bandit, both advisory), Front End (`npm test`,
-`npx tsc --noEmit`, `npm run lint` in `landing/`) and Changelog Check. A
-scheduled `schema-drift.yml` compares the live schema with the tree daily.
+Security Scan (pip-audit gates on a known-vulnerable pin; bandit is advisory),
+Front End (`npm test`, `npx tsc --noEmit`, `npm run lint` in `landing/`) and
+Changelog Check. A scheduled `schema-drift.yml` compares the live schema with
+the tree daily.
 `scripts/lint.sh` is the local lint pass; `scripts/pr_ready.sh` answers whether
 a PR is really ready — it catches a check that was never scheduled, which a
 green rollup hides (`documentation/guides/ci-cd-pipeline.md`).
