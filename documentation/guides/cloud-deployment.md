@@ -166,7 +166,7 @@ commands.
 ### Health Checks
 
 - **Worker**: a small listener answers `/health` on `$PORT`
-  (`src/services/target/health.py:145-166`), bound before the first database
+  (`src/services/target/worker_health.py:156-177`), bound before the first database
   connection so a slow start is not marked failed. The worker is fail-fast — a
   supervised task that dies takes the process down with exit 1
   (`src/worker.py:860-861`) and Railway restarts it; `/health` answers 503 only

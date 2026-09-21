@@ -53,7 +53,9 @@ REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 ISSUERS = frozenset({"https://accounts.google.com", "accounts.google.com"})
 SCOPE = "openid email profile"
 #: Tolerated skew on `exp`/`iat`. One minute, the same allowance the legacy
-#: URL-token validator used (`webapp_auth.CLOCK_SKEW_TOLERANCE`).
+#: URL-token validator used (`src/utils/webapp_auth.py::CLOCK_SKEW_TOLERANCE =
+#: 60`, deleted with the tier in the tear-out, #1216 — the provenance is kept,
+#: the file is not there to grep for).
 CLOCK_SKEW_SECONDS = 60
 
 

@@ -20,15 +20,23 @@ CHECK. So a destination needs no credential, no OAuth round trip and no Meta
 call to exist.
 
 An `oauth_credentials` row is a **connection**: the grant that lets us publish
-through Meta's API. It needs the #1041 redirect flow, Meta App Review, and an
-unparked `publish_pipeline`.
+through Meta's API.
 
-**Only the destination is on the path to a closed loop**, because
+**Only the destination was on the path to a closed loop**, because
 `workspaces.api_publishing_enabled` defaults to FALSE and `approval_mode`
 defaults to `manual`: a new workspace never touches Meta, `plan_slot` mints
 intents that await approval, and `mark_posted` — already built — is how a human
-closes them. This module writes destinations and sources. Connections are
-milestone 2 and are deliberately absent.
+closes them. That is why this module is scoped to destinations and sources, and
+why it stays so.
+
+Connections are no longer absent, and they are not written here: the Instagram
+grant is minted by `ig_login_oauth` (the redirect flow of #1041, `INSERT INTO
+oauth_credentials`) behind the `connect_account` / `reconnect_account` /
+`disconnect_account` commands (`command_executors`), and `publish_pipeline` is
+unparked whenever `media_fetch`, `meta` and `transit` are wired — the worker
+wires the real Graph adapter. The defaults above remain what keeps a new
+workspace off Meta, so the sentence that still holds is the one about the
+defaults, not the one about what is built (#1325 audit, TD-B18).
 
 ## The seeding rule, which is the whole reason this writer is not a bare INSERT
 

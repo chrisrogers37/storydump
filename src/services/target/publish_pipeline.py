@@ -69,10 +69,14 @@ from a second counter: the ops table is the durable record, and
 
 ## What this module deliberately does not do
 
-No claim loop / process root (webhook_ingress's #903 note stands: no
-composition root exists yet and this increment does not create one); no real
-Meta adapter (stub/sandbox until M.3 — `meta_adapter`); no heartbeat wiring
-(`LeaseHeartbeat` is the composition root's, per its own notes). Unexpected
+No claim loop, no process root, no adapter construction and no heartbeat
+wiring — all four belong to `src/worker.py`, which is the composition root
+that did not exist when this module was written (#903, closed 2026-08-21) and
+which now wires the REAL Graph adapter (`instagram_graph`) into the seam
+`meta_adapter` declares. What this module owns is the ladder between them:
+it is handed `meta` and never builds one, which is why the same body runs
+against the stub in the L.5 gate and against Meta in production
+(#1325 audit, TD-A20). Unexpected
 exceptions PROPAGATE — a crashed worker must look crashed, so the lease
 expires, the reaper re-readies, and resume-from-checkpoint does its job;
 a blanket except here would convert crash-safety into silent corruption.
@@ -1560,7 +1564,13 @@ def _error_of(exc: BaseException) -> dict:
 
 
 async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
-    """One bounded readiness segment: 'ready' | 'dead' | 'pending'."""
+    """One bounded readiness segment: 'ready' | 'dead' | 'unauthorized' |
+    'pending'.
+
+    'unauthorized' is the fourth and it is not a variant of 'pending': a dead
+    credential is what no rung of the ladder can mend, so it leaves at once
+    for the human instead of spending the poll budget (see below).
+    """
     for attempt in range(POLL_BUDGET):
         try:
             status = await meta.container_status(

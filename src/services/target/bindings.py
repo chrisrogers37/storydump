@@ -1,18 +1,28 @@
 """The `channel_bindings` writer (#1172, gate clause 4).
 
-## What this closes
+## What this is
 
-Measured on `main` @ `e057063`: **zero** `INSERT INTO channel_bindings`, by SQL
-or by ORM — `ChannelBinding` has no reference outside its own module and the
-package export. Positive-controlled against the sibling tenant tables, which
-carry two INSERTs each, so the zero is the table's and not the probe's.
+**The one writer of `channel_bindings`.** :func:`bind`, :func:`revoke`,
+:func:`revoke_by_id` and :func:`repoint` are the whole write surface, and
+`channel_bind.handle_bind` — the `bind-` lane of the `/start` door — is what
+calls :func:`bind` when a group's ``/start bind-<state>`` consumes its
+one-shot state. Routing every write through one module is what makes
+`uq_binding_external` (a chat binds once) and D13 (`0..n` per workspace) hold
+by construction rather than by review.
 
 `06`/D13 ratifies `0..n` bindings per workspace as a deliberate widening of
-#721's one-chat v1, and **zero has been delivered.** Everything downstream is
-already built and inert for exactly this reason: `work_loop`'s sweep mints
+#721's one-chat v1, and that widening is what the table's shape encodes.
+Everything downstream depends on a row here: `work_loop`'s sweep mints
 `deliver_outbox` jobs `FROM channel_bindings`, the `deliver_outbox` handler
 resolves a binding to its `external_ref`, and `outbox.enqueue` writes the rows
-they carry. None of it can run without a row here.
+they carry — so a workspace with no binding produces cards that land nowhere,
+which is the gap `email_sender` exists for.
+
+(This header opened with a measurement — "zero `INSERT INTO channel_bindings`"
+on `main` @ `e057063`, everything downstream "built and inert". That was the
+gap #1172 was opened to close, and closing it made the sentence false; the
+measurement is history and lives in the PR, not in a present-tense header —
+#1325 audit, TD-B18.)
 
 ## The one rule that is a product rule, and it is stated rather than inferred
 

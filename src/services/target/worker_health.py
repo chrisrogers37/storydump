@@ -1,4 +1,12 @@
-"""The target composition root's ``/health`` endpoint (#942 parity gap).
+"""The WORKER root's raw-socket ``/health`` endpoint (#942 parity gap).
+
+Named `worker_health` rather than `health` because "health" already means
+three other things in this package: the API's own ``/health`` route
+(`src/api/app.py`), the CLI's `storydump health` verb, and the
+`scheduling_health`/`posting_health` estate views sitting beside this file.
+This one is neither a route nor a view — it is an `asyncio.start_server`
+listener the worker process binds for Railway's probe, and nothing else
+imports it (renamed by the #1325 audit, TD-C20).
 
 `railway.toml` sets ``healthcheckPath = "/health"`` for both services. The
 legacy root served it from `src/main.py`; the target root first shipped

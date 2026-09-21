@@ -2,12 +2,19 @@
 
 The out-of-band channel for a **web-born** workspace. `06` §3 routes
 notifications to "the workspace's bindings", and #1092 established what that
-means in practice: `push_bindings` selects `channel_bindings` rows and **nothing
-in the tier writes that table**, so for the default workspace shape every
-notification we produce lands nowhere. Email is the channel the plan already
-chose, and the address already exists — `users.primary_email` is filled from the
-**verified** Google claim at every sign-in, so we hold a deliverable address for
-every account that has ever signed in.
+means in practice: `push_bindings` selects `channel_bindings` rows, and a
+workspace that has never bound a Telegram group has none — so every
+notification we produce for it lands nowhere. Email is the channel the plan
+already chose, and the address already exists — `users.primary_email` is filled
+from the **verified** Google claim at every sign-in, so we hold a deliverable
+address for every account that has ever signed in.
+
+(#1092 measured this as "**nothing in the tier writes that table**", which was
+true then. #1172 built the writer — `bindings.bind`, reached from the `/start`
+door's `bind-` lane — so the gap is now the narrower one above: a binding is an
+explicit act a web-born workspace need never perform, and the default shape
+still has no push channel. The module's reason for existing is unchanged;
+the sentence that stated it was not — #1325 audit, TD-B18.)
 
 ## What this module is, and what it is not
 
@@ -47,11 +54,14 @@ channel at all: it converts a visible gap into an invisible one.
 ## Egress: a narrower policy, not a wider default
 
 `egress.DEFAULT_ALLOWED_HOSTS` is a closed set whose own comment calls it "the
-load-bearing control until #871 lands". This module therefore declares its own
-single-host `allowed_hosts` on its policy rather than widening the shared
-default: the module that talks to the provider is the only thing that gains reach
-to it, and swapping providers touches one file. Widening the global set would
-hand every other caller the same reach for no reason.
+load-bearing control". This module therefore declares its own single-host
+`allowed_hosts` on its policy rather than widening the shared default: the
+module that talks to the provider is the only thing that gains reach to it, and
+swapping providers touches one file. Widening the global set would hand every
+other caller the same reach for no reason. (Both sentences said "until #871
+lands" until #871 landed — it closed on 2026-08-27 and the validated address is
+pinned to the connection now. The quotation tracks `egress`'s comment, which is
+the one that must be edited first — #1325 audit, TD-B18.)
 
 ## Budget
 

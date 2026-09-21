@@ -77,10 +77,12 @@ logger.warning("reconcile poll for intent %s: %s", intent_id, type(exc).__name__
 logger.exception("sender-job sweep failed; retrying on cadence")
 ```
 
-- A module logger and `%`-style arguments, not f-strings: 3 of the 176 log
-  calls under `src/` and `storydump_cli/` pass an f-string (measured
-  2026-09-18). `src/utils/logger.py`'s shared `logger` is what the API routes
-  import; either logger is in use, the argument style is the convention.
+- A module logger and `%`-style arguments, not f-strings: 1 of the 177 log
+  calls under `src/` and `storydump_cli/` passes an f-string (`api/app.py`,
+  measured 2026-09-21; it was 3 of 176 on 2026-09-18, and the tech-debt
+  audit's doc 02 converted two of them). `src/utils/logger.py`'s shared
+  `logger` is what the API routes import; either logger is in use, the
+  argument style is the convention.
 - A deliberate swallow logs with `logger.exception` every time, naming what was
   NOT done ("NO JOBS WERE MINTED"). A counter says something is failing; only
   the log says what.

@@ -53,8 +53,16 @@ missed heartbeat therefore cannot turn one admission into two.
 **Where it does touch this increment is the ack SLO.** The gate measures ack
 latency under slow-worker injection, and a slow worker is precisely the
 condition in which the 60-120s lease boundary bites. So the SLO number is
-adjacent to #903 even though the idempotency guarantee is not, and #903 stays
-open: no composition root exists yet, and this increment does not create one.
+adjacent to #903 even though the idempotency guarantee is not.
+
+#903 has since been CLOSED (2026-08-21) by the composition roots this
+increment declined to create: `src/worker.py` builds the registry, the lanes
+and the clock and starts `jobs.LeaseHeartbeat` alongside them, and
+`src/api/app.py::create_app` mounts this module's route at
+``/webhooks/telegram``. Neither changes a word of the argument above — the
+guarantee was always structural, in `command_dedup` at admission — but the
+clause that said no root exists yet is no longer true, and is corrected here
+rather than left to read as current (#1325 audit, TD-B18).
 """
 
 from __future__ import annotations
