@@ -193,18 +193,17 @@ async def _record_no_surface(
     was owed on this beat*, which is the same distinction the whole change is
     about — not between "sent" and "not sent".
     """
+    from src.services.target import intent_ledger
     from src.services.target.outbox import UNDELIVERABLE
 
     fresh = (
         await conn.execute(
             text(
-                "UPDATE post_intents"
-                " SET last_error ="
-                "   COALESCE(last_error, CAST('{\"v\": 1}' AS jsonb))"
-                "   || jsonb_build_object('evidence',"
-                "        COALESCE(last_error->'evidence', CAST('{}' AS jsonb))"
-                "        || jsonb_build_object('notify_attempted_at', now()))"
-                " WHERE id = :intent"
+                "UPDATE post_intents SET "
+                + intent_ledger.EVIDENCE_MERGE.format(
+                    seed='{"v": 1}', key="notify_attempted_at", value="now()"
+                )
+                + " WHERE id = :intent"
                 "   AND state = 'review_required'"
                 "   AND COALESCE("
                 "         CAST(last_error->'evidence'->>'notify_attempted_at'"
@@ -286,7 +285,7 @@ async def notify_parked_customer(
     rather than a hand-rolled `SET LOCAL` — its docstring is explicit that a
     second copy of that call is how a third ships `is_local=false`.
     """
-    from src.services.target import outbox, prompts, unit_of_work
+    from src.services.target import intent_ledger, outbox, prompts, unit_of_work
 
     # `02` §4's worker actor, matching `make_session_for`: the governance
     # triggers on post_intents refuse a write that names no actor.
@@ -310,13 +309,11 @@ async def notify_parked_customer(
     claimed = (
         await conn.execute(
             text(
-                "UPDATE post_intents"
-                " SET last_error ="
-                "   COALESCE(last_error, CAST('{\"v\": 1}' AS jsonb))"
-                "   || jsonb_build_object('evidence',"
-                "        COALESCE(last_error->'evidence', CAST('{}' AS jsonb))"
-                "        || jsonb_build_object('customer_notified', true))"
-                " WHERE id = :intent"
+                "UPDATE post_intents SET "
+                + intent_ledger.EVIDENCE_MERGE.format(
+                    seed='{"v": 1}', key="customer_notified", value="true"
+                )
+                + " WHERE id = :intent"
                 "   AND state = 'review_required'"
                 "   AND NOT COALESCE("
                 "         CAST(last_error->'evidence'->>'customer_notified'"

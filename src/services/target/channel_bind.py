@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import text
-
 from src.services.target import (
     bindings,
     identity,
@@ -54,13 +52,8 @@ async def issue_bind_state(
     earlier copy pasted somewhere must not stay usable after a new one is
     minted, so issuing retires the workspace's other live bind states.
     """
-    await conn.execute(
-        text(
-            "UPDATE oauth_states SET consumed_at = now()"
-            " WHERE purpose = :purpose AND provider = :provider"
-            "   AND workspace_id = :ws AND consumed_at IS NULL"
-        ),
-        {"purpose": PURPOSE, "provider": PROVIDER, "ws": str(workspace_id)},
+    await ig_login_oauth.retire_live_states(
+        conn, provider=PROVIDER, purpose=PURPOSE, workspace_id=workspace_id
     )
     state = await ig_login_oauth.issue_state(
         conn,

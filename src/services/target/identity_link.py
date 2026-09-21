@@ -27,8 +27,6 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import text
-
 from src.services.target import identity, ig_login_oauth
 from src.services.target.start_router import StartContext, StartResult
 
@@ -57,13 +55,8 @@ async def issue_link_state(conn, *, user_id: str, bot_username: str) -> str:
     transaction — the "last issued wins" rule `07` §2 states for reconnects,
     applied to the purpose it matters most for.
     """
-    await conn.execute(
-        text(
-            "UPDATE oauth_states SET consumed_at = now()"
-            " WHERE purpose = :purpose AND provider = :provider"
-            "   AND user_id = :uid AND consumed_at IS NULL"
-        ),
-        {"purpose": PURPOSE, "provider": PROVIDER, "uid": str(user_id)},
+    await ig_login_oauth.retire_live_states(
+        conn, provider=PROVIDER, purpose=PURPOSE, user_id=user_id
     )
     state = await ig_login_oauth.issue_state(
         conn, purpose=PURPOSE, user_id=user_id, provider=PROVIDER

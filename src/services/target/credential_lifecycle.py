@@ -40,7 +40,6 @@ The token never appears in any raise, log, or error detail, on any path.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -49,7 +48,13 @@ import httpx
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import egress, google_drive_oauth, google_oidc, outbox
+from src.services.target import (
+    audit,
+    egress,
+    google_drive_oauth,
+    google_oidc,
+    outbox,
+)
 from src.services.target import ig_login_oauth as oauth
 
 logger = logging.getLogger(__name__)
@@ -221,21 +226,15 @@ async def _audit_revoke_failed(factory, workspace_id, credential_id, reason) -> 
     """The `revoke_failed` record `06` §lifecycles names. Its own transaction,
     so the record survives whatever the caller does next."""
     async with factory() as s:
-        await s.execute(
-            text(
-                "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
-                " from_state, to_state, actor_kind, actor_user_id, channel, detail)"
-                " VALUES (:ws, 'oauth_credential', :cid, 'revoked', 'revoked',"
-                "         current_setting('app.actor_kind'),"
-                "         NULLIF(current_setting('app.actor_user_id', true), '')::uuid,"
-                "         NULLIF(current_setting('app.channel', true), ''),"
-                "         CAST(:detail AS jsonb))"
-            ),
-            {
-                "ws": workspace_id,
-                "cid": credential_id,
-                "detail": json.dumps({"event": "revoke_failed", "reason": reason}),
-            },
+        await audit.record(
+            s,
+            workspace_id=workspace_id,
+            entity_kind="oauth_credential",
+            entity_id_sql=":cid",
+            from_state="revoked",
+            to_state="revoked",
+            detail={"event": "revoke_failed", "reason": reason},
+            cid=credential_id,
         )
 
 
@@ -362,13 +361,8 @@ async def reauth_prompt(deps, session, job) -> str:
             " re-authorization. Posting for this account is paused until you"
             " reconnect it from the dashboard."
         )
-        for binding_id in bindings:
-            await outbox.enqueue(
-                s,
-                workspace_id=str(row["workspace_id"]),
-                binding_id=binding_id,
-                kind="notification",
-                payload={"v": 1, "text": body},
-            )
+        await outbox.fanout_notification(
+            s, workspace_id=str(row["workspace_id"]), bindings=bindings, text=body
+        )
         await s.commit()
     return "prompted"

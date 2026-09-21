@@ -54,7 +54,7 @@ pretends to close the chain.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import hashlib
 import logging
@@ -65,7 +65,7 @@ import httpx
 from sqlalchemy import text
 
 from src.config.constants import IG_LOGIN_API_BASE, IG_LOGIN_GRAPH_BASE
-from src.exceptions import StorydumpError
+from src.exceptions.base import RefusalError, StorydumpError
 from src.services.target import egress, vocabulary
 
 logger = logging.getLogger(__name__)
@@ -137,6 +137,47 @@ def authorization_url(state: str, *, redirect_uri: str, client_id: str) -> str:
     )
 
 
+async def retire_live_states(
+    conn,
+    *,
+    provider: str,
+    purpose: Optional[str] = None,
+    user_id=None,
+    workspace_id=None,
+    reconnect_target=None,
+) -> int:
+    """Consume every live state this selector matches. Returns the count.
+
+    "Last issued wins" (`07` §2) is one security rule with four writers: a
+    link mint, a bind mint, :func:`issue_state`'s own reconnect-target retire
+    and `disable_destination`'s. Four spellings is how one of them keeps a
+    state tappable after the next is minted. Exactly one selector kwarg is
+    given besides *provider*; the statement is built from named fragments,
+    never from a caller's string.
+    """
+    where = ["provider = :provider", "consumed_at IS NULL"]
+    params: dict[str, Any] = {"provider": provider}
+    if purpose is not None:
+        where.append("purpose = :purpose")
+        params["purpose"] = purpose
+    if user_id is not None:
+        where.append("user_id = :uid")
+        params["uid"] = str(user_id)
+    if workspace_id is not None:
+        where.append("workspace_id = :ws")
+        params["ws"] = str(workspace_id)
+    if reconnect_target is not None:
+        where.append("reconnect_target = :target")
+        params["target"] = str(reconnect_target)
+    result = await conn.execute(
+        text(
+            "UPDATE oauth_states SET consumed_at = now() WHERE " + " AND ".join(where)
+        ),
+        params,
+    )
+    return result.rowcount
+
+
 async def issue_state(
     conn,
     *,
@@ -166,13 +207,8 @@ async def issue_state(
         # consented with two different Instagram accounts, would let the
         # second callback re-point the row — so a connect retires its
         # predecessors exactly as a reconnect does).
-        await conn.execute(
-            text(
-                "UPDATE oauth_states SET consumed_at = now()"
-                " WHERE reconnect_target = :target AND provider = :provider"
-                "   AND consumed_at IS NULL"
-            ),
-            {"target": str(reconnect_target), "provider": provider},
+        await retire_live_states(
+            conn, provider=provider, reconnect_target=reconnect_target
         )
 
     state = new_state()
@@ -513,18 +549,17 @@ REASONS = (
 )
 
 
-class IgOAuthRefused(StorydumpError):
+class IgOAuthRefused(RefusalError):
     """The grant could not be completed. ``reason`` is one of :data:`REASONS`,
     and no token ever rides in the message."""
+
+    _prefix = "instagram grant refused"
 
     def __init__(self, reason: str, detail: str = ""):
         if reason not in REASONS:
             raise ValueError(f"unknown IgOAuthRefused reason {reason!r}")
-        self.reason = reason
         self.detail = detail
-        super().__init__(
-            f"instagram grant refused: {reason}" + (f" — {detail}" if detail else "")
-        )
+        super().__init__(reason, detail)
 
 
 @dataclass(frozen=True)
@@ -628,10 +663,7 @@ async def exchange_code(
         raise IgOAuthRefused(
             "malformed_response", "no access token in the long-lived exchange"
         )
-    expires_at = None
-    expires_in = body.get("expires_in")
-    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+    expires_at = egress.expires_at_from(body.get("expires_in"))
 
     profile = await egress.request(
         client,

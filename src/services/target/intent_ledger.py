@@ -94,6 +94,23 @@ TERMINAL_STATES: tuple[str, ...] = (
     "cancelled",
 )
 
+#: The `last_error->'evidence'` MERGE, as a fragment. `reconciler`'s own prose
+#: says this must never be a rebuild: `evidence` carries `checks`,
+#: `last_checked_at` and the trail, which is the operator's entire inheritance
+#: on a parked intent, and a `jsonb_build_object` rewrite of it notifies the
+#: customer by destroying the evidence. Four writers spelled it out; `{seed}`
+#: is what an absent `last_error` becomes, `{key}` and `{value}` are SQL
+#: literals chosen by the writer — never caller input. The guards, the WHERE
+#: and any RETURNING stay with the writer: the four differ there, and a
+#: function that took them all as parameters would be a second statement
+#: builder rather than one shared clause.
+EVIDENCE_MERGE = (
+    "last_error = COALESCE(last_error, CAST('{seed}' AS jsonb))"
+    " || jsonb_build_object('evidence',"
+    "      COALESCE(last_error->'evidence', CAST('{{}}' AS jsonb))"
+    "      || jsonb_build_object('{key}', {value}))"
+)
+
 
 async def transition(session, intent_id: str, to_state: str) -> None:
     """Move an intent to *to_state*, or raise.

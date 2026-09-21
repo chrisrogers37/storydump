@@ -81,7 +81,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
-from src.services.target import readers, vocabulary
+from src.services.target import ig_login_oauth, readers, vocabulary
 from src.services.target.intent_ledger import TERMINAL_STATES
 from src.services.target._dbapi import constraint_violated
 
@@ -832,18 +832,13 @@ async def disable_destination(
     # A grant issued BEFORE the removal must not land afterwards and revive the
     # row by surprise — the statement `issue_state` uses to retire a target's
     # live states.
-    retired = await executor.execute(
-        text(
-            "UPDATE oauth_states SET consumed_at = now()"
-            " WHERE reconnect_target = :acct AND provider = :provider"
-            "   AND consumed_at IS NULL"
-        ),
-        {"acct": str(ig_account_id), "provider": IG_LOGIN_PROVIDER},
+    retired = await ig_login_oauth.retire_live_states(
+        executor, provider=IG_LOGIN_PROVIDER, reconnect_target=ig_account_id
     )
     return {
         "credential_revoked": bool(revoked.rowcount),
         "intents_flagged": flagged.rowcount,
-        "states_retired": retired.rowcount,
+        "states_retired": retired,
     }
 
 

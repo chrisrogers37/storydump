@@ -101,7 +101,8 @@ import ipaddress
 import socket
 import time
 from dataclasses import dataclass, field, replace
-from typing import NamedTuple, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, NamedTuple, Optional
 
 import httpx
 
@@ -436,3 +437,28 @@ async def request(
         f"all {policy.max_attempts} attempts failed within the absolute budget "
         f"of {policy.total_budget_s}s (L.0/#857): {last_exc!r}"
     )
+
+
+def expires_at_from(
+    expires_in: Any, *, default_seconds: Optional[int] = None
+) -> Optional[datetime]:
+    """A token response's ``expires_in`` as an absolute UTC instant.
+
+    Three provider legs derived this independently (`07` §2's grants and the
+    Drive refresh), and each re-decided the same two guards: a JSON body is
+    untrusted, so a non-numeric value is no expiry, and ``bool`` is an ``int``
+    in Python — ``"expires_in": true`` must not read as one second.
+
+    *default_seconds* is what an ABSENT or unusable value means. ``None``
+    means "no known expiry"; the Drive refresh passes Google's hour, because
+    writing NULL there would read as "never refresh this again".
+
+    It lives on the floor rather than in either leg because the value being
+    read is a provider's answer, and the floor is the one module every
+    provider call already goes through.
+    """
+    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
+        return datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+    if default_seconds is None:
+        return None
+    return datetime.now(timezone.utc) + timedelta(seconds=default_seconds)
