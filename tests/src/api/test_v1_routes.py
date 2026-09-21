@@ -23,6 +23,7 @@ from src.services.target import (
     ig_login_oauth,
     invitations,
     media_sync,
+    oauth_states,
     provisioning,
     sessions,
     webhook_ingress,
@@ -631,7 +632,7 @@ class TestTelegramGroupBindLink:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["link"] == "https://t.me/storydump_app_bot?startgroup=bind-st4te"
-        assert body["expires_in_seconds"] == ig_login_oauth.STATE_TTL_SECONDS
+        assert body["expires_in_seconds"] == oauth_states.STATE_TTL_SECONDS
         assert tenant == [
             ("uow", WS, PRINCIPAL.user_id),
             ("gate", WS, PRINCIPAL.user_id, "admin"),
@@ -729,7 +730,7 @@ class TestTelegramLink:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["link"] == "https://t.me/storydump_app_bot?start=link-st4te"
-        assert body["expires_in_seconds"] == ig_login_oauth.STATE_TTL_SECONDS
+        assert body["expires_in_seconds"] == oauth_states.STATE_TTL_SECONDS
         assert issued == {
             "user_id": PRINCIPAL.user_id,
             "bot_username": "storydump_app_bot",

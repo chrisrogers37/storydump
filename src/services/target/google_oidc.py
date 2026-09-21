@@ -3,8 +3,9 @@
 Three legs, one function each, and none of them touches the database or the
 request: the authorization URL the browser is sent to, the server-side code
 exchange, and verification of the ID token that comes back. The route owns
-the state row (`oauth_states` via `ig_login_oauth.issue_state` /
-`consume_state`, whose ``signin`` purpose already carries the cookie-nonce
+the state row (`oauth_states` via :func:`oauth_states.issue_state` /
+:func:`~oauth_states.consume_state`, whose ``signin`` purpose already
+carries the cookie-nonce
 double submit) and the session it mints afterwards.
 
 ## The ID token is verified by claims, not by signature — deliberately

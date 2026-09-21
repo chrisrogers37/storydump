@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 
-from src.services.target import identity, ig_login_oauth
+from src.services.target import identity, oauth_states
 from src.services.target.start_router import StartContext, StartResult
 
 logger = logging.getLogger(__name__)
@@ -55,10 +55,10 @@ async def issue_link_state(conn, *, user_id: str, bot_username: str) -> str:
     transaction — the "last issued wins" rule `07` §2 states for reconnects,
     applied to the purpose it matters most for.
     """
-    await ig_login_oauth.retire_live_states(
+    await oauth_states.retire_live_states(
         conn, provider=PROVIDER, purpose=PURPOSE, user_id=user_id
     )
-    state = await ig_login_oauth.issue_state(
+    state = await oauth_states.issue_state(
         conn, purpose=PURPOSE, user_id=user_id, provider=PROVIDER
     )
     return deep_link(bot_username, state)
@@ -72,13 +72,13 @@ async def handle_link(conn, ctx: StartContext) -> StartResult:
     Every distinguishing detail rides the named ``outcome`` into the log.
     """
     try:
-        row = await ig_login_oauth.consume_state(
+        row = await oauth_states.consume_state(
             conn,
             state=ctx.payload,
             expected_purpose=PURPOSE,
             expected_provider=PROVIDER,
         )
-    except ig_login_oauth.OAuthStateRefused as exc:
+    except oauth_states.OAuthStateRefused as exc:
         # Unknown, expired, already consumed, or issued for another purpose —
         # four facts, one reply, distinct outcomes in the log.
         logger.warning("identity link refused: %s", exc)

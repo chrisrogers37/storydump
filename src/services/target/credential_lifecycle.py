@@ -57,6 +57,7 @@ from src.services.target import (
     unit_of_work,
 )
 from src.services.target import ig_login_oauth as oauth
+from src.services.target import oauth_states
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +189,7 @@ async def revoke_workspace_credentials(deps, session, job) -> str:
 
     try:
         refresh_token = google_drive_oauth.decode_payload(
-            oauth.ring().decrypt(row[0])
+            oauth_states.ring().decrypt(row[0])
         ).refresh_token
     except Exception:
         # Deliberately not logging the exception: it can carry ciphertext.
@@ -270,7 +271,7 @@ async def refresh_credential(deps, session, job) -> str:
             credential_id,
         )
         return "undecryptable"
-    except oauth.OAuthStateRefused:
+    except oauth_states.OAuthStateRefused:
         logger.warning(
             "refresh_credential %s: credential %s has no row — nothing to refresh",
             job["id"],

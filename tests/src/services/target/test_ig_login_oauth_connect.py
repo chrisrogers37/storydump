@@ -18,6 +18,7 @@ import pytest
 
 from src.services.target import egress
 from src.services.target import ig_login_oauth as ig
+from src.services.target import oauth_states
 
 REDIRECT = "https://api.test/auth/instagram-login/callback"
 APP_ID = "1234567890"
@@ -293,7 +294,7 @@ class TestRetireLiveStates:
 
     async def test_provider_and_liveness_are_always_in_the_where(self):
         conn = _RetireConn()
-        await ig.retire_live_states(conn, provider="telegram")
+        await oauth_states.retire_live_states(conn, provider="telegram")
         ((sql, params),) = conn.statements
         assert sql.startswith("UPDATE oauth_states SET consumed_at = now() WHERE ")
         assert "provider = :provider" in sql and "consumed_at IS NULL" in sql
@@ -322,7 +323,7 @@ class TestRetireLiveStates:
     )
     async def test_each_selector_adds_its_own_predicate(self, kwargs, fragment, params):
         conn = _RetireConn()
-        await ig.retire_live_states(conn, provider="telegram", **kwargs)
+        await oauth_states.retire_live_states(conn, provider="telegram", **kwargs)
         ((sql, bound),) = conn.statements
         assert fragment in sql
         assert bound == params
@@ -332,10 +333,14 @@ class TestRetireLiveStates:
 
         target = uuid.uuid4()
         conn = _RetireConn()
-        await ig.retire_live_states(conn, provider="ig_login", reconnect_target=target)
+        await oauth_states.retire_live_states(
+            conn, provider="ig_login", reconnect_target=target
+        )
         assert conn.statements[0][1]["target"] == str(target)
 
     @pytest.mark.parametrize("rowcount", [0, 1, 3])
     async def test_the_count_of_retired_rows_is_returned(self, rowcount):
         conn = _RetireConn(rowcount)
-        assert await ig.retire_live_states(conn, provider="telegram") == rowcount
+        assert (
+            await oauth_states.retire_live_states(conn, provider="telegram") == rowcount
+        )
