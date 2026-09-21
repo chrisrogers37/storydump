@@ -51,11 +51,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      # No install step, deliberately: the ratchet is stdlib-only (the
-      # fc8_gate.py precedent), so it runs before and independently of the
-      # application's dependency tree. A gate that needs the app installed to
-      # tell you the app is coupled is a gate that goes dark exactly when the
-      # dependency tree is what broke.
+      # No install step, deliberately: the ratchet is stdlib-only, so it runs
+      # before and independently of the application's dependency tree. A gate
+      # that needs the app installed to tell you the app is coupled is a gate
+      # that goes dark exactly when the dependency tree is what broke.
       #
       # Its own job rather than a step inside Lint, because a ratchet's whole
       # purpose is visibility: "FC-2 Telegram ratchet" names the failure on the
