@@ -409,8 +409,9 @@ class WorkspaceClaims:
     Claim OUTSIDE a savepoint the caller may roll back: `ROLLBACK TO
     SAVEPOINT` reverts a `SET LOCAL` made inside it, and this object would
     still believe the workspace is held. The actor restored is the one the
-    caller carried (`system` on every worker path — `apply_gucs` sends only
-    the non-None pairs, so an unset actor stays as it was).
+    caller carried; `apply_gucs` sends only the non-None pairs, so a caller
+    that carried NO actor would be left as `system` — every worker path sets
+    `system` before any sweep, so today that is the same value.
     """
 
     def __init__(self, executor):

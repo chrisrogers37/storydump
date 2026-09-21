@@ -150,7 +150,7 @@ The worker's switch (`f4_switch.sh worker`) and the close of #751.
    `POLICY_CENSUS`, the counts.
 5. **The switch's check.** `f4_switch.sh worker` prints, before and after, the worker's boot line
    and one sweep cycle's counts from the logs (prompts minted, sender jobs minted); the runbook's
-   worker section names the four paths and the door precondition (082).
+   worker section names the six paths and the door precondition (082).
 6. **The battery** `tests/mutations/worker_login_doors.sh`: each read emptied; each write losing
    its tenant claim; the scope kept; the ladder counted before the claim; the file's own
    postconditions.

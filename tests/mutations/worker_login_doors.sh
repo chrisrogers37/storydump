@@ -106,6 +106,17 @@ check "the reconciler counts the ladder before claiming the row's workspace" src
                 poll=deps.poll,
                 checks=climbed,
             )' "$GATE -k climbs_the_ladder"
+# The advance phase's refusal rides a savepoint: without it one raced row aborts the sweep's transaction.
+check "the advance phase's refusal has no savepoint" src/services/target/prompts.py '            async with session.begin_nested():
+                await intent_ledger.transition(
+                    session, str(row["id"]), "awaiting_approval"
+                )
+' '            await intent_ledger.transition(
+                session, str(row["id"]), "awaiting_approval"
+            )
+' "tests/src/services/target/test_prompts.py -k refused_transition_rolls_back"
+# The due door's select list is _CARD_SELECT verbatim: the pin reads the door's body from the file.
+check "the due door drops a card column" scripts/migrations/082_worker_doors.sql '         m.file_name, m.media_kind, m.mime_type,' '         m.file_name, m.media_kind,' "tests/src/services/target/test_prompts.py -k carries_the_card_select"
 # The file's own adoption probes: the runner refuses a file that does not leave what it claims.
 check "a policy svc_maintenance needs is not created" scripts/migrations/082_worker_doors.sql 'CREATE POLICY p_maint_media ON media_items FOR SELECT TO svc_maintenance USING (true);' '-- (no policy)' "$LANE"
 check "the worker loses EXECUTE on the sender door" scripts/migrations/082_worker_doors.sql 'GRANT EXECUTE ON FUNCTION fn_sender_sweep(p_prefix text, p_attempts int, p_deadline numeric, p_age numeric, p_limit int) TO svc_worker;' '-- (no grant)' "$LANE"
