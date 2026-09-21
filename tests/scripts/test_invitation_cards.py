@@ -17,10 +17,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.services.target import bindings, invitation_cards, invitations, work_loop
+from src.services.target import bindings, invitation_cards, invitations
 from src.services.target.invitation_cards import CardRefused
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
+    sweep_as_worker,
     _scratch,
     as_user,
     fetch_one,
@@ -68,29 +69,6 @@ async def _in_uow(dsn, ws, user, fn):
             return await fn(session)
     finally:
         await engine.dispose()
-
-
-async def _sweep_as_worker(dsn: str):
-    """`ensure_sender_jobs` the way the worker runs it: as `svc_worker`, in a
-    session with the empty tenant and the system actor — the sweep's own
-    cross-tenant read is the door's (082)."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    from src.services.target import unit_of_work
-
-    engine = create_async_engine(
-        dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
-    )
-    try:
-        async with engine.begin() as c:
-            await unit_of_work.apply_gucs(c, tenant_id="", actor_kind="system")
-            return await work_loop.ensure_sender_jobs(c)
-    finally:
-        await engine.dispose()
-
-
-def sweep_as_worker(world):
-    return asyncio.run(_sweep_as_worker(world["worker"]))
 
 
 def run(world, fn, *, ids=None):
@@ -278,21 +256,20 @@ class TestItReachesTheBuiltChain:
         inv, token = _mint(world, hint="someone")
         before = _cards(world)
 
-        async def announce_and_sweep(session):
-            n = await invitation_cards.announce(
+        async def announce(session):
+            return await invitation_cards.announce(
                 session,
                 workspace_id=str(world["a"]["ws"]),
                 invitation=inv,
                 token=token,
             )
-            # the sweep is the worker's (082): its own login, its own session
-            minted = await _sweep_as_worker(world["worker"])
-            return n, minted
 
-        n, minted = run(world, announce_and_sweep)
+        n = run(world, announce)
         assert n >= 2, "one card per binding"
         assert _cards(world) == before + n
-        assert minted >= 1
+        # The sweep is the worker's (082): its own session, the worker's
+        # login, after the announcing transaction has committed.
+        assert sweep_as_worker(world["worker"]) >= 1
         (jobs,) = fetch_one(
             world["stream"],
             "SELECT count(*) FROM jobs WHERE kind = 'deliver_outbox'"

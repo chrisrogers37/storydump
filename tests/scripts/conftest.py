@@ -269,6 +269,30 @@ def as_user(dsn: str, user: str) -> str:
     return _dsn(database, user=user, password=TEST_ACTOR_PASSWORD)
 
 
+def sweep_as_worker(dsn: str) -> int:
+    """`work_loop.ensure_sender_jobs` the way the worker runs it: as the login
+    *dsn* names (the worker's), in its own session with the EMPTY tenant and
+    the `system` actor — the sweep's cross-tenant read is the door's (082).
+    Run it AFTER the transaction that enqueued the cards has committed: a
+    second session cannot see an uncommitted row."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from src.services.target import unit_of_work, work_loop
+
+    async def go() -> int:
+        engine = create_async_engine(async_url(dsn))
+        try:
+            async with engine.begin() as conn:
+                await unit_of_work.apply_gucs(conn, tenant_id="", actor_kind="system")
+                return await work_loop.ensure_sender_jobs(conn)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(go())
+
+
 def async_url(dsn: str) -> str:
     """The asyncpg URL for *dsn* — the APPLICATION's rewrite, not a second one.
 

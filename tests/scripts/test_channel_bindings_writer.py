@@ -20,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.services.target import bindings, outbox, prompts, work_loop
+from src.services.target import bindings, outbox, prompts
 from src.services.target.bindings import BOUND, REBOUND, TAKEN, BindingRefused
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
@@ -30,6 +30,7 @@ from tests.scripts.conftest import (
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
+    sweep_as_worker,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -75,29 +76,6 @@ async def _in_uow(dsn: str, ws: str, user: str, fn):
             return await fn(session)
     finally:
         await engine.dispose()
-
-
-async def _sweep_as_worker(dsn: str):
-    """`ensure_sender_jobs` the way the worker runs it: as `svc_worker`, in a
-    session with the empty tenant and the system actor — the sweep's own
-    cross-tenant read is the door's (082)."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    from src.services.target import unit_of_work
-
-    engine = create_async_engine(
-        dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
-    )
-    try:
-        async with engine.begin() as c:
-            await unit_of_work.apply_gucs(c, tenant_id="", actor_kind="system")
-            return await work_loop.ensure_sender_jobs(c)
-    finally:
-        await engine.dispose()
-
-
-def sweep_as_worker(world):
-    return asyncio.run(_sweep_as_worker(world["worker"]))
 
 
 def run(world, fn, *, ids=None):
@@ -325,7 +303,7 @@ class TestItAuditsAndUnInertsTheChain:
         # rather than a story: workspace B never acquires a binding anywhere in
         # this module (its only attempt is the TAKEN case), so the sweep has
         # nothing of B's to find. That is the state the WHOLE product was in.
-        sweep_as_worker(world)
+        sweep_as_worker(world["worker"])
         (b_jobs,) = fetch_one(
             world["stream"],
             "SELECT count(*) FROM jobs WHERE kind = 'deliver_outbox'"
@@ -367,7 +345,7 @@ class TestItAuditsAndUnInertsTheChain:
         # The enqueue commits with the ingress unit of work; the sweep is the
         # worker's (082) — its own login, its own session, after the commit.
         run(world, enqueue_and_sweep)
-        assert sweep_as_worker(world) >= 1
+        assert sweep_as_worker(world["worker"]) >= 1
         (jobs,) = fetch_one(
             world["stream"],
             "SELECT count(*) FROM jobs WHERE kind = 'deliver_outbox'"

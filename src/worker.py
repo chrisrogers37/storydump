@@ -166,7 +166,9 @@ def _poll_from(engine, meta, *, session_factory=None):
     typed error: the ladder records the sighting and, spent, parks the intent
     for a human. A typed error is logged by type and returned as None rather
     than raised so one account's dead token cannot abort the whole sweep.
-    Reads as the owner role (BYPASSRLS, #751) like `ig_credentials`."""
+    Reads under the workspace the reconciler's sweep row names, claimed in the
+    poll's own session (082): a tenant-less read would see nothing once the
+    worker runs as `svc_worker`."""
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
 

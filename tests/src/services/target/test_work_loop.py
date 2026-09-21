@@ -244,6 +244,36 @@ class TestReconcilerSweepBranchesOnItsReason:
         assert [n[0] for n in notified] == ["i-4"]
         assert reconciled == [], "no seam to poll with"
 
+    async def test_the_ladder_count_is_read_after_the_rows_workspace_is_claimed(
+        self, monkeypatch
+    ):
+        """`post_intents` is policy-covered and the sweep's session carries no
+        tenant: a count read before the claim is 0 for every row, so every step
+        is the first and the ladder never exhausts (#1349 review). The claim
+        precedes the read, and what the row says is what the ladder gets."""
+        rows = [{"intent_id": "i-6", "workspace_id": "ws-1", "reason": "ladder_due"}]
+        seen = []
+
+        async def fake_sweep(session, *, limit, notify_after_seconds):
+            return rows
+
+        async def fake_reconcile(session, *, intent_id, checks, **kw):
+            seen.append(checks)
+            return "pending"
+
+        monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
+        monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", fake_reconcile)
+        session = _FakeSession(rows=[7])  # the evidence on the row: seven checks
+        registry = build_registry(full_deps())
+        await registry["reconcile_ambiguous"](session, self._job())
+        assert seen == [7]
+        sql = [s for s, _ in session.statements]
+        claim = next(i for i, s in enumerate(sql) if "app.tenant_id" in s)
+        count = next(i for i, s in enumerate(sql) if "'checks'" in s)
+        assert claim < count, (
+            "the row's workspace is claimed before its ladder is counted"
+        )
+
     async def test_a_workspace_with_no_surface_makes_the_sweep_undeliverable(
         self, monkeypatch
     ):
@@ -390,6 +420,9 @@ class _FakeSession:
                 return _M()
 
             def first(self_inner):
+                return rows[0] if rows else None
+
+            def scalar(self_inner):
                 return rows[0] if rows else None
 
         return _R()
@@ -1654,8 +1687,6 @@ class TestTheSenderMintReadsItsOwners:
         from src.services.target import jobs
 
         class _Result:
-            rowcount = 0
-
             def scalar(self):
 
                 return 0  # the door returns the minted count as a scalar (082)
@@ -1682,8 +1713,6 @@ class TestTheSenderMintReadsItsOwners:
 
     async def test_the_caller_may_bound_the_sweep(self):
         class _Result:
-            rowcount = 0
-
             def scalar(self):
                 return 0  # the door returns the minted count as a scalar (082)
 
@@ -1709,6 +1738,8 @@ class TestTheSenderMintReadsItsOwners:
         # door cannot call the Python fragment, so the predicate is spelled in
         # the door and pinned here to the one owner: the door's body must carry
         # `push_binding_where('b')` verbatim, and the Python no longer spells it.
+        # An applied file is immutable: a predicate change means a fix-forward
+        # door (063's precedent), and this pin moves to the new file with it.
         from scripts.migration_runner import MIGRATIONS_DIR
 
         ddl = (MIGRATIONS_DIR / "082_worker_doors.sql").read_text()

@@ -354,7 +354,10 @@ def build_registry(deps: WorkerDeps) -> dict:
             # so these writes were invisible to `p_tenant` already. Reading the
             # reason tag also makes the tenant VARY across one sweep, so
             # asserting it per row is what keeps a ladder row from inheriting
-            # the scope of whichever notify row preceded it.
+            # the scope of whichever notify row preceded it. The ladder's
+            # count is read AFTER the claim for the same reason: `post_intents`
+            # is policy-covered, and a read with no tenant answers 0 for every
+            # row — a ladder that never exhausts (#1349 review).
             await unit_of_work.apply_gucs(
                 session,
                 tenant_id=str(op["workspace_id"]),
@@ -365,7 +368,9 @@ def build_registry(deps: WorkerDeps) -> dict:
                 intent_id=op["intent_id"],
                 workspace_id=op["workspace_id"],
                 poll=deps.poll,
-                checks=op.get("checks", 0),
+                checks=await reconciler.checks_so_far(
+                    session, intent_id=op["intent_id"]
+                ),
             )
         if ladder_skipped:
             # Loud, per the module docstring: the deployment cannot do this

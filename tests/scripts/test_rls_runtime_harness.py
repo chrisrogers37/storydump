@@ -416,9 +416,9 @@ DOORS = {
         "svc_ingress",
         "SELECT * FROM fn_meta_accounts_for_ref('no-such-ref')",
     ),
-    # The worker's doors (082, `07` §25, #751 part 2): the four tenant-less
+    # The worker's doors (082, `07` §25, #751 part 2): the tenant-less
     # sweeps' reads. The sender sweep is one door (its INSERT … SELECT is one
-    # statement); the other three return rows with their workspace ids and the
+    # statement); the other four return rows with their workspace ids and the
     # worker writes per workspace under that tenant.
     "fn_sender_sweep": (
         "svc_worker",
@@ -431,6 +431,10 @@ DOORS = {
     "fn_prompts_pending": (
         "svc_worker",
         "SELECT * FROM fn_prompts_pending(50)",
+    ),
+    "fn_settled_cards": (
+        "svc_worker",
+        "SELECT * FROM fn_settled_cards(ARRAY['posted'], 50)",
     ),
     "fn_stranded_sources": (
         "svc_worker",

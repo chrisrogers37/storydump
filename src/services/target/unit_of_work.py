@@ -391,6 +391,61 @@ async def apply_gucs(
     )
 
 
+class WorkspaceClaims:
+    """Per-workspace tenant claims INSIDE a caller's transaction, and the
+    caller's own scope handed back at the end.
+
+    A sweep that reads the estate through a door (081, 082) and then writes
+    each row under its workspace's tenant claims several tenants in one
+    transaction. Each claim is `SET LOCAL` (:func:`apply_gucs`), so it dies
+    with the transaction — but not before the rest of the transaction runs.
+    `plan_slot` runs the prompt sweep inside a TENANT job's transaction and
+    then finalizes its own job; a sweep that left the session under the last
+    workspace it prompted would fence that finalization under the policies
+    (`jobs.JobFenced`) — the #1349 review's finding. So the first claim
+    records the caller's scope and :meth:`release` restores it; a sweep that
+    claimed nothing pays nothing.
+
+    Claim OUTSIDE a savepoint the caller may roll back: `ROLLBACK TO
+    SAVEPOINT` reverts a `SET LOCAL` made inside it, and this object would
+    still believe the workspace is held. The actor restored is the one the
+    caller carried (`system` on every worker path — `apply_gucs` sends only
+    the non-None pairs, so an unset actor stays as it was).
+    """
+
+    def __init__(self, executor):
+        self._executor = executor
+        self._before: Optional[tuple[str, Optional[str]]] = None
+        self.held: Optional[str] = None
+
+    async def claim(self, workspace_id: str) -> None:
+        """Hold *workspace_id*'s tenant with the `system` actor; a no-op when
+        it is already held."""
+        if workspace_id == self.held:
+            return
+        if self._before is None:
+            before = (
+                await self._executor.execute(
+                    text(
+                        "SELECT current_setting('app.tenant_id', true),"
+                        " current_setting('app.actor_kind', true)"
+                    )
+                )
+            ).one()
+            self._before = (before[0] or "", before[1] or None)
+        await apply_gucs(self._executor, tenant_id=workspace_id, actor_kind="system")
+        self.held = workspace_id
+
+    async def release(self) -> None:
+        """Hand the caller's scope back — the tenant and actor it carried
+        before the first claim. A no-op when nothing was claimed."""
+        if self._before is None:
+            return
+        tenant, actor = self._before
+        await apply_gucs(self._executor, tenant_id=tenant, actor_kind=actor)
+        self._before, self.held = None, None
+
+
 def unit_of_work(engine: AsyncEngine, tenant_id: str, **gucs) -> UnitOfWork:
     """Factory. Present so call sites read as intent rather than construction."""
     return UnitOfWork(engine, tenant_id, **gucs)

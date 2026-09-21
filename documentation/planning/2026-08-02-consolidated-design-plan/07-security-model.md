@@ -1435,32 +1435,39 @@ GRANT EXECUTE ON FUNCTION fn_meta_accounts_for_ref(p_ref text) TO svc_ingress;
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 ```
 
-### §25. The worker's doors: the four tenant-less sweeps read the estate through svc_maintenance (082, #751 part 2)
+### §25. The worker's doors: the tenant-less sweeps read the estate through svc_maintenance (082, #751 part 2)
 
-**Why:** the worker's outbox sender sweep, prompt sweep, stranded-source alert and the
-reconciler's container poll opened a session with an empty tenant and the `system` actor and ran
-SQL on policy-covered tables — the class §24 closed for the API's health surfaces. Under
-`svc_worker` the sender sweep mints nothing (no card is ever delivered), the prompt sweep finds
-nothing (nothing ever asks for approval), and their writes fail `p_tenant`'s `WITH CHECK`; the
-alert is blind and the poll inconclusive forever. Four SECURITY DEFINER doors carry the READS:
-the sender sweep as one door, because its single `INSERT … SELECT` with the `NOT EXISTS` live-job
-check is its idempotence; the due stories, the pending prompts and the stranded sources as reads
-that return each row with its workspace, so the prompting, the transitions and the `alerted_at`
-stamp run per workspace under that workspace's tenant and the ledger's triggers attribute them
-as they do a member's own. The reconciler's poll needs no door: its sweep row names the
-workspace. `svc_maintenance` gains the three SELECT policies it lacked and INSERT on `jobs`;
-EXECUTE for `svc_worker` on all four (`documentation/planning/2026-09-21-worker-login-doors/`).
+**Why:** the worker's outbox sender sweep, prompt sweep, settled-card sweep, stranded-source alert
+and the reconciler's container poll and ladder count opened a session with an empty tenant and the
+`system` actor and ran SQL on policy-covered tables — the class §24 closed for the API's health
+surfaces. Under `svc_worker` the sender sweep mints nothing (no card is ever delivered), the prompt
+sweep finds nothing (nothing ever asks for approval), no ended story's card loses its buttons, the
+ladder counts every step as the first and never parks a lost answer for review, the alert is blind
+and the poll inconclusive forever; the writes fail `p_tenant`'s `WITH CHECK`. Five SECURITY
+DEFINER doors carry the READS: the sender sweep as one door, because its single `INSERT … SELECT`
+with the `NOT EXISTS` live-job check is its idempotence; the due stories, the pending prompts, the
+settled cards and the stranded sources as reads that return each row with its workspace, so the
+prompting, the transitions, the supersede and the `alerted_at` stamp run per workspace under that
+workspace's tenant and the ledger's triggers attribute them as they do a member's own. A sweep
+hands its caller's scope back when it is done (`unit_of_work.WorkspaceClaims`): `plan_slot` runs
+the prompt sweep inside a tenant job's transaction and then finalizes that job, which the policies
+would fence under the last workspace prompted. The reconciler's poll and ladder count need no
+door: the sweep row names the workspace, and both read after claiming it. `svc_maintenance` gains
+the three SELECT policies it lacked and INSERT on `jobs`; EXECUTE for `svc_worker` on all five
+(`documentation/planning/2026-09-21-worker-login-doors/`).
 
 ```sql
--- [§25 the worker's doors: the four tenant-less sweeps read the estate through svc_maintenance]
--- The worker's sender sweep, prompt sweep, stranded-source alert and the reconciler's container
--- poll opened a session with an empty tenant and ran SQL on policy-covered tables — the class that
--- blinded the health surfaces under svc_ingress (#751). Under svc_worker the sender sweep minted
--- nothing and the prompt sweep found nothing; their writes would have been refused. The reads
+-- [§25 the worker's doors: the tenant-less sweeps read the estate through svc_maintenance]
+-- The worker's sender sweep, prompt sweep, settled-card sweep, stranded-source alert and the
+-- reconciler's container poll and ladder count opened a session with an empty tenant and ran SQL on
+-- policy-covered tables — the class that blinded the health surfaces under svc_ingress (#751). Under
+-- svc_worker the sender sweep minted nothing, the prompt sweep found nothing, no ended story's card
+-- lost its buttons and the ladder never climbed; the writes would have been refused. The reads
 -- become doors owned by svc_maintenance, which lacked channel_bindings, media_items and
--- media_sources (SELECT) and INSERT on jobs; the writes stay under each workspace's own tenant.
--- The sender sweep is one door because its statement is one statement: the NOT EXISTS live-job
--- check evaluated with the mint is what makes it idempotent. The CREATE bracket is 062's.
+-- media_sources (SELECT) and INSERT on jobs; the writes stay under each workspace's own tenant, and
+-- a sweep hands its caller's scope back. The sender sweep is one door because its statement is one
+-- statement: the NOT EXISTS live-job check evaluated with the mint is what makes it idempotent. The
+-- CREATE bracket is 062's.
 GRANT SELECT ON channel_bindings, media_items, media_sources TO svc_maintenance;
 
 GRANT INSERT ON jobs TO svc_maintenance;
@@ -1550,6 +1557,33 @@ ALTER FUNCTION fn_prompts_pending(p_limit int) OWNER TO svc_maintenance;
 REVOKE ALL ON FUNCTION fn_prompts_pending(p_limit int) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_prompts_pending(p_limit int) TO svc_worker;
+
+CREATE FUNCTION fn_settled_cards(p_terminal text[], p_limit int)
+RETURNS TABLE (o_intent_id uuid, o_workspace_id uuid, o_binding_id uuid, o_state text, o_entered_state_at timestamptz, o_tz text, o_since timestamptz)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT o.intent_id, o.workspace_id, o.binding_id, i.state,
+         i.entered_state_at, w.tz, min(o.created_at) AS since
+    FROM channel_outbox o
+    JOIN channel_bindings b ON b.id = o.binding_id AND b.state = 'active'
+    JOIN post_intents i ON i.id = o.intent_id
+    JOIN workspaces w ON w.id = i.workspace_id
+   WHERE o.kind = 'approval_prompt'
+     AND o.state IN ('pending', 'sending', 'sent', 'ambiguous')
+     AND i.state = ANY(p_terminal)
+   GROUP BY o.intent_id, o.workspace_id, o.binding_id, i.state,
+            i.entered_state_at, w.tz
+   ORDER BY since
+   LIMIT p_limit
+$$;
+
+COMMENT ON FUNCTION fn_settled_cards(p_terminal text[], p_limit int) IS
+  'The settled-card sweep''s selection across every workspace: live approval cards on active bindings whose story has ended, oldest first — the terminal states are the caller''s argument (intent_ledger.TERMINAL_STATES, spelled once). The settlement read and the supersede happen per row under that row''s workspace. Owned by svc_maintenance; EXECUTE for svc_worker (082, #751).';
+
+ALTER FUNCTION fn_settled_cards(p_terminal text[], p_limit int) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_settled_cards(p_terminal text[], p_limit int) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_settled_cards(p_terminal text[], p_limit int) TO svc_worker;
 
 CREATE FUNCTION fn_stranded_sources(p_age numeric, p_limit int)
 RETURNS TABLE (o_id uuid, o_workspace_id uuid)

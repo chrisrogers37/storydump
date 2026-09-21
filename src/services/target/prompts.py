@@ -365,27 +365,29 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
     `posted`, the worker's cancellation — its live cards lose their buttons
     and gain the terminal line. One mechanism for every writer, run on the
     prompt sweep's cadence; a tap's own supersede is immediate and this is the
-    backstop. Returns the intents healed."""
+    backstop. Returns the intents healed.
+
+    The selection is a door (082, `fn_settled_cards`): the reaper runs with no
+    tenant and every table it joins is policy-covered — the direct read found
+    nothing under `svc_worker`, so no ended story's card would ever lose its
+    buttons (#1349 review). The door keeps the active-bindings join (a revoked
+    group's cards cannot be edited and would starve the LIMIT every beat) and
+    takes the terminal states as its argument, so their one spelling stays
+    `intent_ledger.TERMINAL_STATES`. The settlement read and the supersede
+    then run per row under that row's workspace, claimed before the savepoint
+    (a rolled-back savepoint would revert a claim made inside it), and the
+    caller's own scope is handed back at the end.
+    """
+    from src.services.target import unit_of_work
+
     rows = (
         (
             await session.execute(
                 text(
-                    # Active bindings only: a revoked group's cards cannot be
-                    # edited (the bot is gone) and would otherwise be
-                    # re-selected every beat, starving the sweep's LIMIT.
-                    "SELECT o.intent_id, o.workspace_id, o.binding_id, i.state,"
-                    "       i.entered_state_at, w.tz, min(o.created_at) AS since"
-                    "  FROM channel_outbox o"
-                    "  JOIN channel_bindings b ON b.id = o.binding_id AND b.state = 'active'"
-                    "  JOIN post_intents i ON i.id = o.intent_id"
-                    "  JOIN workspaces w ON w.id = i.workspace_id"
-                    " WHERE o.kind = 'approval_prompt'"
-                    "   AND o.state IN ('pending', 'sending', 'sent', 'ambiguous')"
-                    "   AND i.state = ANY(CAST(:terminal AS text[]))"
-                    " GROUP BY o.intent_id, o.workspace_id, o.binding_id, i.state,"
-                    "          i.entered_state_at, w.tz"
-                    " ORDER BY since"
-                    " LIMIT :lim"
+                    "SELECT o_intent_id AS intent_id, o_workspace_id AS workspace_id,"
+                    "       o_binding_id AS binding_id, o_state AS state,"
+                    "       o_entered_state_at AS entered_state_at, o_tz AS tz"
+                    "  FROM fn_settled_cards(CAST(:terminal AS text[]), :lim)"
                 ),
                 {
                     "lim": int(limit),
@@ -396,8 +398,10 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
         .mappings()
         .all()
     )
+    claims = unit_of_work.WorkspaceClaims(session)
     healed = 0
     for row in rows:
+        await claims.claim(str(row["workspace_id"]))
         # One row's fault (a zone, a lost binding) must not fail the reaper's
         # transaction for every workspace: a savepoint per row, and on.
         try:
@@ -436,6 +440,7 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
             )
             continue
         healed += 1
+    await claims.release()
     return healed
 
 
@@ -463,8 +468,11 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
     # and every table here is policy-covered. The WRITES — the cards, the
     # transitions — run per workspace under that workspace's tenant and the
     # system actor, exactly as a member's own action does, so the ledger's
-    # triggers attribute them. The claim is transaction-local and is re-made
-    # whenever the workspace changes; the caller's transaction ends it.
+    # triggers attribute them. The claims are transaction-local, re-made
+    # whenever the workspace changes, and the caller's own scope is handed
+    # back at the end: `plan_slot` runs this sweep inside a TENANT job's
+    # transaction and then finalizes that job, which the policies would fence
+    # under the last workspace prompted (`WorkspaceClaims`).
     due = (
         (
             await session.execute(
@@ -486,14 +494,12 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
         .all()
     )
     bindings_by_workspace: dict[str, list[str]] = {}  # same tx, same answer
-    claimed: str | None = None
+    claims = unit_of_work.WorkspaceClaims(session)
     for row in sorted(
         due, key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"])
     ):
         ws = str(row["workspace_id"])
-        if ws != claimed:
-            await unit_of_work.apply_gucs(session, tenant_id=ws, actor_kind="system")
-            claimed = ws
+        await claims.claim(ws)
         if ws not in bindings_by_workspace:
             bindings_by_workspace[ws] = await push_bindings(session, ws)
         await prompt_intent(
@@ -515,13 +521,11 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
         .all()
     )
     for row in sorted(advanced, key=lambda r: str(r["workspace_id"])):
-        ws = str(row["workspace_id"])
-        if ws != claimed:
-            await unit_of_work.apply_gucs(session, tenant_id=ws, actor_kind="system")
-            claimed = ws
+        await claims.claim(str(row["workspace_id"]))
         try:
             await intent_ledger.transition(session, str(row["id"]), "awaiting_approval")
             counts["advanced"] += 1
         except intent_ledger.IntentTransitionRefused:
             pass  # raced by the fast path — the state is already right
+    await claims.release()
     return counts

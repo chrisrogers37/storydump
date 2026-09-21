@@ -35,12 +35,14 @@ each step below is verified rather than assumed.
   the three tenant-less reads the API makes; everything else it reads names
   its tenant or goes through a door built before 081.
 - Migration 082 is applied (ledger head 82 or above) before the WORKER's
-  switch: the worker's four tenant-less sweeps — the outbox sender sweep, the
-  prompt sweep, the stranded-source alert and the reconciler's container
-  poll — read through its doors and write per workspace under that
-  workspace's tenant. Under `svc_worker` without it the sender sweep mints no
-  delivery job and the prompt sweep finds no due story: nothing is delivered
-  and nothing asks for approval, silently.
+  switch: the worker's tenant-less sweeps — the outbox sender sweep, the
+  prompt sweep, the settled-card sweep, the stranded-source alert, the
+  reconciler's container poll and its ladder count — read through its doors
+  (or claim the row's workspace first) and write per workspace under that
+  workspace's tenant, handing the caller's scope back. Under `svc_worker`
+  without it the sender sweep mints no delivery job and the prompt sweep
+  finds no due story: nothing is delivered and nothing asks for approval,
+  silently.
 - Both roles exist and can log in. In the Neon SQL editor, as the project
   owner:
 
@@ -102,10 +104,10 @@ each step below is verified rather than assumed.
 - `/health/scheduling` and `/health/posting` report the estate — the same
   counts as under the owner login — and the fleet monitors' verdicts are
   unchanged across the switch.
-- After the worker's switch, one sweep cycle's log lines show prompts and
-  sender jobs minted at the rate they were before (`f4_switch.sh worker`
-  prints the boot line and the sweep counts before and after), and a card
-  reaches a bound group.
+- After the worker's switch, the worker's log shows, within one sweep
+  cycle, prompts and sender jobs minted at the rate the previous deployment's
+  log showed (compare its last sweep lines with the new deployment's first),
+  and a card reaches a bound group.
 - #751 is closed with those two observations quoted, and the plan README's
   scoreboard moves F.4 to built.
 

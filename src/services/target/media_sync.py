@@ -251,15 +251,19 @@ async def alert_stranded_sources(
     resurrecting it and without a schema change. Silence then means somebody
     chose it, which is the property the current behaviour destroys.
 
-    ## The F4 seam — one statement, not read-then-write
+    ## The F4 seam — a read door, then one conditional UPDATE per workspace
 
-    Selection and the `alerted_at` stamp are a SINGLE ``UPDATE … RETURNING``,
-    and the notifications ride the same transaction. That is what makes the
-    connect flow safe to run concurrently: it sets ``state='active',
-    alerted_at=NULL``, so a row it has already cleared cannot match this
-    predicate, and a row this statement has locked forces the connect flow's
-    UPDATE to re-evaluate after commit. A read-then-write here would reopen
-    exactly that window.
+    The selection across every workspace is `fn_stranded_sources` (082), because
+    this sweep runs with no tenant and `media_sources` is policy-covered. The
+    stamp is then ONE ``UPDATE … RETURNING`` per workspace, under that
+    workspace's tenant, whose predicate IS the selection — ``state = 'error'``
+    and the age window — and the notifications ride the same transaction. That
+    is what keeps the connect flow safe to run concurrently: it sets
+    ``state='active', alerted_at=NULL``, so a row it has cleared between the
+    door's read and this statement cannot match the predicate, and a row this
+    statement has locked forces the connect flow's UPDATE to re-evaluate after
+    commit. Only the rows the UPDATE returns are alerted; a row the door listed
+    that no longer qualifies is silently dropped, never stamped.
 
     **One bounded staleness remains and is not worth more machinery.** If a
     reconnect commits immediately after this transaction, one already-enqueued
@@ -299,11 +303,10 @@ async def alert_stranded_sources(
     by_workspace: dict[str, list[str]] = {}
     for row in candidates:
         by_workspace.setdefault(str(row["workspace_id"]), []).append(str(row["id"]))
-    rows: list[dict] = []
+    claims = unit_of_work.WorkspaceClaims(session)
+    alerted = 0
     for workspace_id, ids in by_workspace.items():
-        await unit_of_work.apply_gucs(
-            session, tenant_id=workspace_id, actor_kind="system"
-        )
+        await claims.claim(workspace_id)
         stamped = (
             (
                 await session.execute(
@@ -311,41 +314,38 @@ async def alert_stranded_sources(
                         "UPDATE media_sources SET alerted_at = now()"
                         " WHERE workspace_id = CAST(:ws AS uuid)"
                         "   AND id = ANY(CAST(:ids AS uuid[]))"
+                        "   AND state = 'error'"
                         "   AND (alerted_at IS NULL"
                         "        OR alerted_at < now() - make_interval(secs => :age))"
-                        " RETURNING id, workspace_id"
+                        " RETURNING id"
                     ),
                     {"ws": workspace_id, "ids": ids, "age": float(stale_after_seconds)},
                 )
             )
-            .mappings()
+            .scalars()
             .all()
         )
-        rows.extend(dict(r) for r in stamped)
-
-    claimed: str | None = None
-    for row in rows:
-        workspace_id = str(row["workspace_id"])
-        if workspace_id != claimed:
-            await unit_of_work.apply_gucs(
-                session, tenant_id=workspace_id, actor_kind="system"
+        if not stamped:
+            continue
+        bindings = await prompts.push_bindings(session, workspace_id)
+        for _ in stamped:
+            await outbox.fanout_notification(
+                session,
+                workspace_id=workspace_id,
+                bindings=bindings,
+                text=(
+                    "⚠️ This workspace's Drive source is still disconnected"
+                    " and has not synced since it failed. Reconnect it to"
+                    " resume syncing, or pause it if this is intended."
+                ),
             )
-            claimed = workspace_id
-        await outbox.fanout_notification(
-            session,
-            workspace_id=workspace_id,
-            bindings=await prompts.push_bindings(session, workspace_id),
-            text=(
-                "⚠️ This workspace's Drive source is still disconnected"
-                " and has not synced since it failed. Reconnect it to"
-                " resume syncing, or pause it if this is intended."
-            ),
-        )
-    if rows:
+            alerted += 1
+    if alerted:
         logger.warning(
-            "stranded-source sweep: re-alerted %d source(s) in error", len(rows)
+            "stranded-source sweep: re-alerted %d source(s) in error", alerted
         )
-    return len(rows)
+    await claims.release()
+    return alerted
 
 
 async def _run_sync(deps, job, *, reason) -> str:
