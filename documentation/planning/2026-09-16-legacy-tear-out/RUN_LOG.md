@@ -1447,10 +1447,12 @@ The branch and the three worktrees are removed.
   old environment until their next deploy, which is fine — nothing reads the names. The
   `WORKER_IMPL` caveat is now the accepted one: a stale redeploy of a pre-tear-out worker would
   fail to boot rather than run the legacy scheduler.
-- **#751, part 1 — PR #1333 (migration 081, the fleet-health doors):** ready for the owner's admin
-  squash (the prepared message in the session's `door_squash.md`; no issue closes by keyword). The
-  deploy applies 081 under the owner login, which executes the doors through its memberships —
-  nothing changes until the switch. Then the API switch again (`f4_switch.sh api`, which now prints
+- **#751, part 1 — PR #1333 (migration 081, the fleet-health doors): MERGED by the owner as
+  `f03af19` at 00:42 UTC 2026-09-21.** `main`'s CI green (run 35548548648); the predeploy applied
+  081 (ledger head 81, nine doors, twelve EXECUTE rows for the runtime logins); both services then
+  redeployed on `2edf0cc` (#1335) with nothing to apply; health unchanged on the owner login. Part
+  2 is planned: `documentation/planning/2026-09-21-worker-login-doors/00_PLAN.md` — the worker's
+  four tenant-less sweeps. Then the API switch again (`f4_switch.sh api`, which now prints
   the two fleet verdicts before and after; they must read the same), the runbook's page checks, and
   #751 stays open for part 2: the worker (`svc_worker` has no access to `oauth_states`, which the
   reaper's expired-state leg deletes from, and no DELETE anywhere; its job legs need reading

@@ -20,6 +20,7 @@ documentation/
 │   ├── 2026-09-15-cli-v2/                     # the `storydump` CLI — completed (spec: 2026-09-15-cli-v2-spec.md)
 │   ├── 2026-09-16-cli-v2-audit/               # the system review of the CLI surface
 │   ├── 2026-09-16-legacy-tear-out/            # retiring the legacy tier (#1216): five phases and the RUN_LOG
+│   ├── 2026-09-21-worker-login-doors/         # #751 part 2: doors for the worker's four tenant-less sweeps, then its switch
 │   └── investigations/                        # production investigations, one folder per incident (resolved ones move to archive/investigations/)
 ├── archive/                        # Completed, superseded and abandoned plans, and the legacy tier's pages (see archive/README.md)
 ├── guides/                         # How-to guides and tutorials
@@ -43,6 +44,7 @@ documentation/
 - **[2026-09-15-cli-v2/](planning/2026-09-15-cli-v2/00_EPIC.md)** — the `storydump` v2 CLI: API tokens, the eight read views, the write verbs, `health`/`deploys`/`webhook`/`doctor`, and the deletion of the legacy `cli/` — COMPLETED 2026-09-15 (spec: [2026-09-15-cli-v2-spec.md](planning/2026-09-15-cli-v2-spec.md), approved; the production probes the read views were built from are under `probes/`)
 - **[2026-09-16-cli-v2-audit/](planning/2026-09-16-cli-v2-audit/00_AUDIT.md)** — the system review of the v2 CLI surface and the fold of its findings
 - **[2026-09-16-legacy-tear-out/](planning/2026-09-16-legacy-tear-out/00_EPIC.md)** — retiring the legacy tier (#1216) in five PRs: delete the code, retire the settings and entry points, snapshot every legacy table into `archive` (078), ship the gated drop and stand-down (079, 080), bring the documentation to the end state — RATIFIED; all five phases shipped (#1316, #1319, #1318, #1321, #1322) and the owner's window ran on 2026-09-19: the `legacy` schema is dropped (079) and the migration window stood down (080). [RUN_LOG.md](planning/2026-09-16-legacy-tear-out/RUN_LOG.md) is the ledger
+- **[2026-09-21-worker-login-doors/](planning/2026-09-21-worker-login-doors/00_PLAN.md)** — #751 part 2: the worker measured statement by statement — four tenant-less sweeps of the class that blinded the health surfaces (the sender sweep, the prompt sweep, the stranded alert, the reconciler's poll) get doors for their reads and tenant claims for their writes; then the worker's switch.
 
 ### Archive
 **[archive/README.md](archive/README.md)** — index of completed, superseded and abandoned plans, moved out of `planning/` on 2026-09-02: the two 2026-07-29 design packages the consolidated plan adjudicated, the 2026-07 full-system review, the 2026-05/06 Instagram investigations, the pre-refactor product phases (Shopify, Printify, LLM, order email, dashboard) and roadmap, and the completed credential-refactor, session-isolation, web-app-migration and Meta-launch plans.
