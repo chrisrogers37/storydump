@@ -7,6 +7,39 @@
  * 2 PM and 2 AM" reads as "2 PM, 6 PM, 10 PM" — and so a workspace running
  * on UTC sees, in its own hours, why a slot passed when nothing arrived.
  */
+/**
+ * The posting window in hours, as `fn_next_slot` (`059`) reads it: `end - start`,
+ * wrapping through midnight, and 24 when the two are equal.
+ *
+ * Exported because the Calendar's Posting Rate card used to recompute it as a
+ * bare `end - start` and guard the result on `> 0` (#1367). Both shapes this
+ * handles fell through that guard — a wrap gives a negative, an equal pair
+ * gives zero — so the card read "interval not set" for them. 14 → 2 is the
+ * schema DEFAULT for a workspace, so that was what a new tenant saw on the one
+ * page whose job is to say when posts go out.
+ */
+export function windowHours(
+  startHour: number | null,
+  endHour: number | null,
+): number | null {
+  if (startHour === null || endHour === null) return null;
+  return endHour === startHour ? 24 : (((endHour - startHour) % 24) + 24) % 24;
+}
+
+/**
+ * The gap between consecutive slots, in minutes — the Calendar's "Posting
+ * Rate". Null where the schedule has no answer, which is not the same as zero.
+ */
+export function postingIntervalMinutes(
+  startHour: number | null,
+  endHour: number | null,
+  postsPerDay: number | null,
+): number | null {
+  const hours = windowHours(startHour, endHour);
+  if (hours === null || !postsPerDay || postsPerDay < 1) return null;
+  return Math.round((hours * 60) / postsPerDay);
+}
+
 export function slotLabels(
   startHour: number | null,
   endHour: number | null,
@@ -14,12 +47,11 @@ export function slotLabels(
 ): string[] {
   if (startHour === null || endHour === null || !postsPerDay || postsPerDay < 1)
     return [];
-  const windowHours =
-    endHour === startHour ? 24 : (((endHour - startHour) % 24) + 24) % 24;
+  const hours = windowHours(startHour, endHour)!;
   const labels: string[] = [];
   for (let k = 0; k < postsPerDay; k += 1) {
     const minutes = Math.round(
-      (startHour * 60 + (k * windowHours * 60) / postsPerDay) % (24 * 60),
+      (startHour * 60 + (k * hours * 60) / postsPerDay) % (24 * 60),
     );
     labels.push(formatMinutes(minutes));
   }
