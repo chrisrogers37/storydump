@@ -745,6 +745,23 @@ async def _notify_exhausted(session, job) -> None:
     )
 
 
+async def _finalize(session, job, *, undeliverable: bool) -> None:
+    """The job's terminal state from its outcome — one spelling.
+
+    Written into both arms of `_run_job` (the executor that owns its own
+    transaction and the one that does not), which is how the two could come
+    to disagree about what `UNDELIVERABLE` means (the tech-debt audit,
+    2026-09-20). The *session* is the caller's, because which transaction
+    this commits in is the difference between the two arms and the one thing
+    that must stay theirs."""
+    await jobs.finalize_job(
+        session,
+        job["id"],
+        job["lease_token"],
+        terminal_state="review_required" if undeliverable else "succeeded",
+    )
+
+
 class WorkLoop:
     """One lane's claim → dispatch → finalize cycle.
 
@@ -853,6 +870,25 @@ class WorkLoop:
             self._heartbeat.unregister(token)
         return True
 
+    async def _run_parked(self, job, entry: Parked) -> None:
+        """A kind with no seam, or none the registry knows: nothing runs, the
+        job is put down for `park_seconds` with its attempt restored, and the
+        lane counts it. Its own concern — it never reaches an executor — and
+        lifting it out is what takes `_run_job` back under the size at which
+        its two finalize arms could drift (the tech-debt audit, 2026-09-20)."""
+        logger.warning(
+            "parked kind %s (job %s): %s", job["kind"], job["id"], entry.reason
+        )
+        async with self._session_for(job) as session:
+            await jobs.reschedule_job(
+                session,
+                job["id"],
+                job["lease_token"],
+                run_at=utcnow() + timedelta(seconds=self._config.park_seconds),
+                restore_attempt=True,
+            )
+        self.parked += 1
+
     async def _run_job(self, job) -> None:
         kind = job["kind"]
         entry = self._registry.get(kind)
@@ -861,16 +897,7 @@ class WorkLoop:
                 f"kind {kind!r} is not in the registry — schema drift; parked"
             )
         if isinstance(entry, Parked):
-            logger.warning("parked kind %s (job %s): %s", kind, job["id"], entry.reason)
-            async with self._session_for(job) as session:
-                await jobs.reschedule_job(
-                    session,
-                    job["id"],
-                    job["lease_token"],
-                    run_at=utcnow() + timedelta(seconds=self._config.park_seconds),
-                    restore_attempt=True,
-                )
-            self.parked += 1
+            await self._run_parked(job, entry)
             return
         try:
             if getattr(entry, "owns_transactions", False):
@@ -882,14 +909,7 @@ class WorkLoop:
                 undeliverable = outcome == outbox.UNDELIVERABLE
                 if outcome is not jobs.SELF_FINALIZED:
                     async with self._session_for(job) as session:
-                        await jobs.finalize_job(
-                            session,
-                            job["id"],
-                            job["lease_token"],
-                            terminal_state=(
-                                "review_required" if undeliverable else "succeeded"
-                            ),
-                        )
+                        await _finalize(session, job, undeliverable=undeliverable)
             else:
                 async with self._session_for(job) as session:
                     outcome = await entry(session, job)
@@ -904,14 +924,7 @@ class WorkLoop:
                     # here would only be fenced and counted as an error
                     # (phase 3a).
                     if outcome is not jobs.SELF_FINALIZED:
-                        await jobs.finalize_job(
-                            session,
-                            job["id"],
-                            job["lease_token"],
-                            terminal_state=(
-                                "review_required" if undeliverable else "succeeded"
-                            ),
-                        )
+                        await _finalize(session, job, undeliverable=undeliverable)
             if undeliverable:
                 logger.warning(
                     "job %s (%s) reached no delivery surface — parked"
