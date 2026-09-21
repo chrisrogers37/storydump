@@ -415,12 +415,9 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
     if not reg.autoregister_enabled(
         env.get(reg.AUTOREGISTER_VAR), environment=env.get(reg.ENVIRONMENT_VAR)
     ):
-        switched_off = (env.get(reg.AUTOREGISTER_VAR) or "").strip().lower() in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
+        switched_off = (
+            env.get(reg.AUTOREGISTER_VAR) or ""
+        ).strip().lower() in reg.OFF_WORDS
         app.state.webhook = {
             "ok": False,
             "skipped": (

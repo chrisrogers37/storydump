@@ -75,6 +75,23 @@ from src.exceptions.base import StorydumpError
 #: refused by name here rather than left to surface as a check violation.
 CHANNELS: tuple[str, ...] = ("telegram_group", "telegram_dm")
 
+
+def push_binding_where(alias: str = "") -> str:
+    """The predicate, optionally qualified for a table alias."""
+    p = f"{alias}." if alias else ""
+    return f"{p}state = 'active' AND {p}channel LIKE 'telegram%'"
+
+
+#: "Where can we say this": the bindings a push may go to. ONE owner for the
+#: predicate — the W3 sweep, the two one-statement outbox doors and
+#: `prompts.push_bindings` all route on it, and four spellings is how they
+#: drift apart the day a second push channel lands
+#: (`invitation_cards.py:126-131` names that exact risk). A fragment, not a
+#: bound parameter: it is SQL, and no user input reaches it.
+#:
+#: The unqualified form, for a statement with one `channel_bindings`.
+PUSH_BINDING_WHERE = push_binding_where()
+
 #: A Telegram chat id as text — negative for groups and supergroups. Both
 #: members of :data:`CHANNELS` are Telegram, which is what makes this shape
 #: knowable; adding a non-Telegram channel to `ck_bindings_channel` must
@@ -116,6 +133,12 @@ _CHAT_TYPES: dict[str, str] = {
     "group": "telegram_group",
     "supergroup": "telegram_group",
 }
+
+#: The chat types that map to `telegram_group` — derived from the mapping
+#: above so a new group-shaped type is added once (#1325, TD-B20).
+GROUP_CHAT_TYPES: tuple[str, ...] = tuple(
+    t for t, channel in _CHAT_TYPES.items() if channel == "telegram_group"
+)
 
 
 def channel_for_chat_type(chat_type: object) -> str:

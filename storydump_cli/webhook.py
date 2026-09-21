@@ -44,6 +44,7 @@ from src.services.target.vocabulary import (
     EXIT_API_UNREACHABLE,
     EXIT_USAGE,
     MAX_CONNECTIONS_VAR,
+    TELEGRAM_BOT_API_BASE,
     TELEGRAM_BOT_VAR,
     TELEGRAM_SECRET_VAR,
     TELEGRAM_TOKEN_VAR,
@@ -55,7 +56,7 @@ from src.services.target.vocabulary import (
 )
 from storydump_cli.output import Failure
 
-BOT_API = "https://api.telegram.org"
+BOT_API = TELEGRAM_BOT_API_BASE
 TIMEOUT_S = 20.0
 ENV_FIX = "export the deployment's variable in this shell (never paste it into a chat)"
 REGISTER_HINT = "run storydump webhook register"
