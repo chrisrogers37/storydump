@@ -564,6 +564,46 @@ class TestRetiringAndFollowingAChat:
             is False
         )
 
+    def test_a_refused_repoint_leaves_the_session_usable_for_the_revoke(self, world):
+        """The caller's real shape: repoint, and revoke on the SAME session.
+
+        `work_loop.py:485` does exactly this —
+
+            async with short() as writer:
+                followed = bool(moved) and await bindings.repoint(writer, ...)
+                if not followed:
+                    await bindings.revoke_by_id(writer, binding_id=...)
+
+        so when `repoint` swallows the unique violation and answers False, the
+        very next statement runs on a transaction Postgres has already
+        aborted. Every other test here calls `repoint` in a session of its
+        own, which is why this survived: the abort is invisible once the
+        session ends.
+
+        A supergroup migration onto an id another workspace already holds is a
+        real user path, and this is the only test that drives both halves of
+        it through one transaction.
+        """
+        _bind(world, "-777000002")
+        row = fetch_one(
+            world["stream"],
+            "SELECT id FROM channel_bindings WHERE external_ref = %s",
+            ("-777000002",),
+        )
+        # Workspace B already holds the id the upgrade would land on.
+        _bind(world, "-1009000000030", ids=world["b"])
+
+        async def repoint_then_revoke(s):
+            followed = await bindings.repoint(
+                s, binding_id=str(row[0]), external_ref="-1009000000030"
+            )
+            assert followed is False, "the taken id must refuse the repoint"
+            # The caller does not open a new session for this.
+            return await bindings.revoke_by_id(s, binding_id=str(row[0]))
+
+        assert run(world, repoint_then_revoke) is True
+        assert _row(world, "-777000002")[1] == "revoked"
+
 
 class TestTheJoinPathThroughTheDoors:
     """`06`'s Telegram join path on postgres:15, driven as a bare `svc_ingress`
