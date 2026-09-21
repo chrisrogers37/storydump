@@ -1732,6 +1732,27 @@ earlier postconditions, the predicate drift.
 
 **CI:** the second run, on 3aff20b (run 35562921300): success — 3691 passed, 1 skipped, 5 deselected in 10:09 on a slow runner, all nine checks green. The third, on the fold's head, run 35599596756 on d948205e, the last code commit: success — 3698 passed, 1 skipped, 5 deselected in 6:12, all nine checks green, mergeable. The ledger entry is the commit after it.
 
+## #751, part 2 — merged, 082 live, the worker switched (2026-09-21)
+
+**Merged** by the owner as `ea788875` at 15:39:43 UTC (admin squash, one commit). Railway deployed
+both services; the worker's predeploy log reads `applied 082 (082_worker_doors.sql)` at 15:40:49 UTC.
+**082 live, by a read-only probe as the owner at 15:48 UTC:** ledger head 82 (row 82 `applied`); the
+five doors owned by `svc_maintenance`, SECURITY DEFINER; five EXECUTE rows for `svc_worker`, none for
+`svc_ingress`; `p_maint_bindings`, `p_maint_media`, `p_maint_sources`; INSERT on `jobs`; the CREATE
+bracket closed; `svc_ingress` and `svc_worker` LOGIN without BYPASSRLS.
+
+**The worker switched** — the owner ran `f4_switch.sh worker` at 15:51:15 UTC (the state file's third
+line). Before: `worker database role: {'user': 'neondb_owner', 'bypassrls': True}`, scheduling
+`healthy`, posting `posting` (posted_ever 117, intents_ever 243). After, on deployment `c33ec782`:
+`worker database role: {'user': 'svc_worker', 'bypassrls': False}`, the Telegram channel live, no
+`permission denied`, no fence, no traceback in the log; the same two verdicts with the same counts;
+`reconcile_ambiguous` jobs created and succeeding (four in four minutes), the heartbeat 34 s, four
+recurring singletons `ready` with an oldest age of 0. The estate was idle — no pending outbox row, no
+due story, no `prompt_pending` intent, no ambiguous intent, no source in error — so the sender and
+prompt sweeps had nothing to mint; the first card delivered as `svc_worker` is to be read off the next
+slot's logs. `/health` still reports the API as `neondb_owner` / `bypassrls: yes`: the API's switch is
+the remaining half of #751.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
@@ -1829,10 +1850,9 @@ earlier postconditions, the predicate drift.
   79`, `apply --manual 80`, the gate, the worker redeployed. Never by an agent (F7; the never-run
   list). (4) Phase 05 builds once 04 is merged; its dated lines — when `legacy` was dropped, the
   gate's pasted output, the epic's `status: completed` — wait for the window.
-- **#751 part 2 — the worker's switch, after PR #1349 merges (the owner's):** the merge is an admin
-  squash with one accurate commit (the PR body's subject). Then, with 082 live (ledger head 82 on both
-  services' predeploy logs), `STATE=<state file> bash -eu f4_switch.sh worker` from the scratchpad: it
-  prints the worker's boot line and one sweep cycle's counts before and after (prompts and sender jobs
-  minted must continue at the same rate), and the two fleet verdicts must read the same; rollback is
-  `f4_switch.sh rollback-worker`. The API's own switch (`f4_switch.sh api`) is independent, its
-  precondition met since 081, and still owed.
+- ~~**#751 part 2 — the worker's switch, after PR #1349 merges (the owner's).**~~ DONE 2026-09-21 —
+  the entry above: #1349 merged as `ea788875` (15:39 UTC), 082 applied by the worker's predeploy at
+  15:40:49 UTC, the owner ran `f4_switch.sh worker` at 15:51:15 UTC and the worker runs as
+  `svc_worker`. **Still owed: the API's own switch** (`f4_switch.sh api`), independent, its
+  precondition met since 081; and the first card delivered as `svc_worker`, to be read off the next
+  slot's logs.
