@@ -52,7 +52,10 @@ export function DashboardHeader({ user }: { user: SessionUser }) {
             </Button>
           </SheetTrigger>
           <SheetContent side="left" className="w-64 p-0">
-            <Sidebar />
+            {/* `mobile` is not optional here: without it the sidebar takes its
+                `hidden … lg:block` variant and the drawer opens onto nothing
+                at exactly the widths the drawer exists for (#1363). */}
+            <Sidebar mobile />
           </SheetContent>
         </Sheet>
 
