@@ -1247,11 +1247,23 @@ def test_the_health_renderer_reads_the_taps_real_keys(tmp_path):
     them the renderer's way so nothing caught it — the same defect the pool
     block had, fixed as `POOL_FACTS` in #1324."""
     from src.api.routes.webhooks import TapMetrics
-    from storydump_cli.output import TAP_FACTS
+    from storydump_cli.output import TAP_FACTS, TAP_OUTCOMES
 
-    emitted = set(TapMetrics().snapshot())
+    snapshot = TapMetrics().snapshot()
+    emitted = set(snapshot)
     assert set(TAP_FACTS) <= emitted, (
         f"the renderer reads {set(TAP_FACTS) - emitted} — the API emits {sorted(emitted)}"
+    )
+    # The NESTED key too, and that it is a map. `_tap_outcomes` renders
+    # nothing at all for a key the API does not emit or a scalar where it
+    # expects counts — silently, which is the whole defect. Binding only the
+    # scalars would have left the one key the new helper depends on resting
+    # on the fixture below, and a fixture cannot notice the API renaming it.
+    assert TAP_OUTCOMES in emitted, (
+        f"`_tap_outcomes` reads {TAP_OUTCOMES!r} — the API emits {sorted(emitted)}"
+    )
+    assert isinstance(snapshot[TAP_OUTCOMES], dict), (
+        f"{TAP_OUTCOMES!r} must be the per-outcome map, not a scalar"
     )
     rt = env_runtime(tmp_path, health_api())
     result = run(rt, "health")

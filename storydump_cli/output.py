@@ -57,6 +57,12 @@ POOL_FACTS = ("size", "checked_out", "checked_out_peak")
 #: `taps`, and `replayed` is not a tap outcome at all (`TAP_OUTCOMES`), so two
 #: of its three cells were always blank (#1360).
 TAP_FACTS = ("taps_total", "answer_failed")
+#: And the key of the per-outcome map nested inside that block. Named rather
+#: than typed into `_tap_outcomes`, and bound by the same test, because an
+#: unbound key is exactly how #1360 happened: a renderer reaching for a
+#: spelling the API does not emit, with a hand-written fixture that spells it
+#: the renderer's way and so can never catch it.
+TAP_OUTCOMES = "taps"
 
 
 def redact(text: str) -> str:
@@ -626,7 +632,7 @@ def _tap_outcomes(payload: Any) -> str:
     for; the outcomes are `telegram_dispatch.TAP_OUTCOMES`, so the renderer
     shows whatever the API counted instead of guessing the names."""
     source = payload if isinstance(payload, dict) else {}
-    counts = source.get("taps")
+    counts = source.get(TAP_OUTCOMES)
     if not isinstance(counts, dict):
         return ""
     return " · ".join(f"{name} {_cell(n)}" for name, n in sorted(counts.items()))
