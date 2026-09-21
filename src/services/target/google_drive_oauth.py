@@ -72,14 +72,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Optional
 from urllib.parse import urlencode
 
 from sqlalchemy import text
 
 from src.exceptions.base import RefusalError, StorydumpError
-from src.services.target import vocabulary
+from src.services.target import egress, vocabulary
 from src.services.target.google_oidc import AUTHORIZE_URL, code_grant, refresh_grant
 from src.services.target.ig_login_oauth import ring
 
@@ -93,6 +93,23 @@ SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 #: The envelope's version. A payload without it, or with another, is
 #: malformed — never guessed at.
 PAYLOAD_VERSION = 1
+
+#: What an access token is worth when the refresh response does not say.
+#: Google always sends `expires_in`; a proxy might not, and writing NULL
+#: there would read as "no known expiry" and never be refreshed again.
+GOOGLE_ACCESS_TOKEN_SECONDS = 3600
+
+#: A `gdrive` credential names no owner column — the WORKSPACE is its owner
+#: (069, #1165), and this predicate is that ownership rule. Six readers had
+#: written it out; one of them omitting `media_source_id IS NULL` the day a
+#: source-owned row returns is exactly how a workspace reads another owner's
+#: grant. A fragment, spliced — there is no caller input in it. The writer
+#: whose `ON CONFLICT … WHERE` IS the rule is :func:`store_credential`, and
+#: that clause is a DIFFERENT fragment: see the comment there.
+WORKSPACE_GRANT_WHERE = (
+    "workspace_id = :ws AND provider = :provider"
+    "   AND ig_account_id IS NULL AND media_source_id IS NULL"
+)
 
 #: Every reason this leg can refuse a grant for → the error-page reason the
 #: callback redirects with. TOTAL over the vocabulary by construction — the
@@ -215,10 +232,7 @@ async def exchange_code(
         raise DriveOAuthRefused(
             "scope_not_granted", "the consent screen did not grant drive.readonly"
         )
-    expires_in = body.get("expires_in")
-    expires_at = None
-    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+    expires_at = egress.expires_at_from(body.get("expires_in"))
     return DriveGrant(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -270,14 +284,9 @@ async def refresh_access_token(
     if not isinstance(access_token, str) or not access_token:
         raise DriveOAuthRefused("malformed_response", "no access token in the refresh")
     rotated = body.get("refresh_token")
-    expires_in = body.get("expires_in")
-    # No `expires_in` (Google always sends one; a proxy might not): assume
-    # Google's hour rather than write NULL, which would read as "no known
-    # expiry" and never be refreshed again.
-    seconds = 3600
-    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool):
-        seconds = int(expires_in)
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    expires_at = egress.expires_at_from(
+        body.get("expires_in"), default_seconds=GOOGLE_ACCESS_TOKEN_SECONDS
+    )
     return DriveGrant(
         access_token=access_token,
         refresh_token=rotated
@@ -327,10 +336,8 @@ async def connect_purpose(conn, *, workspace_id) -> str:
         await conn.execute(
             text(
                 "SELECT EXISTS ("
-                "  SELECT 1 FROM oauth_credentials c"
-                "   WHERE c.workspace_id = :ws AND c.provider = :provider"
-                "     AND c.ig_account_id IS NULL AND c.media_source_id IS NULL"
-                ")"
+                "  SELECT 1 FROM oauth_credentials"
+                "   WHERE " + WORKSPACE_GRANT_WHERE + ")"
             ),
             {"ws": str(workspace_id), "provider": PROVIDER},
         )
@@ -360,6 +367,9 @@ async def store_credential(conn, *, workspace_id, grant: DriveGrant) -> str:
             # next_refresh_at NULL — the read door's header has the fence.
             " VALUES (:ws, :provider, :payload, :exp, NULL, 'active')"
             " ON CONFLICT (workspace_id, provider)"
+            # The INDEX predicate, not :data:`WORKSPACE_GRANT_WHERE`: it
+            # carries no workspace/provider because those are the conflict
+            # target. Same rule, different fragment — do not splice the other.
             "   WHERE ig_account_id IS NULL AND media_source_id IS NULL"
             " DO UPDATE SET encrypted_payload = EXCLUDED.encrypted_payload,"
             "               expires_at = EXCLUDED.expires_at,"

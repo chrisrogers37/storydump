@@ -89,7 +89,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, Mapping, Optional
 
 import httpx
@@ -99,6 +99,7 @@ from src.exceptions.base import RefusalError
 from src.services.target import egress, jobs, rate_counters
 from src.services.target.egress import EgressPolicy
 from src.services.target.unit_of_work import apply_gucs
+from src.utils.datetime_utils import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -292,10 +293,6 @@ async def system_session(engine):
             yield session
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def backoff_seconds(attempts: int) -> int:
     """The `05` ladder rung for a job that has already consumed *attempts*.
 
@@ -313,7 +310,7 @@ async def execute_send_email(
     *,
     sender,
     engine,
-    now=_utcnow,
+    now=utcnow,
 ) -> Optional[str]:
     """Drain one `send_email` job. Returns the provider ref, or None if deferred.
 

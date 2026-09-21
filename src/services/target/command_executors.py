@@ -55,7 +55,6 @@ caught here: `commands.execute` maps it once, for every executor.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -81,6 +80,7 @@ from src.services.target import (
 from src.services.target.ig_login_oauth import issue_state
 from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.intent_ledger import IntentTransitionRefused
+from src.utils.datetime_utils import utcnow
 
 #: `02` §4 terminal states — the reaper/worker own every edge INTO these; a
 #: user command on a terminal intent renders it and acts on nothing (R6). Re-
@@ -140,10 +140,6 @@ def _refuse_if_cancelling(intent: dict[str, Any]) -> None:
     Refused by its own name so a tap can say so."""
     if intent.get("cancel_requested"):
         raise CommandRefused("cancelling", f"intent {intent['id']} is being cancelled")
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 async def _actor_name(
@@ -215,7 +211,7 @@ async def _settle(
         session, workspace_id=command.workspace_id, intent_id=str(intent["id"])
     )
     state = found["state"] or intent["state"]
-    at = found["at"] or _utcnow()
+    at = found["at"] or utcnow()
     line = prompts.outcome_line(
         state,
         by=found["by"],
@@ -354,7 +350,7 @@ async def _record_outcome(
     line = prompts.outcome_line(
         state,
         by=await _actor_name(session, command.actor_user_id, label=command.actor_label),
-        at=_utcnow(),
+        at=utcnow(),
         tz=_tz(intent),
     )
     await _supersede_and_adopt(session, intent, command, line)
@@ -383,7 +379,7 @@ async def _restate_outcome(
     line = prompts.outcome_line(
         state,
         by=await _actor_name(session, command.actor_user_id, label=command.actor_label),
-        at=_utcnow(),
+        at=utcnow(),
         tz=_tz(intent),
     )
     await _restate_and_adopt(session, intent, command, line)
@@ -550,7 +546,7 @@ async def mark_posted(session, command: Command) -> CommandResult:
             {
                 "ws": command.workspace_id,
                 "acct": str(intent["ig_account_id"]),
-                "tz": intent["eff_tz"] or "UTC",
+                "tz": _tz(intent),
                 "cap": int(intent["eff_ppd"]),
                 "intent": str(intent["id"]),
             },
@@ -938,7 +934,7 @@ async def disable_account(session, command: Command) -> CommandResult:
     )
     for row in live:
         line = prompts.outcome_line(
-            "account_disabled", by=None, at=_utcnow(), tz=str(row["eff_tz"] or "UTC")
+            "account_disabled", by=None, at=utcnow(), tz=_tz(row)
         )
         if row["state"] == "review_required":
             # A parked row has no worker checkpoint to finish it at: the
@@ -1000,9 +996,9 @@ async def disconnect_account(session, command: Command) -> CommandResult:
         await session.execute(
             text(
                 "UPDATE oauth_credentials SET state = 'revoked'"
-                " WHERE workspace_id = :ws AND provider = :provider"
-                "   AND ig_account_id IS NULL AND media_source_id IS NULL"
-                "   AND state <> 'revoked'"
+                " WHERE "
+                + google_drive_oauth.WORKSPACE_GRANT_WHERE
+                + "   AND state <> 'revoked'"
                 " RETURNING id"
             ),
             {"ws": command.workspace_id, "provider": google_drive_oauth.PROVIDER},

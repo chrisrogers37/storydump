@@ -1,8 +1,9 @@
 """Tests for src/utils/datetime_utils.py."""
 
+import time
 from datetime import datetime, timezone, timedelta
 
-from src.utils.datetime_utils import ensure_utc
+from src.utils.datetime_utils import ensure_utc, ms_since, utcnow
 
 
 def test_ensure_utc_returns_none_for_none():
@@ -34,3 +35,23 @@ def test_ensure_utc_preserves_microseconds():
     coerced = ensure_utc(naive)
     assert coerced is not None
     assert coerced.microsecond == 123456
+
+
+def test_utcnow_is_timezone_aware_utc():
+    assert utcnow().tzinfo is timezone.utc
+
+
+def test_utcnow_is_now():
+    before = datetime.now(timezone.utc)
+    assert before <= utcnow() <= datetime.now(timezone.utc)
+
+
+def test_ms_since_truncates_rather_than_rounds():
+    """Never negative, and never a rounded-up millisecond that has not
+    elapsed: every `elapsed_ms` in the tier reads the same way."""
+    assert ms_since(time.perf_counter()) == 0
+
+
+def test_ms_since_counts_elapsed_milliseconds():
+    started = time.perf_counter() - 1.5
+    assert ms_since(started) >= 1500

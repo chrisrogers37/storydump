@@ -591,7 +591,7 @@ class TestDisableDestination:
         assert flag[1] == {"acct": "acct", "ws": "ws"}
         assert "UPDATE oauth_states SET consumed_at = now()" in retire[0]
         assert "consumed_at IS NULL" in retire[0]
-        assert retire[1] == {"acct": "acct", "provider": "ig_login"}
+        assert retire[1] == {"provider": "ig_login", "target": "acct"}
 
     async def test_nothing_to_revoke_flag_or_retire_is_reported_not_invented(self):
         from src.services.target.provisioning import disable_destination

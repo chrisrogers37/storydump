@@ -445,8 +445,10 @@ class TestTheWorkspaceStatusProjection:
     async def test_the_row_is_projected_as_the_destinations_are(self, monkeypatch):
         async def row(executor, sql, **params):
             # `state` alone: a past access-token expiry says nothing about a gdrive
-            # grant, which the read door refreshes on demand (P5).
-            assert "expires_at" not in sql and "c.state" in sql
+            # grant, which the read door refreshes on demand (P5). (The statement
+            # reads one table and carries no alias, so the ownership predicate —
+            # `google_drive_oauth.WORKSPACE_GRANT_WHERE` — splices into it.)
+            assert "expires_at" not in sql and "state <> 'active'" in sql
             return {"status": "expired", "connected_at": "2026-09-05T00:00:00+00:00"}
 
         monkeypatch.setattr(workspaces.readers, "row", row)
