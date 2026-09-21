@@ -85,7 +85,6 @@ SETTINGS=src/config/settings.py
 MAIN=src/main.py
 WORKER=src/worker.py
 UOW=src/services/target/unit_of_work.py
-REACH=scripts/target_reachability.py
 ENVX=.env.example
 MAKEFILE=Makefile
 CI=.github/workflows/ci.yml
@@ -94,7 +93,6 @@ B01=tests/mutations/legacy_tear_out_01.sh
 GUARD=tests/src/test_legacy_settings_gone.py
 ENTRY=tests/src/test_worker_entrypoint.py
 ECHO=tests/src/config/test_settings_never_echo_values.py
-TREACH=tests/scripts/test_target_reachability.py
 
 # --- the fields ------------------------------------------------------------------------------
 collect "with a required field back, nothing imports with no variable set" $SETTINGS '    # Logging
@@ -153,12 +151,11 @@ check "create_engine takes no settings-built fallback" $UOW '    if not url:
         raise ValueError(' '    if url is None and False:
         raise ValueError(' "$UNIT" "$GUARD -k create_engine_takes_no_settings_built_fallback"
 
-# --- the instrument's label ------------------------------------------------------------------
-check "the instrument's JSON carries no gate axis" $REACH '                    "deployed": deployed,' '                    "deployed": deployed,
-                    "worker_gate": None,' "$UNIT" "$TREACH -k json_carries_the_movement_and_no_gate_axis"
-check "the label names the call site, not a hunt" $REACH '            "  dispatch in src.main, which runs the target root UNCONDITIONALLY.\n"' '            "  dispatch somewhere: find the call site by hand.\n"' "$UNIT" "$TREACH -k moved_axis_names_its_call_site"
-check "the label narrates no retired switch" $REACH '            "  dispatch in src.main, which runs the target root UNCONDITIONALLY.\n"' '            "  dispatch in src.main, which runs the target root UNCONDITIONALLY.\n"
-            "  (An environment switch once chose the root.)\n"' "$UNIT" "$TREACH -k moved_axis_names_its_call_site"
+# --- the instrument's label -------------------------------------------------------------------
+# Three mutations stood here, over the reachability instrument and its test. Both were retired
+# with the legacy tier's measurement instruments (#1216 — the CHANGELOG names them), so the pins
+# they exercised no longer exist; a mutation over a deleted file reports MUTATION NOT APPLIED
+# rather than a verdict, which is noise a future run would have to re-diagnose.
 
 # --- the surfaces that set variables ---------------------------------------------------------
 check ".env.example may not name a variable nothing reads" $ENVX '# ENCRYPTION_KEYS=' '# ENCRYPTION_KEYS=

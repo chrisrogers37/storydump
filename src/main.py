@@ -10,11 +10,12 @@ name it, and a deletion PR would make no deploy-time change.
 """
 
 # #942: the target composition root rides the deployed worker artifact.
-# EAGER on purpose, and load-bearing: the import closure is how reachability
-# is measured (scripts/target_reachability.py), and a lazy import is invisible
-# to it (#979). The root's own config (TARGET_DATABASE_URL and friends) is
-# read at RUN time inside src.worker.main, never at import (pinned in
-# tests/src/test_worker_entrypoint.py).
+# EAGER on purpose: a lazy import would make the worker's closure invisible to
+# any import-graph measurement, and it is the closure that makes the artifact
+# the artifact (#979; the reachability instrument that measured it was retired
+# with the legacy tier's questions, #1216). The root's own config
+# (TARGET_DATABASE_URL and friends) is read at RUN time inside src.worker.main,
+# never at import (pinned in tests/src/test_worker_entrypoint.py).
 import src.worker as target_worker
 
 

@@ -6,8 +6,8 @@ outside it fails CI, and the core-services segment must reach empty."* This is
 that gate, plus the two structural rules and the `07` §5 hygiene pattern list
 `04` F.6 attaches to the same mechanism.
 
-Standalone stdlib module (the `fc8_gate.py` / `dispatch-overdue.py` precedent),
-so it is unit-testable and runs in CI without installing the application.
+Standalone stdlib module by the repository's rule for gates, so it is
+unit-testable and runs in CI without installing the application.
 
 ## THE PREDICATE IS THE CODE, AND THAT IS THE POINT
 
