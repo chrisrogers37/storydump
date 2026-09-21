@@ -1773,16 +1773,17 @@ entered `awaiting_approval`), its approval card `sent` 16:30:07, `deliver_outbox
 
 **Not done by the agent:** the runbook's page checks (sign in at storydump.app; Queue, Media
 Library, Settings) — the browser extension was not connected, and the sign-in is the owner's. They
-are the owner's confirmation before #751 closes; nothing in the API's log or the ledger suggests a
-tenant-scoped read failing under the policies.
+were the owner's confirmation before #751 closed, and the close records that they rendered.
 
 **Also this day:** #1372 (`41352195`) — the L.8 admission burst's wait is the worker's 3 s, which
 closes the queue's tolerance item below; #1373 (`e25b90b2`) — a verified Meta callback logs which app
 secret signed it, the instrument #739's ruling was waiting on, live on the API since 18:49 UTC.
 
-**After this:** #751 closes with the two observations quoted (the runbook's done-when); the plan
-README's F.4 row is ✅ in this PR. #739's ruling stays the owner's: register the callback URLs under
-the Instagram app at submission, press Meta's test button, read the line, then the deletion PR.
+**#751 closed** by the owner at 19:54 UTC with the two observations quoted (the runbook's done-when)
+and the page checks — Queue, Media Library, Settings — rendered under `svc_ingress`; the plan
+README's F.4 row is ✅ with the tracker marked closed. #739's ruling stays the owner's: register the
+callback URLs under the Instagram app at submission, press Meta's test button, read the line, then
+the deletion PR.
 
 ## Owner-decision queue
 
