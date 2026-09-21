@@ -133,15 +133,17 @@ def app_secrets() -> list[str]:
     return [value for _, value in _candidates()]
 
 
-#: The settings a callback may be signed with, preferred first, legacy second —
-#: the ONE spelling of the order `app_secrets()` and `app_secret_names()` share.
-_CANDIDATE_SETTINGS = ("INSTAGRAM_APP_SECRET", "FACEBOOK_APP_SECRET")
-
-
 def _candidates() -> list[tuple[str, str]]:
+    """The settings a callback may be signed with, preferred first, legacy
+    second — the ONE spelling of the order `app_secrets()` and
+    `app_secret_names()` share. Each is read off `settings` by name, so the
+    reader pin (`test_legacy_settings_gone`) still sees the field is read."""
     from src.config.settings import settings
 
-    pairs = [(name, getattr(settings, name, None)) for name in _CANDIDATE_SETTINGS]
+    pairs = (
+        ("INSTAGRAM_APP_SECRET", settings.INSTAGRAM_APP_SECRET),
+        ("FACEBOOK_APP_SECRET", settings.FACEBOOK_APP_SECRET),
+    )
     return [(name, value) for name, value in pairs if value]
 
 

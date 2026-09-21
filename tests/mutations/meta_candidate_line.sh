@@ -56,7 +56,9 @@ check "the line is never logged" src/api/routes/meta.py '    logger.info(
 check "the position is counted from zero" src/api/routes/meta.py '        position + 1,
         len(secrets),' '        position,
         len(secrets),' "$T"
-check "the names and the secrets disagree on their order" src/services/target/meta_callbacks.py '_CANDIDATE_SETTINGS = ("INSTAGRAM_APP_SECRET", "FACEBOOK_APP_SECRET")' '_CANDIDATE_SETTINGS = ("FACEBOOK_APP_SECRET", "INSTAGRAM_APP_SECRET")' "$T"
+check "the names and the secrets disagree" src/services/target/meta_callbacks.py '        ("INSTAGRAM_APP_SECRET", settings.INSTAGRAM_APP_SECRET),
+        ("FACEBOOK_APP_SECRET", settings.FACEBOOK_APP_SECRET),' '        ("FACEBOOK_APP_SECRET", settings.INSTAGRAM_APP_SECRET),
+        ("INSTAGRAM_APP_SECRET", settings.FACEBOOK_APP_SECRET),' "$T"
 check "the line names the value, not the setting" src/api/routes/meta.py '        meta_callbacks.app_secret_names()[position],' '        secret,' "$T"
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"
