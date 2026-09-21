@@ -84,6 +84,11 @@ Thumbs.db
 .claude/settings.local.json
 .claude/worktrees/
 
+# Claude Code agent memory and personal skills — machine- and
+# account-specific, not project material
+.claude/agent-memory/
+.claude/skills/first-principles/
+
 # Landing site (Next.js)
 landing/node_modules/
 # a vitest run from the repository root leaves its cache here too
