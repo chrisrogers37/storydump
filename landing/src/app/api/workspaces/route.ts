@@ -2,13 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { idempotencyKeyFor } from "@/lib/commands";
 import { getSessionToken } from "@/lib/session";
 import { targetFetch } from "@/lib/target-api";
-
-export type Workspace = {
-  id: string;
-  name: string;
-  role: "owner" | "admin" | "member";
-  state: "active" | "suspended" | "offboarding";
-};
+import type { Workspace } from "@/lib/workspaces";
 
 /** GET /api/workspaces — the ones this user is a member of. Possibly none. */
 export async function GET() {

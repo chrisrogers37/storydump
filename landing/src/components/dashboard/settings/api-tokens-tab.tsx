@@ -4,6 +4,7 @@ import { useId, useState } from "react";
 import type { ReactElement } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
+import { TONE_CLASS, type BadgeTone } from "@/components/dashboard/tone";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -90,7 +91,7 @@ import type {
 
 export type TokenBadge = {
   label: string;
-  tone: "active" | "attention" | "inert";
+  tone: BadgeTone;
 };
 
 /**
@@ -108,12 +109,6 @@ const TOKEN_BADGE: Record<TokenRowState, TokenBadge> = {
 export function tokenStateBadge(state: TokenRowState): TokenBadge {
   return TOKEN_BADGE[state];
 }
-
-const TONE_CLASS: Record<TokenBadge["tone"], string> = {
-  active: "bg-green-100 text-green-800",
-  attention: "bg-amber-100 text-amber-900",
-  inert: "bg-muted text-muted-foreground",
-};
 
 /** What a role lets the token do. An unknown role is shown as itself, not as a guess. */
 export function roleCopy(role: string): string {

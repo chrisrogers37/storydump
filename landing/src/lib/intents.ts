@@ -39,7 +39,17 @@ export const TERMINAL_STATES = [
   "cancelled",
 ] as const;
 
-/** `ck_intent_state`, the closed set — mirrors `workspaces.INTENT_STATES` (Python); this comment is the grep handle from either side. */
+/**
+ * `ck_intent_state`, the closed set — mirrors `workspaces.INTENT_STATES`
+ * (Python); this comment is the grep handle from either side.
+ *
+ * THE ARRAYS ABOVE ARE THE ONLY SOURCE ON THIS TIER. `dashboard-payloads.ts`
+ * used to declare a second partition as comma strings for the `?state=`
+ * query; it now `join(",")`s these. There was never a reason for two, and
+ * the two had already come apart: one of them had a row type missing
+ * `account_handle`/`account_display_name`, which `_INTENT_COLUMNS` has
+ * served since `06` §3.
+ */
 export const INTENT_STATES = [...NON_TERMINAL_STATES, ...TERMINAL_STATES] as const;
 
 export type IntentState = (typeof INTENT_STATES)[number];

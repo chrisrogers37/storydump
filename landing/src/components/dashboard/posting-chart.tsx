@@ -12,6 +12,7 @@ import {
 import { BarChart3 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import type { StatsResponse } from "@/lib/dashboard-payloads";
 
 /**
  * One bar per day, from the cap ledger (#1044 `stats.posts_by_day`).
@@ -23,11 +24,9 @@ import { EmptyState } from "@/components/dashboard/empty-state";
  * honest reading of the same rows, and the cap is the more useful second number
  * anyway: it says whether a quiet day was quiet or full.
  */
-interface DayCount {
-  local_date: string;
-  count: number;
-  cap: number;
-}
+
+/** One bar: a row of `stats.posts_by_day`, which is where the cap comes from. */
+type DayCount = StatsResponse["posts_by_day"][number];
 
 export function PostingChart({ data }: { data: DayCount[] }) {
   const formatted = data.map((d) => ({

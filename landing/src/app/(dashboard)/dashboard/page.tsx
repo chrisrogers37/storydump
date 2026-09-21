@@ -5,9 +5,9 @@ import {
   HISTORY_STATES,
   deriveCategories,
   deriveSummary,
-  type IntentsResponse,
   type StatsResponse,
 } from "@/lib/dashboard-payloads";
+import type { IntentsResponse } from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { PostingChart } from "@/components/dashboard/posting-chart";
