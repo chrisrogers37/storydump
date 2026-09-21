@@ -187,7 +187,10 @@ class TestTheIdentityWriter:
         assert (
             owner(world, "SELECT count(*) FROM users WHERE id = %s", (first,))[0] == 1
         )
-        assert after >= before and display == "new"
+        # STRICTLY greater — the test's own name says "refreshes", and `>=`
+        # does not assert a refresh (#1364's sweep: the same weak comparison
+        # let a mutant that stopped touching the row entirely go green).
+        assert after > before and display == "new"
 
     def test_an_absent_display_name_KEEPS_the_stored_one(self, world):
         """A sign-in that carries no name must not erase the name we hold.
@@ -221,6 +224,11 @@ class TestTheIdentityWriter:
         The two live in one UPDATE, so a fix that guards the whole statement
         rather than the one column would silently stop recording that the
         identity was seen. This is that regression's tripwire.
+
+        STRICTLY greater, and that is the whole test. Under the guarded-
+        statement fix the row is not touched at all, so `verified_at` comes
+        back EQUAL — which `>=` accepts. Checked against that mutant: with
+        `>=` it passed and the tripwire was decorative.
         """
         upsert(world, sub="sub-verify", display_name="kept")
         before = owner(
@@ -235,7 +243,7 @@ class TestTheIdentityWriter:
             " WHERE external_id = %s",
             ("sub-verify",),
         )
-        assert after >= before and display == "kept"
+        assert after > before and display == "kept"
 
     def test_primary_email_fills_when_empty_and_never_overwrites(self, world):
         first = upsert(world, sub="sub-mail")
