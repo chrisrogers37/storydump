@@ -48,9 +48,9 @@ from src.services.target import (
     jobs,
     scheduler,
     unit_of_work,
+    worker_health,
 )
 from src.services.target import backpressure as _backpressure
-from src.services.target import health as health_endpoint
 from src.services.target import prompts as prompts_mod
 from src.services.target.work_loop import (
     assert_concurrency_fits,
@@ -226,6 +226,12 @@ class WorkerApp:
     clock: object = None  # set by run() so a supervisor can read its observables
     sweeper: object = None  # set by run(); carries sweeps/mints observables
     prompt_sweeper: object = None  # set by run(); sweeps/prompted/advanced
+    #: Set by run(): the raw-socket liveness listener (`worker_health`), bound
+    #: before the first connection and closed in the finally. Declared here
+    #: with its three siblings rather than appearing out of nowhere as an
+    #: attribute assignment — the test that reads it already had to
+    #: `getattr(..., None)` for exactly that reason (#1325 audit, TD-A20).
+    health_server: object = None
     #: The bot this worker is CONFIGURED to speak as (`TARGET_TELEGRAM_BOT_USERNAME`,
     #: the API's webhook bot) and the bot its token actually is (from the
     #: startup probe). A mismatch means every card's buttons belong to a bot
@@ -640,12 +646,14 @@ async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
             pass
 
     # BEFORE the first database connection, deliberately. Railway times the
-    # SOCKET, not the program: `main.py` records the previous occurrence of this
-    # exact trap, where slow startup steps ran ahead of the listener and healthy
-    # deploys were marked FAILED. Binding here means the endpoint answers for the
-    # whole of startup however slow the connections and the election turn out to
-    # be, which is also why this root needs no startup-grace constant.
-    health_server = app.health_server = await health_endpoint.serve_health(app)
+    # SOCKET, not the program: `worker_health`'s own header records the previous
+    # occurrence of this exact trap, where slow startup steps ran ahead of the
+    # listener and three healthy deploys were marked FAILED. (It was `main.py`
+    # that carried that account until the tear-out emptied it to a dispatch —
+    # #1216, and #1325 audit, TD-A20.) Binding here means the endpoint answers
+    # for the whole of startup however slow the connections and the election turn
+    # out to be, which is also why this root needs no startup-grace constant.
+    health_server = app.health_server = await worker_health.serve_health(app)
 
     election_conn = await engine.connect()
     # Who the worker connects as, and whether that login bypasses RLS (#751,

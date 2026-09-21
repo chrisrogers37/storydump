@@ -9,6 +9,13 @@ endif
 # Default environment file
 ENV_FILE ?= .env
 
+# Where the virtualenv lives. This checkout uses `.venv/`; older ones and some
+# contributors use `venv/`, and the test targets hardcoded the latter — so six
+# targets named a `pytest` that is not there (TD-O6). Probe rather than choose:
+# `.venv/` wins when it exists, `venv/` is the fallback, and `make VENV=...`
+# overrides both.
+VENV ?= $(if $(wildcard .venv/bin/pytest),.venv,venv)
+
 # Database connection variables
 DB_HOST ?= localhost
 DB_PORT ?= 5432
@@ -58,27 +65,27 @@ install-dev: install ## `install`, plus the lint and scan tools CI runs (ruff, b
 test: ## Run tests with pytest (auto-creates test database)
 	@echo "$(GREEN)Running tests...$(NC)"
 	@echo "$(YELLOW)Note: Test database will be auto-created and cleaned up$(NC)"
-	./venv/bin/pytest -v --cov=src --cov-report=term-missing
+	$(VENV)/bin/pytest -v --cov=src --cov-report=term-missing
 
 test-unit: ## Run unit tests only
 	@echo "$(GREEN)Running unit tests...$(NC)"
-	./venv/bin/pytest -v -m unit
+	$(VENV)/bin/pytest -v -m unit
 
 test-integration: ## Run integration tests only
 	@echo "$(GREEN)Running integration tests...$(NC)"
-	./venv/bin/pytest -v -m integration
+	$(VENV)/bin/pytest -v -m integration
 
 test-quick: ## Run tests without coverage (faster)
 	@echo "$(GREEN)Running tests (no coverage)...$(NC)"
-	./venv/bin/pytest -v --no-cov
+	$(VENV)/bin/pytest -v --no-cov
 
 test-failed: ## Re-run only failed tests
 	@echo "$(GREEN)Re-running failed tests...$(NC)"
-	./venv/bin/pytest -v --lf
+	$(VENV)/bin/pytest -v --lf
 
 test-watch: ## Run tests in watch mode (requires pytest-watch)
 	@echo "$(GREEN)Running tests in watch mode...$(NC)"
-	./venv/bin/ptw -- -v
+	$(VENV)/bin/ptw -- -v
 
 clean: ## Clean up temporary files and caches
 	@echo "$(GREEN)Cleaning up...$(NC)"

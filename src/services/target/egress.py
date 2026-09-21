@@ -123,9 +123,13 @@ TIMEOUT_CLASSES = {
 }
 
 #: The closed set of provider hosts. Additions are deliberate and reviewable.
-#: Widening this before #871 lands moves the SSRF TOCTOU gap (module
-#: docstring, above) from theoretical to reachable — this allowlist is the
-#: load-bearing control until then.
+#: **This allowlist is the load-bearing control** (module docstring, above):
+#: a denylist cannot enumerate the internet, and provider egress is a closed
+#: set. #871 closed the TOCTOU window behind it — the validated address is now
+#: pinned to the connection — so widening this no longer re-opens a rebind
+#: gap; what it still does is hand every caller in the process reach to the
+#: new host, which is why a host that one module needs belongs on that
+#: module's own policy (`email_sender`) and not here.
 DEFAULT_ALLOWED_HOSTS = frozenset(
     {
         "graph.instagram.com",

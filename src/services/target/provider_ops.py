@@ -80,7 +80,11 @@ _KEY_FORMATS = {
 #: The only provider on the rail (`ck_ops_provider` is closed to this too).
 PROVIDER = "ig"
 
-#: Terminal states a permit may be resolved to.
+#: Terminal states a PERMIT may be resolved to — `provider_operations.state`,
+#: not intent state. It shares its name with `intent_ledger.TERMINAL_STATES`
+#: and shares no member with it: that one is `02` §4's closed set of terminal
+#: INTENT states, and doc 01's one-spelling pass could not fold these together
+#: because they are two sets, not two copies (#1325 audit, TD-A20).
 TERMINAL_STATES = ("succeeded", "failed", "ambiguous")
 
 #: The insert is written WITHOUT `ON CONFLICT` on purpose: that clause has to

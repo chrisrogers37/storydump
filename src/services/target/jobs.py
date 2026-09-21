@@ -426,15 +426,19 @@ class LeaseHeartbeat:
     `fn_extend_leases` call, on its OWN connection — the beat task is never
     in a pipeline's await chain, so a provider wait cannot starve it.
 
-    Composition-root notes, for whoever wires this (L.5/L.6) — deliberately
-    NOT handled here:
+    Composition-root notes — `src/worker.py` is that root, and it starts this
+    as `lease-heartbeat` alongside the clock and the lanes:
 
     * **Escalation and liveness registration.** A beat that fails every
       interval logs and keeps trying; `consecutive_failures` is the
-      "presumed dead after two missed beats" observable (`02` §5). Wiring it
-      to `loops/heartbeat.record_heartbeat` and to alerting belongs with the
-      runner — registering a loop nothing starts yet would false-alarm
-      `/health`.
+      "presumed dead after two missed beats" observable (`02` §5). It is
+      REPORTED, never a gate: `worker_health` says so in its own header —
+      a database blip would raise it on a worker that is going to recover,
+      and 503-ing would spend the restart budget on an outage no restart
+      mends. Alerting on it is still unwired. (This note used to name
+      `loops/heartbeat.record_heartbeat` as where the wiring belonged; that
+      was `src/services/core/loops/heartbeat.py`, deleted with the legacy
+      tier — #1216, and #1325 audit, TD-A20.)
     * **Pool shape.** *connect* against the shared 10-slot engine means each
       beat is a pooled checkout — fine — but FIFO rotation plus
       `pool_recycle` makes an otherwise-idle worker pay a real reconnect on

@@ -1,11 +1,14 @@
 """L.5 slice 2 — the FC-3 transit store (#915; `00` FC-3, `03` D28/D38).
 
 The workspace-scoped, signed, reaped Cloudinary transit layer the publish
-pipeline stages media through. The legacy ``cloud_storage.py`` is deliberately
-NOT extended: it uploads into a global app folder with public delivery, which
-is three FC-3 requirements short (no ``ws/{workspace_id}/`` scoping, no
-``type=authenticated``, unsigned delivery), and it mutates process-global
-``cloudinary.config()`` — a per-call-credential store cannot ride on that.
+pipeline stages media through. It was written instead of extending the legacy
+tier's ``cloud_storage.py`` (deleted in the tear-out, #1216): that module
+uploaded into a global app folder with public delivery, three FC-3
+requirements short (no ``ws/{workspace_id}/`` scoping, no
+``type=authenticated``, unsigned delivery), and it mutated process-global
+``cloudinary.config()`` — a per-call-credential store could not ride on that.
+The reasoning is kept because it is why this module has the shape it has; the
+module it argues against is gone.
 
 ## What each FC-3 requirement is, in this module's terms
 
@@ -69,7 +72,7 @@ from src.utils.datetime_utils import ensure_utc, ms_since
 
 
 #: The Instagram story frame (owner, 2026-09-10 — parity with the legacy
-#: `cloud_storage.get_story_optimized_url`): 1080 × 1920, 9:16.
+#: `cloud_storage.get_story_optimized_url`, since deleted): 1080 × 1920, 9:16.
 STORY_WIDTH = 1080
 STORY_HEIGHT = 1920
 #: The blur behind the picture: the legacy tier's value, kept.
@@ -268,7 +271,8 @@ _RESOURCE_TYPES = {"image": "image", "video": "video"}
 DEFAULT_SDK_TIMEOUT_S = TIMEOUT_CLASSES["upload"]
 
 #: One provider listing page per call, the API maximum — fewer round trips
-#: per sweep (the legacy module pages at this size too).
+#: per sweep (the legacy ``cloud_storage.py`` paged at this size too, before
+#: the tear-out removed it).
 _PAGE_SIZE = 500
 
 #: The provider resource_types one sweep walks — deduped once, not per call

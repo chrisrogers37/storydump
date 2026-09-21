@@ -1,14 +1,22 @@
 """L.5 slice 2 — the Meta adapter seam: typed errors + the stub/sandbox
 implementation (#915, `02` §6/§8).
 
-**Nothing reaches a real Meta endpoint until M.3** (#862: "runs against
-stub/sandbox targets until M.3 — there is no shadow phase"). So this module
-ships the SEAM and the sandbox: the executor consumes a duck-typed adapter
-(``create_container`` / ``container_status`` / ``publish`` / ``usage``), the
-gate injects :class:`StubMetaAdapter`, and the composition root wires the same
-stub until the cutover. The real Graph adapter (egress-floor-backed httpx) is
-deliberately NOT here — building it now would create an untestable-until-M.3
-path that reads as coverage.
+**This module owns the SEAM and the taxonomy, not the wire.** The executor
+consumes a duck-typed adapter (``create_container`` / ``container_status`` /
+``publish`` / ``usage``); :class:`StubMetaAdapter` is one implementation of
+it, and it is what the L.5 gate and the unit tests inject, so every pipeline
+proof runs with no network in it.
+
+The real one is :class:`~src.services.target.instagram_graph.InstagramGraphAdapter`
+(`instagram_graph.py`, #1220 step 3) — egress-floor-backed httpx against
+``graph.instagram.com``, mapping every answer onto the taxonomy below. **It is
+what the worker's composition root wires** (`worker.py::_meta_from_env`),
+which is exactly what the seam was built for: the pipeline routes on these
+error types and never learns which adapter produced them.
+
+(This header read "nothing reaches a real Meta endpoint until M.3" (#862)
+until the audit re-read it: true when the seam shipped, the opposite of the
+truth once the Graph adapter landed — #1325, TD-B18.)
 
 ## The taxonomy IS the routing table
 
