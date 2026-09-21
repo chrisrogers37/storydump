@@ -2695,6 +2695,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The L.8 admission gate's 200-update burst no longer inherits the API's 1 s pool wait as its own tolerance (#672).** `tests/scripts/test_l8_webhook_admission.py` admitted 200 distinct updates through a pool of 10 with the ingress wait of 1 s, so the last waiter errored once one admission cost more than about 50 ms — a loaded CI runner did that three times in four days, green on every re-run. The pool keeps its shape and the burst its size; the wait is the worker's 3 s, a latency budget rather than the property, while the 1 s ingress wait stays pinned where it is chosen (`test_app_factory`, `test_unit_of_work`).
 - **Add missing test files for 6 uncovered modules** - Create 64 new unit tests across 6 previously untested files
   - `test_telegram_autopost.py` (6 tests): Safety gates, dry-run mode, Cloudinary failure, operation locks
   - `test_instagram_commands.py` (11 tests): CLI commands for status, add/list/deactivate/reactivate accounts
