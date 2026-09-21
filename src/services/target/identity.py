@@ -80,7 +80,15 @@ async def upsert_google_identity(
         user_id, held = str(row[0]), row[1]
         await executor.execute(
             text(
-                "UPDATE user_identities SET verified_at = now(), display_name = :dn"
+                # COALESCE, not a bare assignment (#1364): `google_oidc` maps an
+                # absent, non-string or blank `name` claim to None before it
+                # reaches here, so NULL means "this token said nothing about the
+                # name" — which is not the same as "the name is now empty", and
+                # only the second would justify a write. A bare `= :dn` erased a
+                # stored name on every sign-in whose token omitted the claim.
+                # `verified_at` stays unconditional: the identity was seen.
+                "UPDATE user_identities SET verified_at = now(),"
+                "       display_name = COALESCE(:dn, display_name)"
                 " WHERE provider = :p AND external_id = :sub"
             ),
             {"dn": display_name, "p": PROVIDER_GOOGLE, "sub": sub},

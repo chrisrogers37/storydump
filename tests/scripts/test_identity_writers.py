@@ -187,20 +187,25 @@ class TestTheIdentityWriter:
         assert (
             owner(world, "SELECT count(*) FROM users WHERE id = %s", (first,))[0] == 1
         )
-        assert after >= before and display == "new"
+        # STRICTLY greater — the test's own name says "refreshes", and `>=`
+        # does not assert a refresh (#1364's sweep: the same weak comparison
+        # let a mutant that stopped touching the row entirely go green).
+        assert after > before and display == "new"
 
-    def test_an_absent_display_name_CLEARS_the_stored_one_on_the_live_lane(self, world):
-        """**A divergence from the retired twin, asserted rather than fixed.**
+    def test_an_absent_display_name_KEEPS_the_stored_one(self, world):
+        """A sign-in that carries no name must not erase the name we hold.
 
-        The twin kept a stored display name when a later sign-in carried none
-        (`COALESCE`-shaped). The live writer's returning branch spells
-        ``SET verified_at = now(), display_name = :dn`` unconditionally
-        (`identity.py`), so a sign-in whose ID token omits `name` clears it.
+        `google_oidc.py:292` already collapses absent, non-string and blank to
+        ``None`` before the writer sees it, so ``None`` here means exactly one
+        thing: *this token told us nothing about the name*. Telling us nothing
+        is not the same as telling us the name is empty, and only the second
+        would justify a write.
 
-        This is what the deployed system does today. Changing it is a
-        behaviour change to the sign-in path and belongs in its own reviewed
-        PR (#1325 audit — filed, not folded in here); the gate's job is to
-        stop it changing by accident, in either direction.
+        Until #1364 the returning branch spelled
+        ``SET verified_at = now(), display_name = :dn`` unconditionally, so a
+        token without `name` wrote NULL over a stored name. The retired sync
+        twin kept it; re-homing this gate onto the live writer is what exposed
+        the divergence.
         """
         upsert(world, sub="sub-keep", display_name="kept")
         upsert(world, sub="sub-keep", display_name=None)
@@ -210,8 +215,35 @@ class TestTheIdentityWriter:
                 "SELECT display_name FROM user_identities WHERE external_id = %s",
                 ("sub-keep",),
             )[0]
-            is None
+            == "kept"
         )
+
+    def test_a_later_sign_in_still_verifies_when_it_carries_no_name(self, world):
+        """Keeping the name must not cost the `verified_at` bump.
+
+        The two live in one UPDATE, so a fix that guards the whole statement
+        rather than the one column would silently stop recording that the
+        identity was seen. This is that regression's tripwire.
+
+        STRICTLY greater, and that is the whole test. Under the guarded-
+        statement fix the row is not touched at all, so `verified_at` comes
+        back EQUAL — which `>=` accepts. Checked against that mutant: with
+        `>=` it passed and the tripwire was decorative.
+        """
+        upsert(world, sub="sub-verify", display_name="kept")
+        before = owner(
+            world,
+            "SELECT verified_at FROM user_identities WHERE external_id = %s",
+            ("sub-verify",),
+        )[0]
+        upsert(world, sub="sub-verify", display_name=None)
+        after, display = owner(
+            world,
+            "SELECT verified_at, display_name FROM user_identities"
+            " WHERE external_id = %s",
+            ("sub-verify",),
+        )
+        assert after > before and display == "kept"
 
     def test_primary_email_fills_when_empty_and_never_overwrites(self, world):
         first = upsert(world, sub="sub-mail")
