@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Notice } from "@/components/ui/notice";
 import {
   removeMemberRefusalCopy,
   submitRemoveMember,
@@ -61,9 +62,7 @@ export function MembersCard({
       </CardHeader>
       <CardContent className="space-y-3">
         {error && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-            {error}
-          </div>
+          <Notice tone="error">{error}</Notice>
         )}
         {members === null ? (
           <p className="text-sm text-muted-foreground">

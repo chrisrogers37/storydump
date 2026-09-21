@@ -15,8 +15,6 @@ import {
 import { settingsRefusalCopy, submitSettingsChange } from "@/lib/command-client";
 
 interface Props {
-  /** The gate this screen is held behind; not this card's to decide. */
-  editable: boolean;
   workspaceId: string;
   captionStyle: string | null;
   onError: (message: string | null) => void;
@@ -35,7 +33,7 @@ const STYLE_OPTIONS = [
   },
 ];
 
-export function CaptionStyleCard({ captionStyle, workspaceId, editable, onError }: Props) {
+export function CaptionStyleCard({ captionStyle, workspaceId, onError }: Props) {
   const router = useRouter();
   const initial = captionStyle ?? "enhanced";
   const [value, setValue] = useState(initial);
@@ -75,7 +73,7 @@ export function CaptionStyleCard({ captionStyle, workspaceId, editable, onError 
       <CardContent className="space-y-4">
         <div className="space-y-2">
           <Label>Telegram notification format</Label>
-          <Select value={value} onValueChange={setValue} disabled={!editable}>
+          <Select value={value} onValueChange={setValue}>
             <SelectTrigger className="w-full sm:w-[260px]">
               <SelectValue />
             </SelectTrigger>
@@ -91,11 +89,9 @@ export function CaptionStyleCard({ captionStyle, workspaceId, editable, onError 
             {STYLE_OPTIONS.find((o) => o.value === value)?.description}
           </p>
         </div>
-        {editable && (
         <Button onClick={save} disabled={!changed || saving}>
           {saving ? "Saving…" : "Save"}
         </Button>
-        )}
       </CardContent>
     </Card>
   );

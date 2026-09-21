@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isWorkspaceId } from "@/lib/session";
+import { passThrough, requireWorkspace } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /** A Drive id: what the API accepts as `parent`, checked here only for shape. */
@@ -12,12 +12,9 @@ const FOLDER_ID = /^[A-Za-z0-9_-]{1,128}$/;
  * this only keeps a malformed parent from travelling.
  */
 export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-  const { id } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
   const parent = request.nextUrl.searchParams.get("parent");
   if (parent !== null && !FOLDER_ID.test(parent)) {
     return NextResponse.json({ error: "invalid_parent" }, { status: 400 });
@@ -27,9 +24,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
     `/workspaces/${id}/drive/folders${query}`,
     token,
   );
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
   return NextResponse.json({
     parent: result.data?.parent ?? "root",
     folders: Array.isArray(result.data?.folders) ? result.data.folders : [],

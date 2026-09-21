@@ -9,23 +9,25 @@ import { Label } from "@/components/ui/label";
 import { settingsRefusalCopy, submitSettingsChange } from "@/lib/command-client";
 
 interface Props {
-  /** The gate this screen is held behind; not this card's to decide. */
-  editable: boolean;
   workspaceId: string;
   repostTtlDays: number | null;
   skipTtlDays: number | null;
   onError: (message: string | null) => void;
 }
 
-/** Per-chat lock TTLs. Null in DB = use deployment env defaults (`REPOST_TTL_DAYS`,
- * `SKIP_TTL_DAYS`). The chat_settings row is bootstrapped with those env values,
- * so values arrive here populated for any chat created after migration 029.
+/**
+ * Per-workspace repost and skip lock TTLs.
+ *
+ * NULL means "no workspace value — the deployment's defaults apply"
+ * (`REPOST_TTL_DAYS`, `SKIP_TTL_DAYS`), which is not the same as zero and
+ * not the same as any particular number. The second half of this note used
+ * to describe `chat_settings` and migration 029 — a legacy table this tier
+ * no longer reads.
  */
 export function RepostCadenceCard({
   repostTtlDays,
   skipTtlDays,
   workspaceId,
-  editable,
   onError,
 }: Props) {
   const router = useRouter();
@@ -73,7 +75,6 @@ export function RepostCadenceCard({
             <Label htmlFor="repost-ttl">Repost lock (days)</Label>
             <div className="flex gap-2">
               <Input
-                disabled={!editable}
                 id="repost-ttl"
                 type="number"
                 min={1}
@@ -82,19 +83,18 @@ export function RepostCadenceCard({
                 onChange={(e) => setRepost(Number(e.target.value))}
                 className="max-w-[120px]"
               />
-              {editable && <Button
+              <Button
                 onClick={() => save("repost_ttl_days", repost)}
                 disabled={!repostChanged || saving !== null}
               >
                 {saving === "repost" ? "Saving…" : "Save"}
-              </Button>}
+              </Button>
             </div>
           </div>
           <div className="space-y-2">
             <Label htmlFor="skip-ttl">Skip lock (days)</Label>
             <div className="flex gap-2">
               <Input
-                disabled={!editable}
                 id="skip-ttl"
                 type="number"
                 min={1}
@@ -103,12 +103,12 @@ export function RepostCadenceCard({
                 onChange={(e) => setSkip(Number(e.target.value))}
                 className="max-w-[120px]"
               />
-              {editable && <Button
+              <Button
                 onClick={() => save("skip_ttl_days", skip)}
                 disabled={!skipChanged || saving !== null}
               >
                 {saving === "skip" ? "Saving…" : "Save"}
-              </Button>}
+              </Button>
             </div>
           </div>
         </div>

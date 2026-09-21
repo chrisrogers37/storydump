@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { ImageIcon, ListChecks, Loader2, Video } from "lucide-react";
+import { callBff, postJson } from "@/lib/bff";
+import { commandPath } from "@/lib/command-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -127,31 +129,28 @@ export function QueueList({
     const { command, body } = requestFor(action, intent);
 
     try {
-      const response = await fetch(
-        `/api/workspaces/${workspaceId}/commands/${command}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-      );
+      // `callBff` and `commandPath`, NOT `submitCommand` (#1341). The queue's
+      // commands are intent-keyed, so they carry no `submission_id`, and a
+      // double-clicked Approve REPLAYS — which `submitCommand` reports as a
+      // failure and this screen has always treated as success. Routing this
+      // through it unchanged would turn a double tap into an error banner.
+      // Sharing the path spelling and the wire shape is the part that was pure
+      // duplication; the replay rule is a real difference. Folding the two is a
+      // follow-up with its own decision, not a cleanup.
+      const result = await callBff(commandPath(workspaceId, command), postJson(body));
 
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        setNotice({ intentId: intent.id, text: refusalCopy(body?.error) });
+      if (!result.ok) {
+        setNotice({ intentId: intent.id, text: refusalCopy(result.error) });
         // A refusal about the ROW (already moved on, no longer here) means the
         // list is stale; a refusal about the request or the session does not.
-        if (response.status === 409 || response.status === 404)
-          router.refresh();
+        // `unreachable` carries status 0, so it correctly refreshes nothing —
+        // and `refusalCopy` answers it with the same sentence the thrown
+        // `fetch` used to reach through `target_router_unreachable`.
+        if (result.status === 409 || result.status === 404) router.refresh();
         return;
       }
 
       router.refresh();
-    } catch {
-      setNotice({
-        intentId: intent.id,
-        text: refusalCopy("target_router_unreachable"),
-      });
     } finally {
       setPending(null);
     }

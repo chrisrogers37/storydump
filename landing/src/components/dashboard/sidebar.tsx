@@ -46,7 +46,6 @@ const navItems = [
  */
 export function Sidebar({ mobile }: { mobile?: boolean }) {
   const pathname = usePathname();
-  const visibleItems = navItems;
 
   return (
     <aside className={mobile ? "w-56 bg-card" : "hidden w-56 shrink-0 border-r bg-card md:block"}>
@@ -56,7 +55,7 @@ export function Sidebar({ mobile }: { mobile?: boolean }) {
         </Link>
       </div>
       <nav className="space-y-1 p-3">
-        {visibleItems.map((item) => {
+        {navItems.map((item) => {
           const active =
             item.href === "/dashboard"
               ? pathname === "/dashboard"

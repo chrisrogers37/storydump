@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isUuid, isWorkspaceId } from "@/lib/session";
+import { isUuid } from "@/lib/session";
+import { passThrough, requireWorkspace } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -11,12 +12,10 @@ export async function DELETE(
   _request: NextRequest,
   context: { params: Promise<{ id: string; sourceId: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-  const { id, sourceId } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
+  const { sourceId } = await context.params;
   if (!isUuid(sourceId)) {
     return NextResponse.json({ error: "invalid_source" }, { status: 400 });
   }
@@ -25,8 +24,6 @@ export async function DELETE(
     token,
     { method: "DELETE" },
   );
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
   return NextResponse.json({ sourceId, state: result.data?.state ?? "paused" });
 }

@@ -185,6 +185,11 @@ describe("refusal copy", () => {
     expect(refusalCopy("target_router_unreachable")).toMatch(/Storydump/);
   });
 
+  it("answers the browser's `unreachable` the same as the server's", () => {
+    expect(refusalCopy("unreachable")).toBe(refusalCopy("target_router_unreachable"));
+    expect(refusalCopy("unreachable")).toContain("Nothing changed");
+  });
+
   it("has a fallback for a reason it does not know — or no reason at all — and the fallback names nobody at fault", () => {
     for (const reason of ["something_new", undefined, 42]) {
       const copy = refusalCopy(reason);

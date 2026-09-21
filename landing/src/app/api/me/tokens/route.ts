@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken } from "@/lib/session";
+import {
+  passThrough,
+  readJsonBody,
+  requireSessionToken,
+} from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 import {
   EXPIRY_DAYS_DEFAULT,
@@ -33,18 +37,13 @@ import {
  * legal value is beyond the shape stays the API's.
  */
 export async function POST(request: NextRequest) {
-  const token = await getSessionToken();
-  if (!token)
-    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const token = await requireSessionToken();
+  if (token instanceof NextResponse) return token;
 
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return NextResponse.json({ error: "malformed_body" }, { status: 400 });
-  }
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody instanceof NextResponse) return parsedBody;
 
-  const body = raw as {
+  const body = parsedBody.raw as {
     name?: unknown;
     role?: unknown;
     expires_in_days?: unknown;
@@ -74,12 +73,7 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify({ name, role, expires_in_days: expiresInDays }),
     },
   );
-  if (!result.ok) {
-    return NextResponse.json(
-      { error: result.error },
-      { status: result.status },
-    );
-  }
+  if (!result.ok) return passThrough(result);
 
   // A 201 whose body carries no usable secret is a failure: the caller's
   // next act is to paste it.

@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isWorkspaceId } from "@/lib/session";
+import {
+  passThrough,
+  readJsonBody,
+  requireWorkspace,
+} from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -33,22 +37,14 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
 
-  const { id } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody instanceof NextResponse) return parsedBody;
 
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return NextResponse.json({ error: "malformed_body" }, { status: 400 });
-  }
-
-  const body = raw as { folder_ref?: unknown; root_name?: unknown; folder_name?: unknown };
+  const body = parsedBody.raw as { folder_ref?: unknown; root_name?: unknown; folder_name?: unknown };
   const folderRef = typeof body?.folder_ref === "string" ? body.folder_ref.trim() : "";
   if (!folderRef) {
     return NextResponse.json({ error: "folder_required" }, { status: 400 });
@@ -78,9 +74,7 @@ export async function POST(
     },
   );
 
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
 
   const sourceId = result.data?.source_id;
   if (typeof sourceId !== "string") {

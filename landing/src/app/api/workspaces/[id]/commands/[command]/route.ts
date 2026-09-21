@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isWorkspaceId } from "@/lib/session";
+import {
+  passThrough,
+  readJsonBody,
+  requireWorkspace,
+} from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 import { idempotencyKeyFor, isOfferedCommand, parseCommand } from "@/lib/commands";
 
@@ -28,25 +32,21 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string; command: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
 
-  const { id, command } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  // `unknown_command` stays inline: it is THIS route's own vocabulary, and the
+  // only route that has it.
+  const { command } = await context.params;
   if (!isOfferedCommand(command)) {
     return NextResponse.json({ error: "unknown_command" }, { status: 404 });
   }
 
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return NextResponse.json({ error: "malformed_body" }, { status: 400 });
-  }
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody instanceof NextResponse) return parsedBody;
 
-  const parsed = parseCommand(command, raw);
+  const parsed = parseCommand(command, parsedBody.raw);
   if (!parsed.ok) {
     return NextResponse.json({ error: parsed.error }, { status: 400 });
   }
@@ -60,8 +60,6 @@ export async function POST(
   // The port's 409s (`illegal_transition`, `manual_mode`) are normal answers
   // and ride through with their reason; the client turns them into a
   // sentence and re-reads the ledger.
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
   return NextResponse.json(result.data);
 }

@@ -1,3 +1,4 @@
+import { callBff, postJson } from "./bff";
 import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 import { isHttpsUrlOnHost } from "./redirect-guard";
 import { requestGrant } from "./start-grant";
@@ -130,22 +131,15 @@ export async function fetchDriveFolders(
   parent: string | null,
 ): Promise<FoldersResult> {
   const query = parent ? `?parent=${encodeURIComponent(parent)}` : "";
-  let response: Response;
-  try {
-    response = await fetch(
-      `/api/workspaces/${workspaceId}/drive/folders${query}`,
-    );
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
+  const result = await callBff(
+    `/api/workspaces/${workspaceId}/drive/folders${query}`,
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
   }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error =
-      typeof data?.error === "string" ? data.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
-  }
-  if (!Array.isArray(data?.folders)) {
-    return { ok: false, error: "malformed_response", status: response.status };
+  const data = result.data;
+  if (!Array.isArray(data.folders)) {
+    return { ok: false, error: "malformed_response", status: result.status };
   }
   const folders = (data.folders as unknown[]).flatMap((f) => {
     const row = f as { id?: unknown; name?: unknown };
@@ -155,9 +149,9 @@ export async function fetchDriveFolders(
   });
   return {
     ok: true,
-    parent: typeof data?.parent === "string" ? data.parent : "root",
+    parent: typeof data.parent === "string" ? data.parent : "root",
     folders,
-    truncated: data?.truncated === true,
+    truncated: data.truncated === true,
   };
 }
 
@@ -198,26 +192,21 @@ export async function addDriveFolder(
   workspaceId: string,
   folder: DriveFolder,
 ): Promise<AddFolderResult> {
-  let response: Response;
-  try {
-    response = await fetch(`/api/workspaces/${workspaceId}/sources`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ folder_ref: folder.id, folder_name: folder.name }),
-    });
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
+  const result = await callBff(
+    `/api/workspaces/${workspaceId}/sources`,
+    postJson({ folder_ref: folder.id, folder_name: folder.name }),
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
   }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error =
-      typeof data?.error === "string" ? data.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
+  if (typeof result.data.sourceId !== "string") {
+    return { ok: false, error: "malformed_response", status: result.status };
   }
-  if (typeof data?.sourceId !== "string") {
-    return { ok: false, error: "malformed_response", status: response.status };
-  }
-  return { ok: true, sourceId: data.sourceId, created: data.created === true };
+  return {
+    ok: true,
+    sourceId: result.data.sourceId,
+    created: result.data.created === true,
+  };
 }
 
 /** The Drive folder ids that are CONNECTED here — sources not removed — for the picker to grey out. */
@@ -269,22 +258,12 @@ export async function removeDriveFolder(
   workspaceId: string,
   sourceId: string,
 ): Promise<RemoveFolderResult> {
-  let response: Response;
-  try {
-    response = await fetch(
-      `/api/workspaces/${workspaceId}/sources/${sourceId}`,
-      {
-        method: "DELETE",
-      },
-    );
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
-  }
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    const error =
-      typeof data?.error === "string" ? data.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
+  const result = await callBff(
+    `/api/workspaces/${workspaceId}/sources/${sourceId}`,
+    { method: "DELETE" },
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
   }
   return { ok: true };
 }

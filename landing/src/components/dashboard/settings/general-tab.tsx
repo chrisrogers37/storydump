@@ -15,6 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Notice } from "@/components/ui/notice";
 import {
   settingsRefusalCopy,
   submitRenameWorkspace,
@@ -23,6 +24,7 @@ import {
 } from "@/lib/command-client";
 import type { SettingsView } from "@/lib/dashboard-payloads";
 import { slotLabels, timeZoneOptions } from "@/lib/schedule";
+import { WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
 import { CaptionStyleCard } from "./caption-style-card";
 import { DangerZoneCard } from "./danger-zone-card";
 import { RepostCadenceCard } from "./repost-cadence-card";
@@ -36,10 +38,12 @@ import { RepostCadenceCard } from "./repost-cadence-card";
  * carries the `Idempotency-Key` the port requires and mints a fresh submission
  * identity per save.
  *
- * `editable` is unchanged by this and is NOT this file's to decide. It is the
- * screen-level gate, held in `settings/page.tsx`, and it is being separated
- * from the removed-control case in its own change. Everything here is written
- * to be correct in BOTH of its states: false, and the true it becomes.
+ * `editable` IS GONE (#1341). It was the screen-level gate held in
+ * `settings/page.tsx`, marking controls whose route did not exist yet; it
+ * reached this tab as a bare `editable` attribute — permanently `true` — and
+ * a flag with one value is the mirror image of the permanently-false one
+ * #1070 refused. Every control it gated is simply rendered and enabled, which
+ * is what it already was.
  *
  * ── Not every toggle on this screen is a `settings_change` ──────────────
  *
@@ -60,6 +64,42 @@ const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => ({
 }));
 
 type ToggleKey = "is_paused" | "dry_run_mode" | "enable_instagram_api";
+
+/**
+ * What a saved schedule means, said exactly. The clock advances an account's
+ * cursor from the slot it already holds (`fn_next_slot`, under the settings
+ * in force at that tick), so a post already on the clock keeps its time; an
+ * account carrying its own posting override never adopts the workspace's
+ * hours (`COALESCE(account, workspace)` in the tick), hence "accounts on the
+ * workspace schedule"; and a workspace being deleted has no clock until it
+ * is restored (the tick skips it). Exported so the wording is pinned.
+ */
+export function scheduleSavedNotice(workspaceState: string): string {
+  // `ck_ws_state` also admits `suspended`, which nothing writes today; it
+  // would read "restored" here, which is the closest true sentence.
+  if (workspaceState !== "active") {
+    return "Schedule saved. It applies once the workspace is restored.";
+  }
+  return (
+    "Schedule saved. A post already on the clock keeps its time; from the next one, " +
+    "accounts on the workspace schedule follow the new hours and cadence."
+  );
+}
+
+/**
+ * THE predicate for "this switch moves". Exported because the #1155 gate
+ * asserts against it: a test that restated it would agree with itself while
+ * diverging from what ships, which is how the original defect survived review
+ * in the first place — a hand-rolled copy of a shipped rule is a copy that can
+ * be wrong on its own.
+ */
+export function isLiveToggle(row: {
+  settingsKey: string | null;
+  command?: { on: string; off: string };
+  inertReason?: string;
+}): boolean {
+  return (row.settingsKey !== null || row.command !== undefined) && !row.inertReason;
+}
 
 /**
  * `settingsKey` is the column name the PORT accepts, or null when this toggle
@@ -85,42 +125,6 @@ type ToggleKey = "is_paused" | "dry_run_mode" | "enable_instagram_api";
  * port has no such setting, which is false and would send the next person to
  * add a command that already exists.
  */
-/**
- * THE predicate for "this switch moves". Exported because the #1155 gate
- * asserts against it: a test that restated it would agree with itself while
- * diverging from what ships, which is how the original defect survived review
- * in the first place — a hand-rolled copy of a shipped rule is a copy that can
- * be wrong on its own.
- */
-/**
- * What a saved schedule means, said exactly. The clock advances an account's
- * cursor from the slot it already holds (`fn_next_slot`, under the settings
- * in force at that tick), so a post already on the clock keeps its time; an
- * account carrying its own posting override never adopts the workspace's
- * hours (`COALESCE(account, workspace)` in the tick), hence "accounts on the
- * workspace schedule"; and a workspace being deleted has no clock until it
- * is restored (the tick skips it). Exported so the wording is pinned.
- */
-export function scheduleSavedNotice(workspaceState: string): string {
-  // `ck_ws_state` also admits `suspended`, which nothing writes today; it
-  // would read "restored" here, which is the closest true sentence.
-  if (workspaceState !== "active") {
-    return "Schedule saved. It applies once the workspace is restored.";
-  }
-  return (
-    "Schedule saved. A post already on the clock keeps its time; from the next one, " +
-    "accounts on the workspace schedule follow the new hours and cadence."
-  );
-}
-
-export function isLiveToggle(row: {
-  settingsKey: string | null;
-  command?: { on: string; off: string };
-  inertReason?: string;
-}): boolean {
-  return (row.settingsKey !== null || row.command !== undefined) && !row.inertReason;
-}
-
 type ToggleRow = {
   key: ToggleKey;
   label: string;
@@ -179,7 +183,6 @@ export function GeneralTab({
   settings,
   workspaceId,
   workspaceName,
-  editable,
   workspaceState,
   restorableUntil,
   isOwner,
@@ -189,7 +192,6 @@ export function GeneralTab({
   settings: SettingsView;
   workspaceId: string;
   workspaceName: string;
-  editable: boolean;
   /** `workspaces.state`; drives the Delete / Restore card (#1127). */
   workspaceState: string;
   /** Server-computed restore deadline while offboarding, else null. */
@@ -251,14 +253,6 @@ export function GeneralTab({
   const [togglingKey, setTogglingKey] = useState<ToggleKey | null>(null);
 
   /**
-   * All three schedule fields in ONE command, deliberately.
-   *
-   * They are saved by a single button and the port validates the map as a
-   * unit, so splitting them into three commands would make a refusal of the
-   * end hour leave the other two already written — a half-applied schedule
-   * with no way to name what happened.
-   */
-  /**
    * The workspace's own name.
    *
    * Its own card and its own command — NOT folded into the schedule save. A
@@ -290,6 +284,14 @@ export function GeneralTab({
     router.refresh();
   }
 
+  /**
+   * All three schedule fields in ONE command, deliberately.
+   *
+   * They are saved by a single button and the port validates the map as a
+   * unit, so splitting them into three commands would make a refusal of the
+   * end hour leave the other two already written — a half-applied schedule
+   * with no way to name what happened.
+   */
   async function saveSchedule() {
     setError(null);
     setNotice(null);
@@ -352,12 +354,9 @@ export function GeneralTab({
   return (
     <div className="space-y-6 pt-4">
       {error && (
-        <div
-          role="alert"
-          className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800"
-        >
+        <Notice tone="error" className="mb-4">
           {error}
-        </div>
+        </Notice>
       )}
 
       <Card>
@@ -371,17 +370,12 @@ export function GeneralTab({
               id="workspace-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              maxLength={100}
+              maxLength={WORKSPACE_NAME_MAX}
               placeholder="e.g. Northside Coffee"
             />
           </div>
           {notice?.card === "name" && (
-            <div
-              role="status"
-              className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800"
-            >
-              {notice.text}
-            </div>
+            <Notice tone="success">{notice.text}</Notice>
           )}
           <Button
             onClick={saveName}
@@ -411,7 +405,6 @@ export function GeneralTab({
                   min={1}
                   max={50}
                   value={postsPerDay}
-                  disabled={!editable}
                   onChange={(e) => setPostsPerDay(Number(e.target.value))}
                 />
               )}
@@ -421,7 +414,7 @@ export function GeneralTab({
               {settings.posting_hours_start === null ? (
                 <Unavailable />
               ) : (
-                <Select value={hoursStart} onValueChange={setHoursStart} disabled={!editable}>
+                <Select value={hoursStart} onValueChange={setHoursStart}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -440,7 +433,7 @@ export function GeneralTab({
               {settings.posting_hours_end === null ? (
                 <Unavailable />
               ) : (
-                <Select value={hoursEnd} onValueChange={setHoursEnd} disabled={!editable}>
+                <Select value={hoursEnd} onValueChange={setHoursEnd}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -456,7 +449,7 @@ export function GeneralTab({
             </div>
             <div className="space-y-2">
               <Label>Time zone</Label>
-              <Select value={tz} onValueChange={setTz} disabled={!editable}>
+              <Select value={tz} onValueChange={setTz}>
                 <SelectTrigger className="w-full">
                   <SelectValue />
                 </SelectTrigger>
@@ -493,21 +486,12 @@ export function GeneralTab({
               ({tz}).
             </p>
           )}
-          {editable && (
-            <>
-              {notice?.card === "schedule" && notice.state === workspaceState && (
-                <div
-                  role="status"
-                  className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800"
-                >
-                  {notice.text}
-                </div>
-              )}
-              <Button onClick={saveSchedule} disabled={savingSchedule}>
-                {savingSchedule ? "Saving..." : "Save Schedule"}
-              </Button>
-            </>
+          {notice?.card === "schedule" && notice.state === workspaceState && (
+            <Notice tone="success">{notice.text}</Notice>
           )}
+          <Button onClick={saveSchedule} disabled={savingSchedule}>
+            {savingSchedule ? "Saving..." : "Save Schedule"}
+          </Button>
         </CardContent>
       </Card>
 
@@ -516,7 +500,6 @@ export function GeneralTab({
       <CaptionStyleCard
         captionStyle={settings.caption_style}
         workspaceId={workspaceId}
-        editable={editable}
         onError={report}
       />
 
@@ -524,9 +507,10 @@ export function GeneralTab({
         CategoryMixCard is NOT rendered, and this is the line alex's #1070
         annotation told a P3 reviewer to treat as a blocker rather than a
         beneficiary of the flip. It was `{editable && <CategoryMixCard />}`;
-        `editable` is now true for this tab, so leaving it would have brought
-        the card back BROKEN — exactly the silent re-introduction #1070 exists
-        to prevent, one control further along.
+        that flag is gone now (#1341), so the argument rests where it always
+        really did — on the card being BROKEN, not on a boolean. Leaving the
+        gate would have brought it back the moment the flag went true, which
+        is exactly the silent re-introduction #1070 exists to prevent.
 
         It is broken in two independent ways, and P3 fixes neither:
           - its READ is a POST to a route that does not exist. navi confirmed a
@@ -547,7 +531,6 @@ export function GeneralTab({
         repostTtlDays={settings.repost_ttl_days}
         skipTtlDays={settings.skip_ttl_days}
         workspaceId={workspaceId}
-        editable={editable}
         onError={report}
       />
 
@@ -584,18 +567,22 @@ export function GeneralTab({
                   ) : (
                     <div className="flex items-center gap-3">
                       {/*
-                        Said only where it is the ACTIVE reason. While the whole
-                        screen is read-only, every switch is inert and naming
-                        one of them specially would imply the others are fine.
+                        Said only where it is the ACTIVE reason. It used to be
+                        gated on `editable` as well, because while the whole
+                        screen was read-only every switch was inert and naming
+                        one of them specially would have implied the others
+                        were fine. The screen is not read-only any more, so
+                        `wired` is the only thing left that makes a switch
+                        inert — and that is exactly when the reason is true.
                       */}
-                      {editable && !wired && row.inertReason && (
+                      {!wired && row.inertReason && (
                         <span className="text-sm text-muted-foreground">
                           {row.inertReason}
                         </span>
                       )}
                       <Switch
                         checked={position}
-                        disabled={!editable || !wired || togglingKey !== null}
+                        disabled={!wired || togglingKey !== null}
                         aria-label={row.label}
                         onCheckedChange={
                           wired ? (next) => toggle(row, next) : undefined

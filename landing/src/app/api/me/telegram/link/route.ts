@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
-import { getSessionToken } from "@/lib/session";
+import { passThrough, requireSessionToken } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
-import { isTelegramLink } from "@/lib/telegram-link";
+import {
+  LINK_TTL_SECONDS_FALLBACK,
+  isTelegramLink,
+} from "@/lib/telegram-link";
 
 /**
  * POST /api/me/telegram/link — mint the one-shot Telegram deep link for the
@@ -10,8 +13,8 @@ import { isTelegramLink } from "@/lib/telegram-link";
  * `Idempotency-Key` — every click is a fresh, independent link.
  */
 export async function POST() {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const token = await requireSessionToken();
+  if (token instanceof NextResponse) return token;
 
   const result = await targetFetch<{ link?: string; expires_in_seconds?: number }>(
     "/me/telegram/link",
@@ -19,9 +22,7 @@ export async function POST() {
     { method: "POST" },
   );
 
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
 
   const link = result.data?.link;
   if (typeof link !== "string" || !isTelegramLink(link)) {
@@ -32,7 +33,8 @@ export async function POST() {
 
   return NextResponse.json({
     link,
-    // The API's STATE_TTL_SECONDS; the fallback is the same number, never 0.
-    expiresInSeconds: result.data?.expires_in_seconds ?? 900,
+    // The API's STATE_TTL_SECONDS, named once as `LINK_TTL_SECONDS_FALLBACK`;
+    // the fallback is the same number, never 0.
+    expiresInSeconds: result.data?.expires_in_seconds ?? LINK_TTL_SECONDS_FALLBACK,
   });
 }
