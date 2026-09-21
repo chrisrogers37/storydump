@@ -254,7 +254,25 @@ class TestRequireSession:
             await require_session(SERVICE_TOKEN)
 
     def test_token_refusal_reasons_are_the_vocabulary(self):
-        assert tuple(TokenRefused.REASONS) == vocabulary.TOKEN_REFUSALS
+        # Pinned to a LITERAL, deliberately, and not to `vocabulary.TOKEN_REFUSALS`.
+        # Until #1336 `TokenRefused.REASONS` was its own hand-written copy, so
+        # comparing the two caught a drift between them. #1336 made REASONS read
+        # the vocabulary directly — which is the point of that PR — and at that
+        # moment this assertion became `tuple(x) == x`: the same object on both
+        # sides, true whatever the vocabulary says. The `cli_v2_01.sh` mutation
+        # that deletes "wrong_workspace" from the vocabulary stopped being killed
+        # by it.
+        #
+        # There is no second copy left to compare against, so the only thing that
+        # can still fail is a statement of what the set actually IS. A reason
+        # added or removed here is a wire-visible change to what `/v1` refuses
+        # with, and it should cost a deliberate edit of this line.
+        assert tuple(TokenRefused.REASONS) == (
+            "session_required",
+            "readonly_token",
+            "wrong_workspace",
+        )
+        assert tuple(vocabulary.TOKEN_REFUSALS) == tuple(TokenRefused.REASONS)
 
     def test_replace_keeps_a_token_principal_frozen_and_comparable(self):
         assert replace(PERSON_TOKEN, token_role="readonly").token_role == "readonly"
