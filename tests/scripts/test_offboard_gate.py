@@ -397,13 +397,25 @@ class TestTheWorkflow:
         # deadline #1288 added. It keeps the hand-written statement — it is a
         # self-excluding, kind-scoped successor mint at a computed `run_at`,
         # which `jobs.enqueue` does not model — but it must still carry one.
-        deadline, attempts = _one(
+        # Measured from `run_at`, NOT from `now()`. Asserted as the exact
+        # interval rather than as `IS NOT NULL`, because `IS NOT NULL` is
+        # satisfied by `now() + 6 h` — which is the failure this whole change
+        # exists to avoid: the finalizer is minted up to
+        # `GRACE_SECONDS_DEFAULT` (thirty days) before it is due, so a deadline
+        # anchored at mint is already spent when the job becomes runnable and
+        # `budget_exhausted` ends the workflow on its first claim. Checked
+        # against that mutant: with `IS NOT NULL` it passed.
+        budget_attempts, budget_seconds = jobs.LANE_BUDGETS[offboarding.LANE]
+        from_run_at, attempts = _one(
             off_db,
-            "SELECT deadline_at IS NOT NULL, max_attempts FROM jobs WHERE id = %s",
-            (out["successor"],),
+            "SELECT deadline_at = run_at + make_interval(secs => %s), max_attempts"
+            "  FROM jobs WHERE id = %s",
+            (budget_seconds, out["successor"]),
         )
-        assert deadline is True, "the successor must carry a deadline"
-        assert attempts == jobs.LANE_BUDGETS[offboarding.LANE][0], (
+        assert from_run_at is True, (
+            "the successor's deadline must be the lane's budget from RUN_AT"
+        )
+        assert attempts == budget_attempts, (
             "and the lane's attempt budget, not a hand-copied 5"
         )
 

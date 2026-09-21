@@ -15,7 +15,7 @@ each stub outcome can go red on its own (the controls-can-fail standard).
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -73,7 +73,7 @@ def _source_row(conn, source_id):
 def _jobs(conn, kind):
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, payload, state, deadline_at, max_attempts FROM jobs"
+            "SELECT id, payload, state, deadline_at, max_attempts, run_at FROM jobs"
             " WHERE kind = %s ORDER BY created_at",
             (kind,),
         )
@@ -84,6 +84,7 @@ def _jobs(conn, kind):
                 "state": r[2],
                 "deadline_at": r[3],
                 "max_attempts": r[4],
+                "run_at": r[5],
             }
             for r in cur.fetchall()
         ]
@@ -364,10 +365,16 @@ class TestChunkChaining:
         # #1361: the chain was hand-written INSERT INTO jobs, so it never got
         # the deadline #1288 added — a stuck chunk sat until its attempts ran
         # out instead of being reaped. `jobs.enqueue` is what writes it.
-        assert chunks[0]["deadline_at"] is not None, (
-            "a chained chunk must carry the bulk lane's deadline"
-        )
-        assert chunks[0]["max_attempts"] == jobs.LANE_BUDGETS["bulk"][0], (
+        # The lane's budget, both halves, asserted as VALUES. `is not None`
+        # would accept any interval at all — including one measured from the
+        # wrong instant, which is the failure the offboarding half of #1361
+        # turns on. Same reason `max_attempts` is compared rather than merely
+        # checked for presence.
+        budget_attempts, budget_seconds = jobs.LANE_BUDGETS["bulk"]
+        assert chunks[0]["deadline_at"] - chunks[0]["run_at"] == timedelta(
+            seconds=budget_seconds
+        ), "a chained chunk must carry the bulk lane's deadline, from its run_at"
+        assert chunks[0]["max_attempts"] == budget_attempts, (
             "and the lane's attempt budget, not a hand-copied 5"
         )
         assert (
