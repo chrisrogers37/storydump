@@ -422,7 +422,8 @@ DOORS = {
     # worker writes per workspace under that tenant.
     "fn_sender_sweep": (
         "svc_worker",
-        "SELECT fn_sender_sweep('tg:', 3, 600, 30, 200)",
+        # a bound of 0: the probe proves EXECUTE, it must not mint a job
+        "SELECT fn_sender_sweep('tg:', 3, 600, 30, 0)",
     ),
     "fn_prompts_due": (
         "svc_worker",
