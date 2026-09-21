@@ -7,7 +7,6 @@ database, both speaking to the fake Telegram through
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -16,15 +15,11 @@ from typing import Optional
 
 import httpx
 
+from tests.scripts.load import free_port
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SECRET = "load-harness-secret"
 BOT_TOKEN = "4242:load-harness-fake-token"
-
-
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def process_env(

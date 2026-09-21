@@ -24,6 +24,8 @@ from typing import Any, Optional
 import uvicorn
 from fastapi import FastAPI, Request
 
+from tests.scripts.load import free_port
+
 BOT_USERNAME = "storydump_load_fake_bot"
 
 
@@ -149,7 +151,7 @@ class FakeServer:
     def __init__(self, fake: FakeTelegram, *, host: str = "127.0.0.1", port: int = 0):
         self.fake = fake
         self.host = host
-        self.port = port or _free_port()
+        self.port = port or free_port()
         self._server = uvicorn.Server(
             uvicorn.Config(fake.app(), host=host, port=self.port, log_level="warning")
         )
@@ -171,11 +173,3 @@ class FakeServer:
     def stop(self) -> None:
         self._server.should_exit = True
         self._thread.join(timeout=5)
-
-
-def _free_port() -> int:
-    import socket
-
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])

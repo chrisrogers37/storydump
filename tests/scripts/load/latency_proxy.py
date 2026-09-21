@@ -8,16 +8,17 @@ on; the report names the number."""
 from __future__ import annotations
 
 import asyncio
-import socket
 import threading
 from typing import Optional
+
+from tests.scripts.load import free_port
 
 
 class LatencyProxy:
     def __init__(self, upstream_host: str, upstream_port: int, *, delay_s: float):
         self.upstream = (upstream_host, upstream_port)
         self.delay_s = delay_s
-        self.port = _free_port()
+        self.port = free_port()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._server: Optional[asyncio.AbstractServer] = None
@@ -78,12 +79,6 @@ class LatencyProxy:
             self._loop.call_soon_threadsafe(self._server.close)
         if self._thread is not None:
             self._thread.join(timeout=2)
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def through_proxy(dsn: str, proxy: LatencyProxy) -> str:

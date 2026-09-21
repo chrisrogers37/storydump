@@ -38,16 +38,13 @@ from src.services.target import (
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    async_url,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
 )
 
 pytestmark = pytest.mark.integration
-
-
-def _async_url(dsn: str) -> str:
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
 def _run(coro):
@@ -140,7 +137,7 @@ async def _pressure(c) -> dict:
 
 async def _surfaces(dsn: str) -> dict:
     """Everything the API's two health routes read, as one login."""
-    engine = create_async_engine(_async_url(dsn))
+    engine = create_async_engine(async_url(dsn))
     try:
         async with engine.connect() as c:
             return {
@@ -158,7 +155,7 @@ async def _worker_signal(dsn: str) -> dict:
     """What the worker reads: its status line renders the backpressure
     snapshot and nothing else of these (the posting and lag doors are the
     API's alone)."""
-    engine = create_async_engine(_async_url(dsn))
+    engine = create_async_engine(async_url(dsn))
     try:
         async with engine.connect() as c:
             return await _pressure(c)
@@ -177,7 +174,7 @@ _TABLES = (
 
 
 async def _plain_counts(dsn: str) -> dict:
-    engine = create_async_engine(_async_url(dsn))
+    engine = create_async_engine(async_url(dsn))
     try:
         async with engine.connect() as c:
             counts = {
@@ -198,7 +195,7 @@ async def _plain_counts(dsn: str) -> dict:
 
 async def _deauthorize(dsn: str, subject: str) -> tuple[int, int]:
     """The deauthorize route's two calls, as one login, in one transaction."""
-    engine = create_async_engine(_async_url(dsn))
+    engine = create_async_engine(async_url(dsn))
     try:
         async with engine.begin() as c:
             accounts = await meta_callbacks.resolve_ig_accounts(c, subject)
@@ -209,7 +206,7 @@ async def _deauthorize(dsn: str, subject: str) -> tuple[int, int]:
 
 
 async def _credential_state(dsn: str, iga: str) -> str:
-    engine = create_async_engine(_async_url(dsn))
+    engine = create_async_engine(async_url(dsn))
     try:
         async with engine.connect() as c:
             return (
@@ -225,7 +222,7 @@ async def _credential_state(dsn: str, iga: str) -> str:
 
 
 async def _door_source(dsn: str) -> str:
-    engine = create_async_engine(_async_url(dsn))
+    engine = create_async_engine(async_url(dsn))
     try:
         async with engine.connect() as c:
             return (
@@ -327,7 +324,7 @@ def test_the_api_login_never_holds_a_foreign_workspace_id_but_the_worker_may(wor
     assert "workspace_id" not in api["ws_oldest_wait"]
 
     async def named(dsn: str) -> dict:
-        engine = create_async_engine(_async_url(dsn))
+        engine = create_async_engine(async_url(dsn))
         try:
             async with engine.connect() as c:
                 return await backpressure.snapshot(
