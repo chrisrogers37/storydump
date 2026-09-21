@@ -153,10 +153,18 @@ jobs:
         run: |
           pip install pip-audit bandit
 
+      # This step GATES. It ran behind `|| true` + `continue-on-error` with a
+      # placeholder `--ignore-vuln GHSA-1234` suppressing nothing that exists,
+      # so the security tier the deployment guide advertises could not go red
+      # while it was masking four live advisories (#1216). A real suppression
+      # carries the real advisory id and a comment saying why it does not
+      # apply; a placeholder is not a suppression, it is a disabled check.
       - name: Run pip-audit
-        run: pip-audit -r requirements.txt --ignore-vuln GHSA-1234 || true
-        continue-on-error: true
+        run: pip-audit -r requirements.txt
 
+      # Advisory for now: bandit's findings on this tree have not been triaged,
+      # so it reports without gating. pip-audit above DOES gate — a
+      # known-vulnerable pin fails CI.
       - name: Run bandit security scan
         run: bandit -r src/ storydump_cli/ -ll -ii --format json --output bandit-report.json || true
         continue-on-error: true

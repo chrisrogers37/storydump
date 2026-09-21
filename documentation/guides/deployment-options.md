@@ -45,7 +45,9 @@ GitHub Actions runs automatically on every push/PR (`.github/workflows/ci.yml`):
   that may reference Telegram
 - **Tests** (pytest) -- unit and integration tests against a PostgreSQL 15
   service container
-- **Security** (pip-audit, bandit) -- vulnerability scanning, advisory only
+- **Security** -- vulnerability scanning: `pip-audit` gates (a known-vulnerable
+  pin in `requirements.txt` fails the job); `bandit` is advisory, read its
+  uploaded report rather than the step's colour
 - **Front end** (`landing/`: vitest, `tsc --noEmit`, eslint)
 - **Changelog** -- a PR must touch `CHANGELOG.md` unless it is docs-only
 

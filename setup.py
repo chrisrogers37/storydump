@@ -6,23 +6,24 @@ setup(
     name="storydump",
     version=__version__,
     description="Instagram Story Automation System with Telegram Integration",
-    author="Your Name",
+    author="Chris Rogers",
     packages=find_packages(),
+    # Floors, not pins: `requirements.txt` holds the pins for a deploy, this
+    # list holds the names a `pip install -e .` must resolve. Only the NAMES
+    # have to agree, and `tests/test_dependency_declarations.py` holds them
+    # equal in both directions.
     install_requires=[
-        "alembic>=1.18.0",
+        "asyncpg>=0.29.0",
         "click>=8.1.7",
         "cloudinary>=1.36.0",
         "cryptography>=41.0.0",
         "fastapi>=0.109.0",
-        "google-api-python-client>=2.100.0",
-        "google-auth>=2.23.0",
-        "google-auth-oauthlib>=1.1.0",
         "httpx>=0.25.2",
         "psycopg2-binary>=2.9.9",
         "pydantic>=2.5.0",
         "pydantic-settings>=2.1.0",
-        "python-dateutil>=2.8.2",
         "python-dotenv>=1.0.0",
+        "python-multipart>=0.0.9",
         "rich>=13.7.0",
         "sqlalchemy>=2.0.23",
         "uvicorn>=0.27.0",
