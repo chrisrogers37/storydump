@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isWorkspaceId } from "@/lib/session";
+import {
+  passThrough,
+  readJsonBody,
+  requireWorkspace,
+} from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -12,20 +16,12 @@ export async function PUT(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token)
-    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-  const { id } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return NextResponse.json({ error: "malformed_body" }, { status: 400 });
-  }
-  const rows = (raw as { rows?: unknown })?.rows;
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody instanceof NextResponse) return parsedBody;
+  const rows = (parsedBody.raw as { rows?: unknown })?.rows;
   if (!Array.isArray(rows)) {
     return NextResponse.json(
       { error: "invalid_mix_not_a_list" },
@@ -40,12 +36,7 @@ export async function PUT(
       body: JSON.stringify({ rows }),
     },
   );
-  if (!result.ok) {
-    return NextResponse.json(
-      { error: result.error },
-      { status: result.status },
-    );
-  }
+  if (!result.ok) return passThrough(result);
   return NextResponse.json({
     rows: Array.isArray(result.data?.rows) ? result.data.rows : [],
   });

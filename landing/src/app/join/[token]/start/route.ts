@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { INVITE_COOKIE, INVITE_MAX_AGE_SECONDS } from "@/lib/session";
 import { TARGET_API_URL } from "@/lib/target-api";
-
-/** Remembered just long enough to survive the round trip to Google. */
-export const INVITE_COOKIE = "storydump_invite";
 
 /**
  * GET /join/[token]/start — sign in, and come back here afterwards.
@@ -34,7 +32,7 @@ export async function GET(
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
-      maxAge: 900,
+      maxAge: INVITE_MAX_AGE_SECONDS,
     });
   }
 

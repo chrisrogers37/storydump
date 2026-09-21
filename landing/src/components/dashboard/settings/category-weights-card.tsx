@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Notice } from "@/components/ui/notice";
 import type {
   CardRow,
   CategoryMixResponse,
@@ -36,15 +37,19 @@ export function CategoryWeightsCard({
   editable: boolean;
 }) {
   const router = useRouter();
-  // The server's picture, re-derived when it changes (a refresh after a
-  // save, a newly connected folder); a person mid-edit before a refresh keeps
-  // nothing, which is the honest outcome — the numbers on screen are the
-  // server's again.
-  const seed = data ? JSON.stringify(data.rows) : "";
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const baseline = useMemo(() => (data ? cardRows(data) : []), [seed]);
+  // The server's picture. A person mid-edit before a refresh keeps nothing,
+  // which is the honest outcome — the numbers on screen are the server's
+  // again.
+  //
+  // THE RESYNC IS A `key`, NOT AN EFFECT (#1344). This was prop → `useMemo`
+  // with an `eslint-disable` for a dependency array that lied → `useState`
+  // → `useEffect` writing that state back: four hops to say "when the
+  // server's rows change, start over". `settings/page.tsx` now keys this
+  // card on those rows, so React unmounts and remounts it and the baseline
+  // is simply what this mount was born with. The disable comment goes with
+  // it — it was suppressing the warning that the chain was wrong.
+  const baseline = data ? cardRows(data) : [];
   const [rows, setRows] = useState<CardRow[]>(baseline);
-  useEffect(() => setRows(baseline), [baseline]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -123,14 +128,10 @@ export function CategoryWeightsCard({
           folders freely; the weight follows the folder.
         </p>
         {error && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-            {error}
-          </div>
+          <Notice tone="error">{error}</Notice>
         )}
         {notice && (
-          <div className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800">
-            {notice}
-          </div>
+          <Notice tone="success">{notice}</Notice>
         )}
         {data === null ? (
           <p className="text-sm text-muted-foreground">

@@ -1,5 +1,4 @@
-import { redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
+import { requireWorkspacePage } from "@/lib/page-guards";
 import { workspaceFetch } from "@/lib/workspaces";
 import {
   derivePoolHealth,
@@ -20,14 +19,7 @@ import { MediaGrid } from "@/components/dashboard/media/media-grid";
 const MEDIA_LIMIT = 100;
 
 export default async function MediaLibraryPage() {
-  const session = await getSession().catch(() => null);
-  if (!session) redirect("/login");
-  // Middleware already required a selected workspace to reach any route under
-  // /dashboard. Repeated because a page is reachable in tests and in a direct
-  // render without it, and `activeWorkspaceId!` would be a non-null assertion
-  // on a value that is legitimately null for every brand-new user.
-  const workspaceId = session.activeWorkspaceId;
-  if (!workspaceId) redirect("/welcome");
+  const { workspaceId } = await requireWorkspacePage();
 
   const [mediaResult, statsResult] = await Promise.all([
     workspaceFetch<MediaResponse>(

@@ -133,6 +133,25 @@ export const WORKSPACE_COOKIE_OPTIONS = {
   maxAge: WORKSPACE_MAX_AGE_SECONDS,
 };
 
+/**
+ * The invitation token, remembered just long enough to survive the round
+ * trip to Google.
+ *
+ * A cookie rather than a `?next=` parameter: a `next` parameter is a
+ * redirect target an attacker can set, and the fix for that is an allowlist
+ * nobody maintains. A cookie holding only the token cannot name a
+ * destination at all.
+ *
+ * Here rather than in `app/join/[token]/start/route.ts`, where it was
+ * declared and from where two unrelated modules imported it. A route module
+ * is a mounted endpoint, not a library; the other two cookie names this
+ * tier owns live here, and this is the third.
+ */
+export const INVITE_COOKIE = "storydump_invite";
+
+/** 15 minutes. Long enough for a sign-in, short enough that a stale invite dies. */
+export const INVITE_MAX_AGE_SECONDS = 60 * 15;
+
 type MeResponse = {
   user: {
     id: string;

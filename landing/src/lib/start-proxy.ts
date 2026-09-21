@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { passThrough } from "./route-guards";
 import { targetFetch } from "./target-api";
 
 /**
@@ -17,9 +18,7 @@ export async function proxyStartOfGrant(
     method: "POST",
   });
 
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
 
   const url = result.data?.authorization_url;
   if (typeof url !== "string" || !isAllowedUrl(url)) {

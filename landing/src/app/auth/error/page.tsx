@@ -14,21 +14,6 @@ import { resolveContent, resolveFlow } from "./content";
  */
 
 /**
- * The API's closed reason vocabulary, verbatim from `src/api/routes/auth.py`.
- *
- * REPLACED, and the mismatch is worth recording rather than quietly fixing:
- * this page previously rendered `expired | already_linked | email_in_use`,
- * which the API never sends. It sends these five. Zero overlap — so every real
- * sign-in failure fell through to the generic fallback, and the page LOOKED
- * like it was handling errors while handling none of them. The API's docstring
- * says "virgil's P3 already renders it", which was true of the page and not of
- * the reasons.
- *
- * These stay in step by being copied from one closed list. If the API adds a
- * sixth, it lands here as the fallback rather than as a blank — which is the
- * right failure direction, but it is a fallback, not coverage.
- */
-/**
  * The tab title is part of the claim. "Sign-in problem" on a Drive failure is
  * the same false statement as the heading was, in the one place a reader sees
  * before the page even paints.

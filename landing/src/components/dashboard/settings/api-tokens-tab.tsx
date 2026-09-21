@@ -34,6 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { CopyButton } from "@/components/setup/copy-button";
+import { Notice } from "@/components/ui/notice";
 import {
   EXPIRY_DAYS_DEFAULT,
   EXPIRY_DAYS_MAX,
@@ -507,14 +508,14 @@ export function ApiTokensTab({
   return (
     <div className="space-y-6 pt-4">
       {error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <Notice tone="error" className="mb-4">
           {error}
-        </div>
+        </Notice>
       )}
       {notice && (
-        <div className="mb-4 rounded-md border bg-muted/40 p-3 text-sm">
+        <Notice tone="info" className="mb-4">
           {notice}
-        </div>
+        </Notice>
       )}
 
       <TokenCard

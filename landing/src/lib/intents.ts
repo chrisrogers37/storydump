@@ -239,6 +239,11 @@ export function refusalCopy(reason: unknown): string {
       return "This post is no longer in the queue.";
     case "unauthenticated":
       return notAuthenticatedCopy("Nothing changed.");
+    // Two spellings, one cause. `target_router_unreachable` is what the
+    // server-side `workspaceFetch` reports; `unreachable` is what `callBff`
+    // reports when the browser's own `fetch` threw. `settingsRefusalCopy`
+    // has paired them since it was written; this table now does too.
+    case "unreachable":
     case "target_router_unreachable":
       return "Storydump cannot reach the queue right now. Nothing changed — try again shortly.";
   }

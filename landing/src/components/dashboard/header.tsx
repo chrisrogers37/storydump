@@ -24,16 +24,19 @@ import { SignOutButton } from "@/components/auth/sign-out-button";
  *     it from. Keeping both would be two implementations of one surface, which
  *     is exactly the fork that drifts.
  *
- * So the header states which workspace you are in and links to where you change
- * it. One place to keep correct.
+ * So the header LINKS to where you change workspace. It does not name the
+ * one you are in: the prop that would have (`workspaceName`) was never
+ * passed by `(dashboard)/layout.tsx`, so the link has always read "Switch
+ * workspace", and the docblock said otherwise (#1344).
+ *
+ * NAMING IT IS A CHANGE, NOT A FIX. The session carries the name
+ * (`session.workspaces?.find(w => w.id === session.activeWorkspaceId)?.name`),
+ * so passing it is two lines — and it would put a workspace name in the
+ * chrome of every dashboard page, which is a design decision nobody has
+ * taken. Deleting the dead prop is the behaviour-preserving half; wiring it
+ * up is its own change.
  */
-export function DashboardHeader({
-  user,
-  workspaceName,
-}: {
-  user: SessionUser;
-  workspaceName?: string;
-}) {
+export function DashboardHeader({ user }: { user: SessionUser }) {
   return (
     <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b bg-background px-4 lg:px-6">
       <div className="flex min-w-0 items-center gap-3">
@@ -57,7 +60,7 @@ export function DashboardHeader({
           href="/workspaces"
           className="truncate text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
         >
-          {workspaceName || "Switch workspace"}
+          Switch workspace
         </Link>
       </div>
 

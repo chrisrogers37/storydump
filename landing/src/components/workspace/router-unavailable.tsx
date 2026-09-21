@@ -11,9 +11,17 @@ import { CloudOff } from "lucide-react";
  * because it reads as good news.
  *
  * It is also not an alarm. No warning colour, no error icon, no apology
- * paragraph: this is the expected state of every workspace screen until the
- * target router is mounted, and dressing an expected state as a fault teaches
- * people to ignore the styling that will matter later.
+ * paragraph. It used to be the EXPECTED state of every workspace screen,
+ * before the target router was mounted; it is now the rare one — a deploy
+ * in flight, a pool saturated — and the styling is unchanged on purpose,
+ * because a reader who meets it once should be told "ask again shortly",
+ * not "something is broken".
+ *
+ * THE DEFAULT `detail` STILL SAYS "being connected" AND IS NOW WRONG. It is
+ * the sentence eight screens render when they pass no `detail` of their own,
+ * so correcting it changes what a person reads on every one of them — a copy
+ * change, not a cleanup, and it is left for the ruling that owns copy
+ * (`00_TECH_DEBT.md` §Observations) rather than folded in here.
  */
 export function RouterUnavailable({
   what,
