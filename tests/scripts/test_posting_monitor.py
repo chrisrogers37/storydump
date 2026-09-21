@@ -521,7 +521,7 @@ class TestAMissingLadderAgeCannotSILENCEAnOverdueEstate:
     Not reachable from today's SQL — each pair comes from one `count(*)` and one
     `max(...)` over one population in one statement. This is the guard for the
     edit that decouples them, and `posting_health` already filters one side of
-    one pair deliberately (`_REAL_POST`), so that edit has a precedent in the
+    one pair deliberately (the landing filter in `fn_health_posting_freshness`, 081), so that edit has a precedent in the
     very file that produces these fields.
     """
 

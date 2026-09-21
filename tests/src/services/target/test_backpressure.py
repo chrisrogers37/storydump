@@ -32,7 +32,8 @@ class _Result:
 
 
 class _Executor:
-    """Answers the four statements by what they select from."""
+    """Answers the four statements by the door (or table) each selects from —
+    the doors of 081 for the three tenant-wide reads, `rate_counters` direct."""
 
     def __init__(self, *, lanes, pending, paced, oldest):
         self.answers = {
@@ -46,18 +47,22 @@ class _Executor:
     async def execute(self, stmt, params=None):
         sql = " ".join(str(stmt).split())
         self.statements.append((sql, params))
-        if "GROUP BY lane" in sql:
+        if "FROM fn_health_ready_lanes()" in sql:
             return _Result(rows=self.answers["lanes"])
-        if "FROM channel_outbox" in sql:
+        if "SELECT fn_health_outbox_pending()" in sql:
             return _Result(scalar=self.answers["pending"])
         if "FROM rate_counters" in sql:
             return _Result(
                 rows=[self.answers["paced"]] if self.answers["paced"] else []
             )
-        if "GROUP BY workspace_id" in sql:
+        if "FROM fn_health_oldest_tenant_wait_named()" in sql:
             return _Result(
                 rows=[self.answers["oldest"]] if self.answers["oldest"] else []
             )
+        if "FROM fn_health_oldest_tenant_wait()" in sql:
+            # the wait-only door: a row names no workspace
+            oldest = self.answers["oldest"]
+            return _Result(rows=[{**oldest, "workspace_id": None}] if oldest else [])
         raise AssertionError(sql)
 
 

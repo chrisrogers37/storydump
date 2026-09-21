@@ -749,13 +749,12 @@ def create_app(
         # and has no tenant; naming one that does not exist is a lie the guard
         # correctly refused, and the remedy is the one its own message gives.
         #
-        # That the estate-wide read ANSWERS rests on the owner bypassing RLS,
-        # which is now measured rather than assumed: production connects as
-        # `neondb_owner`, `058` sets no `FORCE ROW LEVEL SECURITY` and never
-        # reassigns the owner, so `p_tenant` does not apply. Under a role the
-        # policy DOES cover, a tenant-less read returns zero rows — and zero
-        # rows here reads as a healthy estate. Whoever closes #751 must give
-        # this a door; `accounts_active` is what tells the two apart.
+        # The estate-wide reads answer through doors (081, `07` §24): each
+        # is a SECURITY DEFINER function owned by `svc_maintenance`, so the
+        # answer is the same under the owner login and under `svc_ingress`.
+        # The first switch to `svc_ingress` (2026-09-20, #751) is why: with
+        # the reads still direct, every policy-covered table read empty and
+        # this surface said `no-signal` for a live estate.
         async with engine.connect() as conn:
             # TWO AXES, ONE PAYLOAD (#1120). The cursor axis is empty whenever
             # no destination is active, and `no-signal` is then the answer
@@ -834,8 +833,8 @@ def create_app(
         # A DIRECT CONNECTION, not a unit of work, for the reason the route
         # above records: `UnitOfWork.__init__` refuses a blank tenant at
         # construction, and this aggregate is estate-wide and has no tenant.
-        # Its cross-tenant reach rests on the owner bypassing RLS (#751), the
-        # same footing and the same door to build when that is closed.
+        # Its cross-tenant reach is 081's doors, the same footing as the route
+        # above.
         async with engine.connect() as conn:
             posting = await posting_health.posting_freshness(conn)
             attempts = await posting_health.publish_attempts(conn)

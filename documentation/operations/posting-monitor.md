@@ -120,7 +120,7 @@ not a degradation, a silence, in the direction that looks fine.
 This is defence in depth, not a live bug: today each pair is one `count(*)` and
 one `max(...)` over one population in a single statement, so they cannot
 diverge. It fires the moment an edit decouples a pair — and `posting_health`
-already filters one side of one pair deliberately (`_REAL_POST`), so that edit
+already filters one side of one pair deliberately (the landing filter in `fn_health_posting_freshness`, 081), so that edit
 has a precedent in the very file that produces these fields.
 
 In phase (a) the tier was empty, so the local clock is the only rung — which is

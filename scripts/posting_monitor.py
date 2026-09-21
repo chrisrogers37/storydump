@@ -365,7 +365,7 @@ def classify(
     # Not reachable from today's SQL — each pair is one `count(*)` and one
     # `max(...)` over one population in one statement. It becomes reachable the
     # moment a filter lands on one side of a pair, which `posting_health`
-    # already does deliberately once (`_REAL_POST`), so the precedent for the
+    # already does deliberately once (the landing filter in `fn_health_posting_freshness`, 081), so the precedent for the
     # decoupling lives in the very file that produces these fields.
     for count_key, age_key in _PAIRS:
         count, paired_age = data[count_key], data[age_key]
