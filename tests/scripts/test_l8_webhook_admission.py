@@ -473,9 +473,18 @@ class TestTheSecretToken:
 
 class TestManyDistinctDeliveriesAtOnce:
     """Phase 2's admission gate: 200 DISTINCT updates admitted concurrently on
-    an ingress-shaped pool (10, overflow 0, the 1 s ingress wait) — 200
-    admissions, zero errors, the pool's high-water mark within its size, and
-    the run provably concurrent (#672: the property, never wall-clock)."""
+    an ingress-shaped pool (10, overflow 0) — 200 admissions, zero errors, the
+    pool's high-water mark within its size, and the run provably concurrent
+    (#672: the property, never wall-clock).
+
+    The pool's WAIT is the worker's 3 s, not the API's 1 s. The wait is a
+    latency budget, not the property: 200 admissions through 10 connections
+    is twenty rounds, and under a 1 s wait the last waiter errors once one
+    admission costs more than ~50 ms — which a loaded CI runner did three
+    times in four days (the tear-out's ledger, 2026-09-20). The 1 s ingress
+    wait is pinned where it is chosen (`test_app_factory`,
+    `test_unit_of_work`); here it only made the runner's speed part of the
+    assertion."""
 
     def test_200_distinct_updates_admit_with_zero_errors_within_the_pool(
         self, admit_db
@@ -484,7 +493,7 @@ class TestManyDistinctDeliveriesAtOnce:
 
         engine = uow.create_engine(
             async_url(admit_db["owner"]),
-            pool_timeout=uow.INGRESS_POOL_TIMEOUT_SEAM,
+            pool_timeout=uow.POOL_TIMEOUT_SEAM,  # the wait is a budget, not the property
         )
         watch = uow.PoolWatch(engine)
         refs = [_ref() for _ in range(200)]

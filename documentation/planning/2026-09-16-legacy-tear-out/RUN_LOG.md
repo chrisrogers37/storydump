@@ -1827,10 +1827,11 @@ the remaining half of #751.
   closes by keyword at the merge (its first draft would have auto-closed #1202).
 - **The residue PR #1324:** merged as `a85f6db` on 2026-09-20 and live on both services (the entry
   above).
-- **A load-sensitive test's tolerance:** `test_l8_webhook_admission.py`'s 200-concurrent admission
-  test trips the production 1 s pool wait on a slow CI runner (three times in four days, on `main`,
-  the phase-04 branch and #1324; green on every re-run). Re-run, not chased; the fix — a
-  runner-aware wait, or a smaller burst — is the owner's call, outside the tear-out.
+- ~~**A load-sensitive test's tolerance:** `test_l8_webhook_admission.py`'s 200-concurrent admission
+  test trips the production 1 s pool wait on a slow CI runner.~~ CLOSED 2026-09-21 (the branch
+  `test/l8-wait-budget`): the burst keeps its 200 and the pool its shape (10, overflow 0); the wait
+  is the worker's 3 s — a latency budget, not the property — and the 1 s ingress wait stays pinned
+  where it is chosen (`test_app_factory`, `test_unit_of_work`).
 - **After the window (2026-09-19) — the marker and the variables DONE 2026-09-20, the entry above:** the marker branch `pre-3g-20260919-2134` is retired a day after
   the worker has run clean (`neonctl branches delete pre-3g-20260919-2134 --project-id … --org-id …`);
   `WORKER_IMPL` on the worker service is what made a stale redeploy harmless — remove it only once
