@@ -45,7 +45,15 @@ def world(admin_conn, owner_actor):
             b = seed_workspace_chain(conn, "card-b")
         finally:
             conn.close()
-        yield {"stream": stream, "ingress": as_user(db, "svc_ingress"), "a": a, "b": b}
+        yield {
+            "stream": stream,
+            "ingress": as_user(db, "svc_ingress"),
+            # the sender sweep is the worker's (082: a door granted to
+            # svc_worker alone), run here the way the worker runs it
+            "worker": as_user(db, "svc_worker"),
+            "a": a,
+            "b": b,
+        }
     finally:
         gen.close()
 
@@ -60,6 +68,29 @@ async def _in_uow(dsn, ws, user, fn):
             return await fn(session)
     finally:
         await engine.dispose()
+
+
+async def _sweep_as_worker(dsn: str):
+    """`ensure_sender_jobs` the way the worker runs it: as `svc_worker`, in a
+    session with the empty tenant and the system actor — the sweep's own
+    cross-tenant read is the door's (082)."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from src.services.target import unit_of_work
+
+    engine = create_async_engine(
+        dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+    )
+    try:
+        async with engine.begin() as c:
+            await unit_of_work.apply_gucs(c, tenant_id="", actor_kind="system")
+            return await work_loop.ensure_sender_jobs(c)
+    finally:
+        await engine.dispose()
+
+
+def sweep_as_worker(world):
+    return asyncio.run(_sweep_as_worker(world["worker"]))
 
 
 def run(world, fn, *, ids=None):
@@ -254,7 +285,8 @@ class TestItReachesTheBuiltChain:
                 invitation=inv,
                 token=token,
             )
-            minted = await work_loop.ensure_sender_jobs(session)
+            # the sweep is the worker's (082): its own login, its own session
+            minted = await _sweep_as_worker(world["worker"])
             return n, minted
 
         n, minted = run(world, announce_and_sweep)

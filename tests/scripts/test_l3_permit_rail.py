@@ -576,7 +576,9 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
                     conn,
                     intent_id=intent,
                     workspace_id=ops_db["ws"],
-                    poll=lambda intent_id: seen.append(intent_id) or status,
+                    poll=lambda intent_id, workspace_id=None: (
+                        seen.append(intent_id) or status
+                    ),
                     stories_check=lambda intent_id: {"stories": []},
                     mode=mode,
                     checks=checks,
