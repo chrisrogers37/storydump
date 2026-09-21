@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
@@ -27,7 +27,7 @@ from src.api.principal import (
     require_own_workspace,
     require_session,
 )
-from src.api.routes import v1
+from src.api import principal as principal_mod
 from src.exceptions.tenancy import TokenRefused
 from src.services.target import service_tokens, workspaces
 
@@ -91,7 +91,7 @@ async def me_principal(
         }
     if principal.is_service_identity:
         ws = principal.token_workspace_id
-        async with v1._open_tenant(request, ws, principal) as session:
+        async with principal_mod.open_tenant(request, ws, principal) as session:
             row = await workspaces.get_workspace(session, workspace_id=ws)
         memberships = (
             []
@@ -124,7 +124,7 @@ async def mint_my_token(
 ):
     """Mint a person-bound token: the secret is in this answer and nowhere
     else, ever."""
-    body = await v1._json_object(request)
+    body = await principal_mod.json_object(request)
     engine = require_engine(request)
     async with engine.begin() as conn:
         secret, row = await service_tokens.mint(
@@ -168,7 +168,7 @@ async def revoke_my_token(
             conn, token_id=str(token_id), user_id=principal.user_id
         )
     if not revoked:
-        raise HTTPException(status_code=404, detail="not found")
+        raise principal_mod.not_found()
     return {"revoked": True}
 
 
@@ -181,8 +181,8 @@ async def mint_service_identity(
 ):
     """An admin or owner mints a workspace service identity. The role is
     ``readonly`` whatever the body says (F10): a service identity reads."""
-    body = await v1._json_object(request)
-    async with v1._admin(request, str(ws), principal) as session:
+    body = await principal_mod.json_object(request)
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         secret, row = await service_tokens.mint(
             session,
             name=body.get("name"),
@@ -202,12 +202,12 @@ async def list_service_identities(
     on because it has no membership."""
     if principal.is_service_identity:
         require_own_workspace(principal, str(ws))
-        async with v1._open_tenant(request, str(ws), principal) as session:
+        async with principal_mod.open_tenant(request, str(ws), principal) as session:
             rows = await service_tokens.list_for_workspace(
                 session, workspace_id=str(ws)
             )
     else:
-        async with v1._admin(request, str(ws), principal) as session:
+        async with principal_mod.admin_session(request, str(ws), principal) as session:
             rows = await service_tokens.list_for_workspace(
                 session, workspace_id=str(ws)
             )
@@ -231,16 +231,16 @@ async def revoke_service_identity(
             raise TokenRefused(
                 "readonly_token", "a service identity may revoke only itself"
             )
-        async with v1._open_tenant(request, str(ws), principal) as session:
+        async with principal_mod.open_tenant(request, str(ws), principal) as session:
             revoked = await service_tokens.revoke(
                 session, token_id=token_id, workspace_id=str(ws)
             )
     else:
         _token_may_revoke(principal, token_id)
-        async with v1._admin(request, str(ws), principal) as session:
+        async with principal_mod.admin_session(request, str(ws), principal) as session:
             revoked = await service_tokens.revoke(
                 session, token_id=token_id, workspace_id=str(ws)
             )
     if not revoked:
-        raise HTTPException(status_code=404, detail="not found")
+        raise principal_mod.not_found()
     return {"revoked": True}

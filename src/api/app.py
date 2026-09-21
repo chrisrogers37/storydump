@@ -62,7 +62,6 @@ from src.api.routes.tokens import router as tokens_router
 from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
-from src.api.routes.webhooks import router as webhooks_router
 from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError, TokenRefused
 from src.services.target.commands import CommandNotBuilt, CommandRefused
@@ -157,6 +156,11 @@ class DropAmbiguousForwardedForMiddleware:
 
         await self.app(scope, receive, send)
 
+
+#: How often `_sample_webhook_live` re-reads what Telegram holds. The CLI's
+#: `storydump health` reads the cached sample and states this bound in its
+#: help; the number should be findable from both ends.
+WEBHOOK_LIVE_SAMPLE_SECONDS = 60
 
 #: `TenantResolutionError.reason` → status, for the reasons the web surface can
 #: raise. Session reasons are 401 and the body does not say which (the
@@ -269,6 +273,55 @@ def _unmapped(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": "internal error"})
 
 
+def _reason_detail(exc, status: int) -> dict:
+    """The ordinary refusal body: the message, and the machine-routable
+    reason the web's `target-api.ts::readError` matches on."""
+    return {"detail": str(exc), "reason": exc.reason}
+
+
+def _tenant_detail(exc, status: int) -> dict:
+    """No `reason` on the wire: the web surface must not learn which of
+    "not a member", "no such workspace" and "disabled" it met (`07` §5, no
+    existence oracle). The detail is keyed by the STATUS, not the reason."""
+    return {"detail": _TENANT_DETAIL[status]}
+
+
+def _invitation_detail(exc, status: int) -> dict:
+    """The invitation's own sentence, keyed by reason — `str(exc)` is the
+    service's wording and this table is the surface's."""
+    return {"detail": _INVITATION_DETAIL[exc.reason], "reason": exc.reason}
+
+
+def _command_body(exc, status: int) -> dict:
+    # `CommandNotBuilt` is the vocabulary's "known, not built yet": the body
+    # names the command so the caller can tell it from a typo, and its reason
+    # is the fixed `not_built` rather than the exception's message.
+    if isinstance(exc, CommandNotBuilt):
+        return {"command": exc.command, "detail": "not built", "reason": "not_built"}
+    return _reason_detail(exc, status)
+
+
+def _mapped(table: dict, content=_reason_detail, *, log: bool = True):
+    """A handler for a refusal whose `reason` this table maps to a status.
+
+    The five handlers below had each written out the same decision — look
+    the reason up, fall through to `_unmapped` when it is not there (which
+    is the pin `TestRefusalMappingsAreTotal` exists to keep honest), then
+    answer. What actually varies is the body and whether the refusal is
+    logged, so those are the arguments; everything else is this function.
+    """
+
+    async def handler(request: Request, exc):
+        status = table.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
+        if log:
+            logger.info("refused %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(status_code=status, content=content(exc, status))
+
+    return handler
+
+
 def _register_handlers(app: FastAPI) -> None:
     """Service refusals → HTTP, once. No route speaks a status for these."""
 
@@ -285,25 +338,11 @@ def _register_handlers(app: FastAPI) -> None:
             headers={"Retry-After": "1"},
         )
 
-    @app.exception_handler(TenantResolutionError)
-    async def _tenant(request: Request, exc: TenantResolutionError):
-        status = _TENANT_STATUS.get(exc.reason)
-        if status is None:
-            return _unmapped(request, exc)
-        logger.info("refused %s %s: %s", request.method, request.url.path, exc)
-        return JSONResponse(
-            status_code=status, content={"detail": _TENANT_DETAIL[status]}
-        )
+    app.add_exception_handler(
+        TenantResolutionError, _mapped(_TENANT_STATUS, _tenant_detail)
+    )
 
-    @app.exception_handler(TokenRefused)
-    async def _token(request: Request, exc: TokenRefused):
-        status = _TOKEN_STATUS.get(exc.reason)
-        if status is None:
-            return _unmapped(request, exc)
-        logger.info("refused %s %s: %s", request.method, request.url.path, exc)
-        return JSONResponse(
-            status_code=status, content={"detail": str(exc), "reason": exc.reason}
-        )
+    app.add_exception_handler(TokenRefused, _mapped(_TOKEN_STATUS, _reason_detail))
 
     @app.exception_handler(TokenArgsInvalid)
     async def _token_args(request: Request, exc: TokenArgsInvalid):
@@ -311,29 +350,13 @@ def _register_handlers(app: FastAPI) -> None:
             status_code=400, content={"detail": str(exc), "reason": "invalid_args"}
         )
 
-    @app.exception_handler(CommandRefused)
-    async def _command(request: Request, exc: CommandRefused):
-        status = _COMMAND_STATUS.get(exc.reason)
-        if status is None:
-            return _unmapped(request, exc)
-        content = {"detail": str(exc), "reason": exc.reason}
-        if isinstance(exc, CommandNotBuilt):
-            content = {
-                "command": exc.command,
-                "detail": "not built",
-                "reason": "not_built",
-            }
-        return JSONResponse(status_code=status, content=content)
+    app.add_exception_handler(
+        CommandRefused, _mapped(_COMMAND_STATUS, _command_body, log=False)
+    )
 
-    @app.exception_handler(ProvisioningRefused)
-    async def _provisioning(request: Request, exc: ProvisioningRefused):
-        status = _PROVISIONING_STATUS.get(exc.reason)
-        if status is None:
-            return _unmapped(request, exc)
-        logger.info("refused %s %s: %s", request.method, request.url.path, exc)
-        return JSONResponse(
-            status_code=status, content={"detail": str(exc), "reason": exc.reason}
-        )
+    app.add_exception_handler(
+        ProvisioningRefused, _mapped(_PROVISIONING_STATUS, _reason_detail)
+    )
 
     @app.exception_handler(MixInvalid)
     async def _mix(request: Request, exc: MixInvalid):
@@ -346,15 +369,9 @@ def _register_handlers(app: FastAPI) -> None:
             content={"detail": str(exc), "reason": f"invalid_mix_{exc.reason}"},
         )
 
-    @app.exception_handler(InvitationRefused)
-    async def _invitation(request: Request, exc: InvitationRefused):
-        status = _INVITATION_STATUS.get(exc.reason)
-        if status is None:
-            return _unmapped(request, exc)
-        return JSONResponse(
-            status_code=status,
-            content={"detail": _INVITATION_DETAIL[exc.reason], "reason": exc.reason},
-        )
+    app.add_exception_handler(
+        InvitationRefused, _mapped(_INVITATION_STATUS, _invitation_detail, log=False)
+    )
 
     @app.exception_handler(DeliveryReplayed)
     async def _replayed(request: Request, exc: DeliveryReplayed):
@@ -492,7 +509,7 @@ async def _sample_webhook_live(app: FastAPI, env: Mapping[str, str]) -> None:
                     "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     "error": type(exc).__name__,
                 }
-            await asyncio.sleep(60)
+            await asyncio.sleep(WEBHOOK_LIVE_SAMPLE_SECONDS)
     finally:
         try:
             await transport.aclose()
@@ -544,6 +561,12 @@ def create_app(
     """Assemble the app. *engine* injects the target engine (tests, or a
     composition root that owns the pool); otherwise it comes from *env*
     (default: the process environment) and from nothing else."""
+    # Resolved once: `os.environ` is a live mapping, so binding it here reads
+    # exactly what reading it per call site read — five spellings of one
+    # decision, and `create_app(env=…)`'s seam is now a single place. The
+    # `_lifespan` closure below captures the resolved mapping, not the
+    # decision.
+    env = os.environ if env is None else env
 
     @asynccontextmanager
     async def _lifespan(app_: FastAPI):
@@ -553,12 +576,8 @@ def create_app(
         # pending at shutdown is cancelled rather than left to die with the loop.
         tasks = [
             asyncio.create_task(_sample_db_role(app_)),
-            asyncio.create_task(
-                _register_webhook(app_, os.environ if env is None else env)
-            ),
-            asyncio.create_task(
-                _sample_webhook_live(app_, os.environ if env is None else env)
-            ),
+            asyncio.create_task(_register_webhook(app_, env)),
+            asyncio.create_task(_sample_webhook_live(app_, env)),
         ]
         try:
             yield
@@ -573,11 +592,7 @@ def create_app(
         version=VERSION,
         lifespan=_lifespan,
     )
-    app.state.engine = (
-        engine
-        if engine is not None
-        else _engine_from_env(os.environ if env is None else env)
-    )
+    app.state.engine = engine if engine is not None else _engine_from_env(env)
     # Which database login this process holds, and whether it bypasses RLS
     # (#751, F.4). Sampled ONCE, in the background, after startup — `/health`
     # reports the cached answer and still opens no connection of its own, so a
@@ -606,9 +621,9 @@ def create_app(
     # Wired only when an engine exists: without one there is nothing to
     # `connect` to, and a runtime whose `connect` fails would convert the
     # route's honest 503 into a 500 mid-delivery.
-    bot = _telegram_transport(os.environ if env is None else env)
+    bot = _telegram_transport(env)
     app.state.tap_metrics = webhooks.TapMetrics()
-    app.state.ingress_workers = _ingress_workers(os.environ if env is None else env)
+    app.state.ingress_workers = _ingress_workers(env)
     app.state.pool_watch = (
         PoolWatch(app.state.engine) if app.state.engine is not None else None
     )
@@ -661,7 +676,7 @@ def create_app(
     # The read views (phase 02 of the v2 CLI, fork F6): one file for the
     # operator surface, tenant-scoped, admitted to tokens.
     app.include_router(ops_router, prefix="/api/v1")
-    app.include_router(webhooks_router, prefix="/webhooks")
+    app.include_router(webhooks.router, prefix="/webhooks")
     # Meta's policy callbacks (#410). Under the same prefix as the other
     # provider-called doors; the URLs are not registered with Meta yet.
     app.include_router(meta_router, prefix="/webhooks/meta")
@@ -684,7 +699,7 @@ def create_app(
             # with `ingress_workers` this is the Σ the `05` inequality reads.
             "pool": (
                 app.state.pool_watch.snapshot()
-                if getattr(app.state, "pool_watch", None) is not None
+                if app.state.pool_watch is not None
                 else None
             ),
             "ingress_workers": app.state.ingress_workers,
