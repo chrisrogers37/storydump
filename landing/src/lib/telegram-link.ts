@@ -81,14 +81,6 @@ export function telegramLinkRefusalCopy(reason: unknown): string {
   return "Could not start Telegram linking. Nothing changed — try again shortly.";
 }
 
-/** Whether the user already has a Telegram identity attached, from `/me`'s
- *  identities. An unreadable list is "not linked", never "linked". */
-export function telegramLinkedFrom(
-  identities: ReadonlyArray<{ provider: string }> | null | undefined,
-): boolean {
-  return telegramIdentityFrom(identities) !== null;
-}
-
 /**
  * The attached Telegram identity's display name, or null. Shown beside
  * "Linked" so a person can tell WHOSE Telegram is on their account — the one

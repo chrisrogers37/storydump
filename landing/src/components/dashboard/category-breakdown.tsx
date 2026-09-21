@@ -3,6 +3,7 @@
 import { Layers } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import type { CategoryView } from "@/lib/dashboard-payloads";
 
 /**
  * Category mix, from `stats.media_by_category` + `posted_by_category` (#1044).
@@ -23,15 +24,9 @@ import { EmptyState } from "@/components/dashboard/empty-state";
  *
  * `configured_ratio` is `number | null` rather than optional so that a future
  * edit cannot reintroduce the silent version with `?? 0` — the compiler stops
- * at this file until it says what it shows.
+ * at this file until it says what it shows — the lib type spells the null
+ * `Unavailable`, which is the same type under the name that says why.
  */
-interface CategoryView {
-  category: string;
-  posted: number;
-  total: number;
-  actual_ratio: number;
-  configured_ratio: number | null;
-}
 
 export function CategoryBreakdown({ categories }: { categories: CategoryView[] }) {
   const anyConfigured = categories.some((c) => c.configured_ratio !== null);

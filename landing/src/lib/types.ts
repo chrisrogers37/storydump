@@ -2,11 +2,11 @@
  * A DESTINATION — the Instagram account a workspace schedules for, as the
  * target API actually returns it (`GET /workspaces/{ws}/accounts`).
  *
- * Separate from `InstagramAccount`, which is the LEGACY payload shape and now
- * has one consumer left (the unreachable setup wizard). They are not two names
- * for one thing: the target sends `handle` and `state`, the legacy shape sent
- * `instagram_username` and `is_active`, and the settings screen was reading the
- * legacy field names off a target response — rendering a bare `@` for every row
+ * The LEGACY payload shape it replaced (`InstagramAccount`: `display_name`,
+ * `instagram_username`, `is_active`) is deleted (TD-D4) — it had no consumers
+ * and the target serves `handle`/`state`. They were never two names for one
+ * thing, which is the whole point: the settings screen was reading the legacy
+ * field names off a target response and rendering a bare `@` for every row
  * (#1048's class). Typing the response for what it is, is the fix.
  *
  * A NARROWING, not the whole projection: `workspaces.list_accounts` also returns
@@ -27,26 +27,6 @@ export interface Destination {
   /** #1220 step 2. `none` = never connected; `expired`/`revoked` = reconnect needed. */
   credential_status: "none" | "active" | "expired" | "revoked";
   credential_connected_at: string | null;
-}
-
-/** LEGACY account payload. One consumer left; dies with it. See `Destination`. */
-export interface InstagramAccount {
-  id: string;
-  display_name: string;
-  instagram_username: string;
-  is_active: boolean;
-}
-
-/** Backend instance summary returned by GET /api/instances. */
-export interface Instance {
-  chat_settings_id: string;
-  telegram_chat_id: number;
-  display_name: string;
-  media_count: number;
-  posts_per_day: number;
-  is_paused: boolean;
-  last_post_at: string | null;
-  instance_role: string;
 }
 
 /** A Telegram chat this workspace's cards go to (`GET /workspaces/{ws}/bindings`). */

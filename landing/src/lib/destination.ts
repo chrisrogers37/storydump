@@ -2,6 +2,7 @@ import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 import { isHttpsUrlOnHost } from "./redirect-guard";
 import { requestGrant } from "./start-grant";
 import type { GrantResult } from "./start-grant";
+import type { BadgeTone } from "@/components/dashboard/tone";
 /**
  * Destinations, browser side (#1089).
  *
@@ -60,7 +61,7 @@ export function destinationIsActive(state: string | null | undefined): boolean {
  */
 export type DestinationStateBadge = {
   label: string;
-  tone: "active" | "attention" | "inert";
+  tone: BadgeTone;
 };
 
 /** The vocabulary `ck_ig_accounts_state` admits. */

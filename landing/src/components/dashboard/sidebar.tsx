@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  BarChart3,
   CalendarDays,
   ImageIcon,
   LayoutDashboard,
@@ -19,7 +18,6 @@ const navItems = [
   { href: "/dashboard/media", label: "Media Library", icon: ImageIcon },
   { href: "/dashboard/media/calendar", label: "Calendar", icon: CalendarDays },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
-  { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
 ];
 
 /**
@@ -34,6 +32,17 @@ const navItems = [
  * Deleted rather than pointed somewhere placeholder: a nav item is a promise
  * that a destination exists, and there is no destination. It comes back with
  * the screen it names.
+ *
+ * THE SAME RULE, APPLIED AGAIN (TD-D4). `/dashboard/analytics` was in this
+ * list and its destination renders one card reading "Coming Soon … planned
+ * for Phase 3". A nav item is a promise that a destination exists; a
+ * destination that exists only to say it does not is the same broken promise
+ * with a softer landing. The entry is gone.
+ *
+ * THE PAGE IS NOT. Deleting it would turn a URL that answers 200 today into
+ * a 404 for anyone holding the link, which is a behaviour change this
+ * cleanup does not get to make. It comes back to this list with the screen
+ * it names, or it is deleted under its own ruling.
  */
 export function Sidebar({ mobile }: { mobile?: boolean }) {
   const pathname = usePathname();

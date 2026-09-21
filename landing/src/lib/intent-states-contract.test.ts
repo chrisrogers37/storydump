@@ -9,6 +9,11 @@ import {
   SCHEDULED_STATES,
   TERMINAL_STATES,
 } from "./dashboard-payloads";
+import {
+  INTENT_STATES,
+  NON_TERMINAL_STATES,
+  TERMINAL_STATES as TERMINAL_STATE_LIST,
+} from "./intents";
 
 /**
  * The intent vocabulary is a CROSS-TIER CONTRACT, and this tier partitions it.
@@ -99,6 +104,21 @@ describe("the intent-state partition agrees with the API", () => {
       `state(s) named here that the API does not admit — a filter on one is ` +
         `a 422, not an empty list`,
     ).toEqual([]);
+  });
+
+  it("keeps the query spellings derived from the arrays, not re-typed", () => {
+    // The `?state=` strings USED to be a second, hand-written partition in
+    // `dashboard-payloads.ts`, and this file pinned only those. The arrays in
+    // `intents.ts` were pinned only against a hand-typed literal in
+    // `intents.test.ts` — a copy agreeing with itself, which is the exact
+    // anti-pattern the docblock at the top of this file names. Now one is
+    // derived from the other; this case is what makes that structural rather
+    // than a convention.
+    expect(split(QUEUE_STATES)).toEqual([...NON_TERMINAL_STATES]);
+    expect(split(TERMINAL_STATES)).toEqual([...TERMINAL_STATE_LIST]);
+    expect(new Set([...split(QUEUE_STATES), ...split(TERMINAL_STATES)])).toEqual(
+      new Set(INTENT_STATES),
+    );
   });
 
   it("puts each state in exactly one half", () => {

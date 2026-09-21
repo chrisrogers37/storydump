@@ -32,6 +32,8 @@
  * what makes the decision Chris's rather than a side effect of this PR.
  */
 
+import { NON_TERMINAL_STATES, TERMINAL_STATES as TERMINAL_STATE_LIST } from "./intents";
+
 // ── What the routes actually return ────────────────────────────────────────
 
 /** `GET /api/v1/workspaces/{ws}/stats` — counted where the rows are. */
@@ -46,28 +48,19 @@ export type StatsResponse = {
   sources: number;
 };
 
-/** A row of `GET …/intents?state=&limit=` — `_INTENT_COLUMNS`, joined to media. */
-export type IntentRow = {
-  id: string;
-  state: string;
-  ig_account_id: string | null;
-  media_item_id: string;
-  schedule_slot_at: string | null;
-  approval_mode: string | null;
-  published_via: string | null;
-  publish_step: string | null;
-  cancel_requested: boolean;
-  ig_permalink: string | null;
-  entered_state_at: string;
-  created_at: string;
-  file_name: string;
-  media_kind: string;
-  thumbnail_url: string | null;
-  caption: string | null;
-  category: string | null;
-};
-
-export type IntentsResponse = { intents: IntentRow[]; limit: number };
+/**
+ * The intent row and its envelope live in `intents.ts` — ONE contract.
+ *
+ * This file used to declare a second `IntentRow`/`IntentsResponse` pair for
+ * the three screens that read `?state=`. Structural typing kept both
+ * compiling while they drifted: this copy was missing `account_handle` and
+ * `account_display_name` (served by `_INTENT_COLUMNS`), and typed
+ * `ig_account_id`, `schedule_slot_at` and `approval_mode` as nullable where
+ * the server never sends null. Re-exported rather than deleted outright so
+ * that a reader who lands here on the name is sent to the owner rather than
+ * finding nothing.
+ */
+export type { Intent, IntentState, IntentsResponse } from "./intents";
 
 /** A row of `GET …/media?state=&never_posted=&limit=` — `_MEDIA_COLUMNS`. */
 export type MediaRow = {
@@ -181,10 +174,13 @@ export const HISTORY_STATES = "posted,skipped,rejected";
  * but it is not one the label "In Queue" draws for a reader, and holding it
  * cost a wrong number. If the queue should ever exclude a non-terminal state
  * again, the contract test makes that a deliberate, visible edit.
+ *
+ * DERIVED, NOT RE-TYPED (TD-D1). The members are `NON_TERMINAL_STATES` in
+ * `intents.ts`; this is the `?state=` spelling of them. A state added there
+ * now lands here without an edit, which is the failure mode the paragraph
+ * above describes, closed at the source rather than watched for.
  */
-export const QUEUE_STATES =
-  "scheduled,prompt_pending,awaiting_approval,approved," +
-  "publishing,publishing_ambiguous,review_required";
+export const QUEUE_STATES = NON_TERMINAL_STATES.join(",");
 
 /**
  * The terminal outcomes — the other half of the partition. Migration `055`
@@ -196,9 +192,12 @@ export const QUEUE_STATES =
  * #1044's call and not this file's. Naming them here is what lets the contract
  * test account for all thirteen states rather than for thirteen minus whatever
  * the history tab happens to render.
+ *
+ * DERIVED from `intents.TERMINAL_STATES`, which mirrors
+ * `command_executors.TERMINAL_STATES` (Python). The superset relationship
+ * with `HISTORY_STATES` above is unchanged and still this tier's call.
  */
-export const TERMINAL_STATES =
-  "posted,skipped,rejected,expired,failed,cancelled";
+export const TERMINAL_STATES = TERMINAL_STATE_LIST.join(",");
 
 /**
  * The one queue member an operator has to act on personally.
@@ -462,46 +461,7 @@ export function deriveSettings(
 // row — the type asserted a shape nothing produced (#1048's class, #1089).
 export type AccountsResponse = { accounts?: import("./types").Destination[] };
 
-// ── STILL LEGACY: the settings screen ──────────────────────────────────────
-//
-// `init` is NOT repointed in this change and these types are kept for it. That
-// is deliberate and is not the same gap as the two contested figures.
-//
-// Settings looked like the fourth rename and is not. Its READS have a home
-// (`GET /workspaces/{ws}` serves posts_per_day, the posting window, the TTLs,
-// caption style, dry-run and pause), but its WRITES are ten separate legacy
-// endpoints — `schedule`, `toggle-setting`, `update-setting`,
-// `update-string-setting`, `disconnect-gdrive`, `sync-media`,
-// `switch-account`, `remove-account`, `category-mix`, `update-category-mix` —
-// which have to be mapped onto the closed command vocabulary with idempotency
-// keys, and two of them (`connect_account` / `reconnect_account`) are 501 on
-// the target tier BY DESIGN, being browser redirect flows rather than commands.
-//
-// Repointing the reads alone would be worse than leaving it: the form would
-// show real current values beside a save button that silently 404s, and
-// someone would change a setting to match what they saw. So the screen stays
-// on `init` and answers `RouterUnavailable` — unchanged by this PR, honest
-// about being unreachable, and tracked separately.
-
-export type SetupState = {
-  onboarding_completed?: boolean;
-  posts_per_day?: number;
-  posting_hours_start?: number;
-  posting_hours_end?: number;
-  is_paused?: boolean;
-  dry_run_mode?: boolean;
-  enable_instagram_api?: boolean;
-  show_verbose_notifications?: boolean;
-  media_sync_enabled?: boolean;
-  repost_ttl_days?: number | null;
-  skip_ttl_days?: number | null;
-  caption_style?: string | null;
-  send_lifecycle_notifications?: boolean | null;
-  gdrive_connected?: boolean;
-  gdrive_email?: string | null;
-  media_count?: number;
-  media_source_type?: string | null;
-  media_source_root?: string | null;
-};
-
-export type InitResponse = { setup_state?: SetupState };
+// The `init`/`SetupState` pair that used to close this file is deleted
+// (TD-D4). It carried a paragraph saying the settings screen "stays on `init`
+// and answers `RouterUnavailable`"; `deriveSettings` above had already made
+// that false, and neither type had an importer.

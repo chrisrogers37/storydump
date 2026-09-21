@@ -39,6 +39,8 @@
  * per-click would be the bug.
  */
 
+import { isUuid } from "./session";
+
 /** The port refuses a key longer than this — the vocabulary's `IDEMPOTENCY_KEY_MAX` (`wire-contract.test.ts` pins them equal). */
 export const IDEMPOTENCY_KEY_MAX = 200;
 
@@ -55,13 +57,6 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-export function isUuidLike(v: unknown): v is string {
-  return typeof v === "string" && UUID_RE.test(v);
-}
-
 /**
  * An intent-keyed command: `{intent_id}`, and the intent is the identity.
  *
@@ -73,7 +68,7 @@ function intentCommand(): CommandSpec {
     parse(raw) {
       if (!isPlainObject(raw)) return { ok: false, error: "malformed_body" };
       const intentId = raw.intent_id;
-      if (!isUuidLike(intentId)) return { ok: false, error: "invalid_intent" };
+      if (!isUuid(intentId)) return { ok: false, error: "invalid_intent" };
       return { ok: true, body: { intent_id: intentId }, identity: intentId };
     },
   };
@@ -100,7 +95,7 @@ function submissionCommand(
     parse(raw) {
       if (!isPlainObject(raw)) return { ok: false, error: "malformed_body" };
       const submissionId = raw.submission_id;
-      if (!isUuidLike(submissionId)) {
+      if (!isUuid(submissionId)) {
         return { ok: false, error: "invalid_submission_id" };
       }
       const parsed = parseBody(raw);
@@ -134,7 +129,7 @@ function resolveReviewCommand(): CommandSpec {
     parse(raw) {
       if (!isPlainObject(raw)) return { ok: false, error: "malformed_body" };
       const intentId = raw.intent_id;
-      if (!isUuidLike(intentId)) return { ok: false, error: "invalid_intent" };
+      if (!isUuid(intentId)) return { ok: false, error: "invalid_intent" };
       const resolution = raw.resolution;
       if (
         typeof resolution !== "string" ||
@@ -263,21 +258,21 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * explicitly") — the revoke for every join edge, the Telegram one included.
    */
   remove_member: submissionCommand((raw) => {
-    if (!isUuidLike(raw.user_id)) {
+    if (!isUuid(raw.user_id)) {
       return { ok: false, error: "invalid_user_id" };
     }
     return { ok: true, body: { user_id: raw.user_id } };
   }),
 
   disable_account: submissionCommand((raw) => {
-    if (!isUuidLike(raw.ig_account_id)) {
+    if (!isUuid(raw.ig_account_id)) {
       return { ok: false, error: "invalid_account_id" };
     }
     return { ok: true, body: { ig_account_id: raw.ig_account_id } };
   }),
 
   sync_now: submissionCommand((raw) => {
-    if (!isUuidLike(raw.source_id)) {
+    if (!isUuid(raw.source_id)) {
       return { ok: false, error: "invalid_source_id" };
     }
     return { ok: true, body: { source_id: raw.source_id } };
@@ -302,7 +297,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * account", which is also what the port must answer for someone else's.
    */
   account_settings_change: submissionCommand((raw) => {
-    if (!isUuidLike(raw.ig_account_id)) {
+    if (!isUuid(raw.ig_account_id)) {
       return { ok: false, error: "invalid_ig_account_id" };
     }
     if (

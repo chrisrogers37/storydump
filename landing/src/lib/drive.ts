@@ -3,6 +3,7 @@ import { isHttpsUrlOnHost } from "./redirect-guard";
 import { requestGrant } from "./start-grant";
 import type { GrantResult } from "./start-grant";
 import type { DriveStatus } from "./dashboard-payloads";
+import type { BadgeTone } from "@/components/dashboard/tone";
 
 /**
  * Google Drive, browser side — the WORKSPACE's grant and the folders picked
@@ -60,7 +61,7 @@ export function driveConnectRefusalCopy(reason: unknown): string {
 
 export type DriveBadge = {
   label: string;
-  tone: "active" | "attention" | "inert";
+  tone: BadgeTone;
 };
 
 /**

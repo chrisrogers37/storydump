@@ -36,15 +36,22 @@ import { tokenRowsFrom } from "@/lib/tokens";
  *
  * All six Settings writes used to target routes that do not exist. Four of
  * them — the `settings_change` controls on General — are now on the command
- * client (epic P3), so that tab is editable. The other two tabs are NOT — and
- * note `editable` is not the same question as "can this tab write": Accounts
- * now carries a working destination form (#1089) that is deliberately outside
- * the flag, because the flag marks controls whose ROUTE does not exist yet.
- * This is one flag passed three times rather than one screen-wide state:
- * `switch-account` has no target-tier home at all, `remove-account` and
- * `disconnect-gdrive` map to `disconnect_account` which is UNBUILT, and
- * `sync-media` is the epic's P4. Flipping those with General would be exactly
- * the shape #1051 refused — "a save button that silently 404s".
+ * client (epic P3), so that tab is editable. Integrations is NOT — and note
+ * `editable` is not the same question as "can this tab write": Accounts
+ * carries a working destination form (#1089) that was always deliberately
+ * outside the flag, because the flag marks controls whose ROUTE does not
+ * exist yet. `remove-account` and `disconnect-gdrive` map to
+ * `disconnect_account` which is UNBUILT, and `sync-media` is the epic's P4.
+ * Flipping those with General would be exactly the shape #1051 refused —
+ * "a save button that silently 404s".
+ *
+ * ACCOUNTS NO LONGER TAKES THE FLAG AT ALL (TD-D3). The one control it gated
+ * there was "Make Active", whose `switch-account` had no target-tier home;
+ * it POSTed through a BFF proxy onto a path the API does not serve, and both
+ * are deleted rather than kept disabled. A flag with nothing behind it is not
+ * a promise, so the prop is gone from that tab rather than passed as `false`;
+ * it is still passed to General and Integrations, where it means what it
+ * always meant.
  *
  * Both connect flows targeted `oauth-url/<provider>` and were DELETED rather
  * than gated (#1070). The Drive one is BACK since 069 (#1165): per-workspace
@@ -282,17 +289,14 @@ export default async function SettingsPage({
         </TabsContent>
 
         {/*
-          NOT flipped with General: `editable` now gates only `switch-account`,
-          which has no target-tier home yet (epic P6) — Connect and Remove are
-          real and ungated inside the tab (Remove = `disable_account`,
-          owner decision 2026-09-04).
+          No `editable` here any more (TD-D3): the one control it gated was
+          "Make Active", which POSTed through a BFF proxy onto a target path
+          that does not exist. Both are deleted. Connect and Remove are real
+          and ungated inside the tab (Remove = `disable_account`, owner
+          decision 2026-09-04), so the tab has nothing left that is pending.
         */}
         <TabsContent value="accounts">
-          <AccountsTab
-            accounts={accounts}
-            editable={false}
-            workspaceId={workspaceId}
-          />
+          <AccountsTab accounts={accounts} workspaceId={workspaceId} />
         </TabsContent>
 
         {/*

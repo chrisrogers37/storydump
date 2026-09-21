@@ -6,17 +6,16 @@ import {
   QUEUE_STATES,
   REVIEW_REQUIRED_STATE,
   SCHEDULED_STATES,
-  type IntentRow,
-  type IntentsResponse,
   type StatsResponse,
   type WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
+import type { Intent, IntentsResponse } from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 /** The calendar's lanes are all the intent ledger now, filtered by state. */
-const laneItem = (i: IntentRow) => ({
+const laneItem = (i: Intent) => ({
   media_name: i.file_name,
   category: i.category ?? "uncategorised",
   status: i.state,

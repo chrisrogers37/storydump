@@ -63,11 +63,14 @@ describe("the accounts tab renders destination state, not a boolean", () => {
     // The regression, verbatim: `{isActive && (<Badge …>Active</Badge>)}`.
     //
     // The lookbehind is load-bearing and the first version of this test was
-    // wrong without it. `destinationIsActive` still has a legitimate caller on
-    // this screen — `{!isActive && <Button>Make Active</Button>}`, which is a
-    // genuine boolean question — and `isActive` is a substring of `!isActive`,
-    // so the naive pattern failed on correct code. The guard being forbidden
-    // is the POSITIVE one.
+    // wrong without it. `isActive` is a substring of `!isActive`, so the
+    // naive pattern failed on correct code: the guard being forbidden is the
+    // POSITIVE one. The negative form had a legitimate caller on this screen
+    // — `{!isActive && <Button>Make Active</Button>}` — until TD-D3 deleted
+    // the switch-account control and its dead proxy. The lookbehind stays
+    // anyway: it is what makes this case say "no positive guard" rather than
+    // "no mention of isActive", and the next `!isActive` on this screen must
+    // not be the thing that turns the badge back into a boolean.
     expect(accountsTabSource()).not.toMatch(/(?<![!\w])isActive\s*&&/);
   });
 });

@@ -102,6 +102,11 @@ describe("which actions an intent offers", () => {
   });
 
   it("knows the non-terminal states the page lists", () => {
+    // A hand-typed second opinion on the ORDER, kept deliberately: the
+    // membership question is answered against the API's own tuple by
+    // `intent-states-contract.test.ts`, which also pins the `?state=` query
+    // spellings as `join(",")` of these. This case fails if someone reorders
+    // the array, which the query strings would otherwise absorb silently.
     expect(NON_TERMINAL_STATES).toEqual([
       "scheduled",
       "prompt_pending",

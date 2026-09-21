@@ -1,4 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import type { PoolHealthView } from "@/lib/dashboard-payloads";
 
 /**
  * Pool health, as far as `stats` can answer it (#1044).
@@ -15,14 +16,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
  * So the two cards are gone and one line says why. The remaining two are
  * counted, not derived, and are true.
  */
-interface PoolHealthView {
-  total_active: number;
-  never_posted: number;
-  by_category: { name: string; count: number }[];
-  posted_once: number | null;
-  posted_multiple: number | null;
-  eligible_for_posting: number | null;
-}
 
 export function PoolHealth({ health }: { health: PoolHealthView }) {
   const total = health.total_active || 1;
