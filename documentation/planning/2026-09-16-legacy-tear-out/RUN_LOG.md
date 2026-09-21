@@ -1469,7 +1469,8 @@ The branch and the three worktrees are removed.
   registered under (a dashboard fact); `meta_callbacks.py::app_secrets` accepts either configured
   secret, Instagram first; the Facebook one is the last legacy-named credential. The ruling is
   which app the URLs are registered under; the offered instrument is a log line naming which
-  candidate verified — by position, never by value — and one press of Meta's test button.
+  candidate verified — by position, never by value — and one press of Meta's test button. (The
+  instrument shipped 2026-09-21 as PR #1373 — the entry of that day below.)
 - **The README, a LICENSE and the mission page** are the docs PR this entry ships in: the README
   said "see LICENSE file" with none in the tree; `PROJECT_MISSION.md` described the retired tier's
   model (a Telegram identity managing "instances" that were group chats) and now describes the one
@@ -1753,6 +1754,36 @@ prompt sweeps had nothing to mint; the first card delivered as `svc_worker` is t
 slot's logs. `/health` still reports the API as `neondb_owner` / `bypassrls: yes`: the API's switch is
 the remaining half of #751.
 
+## #751 — the API switched; both services off the owner login (2026-09-21)
+
+**The API switched** — the owner ran `f4_switch.sh api` at 19:45:08 UTC (the state file's fourth
+line; the first attempt, on 2026-09-20, was rolled back within the hour when the fleet surfaces went
+blind, which 081 then fixed). Before: `db_role user=neondb_owner bypassrls=yes`, scheduling
+`healthy` (2 active accounts, 0 overdue), posting `posting` (posted_ever 119, intents_ever 248).
+After, on deployment `0a554321` (live within four minutes): `db_role user=svc_ingress
+bypassrls=no`, the same two verdicts with the same counts, the webhook registered, the pool at its
+ingress shape (10, the 1 s wait), the runner reporting nothing owed; the deployment's log carries
+only 200s — no permission denied, no traceback. The worker, on `svc_worker` since 15:51 UTC, kept
+its cadence through the API's switch (four reconciler jobs succeeded in the following five minutes,
+heartbeat 51 s, no failed or parked job since either switch, three cards sent since its own).
+
+**The first card as `svc_worker`** — seen at 16:30 UTC: `plan_slot` succeeded 16:30:03 (a story
+entered `awaiting_approval`), its approval card `sent` 16:30:07, `deliver_outbox` succeeded
+16:30:09. The runbook's worker half is fully observed.
+
+**Not done by the agent:** the runbook's page checks (sign in at storydump.app; Queue, Media
+Library, Settings) — the browser extension was not connected, and the sign-in is the owner's. They
+are the owner's confirmation before #751 closes; nothing in the API's log or the ledger suggests a
+tenant-scoped read failing under the policies.
+
+**Also this day:** #1372 (`41352195`) — the L.8 admission burst's wait is the worker's 3 s, which
+closes the queue's tolerance item below; #1373 (`e25b90b2`) — a verified Meta callback logs which app
+secret signed it, the instrument #739's ruling was waiting on, live on the API since 18:49 UTC.
+
+**After this:** #751 closes with the two observations quoted (the runbook's done-when); the plan
+README's F.4 row is ✅ in this PR. #739's ruling stays the owner's: register the callback URLs under
+the Instagram app at submission, press Meta's test button, read the line, then the deletion PR.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
@@ -1854,6 +1885,6 @@ the remaining half of #751.
 - ~~**#751 part 2 — the worker's switch, after PR #1349 merges (the owner's).**~~ DONE 2026-09-21 —
   the entry above: #1349 merged as `ea788875` (15:39 UTC), 082 applied by the worker's predeploy at
   15:40:49 UTC, the owner ran `f4_switch.sh worker` at 15:51:15 UTC and the worker runs as
-  `svc_worker`. **Still owed: the API's own switch** (`f4_switch.sh api`), independent, its
-  precondition met since 081; and the first card delivered as `svc_worker`, to be read off the next
-  slot's logs.
+  `svc_worker`. The API's own switch followed at 19:45 UTC and the first card as `svc_worker` was
+  seen at 16:30 UTC (the entry of 2026-09-21 below): both of #751's switches are done; the close is
+  the owner's.
