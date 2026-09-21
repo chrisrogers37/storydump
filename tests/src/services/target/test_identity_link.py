@@ -13,6 +13,13 @@ from src.services.target import identity, identity_link
 from src.services.target.start_router import StartContext, StartRouter
 
 
+class _Rowcount:
+    """What a real executor returns from an UPDATE: something with a count."""
+
+    def __init__(self, rowcount: int):
+        self.rowcount = rowcount
+
+
 def ctx(payload="STATE1", uid="tg-42", name="ada"):
     return StartContext(
         payload=payload,
@@ -157,6 +164,7 @@ class TestIssuingRetiresTheUsersEarlierLinks:
         class _Conn:
             async def execute(self, statement, params=None):
                 statements.append((str(statement), params))
+                return _Rowcount(1)
 
         async def issue_state(conn, **kw):
             statements.append(("ISSUE", kw))

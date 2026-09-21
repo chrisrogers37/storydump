@@ -23,7 +23,7 @@ import logging
 import time
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, Callable, Mapping, Optional
 
 from sqlalchemy import text
@@ -43,12 +43,9 @@ from src.services.target import (
     scheduler,
     unit_of_work,
 )
+from src.utils.datetime_utils import utcnow
 
 logger = logging.getLogger("target.work_loop")
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -464,7 +461,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             poller_session_factory(deps.engine, str(row["workspace_id"])),
             binding_id=binding_id,
             transport=deps.transport.for_chat(row["external_ref"]),
-            clock=_utcnow,
+            clock=utcnow,
             interval_seconds=cfg.poller_interval_seconds,
             chat_limit=cfg.chat_limit,
             chat_window_seconds=cfg.chat_window_seconds,
@@ -504,7 +501,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                         writer,
                         job["id"],
                         job["lease_token"],
-                        run_at=_utcnow() + timedelta(seconds=wait),
+                        run_at=utcnow() + timedelta(seconds=wait),
                         restore_attempt=True,
                     )
                 logger.info(
@@ -875,7 +872,7 @@ class WorkLoop:
                     session,
                     job["id"],
                     job["lease_token"],
-                    run_at=_utcnow() + timedelta(seconds=self._config.park_seconds),
+                    run_at=utcnow() + timedelta(seconds=self._config.park_seconds),
                     restore_attempt=True,
                 )
             self.parked += 1
@@ -939,7 +936,7 @@ class WorkLoop:
         except Exception:
             self.failures += 1
             self.consecutive_errors += 1
-            now = _utcnow()
+            now = utcnow()
             if jobs.budget_exhausted(job, now=now):
                 # F6 (a): the `05:38` budget is spent — attempts or the
                 # deadline. The job ends `failed`, and a tenant kind the

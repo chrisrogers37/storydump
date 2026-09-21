@@ -298,22 +298,16 @@ async def alert_stranded_sources(
 
     for row in rows:
         workspace_id = str(row["workspace_id"])
-        bindings = await prompts.push_bindings(session, workspace_id)
-        for binding_id in bindings:
-            await outbox.enqueue(
-                session,
-                workspace_id=workspace_id,
-                binding_id=binding_id,
-                kind="notification",
-                payload={
-                    "v": 1,
-                    "text": (
-                        "⚠️ This workspace's Drive source is still disconnected"
-                        " and has not synced since it failed. Reconnect it to"
-                        " resume syncing, or pause it if this is intended."
-                    ),
-                },
-            )
+        await outbox.fanout_notification(
+            session,
+            workspace_id=workspace_id,
+            bindings=await prompts.push_bindings(session, workspace_id),
+            text=(
+                "⚠️ This workspace's Drive source is still disconnected"
+                " and has not synced since it failed. Reconnect it to"
+                " resume syncing, or pause it if this is intended."
+            ),
+        )
     if rows:
         logger.warning(
             "stranded-source sweep: re-alerted %d source(s) in error", len(rows)
@@ -322,7 +316,9 @@ async def alert_stranded_sources(
 
 
 async def _run_sync(deps, job, *, reason) -> str:
-    from src.services.target import prompts
+    # Local imports, as in `alert_stranded_sources` above: these modules reach
+    # back into this one, so a module-level import is a cycle.
+    from src.services.target import outbox, prompts
     from src.services.target.work_loop import poller_session_factory
 
     payload = job.get("payload") or {}
@@ -479,23 +475,18 @@ async def _run_sync(deps, job, *, reason) -> str:
                 if flipped == "error"
                 else []
             )
-            for binding_id in bindings:
-                from src.services.target import outbox
-
-                await outbox.enqueue(
-                    s,
-                    workspace_id=workspace_id,
-                    binding_id=binding_id,
-                    kind="notification",
-                    payload={
-                        "v": 1,
-                        "text": (
-                            "⚠️ Media sync failed for this workspace's Drive"
-                            f" source: {exc}. Syncing is paused until the"
-                            " source is reconnected or repaired."
-                        ),
-                    },
-                )
+            # An empty list writes nothing and returns 0 — the same as the
+            # zero-iteration loop this replaces.
+            await outbox.fanout_notification(
+                s,
+                workspace_id=workspace_id,
+                bindings=bindings,
+                text=(
+                    "⚠️ Media sync failed for this workspace's Drive"
+                    f" source: {exc}. Syncing is paused until the"
+                    " source is reconnected or repaired."
+                ),
+            )
             await s.commit()
         logger.warning(
             "sync %s: source %s classified persistent (%s) — state=error,"

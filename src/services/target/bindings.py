@@ -69,7 +69,7 @@ from sqlalchemy.exc import DBAPIError
 
 from src.services.target._dbapi import constraint_violated
 
-from src.exceptions.base import StorydumpError
+from src.exceptions.base import RefusalError
 
 #: `ck_bindings_channel`, verbatim. A closed set the CALLER supplies, so it is
 #: refused by name here rather than left to surface as a check violation.
@@ -108,15 +108,11 @@ REBOUND = "rebound"
 TAKEN = "taken"
 
 
-class BindingRefused(StorydumpError):
+class BindingRefused(RefusalError):
     """A caller-supplied value the boundary refuses, before the database sees
     it (`provisioning.ProvisioningRefused`'s shape)."""
 
-    def __init__(self, reason: str, detail: str = ""):
-        self.reason = reason
-        super().__init__(
-            f"binding refused: {reason}" + (f" — {detail}" if detail else "")
-        )
+    _prefix = "binding refused"
 
 
 #: Telegram's chat types → this module's channel vocabulary. **It lives here,

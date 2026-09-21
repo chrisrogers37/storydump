@@ -94,6 +94,7 @@ from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
 from src.services.target import (
+    audit,
     intent_ledger,
     jobs,
     outbox,
@@ -118,6 +119,7 @@ from src.services.target.meta_adapter import (
 from src.services.target.publish_cap import FlipOutcome, IntentNotApproved
 from src.services.target.unit_of_work import apply_gucs, unit_of_work
 from src.services.target.usage_precheck import DEFER
+from src.utils.datetime_utils import ms_since, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -188,10 +190,6 @@ POSTED_DRY_RUN = "posted_dry_run"
 PAUSE_RECHECK_SECONDS = 300
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 class _Ctx:
     """One run's working set: the job, the intent row, account/workspace
     effective config, and permit state — read once, threaded explicitly."""
@@ -217,6 +215,13 @@ class _Ctx:
     @property
     def workspace_id(self) -> str:
         return str(self.job["workspace_id"])
+
+    @property
+    def tz(self) -> str:
+        """The story's effective zone. `_load`'s SELECT always projects
+        `eff_tz` (`COALESCE(a.tz, w.tz)`, :395), so the fallback is for a NULL
+        column, not a missing key."""
+        return str(self.intent.get("eff_tz") or "UTC")
 
     def count(self, key: str) -> int:
         """A per-class counter on the story (`attempts_by_step`, the float)."""
@@ -267,7 +272,7 @@ async def run_publish_pipeline(
     precheck=None,
     backoff_seconds: tuple = DEFAULT_BACKOFF_SECONDS,
     repost_ttl_days_default: int = 7,
-    now_fn: Callable[[], datetime] = _utcnow,
+    now_fn: Callable[[], datetime] = utcnow,
     sleep: Callable[[float], Any] = asyncio.sleep,
 ) -> str:
     """Drive one claimed `publish_pipeline` job to this run's outcome.
@@ -441,7 +446,7 @@ def _local_date(ctx: _Ctx, now_fn) -> date:
     """The §4 debit day, in the account's effective tz — service-side, with
     the §0 fn_safe_tz rule applied at this site: an unresolvable zone
     degrades to UTC rather than aborting."""
-    tz_name = ctx.intent["eff_tz"] or "UTC"
+    tz_name = ctx.tz
     try:
         tz = ZoneInfo(tz_name)
     except Exception:  # noqa: BLE001 — the §0 rule IS "degrade, never abort"
@@ -480,29 +485,20 @@ async def _audit_deferral(
 ) -> None:
     """The §4 'cap_deferred' audit row — the first direct (non-trigger) audit
     write in the codebase, so it reads the actor GUCs exactly the way the
-    triggers do rather than trusting parameters."""
-    await session.execute(
-        text(
-            "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
-            " from_state, to_state, actor_kind, actor_user_id, channel, detail)"
-            " VALUES (:ws, 'post_intent', :intent, :state, :state,"
-            "         current_setting('app.actor_kind'),"
-            "         NULLIF(current_setting('app.actor_user_id', true), '')::uuid,"
-            "         NULLIF(current_setting('app.channel', true), ''),"
-            "         CAST(:detail AS jsonb))"
-        ),
-        {
-            "ws": ctx.workspace_id,
-            "intent": ctx.intent_id,
-            "state": state,
-            "detail": json.dumps(
-                {
-                    "v": 1,
-                    "event": "cap_deferred",
-                    "reason": reason,
-                    "next_run_at": next_run_at.isoformat(),
-                }
-            ),
+    triggers do rather than trusting parameters (`audit.ACTOR_FROM_GUCS`)."""
+    await audit.record(
+        session,
+        workspace_id=ctx.workspace_id,
+        entity_kind="post_intent",
+        entity_id_sql=":intent",
+        from_state=state,
+        to_state=state,
+        intent=ctx.intent_id,
+        detail={
+            "v": 1,
+            "event": "cap_deferred",
+            "reason": reason,
+            "next_run_at": next_run_at.isoformat(),
         },
     )
 
@@ -818,10 +814,11 @@ async def _retry_or_poison(
                 # push binding at poison time keeps its six-hour backstop.
                 await session.execute(
                     text(
-                        "UPDATE post_intents SET last_error = COALESCE(last_error, '{}'::jsonb)"
-                        " || jsonb_build_object('evidence', COALESCE(last_error->'evidence', '{}'::jsonb)"
-                        "    || jsonb_build_object('customer_notified', true))"
-                        " WHERE id = :intent"
+                        "UPDATE post_intents SET "
+                        + intent_ledger.EVIDENCE_MERGE.format(
+                            seed="{}", key="customer_notified", value="true"
+                        )
+                        + " WHERE id = :intent"
                     ),
                     {"intent": ctx.intent_id},
                 )
@@ -925,30 +922,22 @@ async def _audit_wait(
     """The wait's own audit row (plan 03 D3): the trigger's `publishing →
     approved` row carries no detail, so the class, the rung and the story's
     counters ride a direct row in `_audit_deferral`'s shape."""
-    await session.execute(
-        text(
-            "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
-            " from_state, to_state, actor_kind, actor_user_id, channel, detail)"
-            " VALUES (:ws, 'post_intent', :intent, 'approved', 'approved',"
-            "         current_setting('app.actor_kind'),"
-            "         NULLIF(current_setting('app.actor_user_id', true), '')::uuid,"
-            "         NULLIF(current_setting('app.channel', true), ''),"
-            "         CAST(:detail AS jsonb))"
-        ),
-        {
-            "ws": ctx.workspace_id,
-            "intent": ctx.intent_id,
-            "detail": json.dumps(
-                {
-                    "v": 1,
-                    "event": "float_wait",
-                    "class": wait,
-                    "rung": rung,
-                    "seconds": seconds,
-                    "next_run_at": next_run_at.isoformat(),
-                    "counters": ctx.counters(),
-                }
-            ),
+    await audit.record(
+        session,
+        workspace_id=ctx.workspace_id,
+        entity_kind="post_intent",
+        entity_id_sql=":intent",
+        from_state="approved",
+        to_state="approved",
+        intent=ctx.intent_id,
+        detail={
+            "v": 1,
+            "event": "float_wait",
+            "class": wait,
+            "rung": rung,
+            "seconds": seconds,
+            "next_run_at": next_run_at.isoformat(),
+            "counters": ctx.counters(),
         },
     )
 
@@ -963,18 +952,16 @@ async def _say_waiting(
     tomorrow."""
     line = prompts.waiting_line(
         next_run_at,
-        tz=str(ctx.intent.get("eff_tz") or "UTC"),
+        tz=ctx.tz,
         now=datetime.now(timezone.utc),
         day_spent=day_spent,
     )
-    for binding_id in await prompts.push_bindings(session, ctx.workspace_id):
-        await outbox.restate_cards(
-            session,
-            workspace_id=ctx.workspace_id,
-            binding_id=binding_id,
-            intent_id=ctx.intent_id,
-            outcome_text=line,
-        )
+    await outbox.restate_everywhere(
+        session,
+        workspace_id=ctx.workspace_id,
+        intent_id=ctx.intent_id,
+        outcome_text=line,
+    )
 
 
 async def _permit(engine, ctx: _Ctx, *, op_kind: str, generation: int) -> dict:
@@ -1152,7 +1139,7 @@ async def _ladder(
                 )
             except MetaTerminalError as exc:
                 if exc.code == FETCH_FAILED_CODE:
-                    elapsed_ms = _ms_since(started)
+                    elapsed_ms = ms_since(started)
                     refusals = ctx.count("fetch_refusals") + 1
                     record = _permit_record(
                         {
@@ -1237,7 +1224,7 @@ async def _ladder(
                     record=_permit_record(
                         {"url_variant": variant},
                         exc=exc,
-                        elapsed_ms=_ms_since(started),
+                        elapsed_ms=ms_since(started),
                         probe=probe,
                     ),
                 )
@@ -1258,7 +1245,7 @@ async def _ladder(
                     resolve_response=_permit_record(
                         {"v": 1, "error": exc.code, "url_variant": variant},
                         exc=exc,
-                        elapsed_ms=_ms_since(started),
+                        elapsed_ms=ms_since(started),
                         probe=probe,
                     ),
                     error=_error_of(exc),
@@ -1278,11 +1265,11 @@ async def _ladder(
                     resolve_op_id=permit["id"],
                     resolve_response=_permit_record(
                         {"v": 1, "error": "lost_response", "url_variant": variant},
-                        elapsed_ms=_ms_since(started),
+                        elapsed_ms=ms_since(started),
                         probe=probe,
                     ),
                 )
-            elapsed_ms = _ms_since(started)
+            elapsed_ms = ms_since(started)
             async with _leased_tx(uow, ctx.job) as session:
                 await provider_ops.resolve_permit(
                     session,
@@ -1522,10 +1509,6 @@ def _dead_credential(exc: BaseException) -> bool:
     return isinstance(exc, MetaRetryableError) and exc.code == OAUTH_ERROR_CODE
 
 
-def _ms_since(started: float) -> int:
-    return int((time.perf_counter() - started) * 1000)
-
-
 def _permit_record(
     base: dict,
     *,
@@ -1670,16 +1653,14 @@ async def _confirm_dry_run(
             "dry_run",
             by=None,
             at=now_fn(),
-            tz=str(ctx.intent.get("eff_tz") or "UTC"),
+            tz=ctx.tz,
         )
-        for binding_id in await prompts.push_bindings(session, ctx.workspace_id):
-            await outbox.restate_cards(
-                session,
-                workspace_id=ctx.workspace_id,
-                binding_id=binding_id,
-                intent_id=ctx.intent_id,
-                outcome_text=line,
-            )
+        await outbox.restate_everywhere(
+            session,
+            workspace_id=ctx.workspace_id,
+            intent_id=ctx.intent_id,
+            outcome_text=line,
+        )
         await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "succeeded")
     return POSTED_DRY_RUN
 
@@ -1781,7 +1762,7 @@ async def _say_outcome(
         intent_id=ctx.intent_id,
         state=state,
         at=at,
-        tz=str(ctx.intent.get("eff_tz") or "UTC"),
+        tz=ctx.tz,
         notice=notice,
         reply_markup=reply_markup,
     )
@@ -1872,10 +1853,11 @@ async def park_for_review(
     if told:
         await session.execute(
             text(
-                "UPDATE post_intents SET last_error = COALESCE(last_error, '{}'::jsonb)"
-                " || jsonb_build_object('evidence', COALESCE(last_error->'evidence', '{}'::jsonb)"
-                "    || jsonb_build_object('customer_notified', true))"
-                " WHERE id = :intent"
+                "UPDATE post_intents SET "
+                + intent_ledger.EVIDENCE_MERGE.format(
+                    seed="{}", key="customer_notified", value="true"
+                )
+                + " WHERE id = :intent"
             ),
             {"intent": intent_id},
         )
@@ -2088,16 +2070,14 @@ async def _confirm(
             "posted",
             by=None,
             at=(now_fn() if now_fn is not None else datetime.now(timezone.utc)),
-            tz=str(ctx.intent.get("eff_tz") or "UTC"),
+            tz=ctx.tz,
         )
-        for binding_id in await prompts.push_bindings(session, ctx.workspace_id):
-            await outbox.restate_cards(
-                session,
-                workspace_id=ctx.workspace_id,
-                binding_id=binding_id,
-                intent_id=ctx.intent_id,
-                outcome_text=line,
-            )
+        await outbox.restate_everywhere(
+            session,
+            workspace_id=ctx.workspace_id,
+            intent_id=ctx.intent_id,
+            outcome_text=line,
+        )
         await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "succeeded")
     try:
         await transit.destroy(

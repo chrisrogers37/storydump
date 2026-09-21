@@ -567,6 +567,16 @@ class TestTheDrainPark:
             "   AND detail->>'event' = 'offboard_drain_timeout'",
             (ws["ws"],),
         ) == (1,)
+        # The actor spelling this writer does NOT share with the other three
+        # (`audit.ACTOR_SYSTEM_CHANNEL`): the poller session sets no
+        # `app.channel`, and a NULL there would lose the only thing the row
+        # says about who ran the drain.
+        assert _one(
+            off_db,
+            "SELECT actor_user_id, channel FROM audit_events"
+            " WHERE workspace_id = %s AND detail->>'event' = 'offboard_drain_timeout'",
+            (ws["ws"],),
+        ) == (None, "system")
 
 
 class TestTheTransitSeam:

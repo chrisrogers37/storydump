@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlencode
 
-from src.exceptions.base import StorydumpError
+from src.exceptions.base import RefusalError
 from src.services.target import egress
 from src.services.target.egress import EgressPolicy
 
@@ -57,17 +57,13 @@ SCOPE = "openid email profile"
 CLOCK_SKEW_SECONDS = 60
 
 
-class OidcRefused(StorydumpError):
+class OidcRefused(RefusalError):
     """A sign-in the flow will not complete. ``reason`` is a closed set so the
     route maps it without parsing prose: ``exchange_failed`` · ``no_id_token``
     · ``malformed_id_token`` · ``issuer`` · ``audience`` · ``expired`` ·
     ``future`` · ``nonce`` · ``subject``."""
 
-    def __init__(self, reason: str, detail: str = ""):
-        self.reason = reason
-        super().__init__(
-            f"sign-in refused: {reason}" + (f" — {detail}" if detail else "")
-        )
+    _prefix = "sign-in refused"
 
 
 @dataclass(frozen=True)

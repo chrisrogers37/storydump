@@ -65,7 +65,7 @@ from typing import Any, Callable, Optional
 
 from src.exceptions.base import StorydumpError
 from src.services.target.egress import TIMEOUT_CLASSES
-from src.utils.datetime_utils import ensure_utc
+from src.utils.datetime_utils import ensure_utc, ms_since
 
 
 #: The Instagram story frame (owner, 2026-09-10 — parity with the legacy
@@ -456,13 +456,13 @@ class TransitStore:
             try:
                 answer = _as_answer(
                     await self._probe_fn(url),
-                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                    elapsed_ms=ms_since(started),
                 )
             except Exception as exc:  # noqa: BLE001 — a failed probe, or an answer of no known shape, is "not yet"
                 answer = ProbeAnswer(
                     0,
                     f"probe failed: {type(exc).__name__}",
-                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                    elapsed_ms=ms_since(started),
                 )
             observation = {
                 "status": answer.status,
@@ -535,7 +535,7 @@ class TransitStore:
             head=bytes(response.content[:PROBE_RANGE_BYTES]) if bytes_read else b"",
             length=length,
             request_id=response.headers.get("x-request-id") or None,
-            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            elapsed_ms=ms_since(started),
             bytes_read=bytes_read,
         )
 

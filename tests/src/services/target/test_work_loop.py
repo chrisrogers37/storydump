@@ -1010,7 +1010,7 @@ class TestTheBudgetCeiling:
         monkeypatch.setattr(prompts, "push_bindings", push_bindings)
         monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
         monkeypatch.setattr(
-            work_loop, "_utcnow", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+            work_loop, "utcnow", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
         )
 
         loop = WorkLoop.__new__(WorkLoop)
@@ -1249,7 +1249,7 @@ class TestAFailureToRecordAFailureDoesNotTakeTheLane:
 
         monkeypatch.setattr(work_loop, "jobs", _Jobs)
         monkeypatch.setattr(
-            work_loop, "_utcnow", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+            work_loop, "utcnow", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
         )
 
         async def executor(session, job):

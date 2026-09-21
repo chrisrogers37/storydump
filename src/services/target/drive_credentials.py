@@ -113,8 +113,7 @@ async def token_for_workspace(engine, workspace_id: str, *, fresh: bool = False)
                         # query on this table keeps (review of #1246).
                         "SELECT encrypted_payload, state, expires_at"
                         " FROM oauth_credentials"
-                        " WHERE workspace_id = :ws AND provider = :provider"
-                        "   AND ig_account_id IS NULL AND media_source_id IS NULL"
+                        " WHERE " + google_drive_oauth.WORKSPACE_GRANT_WHERE
                     ),
                     {"ws": str(workspace_id), "provider": PROVIDER},
                 )
@@ -258,9 +257,9 @@ async def _store_refreshed(engine, workspace_id: str, grant, *, seen: str) -> No
             text(
                 "UPDATE oauth_credentials"
                 "   SET encrypted_payload = :payload, expires_at = :exp"
-                " WHERE workspace_id = :ws AND provider = :provider"
-                "   AND ig_account_id IS NULL AND media_source_id IS NULL"
-                "   AND state = 'active' AND encrypted_payload = :seen"
+                " WHERE "
+                + google_drive_oauth.WORKSPACE_GRANT_WHERE
+                + "   AND state = 'active' AND encrypted_payload = :seen"
             ),
             {
                 "ws": str(workspace_id),
@@ -290,9 +289,9 @@ async def _mark_expired(engine, workspace_id: str, *, seen: str) -> None:
         await session.execute(
             text(
                 "UPDATE oauth_credentials SET state = 'expired'"
-                " WHERE workspace_id = :ws AND provider = :provider"
-                "   AND ig_account_id IS NULL AND media_source_id IS NULL"
-                "   AND state = 'active' AND encrypted_payload = :seen"
+                " WHERE "
+                + google_drive_oauth.WORKSPACE_GRANT_WHERE
+                + "   AND state = 'active' AND encrypted_payload = :seen"
             ),
             {"ws": str(workspace_id), "provider": PROVIDER, "seen": seen},
         )

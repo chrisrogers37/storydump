@@ -268,3 +268,74 @@ class TestConnectPurpose:
         await ig.connect_purpose(conn, workspace_id="ws-1", ig_account_id="acct-1")
         assert conn.params["ws"] == "ws-1" and conn.params["acct"] == "acct-1"
         assert conn.params["provider"] == ig.PROVIDER
+
+
+class _RetireConn:
+    """Records the statement and params, and answers with a rowcount."""
+
+    def __init__(self, rowcount=0):
+        self.statements = []
+        self._rowcount = rowcount
+
+    async def execute(self, statement, params=None):
+        self.statements.append((str(statement), params))
+
+        class _R:
+            rowcount = self._rowcount
+
+        return _R()
+
+
+class TestRetireLiveStates:
+    """ "Last issued wins" (`07` §2) is one rule with four writers — the link
+    mint, the bind mint, `issue_state`'s own reconnect retire and
+    `disable_destination`'s. One statement, one selector per caller."""
+
+    async def test_provider_and_liveness_are_always_in_the_where(self):
+        conn = _RetireConn()
+        await ig.retire_live_states(conn, provider="telegram")
+        ((sql, params),) = conn.statements
+        assert sql.startswith("UPDATE oauth_states SET consumed_at = now() WHERE ")
+        assert "provider = :provider" in sql and "consumed_at IS NULL" in sql
+        assert params == {"provider": "telegram"}
+
+    @pytest.mark.parametrize(
+        "kwargs,fragment,params",
+        [
+            (
+                {"purpose": "link", "user_id": "u-1"},
+                "user_id = :uid",
+                {"provider": "telegram", "purpose": "link", "uid": "u-1"},
+            ),
+            (
+                {"purpose": "bind", "workspace_id": "ws-1"},
+                "workspace_id = :ws",
+                {"provider": "telegram", "purpose": "bind", "ws": "ws-1"},
+            ),
+            (
+                {"reconnect_target": "acct-1"},
+                "reconnect_target = :target",
+                {"provider": "telegram", "target": "acct-1"},
+            ),
+        ],
+        ids=["link-by-user", "bind-by-workspace", "reconnect-by-target"],
+    )
+    async def test_each_selector_adds_its_own_predicate(self, kwargs, fragment, params):
+        conn = _RetireConn()
+        await ig.retire_live_states(conn, provider="telegram", **kwargs)
+        ((sql, bound),) = conn.statements
+        assert fragment in sql
+        assert bound == params
+
+    async def test_the_ids_are_coerced_to_str(self):
+        import uuid
+
+        target = uuid.uuid4()
+        conn = _RetireConn()
+        await ig.retire_live_states(conn, provider="ig_login", reconnect_target=target)
+        assert conn.statements[0][1]["target"] == str(target)
+
+    @pytest.mark.parametrize("rowcount", [0, 1, 3])
+    async def test_the_count_of_retired_rows_is_returned(self, rowcount):
+        conn = _RetireConn(rowcount)
+        assert await ig.retire_live_states(conn, provider="telegram") == rowcount

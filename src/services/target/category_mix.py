@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
-from src.exceptions.base import StorydumpError
+from src.exceptions.base import RefusalError
 from src.services.target import readers
 from src.services.target.workspaces import CONNECTED_SQL
 
@@ -47,15 +47,13 @@ MAX_SOURCES = 500
 _LABEL = "COALESCE(s.config->>'folder_name', s.config->>'folder_ref', 'folder')"
 
 
-class MixInvalid(StorydumpError):
+class MixInvalid(RefusalError):
     """The mix cannot be stored as sent. `reason` is one of: not_a_list ·
     empty_source · duplicate_source · bad_ratio · sum_not_one ·
     too_many_sources (from `normalize`) · unknown_source · all_off (from
     `set_mix`, against the connected folders) · ambiguous_name (v1)."""
 
-    def __init__(self, reason: str, detail: str = ""):
-        self.reason = reason
-        super().__init__(f"mix invalid: {reason}" + (f" — {detail}" if detail else ""))
+    _prefix = "mix invalid"
 
 
 def _ratio(value: Any, label: str) -> float:

@@ -246,8 +246,9 @@ async def fanout_notification(
     would make "nobody to tell" a zero-length loop again, which is the exact
     silence this module's `UNDELIVERABLE` exists to break.
 
-    Remaining callers to move: `media_sync` (two sites) and
-    `credential_lifecycle` (one). They belong to #1090 D1/D2 rather than here.
+    The three that were still written out — `media_sync` twice and
+    `credential_lifecycle` once — came through this door in the rule-of-three
+    pass; there are no copies left to move.
     """
     for binding_id in bindings:
         await enqueue(

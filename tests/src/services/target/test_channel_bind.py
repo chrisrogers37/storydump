@@ -12,6 +12,13 @@ from src.services.target import bindings, channel_bind
 from src.services.target.start_router import StartContext, StartRouter
 
 
+class _Rowcount:
+    """What a real executor returns from an UPDATE: something with a count."""
+
+    def __init__(self, rowcount: int):
+        self.rowcount = rowcount
+
+
 def ctx(payload="STATE1", chat_id="-100777", chat_type="supergroup", uid="tg-42"):
     return StartContext(
         payload=payload,
@@ -182,6 +189,7 @@ class TestIssuingRetiresTheWorkspacesEarlierLinks:
         class _Conn:
             async def execute(self, statement, params=None):
                 seen.append((str(statement), params))
+                return _Rowcount(1)
 
         async def issue_state(conn, **kw):
             seen.append(("issue", kw))

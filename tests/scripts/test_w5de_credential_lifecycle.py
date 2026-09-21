@@ -465,6 +465,10 @@ class TestRefreshExecutorOnTheRealMachinery:
             )
             rows = cur.fetchall()
         assert len(rows) == 1, "exactly one notification per binding"
+        assert set(rows[0][0]) == {"v", "text"} and rows[0][0]["v"] == 1, (
+            "the `outbox.fanout_notification` envelope, pinned from outside the"
+            " door the prompt now goes through"
+        )
         assert "re-authoriz" in rows[0][0]["text"], (
             "the prompt must say what happened and what is paused"
         )

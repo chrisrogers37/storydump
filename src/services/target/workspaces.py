@@ -27,7 +27,7 @@ free-form keys — and whose validation is a floor: the database's CHECKs
 (`ck_ws_posts_per_day`, `ck_ws_tz_valid`, …) remain the authority, and a
 `check_violation` from any writer here surfaces as `InvalidWorkspaceArgs`
 (translated once, in :func:`_write`, through the tier's one unwrap —
-`_dbapi.driver_candidates`), which the port maps to `invalid_args`.
+`_dbapi.driver_error_is`), which the port maps to `invalid_args`.
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ from sqlalchemy.exc import DBAPIError
 
 from src.exceptions.base import StorydumpError
 from src.services.target import vocabulary
-from src.services.target import offboarding, readers
-from src.services.target._dbapi import driver_candidates
+from src.services.target import google_drive_oauth, offboarding, readers
+from src.services.target._dbapi import driver_error_is
 from src.services.target.unit_of_work import apply_gucs
 
 #: `workspaces.name` is VARCHAR(100).
@@ -123,10 +123,10 @@ async def _write(executor, sql: str, **params):
     try:
         return await executor.execute(text(sql), params)
     except DBAPIError as exc:
-        for cause in driver_candidates(exc):
-            if isinstance(cause, CheckViolationError):
-                name = getattr(cause, "constraint_name", None) or "check"
-                raise InvalidWorkspaceArgs(f"invalid value ({name})") from exc
+        cause = driver_error_is(exc, CheckViolationError)
+        if cause is not None:
+            name = getattr(cause, "constraint_name", None) or "check"
+            raise InvalidWorkspaceArgs(f"invalid value ({name})") from exc
         raise
 
 
@@ -300,11 +300,10 @@ async def drive_status(executor, *, workspace_id: str) -> dict:
         executor,
         # updated_at, not created_at: a reconnect (and every refresh) replaces
         # the row in place, and "connected since" is the LAST grant's time.
-        "SELECT CASE WHEN c.state <> 'active' THEN c.state ELSE 'active' END AS status,"
-        "       c.updated_at AS connected_at"
-        "  FROM oauth_credentials c"
-        " WHERE c.workspace_id = :ws AND c.provider = :provider"
-        "   AND c.ig_account_id IS NULL AND c.media_source_id IS NULL",
+        "SELECT CASE WHEN state <> 'active' THEN state ELSE 'active' END AS status,"
+        "       updated_at AS connected_at"
+        "  FROM oauth_credentials"
+        " WHERE " + google_drive_oauth.WORKSPACE_GRANT_WHERE,
         ws=str(workspace_id),
         provider=GDRIVE_PROVIDER,
     )

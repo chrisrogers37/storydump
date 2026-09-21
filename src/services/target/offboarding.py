@@ -72,7 +72,7 @@ from typing import Any, Optional
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import intent_ledger, jobs
+from src.services.target import audit, intent_ledger, jobs
 from src.services.target.intent_ledger import IntentTransitionRefused
 
 logger = logging.getLogger(__name__)
@@ -287,18 +287,15 @@ async def _audit(factory, workspace_id: str, event: str, detail: dict) -> None:
     `credential_lifecycle._audit_revoke_failed` opens its own.
     """
     async with factory() as session:
-        await session.execute(
-            text(
-                "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
-                " from_state, to_state, actor_kind, actor_user_id, channel, detail)"
-                " VALUES (:ws, 'workspace', CAST(:ws AS uuid), 'offboarding',"
-                "         'offboarding', current_setting('app.actor_kind'),"
-                "         NULL, 'system', CAST(:detail AS jsonb))"
-            ),
-            {
-                "ws": workspace_id,
-                "detail": json.dumps({"v": 1, "event": event, **detail}),
-            },
+        await audit.record(
+            session,
+            workspace_id=workspace_id,
+            entity_kind="workspace",
+            entity_id_sql="CAST(:ws AS uuid)",
+            from_state="offboarding",
+            to_state="offboarding",
+            detail={"v": 1, "event": event, **detail},
+            actor_sql=audit.ACTOR_SYSTEM_CHANNEL,
         )
         await session.commit()
 

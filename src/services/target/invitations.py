@@ -7,7 +7,7 @@ caller's verified email, grants the role, and consumes the invitation. It
 signals its two refusals as SQLSTATEs — ``no_data_found`` (used, revoked,
 expired, unknown) and ``check_violation`` (identity proof mismatch) — and this
 module turns them into a typed :class:`InvitationRefused` the adapter maps by
-``reason``. The unwrap goes through `_dbapi.driver_candidates`, the one place
+``reason``. The unwrap goes through `_dbapi.driver_error_is`, the one place
 the SQLAlchemy→asyncpg chain is walked (`intent_ledger` precedent); an HTTP
 layer sniffing SQLSTATEs was the shape this replaces.
 
@@ -30,9 +30,9 @@ from asyncpg.exceptions import (
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from src.exceptions.base import StorydumpError
+from src.exceptions.base import RefusalError
 from src.services.target import identity, jobs, sessions, tenant_resolution
-from src.services.target._dbapi import driver_candidates
+from src.services.target._dbapi import driver_error_is
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +56,8 @@ CHANNELS = ("email", "telegram")
 INVITE_TTL_SECONDS = 7 * 24 * 3600
 
 
-class InvitationRefused(StorydumpError):
-    def __init__(self, reason: str, detail: str = ""):
-        self.reason = reason
-        super().__init__(
-            f"invitation refused: {reason}" + (f" — {detail}" if detail else "")
-        )
+class InvitationRefused(RefusalError):
+    _prefix = "invitation refused"
 
 
 async def accept(executor, *, token: str, user_id: str, channel: str) -> dict[str, Any]:
@@ -91,11 +87,13 @@ async def accept(executor, *, token: str, user_id: str, channel: str) -> dict[st
             )
         ).first()
     except DBAPIError as exc:
-        for cause in driver_candidates(exc):
-            if isinstance(cause, NoDataFoundError):
-                raise InvitationRefused("not_acceptable", str(cause)) from exc
-            if isinstance(cause, CheckViolationError):
-                raise InvitationRefused("identity_mismatch", str(cause)) from exc
+        # One pass, then discriminate: asking per class would invert the
+        # candidate order where `orig` and its `__cause__` differ.
+        cause = driver_error_is(exc, NoDataFoundError, CheckViolationError)
+        if isinstance(cause, NoDataFoundError):
+            raise InvitationRefused("not_acceptable", str(cause)) from exc
+        if isinstance(cause, CheckViolationError):
+            raise InvitationRefused("identity_mismatch", str(cause)) from exc
         raise
     if row is None:
         raise InvitationRefused("not_acceptable")
@@ -200,12 +198,11 @@ async def create(
         # only against a LIVE invitation — a revoked or accepted one does not
         # block a new send, which is the behaviour a person expects when they
         # re-invite someone whose first invite expired.
-        for cause in driver_candidates(exc):
-            if isinstance(cause, UniqueViolationError):
-                raise InvitationRefused(
-                    "already_invited",
-                    "that address already has a pending invitation to this workspace",
-                ) from exc
+        if driver_error_is(exc, UniqueViolationError) is not None:
+            raise InvitationRefused(
+                "already_invited",
+                "that address already has a pending invitation to this workspace",
+            ) from exc
         raise
 
     return str(row[0]), token
