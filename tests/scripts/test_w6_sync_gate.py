@@ -18,7 +18,6 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import psycopg2
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -26,27 +25,9 @@ from src.services.target.commands import CommandRefused
 from src.services.target.work_loop import WorkerConfig
 from src.worker import compose
 from src.services.target.drive_adapter import checkpoint_incomplete
-from tests.scripts.conftest import seed_workspace_chain
-from tests.scripts.test_lineage_lane import run_lane
+from tests.scripts.conftest import async_url, seed_workspace_chain
 
 pytestmark = [pytest.mark.integration]
-
-
-def _async_url(dsn: str) -> str:
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-
-@pytest.fixture()
-def lane_db(bootstrapped_db):
-    run_lane(bootstrapped_db)
-    return bootstrapped_db
-
-
-@pytest.fixture()
-def sync_conn(lane_db):
-    conn = psycopg2.connect(lane_db)
-    yield conn
-    conn.close()
 
 
 def _arm_source(conn, source_id, when="now()"):
@@ -197,7 +178,7 @@ def _item(ref, h=None, kind="image", name=None, mime=_UNSET):
 
 
 async def _run_once_w6(lane_db, drive):
-    engine = create_async_engine(_async_url(lane_db))
+    engine = create_async_engine(async_url(lane_db))
     try:
         app = compose(engine=engine, config=WorkerConfig(), env={}, drive=drive)
         wl = next(wl_ for wl_ in app.loops if wl_.lane == "bulk")
@@ -421,7 +402,7 @@ async def _command(lane_db, kind, chain, **args):
     # write to oauth_credentials, so a bare session does not merely skip the
     # GUCs — it cannot execute the statement at all. Running the executor any
     # other way would test a path production never takes.
-    engine = create_async_engine(_async_url(lane_db))
+    engine = create_async_engine(async_url(lane_db))
     try:
         uow = unit_of_work(
             engine,
@@ -450,7 +431,7 @@ async def _rearm(lane_db, workspace_id, source_id) -> bool:
 
     from src.services.target import media_sync
 
-    engine = create_async_engine(_async_url(lane_db))
+    engine = create_async_engine(async_url(lane_db))
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
@@ -469,7 +450,7 @@ async def _sweep(lane_db, *, age_seconds=0, limit=200) -> int:
 
     from src.services.target import media_sync
 
-    engine = create_async_engine(_async_url(lane_db))
+    engine = create_async_engine(async_url(lane_db))
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
@@ -696,7 +677,7 @@ class TestAStrandedSourceKeepsSayingSo:
             " WHERE id = %s"
         )
 
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session:
@@ -1462,7 +1443,7 @@ def _second_source(conn, ws, name):
 
 
 async def _in_session(lane_db, fn):
-    engine = create_async_engine(_async_url(lane_db))
+    engine = create_async_engine(async_url(lane_db))
     try:
         maker = async_sessionmaker(engine, expire_on_commit=False)
         async with maker() as session:

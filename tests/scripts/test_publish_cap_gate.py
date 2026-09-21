@@ -38,6 +38,7 @@ from src.services.target import publish_cap
 from src.services.target.publish_cap import FlipOutcome, IntentNotApproved
 from tests.scripts.conftest import (
     _scratch,
+    async_url,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -62,7 +63,7 @@ def cap_db(admin_conn, owner_actor):
         finally:
             conn.close()
         engine = create_async_engine(
-            dsn.replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(dsn),
             poolclass=NullPool,
             connect_args={"server_settings": {"app.actor_kind": "system"}},
         )

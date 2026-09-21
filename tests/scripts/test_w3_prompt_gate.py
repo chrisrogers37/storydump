@@ -14,32 +14,13 @@ sweep changes nothing.
 
 import uuid
 
-import psycopg2
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.services.target import prompts, unit_of_work
-from tests.scripts.conftest import seed_workspace_chain
-from tests.scripts.test_lineage_lane import run_lane
+from tests.scripts.conftest import async_url, seed_workspace_chain
 
 pytestmark = [pytest.mark.integration]
-
-
-def _async_url(dsn: str) -> str:
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-
-@pytest.fixture()
-def lane_db(bootstrapped_db):
-    run_lane(bootstrapped_db)
-    return bootstrapped_db
-
-
-@pytest.fixture()
-def sync_conn(lane_db):
-    conn = psycopg2.connect(lane_db)
-    yield conn
-    conn.close()
 
 
 def _seed_world(sync_conn, name: str, *, api_enabled: bool = False):
@@ -91,7 +72,7 @@ class TestDueScheduledGainsItsCard:
         self, lane_db, sync_conn
     ):
         chain, binding = _seed_world(sync_conn, "w3due")
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             counts = await _sweep(engine)
             assert counts["prompted"] == 1
@@ -132,7 +113,7 @@ class TestDueScheduledGainsItsCard:
         self, lane_db, sync_conn
     ):
         chain, binding = _seed_world(sync_conn, "w3api", api_enabled=True)
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             await _sweep(engine)
             payload = _cards(sync_conn, chain["intent"])[0][2]
@@ -149,7 +130,7 @@ class TestTheWebIsASurface:
 
     async def test_delivery_after_the_fact_changes_nothing(self, lane_db, sync_conn):
         chain, binding = _seed_world(sync_conn, "w3adv")
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             await _sweep(engine)
             assert _intent_state(sync_conn, chain["intent"]) == "awaiting_approval"
@@ -176,7 +157,7 @@ class TestTheWebIsASurface:
         so the `prompt_pending → failed` edge has no producer any more — the
         intent waits for a person, or for `approval_ttl` to expire it."""
         chain, binding = _seed_world(sync_conn, "w3fail")
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             await _sweep(engine)
             with sync_conn.cursor() as cur:
@@ -200,7 +181,7 @@ class TestTheWebIsASurface:
         its intents never left `scheduled` and the reaper expired them, on the
         exact workspace milestone 1 exists to serve."""
         chain = seed_workspace_chain(sync_conn, "w3nobind")
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             counts = await _sweep(engine)
             assert counts == {"prompted": 1, "advanced": 1}

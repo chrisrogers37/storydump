@@ -42,6 +42,7 @@ from psycopg2 import errors as pg_errors
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    async_url,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -300,7 +301,7 @@ class TestTheClockElectionIsExclusive:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         return create_async_engine(
-            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(clock_db["worker"]),
             pool_size=2,
             max_overflow=0,
         )
@@ -382,7 +383,7 @@ class TestAFailingTickIsVisibleInBothTheCounterAndTheLog:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         engine = create_async_engine(
-            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(clock_db["worker"]),
             pool_size=2,
             max_overflow=0,
         )
@@ -431,7 +432,7 @@ class TestAFailingTickIsVisibleInBothTheCounterAndTheLog:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         engine = create_async_engine(
-            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(clock_db["worker"]),
             pool_size=2,
             max_overflow=0,
         )
@@ -519,7 +520,7 @@ class TestKillingTheClockMidTickLosesNothing:
 
         def _engine():
             return create_async_engine(
-                clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+                async_url(clock_db["worker"]),
                 pool_size=1,
                 max_overflow=0,
             )
@@ -582,7 +583,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         return create_async_engine(
-            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(clock_db["worker"]),
             pool_size=2,
             max_overflow=0,
         )
@@ -810,7 +811,7 @@ class TestTheTickAndTheSweepAreBounded:
 
         budget = 3
         engine = create_async_engine(
-            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(clock_db["worker"]),
             pool_size=1,
             max_overflow=0,
         )
@@ -870,7 +871,7 @@ class TestTheTickAndTheSweepAreBounded:
         assert overdue >= 6, "positive control: there is more work than the bound"
 
         engine = create_async_engine(
-            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(clock_db["worker"]),
             pool_size=1,
             max_overflow=0,
         )
@@ -1004,9 +1005,7 @@ async def _plan_slot(clock_db, account, seed):
     slot = _owner_exec(
         clock_db, "SELECT now() + make_interval(secs => %s)", (seed,), fetch=True
     )[0][0]
-    engine = create_async_engine(
-        clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1)
-    )
+    engine = create_async_engine(async_url(clock_db["worker"]))
     try:
         async with engine.connect() as conn:
             await conn.execute(
@@ -1077,9 +1076,7 @@ class TestTheCategoryMixShapesTheDraw:
     def _engine(self, clock_db):
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        return create_async_engine(
-            clock_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1)
-        )
+        return create_async_engine(async_url(clock_db["worker"]))
 
     async def _plan(self, clock_db, account, seed):
         return await _plan_slot(clock_db, account, seed)

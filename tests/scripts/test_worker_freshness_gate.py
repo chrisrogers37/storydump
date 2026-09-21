@@ -33,19 +33,8 @@ import psycopg2
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from tests.scripts.conftest import seed_workspace_chain
-from tests.scripts.test_lineage_lane import run_lane
+from tests.scripts.conftest import async_url, seed_workspace_chain
 from src.services.target import scheduling_health
-
-
-def _async_url(dsn: str) -> str:
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-
-@pytest.fixture()
-def lane_db(bootstrapped_db):
-    run_lane(bootstrapped_db)
-    return bootstrapped_db
 
 
 @pytest.fixture()
@@ -91,7 +80,7 @@ def _seed_system_job(
 
 
 async def _freshness(lane_db):
-    engine = create_async_engine(_async_url(lane_db))
+    engine = create_async_engine(async_url(lane_db))
     try:
         async with engine.connect() as c:
             return await scheduling_health.worker_freshness(c)

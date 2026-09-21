@@ -32,16 +32,13 @@ from src.services.target.commands import Command, CommandRefused
 from tests.scripts.conftest import (
     _scratch,
     actor_lacks_createrole,
+    async_url,
     run_bootstrap,
     seed_workspace_chain,
 )
 from tests.scripts.test_lineage_lane import run_lane
 
 pytestmark = [pytest.mark.integration]
-
-
-def _async_url(dsn: str) -> str:
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
 @pytest.fixture(scope="module")
@@ -88,7 +85,7 @@ class _Round:
 
     def __init__(self, world):
         self.world = world
-        self.engine = create_async_engine(_async_url(world["dsn"]))
+        self.engine = create_async_engine(async_url(world["dsn"]))
 
     async def create(self, **kw):
         kw.setdefault("workspace_id", self.world["ws"])
@@ -298,7 +295,7 @@ class TestTheExecutorDoesNotNarrowTheWriter:
     """
 
     async def _execute(self, world, args):
-        engine = create_async_engine(_async_url(world["dsn"]))
+        engine = create_async_engine(async_url(world["dsn"]))
         try:
             async with engine.begin() as conn:
                 return await commands.execute(
@@ -332,7 +329,7 @@ class TestTheExecutorDoesNotNarrowTheWriter:
             },
         )
         assert result.outcome == "executed"
-        engine = create_async_engine(_async_url(world["dsn"]))
+        engine = create_async_engine(async_url(world["dsn"]))
         try:
             async with engine.begin() as conn:
                 row = (
@@ -397,7 +394,7 @@ class TestTheEmailProducer:
     """
 
     async def _invite(self, world, args, *, origin="https://app.example.test"):
-        engine = create_async_engine(_async_url(world["dsn"]))
+        engine = create_async_engine(async_url(world["dsn"]))
         try:
             import src.services.target.command_executors as ce
 
@@ -424,7 +421,7 @@ class TestTheEmailProducer:
             await engine.dispose()
 
     async def _job(self, world, job_id):
-        engine = create_async_engine(_async_url(world["dsn"]))
+        engine = create_async_engine(async_url(world["dsn"]))
         try:
             async with engine.begin() as conn:
                 row = (
@@ -488,7 +485,7 @@ class TestTheEmailProducer:
         was already in.
         """
         result = await self._invite(world, {"email": "claimable@example.com"})
-        engine = create_async_engine(_async_url(world["dsn"]))
+        engine = create_async_engine(async_url(world["dsn"]))
         try:
             async with engine.begin() as conn:
                 claimed = (
@@ -528,7 +525,7 @@ class TestTheEmailProducer:
         # Scoped to THIS invitation, not the whole table: the lane is
         # module-scoped, so earlier tests in this class have left their own
         # `send_email` rows behind and a global count would answer about them.
-        engine = create_async_engine(_async_url(world["dsn"]))
+        engine = create_async_engine(async_url(world["dsn"]))
         try:
             async with engine.begin() as conn:
                 count = (

@@ -45,7 +45,11 @@ import re
 import psycopg2
 import pytest
 
-from tests.scripts.conftest import replay_advertised_stream, seed_workspace_chain
+from tests.scripts.conftest import (
+    async_url,
+    replay_advertised_stream,
+    seed_workspace_chain,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -743,7 +747,7 @@ class TestTheServicePathAgreesWithTheTrigger:
     """
 
     def _async_dsn(self, ledger) -> str:
-        return ledger["dsn"].replace("postgresql://", "postgresql+asyncpg://", 1)
+        return async_url(ledger["dsn"])
 
     @pytest.mark.asyncio
     async def test_a_legal_transition_goes_through_the_service(self, ledger):

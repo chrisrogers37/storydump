@@ -269,6 +269,24 @@ def as_user(dsn: str, user: str) -> str:
     return _dsn(database, user=user, password=TEST_ACTOR_PASSWORD)
 
 
+def async_url(dsn: str) -> str:
+    """The asyncpg URL for *dsn* — the APPLICATION's rewrite, not a second one.
+
+    `unit_of_work.asyncpg_url` is the deploy door both roots share, and its own
+    docstring says why it exists: "so the rewrite lives once". Nineteen gate
+    files spelled the `postgresql+asyncpg` swap by hand at thirty-seven call
+    sites anyway, nine of them through a private copy of this function — and a
+    test that hand-rolls what the application does is a test that can go on
+    agreeing with itself while the application changes underneath it.
+
+    It does strictly more than the hand copies did: it also strips the
+    libpq-only `sslmode`/`channel_binding` params asyncpg refuses. Inert for
+    every DSN this suite builds (`_dsn` above emits no query string at all),
+    and correct rather than inert if one ever carries them.
+    """
+    return asyncpg_url(dsn)
+
+
 def _scratch_name(prefix: str = TEST_DB_PREFIX, tag: str = "") -> str:
     return f"{prefix}{tag}{SESSION_TOKEN}_{uuid.uuid4().hex[:10]}"
 
@@ -1015,6 +1033,38 @@ def bootstrapped_db(admin_conn, roleless_db):
     dsn, _ = roleless_db
     run_bootstrap(admin_conn, dsn)
     return dsn
+
+
+@pytest.fixture()
+def lane_db(bootstrapped_db):
+    """The full-lineage world (legacy schema + target public), once per test.
+
+    The parenthetical still holds after 079. That file carries `runner:manual`,
+    so `apply_pending` — which is all `run_lane` invokes — reports it OWED and
+    never applies it; `test_lineage_lane.py` pins both halves (owed == [79, 80],
+    and `legacy` holds exactly the sixteen inventory tables at the end of the
+    lane). The `DROP SCHEMA legacy CASCADE` ran in production's window on
+    2026-09-19 and does not run here.
+
+    `run_lane` is imported inside the body rather than at module scope because
+    `tests/scripts/test_lineage_lane.py` imports a dozen names from THIS file:
+    a module-level import would close the cycle and the conftest would fail to
+    load for the whole directory. The six gate files that each carried a copy
+    of this fixture could import it at the top only because none of them is
+    what the lane imports.
+    """
+    from tests.scripts.test_lineage_lane import run_lane
+
+    run_lane(bootstrapped_db)
+    return bootstrapped_db
+
+
+@pytest.fixture()
+def sync_conn(lane_db):
+    """A plain psycopg2 connection to the lane world, closed on teardown."""
+    conn = psycopg2.connect(lane_db)
+    yield conn
+    conn.close()
 
 
 @functools.lru_cache(maxsize=1)

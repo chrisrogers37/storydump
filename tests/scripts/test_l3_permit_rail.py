@@ -25,6 +25,7 @@ from src.services.target.provider_ops import PermitRefused
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    async_url,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -53,7 +54,7 @@ def ops_db(admin_conn, owner_actor):
         # ResourceWarning as an error — which reads as a logic failure in
         # whichever test happens to run when the garbage collector notices.
         engine = create_async_engine(
-            dsn.replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(dsn),
             # NullPool is PRECAUTIONARY, and saying so matters because I
             # briefly believed otherwise. The kill-mid-transaction test
             # abandons a connection while it holds FOR SHARE on a jobs row;

@@ -15,31 +15,12 @@ proves only that the test ran.
 
 import json
 
-import psycopg2
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from tests.scripts.conftest import seed_workspace_chain
-from tests.scripts.test_lineage_lane import run_lane
+from tests.scripts.conftest import async_url, seed_workspace_chain
 
 pytestmark = [pytest.mark.integration]
-
-
-def _async_url(dsn: str) -> str:
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-
-@pytest.fixture()
-def lane_db(bootstrapped_db):
-    run_lane(bootstrapped_db)
-    return bootstrapped_db
-
-
-@pytest.fixture()
-def sync_conn(lane_db):
-    conn = psycopg2.connect(lane_db)
-    yield conn
-    conn.close()
 
 
 def _tick(conn, max_jobs: int = 50) -> None:
@@ -272,7 +253,7 @@ class TestStoreArmsTheTick:
         chain = seed_workspace_chain(sync_conn, "w5de-arming")
         account_id, _ = _account_of(chain, sync_conn)
 
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             maker = async_sessionmaker(engine, expire_on_commit=False)
             async with maker() as session:
@@ -334,7 +315,7 @@ async def _run_once_w5(lane_db, refresh_stub):
     from src.services.target.work_loop import WorkerConfig
     from src.worker import compose
 
-    engine = create_async_engine(_async_url(lane_db))
+    engine = create_async_engine(async_url(lane_db))
     try:
         app = compose(
             engine=engine, config=WorkerConfig(), env={}, refresh=refresh_stub
@@ -356,7 +337,7 @@ async def _store_cred(lane_db, chain) -> str:
 
     from src.services.target import ig_login_oauth as oauth
 
-    engine = create_async_engine(_async_url(lane_db))
+    engine = create_async_engine(async_url(lane_db))
     try:
         maker = async_sessionmaker(engine, expire_on_commit=False)
         async with maker() as session:
@@ -414,7 +395,7 @@ class TestRefreshExecutorOnTheRealMachinery:
 
         # The NEW token is what the ring now holds — read it back through the
         # real decrypt path, not by comparing ciphertext.
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             maker = async_sessionmaker(engine, expire_on_commit=False)
             async with maker() as s:
@@ -579,7 +560,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
 
         from src.services.target import google_drive_oauth as gdrive
 
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             maker = async_sessionmaker(engine, expire_on_commit=False)
             async with maker() as session:

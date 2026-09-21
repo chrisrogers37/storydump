@@ -45,6 +45,7 @@ from psycopg2 import errors as pg_errors
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    async_url,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -703,7 +704,7 @@ class TestTheServicePathAgreesWithTheDoors:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         return create_async_engine(
-            jobs_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(jobs_db["worker"]),
             pool_size=1,
             max_overflow=0,
         )
