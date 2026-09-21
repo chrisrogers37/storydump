@@ -45,7 +45,7 @@ def patched(monkeypatch):
     async def consume(conn, **kw):
         f.consume_kw = kw
         if f.refuse:
-            raise identity_link.ig_login_oauth.OAuthStateRefused(f.refuse)
+            raise identity_link.oauth_states.OAuthStateRefused(f.refuse)
         return f.state_row
 
     async def link(conn, **kw):
@@ -54,7 +54,7 @@ def patched(monkeypatch):
             raise f.link
         return f.link
 
-    monkeypatch.setattr(identity_link.ig_login_oauth, "consume_state", consume)
+    monkeypatch.setattr(identity_link.oauth_states, "consume_state", consume)
     monkeypatch.setattr(identity_link.identity, "link_identity", link)
     return f
 
@@ -170,7 +170,7 @@ class TestIssuingRetiresTheUsersEarlierLinks:
             statements.append(("ISSUE", kw))
             return "st4te"
 
-        monkeypatch.setattr(identity_link.ig_login_oauth, "issue_state", issue_state)
+        monkeypatch.setattr(identity_link.oauth_states, "issue_state", issue_state)
         link = await identity_link.issue_link_state(
             _Conn(), user_id="user-1", bot_username="storydump_app_bot"
         )

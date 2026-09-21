@@ -8,7 +8,7 @@ for Drive read access WITH offline consent and writes the credential the read
 door (:mod:`drive_credentials`) and the Drive adapter live on. Shared with the
 rest of the tier rather than owned here: the token-endpoint POST
 (:func:`google_oidc.code_grant`), the state machinery and the encryption ring
-(:mod:`ig_login_oauth`). Owned here: the URL, what a grant must contain to be
+(:mod:`oauth_states`). Owned here: the URL, what a grant must contain to be
 kept, the payload shape, and the INSERT.
 
 ## What is taken from the legacy flow, and how
@@ -81,7 +81,7 @@ from sqlalchemy import text
 from src.exceptions.base import RefusalError, StorydumpError
 from src.services.target import egress, vocabulary
 from src.services.target.google_oidc import AUTHORIZE_URL, code_grant, refresh_grant
-from src.services.target.ig_login_oauth import ring
+from src.services.target.oauth_states import ring
 
 #: `ck_credentials_provider` / `ck_sources_provider` / `ck_oauth_state_provider`.
 PROVIDER = vocabulary.PROVIDER_GDRIVE

@@ -131,6 +131,91 @@ def _cursor_folder(entry: Mapping[str, Any]) -> dict:
     }
 
 
+def _queued_child(
+    parent: Mapping[str, Any], child: Mapping[str, Any], *, root: str
+) -> dict:
+    """A discovered subfolder as a queue entry.
+
+    A child of the ROOT becomes its own top-level folder — that is the label
+    the sync stores as `category`, and the path starts at its own name. Deeper
+    down it inherits the top-level folder it sits under and extends its
+    parent's path. Split out of :meth:`GoogleDriveAdapter.list_changes` (the
+    tech-debt audit, 2026-09-20).
+    """
+    if parent["id"] == root:
+        top, top_name, path = child["id"], child["name"], child["name"]
+    else:
+        top, top_name = parent["top"], parent["top_name"]
+        path = f"{parent['path']}/{child['name']}"
+    return {
+        "id": child["id"],
+        "name": child["name"],
+        "top": top,
+        "top_name": top_name,
+        "path": path,
+        "listed": False,
+    }
+
+
+def _resume_walk(
+    cp: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    root: str,
+    source_id: str,
+) -> tuple[str, dict, list, Optional[str], int, bool, list]:
+    """The walk a stored cursor resumes, or the fresh one that replaces it.
+
+    Split out of :meth:`GoogleDriveAdapter.list_changes` (the tech-debt audit,
+    2026-09-20): deciding whether a stored cursor can be believed is one
+    decision, and it was the first third of the listing verb. Returns the
+    seven values the walk reads — ``(walk, current, queue, page_token, seen,
+    truncated, visited)`` — under the names the walk already used, so the
+    listing body is unchanged by the move.
+
+    A cursor is resumable only when it is v2, carries a `walk` token and names
+    a `current` folder whose id is a Drive id; anything else starts over, and
+    a cursor that held a `current` or a `page_token` says so once before it
+    does. `walk` is reused when the cursor carried one (a caller that minted
+    it keeps it) and minted here otherwise.
+    """
+    walk = cp.get("walk")
+    if not (cp.get("v") == 2 and isinstance(walk, str) and walk):
+        walk = None
+    resumed = cp.get("current") if walk is not None else None
+    if resumed and is_folder_id(resumed.get("id")):
+        # Healed, not trusted: a field a stored cursor lacks gets its
+        # default rather than a KeyError that would retry forever.
+        current: dict = _cursor_folder(resumed)
+        queue = [
+            _cursor_folder(f)
+            for f in (cp.get("queue") or [])
+            if is_folder_id((f or {}).get("id"))
+        ]
+        page_token = cp.get("page_token")
+        seen = int(cp.get("seen") or 0)
+        truncated = bool(cp.get("truncated"))
+        visited = [v for v in (cp.get("visited") or []) if isinstance(v, str)]
+    else:
+        if cp.get("current") or cp.get("page_token"):
+            logger.warning(
+                "drive source %s: the stored cursor cannot be resumed (pre-v2, or"
+                " malformed) — starting over",
+                source_id,
+            )
+        walk = walk or uuid.uuid4().hex
+        current = {
+            "id": root,
+            "name": None,
+            "top": root,
+            "top_name": _folder_label(config),
+            "path": "",
+            "listed": False,
+        }
+        queue, page_token, seen, truncated, visited = [], None, 0, False, []
+    return walk, current, queue, page_token, seen, truncated, visited
+
+
 @dataclass(frozen=True)
 class FolderPage:
     """What the browser returns: the folders, and whether the cap cut them."""
@@ -328,40 +413,9 @@ class GoogleDriveAdapter:
             await self._token_provider(source_id, workspace_id=workspace_id)
         )
 
-        walk = cp.get("walk")
-        if not (cp.get("v") == 2 and isinstance(walk, str) and walk):
-            walk = None
-        resumed = cp.get("current") if walk is not None else None
-        if resumed and is_folder_id(resumed.get("id")):
-            # Healed, not trusted: a field a stored cursor lacks gets its
-            # default rather than a KeyError that would retry forever.
-            current: dict = _cursor_folder(resumed)
-            queue = [
-                _cursor_folder(f)
-                for f in (cp.get("queue") or [])
-                if is_folder_id((f or {}).get("id"))
-            ]
-            page_token = cp.get("page_token")
-            seen = int(cp.get("seen") or 0)
-            truncated = bool(cp.get("truncated"))
-            visited = [v for v in (cp.get("visited") or []) if isinstance(v, str)]
-        else:
-            if cp.get("current") or cp.get("page_token"):
-                logger.warning(
-                    "drive source %s: the stored cursor cannot be resumed (pre-v2, or"
-                    " malformed) — starting over",
-                    source_id,
-                )
-            walk = walk or uuid.uuid4().hex
-            current = {
-                "id": root,
-                "name": None,
-                "top": root,
-                "top_name": _folder_label(config),
-                "path": "",
-                "listed": False,
-            }
-            queue, page_token, seen, truncated, visited = [], None, 0, False, []
+        walk, current, queue, page_token, seen, truncated, visited = _resume_walk(
+            cp, config, root=root, source_id=source_id
+        )
 
         def cursor(**extra: Any) -> dict:
             # `seen` and `truncated` ride to completion (the log reads them);
@@ -380,19 +434,30 @@ class GoogleDriveAdapter:
             # The cursor past `current`: the next queued folder, or done.
             return cursor(current=queue[0], queue=queue[1:]) if queue else cursor()
 
+        def note_truncation() -> None:
+            # ONE cut, said ONCE per walk. The cap is reached two ways — a
+            # folder popped when the queue is already full, and the queue
+            # filling mid-batch — and they are the same fact to everyone
+            # downstream: the same sentence, and a `truncated` that rides the
+            # cursor to completion. They were two copies of this block until
+            # the tech-debt audit (2026-09-20, TD-B9) folded them.
+            nonlocal truncated
+            if truncated:
+                return
+            logger.warning(
+                "drive source %s: more than %d folders under %s in one walk —"
+                " the rest are skipped this walk (truncated)",
+                source_id,
+                FOLDER_WALK_CAP,
+                root,
+            )
+            truncated = True
+
         if not current.get("listed") and seen >= FOLDER_WALK_CAP:
             # Past the cap no listing is even asked for: every child would be
             # discarded, and a 2,000-folder tree would otherwise spend 2,000
             # requests per walk on nothing (review of #1256).
-            if not truncated:
-                logger.warning(
-                    "drive source %s: more than %d folders under %s in one walk —"
-                    " the rest are skipped this walk (truncated)",
-                    source_id,
-                    FOLDER_WALK_CAP,
-                    root,
-                )
-                truncated = True
+            note_truncation()
             current["listed"] = True
         if not current.get("listed"):
             # Lazy discovery: this folder's subfolders, once, as it is popped.
@@ -428,50 +493,18 @@ class GoogleDriveAdapter:
                     )
                     continue
                 if seen >= FOLDER_WALK_CAP:
-                    if not truncated:
-                        logger.warning(
-                            "drive source %s: more than %d folders under %s in one walk —"
-                            " the rest are skipped this walk (truncated)",
-                            source_id,
-                            FOLDER_WALK_CAP,
-                            root,
-                        )
-                        truncated = True
+                    note_truncation()
                     break
-                if current["id"] == root:
-                    top, top_name, path = child["id"], child["name"], child["name"]
-                else:
-                    top, top_name = current["top"], current["top_name"]
-                    path = f"{current['path']}/{child['name']}"
-                queue.append(
-                    {
-                        "id": child["id"],
-                        "name": child["name"],
-                        "top": top,
-                        "top_name": top_name,
-                        "path": path,
-                        "listed": False,
-                    }
-                )
+                queue.append(_queued_child(current, child, root=root))
                 seen += 1
                 known.add(child["id"])
             visited.append(str(current["id"]))
             current["listed"] = True
 
-        params = {
-            "q": _listing_query(str(current["id"])),
-            "fields": f"nextPageToken,files({FILE_FIELDS})",
-            "pageSize": str(self._page_size),
-            "spaces": "drive",
-            "supportsAllDrives": "true",
-            "includeItemsFromAllDrives": "true",
-        }
-        if page_token:
-            params["pageToken"] = page_token
-
         try:
-            payload = await self._get_as_workspace(
-                f"{FILES_URL}?{urlencode(params)}",
+            payload = await self._list_page(
+                str(current["id"]),
+                page_token=page_token,
                 source_id=source_id,
                 workspace_id=workspace_id,
                 box=box,
@@ -504,7 +537,55 @@ class GoogleDriveAdapter:
             )
             return [], cursor(current=current, queue=queue)
 
-        category = current.get("top_name")
+        items = self._page_items(payload, current)
+
+        next_token = payload.get("nextPageToken")
+        if next_token:
+            return items, cursor(current=current, queue=queue, page_token=next_token)
+        return items, advanced()
+
+    async def _list_page(
+        self,
+        folder_id: str,
+        *,
+        page_token: Optional[str],
+        source_id: str,
+        workspace_id: str,
+        box: "_TokenBox",
+    ) -> dict:
+        """ONE listing request for one folder: the media page, bounded by
+        `page_size` and resumed by `page_token`.
+
+        Split out of :meth:`list_changes` (the tech-debt audit, 2026-09-20).
+        The refusals ride out unchanged — :class:`DriveSourceGone` and
+        :class:`DriveTerminalError` are cursor decisions, and they are made
+        where the cursor is.
+        """
+        params = {
+            "q": _listing_query(folder_id),
+            "fields": f"nextPageToken,files({FILE_FIELDS})",
+            "pageSize": str(self._page_size),
+            "spaces": "drive",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        return await self._get_as_workspace(
+            f"{FILES_URL}?{urlencode(params)}",
+            source_id=source_id,
+            workspace_id=workspace_id,
+            box=box,
+        )
+
+    def _page_items(
+        self, payload: Mapping[str, Any], folder: Mapping[str, Any]
+    ) -> list[dict]:
+        """One listing page as port items, labelled by the folder they came
+        from. Split out of :meth:`list_changes` (the tech-debt audit,
+        2026-09-20). A file the mime filter or the checksum rule rejects is
+        dropped by :meth:`_item_for`, which says so."""
+        category = folder.get("top_name")
         items: list[dict] = []
         for entry in payload.get("files") or []:
             item = self._item_for(entry)
@@ -512,13 +593,9 @@ class GoogleDriveAdapter:
                 if category is not None:
                     # Absent = the root's own files; the sync reads `.get`.
                     item["category"] = category
-                item["folder_path"] = current.get("path") or ""
+                item["folder_path"] = folder.get("path") or ""
                 items.append(item)
-
-        next_token = payload.get("nextPageToken")
-        if next_token:
-            return items, cursor(current=current, queue=queue, page_token=next_token)
-        return items, advanced()
+        return items
 
     async def _subfolders(
         self,

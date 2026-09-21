@@ -23,7 +23,7 @@ import logging
 from src.services.target import (
     bindings,
     identity,
-    ig_login_oauth,
+    oauth_states,
     readers,
     unit_of_work,
 )
@@ -52,10 +52,10 @@ async def issue_bind_state(
     earlier copy pasted somewhere must not stay usable after a new one is
     minted, so issuing retires the workspace's other live bind states.
     """
-    await ig_login_oauth.retire_live_states(
+    await oauth_states.retire_live_states(
         conn, provider=PROVIDER, purpose=PURPOSE, workspace_id=workspace_id
     )
-    state = await ig_login_oauth.issue_state(
+    state = await oauth_states.issue_state(
         conn,
         purpose=PURPOSE,
         provider=PROVIDER,
@@ -88,13 +88,13 @@ async def handle_bind(conn, ctx: StartContext) -> StartResult:
     spelling). They die at the route's commit.
     """
     try:
-        row = await ig_login_oauth.consume_state(
+        row = await oauth_states.consume_state(
             conn,
             state=ctx.payload,
             expected_purpose=PURPOSE,
             expected_provider=PROVIDER,
         )
-    except ig_login_oauth.OAuthStateRefused as exc:
+    except oauth_states.OAuthStateRefused as exc:
         logger.warning("group bind refused: %s", exc)
         return StartResult(outcome="state_refused", handled=False)
     workspace_id, minter = row["workspace_id"], row["user_id"]

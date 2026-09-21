@@ -77,7 +77,7 @@ from src.services.target import (
     vocabulary,
     workspaces,
 )
-from src.services.target.ig_login_oauth import issue_state
+from src.services.target.oauth_states import issue_state
 from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.intent_ledger import IntentTransitionRefused
 from src.utils.datetime_utils import utcnow

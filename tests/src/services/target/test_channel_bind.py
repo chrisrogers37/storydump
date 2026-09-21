@@ -47,7 +47,7 @@ def patched(monkeypatch):
     async def consume(conn, **kw):
         f.consume_kw = kw
         if f.refuse:
-            raise channel_bind.ig_login_oauth.OAuthStateRefused(f.refuse)
+            raise channel_bind.oauth_states.OAuthStateRefused(f.refuse)
         return f.state_row
 
     async def bind(session, **kw):
@@ -64,7 +64,7 @@ def patched(monkeypatch):
     async def apply_gucs(executor, **kw):
         f.gucs.append(kw)
 
-    monkeypatch.setattr(channel_bind.ig_login_oauth, "consume_state", consume)
+    monkeypatch.setattr(channel_bind.oauth_states, "consume_state", consume)
     monkeypatch.setattr(channel_bind.bindings, "bind", bind)
     monkeypatch.setattr(channel_bind.readers, "row", row)
     monkeypatch.setattr(channel_bind.identity, "user_for_identity", user_for_identity)
@@ -195,7 +195,7 @@ class TestIssuingRetiresTheWorkspacesEarlierLinks:
             seen.append(("issue", kw))
             return "st4te"
 
-        monkeypatch.setattr(channel_bind.ig_login_oauth, "issue_state", issue_state)
+        monkeypatch.setattr(channel_bind.oauth_states, "issue_state", issue_state)
         link = await channel_bind.issue_bind_state(
             _Conn(), user_id="u1", workspace_id="ws-1", bot_username="storydump_app_bot"
         )

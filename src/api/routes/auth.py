@@ -79,7 +79,7 @@ from src.services.target import (
     sessions,
     tenant_resolution,
 )
-from src.services.target.ig_login_oauth import (
+from src.services.target.oauth_states import (
     STATE_TTL_SECONDS,
     OAuthStateRefused,
     consume_state,

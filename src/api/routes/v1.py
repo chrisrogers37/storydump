@@ -73,7 +73,7 @@ from src.services.target import (
     vocabulary,
 )
 from src.services.target.commands import Command, CommandResult
-from src.services.target.ig_login_oauth import STATE_TTL_SECONDS, issue_state
+from src.services.target.oauth_states import STATE_TTL_SECONDS, issue_state
 from src.exceptions.tenancy import TokenRefused
 from sqlalchemy import text
 

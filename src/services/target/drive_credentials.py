@@ -56,7 +56,7 @@ from sqlalchemy import text
 from src.config.settings import settings
 from src.services.target import egress, google_drive_oauth
 from src.services.target.drive_adapter import DriveLostResponse, DriveRetryableError
-from src.services.target.ig_login_oauth import ring
+from src.services.target.oauth_states import ring
 from src.services.target.media_sync import DriveCredentialDead
 from src.services.target.unit_of_work import poller_session_factory, unit_of_work
 

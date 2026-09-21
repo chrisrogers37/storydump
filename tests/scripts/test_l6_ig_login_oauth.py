@@ -27,10 +27,9 @@ import psycopg2
 import pytest
 
 from src.services.target import ig_login_oauth as oauth
-from src.services.target.ig_login_oauth import (
-    CredentialUndecryptable,
-    OAuthStateRefused,
-)
+from src.services.target import oauth_states
+from src.services.target.ig_login_oauth import CredentialUndecryptable
+from src.services.target.oauth_states import OAuthStateRefused
 from tests.scripts.conftest import (
     _scratch,
     async_url,
@@ -202,11 +201,11 @@ class TestStateIssueAndConsume:
         ws, user = oauth_db["ws"], oauth_db["user"]
         state = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c, purpose="connect", user_id=user, workspace_id=ws
             ),
         )
-        row = _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+        row = _call(oauth_db, lambda c: oauth_states.consume_state(c, state=state))
         assert row["purpose"] == "connect"
         assert str(row["workspace_id"]) == str(ws)
 
@@ -215,7 +214,7 @@ class TestStateIssueAndConsume:
         zero-row result is allowed to mean 'refused'."""
         state = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="connect",
                 user_id=oauth_db["user"],
@@ -231,7 +230,7 @@ class TestStateIssueAndConsume:
             )[0][0]
             is True
         )
-        _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+        _call(oauth_db, lambda c: oauth_states.consume_state(c, state=state))
         assert (
             _exec(
                 oauth_db,
@@ -245,16 +244,16 @@ class TestStateIssueAndConsume:
     def test_REPLAY_is_refused_BY_NAME(self, oauth_db):
         state = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
             ),
         )
-        _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+        _call(oauth_db, lambda c: oauth_states.consume_state(c, state=state))
         with pytest.raises(OAuthStateRefused, match="already consumed"):
-            _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+            _call(oauth_db, lambda c: oauth_states.consume_state(c, state=state))
 
     def test_EXPIRY_is_refused_BY_NAME_and_is_a_different_reason_than_replay(
         self, oauth_db
@@ -264,7 +263,7 @@ class TestStateIssueAndConsume:
         the log needs to tell them apart."""
         state = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="connect",
                 user_id=oauth_db["user"],
@@ -278,18 +277,18 @@ class TestStateIssueAndConsume:
             (state,),
         )
         with pytest.raises(OAuthStateRefused, match="expired"):
-            _call(oauth_db, lambda c: oauth.consume_state(c, state=state))
+            _call(oauth_db, lambda c: oauth_states.consume_state(c, state=state))
 
     def test_an_UNKNOWN_state_is_refused_BY_NAME(self, oauth_db):
         with pytest.raises(OAuthStateRefused, match="unknown state"):
-            _call(oauth_db, lambda c: oauth.consume_state(c, state="nope"))
+            _call(oauth_db, lambda c: oauth_states.consume_state(c, state="nope"))
 
     def test_CROSS_WORKSPACE_replay_is_refused(self, oauth_db):
         """`07` §2: the row pins the workspace, so a callback cannot be replayed
         into a different one — checked at callback as well as at issue."""
         state = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="connect",
                 user_id=oauth_db["user"],
@@ -300,16 +299,16 @@ class TestStateIssueAndConsume:
         with pytest.raises(OAuthStateRefused, match="cross-workspace"):
             _call(
                 oauth_db,
-                lambda c: oauth.consume_state(
+                lambda c: oauth_states.consume_state(
                     c, state=state, expected_workspace_id=other
                 ),
             )
 
     def test_the_TTL_is_the_05_seam_not_the_legacy_value(self, oauth_db):
-        assert oauth.STATE_TTL_SECONDS == 900
+        assert oauth_states.STATE_TTL_SECONDS == 900
         state = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="connect",
                 user_id=oauth_db["user"],
@@ -335,7 +334,7 @@ class TestReconnectIsLastIssuedWins:
         target = oauth_db["iga"]
         first = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="reconnect",
                 user_id=oauth_db["user"],
@@ -345,7 +344,7 @@ class TestReconnectIsLastIssuedWins:
         )
         second = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="reconnect",
                 user_id=oauth_db["user"],
@@ -354,8 +353,8 @@ class TestReconnectIsLastIssuedWins:
             ),
         )
         with pytest.raises(OAuthStateRefused, match="already consumed"):
-            _call(oauth_db, lambda c: oauth.consume_state(c, state=first))
-        row = _call(oauth_db, lambda c: oauth.consume_state(c, state=second))
+            _call(oauth_db, lambda c: oauth_states.consume_state(c, state=first))
+        row = _call(oauth_db, lambda c: oauth_states.consume_state(c, state=second))
         assert row["purpose"] == "reconnect"
 
     def test_at_most_one_live_reconnect_state_per_target_at_any_commit(self, oauth_db):
@@ -363,7 +362,7 @@ class TestReconnectIsLastIssuedWins:
         for _ in range(3):
             _call(
                 oauth_db,
-                lambda c: oauth.issue_state(
+                lambda c: oauth_states.issue_state(
                     c,
                     purpose="reconnect",
                     user_id=oauth_db["user"],
@@ -385,7 +384,7 @@ class TestReconnectIsLastIssuedWins:
         with pytest.raises(OAuthStateRefused, match="reconnect_target"):
             _call(
                 oauth_db,
-                lambda c: oauth.issue_state(
+                lambda c: oauth_states.issue_state(
                     c,
                     purpose="reconnect",
                     user_id=oauth_db["user"],
@@ -455,7 +454,7 @@ class TestTheCredentialUnderTheRing:
             fetch=True,
         )
         assert len(rows) == 1 and rows[0][1] == "active"
-        assert oauth.ring().decrypt(rows[0][2]) == "second"
+        assert oauth_states.ring().decrypt(rows[0][2]) == "second"
 
     def test_a_reconnect_swap_replaces_the_payload_IN_PLACE(self, oauth_db):
         """`07` §2 — no window where the account has zero credentials. A
@@ -582,7 +581,7 @@ class TestReapExpiredCoversTheOauthStatesClass:
         _exec(oauth_db, "DELETE FROM oauth_states")
         live = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="connect",
                 user_id=oauth_db["user"],
@@ -591,17 +590,17 @@ class TestReapExpiredCoversTheOauthStatesClass:
         )
         consumed = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="connect",
                 user_id=oauth_db["user"],
                 workspace_id=oauth_db["ws"],
             ),
         )
-        _call(oauth_db, lambda c: oauth.consume_state(c, state=consumed))
+        _call(oauth_db, lambda c: oauth_states.consume_state(c, state=consumed))
         stale = _call(
             oauth_db,
-            lambda c: oauth.issue_state(
+            lambda c: oauth_states.issue_state(
                 c,
                 purpose="connect",
                 user_id=oauth_db["user"],
@@ -615,7 +614,7 @@ class TestReapExpiredCoversTheOauthStatesClass:
             (stale,),
         )
 
-        reaped = _call(oauth_db, lambda c: oauth.reap_expired_states(c))
+        reaped = _call(oauth_db, lambda c: oauth_states.reap_expired_states(c))
         assert reaped == 2
         remaining = [
             r[0] for r in _exec(oauth_db, "SELECT state FROM oauth_states", fetch=True)
@@ -629,15 +628,17 @@ class TestReapExpiredCoversTheOauthStatesClass:
         for _ in range(4):
             s = _call(
                 oauth_db,
-                lambda c: oauth.issue_state(
+                lambda c: oauth_states.issue_state(
                     c,
                     purpose="connect",
                     user_id=oauth_db["user"],
                     workspace_id=oauth_db["ws"],
                 ),
             )
-            _call(oauth_db, lambda c: oauth.consume_state(c, state=s))
-        assert _call(oauth_db, lambda c: oauth.reap_expired_states(c, limit=2)) == 2
+            _call(oauth_db, lambda c: oauth_states.consume_state(c, state=s))
+        assert (
+            _call(oauth_db, lambda c: oauth_states.reap_expired_states(c, limit=2)) == 2
+        )
         assert (
             _exec(oauth_db, "SELECT count(*) FROM oauth_states", fetch=True)[0][0] == 2
         )
@@ -701,7 +702,7 @@ class TestARemovedDestinationStaysRemoved:
             "UPDATE oauth_credentials SET state = 'revoked' WHERE id = %s",
             (cid,),
         )
-        with pytest.raises(oauth.OAuthStateRefused):
+        with pytest.raises(oauth_states.OAuthStateRefused):
             _call(
                 oauth_db,
                 lambda c: oauth.swap_credential(c, credential_id=cid, token="new"),

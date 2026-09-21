@@ -89,7 +89,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
-from src.services.target import ig_login_oauth, readers, vocabulary
+from src.services.target import oauth_states, readers, vocabulary
 from src.services.target.intent_ledger import TERMINAL_STATES
 from src.services.target._dbapi import constraint_violated
 
@@ -840,7 +840,7 @@ async def disable_destination(
     # A grant issued BEFORE the removal must not land afterwards and revive the
     # row by surprise — the statement `issue_state` uses to retire a target's
     # live states.
-    retired = await ig_login_oauth.retire_live_states(
+    retired = await oauth_states.retire_live_states(
         executor, provider=IG_LOGIN_PROVIDER, reconnect_target=ig_account_id
     )
     return {
