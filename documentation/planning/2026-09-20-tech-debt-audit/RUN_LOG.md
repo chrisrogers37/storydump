@@ -73,11 +73,22 @@ REQUIRE_TEST_DATABASE=1 .venv/bin/pytest --no-cov -q     # sandbox OFF
 Note `.venv/`, not `./venv/` — the `Makefile` targets that say `./venv/bin/pytest` are finding
 TD-O6 in doc 12, not a usable command.
 
-**Frozen baseline** — `main` at `5b90388`, PostgreSQL 15.18, 2026-09-20:
+**Frozen baseline** — `main` at `2edf0cc`, PostgreSQL 15.18, 2026-09-20:
 
 ```
-===== 2 failed, 3671 passed, 2 skipped, 5 deselected in 166.55s (0:02:46) ======
+===== 2 failed, 3690 passed, 2 skipped, 5 deselected in 185.22s (0:03:05) ======
 ```
+
+It was measured twice, and the first figure is recorded rather than quietly replaced. The first
+run gave **3671 passed** on `5b90388`. While the sprint was setting up, #1333 merged (the
+fleet-health doors, migration 081) and moved `main` to `f03af19`, adding 19 tests. Every Wave 1
+branch is cut from `2edf0cc`, so `2edf0cc` is the number that governs, and the four agents already
+dispatched against 3671 were sent the correction rather than left to discover it.
+
+The re-measurement also caught a defect in the runner's own tooling: the copied `testenv.sh` had
+lost the trailing `=` of the Fernet `ENCRYPTION_KEY` to a `cut -d= -f2`, which produced 33
+credential-test failures that looked like a regression in the tree and were nothing of the kind.
+A baseline is only worth what its environment is worth.
 
 The two failures are the same pair every run, and they are the platform, not the tree:
 
@@ -174,7 +185,7 @@ entry. A broken invariant stops the sprint.
 | I1 | The frozen test baseline does not regress | `REQUIRE_TEST_DATABASE=1 .venv/bin/pytest --no-cov -q` (sandbox off); compare pass/fail/skip to §1 G3 | Stop. A cleanup sprint that loses a test has changed behaviour. |
 | I2 | **No phase changes behaviour.** The 12 flagged defects (epic §Questions) stay out of every cleanup PR | Per-phase: the doc's own call-site audit + I1. Any step that would change a rendered value, a wire contract or a stored key stops the phase | Queue to §7. Never fold a defect fix into a cleanup PR. |
 | I3 | The docs guards stay green — the never-run mirror between `CLAUDE.md` and `AGENTS.md`, the legacy-name pins, the satellite copies | `.venv/bin/pytest --no-cov -q tests/test_agent_docs.py` | Docs 12 and 13 rename and delete; a drifted mirror is a real defect, not a test to relax. |
-| I4 | The FC-2 Telegram ratchet stays green | `python scripts/telegram_ratchet.py` | `src/exceptions/telegram.py` **is** in the baseline's `telegram_modules` (4 entries). Doc 02 deleting it must `--write-baseline` deliberately, in the same PR. |
+| I4 | The FC-2 Telegram ratchet stays green | `python scripts/telegram_ratchet.py` | **Discharged as designed.** `src/exceptions/telegram.py` was one of the baseline's 4 `telegram_modules`; doc 02 deleted it (C4) and re-baselined in the same commit. The JSON diff is one line — the module leaves the set, the `predicate` string is untouched, the other three axes are byte-identical, and the ratchet reads `telegram_modules: 3 (baseline 3)`. Exactly the deliberate re-baseline this row was written to require. |
 | I5 | No phase adds a skipped test | Falls out of I1; `MAX_EXPECTED_SKIPS = 1` (`tests/conftest.py:80`) | Docs 02, 11, 13 delete test-only surfaces — deleting a test is fine, skipping one is not. |
 | I6 | Lint stays clean at the repo's own policy | `ruff check .` and `ruff format . --check` | Whole-repo scope including `tests/`. |
 | I7 | `landing/` stays green — docs 14, 15 and 16 all edit it | `npx vitest run` · `npx tsc --noEmit` · `npx eslint`, from `landing/` | Baseline 2026-09-20: **378 passed / 36 files**, `tsc` clean, `eslint` clean. Node 20.19.5. |
@@ -225,29 +236,75 @@ into the same checkout. Nothing of this sprint's is in it and it is not staged h
 consequence for the runner: **every phase works in its own git worktree**, and the main checkout
 is left alone rather than being branch-switched under a concurrent session. Untracked output
 survives branch switches, so the other session is unharmed, but a phase that ran in the main
-checkout would not be.
+checkout would not be. (Resolved on its own: that session has since committed its forge plan to
+`docs/device-native-inbound-spec` — PR #1334, now two commits — and moved into a worktree of its
+own. Nothing was lost and this sprint did not touch it.)
+
+---
+
+## 3a. Deploy reachability — answered once, for the sprint's phase classes
+
+The skill's question is *"what makes this change live, and is that automated?"* For this repo the
+answer is uniform per class, so it is settled here rather than re-derived sixteen times.
+
+**Railway auto-deploys `main`, both services, with no human step.** `railway.toml` and the
+`Procfile` say what that means concretely:
+
+```
+preDeployCommand = "python -m scripts.migration_runner apply"
+healthcheckPath  = "/health"      healthcheckTimeout = 30
+drainingSeconds  = 60             restartPolicyType = "ON_FAILURE"
+
+worker: python -m src.main
+web:    uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}
+```
+
+So for this sprint, **merged really is live** — there is no "merged, NOT live" caveat to carry and
+no manual operator command owed. Three consequences the runner holds rather than discovers:
+
+1. **Every merge restarts the production posting worker.** `python -m src.main` is the scheduler
+   this repo's safety rules forbid an agent to run; Railway runs it as the service's own
+   entrypoint, which is a different thing from the runner invoking it, and is exactly what the
+   owner authorised in §1 G7. `drainingSeconds = 60` lets an in-flight publish or delivery commit
+   before SIGKILL, and a lease it still holds lapses within 90s for the clock's reaper.
+2. **Every deploy applies pending migrations** before the new version serves. That is the armed,
+   automatic `runner apply`, not the gated `apply --manual` the safety rules name. A failing
+   migration aborts the deploy with the old version still serving.
+3. **The deployed SHA is worth checking after a merge, not assumed.** This repo has already been
+   bitten once: after the owner's window the worker came back on an *old* deployment because a
+   `railway redeploy` re-ran a superseded commit. Auto-deploy is automatic, not infallible.
+
+| Phase class | Phases | What makes it live |
+|---|---|---|
+| Runtime Python (`src/`, `storydump_cli/`) | 01–09, 12 | Railway, both services, automatic |
+| Dependency manifest (`requirements.txt`, `setup.py`) | 10 | Railway **rebuild** — the riskiest deploy in Wave 1, because it changes the image rather than the code in it |
+| `landing/` | 14, 15, 16 | Vercel, automatic (it already reports as a PR check) |
+| Tests, CI config, deleted dev scripts | 11, 13 | **Nothing — inert at runtime.** `scripts/migration_runner.py` is the exception that *is* reachable (it is the `preDeployCommand`), and no phase in this sprint touches it |
 
 
 ## 4. Phase results
 
 | # | Doc | Status | PR | CI | Deploy |
 |---|---|---|---|---|---|
-| 01 | `01_one-spelling.md` | not started | — | — | — |
-| 02 | `02_dead-lane-and-surfaces.md` | not started | — | — | — |
-| 03 | `03_rule-of-three-services.md` | not started | — | — | — |
-| 04 | `04_rule-of-three-api-cli.md` | not started | — | — | — |
-| 05 | `05_imports-and-homes.md` | not started | — | — | — |
+| 01 | `01_one-spelling.md` | **MERGED** | #1336 | 9/9 | live |
+| 02 | `02_dead-lane-and-surfaces.md` | **MERGED** | #1343 | 9/9 | live |
+| 03 | `03_rule-of-three-services.md` | **MERGED** | #1345 | 9/9 | live |
+| 04 | `04_rule-of-three-api-cli.md` | PR open, CI green, re-verifying | #1346 | 9/9 | auto |
+| 05 | `05_imports-and-homes.md` | W3 — building | — | — | — |
 | 06 | `06_publish-pipeline-shape.md` | not started | — | — | — |
 | 07 | `07_executors-and-tap.md` | not started | — | — | — |
 | 08 | `08_integrations-shape.md` | not started | — | — | — |
 | 09 | `09_composition-roots.md` | not started | — | — | — |
-| 10 | `10_dependencies-and-ci.md` | not started | — | — | — |
-| 11 | `11_test-scaffolding.md` | not started | — | — | — |
-| 12 | `12_stale-words-and-names.md` | not started | — | — | — |
-| 13 | `13_legacy-instruments.md` | not started | — | — | — |
-| 14 | `14_landing-one-contract.md` | not started | — | — | — |
-| 15 | `15_landing-shared-shapes.md` | not started | — | — | — |
-| 16 | `16_landing-integrations-tab.md` | not started | — | — | — |
+| 10 | `10_dependencies-and-ci.md` | **MERGED** | #1337 | 9/9 | live |
+| 11 | `11_test-scaffolding.md` | **MERGED** | #1339 | 9/9 | inert |
+| 12 | `12_stale-words-and-names.md` | W3 — building | — | — | — |
+| 13 | `13_legacy-instruments.md` | **MERGED** | #1340 | 9/9 | inert |
+| 14 | `14_landing-one-contract.md` | **MERGED** | #1338 | 9/9 | live |
+| 15 | `15_landing-shared-shapes.md` | **MERGED** | #1344 | 9/9 | live |
+| 16 | `16_landing-integrations-tab.md` | W3 — building | — | — | — |
+
+
+**Plus one PR the sprint did not plan:** [#1342](https://github.com/chrisrogers37/storydump/pull/1342), **MERGED** — a defect doc 01 introduced and doc 04 found. See §5.
 
 ---
 
@@ -255,6 +312,42 @@ checkout would not be.
 
 _Written as each phase completes: verification output pasted, scope exclusions stated, premise
 findings recorded rather than papered over, invariant sweep output._
+
+### Wave 1 — dispatched, interrupted, resumed
+
+All five W1 phases (01, 10, 11, 13, 14) were dispatched into isolated worktrees cut from
+`2edf0cc`. Roughly forty minutes in, **all five were terminated mid-flight by an account session
+rate limit** — an infrastructure interruption, not a failure of any phase.
+
+Recorded because the recovery is the interesting part, and because a sprint that hides an
+interruption is not auditable:
+
+| Phase | Where it stopped | State of its worktree |
+|---|---|---|
+| 01 | re-running the suite after judging one collection error pre-existing | 9 files modified, uncommitted |
+| 10 | verifying the new dependency pin catches drift both ways | `requirements.txt`, `setup.py` modified; new test file untracked |
+| 11 | baseline confirmed, edits not yet begun | clean |
+| 13 | final orphan sweep; 3,542 lines confirmed | 5 deletions staged, 7 files modified |
+| 14 | executing the D3 route deletion | 2 deletions, 7 files modified |
+
+**Nothing was lost.** Git worktrees are ordinary directories, so uncommitted work survives an
+agent's death; the agents were resumed from their own transcripts rather than restarted, which
+preserved their reasoning as well as their edits. Two test databases leaked from the killed runs
+(≈15 MB) and were deliberately left for the repo's own reaper rather than dropped by hand — with
+fresh suites running concurrently, a stray and a live database are not distinguishable from
+outside.
+
+Two phase-specific flags were added on resume, both of them invariant defence rather than new work:
+
+- **13** had modified *both* `scripts/telegram_ratchet.py` and its baseline JSON. The FC-2 ratchet
+  is invariant I4 and `src/exceptions/telegram.py` is one of its 4 `telegram_modules` entries, so
+  the phase was asked to state exactly what changed in each and why. A re-baseline must be
+  deliberate and explained, never incidental — that is the whole point of a ratchet.
+- **14** had modified `calendar/page.tsx`, which is where flagged defect **D2** lives (the
+  posting-window arithmetic that is wrong for wrap-midnight and 24-hour windows). The phase was
+  asked to confirm its change there is import/type only, and to revert it otherwise. D2 is an
+  owner ruling, not a cleanup.
+
 
 ### Pre-flight finding — doc 10, measured before dispatch
 
@@ -289,6 +382,197 @@ leaves the gate blind or turns `main` red.
 
 ---
 
+### The two things Wave 1 taught the sprint
+
+Both cost real time, both are mechanical, and both are written here so Waves 2–4 do not re-learn
+them.
+
+#### 1. The DB gates serialise on one cluster-wide advisory lock — do not run phases in parallel
+
+`tests/scripts/conftest.py` holds `SUITE_CLUSTER_LOCK_KEY = 7_532_026` and `admin_conn` polls
+`pg_try_advisory_lock` every 5s, raising after `SUITE_LOCK_WAIT_SECONDS = 1200`. **Only one
+checkout on the host can run `tests/scripts/` at a time.** Five phases were dispatched in
+parallel; three of them independently diagnosed this, one by pinning the hang with
+`faulthandler.dump_traceback_later` and naming the holder out of `pg_locks`.
+
+The concrete damage: one phase's orphaned pytest held the lock **idle for 68 minutes** after its
+agent died, so two later phases' full-suite runs died at the 20-minute wait with ~950 collection
+errors each — all of them the same `RuntimeError`, none of them a real failure. At peak, 17 pytest
+processes were queued behind one dead one.
+
+**The rule for the rest of this sprint: full-suite runs are serialised, one phase at a time.** The
+runner does them, not the phases. Everything outside `tests/scripts/` is contention-free and
+finishes in ~25s, so a phase can self-check with `--ignore=tests/scripts` and leave the gate tree
+to the runner.
+
+Housekeeping that followed: 14 stray `storydump_test_*` databases from killed sessions were
+dropped once `pg_stat_activity` showed zero `storydump_user` backends and no pytest process
+remained. The repo's own reaper ships disarmed on purpose — dropping on a shared host has gone
+wrong here before — so this was done by hand, after proving the cluster was quiet, rather than by
+arming it.
+
+#### 2. A green local suite is not evidence when the change is to `requirements.txt`
+
+Doc 10 removed eight packages "nothing imports". Its phase ran the full suite locally and got
+**3705 passed** — green, and wrong. CI went red at collection:
+
+```
+starlette/testclient.py:36  import httpx2 as httpx
+E  starlette.exceptions.StarletteDeprecationWarning: Using `httpx` with `starlette.testclient`
+   is deprecated; install `httpx2` instead.
+!!!!!!!!!!!!!!!!!!! Interrupted: 7 errors during collection !!!!!!!!!!!!!!!!!!!!
+```
+
+**`httpx2` is not unimported — `starlette.testclient` imports it**, falling back to `httpx` with a
+custom `StarletteDeprecationWarning`, which `pytest.ini`'s `filterwarnings = error` escalates
+(its three ignores do not cover a custom warning class).
+
+Two separate reasons the phase could not see it, both worth generalising:
+
+- **Removing a line from `requirements.txt` does not uninstall anything.** The local run used a
+  venv that still had the package. Only a fresh install proves a removal.
+- **The doc's own clean-venv probe was runtime-only** — it imported `src.api.app`, `src.worker`,
+  `src.main`, `storydump_cli.main` and the scripts. `starlette.testclient` is imported by the
+  *tests*, so nothing the probe touched could reach it.
+
+The audit's grep was over *this repository's* source. It cannot see a third-party package
+importing a name, and "no importer in `src/`" is not "no importer".
+
+**Resolution:** `httpx2` stays, bumped to `2.13.0`. The advisories are fixed in 2.11.0 and 2.12.0
+(and httpcore2's in 2.10.0), so all four clear and `pip-audit` can still gate. This is a
+deliberate deviation from the doc's "removes names, does not bump versions" — a rule that existed
+only because the package was assumed removable. With the premise falsified, both alternatives are
+worse: keeping 2.2.0 either leaves four known CVEs live or forces the gate back off.
+
+**The merge gate did its job.** This is precisely the "green CI plus honest evidence was not
+sufficient" shape, caught because no phase merges before its CI is observed green.
+
+
+#### 3. A finding the audit did not have: `greenlet` is absent on Apple Silicon
+
+Surfaced while doc 10 was re-verifying its removal in a *fresh* venv, which is the only kind of
+run that can see it. The first fresh-venv attempt came back `555 failed, 3141 passed`, with
+**1,252 × `ValueError: the greenlet library is required to use this function`**.
+
+SQLAlchemy declares `greenlet` conditionally:
+
+```
+greenlet>=1; platform_machine == "aarch64" or ... "x86_64" or ... "amd64" or ... "win32" ...
+```
+
+`arm64` — what an Apple Silicon Mac reports — **is not in that list**. CI's `ubuntu-latest` is
+`x86_64`, which is. So a fresh install on this machine silently lacks SQLAlchemy's async support
+while CI has it.
+
+Proven pre-existing rather than caused by the pruning, by building a venv from **`origin/main`'s
+own** `requirements.txt` and finding `greenlet` equally absent. Correctly **not** fixed inside doc
+10 — adding a dependency would be an undeclared behaviour change smuggled into a cleanup PR.
+
+Two consequences:
+
+- **Operationally:** any fresh-venv run on Apple Silicon needs `pip install greenlet` first to
+  stand in for CI. Without it, 1,252 failures look like catastrophe and mean nothing.
+- **As a finding:** this is real debt the audit could not see, because the audit read the source
+  tree and this lives in a dependency's environment markers. Queued in §7 rather than folded in.
+
+The same phase also demonstrated the right shape for this kind of proof. Its new probe asserts
+`starlette.testclient.httpx.__name__ == 'httpx2'` under `pytest.ini`'s own filters, **and carries
+a negative control** — remove `httpx2`, watch the probe fail, restore it, watch collection
+recover. A probe that cannot fail proves nothing, which is the entire lesson of the `GHSA-1234`
+placeholder this phase deleted.
+
+One detail worth keeping: `StarletteDeprecationWarning` subclasses **`UserWarning`**, not
+`DeprecationWarning`. Warning filters match subclasses, so had it subclassed `DeprecationWarning`,
+`pytest.ini`'s `ignore::DeprecationWarning` would have caught it and there would have been no
+error at all. The escalation was not a misconfiguration; it was the filter working as written.
+
+
+### Deploy reachability, verified rather than assumed (Wave 1)
+
+§3a says merged is live here. That was checked against Railway rather than taken on trust, because
+this repo has been bitten once by a redeploy re-running a superseded commit.
+
+Both services exist and **both deploy on every merge**:
+
+```
+worker      cadbb06c  SUCCESS  2026-09-20 23:14:36
+            d6135da2  SUCCESS  2026-09-20 23:01:19
+storydump   68aa9e3a  WAITING  2026-09-20 23:14:36
+            9ccc4bf7  SUCCESS  2026-09-20 23:01:19
+```
+
+One deployment pair per merge, both reaching SUCCESS, with the newest still settling. So the
+sprint carries no "merged, NOT live" caveat and owes no manual operator command — and, as §3a
+warns, each of those pairs restarted the production posting worker under its 60-second drain.
+
+`railway status --json` names the services (`worker`, `storydump`) without linking one, which is
+the read to prefer: `railway link` mutates local state another session depends on.
+
+
+### Wave 2 — what the rebases taught, and the defect the sprint caught in itself
+
+#### The squash topology's real cost is not the rebase, it is the resolutions that need reading
+
+Every phase adds a `CHANGELOG.md` bullet at the same anchor, so each merge conflicts every open
+sibling. That much was planned for in §3. What was not planned for is that **three of those
+conflicts could not be resolved by a rule**, and a blanket "keep both sides" would have shipped
+each one wrong:
+
+1. **Doc 10's superseded bullet.** Its first commit said "Eight packages nothing imports"; its
+   second corrected that to "Seven" plus the `httpx2` story. Keeping both sides produces a
+   CHANGELOG that contradicts itself in adjacent paragraphs. Resolved by dropping the superseded
+   bullet, verified by count afterwards: stale 0, corrected 1.
+2. **Doc 03 onto doc 02, in `src/utils/datetime_utils.py`.** Doc 02 **deleted** `naive_utc` as a
+   test-only surface (C16); doc 03 **added** `utcnow` and `ms_since` to the same file and its diff
+   still carried `naive_utc`, because its base predated the deletion. Keeping both would have
+   silently resurrected a function another phase had just proved dead — the sprint undoing its own
+   work through a merge artifact. Resolved by taking doc 03's additions without `naive_utc`, after
+   confirming against `main` that only `ensure_utc` survives there.
+3. **The tail of that same resolution.** `utcnow`'s docstring still read *"It lives beside
+   `ensure_utc` and `naive_utc`"* — a reference to a function that no longer exists, created by
+   the resolution itself. Corrected, reformatted, re-linted, and the suite re-run: **3670 passed,
+   +74 against main, unchanged by the resolution.**
+
+The general rule this sprint ends with: **a conflict between two phases of the same sprint is more
+likely to be semantic than textual**, because both sides are deliberate changes to the same
+neighbourhood. Read them.
+
+#### A defect doc 01 introduced, doc 04 found, and #1342 fixed
+
+Doc 01 correctly replaced `TokenRefused.REASONS`' hand-written tuple with
+`vocabulary.TOKEN_REFUSALS`. One line away sat
+`assert tuple(TokenRefused.REASONS) == vocabulary.TOKEN_REFUSALS`, which was a real comparison for
+exactly as long as there were two copies. The moment one *became* the other it read `tuple(x) == x`
+— true for any vocabulary, including a wrong one.
+
+Measurable, not theoretical: `cli_v2_01.sh`'s "a token refusal leaves the vocabulary" mutation
+deletes `"wrong_workspace"` from the vocabulary and **survived on `main`**. The pin now asserts the
+literal set; with the mutation applied the test fails again.
+
+**How it was found is the part worth keeping.** Not by CI, which was green, and not by the phase
+that caused it. Doc 04 resolved **all 337 `check` anchors in the eleven mutation batteries**
+mechanically, against both `HEAD` and its working tree, rather than grepping for the identifiers it
+had renamed. Two of the four anchors it broke contain **no renamed identifier at all** — one is an
+exception-handler body, another moved file because its text lived inside a function that moved. A
+grep-based sweep finds neither, and a broken anchor does not fail: it reports `MUTATION NOT
+APPLIED`, so the battery stays green while covering less.
+
+The sweep for siblings was run before fixing: `service_tokens.NAME_MAX`, `commands.REASONS` and
+`workspaces.INTENT_STATES` are the same alias shape but **pre-date this sprint** and no mutation
+targets them; `workspaces.IG_LOGIN_PROVIDER`/`GDRIVE_PROVIDER` were aliased by doc 01 but have no
+alias-equals-source test. One instance of the class, fixed.
+
+#### Doc 15 found two bugs in its own plan document
+
+Both caught by tests it did **not** edit. Step 4's `submitCommand` rewrite re-derives the error
+from the response body only, so a thrown `fetch` (no body, status 0) spelled `http_0` instead of
+`unreachable`, for which the UI has a sentence. Step 3's premise that "adding a field to a union arm
+breaks no existing reader" is false for `tokens.ts`, which passes the wrapper's failure arm through
+as its *public* type — structural typing let it compile while the runtime object grew a `body` key.
+
+Worth folding back into the doc before anyone else runs it.
+
+
 ## 6. Review rounds
 
 _Per round: which findings, the class sweep for each with its command and counts, what closed._
@@ -302,5 +586,10 @@ _Per round: which findings, the class sweep for each with its command and counts
 | Q1 | **PR #1334** — the device-native inbound docs | Not a phase of this sprint. Opened and left for the owner. It also carries this epic's `documentation/README.md` index rows (see §1 G1) — if it is abandoned, those rows need re-adding by hand. |
 | Q2 | The 12 flagged defects (epic §Questions 1–12) | Each changes behaviour; each wants its own ruling or a bug-fix PR, never a cleanup PR. Carried here for the sprint's duration so none is silently folded in. |
 | Q3 | `.claude/settings.json` still names the deleted legacy CLI verbs and denies none of the `storydump` never-run verbs | Owner edit, noted in `CLAUDE.md`. Out of every phase's scope; recorded so it is not lost. |
-| Q4 | Two egress-floor tests cannot run on macOS | `OSError: could not bind on any address out of [('127.0.0.2', 0)]`. Smallest unblocking action: `sudo ifconfig lo0 alias 127.0.0.2`. They run in CI (Linux), so the sprint is not blind to them — but the local baseline excludes them. |
+| Q4 | **`greenlet` is absent from a fresh install on Apple Silicon** — SQLAlchemy's environment marker lists `aarch64`/`x86_64`/`amd64`/`win32` but not `arm64`. CI (`x86_64`) is unaffected; a local fresh venv silently loses async SQLAlchemy and produces ~1,252 spurious failures. Pre-existing on `main`, deliberately not fixed inside a cleanup PR. A real finding the audit could not see, because it lives in a dependency's markers rather than in this tree | Discovered by doc 10's fresh-venv verification |
+| Q5 | **`documentation/guides/TEST_COVERAGE.md` is knowingly stale mid-sprint and needs one authoritative recount at the close.** Doc 10 recounted it correctly (158 files / 3,709 tests) — then doc 01 added 10 tests and doc 13 removed 4 files and 88, and the rebased tree collects **3,636**. Nothing enforces the table, so it is documentation rather than a gate; re-deriving it inside every one of sixteen PRs would be churn that is wrong again an hour later. **The sprint's final act recounts it once against the finished tree.** | A snapshot doc in a 16-PR sprint |
+| Q6 | **NEW FLAGGED DEFECT (13th) — a Google sign-in without a `name` claim ERASES a stored display name.** `identity.py:83` runs `UPDATE user_identities SET verified_at = now(), display_name = :dn` unconditionally on the returning branch, so a token that omits `name` writes NULL over whatever was there. The retired sync twin kept it. **Found only because doc 02 re-homed the RLS gate onto the live writers** — it was invisible while the gate exercised the twin, which is the exact harm finding B1/C3 described. Asserted as current behaviour in the gate, deliberately not fixed: a fix changes behaviour and belongs in a bug-fix PR or an owner ruling, like the audit's other twelve | Discovered by doc 02's gate re-homing |
+| Q7 | **BLOCKED (doc 03, step 9) — the two-binding supersede gate assertion was not added.** It needs `_seed_card` in `test_l5_pipeline_gate.py` to seed a second active Telegram binding, which ripples through every test using that helper, and the phase could not run `tests/scripts/` to verify the ripple. **Smallest unblocking action:** extend `_seed_card` with an optional second binding and run `test_l5_pipeline_gate.py` alone, which takes the cluster lock for ~30s. Not silently skipped: the invariant it would pin is already covered by `test_outbox_restate.py::TestRestateEverywhere::test_one_statement_addresses_every_binding_by_ref`, so this is a *second* assertion at the gate level, not an uncovered property | Doc 03 |
+| Q8 | **A fourth `driver_candidates` reader that would fold exactly** — `intent_ledger.transition:145`, where `refusals[0]` is equivalent to the first matching candidate. Doc 03 did not fold it because it is not in that doc's site list and `_dbapi`'s own docstring cites it as the origin story. Widening scope mid-phase is how a cleanup PR stops being reviewable; recorded for a later phase instead | Doc 03 |
+| Q9 | Two egress-floor tests cannot run on macOS | `OSError: could not bind on any address out of [('127.0.0.2', 0)]`. Smallest unblocking action: `sudo ifconfig lo0 alias 127.0.0.2`. They run in CI (Linux), so the sprint is not blind to them — but the local baseline excludes them. |
 
