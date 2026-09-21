@@ -217,24 +217,21 @@ async def resolve_ig_accounts(conn, subject: str) -> list[AccountRef]:
     `provider_account_ref`, which names an ACCOUNT rather than a person and is
     sometimes a provisional `manual:<handle>` no Meta id will ever equal.
 
-    Second, and decisively: **`ig_accounts` is tenant-scoped under RLS**
-    (`058_rls_and_policies.sql:266`, `p_tenant ... TO svc_ingress, svc_worker`
-    `USING (workspace_id = current_setting('app.tenant_id'))`). A Meta callback
-    names no workspace, so there is no tenant to set, and under either of those
-    roles this SELECT returns **zero rows regardless of what is stored**.
-
-    That matters more than it looks, because the two causes are
-    indistinguishable here and they fail in the SAME reassuring direction: an
-    empty list reads as "we hold nothing for this person" whether or not that
-    is true. The caller therefore must not report a miss as a finding of fact —
-    see `routes/meta.py`, which says "not established" rather than "none", and
-    the runbook, which states the door this needs.
+    Second: **`ig_accounts` is tenant-scoped under RLS** (`058`, `p_tenant`
+    for `svc_ingress`/`svc_worker`), and a Meta callback names no workspace,
+    so there is no tenant to set. Until 081 this SELECT went at the table and
+    returned zero rows under the runtime login regardless of what was stored —
+    the miss the route still reports as "not established" rather than "none".
+    It reads through `fn_meta_accounts_for_ref` now, a SECURITY DEFINER door
+    owned by `svc_maintenance` (081, `07` §24): an equality on one bound value,
+    every workspace's accounts, EXECUTE for `svc_ingress`. The first reason
+    stands, so an empty answer is still not proof of absence.
     """
     rows = (
         await conn.execute(
             text(
-                "SELECT id, workspace_id FROM ig_accounts"
-                " WHERE provider_account_ref = :ref"
+                "SELECT o_ig_account_id, o_workspace_id"
+                " FROM fn_meta_accounts_for_ref(:ref)"
             ),
             {"ref": subject},
         )
@@ -252,30 +249,44 @@ async def revoke_for_accounts(conn, accounts: list[AccountRef]) -> int:
     delete anything, and treating a disconnect as a deletion is the failure
     this separation exists to prevent.
 
-    **Scoped on the `(ig_account_id, workspace_id)` PAIR, not the account
-    alone, and that is load-bearing rather than tidy.** No migration declares
-    `FORCE ROW LEVEL SECURITY`, so whether RLS applies here depends on whether
-    the connecting role owns the tables — which this code cannot know. The two
-    branches fail in opposite directions: as `svc_ingress` the tenant policy
-    (`:278`) filters everything and this truthfully updates nothing, while as
-    an owner RLS is bypassed entirely and an account-only predicate would be a
-    cross-tenant write with no workspace bound at all. Carrying the workspace
-    the resolve already returned makes the statement correct under both, and
-    costs nothing under either. `command_executors.disconnect_account:437`
-    scopes the same way for the same reason.
+    **One tenant-scoped UPDATE per workspace, under that workspace's tenant
+    and a named actor.** `oauth_credentials` is policy-covered, and a write is
+    not given a door: the resolve returned each account's workspace, so this
+    claims that tenant (`app.tenant_id`, transaction-local — the GUC every
+    unit of work sets) and updates the pair under the policy, exactly as a
+    member's own disconnect does (`command_executors.disconnect_account`).
+    Under the owner login the tenant claim is inert and the pair predicate
+    still bounds the write to the workspace; under `svc_ingress` it is what
+    makes the UPDATE reach its rows at all — without it the policy filtered
+    everything and this truthfully updated nothing (the shape the first
+    switch would have shipped, 081). The actor is `system`, as the worker's
+    own writes claim: `trg_governance_audit` refuses an anonymous mutation of
+    this table under EVERY login, and this route claimed no actor before 081's
+    gate first ran the path end to end — a matched deauthorize would have
+    raised, and Meta would have retried into the same raise.
     """
     if not accounts:
         return 0
-    result = await conn.execute(
-        text(
-            "UPDATE oauth_credentials SET state = 'revoked'"
-            " WHERE (ig_account_id, workspace_id) IN ("
-            "   SELECT * FROM unnest(CAST(:ids AS uuid[]), CAST(:wss AS uuid[]))"
-            " ) AND state <> 'revoked'"
-        ),
-        {
-            "ids": [a.ig_account_id for a in accounts],
-            "wss": [a.workspace_id for a in accounts],
-        },
-    )
-    return result.rowcount or 0
+    by_workspace: dict[str, list[str]] = {}
+    for a in accounts:
+        by_workspace.setdefault(a.workspace_id, []).append(a.ig_account_id)
+    revoked = 0
+    for workspace_id, ids in by_workspace.items():
+        await conn.execute(
+            text(
+                "SELECT set_config('app.tenant_id', :ws, true),"
+                "       set_config('app.actor_kind', 'system', true)"
+            ),
+            {"ws": workspace_id},
+        )
+        result = await conn.execute(
+            text(
+                "UPDATE oauth_credentials SET state = 'revoked'"
+                " WHERE workspace_id = CAST(:ws AS uuid)"
+                "   AND ig_account_id = ANY(CAST(:ids AS uuid[]))"
+                "   AND state <> 'revoked'"
+            ),
+            {"ws": workspace_id, "ids": ids},
+        )
+        revoked += result.rowcount or 0
+    return revoked

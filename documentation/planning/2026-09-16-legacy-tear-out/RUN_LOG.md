@@ -1447,7 +1447,16 @@ The branch and the three worktrees are removed.
   old environment until their next deploy, which is fine — nothing reads the names. The
   `WORKER_IMPL` caveat is now the accepted one: a stale redeploy of a pre-tear-out worker would
   fail to boot rather than run the legacy scheduler.
-- **#751 (the runtime logins):** the session's classifier refused the switch script
+- **#751, part 1 — PR #1333 (migration 081, the fleet-health doors):** ready for the owner's admin
+  squash (the prepared message in the session's `door_squash.md`; no issue closes by keyword). The
+  deploy applies 081 under the owner login, which executes the doors through its memberships —
+  nothing changes until the switch. Then the API switch again (`f4_switch.sh api`, which now prints
+  the two fleet verdicts before and after; they must read the same), the runbook's page checks, and
+  #751 stays open for part 2: the worker (`svc_worker` has no access to `oauth_states`, which the
+  reaper's expired-state leg deletes from, and no DELETE anywhere; its job legs need reading
+  statement by statement — a door or a maintenance policy for that leg, and a gate that runs the
+  worker's legs as `svc_worker`).
+- **#751 (the runtime logins), the first attempt:** the session's classifier refused the switch script
   (`f4_switch.sh api`: an `ALTER ROLE … PASSWORD` and a `railway variable set` — "Secret-Store
   Writes"), as it refused the same writes on the 19th; the owner runs it, one service at a time,
   and the result is recorded when it lands. Preconditions re-measured today: `svc_ingress` and
@@ -1465,6 +1474,149 @@ The branch and the three worktrees are removed.
   tier — a person who is a member of workspaces, what a workspace owns, the three surfaces, the two
   rules the database enforces — and joins the legacy-name pin's live roots.
 - **A CI flake, as the queue records above:** the l8 admission test; re-run, not chased.
+
+## #751, part 1 — the fleet-health doors (PR #1333, migration 081)
+
+**The finding that forced it (2026-09-20, ~17:34 UTC).** The owner ran the switch script for the
+API (`f4_switch.sh api`): `/health` read `svc_ingress` / `bypassrls=no`, no permission errors, every
+door the API calls EXECUTE-granted, SELECT/INSERT/UPDATE on all 26 RLS tables. And the two fleet
+surfaces went blind: `/health/posting` `never-posted` (posted_ever 0 for 104 landings),
+`/health/scheduling` `no-signal` (accounts_active 0 for 2). `posting_health.py` and
+`scheduling_health.py` read the tenant tables directly with no tenant set — both had documented
+that their reach rested on the owner login's BYPASSRLS and named #751 as the place a door would
+close it. The monitors' consequence, from their own code: the scheduling monitor never pages on
+NO_SIGNAL (blind to the 18- and 19-hour stalls it exists for); the posting monitor alerts
+`never-posted-overdue` after its 72 h grace, falsely, every 6 h. Rolled back on the owner's word at
+~18:20 UTC (`rollback-api`): `neondb_owner` again, `healthy` / `posting` again (106 landings by
+then). Two attempts before the one that ran had died at the shell's 120-second foreground limit,
+not on Railway; the script now reads the running deployment with retries and refuses loudly, and
+prints the two fleet verdicts before and after a switch.
+
+**Measured before building.** The reads that RLS hides with no tenant: `post_intents`
+(posting_freshness), `daily_post_counts` (publish_attempts), `ig_accounts` (destinations,
+scheduling_lag), `jobs`' tenant rows (the ready lanes, the longest-waiting tenant),
+`channel_outbox` (pending). The reads a policy already answers: the system lane's jobs
+(`workspace_id IS NULL`, `p_jobs`) and the `tg_global` counter (`p_rate USING (true)`).
+`svc_maintenance` holds `USING (true)` on every table involved but `ig_accounts` (058) and SELECT on
+each (057) — the door owner, with one policy added. The owner login inherits every service role
+in production (`rolinherit` t; memberships `neon_superuser, svc_claim, svc_clock, svc_ingress,
+svc_maintenance, svc_membership, svc_migration, svc_worker`) and holds EXECUTE on the existing
+doors of every owner — so 081 deploys under the owner login without breaking the API or the worker
+that still run as it.
+
+**Built (cb4298f).** 081: seven SECURITY DEFINER doors owned by `svc_maintenance`, each the module's
+former query verbatim; `p_maint_accts` on `ig_accounts`; EXECUTE for `svc_ingress` on all seven and
+for `svc_worker` on the three backpressure reads its status line renders; four catalog-only
+postconditions; the CREATE bracket. `07` §24 (ordinal 22 in the manifest), the ratified list, the
+advertised count 36. The Python reads `SELECT o_x AS x FROM fn_health_…()`. Red first:
+`tests/scripts/test_fleet_health_doors_gate.py` — 4 failed (`0 == 1`) on the unfixed tree, the
+vacuity guard green; with the doors, green. The RLS runtime harness: the seven doors registered
+(three with two permitted logins — the first such shape; the denial test learned it), the census
+row, 59 policies / 30 door dispositions, and a test that runs each door as its logins and refuses
+it to the other. 270 passed across the harness, the gate, the lineage lane, the advertised
+ratchet, the runner suite and the tenancy gate; 261 passed on the no-database suites (the five
+loopback-listener tests pass with the sandbox off).
+
+**The battery** (`tests/mutations/fleet_health_doors.sh`, its own worktree): 10 of 10 killed on
+cb4298f; on f5c2f10 eight killed and the first baseline errored after a 20-minute wait — a
+collision with the adversarial lens running the same gates on the same Docker Postgres (the
+service-role bracket is cluster-wide), recorded as a lesson, not a red test; on `46d6617` and again on the final `c416b40`, run
+alone, 12 of 12 killed, every verdict a real `1 failed` — five reads going direct again, the live
+door's filter losing the dry-run exclusion (the plan's block mutated and re-classified), the
+callback's lookup going direct again, the revoke forgetting its tenant claim, the API gaining the
+named-tenant door (the harness's catalog test), and three of the file's own postconditions (the
+policy missing, the worker's EXECUTE missing, the bracket left open) refused by the runner in the
+lane.
+
+**Round 1 — structural + simplify** (on cb4298f; the lens died once on the session's usage limit and
+was resumed with its context): one major — 081's two count probes matched a prefix with exact counts,
+an absence claim a later `fn_health_*` door or grant would flip on an applied, immutable file; five
+minors — the gate's control arm was the suite's superuser, not the owner actor whose memberships the
+deploy depends on; the agreement test compared door output with door output; the vacuity guard
+omitted `jobs`; the harness test added for the doors asserted nothing its neighbours did not;
+`_REAL_POST` was unread by production code and its pin read an immutable file; four nits. Verified
+without finding: the door bodies equal the former queries verbatim, `p_jobs` admits the system rows
+and `p_rate` is `USING (true)`, svc_maintenance's holdings and its one gap, the bracket cycle, the
+return types, the `identify` gate, the manifest ordinal, the census counts, all ten battery anchors
+and selectors. Folded in `f5c2f10`: the probes name the seven doors and take the EXECUTE rows as a
+floor (mutation 9 still dies: 9 < 10); the control arm is the owner actor with its own test (the
+owner executes the doors it deploys); the agreement test compares the doors' counts as svc_ingress
+against the owner's direct reads; `jobs` in the guard; the constant deleted, its three prose
+mentions pointed at the door's filter, the pin reading the LIVE function's body in the replayed
+world; the redundant test deleted; the nits. 376 passed across the affected suites.
+
+**Round 2 — adversarial** (on cb4298f, re-checked against f5c2f10; the lens died twice on the
+session's usage limit and was resumed each time with its context): one major — a THIRD tenant-less
+read on the API that 081 left blind: the Meta deauthorize callback's account lookup
+(`meta_callbacks.resolve_ig_accounts`) names no workspace, so under `svc_ingress` it found nothing
+and a credential Meta had already invalidated stayed in play, and the runbook presented 081 as the
+precondition without naming it; three minors — the one door that named a tenant handed the API's
+login a foreign workspace id it never held before; a stale comment in the posting route; the
+harness's owner actor reaches the doors through the bootstrap's `svc_migration → svc_maintenance`
+chain rather than production's direct memberships; one nit (the control counted all jobs, not the
+ready ones). Verified without finding: no door takes an unbound parameter, `SET search_path` on
+every one; every read on both health routes goes through a door or a policy that admits it with no
+tenant; all four postconditions true as the applier and as the owner, none raise; the §24 block
+equals 081's statements under the repo's own prefix report (377/377); the seed satisfies
+`ck_posted_complete`; question 3 answered no — the owner holds EXECUTE on the doors through
+membership in production and in the harness. Folded in `46d6617`: `fn_meta_accounts_for_ref(text)`,
+the one parameterised door (an equality on a bound value, EXECUTE for `svc_ingress`); running the
+deauthorize path end to end as `svc_ingress` in the gate then exposed what no test had run under
+any login — `trg_governance_audit` refuses an anonymous mutation of `oauth_credentials` and the
+route claimed no actor, so a matched deauthorize would have raised and Meta would have retried into
+the same raise — the revoke claims each account's own tenant and the `system` actor before its
+UPDATE, under the policy; the named-tenant read split into a wait-only door for both logins and a
+named door for `svc_worker` alone, picked by `identify`; nine doors, the probes naming them,
+twelve EXECUTE rows as the floor; the gate runs the deauthorize path (a miss, a revoke, the
+completed no-op) and proves the API cannot execute the named door; the harness registers the two
+doors; the plan, the CHANGELOG and the runbook name the third read; the comment, the docstring, the
+nit. 707 passed across the affected suites and the API tests.
+
+**Round 3 — the fresh re-verify lens** (on 46d6617): every fold claim of rounds 1 and 2 VERIFIED by
+command — the probes name the nine doors and floor the twelve EXECUTE rows (counted from the GRANT
+lines and evaluated live in the replayed world: doors 9, rows 12); the owner actor as the control
+and its own execute test with the membership chain named; doors against direct reads; `jobs` and
+`oauth_credentials` in the guard; the constant gone and the live `prosrc` pin; the harness's
+registry (23 doors, tuple grantees for exactly the three shared), census and denial logic; the Meta
+door, the revoke's tenant and actor claims (the trigger's RAISE at 055:379, `system` in
+`ck_audit_actor`, the route's one transaction needing no change, no other anonymous writer of
+`oauth_credentials`); the wait split, with the no-waiting-tenant case run live (both wait doors and
+the lanes door return zero rows; `snapshot` answers `None` for both shapes); the stale comment; the
+§24 block equal to 081's 57 statements, the manifest sha, the count 36, the lineage list, the
+plan's 23 doors, the CHANGELOG, the runbook and the database rule. 548 passed on the snapshot, ruff
+clean. One new finding, prose: the deauthorize route's docstring and log line still blamed the
+policy for a miss — folded in the fourth commit (the miss is the identity mismatch: Meta's
+subject names a person, the stored reference an account). Verdict: ready.
+
+**The rebase.** While the reviews ran, #1332 (the docs audit after the window) landed on `main`
+at 5b90388 and touched five files this branch edits; a conflicting PR gets no workflow run from
+GitHub, which is why no CI had run on the three commits. Rebased onto 5b90388 with the plan's F.4
+row merged by hand (the audit's re-measurement and D40 note kept beside the switch's story); the
+docs pins, the advertised ratchet, the lineage lane, the gate and the harness green on the rebased
+tree (186 passed); the code files are the same patches on the new base.
+
+**CI.** The three commits before the rebase had no run at all (the conflicting PR); the first run on
+the rebased branch (4b6b3b2, run 35545788526) failed 19 tests in `test_window_close.py` and
+`test_legacy_snapshots.py` — the phase-03/04 gates pinned 080 as the corpus's end: "the ledger's
+last row is 078 after the deploy", "the deploy applies nothing else", "after the window the last
+applied is 080". With 081 advertised, the same deploy that owes 079 and 080 applies 081, and the
+ledger reads by version. Folded: the gates derive `LAST_DEPLOYABLE` (the highest non-manual
+version in the corpus) and assert each version's row by name — 078 present and the last row the
+last deployable, 079 absent after a refusal, 079's row applied after the drop, the applied set
+holding 079, 080 and the last deployable after the window. The second run (c416b40, run
+35546440307) failed six unit tests that pinned the SQL text the modules emitted before the doors —
+the backpressure fake executor answered the four statements by table name, and the
+backfill-exclusion pins asserted the landing filter inside the module's statement; both files had
+fallen off a truncated listing of the surfaces' tests. Folded: the fake answers by door name, the
+exclusion pins read the door's body from the migration file with a fourth pinning the module's
+statement to the door. Locally: 1496 passed across the target tier, the API and the worker (the two
+known loopback failures aside); the whole `tests/scripts` directory, the CLI suite and the root
+pins: 1860 passed, 1 skipped, 5 deselected in 3:44. The third run, on 7379bfc (run 35547013257): success — 3693 passed, 1 skipped, 5 deselected in 5:26, all nine checks green. The ledger entry below it is this PR's last commit; its own run is the PR's final check.
+
+**Not in this PR — the worker's switch (part 2):** `svc_worker` has no access to `oauth_states`
+(the reaper's `reap_expired_states` deletes there: a door or a maintenance policy), no DELETE on any
+table, no EXECUTE on the API-side doors (right); its job legs need reading statement by statement
+against the grant matrix before the worker moves.
 
 ## Owner-decision queue
 

@@ -24,6 +24,16 @@ each step below is verified rather than assumed.
 - The deploy that added `db_role` to `/health` is live:
   `curl -s https://api.storydump.app/health` shows the field (today it reads
   `neondb_owner` / `bypassrls: true`).
+- Migration 081 is applied (`storydump doctor` reads the ledger head at 81 or
+  above): the fleet health surfaces and the Meta deauthorize callback read the
+  estate through its doors. Before it, `/health/scheduling` and
+  `/health/posting` read the tenant tables directly and answered `no-signal` /
+  `never-posted` under `svc_ingress` — the monitors went blind on the first
+  switch (2026-09-20) and the API was rolled back the same hour — and the
+  deauthorize callback's account lookup, which names no workspace, would have
+  found nothing and kept a credential Meta had already invalidated. Those are
+  the three tenant-less reads the API makes; everything else it reads names
+  its tenant or goes through a door built before 081.
 - Both roles exist and can log in. In the Neon SQL editor, as the project
   owner:
 
@@ -54,6 +64,10 @@ each step below is verified rather than assumed.
    `TARGET_DATABASE_URL` = the `svc_ingress` string. Redeploy. Then:
    - `curl -s https://api.storydump.app/health` →
      `"db_role": {"user": "svc_ingress", "bypassrls": false}`.
+   - `storydump health`: the `scheduling` and `posting` lines report the SAME
+     verdicts and counts as before the switch (`accounts_active`,
+     `posted_ever`, `intents_ever`). A `no-signal` or `never-posted` that was
+     `healthy` / `posting` a minute earlier is the blind read — roll back.
    - Sign in at storydump.app and open Queue, Media Library and Settings.
    - **Rollback** if any page shows "Router unavailable" or a request 500s:
      put the previous value back and redeploy. Note which page failed —
@@ -78,6 +92,9 @@ each step below is verified rather than assumed.
 
 - `/health` on production reads `svc_ingress` / `bypassrls: false` and the
   worker's boot line reads `svc_worker` / `False`.
+- `/health/scheduling` and `/health/posting` report the estate — the same
+  counts as under the owner login — and the fleet monitors' verdicts are
+  unchanged across the switch.
 - #751 is closed with those two observations quoted, and the plan README's
   scoreboard moves F.4 to built.
 
