@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.services.target import credential_lifecycle, work_loop
+from src.services.target import credential_lifecycle, unit_of_work
 
 
 class _Session:
@@ -23,7 +23,7 @@ class _Session:
 @pytest.mark.asyncio
 async def test_a_revoked_credential_is_not_refreshed(monkeypatch):
     monkeypatch.setattr(
-        work_loop, "poller_session_factory", lambda engine, ws: _Session
+        unit_of_work, "poller_session_factory", lambda engine, ws: _Session
     )
 
     async def credential_state(conn, *, credential_id):

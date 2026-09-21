@@ -70,6 +70,7 @@ here hardcodes them.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 
@@ -78,7 +79,13 @@ from typing import Optional, Union
 
 from sqlalchemy import text
 
-from src.services.target import category_mix, intent_ledger, workspaces
+from src.services.target import (
+    category_mix,
+    intent_ledger,
+    outbox,
+    prompts,
+    workspaces,
+)
 
 
 #: The advisory-lock key the clock elects on. A single fixed key, because there
@@ -168,7 +175,7 @@ async def tick(
             {
                 "m": max_inserts,
                 "r": refresh_cadence_seconds,
-                "g": _json(recurring),
+                "g": json.dumps(recurring),
             },
         )
     ).first()
@@ -178,12 +185,6 @@ async def tick(
         "sync_jobs": row[2],
         "recurring_jobs": row[3],
     }
-
-
-def _json(value) -> str:
-    import json
-
-    return json.dumps(value)
 
 
 @dataclass(frozen=True)
@@ -238,10 +239,6 @@ async def _notice_no_media(
     `review_required` job on every planned slot for as long as the condition
     stands, which buries the signal it is meant to raise.
     """
-    # Local imports, matching `media_sync` and `_run_sync`: these modules reach
-    # back into this one, so a module-level import is a cycle.
-    from src.services.target import outbox, prompts
-
     claimed = (
         await session.execute(
             text(
@@ -469,8 +466,6 @@ async def execute_plan_slot(
             )
         ).first()
     if media is None:
-        from src.services.target import outbox
-
         said = await _notice_no_media(
             session,
             workspace_id=workspace_id,
