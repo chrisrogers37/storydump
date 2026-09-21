@@ -13,7 +13,7 @@ the tree is the list, and the command below prints it.
 
 ## The suite's shape
 
-Collected on 2026-09-20: **3,709 tests in 158 files**, plus the 5 load-harness
+Collected on 2026-09-21: **3,683 tests in 159 files**, plus the 5 load-harness
 scenarios, which are deselected by default. Re-measure in about a second, with
 no database:
 
@@ -23,16 +23,16 @@ pytest --collect-only -qqq --no-cov tests/    # one `path: count` line per file
 
 | Directory | What it covers | Files | Tests |
 |---|---|---|---|
-| `tests/scripts/` | The DB gates: the migration runner and the lineage lane, the advertised DDL, row-level security, the command port, the job lanes, the publish pipeline, the outbox, the ops views, and the real `storydump` CLI against the real app — on scratch PostgreSQL databases, one per test or module. A few files here need no database (the two monitors' `classify`, the ratchets, `test_pr_ready.py`) | 67 | 1,381 |
-| `tests/src/services/target/` | The target tier's services with their seams patched (the egress floor, Meta, Drive, Telegram) | 47 | 1,128 |
+| `tests/scripts/` | The DB gates: the migration runner and the lineage lane, the advertised DDL, row-level security, the command port, the job lanes, the publish pipeline, the outbox, the ops views, and the real `storydump` CLI against the real app — on scratch PostgreSQL databases, one per test or module. A few files here need no database (the two monitors' `classify`, the ratchets, `test_pr_ready.py`) | 63 | 1,297 |
+| `tests/src/services/target/` | The target tier's services with their seams patched (the egress floor, Meta, Drive, Telegram) | 53 | 1,150 |
 | `tests/storydump_cli/` | The `storydump` console against a scripted API — no network, no database | 11 | 426 |
-| `tests/src/api/` | The API's routes over a fake engine whose session refuses SQL (`tests/src/api/conftest.py`) | 9 | 327 |
+| `tests/src/api/` | The API's routes over a fake engine whose session refuses SQL (`tests/src/api/conftest.py`) | 9 | 336 |
 | `tests/src/` (top level) | The worker's composition root and entrypoint, the worker's `/health`, and the two tear-out guards (`test_legacy_tier_gone.py`, `test_legacy_settings_gone.py`) | 5 | 167 |
 | `tests/` (top level) | The harness's own policy (`test_integration_coverage_policy.py`, `test_session_database_isolation.py`, `test_stray_database_reaping.py`), the documentation pins (`test_agent_docs.py`, `test_legacy_cli_gone.py`, `test_meta_runbook_markers.py`), `test_deploy_guardrails.py`, `test_landing_env_example.py` (the landing's example environment names only what the front end reads) and `test_dependency_declarations.py` (`requirements.txt` and `setup.py`'s `install_requires` name the same runtime set) | 9 | 126 |
-| `tests/src/channels/` | The Telegram transport and the webhook registration | 2 | 66 |
-| `tests/src/utils/` | Encryption, datetime helpers, the logger | 4 | 47 |
+| `tests/src/channels/` | The Telegram transport and the webhook registration | 2 | 67 |
+| `tests/src/utils/` | Encryption, datetime helpers, the logger | 3 | 45 |
 | `tests/src/config/` | Settings and constants | 3 | 36 |
-| `tests/src/exceptions/` | The exception base | 1 | 5 |
+| `tests/src/exceptions/` | The exception base | 1 | 33 |
 
 Outside that count:
 

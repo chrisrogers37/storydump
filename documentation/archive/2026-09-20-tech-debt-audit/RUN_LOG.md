@@ -289,19 +289,19 @@ no manual operator command owed. Three consequences the runner holds rather than
 | 01 | `01_one-spelling.md` | **MERGED** | #1336 | 9/9 | live |
 | 02 | `02_dead-lane-and-surfaces.md` | **MERGED** | #1343 | 9/9 | live |
 | 03 | `03_rule-of-three-services.md` | **MERGED** | #1345 | 9/9 | live |
-| 04 | `04_rule-of-three-api-cli.md` | PR open, CI green, re-verifying | #1346 | 9/9 | auto |
-| 05 | `05_imports-and-homes.md` | W3 — building | — | — | — |
-| 06 | `06_publish-pipeline-shape.md` | not started | — | — | — |
-| 07 | `07_executors-and-tap.md` | not started | — | — | — |
-| 08 | `08_integrations-shape.md` | not started | — | — | — |
-| 09 | `09_composition-roots.md` | not started | — | — | — |
+| 04 | `04_rule-of-three-api-cli.md` | **MERGED** | #1346 | 9/9 | live |
+| 05 | `05_imports-and-homes.md` | **MERGED** | #1351 | 9/9 | live |
+| 06 | `06_publish-pipeline-shape.md` | **MERGED** | #1356 | 9/9 | live |
+| 07 | `07_executors-and-tap.md` | **MERGED** | #1353 | 9/9 | live |
+| 08 | `08_integrations-shape.md` | **MERGED** | #1354 | 9/9 | live |
+| 09 | `09_composition-roots.md` | **MERGED** | #1355 | 9/9 | live |
 | 10 | `10_dependencies-and-ci.md` | **MERGED** | #1337 | 9/9 | live |
 | 11 | `11_test-scaffolding.md` | **MERGED** | #1339 | 9/9 | inert |
-| 12 | `12_stale-words-and-names.md` | W3 — building | — | — | — |
+| 12 | `12_stale-words-and-names.md` | **MERGED** | #1352 | 9/9 | live |
 | 13 | `13_legacy-instruments.md` | **MERGED** | #1340 | 9/9 | inert |
-| 14 | `14_landing-one-contract.md` | **MERGED** | #1338 | 9/9 | live |
-| 15 | `15_landing-shared-shapes.md` | **MERGED** | #1344 | 9/9 | live |
-| 16 | `16_landing-integrations-tab.md` | W3 — building | — | — | — |
+| 14 | `14_landing-one-contract.md` | **MERGED** | #1338 | 9/9 | Vercel |
+| 15 | `15_landing-shared-shapes.md` | **MERGED** | #1344 | 9/9 | Vercel |
+| 16 | `16_landing-integrations-tab.md` | **MERGED** | #1350 | 9/9 | Vercel |
 
 
 **Plus one PR the sprint did not plan:** [#1342](https://github.com/chrisrogers37/storydump/pull/1342), **MERGED** — a defect doc 01 introduced and doc 04 found. See §5.
@@ -583,7 +583,8 @@ _Per round: which findings, the class sweep for each with its command and counts
 
 | # | Item | Why it is here |
 |---|---|---|
-| Q1 | **PR #1334** — the device-native inbound docs | Not a phase of this sprint. Opened and left for the owner. It also carries this epic's `documentation/README.md` index rows (see §1 G1) — if it is abandoned, those rows need re-adding by hand. |
+| Q1 | **PR #1334 will add a broken link when it merges.** It is still open, and it adds a `documentation/README.md` row for this epic pointing at `planning/2026-09-20-tech-debt-audit/` — the path this closeout just moved to `archive/`. The archived plan is indexed in `archive/README.md` instead, per the convention, so the row wants deleting rather than re-pointing. Nothing is broken today; it breaks on #1334's merge | Created by this sprint's own archive step |
+| Q1b | **PR #1334** — the device-native inbound docs | Not a phase of this sprint. Opened and left for the owner. It also carries this epic's `documentation/README.md` index rows (see §1 G1) — if it is abandoned, those rows need re-adding by hand. |
 | Q2 | The 12 flagged defects (epic §Questions 1–12) | Each changes behaviour; each wants its own ruling or a bug-fix PR, never a cleanup PR. Carried here for the sprint's duration so none is silently folded in. |
 | Q3 | `.claude/settings.json` still names the deleted legacy CLI verbs and denies none of the `storydump` never-run verbs | Owner edit, noted in `CLAUDE.md`. Out of every phase's scope; recorded so it is not lost. |
 | Q4 | **`greenlet` is absent from a fresh install on Apple Silicon** — SQLAlchemy's environment marker lists `aarch64`/`x86_64`/`amd64`/`win32` but not `arm64`. CI (`x86_64`) is unaffected; a local fresh venv silently loses async SQLAlchemy and produces ~1,252 spurious failures. Pre-existing on `main`, deliberately not fixed inside a cleanup PR. A real finding the audit could not see, because it lives in a dependency's markers rather than in this tree | Discovered by doc 10's fresh-venv verification |
@@ -592,4 +593,123 @@ _Per round: which findings, the class sweep for each with its command and counts
 | Q7 | **BLOCKED (doc 03, step 9) — the two-binding supersede gate assertion was not added.** It needs `_seed_card` in `test_l5_pipeline_gate.py` to seed a second active Telegram binding, which ripples through every test using that helper, and the phase could not run `tests/scripts/` to verify the ripple. **Smallest unblocking action:** extend `_seed_card` with an optional second binding and run `test_l5_pipeline_gate.py` alone, which takes the cluster lock for ~30s. Not silently skipped: the invariant it would pin is already covered by `test_outbox_restate.py::TestRestateEverywhere::test_one_statement_addresses_every_binding_by_ref`, so this is a *second* assertion at the gate level, not an uncovered property | Doc 03 |
 | Q8 | **A fourth `driver_candidates` reader that would fold exactly** — `intent_ledger.transition:145`, where `refusals[0]` is equivalent to the first matching candidate. Doc 03 did not fold it because it is not in that doc's site list and `_dbapi`'s own docstring cites it as the origin story. Widening scope mid-phase is how a cleanup PR stops being reviewable; recorded for a later phase instead | Doc 03 |
 | Q9 | Two egress-floor tests cannot run on macOS | `OSError: could not bind on any address out of [('127.0.0.2', 0)]`. Smallest unblocking action: `sudo ifconfig lo0 alias 127.0.0.2`. They run in CI (Linux), so the sprint is not blind to them — but the local baseline excludes them. |
+
+
+---
+
+## 8. Closeout — the goal condition, answered
+
+**The goal condition was:** all 16 phase PRs merged with the frozen baseline unregressed; the 12
+flagged defects still *outside* the cleanup PRs and queued; this directory archived.
+
+### Met, with one addition and one correction to its own terms
+
+**All 16 phases merged.** 01 #1336 · 02 #1343 · 03 #1345 · 04 #1346 · 05 #1351 · 06 #1356 ·
+07 #1353 · 08 #1354 · 09 #1355 · 10 #1337 · 11 #1339 · 12 #1352 · 13 #1340 · 14 #1338 ·
+15 #1344 · 16 #1350. Each merged only after its own CI was observed green — nine checks, every
+time, never assumed.
+
+Four PRs the sprint did not plan also landed: **#1335** (the plan docs, which were untracked when
+the sprint began), **#1342** and **#1348** (two defects the sprint introduced and caught — see
+below), and **#1347** (this ledger).
+
+**The baseline is unregressed.** Final authoritative run on the completed tree:
+
+```
+===== 2 failed, 3679 passed, 2 skipped, 5 deselected in 143.94s (0:02:23) ======
+```
+
+The 2 failures are the frozen baseline's macOS `127.0.0.2` pair and the 2 skips its expected pair
+— **the same shape the sprint started from**. The net −11 against the 3690 baseline reconciles
+exactly: +10 (01) +15 (10) −88 (13) −31 (02) +74 (03) +9 (04), and zero from 05, 06, 07, 08, 09,
+11, 12, 14, 15, 16.
+
+**Every invariant green on the merged tree:**
+
+| ID | Check | Result |
+|---|---|---|
+| I1 | full suite | 3679 passed, baseline shape |
+| I2 | no behaviour change | held — see below |
+| I3 | docs guards | 18 passed |
+| I4 | FC-2 ratchet | 4 axes `[ok]`, re-baselined once, deliberately, by doc 02 |
+| I5 | no new skip | 2 skips, both the baseline's |
+| I6 | lint | clean, 308 files formatted |
+| I7 | `landing/` | 408 tests, `tsc` clean, `eslint` zero output |
+
+**Deploy reachability:** Railway deployed both services on every merge, each pair reaching
+SUCCESS. No phase carries a "merged, NOT live" caveat and no manual operator command is owed.
+
+### The correction to the goal's own terms: there are now thirteen flagged defects, not twelve
+
+The audit flagged 12. Doc 02 found a **thirteenth**, and it is the finding that justifies the
+sprint's most expensive phase: `identity.py:83` runs
+`UPDATE user_identities SET verified_at = now(), display_name = :dn` unconditionally, so **a
+Google sign-in whose token omits `name` erases a stored display name**. The retired sync twin kept
+it.
+
+It was invisible for exactly the reason finding B1/C3 described — the RLS gate was exercising the
+*retired twin*, so the live async writers had no real-database coverage at all. Re-homing that
+gate is what surfaced it. It is asserted as current behaviour in the gate and deliberately not
+fixed.
+
+All thirteen remain outside every cleanup PR. **I2 held.**
+
+### Two defects the sprint introduced, and how they were caught
+
+Recorded because a sprint that hides its own damage is not auditable.
+
+1. **Doc 01 turned a test into a tautology.** Replacing `TokenRefused.REASONS`' hand-written tuple
+   with `vocabulary.TOKEN_REFUSALS` was right, but one line away sat an assertion comparing the
+   two — which became `tuple(x) == x`. The `cli_v2_01.sh` mutation that deletes `"wrong_workspace"`
+   from the vocabulary **survived on `main`**. Found by doc 04 resolving all 337 mutation anchors
+   mechanically; fixed in **#1342**, verified by re-running the mutation to a kill.
+2. **The runner shipped a duplicated CHANGELOG bullet.** A blanket "keep both sides" conflict
+   resolver kept both doc 15's pre-correction and post-correction bullets. The same resolver had
+   already been corrected by hand twice for the same reason. Found by doc 16 reading the file it
+   was about to append to; fixed in **#1348**. Swept: `main` carried 3 duplicate bullets before the
+   sprint and 4 after, so this was the only one introduced.
+
+**Neither was caught by CI.** CI was green for both.
+
+### What the sprint learned about the audit
+
+The audit's **structural** findings held up almost without exception — the dead lane, the copied
+constants, the 3,542 lines of dead instruments, the duplicated `intents` contract, the security
+job that could not go red while masking four live advisories.
+
+Its **"these two things are duplicates"** findings were considerably weaker, and every phase that
+checked found at least one that dissolved:
+
+- `TERMINAL_STATES` in `provider_ops` and `intent_ledger` are **disjoint sets for different
+  entities** (`succeeded/failed/ambiguous` vs six intent states), not two copies.
+- Three `driver_candidates` loops ask "which **constraint**", not "which driver class" — folding
+  them into the shared helper would have been a behaviour change.
+- `publish_pipeline`'s two `str(row["tz"] or "UTC")` sites are a *pair*. The rule is three.
+- `rate_counters.count` is not dead; it is a monkeypatched tripwire proving the tap never reads the
+  counter before the flip.
+- `resolve-failed` is not torn-out code; it is a live design name pinned by a gate test.
+
+And one **withdrawal was itself wrong**: doc 08 reinstated the cap-warning finding after measuring
+`FOLDER_WALK_CAP` at **6 occurrences** where the doc recorded "one definition, one use" — a grep
+that was false at the audit's own snapshot.
+
+Roughly sixty corrections in total are recorded across the sixteen PR bodies. None of the sixteen
+docs was executed exactly as written.
+
+### The methods worth keeping
+
+- **Resolve mutation anchors mechanically, never by grepping renamed identifiers.** Doc 04 found
+  two broken anchors containing no renamed identifier at all — one had moved file. A broken anchor
+  reports `MUTATION NOT APPLIED` rather than failing, so a battery stays green while covering less.
+  Doc 12 revived three anchors that had been dead on `main`.
+- **Prove equivalence by AST, not by reading.** Doc 07 inlined its helper back into both callers
+  and matched `ast.dump`; doc 09 diffed `app.routes`, `app.exception_handlers` and all 2,396 lines
+  of `/openapi.json`; doc 06 matched sha256 hashes on four functions, ran a purity analysis on the
+  reordered keywords, replayed 365 runtime records on both trees, and drove a 96-case finalize
+  matrix.
+- **A probe that cannot fail proves nothing.** Doc 10's negative control — remove the package,
+  watch the probe fail, restore it, watch collection recover — is the lesson of the `GHSA-1234`
+  placeholder it deleted.
+- **A conflict between two phases of the same sprint is more likely semantic than textual.** Four
+  needed reading rather than a rule; two would have silently reverted a merged phase's work.
 
