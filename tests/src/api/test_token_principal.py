@@ -15,6 +15,7 @@ from dataclasses import replace
 import pytest
 from fastapi.routing import APIRoute
 
+from src.api import principal
 from src.api.principal import (
     TOKEN_ROUTES,
     Principal,
@@ -277,3 +278,79 @@ class TestRequireSession:
     def test_replace_keeps_a_token_principal_frozen_and_comparable(self):
         assert replace(PERSON_TOKEN, token_role="readonly").token_role == "readonly"
         assert PERSON_TOKEN == replace(PERSON_TOKEN)
+
+
+class TestTheHouse404:
+    """`principal.not_found()` — the one 404 eight routes had spelled out.
+
+    A row the caller may not see and a row that is not there answer
+    identically (`07` §5, no existence oracle), so the status and the detail
+    are the wire contract and belong in one place.
+    """
+
+    def test_the_status_and_the_detail_are_the_house_answer(self):
+        exc = principal.not_found()
+        assert exc.status_code == 404
+        assert exc.detail == "not found"
+
+    def test_two_calls_are_distinct_objects(self):
+        """The reason it is a function and not a module constant: a raised
+        instance carries `__traceback__` and `__context__`, so a shared one
+        would pin one request's frames until the next raise replaced them."""
+        assert principal.not_found() is not principal.not_found()
+
+
+class TestTheTenantSeamsResolveThroughTheModule:
+    """The four seams that moved here from `v1` (`open_tenant`,
+    `member_session`, `admin_session`, `json_object`).
+
+    The shared conftest patches `principal.open_tenant` BY NAME, so the two
+    gates must reach it as a module global and every router must reach all
+    four through the module attribute. A from-import binds the real function
+    at import time: the patch would not land, and a route unit test would
+    quietly open a real unit of work against the test engine and pass for
+    the wrong reason.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "gate,floor",
+        [("member_session", "member"), ("admin_session", "admin")],
+    )
+    async def test_both_gates_call_the_patched_open_tenant(
+        self, monkeypatch, gate, floor
+    ):
+        from contextlib import asynccontextmanager
+
+        from src.services.target import tenant_resolution
+
+        seen = []
+
+        @asynccontextmanager
+        async def fake_open_tenant(request, workspace_id, who):
+            seen.append(("uow", workspace_id, who.user_id))
+            yield "session"
+
+        async def fake_gate(session, workspace_id, user_id, minimum_role="member"):
+            seen.append(("gate", workspace_id, user_id, minimum_role))
+
+        monkeypatch.setattr(principal, "open_tenant", fake_open_tenant)
+        monkeypatch.setattr(tenant_resolution, "authorize_member", fake_gate)
+
+        async with getattr(principal, gate)(None, WS, PRINCIPAL) as session:
+            assert session == "session"
+        assert seen == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, floor),
+        ]
+
+    @pytest.mark.parametrize("router", ["v1", "tokens", "ops"])
+    def test_no_router_from_imports_a_seam(self, router):
+        import importlib
+
+        module = importlib.import_module(f"src.api.routes.{router}")
+        for name in ("open_tenant", "member_session", "admin_session", "json_object"):
+            assert not hasattr(module, name), (
+                f"src.api.routes.{router} binds `{name}` at import time; reach it"
+                " as `principal_mod.{name}` so the conftest's patch lands"
+            )

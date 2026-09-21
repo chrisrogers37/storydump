@@ -25,7 +25,7 @@ from src.api.principal import (
     require_engine,
     require_own_workspace,
 )
-from src.api.routes import v1
+from src.api import principal as principal_mod
 from src.services.target import ops_views, vocabulary
 
 router = APIRouter(tags=["ops"])
@@ -53,10 +53,10 @@ async def _scoped(request: Request, ws: uuid.UUID, principal: Principal):
     the membership gate."""
     if principal.is_service_identity:
         require_own_workspace(principal, str(ws))
-        async with v1._open_tenant(request, str(ws), principal) as session:
+        async with principal_mod.open_tenant(request, str(ws), principal) as session:
             yield session
         return
-    async with v1._member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         yield session
 
 

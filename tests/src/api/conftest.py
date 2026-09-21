@@ -25,7 +25,8 @@ from sqlalchemy.pool import NullPool
 
 from src.api.app import create_app
 from src.api.principal import COOKIE, Principal, current_principal
-from src.api.routes import auth, v1
+from src.api import principal
+from src.api.routes import auth
 from src.config.settings import settings
 from src.services.target import google_oidc, tenant_resolution
 from src.services.target.unit_of_work import asyncpg_url
@@ -168,7 +169,7 @@ def tenant(monkeypatch, engine):
             raise log.refuse
         return "owner"
 
-    monkeypatch.setattr(v1, "_open_tenant", open_tenant)
+    monkeypatch.setattr(principal, "open_tenant", open_tenant)
     monkeypatch.setattr(tenant_resolution, "authorize_member", gate)
     del asked
     return log

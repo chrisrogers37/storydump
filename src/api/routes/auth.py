@@ -57,6 +57,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from src.api import google_client, instagram_client
+from src.api import principal as principal_mod
 from src.api.principal import (
     clear_session_cookie,
     presented_token,
@@ -362,7 +363,7 @@ async def google_drive_callback(
         str(row["workspace_id"]),
         actor_kind="user",
         actor_user_id=str(row["user_id"]),
-        channel="web",
+        channel=principal_mod.WEB_CHANNEL,
     )
     async with uow.begin() as session:
         await google_drive_oauth.store_credential(
@@ -450,7 +451,7 @@ async def instagram_login_callback(
         workspace_id,
         actor_kind="user",
         actor_user_id=str(row["user_id"]),
-        channel="web",
+        channel=principal_mod.WEB_CHANNEL,
     )
     try:
         async with uow.begin() as session:
