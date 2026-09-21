@@ -27,7 +27,7 @@ import { SignOutButton } from "@/components/auth/sign-out-button";
  * So the header LINKS to where you change workspace. It does not name the
  * one you are in: the prop that would have (`workspaceName`) was never
  * passed by `(dashboard)/layout.tsx`, so the link has always read "Switch
- * workspace", and the docblock said otherwise (#1341).
+ * workspace", and the docblock said otherwise (#1344).
  *
  * NAMING IT IS A CHANGE, NOT A FIX. The session carries the name
  * (`session.workspaces?.find(w => w.id === session.activeWorkspaceId)?.name`),

@@ -2,7 +2,7 @@
  * The browser's one door to this tier's own routes, and the shape every
  * caller answers in.
  *
- * NINE HAND-WRITTEN COPIES (#1341). `tokens.ts`, `start-grant.ts`,
+ * NINE HAND-WRITTEN COPIES (#1344). `tokens.ts`, `start-grant.ts`,
  * `command-client.ts`, `drive.ts` (×3), `telegram-link.ts` (×2) and
  * `category-mix.ts` each carried this block: `try { fetch } catch {
  * unreachable/0 }`, then `json().catch(() => ({}))`, then

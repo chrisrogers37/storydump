@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 /**
  * The banner this app says things in, because it has no toast.
  *
- * SIXTEEN HAND-WRITTEN COPIES (#1341), and the copies disagreed about the
+ * SIXTEEN HAND-WRITTEN COPIES (#1344), and the copies disagreed about the
  * thing that matters least visually and most to a screen reader: four of
  * the nine error boxes carried `role="alert"` and five did not, so the same
  * kind of failure was announced on some screens and silent on others. Two

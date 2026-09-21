@@ -129,7 +129,7 @@ export function QueueList({
     const { command, body } = requestFor(action, intent);
 
     try {
-      // `callBff` and `commandPath`, NOT `submitCommand` (#1341). The queue's
+      // `callBff` and `commandPath`, NOT `submitCommand` (#1344). The queue's
       // commands are intent-keyed, so they carry no `submission_id`, and a
       // double-clicked Approve REPLAYS — which `submitCommand` reports as a
       // failure and this screen has always treated as success. Routing this

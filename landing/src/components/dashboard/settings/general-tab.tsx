@@ -38,7 +38,7 @@ import { RepostCadenceCard } from "./repost-cadence-card";
  * carries the `Idempotency-Key` the port requires and mints a fresh submission
  * identity per save.
  *
- * `editable` IS GONE (#1341). It was the screen-level gate held in
+ * `editable` IS GONE (#1344). It was the screen-level gate held in
  * `settings/page.tsx`, marking controls whose route did not exist yet; it
  * reached this tab as a bare `editable` attribute — permanently `true` — and
  * a flag with one value is the mirror image of the permanently-false one
@@ -507,7 +507,7 @@ export function GeneralTab({
         CategoryMixCard is NOT rendered, and this is the line alex's #1070
         annotation told a P3 reviewer to treat as a blocker rather than a
         beneficiary of the flip. It was `{editable && <CategoryMixCard />}`;
-        that flag is gone now (#1341), so the argument rests where it always
+        that flag is gone now (#1344), so the argument rests where it always
         really did — on the card being BROKEN, not on a boolean. Leaving the
         gate would have brought it back the moment the flag went true, which
         is exactly the silent re-introduction #1070 exists to prevent.

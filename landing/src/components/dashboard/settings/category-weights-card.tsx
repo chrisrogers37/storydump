@@ -41,7 +41,7 @@ export function CategoryWeightsCard({
   // which is the honest outcome — the numbers on screen are the server's
   // again.
   //
-  // THE RESYNC IS A `key`, NOT AN EFFECT (#1341). This was prop → `useMemo`
+  // THE RESYNC IS A `key`, NOT AN EFFECT (#1344). This was prop → `useMemo`
   // with an `eslint-disable` for a dependency array that lied → `useState`
   // → `useEffect` writing that state back: four hops to say "when the
   // server's rows change, start over". `settings/page.tsx` now keys this
