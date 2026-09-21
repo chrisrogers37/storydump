@@ -33,3 +33,17 @@ pytest==9.0.3
 pytest-asyncio==1.3.0
 pytest-cov==7.1.0
 pytest-mock==3.15.1
+# NOT a second HTTP client for the application, and NOT dead weight (#1216):
+# no module under src/, storydump_cli/ or scripts/ imports it, and the app
+# reaches the network through httpx and the egress floor. `starlette.testclient`
+# imports it — it prefers `httpx2` and falls back to `httpx` with a
+# StarletteDeprecationWarning, which subclasses UserWarning, NOT
+# DeprecationWarning, so this file's `filterwarnings = error` (pytest.ini) does
+# not ignore it and the fallback becomes a COLLECTION ERROR in every module
+# that builds a TestClient. Deleting this line for being unimported is exactly
+# what happened, and CI came back with seven collection errors.
+# 2.13.0, not the 2.2.0 it was pinned at: that version carried
+# PYSEC-2026-3849/3848 (fixed in 2.11.0) and PYSEC-2026-3846 (2.12.0), and
+# pulled httpcore2 2.2.0 with PYSEC-2026-3844 (2.10.0). `pip-audit` gates now,
+# so this pin has to be clean.
+httpx2==2.13.0

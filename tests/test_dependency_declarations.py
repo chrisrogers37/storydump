@@ -22,6 +22,11 @@ a deploy does not get. `setup.py`'s `cli` extra is not runtime either: it is
 opt-in (`pip install 'storydump[cli]'`), and decision F2 is that `keyring`
 never ships to the API or the worker. Both exclusions are themselves pinned
 below, so widening one is a visible edit rather than a quiet loosening.
+
+That matters most for `httpx2`, which no module in this repository imports and
+which is therefore load-bearing in a way no grep can see — `starlette.testclient`
+imports it, and losing it is a collection error, not a missing feature.
+`test_httpx2_stays_pinned_for_the_testclient` is the whole story.
 """
 
 from __future__ import annotations
@@ -40,8 +45,12 @@ SETUP = ROOT / "setup.py"
 #: to the end of the file is excluded from the runtime set.
 _TEST_HEADER = "# Testing"
 #: What that block holds today. Pinned so that a test-only package added under
-#: a different name is a deliberate edit here, not a silent exclusion.
-TEST_TIER = frozenset({"pytest", "pytest-asyncio", "pytest-cov", "pytest-mock"})
+#: a different name is a deliberate edit here, not a silent exclusion — and so
+#: that `httpx2`, which reads like an application dependency and is not one,
+#: cannot quietly leave again (see `test_httpx2_stays_pinned_for_the_testclient`).
+TEST_TIER = frozenset(
+    {"pytest", "pytest-asyncio", "pytest-cov", "pytest-mock", "httpx2"}
+)
 #: `setup.py`'s opt-in extra. Its contents are not runtime dependencies.
 CLI_EXTRA = "cli"
 
@@ -198,11 +207,11 @@ def test_the_cli_extra_is_opt_in_and_not_a_runtime_dependency():
 
 @pytest.mark.parametrize(
     "package",
-    ["alembic", "httpx2", "python-dateutil", "tenacity", "anthropic"]
+    ["alembic", "python-dateutil", "tenacity", "anthropic"]
     + ["google-api-python-client", "google-auth", "google-auth-oauthlib"],
 )
 def test_a_package_nothing_imports_stays_out_of_both_files(package):
-    """The eight removed by #1216. Drive and the Meta Graph API are reached
+    """The seven removed by #1216. Drive and the Meta Graph API are reached
     over httpx through the egress floor, never a Google client library, and
     nothing calls the Anthropic SDK; `alembic` is not the migration tool here
     (`scripts/migration_runner.py` is). Compared as PEP 503 names, so
@@ -210,3 +219,33 @@ def test_a_package_nothing_imports_stays_out_of_both_files(package):
     name = normalize(package)
     assert name not in requirement_names(), f"{package} is back in requirements.txt"
     assert name not in install_requires_names(), f"{package} is back in setup.py"
+
+
+def test_httpx2_stays_pinned_for_the_testclient():
+    """`httpx2` is a TEST dependency, and the one entry here whose absence is
+    invisible until CI collects.
+
+    No module under `src/`, `storydump_cli/` or `scripts/` imports it, so every
+    unimported-package sweep flags it — and one did, in this very PR. But
+    `starlette.testclient` imports it: it prefers `httpx2` and falls back to
+    `httpx` with a `StarletteDeprecationWarning`, which subclasses
+    **`UserWarning`, not `DeprecationWarning`**, so `pytest.ini`'s
+    `filterwarnings = error` does not ignore it and the fallback is a
+    COLLECTION ERROR in every module that builds a `TestClient` — seven of them
+    here. A local run does not catch this: dropping the line from
+    `requirements.txt` does not uninstall the package from an existing venv.
+
+    It stays out of `install_requires` because it is not a runtime dependency:
+    nothing the API, the worker or the CLI imports reaches `starlette.testclient`.
+    """
+    _, test_tier = _split_at_test_tier()
+    assert "httpx2" in test_tier, (
+        "httpx2 left requirements.txt — `starlette.testclient` falls back to"
+        " httpx and pytest turns that warning into a collection error"
+    )
+    assert "httpx2" not in install_requires_names(), (
+        "httpx2 is a test dependency; a runtime install must not carry it"
+    )
+    assert "httpx2" not in requirement_names(), (
+        "httpx2 belongs under the `# Testing` header, not in the runtime set"
+    )
