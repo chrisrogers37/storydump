@@ -2,12 +2,13 @@
 
 ## Why this matters
 
-Production connects to Neon as `neondb_owner`. That role owns every table and
-holds `BYPASSRLS`, so every row-level-security policy the target schema
-installs (`058` and `060`, 58 policies between them) is inert on the deployed path: the database
-enforces no tenant boundary at all today, the application code is the only
-thing keeping one workspace's rows away from another's. Measured 2026-08-25
-on #751.
+The API still connects to Neon as `neondb_owner`; the worker has connected as
+`svc_worker` since 2026-09-21 15:51 UTC (step 4 below, run by the owner once
+082 was live). The owner role owns every table and holds `BYPASSRLS`, so on
+the API's path every row-level-security policy the target schema installs
+(`058` and `060`, 58 policies between them) is still inert: there the
+application code is the only thing keeping one workspace's rows away from
+another's. Measured 2026-08-25 on #751; the worker's half closed 2026-09-21.
 
 The plan's runtime posture (`02` §7, `04` F.4) is: the API connects as
 `svc_ingress`, the worker as `svc_worker`, and only the migration runner uses
@@ -100,14 +101,18 @@ each step below is verified rather than assumed.
 ## Done when
 
 - `/health` on production reads `svc_ingress` / `bypassrls: false` and the
-  worker's boot line reads `svc_worker` / `False`.
+  worker's boot line reads `svc_worker` / `False`. The worker's half: observed
+  2026-09-21 15:52 UTC (deployment `c33ec782`).
 - `/health/scheduling` and `/health/posting` report the estate — the same
   counts as under the owner login — and the fleet monitors' verdicts are
   unchanged across the switch.
 - After the worker's switch, the worker's log shows, within one sweep
   cycle, prompts and sender jobs minted at the rate the previous deployment's
   log showed (compare its last sweep lines with the new deployment's first),
-  and a card reaches a bound group.
+  and a card reaches a bound group. Observed 2026-09-21: the verdicts
+  unchanged, `reconcile_ambiguous` jobs succeeding, no permission denied; the
+  estate was idle (no pending outbox row, no due story), so the first card as
+  `svc_worker` is to be seen on the next slot.
 - #751 is closed with those two observations quoted, and the plan README's
   scoreboard moves F.4 to built.
 
