@@ -564,9 +564,7 @@ class TestRetiringAndFollowingAChat:
             is False
         )
 
-    def test_a_refused_repoint_leaves_the_session_usable_for_the_revoke(
-        self, world
-    ):
+    def test_a_refused_repoint_leaves_the_session_usable_for_the_revoke(self, world):
         """The caller's real shape: repoint, and revoke on the SAME session.
 
         `work_loop.py:485` does exactly this —
