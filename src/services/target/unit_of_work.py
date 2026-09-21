@@ -451,6 +451,54 @@ def unit_of_work(engine: AsyncEngine, tenant_id: str, **gucs) -> UnitOfWork:
     return UnitOfWork(engine, tenant_id, **gucs)
 
 
+def make_session_for(engine):
+    """Per-job transaction contexts with the GUC invariant applied once.
+
+    Tenant scope comes from the claimed row (system singletons carry none and
+    get an empty tenant id — fail-closed under any tenant policy); the actor
+    is `system`, the `02` §4 worker actor. Lives here beside `apply_gucs`,
+    which is the whole of its body: homed in `work_loop` (phase 3b) it forced
+    six service modules to import the work loop from inside a function,
+    because `work_loop` imports them at module level (#1216 audit, 2026-09-20).
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    def session_for(job: dict):
+        @asynccontextmanager
+        async def ctx():
+            async with maker() as session:
+                async with session.begin():
+                    await apply_gucs(
+                        session,
+                        tenant_id=str(job.get("workspace_id") or ""),
+                        actor_kind="system",
+                    )
+                    yield session
+
+        return ctx()
+
+    return session_for
+
+
+def poller_session_factory(engine, tenant_id: str):
+    """Sessions for the outbox poller with the GUC invariant pre-applied.
+
+    The poller opens its own transaction per tick and commits it; SET LOCAL
+    inside that transaction is what keeps pool reuse safe (`apply_gucs`).
+    Lives here beside `apply_gucs` for the same reason `make_session_for`
+    does (#1216 audit, 2026-09-20).
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def factory():
+        async with maker() as session:
+            await apply_gucs(session, tenant_id=tenant_id, actor_kind="system")
+            yield session
+
+    return factory
+
+
 #: Who is this connection, and does that login bypass row-level security?
 #: Asked of the catalog, never read off the URL: the F.4 rollout (#751) exists
 #: because the configured login and the effective one can disagree, and only

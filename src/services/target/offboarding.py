@@ -72,7 +72,7 @@ from typing import Any, Optional
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import audit, intent_ledger, jobs
+from src.services.target import audit, intent_ledger, jobs, unit_of_work
 from src.services.target.intent_ledger import IntentTransitionRefused
 
 logger = logging.getLogger(__name__)
@@ -363,8 +363,6 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
     *session* is the loop's transaction: legs 1–3 and the successor mint ride
     it. Leg 5 does not, and the module docstring says why.
     """
-    from src.services.target.work_loop import poller_session_factory
-
     cfg = deps.config
     workspace_id = str(job["workspace_id"])
     # One read, both deadlines. `now()` is `transaction_timestamp()` and does
@@ -408,7 +406,7 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
             # signals available are used: an audit row, and a raise that spends
             # the job's retry budget and lands as a dead job row.
             await _audit(
-                poller_session_factory(deps.engine, workspace_id),
+                unit_of_work.poller_session_factory(deps.engine, workspace_id),
                 workspace_id,
                 "offboard_drain_timeout",
                 {"publishing": still_publishing},
@@ -470,7 +468,7 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
         workspace_id,
     )
     await finalize(
-        poller_session_factory(deps.engine, workspace_id),
+        unit_of_work.poller_session_factory(deps.engine, workspace_id),
         workspace_id,
         cfg.offboard_grace_seconds,
     )

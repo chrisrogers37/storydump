@@ -21,14 +21,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable, Mapping, Optional
 
 from sqlalchemy import text
 from sqlalchemy.exc import TimeoutError as PoolTimeout
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.services.target import credential_lifecycle, email_sender, media_sync
 
@@ -422,7 +421,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         # transactions; the loop must not finalize again.
         return jobs.SELF_FINALIZED
 
-    sessions = make_session_for(deps.engine)
+    sessions = unit_of_work.make_session_for(deps.engine)
 
     @own_transactions
     async def deliver_outbox(session, job):
@@ -463,7 +462,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 f"deliver_outbox {job['id']}: binding {binding_id} has no row"
             )
         poller = outbox.OutboxPoller(
-            poller_session_factory(deps.engine, str(row["workspace_id"])),
+            unit_of_work.poller_session_factory(deps.engine, str(row["workspace_id"])),
             binding_id=binding_id,
             transport=deps.transport.for_chat(row["external_ref"]),
             clock=utcnow,
@@ -738,14 +737,10 @@ async def _notify_exhausted(session, job) -> None:
         # Plan 03: the story a dead publish job carried is parked for the
         # workspace's review — the card with its buttons and one honest
         # line — never left reading Approved behind a generic notice.
-        from src.services.target import publish_pipeline  # noqa: PLC0415 — cycle
-
         await publish_pipeline.park_exhausted(session, job)
         return
     if kind in _SYNC_KINDS:
         await _rearm_source(session, job)
-    from src.services.target import prompts  # noqa: PLC0415 — cycle
-
     bindings = await prompts.push_bindings(session, str(workspace_id))
     await outbox.fanout_notification(
         session,
@@ -1028,52 +1023,6 @@ class WorkLoop:
 
     def stop(self) -> None:
         self._stop.set()
-
-
-def make_session_for(engine):
-    """Per-job transaction contexts with the GUC invariant applied once.
-
-    Tenant scope comes from the claimed row (system singletons carry none and
-    get an empty tenant id — fail-closed under any tenant policy); the actor
-    is `system`, the `02` §4 worker actor. Lives here (phase 3b) because the
-    sender executor takes its own short transactions through it.
-    """
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-
-    def session_for(job: dict):
-        @asynccontextmanager
-        async def ctx():
-            async with maker() as session:
-                async with session.begin():
-                    await unit_of_work.apply_gucs(
-                        session,
-                        tenant_id=str(job.get("workspace_id") or ""),
-                        actor_kind="system",
-                    )
-                    yield session
-
-        return ctx()
-
-    return session_for
-
-
-def poller_session_factory(engine, tenant_id: str):
-    """Sessions for the outbox poller with the GUC invariant pre-applied.
-
-    The poller opens its own transaction per tick and commits it; SET LOCAL
-    inside that transaction is what keeps pool reuse safe (`apply_gucs`).
-    """
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def factory():
-        async with maker() as session:
-            await unit_of_work.apply_gucs(
-                session, tenant_id=tenant_id, actor_kind="system"
-            )
-            yield session
-
-    return factory
 
 
 async def ensure_sender_jobs(

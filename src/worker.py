@@ -54,7 +54,6 @@ from src.services.target import health as health_endpoint
 from src.services.target import prompts as prompts_mod
 from src.services.target.work_loop import (
     assert_concurrency_fits,
-    make_session_for,
     Parked,
     WorkerConfig,
     WorkerDeps,
@@ -323,7 +322,7 @@ def compose(
         interval_seconds=config.heartbeat_interval_seconds,
         lease_seconds=config.lease_seconds,
     )
-    session_for = make_session_for(engine)
+    session_for = unit_of_work.make_session_for(engine)
     name = f"{socket.gethostname()}-{os.getpid()}"
     # Phase 3b (F7 (a)): K claim-and-run tasks per lane, each claiming on a
     # pooled checkout it returns at once — K bounds tasks, not connections.

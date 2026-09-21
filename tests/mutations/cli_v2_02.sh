@@ -72,7 +72,7 @@ check "the ledger is reported present when unreadable" $OV '        if found["ok
 check "an ops route leaves the allowlist" $PR '        ("GET", "/api/v1/ops/workspaces/{ws}/burst"),
 ' '' "$UNIT" "$TU -k every_ops_route_is_admitted"
 check "a service identity reads any workspace" $OR '        require_own_workspace(principal, str(ws))
-        async with v1._open_tenant(request, str(ws), principal) as session:' '        async with v1._open_tenant(request, str(ws), principal) as session:' "$UNIT" "$TU -k without_a_membership"
+        async with principal_mod.open_tenant(request, str(ws), principal) as session:' '        async with principal_mod.open_tenant(request, str(ws), principal) as session:' "$UNIT" "$TU -k without_a_membership"
 check "a service identity is gated on a membership it has not got" $OR '    if principal.is_service_identity:
         require_own_workspace(principal, str(ws))' '    if False:
         require_own_workspace(principal, str(ws))' "$UNIT" "$TU -k without_a_membership"

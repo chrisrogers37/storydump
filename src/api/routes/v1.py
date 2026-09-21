@@ -49,6 +49,7 @@ from src.api.principal import (
     require_session,
 )
 from src.api import google_client, instagram_client
+from src.api import principal as principal_mod
 from src.config.settings import settings
 from src.services.target.drive_adapter import (
     DriveLostResponse,
@@ -68,13 +69,11 @@ from src.services.target import (
     invitations,
     media_sync,
     provisioning,
-    tenant_resolution,
     workspaces,
     vocabulary,
 )
 from src.services.target.commands import Command, CommandResult
 from src.services.target.ig_login_oauth import STATE_TTL_SECONDS, issue_state
-from src.services.target.unit_of_work import unit_of_work
 from src.exceptions.tenancy import TokenRefused
 from sqlalchemy import text
 
@@ -116,7 +115,7 @@ def _target_bot_username() -> str:
 router = APIRouter(tags=["v1"])
 
 #: `command_dedup.channel` for this adapter (`webhook_ingress.CHANNELS`).
-CHANNEL = "web"
+CHANNEL = principal_mod.WEB_CHANNEL
 #: Required on every command. The client owns the value — the web front end
 #: mints it as ``<command>:<intent_id>`` in its route handler, so a repeated
 #: click replays rather than re-executes; the server owns nothing but the
@@ -132,38 +131,10 @@ LIST_LIMIT_MAX = 200
 # --- seams ---------------------------------------------------------------
 
 
-def _open_tenant(request: Request, workspace_id: str, principal: Principal):
-    """The request's tenant-scoped unit of work: tenant + actor GUCs applied,
-    one transaction. The one seam the unit gate replaces.
-
-    The GUCs come from the principal: a person is ``user`` on ``web`` or, via
-    a person-bound token, on ``cli``; a service identity is ``operator`` with
-    no user, which the audit triggers read as such. The triggers never see a
-    token's name — that rides the direct `cli_command` row (F4).
-    """
-    return unit_of_work(
-        require_engine(request),
-        workspace_id,
-        actor_kind=principal.actor_kind,
-        actor_user_id=principal.user_id,
-        channel=principal.channel,
-    ).begin()
-
-
-@asynccontextmanager
-async def _member(request: Request, workspace_id: str, principal: Principal):
-    """Open the tenant's unit of work and run the ONE gate — every read."""
-    async with _open_tenant(request, workspace_id, principal) as session:
-        await tenant_resolution.authorize_member(
-            session, workspace_id, principal.user_id, minimum_role="member"
-        )
-        yield session
-
-
 async def _collection(
     request: Request, ws: uuid.UUID, principal: Principal, reader, name: str
 ):
-    async with _member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         items = await reader(session, workspace_id=str(ws))
     return {name: items}
 
@@ -181,20 +152,6 @@ def _idempotency_key(request: Request) -> str:
             detail=f"{IDEMPOTENCY_HEADER} exceeds {IDEMPOTENCY_KEY_MAX} characters",
         )
     return key
-
-
-async def _json_object(request: Request) -> dict[str, Any]:
-    """The body as a JSON object; an empty body is an empty object."""
-    raw = await request.body()
-    if not raw.strip():
-        return {}
-    try:
-        body = json.loads(raw)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="body is not JSON")
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be a JSON object")
-    return body
 
 
 async def _dispatch(
@@ -215,7 +172,7 @@ async def _dispatch(
     if principal.is_token:
         _refuse_token_write(principal, tenant)
     key = _idempotency_key(request)
-    body = await _json_object(request)
+    body = await principal_mod.json_object(request)
     command = Command(
         kind=kind,
         workspace_id=workspace_id,
@@ -224,7 +181,7 @@ async def _dispatch(
         args={**body, **(extra or {})},
         actor_label=principal.token_name,
     )
-    async with _open_tenant(request, tenant, principal) as session:
+    async with principal_mod.open_tenant(request, tenant, principal) as session:
         result = await commands.ingest(
             session,
             command,
@@ -334,7 +291,7 @@ async def me(request: Request, principal: Principal = Depends(require_session)):
         user = await identity.get_user(conn, user_id=principal.user_id)
         memberships = await workspaces.list_for_user(conn, user_id=principal.user_id)
     if user is None:
-        raise HTTPException(status_code=404, detail="not found")
+        raise principal_mod.not_found()
     return {"user": user, "workspaces": memberships}
 
 
@@ -372,7 +329,7 @@ async def telegram_group_bind_link(
     `/start` door does the rest. Admin floor: where a workspace's cards go is
     an admin act (`06` §4). One live link per workspace."""
     bot_username = _target_bot_username()
-    async with _admin(request, str(ws), principal) as session:
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         # The link only works for the admin who minted it, proven by their
         # linked Telegram identity — so an admin who has not linked would be
         # sent into a flow that can only refuse. Say so here instead.
@@ -431,10 +388,10 @@ async def create_workspace(
 async def get_workspace(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
-    async with _member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         row = await workspaces.get_workspace(session, workspace_id=str(ws))
     if row is None:
-        raise HTTPException(status_code=404, detail="not found")
+        raise principal_mod.not_found()
     return row
 
 
@@ -504,7 +461,7 @@ async def list_intents(
     is ``?state=awaiting_approval``; a history tab is
     ``?state=posted,skipped,rejected`` (one call, several states)."""
     states = _states(state)
-    async with _member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         rows = await workspaces.list_intents(
             session, workspace_id=str(ws), states=states, limit=limit
         )
@@ -524,7 +481,7 @@ async def list_media(
     intent exists for an item."""
     if state is not None and state not in workspaces.MEDIA_STATES:
         raise HTTPException(status_code=422, detail=f"unknown media state {state!r}")
-    async with _member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         rows = await workspaces.list_media(
             session,
             workspace_id=str(ws),
@@ -542,12 +499,12 @@ async def get_media(
     request: Request,
     principal: Principal = Depends(require_session),
 ):
-    async with _member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         row = await workspaces.get_media(
             session, workspace_id=str(ws), media_id=str(media_id)
         )
     if row is None:
-        raise HTTPException(status_code=404, detail="not found")
+        raise principal_mod.not_found()
     return row
 
 
@@ -557,7 +514,7 @@ async def get_stats(
 ):
     """Server-side aggregates (#1044). A bounded list cannot answer an
     aggregate question, so these are counted where the rows are."""
-    async with _member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         return await workspaces.stats(session, workspace_id=str(ws))
 
 
@@ -568,12 +525,12 @@ async def get_intent(
     request: Request,
     principal: Principal = Depends(require_session),
 ):
-    async with _member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         row = await workspaces.get_intent(
             session, workspace_id=str(ws), intent_id=str(intent_id)
         )
     if row is None:
-        raise HTTPException(status_code=404, detail="not found")
+        raise principal_mod.not_found()
     return row
 
 
@@ -590,16 +547,6 @@ async def get_intent(
 #
 # Admin floor on both (`06` §4). A member may look at the accounts and sources
 # a workspace posts to and from; deciding what they are is an admin act.
-
-
-@asynccontextmanager
-async def _admin(request: Request, workspace_id: str, principal: Principal):
-    """`_member`, at the admin floor."""
-    async with _open_tenant(request, workspace_id, principal) as session:
-        await tenant_resolution.authorize_member(
-            session, workspace_id, principal.user_id, minimum_role="admin"
-        )
-        yield session
 
 
 @router.post("/workspaces/{ws}/accounts", status_code=201)
@@ -634,7 +581,7 @@ async def create_account(
     the existing row with ``created: false`` rather than a second schedule
     against one real feed.
     """
-    body = await _json_object(request)
+    body = await principal_mod.json_object(request)
     schedule = body.get("schedule", True)
     if not isinstance(schedule, bool):
         raise HTTPException(status_code=400, detail="schedule must be a boolean")
@@ -644,7 +591,7 @@ async def create_account(
     # disagreed: `{"handle": "   "}` answered `account_ref_required` while
     # `{"handle": "@"}` answered `handle_required`, one user error with two
     # reasons. `provisioning` owns presence for both columns.
-    async with _admin(request, str(ws), principal) as session:
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         account_id, created = await provisioning.create_destination(
             session,
             workspace_id=str(ws),
@@ -675,10 +622,10 @@ async def create_source(
     in this transaction (`media_sync.rearm_after_connect`), which also revives
     a folder that was removed and picked again.
     """
-    body = await _json_object(request)
+    body = await principal_mod.json_object(request)
     name = body.get("root_name")
     folder_name = body.get("folder_name")
-    async with _admin(request, str(ws), principal) as session:
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         grant = await workspaces.drive_status(session, workspace_id=str(ws))
         if grant["status"] != "active":
             raise HTTPException(status_code=409, detail="drive_not_connected")
@@ -713,7 +660,7 @@ async def create_source(
             label=folder_name or ref,
             ancestors_of=ancestors_of,
         )
-    async with _admin(request, str(ws), principal) as session:
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         # The check above ran outside this unit of work: under the workspace's
         # sources lock, a changed set of connected folders is refused
         # (`sources_changed`, 409) and the person retries.
@@ -746,12 +693,12 @@ async def remove_source(
     """Remove a folder from the workspace's sync — a PAUSE, never a delete
     (`provisioning.pause_media_source`): the media and its history stay, and
     picking the folder again revives it. Admin floor, like adding one."""
-    async with _admin(request, str(ws), principal) as session:
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         paused = await provisioning.pause_media_source(
             session, workspace_id=str(ws), source_id=str(source_id)
         )
     if not paused:
-        raise HTTPException(status_code=404, detail="not found")
+        raise principal_mod.not_found()
     return {"source_id": str(source_id), "state": "paused"}
 
 
@@ -766,7 +713,7 @@ async def get_category_mix(
     ride along for one release so the card deployed before this phase keeps
     working while the API and the web deploy apart. Member floor: it explains
     what will post."""
-    async with _member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         rows = await category_mix.mix_view(session, workspace_id=str(ws))
     return _mix_response(rows)
 
@@ -790,8 +737,8 @@ async def put_category_mix(
     folders share a name). Refused by name (400, ``reason =
     invalid_mix_<reason>``) before anything is written; answers with the
     GET's shape."""
-    body = await _json_object(request)
-    async with _admin(request, str(ws), principal) as session:
+    body = await principal_mod.json_object(request)
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         # `MixInvalid` is answered by the app's handler as 400 with
         # `reason = invalid_mix_<reason>` — the shape the web reads.
         rows = body.get("rows")
@@ -814,7 +761,7 @@ async def drive_status(
     """The workspace's Google Drive grant — presence and freshness, never a
     token (`workspaces.drive_status`). Member floor: it says whether the
     library can sync, which every member's screens render."""
-    async with _member(request, str(ws), principal) as session:
+    async with principal_mod.member_session(request, str(ws), principal) as session:
         status = await workspaces.drive_status(session, workspace_id=str(ws))
     return {"drive": status}
 
@@ -839,7 +786,7 @@ async def connect_drive(
     client_id, _, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )
-    async with _admin(request, str(ws), principal) as session:
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         purpose = await google_drive_oauth.connect_purpose(
             session, workspace_id=str(ws)
         )
@@ -906,7 +853,7 @@ async def list_drive_folders(
     usable answer, `drive_refused` (502) for a terminal answer. `SHARED_ROOT`
     as the parent lists the folders shared to the account.
     """
-    async with _admin(request, str(ws), principal) as session:
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         grant = await workspaces.drive_status(session, workspace_id=str(ws))
     # Admission first, then the shape check: a non-admin learns nothing about
     # the parent it sent. Then the grant, by its projected status, so "never
@@ -952,7 +899,7 @@ async def connect_workspace_account(
     are independent one-shots).
     """
     app_id, _, redirect_uri = instagram_client.configured()
-    async with _admin(request, str(ws), principal) as session:
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         return await _instagram_grant(
             session,
             principal=principal,
@@ -1006,12 +953,12 @@ async def connect_account(
     `manual:<handle>` reference to the real Meta id.
     """
     app_id, _, redirect_uri = instagram_client.configured()
-    async with _admin(request, str(ws), principal) as session:
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
         purpose = await ig_login_oauth.connect_purpose(
             session, workspace_id=str(ws), ig_account_id=str(account_id)
         )
         if purpose is None:
-            raise HTTPException(status_code=404, detail="not found")
+            raise principal_mod.not_found()
         return await _instagram_grant(
             session,
             principal=principal,

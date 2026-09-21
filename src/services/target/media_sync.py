@@ -42,6 +42,7 @@ two syncs offering the same bytes cannot race a duplicate in.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import uuid
@@ -49,7 +50,7 @@ from typing import Optional, Any
 
 from sqlalchemy import text
 
-from src.services.target import vocabulary
+from src.services.target import outbox, prompts, unit_of_work, vocabulary
 from src.services.target.drive_adapter import checkpoint_incomplete
 from src.services.target.workspaces import CONNECTED_FLAG_SQL
 
@@ -275,12 +276,6 @@ async def alert_stranded_sources(
     is picked up rather than skipped forever; that column is nullable and rows
     written by paths that never stamped it are the realistic case.
     """
-    # Local imports, matching `_run_sync` below: these modules reach back into
-    # this one, so a module-level import is a cycle.
-    from src.services.target import outbox, prompts
-
-    from src.services.target import unit_of_work
-
     # The selection is a door (082): the sweep runs with no tenant and
     # `media_sources` is policy-covered. The stamp is written per workspace
     # under that workspace's tenant, re-checking the window so a row stamped
@@ -349,15 +344,10 @@ async def alert_stranded_sources(
 
 
 async def _run_sync(deps, job, *, reason) -> str:
-    # Local imports, as in `alert_stranded_sources` above: these modules reach
-    # back into this one, so a module-level import is a cycle.
-    from src.services.target import outbox, prompts
-    from src.services.target.work_loop import poller_session_factory
-
     payload = job.get("payload") or {}
     source_id = str(payload["source_id"])
     workspace_id = str(job["workspace_id"])
-    factory = poller_session_factory(deps.engine, workspace_id)
+    factory = unit_of_work.poller_session_factory(deps.engine, workspace_id)
 
     # Phase 1 — read the source, own transaction, committed before the door.
     async with factory() as s:
@@ -554,8 +544,8 @@ async def _run_sync(deps, job, *, reason) -> str:
                     " RETURNING id"
                 ),
                 {
-                    "cp": _json(new_checkpoint),
-                    "old": _json(stored if stored is not None else {}),
+                    "cp": _payload_json(new_checkpoint),
+                    "old": _payload_json(stored if stored is not None else {}),
                     "s": source_id,
                     "ws": workspace_id,
                 },
@@ -653,7 +643,7 @@ async def _run_sync(deps, job, *, reason) -> str:
                     "key": f"src:{source_id}",
                     # The chunk names the walk it belongs to; the row's cursor
                     # is the one resumed (see the cursor rule above).
-                    "p": _json({"v": 2, "source_id": source_id, "walk": walk}),
+                    "p": _payload_json({"v": 2, "source_id": source_id, "walk": walk}),
                 },
             )
         else:
@@ -690,7 +680,9 @@ async def _run_sync(deps, job, *, reason) -> str:
     return "chained" if checkpoint_incomplete(new_checkpoint) else "synced"
 
 
-def _json(value) -> str:
-    import json
-
+def _payload_json(value) -> str:
+    """*value* as JSON — with `None` rendered as the `{"v": 2}` checkpoint
+    default rather than `null`, which is why this is not a bare `json.dumps`
+    and why it is not the `_json` two other modules briefly spelled the same
+    (#1216 audit, 2026-09-20)."""
     return json.dumps(value if value is not None else {"v": 2})

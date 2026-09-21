@@ -196,6 +196,48 @@ class TestRefusalMappingsAreTotal:
         assert resp.status_code == 500
         assert resp.json() == {"detail": "internal error"}
 
+    def test_a_mapped_tenant_refusal_carries_no_reason_on_the_wire(
+        self, client, signed_in, monkeypatch
+    ):
+        """The no-existence-oracle rule (`07` §5), as a body: the detail is
+        keyed by the STATUS and the reason never leaves the log. A shared
+        refusal-body helper that "normalised" this would tell the web surface
+        which of "not a member", "no such workspace" and "disabled" it met."""
+        from src.api import app as module
+        from src.exceptions.tenancy import TenantResolutionError
+        from src.services.target import identity
+
+        async def get_user(conn, *, user_id):
+            raise TenantResolutionError("not_a_member")
+
+        monkeypatch.setattr(identity, "get_user", get_user)
+        resp = client.get("/api/v1/me")
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": module._TENANT_DETAIL[404]}
+        assert "reason" not in resp.json()
+
+    def test_an_invitation_refusal_carries_its_own_sentence_not_str_exc(
+        self, client, signed_in, monkeypatch
+    ):
+        """`InvitationRefused` answers with `_INVITATION_DETAIL[reason]` — the
+        surface's wording — and NOT with `str(exc)`, which is the service's."""
+        from src.api import app as module
+        from src.services.target import invitations
+
+        async def accept(*args, **kwargs):
+            raise invitations.InvitationRefused(
+                "identity_mismatch", "the service's own wording"
+            )
+
+        monkeypatch.setattr(invitations, "accept", accept)
+        resp = client.post("/api/v1/invitations/tok/accept")
+        assert resp.status_code == module._INVITATION_STATUS["identity_mismatch"]
+        assert resp.json() == {
+            "detail": module._INVITATION_DETAIL["identity_mismatch"],
+            "reason": "identity_mismatch",
+        }
+        assert resp.json()["detail"] != "the service's own wording"
+
 
 async def _fake_snapshot(executor, **kwargs):
     """The third seam on `/health/scheduling` (phase 3a): stubbed so a route
