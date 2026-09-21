@@ -74,7 +74,7 @@ def parse_signed_request(
         # A deployment with no secret cannot verify anything. Refusing is the
         # only safe answer: the alternative is an unauthenticated public door
         # onto a destructive operation.
-        logger.warning("meta callback: refused, no FACEBOOK_APP_SECRET configured")
+        logger.warning("meta callback: refused, no Meta app secret configured")
         raise SignedRequestInvalid("not configured")
     if not signed_request:
         raise SignedRequestInvalid("absent")
@@ -130,10 +130,32 @@ def app_secrets() -> list[str]:
     full constant-time HMAC comparison, and an empty list — no secret
     configured at all — still refuses everything.
     """
+    return [value for _, value in _candidates()]
+
+
+#: The settings a callback may be signed with, preferred first, legacy second —
+#: the ONE spelling of the order `app_secrets()` and `app_secret_names()` share.
+_CANDIDATE_SETTINGS = ("INSTAGRAM_APP_SECRET", "FACEBOOK_APP_SECRET")
+
+
+def _candidates() -> list[tuple[str, str]]:
     from src.config.settings import settings
 
-    candidates = [settings.INSTAGRAM_APP_SECRET, settings.FACEBOOK_APP_SECRET]
-    return [c for c in candidates if c]
+    pairs = [(name, getattr(settings, name, None)) for name in _CANDIDATE_SETTINGS]
+    return [(name, value) for name, value in pairs if value]
+
+
+def app_secret_names() -> list[str]:
+    """The setting names behind :func:`app_secrets`, in the same order.
+
+    For the one line the route logs after a callback verifies: WHICH setting
+    signed it, by name and position, never by value. Which Meta app the
+    callback URLs are registered under is a dashboard fact this code cannot
+    read (#739); one press of Meta's test button and this line answer it, and
+    once `INSTAGRAM_APP_SECRET` is the one that verifies, the legacy
+    `FACEBOOK_APP_SECRET` can go.
+    """
+    return [name for name, _ in _candidates()]
 
 
 def verify_signed_request(
