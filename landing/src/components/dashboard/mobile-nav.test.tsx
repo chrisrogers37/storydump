@@ -40,13 +40,18 @@ const header = () =>
     user: { email: "owner@example.com", displayName: "Owner" },
   } as Parameters<typeof DashboardHeader>[0]) as ReactElement;
 
-/** The one Tailwind responsive prefix in a class string (`lg` of `lg:hidden`). */
-function breakpoint(className: string): string | undefined {
-  const prefixes = new Set(
-    Array.from(className.matchAll(/\b(sm|md|lg|xl|2xl):/g), (m) => m[1])
+/** The responsive prefix attached to one utility — `lg` of `lg:hidden`.
+ *
+ *  Read per-utility rather than "the only prefix in the string": the trigger
+ *  is an ordinary button and the aside an ordinary column, so either may grow
+ *  an unrelated `md:px-4` one day. That must not turn this into a red build
+ *  about padding. */
+function breakpointOf(className: string, utility: string): string {
+  const found = className.match(
+    new RegExp(`\\b(sm|md|lg|xl|2xl):${utility}\\b`)
   );
-  expect(prefixes.size, `one breakpoint, got: ${className}`).toBe(1);
-  return [...prefixes][0];
+  expect(found, `expected a responsive \`${utility}\` in: ${className}`).not.toBeNull();
+  return found![1];
 }
 
 describe("the mobile navigation drawer", () => {
@@ -84,7 +89,10 @@ describe("the mobile navigation drawer", () => {
     expect(desktop.props.className).toMatch(/\bhidden\b/);
 
     expect(
-      breakpoint(String((trigger!.props as { className: string }).className))
-    ).toBe(breakpoint(desktop.props.className));
+      breakpointOf(
+        String((trigger!.props as { className: string }).className),
+        "hidden"
+      )
+    ).toBe(breakpointOf(desktop.props.className, "block"));
   });
 });
