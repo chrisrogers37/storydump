@@ -37,7 +37,7 @@ under today's arithmetic, two drops beside 350 files in weighted folders draw ab
 
 Facts the weighing rests on, read from the repository on 2026-09-20:
 
-- The media-source port is pull-only: `list_changes`, `stream`, `probe`
+- The media-source port is pull-only: `list_changes`, `fetch_bytes`, `probe`
   (`2026-08-02-consolidated-design-plan/01-target-architecture.md`, "Media-source port"). D37
   records "no upload/write operation" as a deliberate non-goal with the port as the extension seam.
 - Bytes are fetched from the source at publish time and staged through Cloudinary as transit, then
@@ -69,7 +69,7 @@ Facts the weighing rests on, read from the repository on 2026-09-20:
 **Options.**
 
 - **A. Telegram keeps the bytes.** A `telegram` provider; one implicit source per workspace;
-  `provider_file_ref` is the file id; `stream` calls getFile at publish and card time.
+  `provider_file_ref` is the file id; `fetch_bytes` calls getFile at publish and card time.
 - **B. Relay into an app-created Drive folder.** The grant adds `drive.file`; a job downloads the
   drop and uploads it into a "Telegram drops" folder the app created at the root of the connecting
   account's Drive, connected as a source; the sync ingests it.

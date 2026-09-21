@@ -10,7 +10,8 @@ links: []
 ---
 
 > **Status:** approved 2026-09-20 — the design approved section by section in the kindle discovery,
-> the spec text reviewed by the owner the same day; handed to `forge`. The two junctions this spec builds on were weighed
+> the spec text reviewed by the owner the same day; handed to `forge`, whose plan is
+> [`2026-09-20-device-native-inbound/`](2026-09-20-device-native-inbound/00_EPIC.md) (ratified 2026-09-20). The two junctions this spec builds on were weighed
 > and ratified in [`2026-09-20-device-native-inbound-decision.md`](2026-09-20-device-native-inbound-decision.md);
 > this spec inherits those picks and does not re-decide them.
 
@@ -41,7 +42,7 @@ before it.
 - **The pain.** Content is made on iPhones. Getting it into the pipeline today means saving it,
   opening the Drive app, and uploading it into the right connected folder. The owner's words:
   "right now we need to download and move to google drive."
-- **The primitives.** The media-source port is pull-only (`list_changes`, `stream`, `probe`;
+- **The primitives.** The media-source port is pull-only (`list_changes`, `fetch_bytes`, `probe`;
   `2026-08-02-consolidated-design-plan/01-target-architecture.md`), with Google Drive as its one
   adapter (`src/services/target/google_drive_adapter.py`). Bytes are fetched from the source at
   publish time and staged through Cloudinary as transit (`transit.py`), then destroyed. The
@@ -215,7 +216,7 @@ first ingest is chunked. No credential row: the album is public by link.
   largest derivative; name from the id and kind; category label = the album's name; folder path
   NULL, which migration 070 reserves for an adapter with no folders. A photo absent from the
   listing is marked `removed`, the signal a Drive file gives.
-- **Stream:** asset URLs expire, so they are resolved at fetch time and never stored: one
+- **Fetch bytes:** asset URLs expire, so they are resolved at fetch time and never stored: one
   asset-URL call for the photo, then a download of the largest derivative under the floor's byte
   cap. Photos arrive as 2048 px JPEG derivatives, videos at 720p; HEIC never appears.
 - **Failure posture:** an unrecognised feed shape, a 4xx, or a vanished album is classified
