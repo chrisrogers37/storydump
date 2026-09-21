@@ -48,7 +48,13 @@ export function Sidebar({ mobile }: { mobile?: boolean }) {
   const pathname = usePathname();
 
   return (
-    <aside className={mobile ? "w-56 bg-card" : "hidden w-56 shrink-0 border-r bg-card md:block"}>
+    // `lg`, matching the header trigger's `lg:hidden`, because the two are
+    // complements: the drawer is the navigation below this width and this
+    // aside is the navigation above it. They disagreed (`md` here, `lg`
+    // there), so 768–1023px showed both. `lg` rather than `md` because at
+    // 768px this 224px column leaves the Queue and Calendar under 500px of
+    // content; a drawer is the better affordance there (#1363).
+    <aside className={mobile ? "w-56 bg-card" : "hidden w-56 shrink-0 border-r bg-card lg:block"}>
       <div className="flex h-14 items-center border-b px-4">
         <Link href="/dashboard" className="text-lg font-semibold tracking-tight">
           {siteConfig.name}
