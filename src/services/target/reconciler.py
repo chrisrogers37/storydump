@@ -123,7 +123,9 @@ async def sweep_due(conn, *, limit: int, notify_after_seconds: int) -> list[dict
 
     ``reason`` is ``ladder_due`` or ``notify_window`` and the caller MUST
     branch on it: the two rows want opposite work (poll the provider vs. tell
-    the customer), and the second needs no provider seam at all.
+    the customer), and the second needs no provider seam at all. A ladder row
+    says nothing about how far its ladder has climbed: that is
+    :func:`checks_so_far`, read under the row's tenant once the caller holds it.
     """
     # A LIST of timedeltas, not a Postgres array LITERAL in a string. asyncpg
     # binds `interval[]` from a Python sequence of timedeltas and REFUSES a
@@ -143,32 +145,33 @@ async def sweep_due(conn, *, limit: int, notify_after_seconds: int) -> list[dict
         ),
         {"lim": limit, "rungs": rungs, "notify": notify_after_seconds},
     )
-    rows = [dict(r) for r in result.mappings().all()]
-    # The door returns WHICH rows are due; the ladder also needs HOW FAR each
-    # has climbed, which `_record_evidence` keeps on the row. Without it every
-    # step counted as the first, the ladder never exhausted, and an intent
-    # whose poll stays inconclusive never reached `review_required` (#1276
-    # review) — silently holding its account's next publish.
-    due = [r for r in rows if r["reason"] == "ladder_due"]
-    if due:
-        counted = await conn.execute(
+    return [dict(r) for r in result.mappings().all()]
+
+
+async def checks_so_far(conn, *, intent_id) -> int:
+    """How far the ladder has climbed for one ambiguous intent — the ``checks``
+    that :func:`_record_evidence` keeps in ``last_error.evidence``; 0 for an
+    intent never polled.
+
+    The door says WHICH rows are due; without this every step counted as the
+    first, the ladder never exhausted, and an intent whose poll stays
+    inconclusive never reached `review_required` (#1276 review) — silently
+    holding its account's next publish. It is read HERE, per row, and the
+    caller claims the row's workspace first: `post_intents` is policy-covered
+    and the sweep's session carries no tenant, so one read for the whole sweep
+    before any claim saw nothing under `svc_worker` and answered 0 for every
+    row — the same ladder that never exhausts, one login later (#1349 review).
+    """
+    row = (
+        await conn.execute(
             text(
-                "SELECT id, COALESCE((last_error->'evidence'->>'checks')::int, 0)"
-                "       AS checks"
-                "  FROM post_intents WHERE id = ANY(CAST(:ids AS uuid[]))"
+                "SELECT COALESCE((last_error->'evidence'->>'checks')::int, 0)"
+                "  FROM post_intents WHERE id = :intent"
             ),
-            {"ids": [_uuid(r["intent_id"]) for r in due]},
+            {"intent": str(intent_id)},
         )
-        checks = {str(r["id"]): int(r["checks"]) for r in counted.mappings().all()}
-        for r in due:
-            r["checks"] = checks.get(str(r["intent_id"]), 0)
-    return rows
-
-
-def _uuid(value):
-    import uuid
-
-    return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+    ).scalar()
+    return int(row or 0)
 
 
 async def _record_no_surface(
@@ -385,7 +388,9 @@ async def reconcile_intent(
     evidence — the L.3 gate requires exactly that, in both modes.
     """
     trail = list(trail or [])
-    status_code = await _maybe_await(poll, intent_id=intent_id)
+    status_code = await _maybe_await(
+        poll, intent_id=intent_id, workspace_id=workspace_id
+    )
     trail.append({"status_code": status_code, "check": checks + 1})
     verdict = classify(status_code, mode)
 

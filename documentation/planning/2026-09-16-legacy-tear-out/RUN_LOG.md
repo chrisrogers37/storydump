@@ -1620,6 +1620,118 @@ pins: 1860 passed, 1 skipped, 5 deselected in 3:44. The third run, on 7379bfc (r
 table, no EXECUTE on the API-side doors (right); its job legs need reading statement by statement
 against the grant matrix before the worker moves.
 
+## #751, part 2 — the worker's doors (PR #1349, migration 082)
+
+**Measured before building (2026-09-21).** The worker issues no direct DELETE (`reap_expired_states`,
+the oauth-state purge, is unwired dead code) and touches none of `oauth_states`, `service_tokens`,
+`session_tokens`, `command_dedup`; `svc_worker` holds SELECT, INSERT and UPDATE on all 26
+policy-covered tables and EXECUTE on every worker-side door. What blocked its switch was four paths
+that open a session with an empty tenant and the `system` actor and run SQL on policy-covered
+tables — the class that blinded the health surfaces: `work_loop.ensure_sender_jobs` (the outbox
+sender sweep), `prompts.sweep_due_prompts` (the prompt sweep), `media_sync.alert_stranded_sources`
+and `worker._poll_from` (the reconciler's container poll). The executor gates ran every one as the
+owner; none had run as `svc_worker` in any test. The plan (#1341, merged as 5207870) recorded the
+measurement and two forks; the owner merged it and the build followed the leans.
+
+**Red first** — `tests/scripts/test_worker_login_gate.py`, on a replayed world seeded with a bound
+Telegram group, a pending outbox row, a due scheduled intent, a source stranded in error and an
+ambiguous intent with a container id, each sweep in a rolled-back transaction so both logins see
+the same estate: as `svc_worker` the sender sweep minted 0 (the owner 1), the prompt sweep prompted
+0 (1), the alert found 0 (1), the poll returned None (PUBLISHED); the vacuity guard (the tenant-less
+session sees nothing) and the owner control green. Committed red as bc0d937.
+
+**Built (d50adfd, the lint fix 631724c).** 082: `fn_sender_sweep(prefix, attempts, deadline, age,
+limit)` — the worker's `INSERT … SELECT` verbatim, one door because its single statement with the
+`NOT EXISTS` live-job check is its idempotence, the key prefix, lane budget and bound as parameters
+spelled once in Python and the binding predicate pinned to `bindings.push_binding_where` by a test
+that reads the door's body; `fn_prompts_due`, `fn_prompts_pending`, `fn_stranded_sources` — reads
+returning each row with its workspace. The prompting, the transitions and the `alerted_at` stamp
+run per workspace under that workspace's tenant and the `system` actor (the stamp re-checks its
+window, so a row stamped since the read is not alerted twice); the reconciler's poll takes the
+workspace its sweep row already names. `svc_maintenance` gains SELECT policies on
+`channel_bindings`, `media_items`, `media_sources` and INSERT on `jobs`; EXECUTE for `svc_worker`,
+refused to `svc_ingress`. `07` §25 (ordinal 23), the ratified list, the advertised count 37. The
+harness: 27 doors, 62 policies, 33 door dispositions. The gate green (5); the lineage lane, the
+advertised ratchet, the runner suite, the prompt/sync/sender gates as the owner, the harness and the
+tenancy gate green (175 + 172); the unit fakes answer the door's scalar and the poll tests pass the
+workspace (174). Docs: the runbook's worker precondition and sweep-count check; the plan's forks
+marked built as leaned; CHANGELOG; the plan's F.4 row; the database rule.
+
+**The first full run and CI (631724c, run 35562308899): seven failures, none the doors'** — two chain
+gates (`test_channel_bindings_writer.py`, `test_invitation_cards.py`) ran the sender sweep as
+`svc_ingress` inside a tenant unit of work, which the direct statement tolerated and the worker's
+door refuses; five rail tests (`test_l3_permit_rail.py`) injected a poll stub taking `intent_id`
+alone. Folded in 3aff20b: the gates run the sweep the way the worker runs it — as `svc_worker`, in
+its own session with the empty tenant and the system actor, after the ingress transaction that
+enqueued the card has committed (the first rewrite minted 0 because a second session cannot see an
+uncommitted row); the stubs take the workspace. 62 passed across the four files. The two known
+loopback failures in `test_egress_floor.py` aside, the full local run's other 3600 passed.
+
+**Review:** two lenses on a detached snapshot of 3aff20b, then a fold (beaaceb1, fc3b3476).
+*Structural:* the battery's `check2` mutated the doc while its selector read the migration file (it
+could not kill — removed; the postcondition mutations mutate the file); the prompt gate asserted the
+count a sweep reports, not the effect (`intent_ledger.transition` is a bare UPDATE — every gate now
+reads the effect under the workspace's own tenant); the invitation chain gate swept inside the
+ingress unit of work before commit (it sweeps after the commit, as the worker, through the conftest's
+`sweep_as_worker`); the stranded stamp's UPDATE lacked `state = 'error'` and its docstring claimed one
+statement (predicate added, prose corrected); minors (the poll's docstring, the runbook's script
+claim, the plan's step-2 signature); simplifications (the conftest helper, `async_url`, one fanout
+loop, the claim closure). *Adversarial:* two more blind reads and a scope leak the measurement had
+missed — `prompts.sweep_settled_cards` read four policy-covered tables directly from the
+`reap_expired` singleton (no ended story's card would ever lose its buttons under `svc_worker`);
+`reconciler.sweep_due` read every due row's ladder count in one statement before any per-row claim
+(0 for every row: a ladder that never exhausts, a lost publish answer never parked for review); and
+`plan_slot` runs the prompt sweep inside its own TENANT transaction, where a sweep that claims
+workspaces per row and never restores the caller's leaves the session under the last workspace
+prompted and `finalize_job` raises `JobFenced` on every planned slot after the switch; the gate never
+asserted the advance phase; the harness's sender probe minted when run as the permitted login.
+*The fold:* a fifth door, `fn_settled_cards(p_terminal text[], p_limit int)` — the SELECT verbatim,
+the terminal states as its argument so `intent_ledger.TERMINAL_STATES` stays the one spelling;
+`unit_of_work.WorkspaceClaims` — one home for per-workspace claims inside a caller's transaction,
+which records the caller's scope on the first claim and hands it back on `release()`, used by the
+prompt, settled-card and stranded-source sweeps (the settled sweep claims before its savepoint, since
+`ROLLBACK TO SAVEPOINT` reverts a `SET LOCAL` made inside it); `reconciler.checks_so_far`, the ladder
+count per row, read by `reconcile_ambiguous` after the claim, `sweep_due` one statement again and a
+unit test pinning the claim before the count; the gate's world grew to three workspaces — an older
+due story in B (a one-story sweep under A's claim, then the real `jobs.finalize_job` on a seeded
+leased `plan_slot` job), a `prompt_pending` story in C that the prompting phase never claims, an
+ended story's live card, the ambiguous story at step 1 climbing to 2 through the registry's own
+adapter — eight gates, every assertion the effect under the workspace's own tenant; the tap gate runs
+the settled sweep as the worker's login (the worker-only door refused `svc_ingress`, the same shape
+as the chain gates); the probe takes a bound of 0. 082 regenerated (five doors, the postconditions
+count them), §25 and the header say six paths and the leak, the manifest re-hashed; CHANGELOG, the
+runbook, the plan (the second measurement folded in as items 5–7), the F.4 row (28 doors). The
+`str(None)` tenant on a poll without a workspace is left loud: a uuid cast error beats a silent empty
+read. Runs: the gate 8; the chain gates, the rail, the harness, the lane, the tap and notice gates,
+the prompt, worker and offboard gates, the window and snapshot gates, the runner and the tenancy gate
+415 in one process; the units 289; on the final head d948205e the same sixteen gate files plus the credential lifecycle: 439 in one process, the units 306 and 233. *Re-verify:* a fresh lens on the fold's head (fc3b3476): mergeable as the worker's switch
+precondition — every earlier finding closed with a file:line, the scope gate proven to kill for the
+right reason (with `release()` deleted on a throwaway copy the gate fails on the tenant left under
+B), the door's column types and `svc_maintenance`'s grants on every joined table checked against
+055–082, the singleton audit clean (`retention_sweep` and `reencrypt_credentials` parked, the
+reaper through its three doors, `p_jobs` admitting the system rows). Four new: nothing pinned
+`fn_prompts_due`'s columns to `_CARD_SELECT` (a column added for `render_card` would reach the
+resend and not the sweep); the advance loop caught `IntentTransitionRefused` with no savepoint —
+a `check_violation` aborts the transaction, so the next row or the hand-back would raise
+`InFailedSqlTransaction` (pre-existing; the release made it reachable); the helper's docstring said
+an unset actor stays as it was; the plan still counted four. Folded in 2735d866 (the door's body
+carries the fragment verbatim by test and the sweep's alias list every column; each transition
+rides its own savepoint, pinned by a session double that counts them; the wording), the battery's
+anchor in d948205e (18 mutations). Between the two folds main moved (#1346–#1351, the session
+factories into the unit of work): merged as 132b13a3 with one conflict, the stranded alert's
+imports now module-level; CI on the merge head (run 35598703817) success — 3696 passed, 1 skipped,
+5 deselected in 6:12.
+
+**The battery:** `tests/mutations/worker_login_doors.sh` on the committed tree in its own worktree, alone on
+the test database — beaaceb1 first: 16 of 16 killed; then the final head d948205e with the
+re-verify's two: 18 of 18 killed, each a real `1 failed`, baseline green — the four reads emptied (the owner control kills), the four claims
+forgotten (the prompt sweep's two phases, the settled sweep, the stranded stamp) and the poll's, the
+scope kept, the ladder counted before the claim, the advance phase's refusal without its savepoint,
+the due door dropping a card column, the fifth door not handed to `svc_maintenance`, the three
+earlier postconditions, the predicate drift.
+
+**CI:** the second run, on 3aff20b (run 35562921300): success — 3691 passed, 1 skipped, 5 deselected in 10:09 on a slow runner, all nine checks green. The third, on the fold's head, run 35599596756 on d948205e, the last code commit: success — 3698 passed, 1 skipped, 5 deselected in 6:12, all nine checks green, mergeable. The ledger entry is the commit after it.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
@@ -1717,3 +1829,10 @@ against the grant matrix before the worker moves.
   79`, `apply --manual 80`, the gate, the worker redeployed. Never by an agent (F7; the never-run
   list). (4) Phase 05 builds once 04 is merged; its dated lines — when `legacy` was dropped, the
   gate's pasted output, the epic's `status: completed` — wait for the window.
+- **#751 part 2 — the worker's switch, after PR #1349 merges (the owner's):** the merge is an admin
+  squash with one accurate commit (the PR body's subject). Then, with 082 live (ledger head 82 on both
+  services' predeploy logs), `STATE=<state file> bash -eu f4_switch.sh worker` from the scratchpad: it
+  prints the worker's boot line and one sweep cycle's counts before and after (prompts and sender jobs
+  minted must continue at the same rate), and the two fleet verdicts must read the same; rollback is
+  `f4_switch.sh rollback-worker`. The API's own switch (`f4_switch.sh api`) is independent, its
+  precondition met since 081, and still owed.

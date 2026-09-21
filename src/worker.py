@@ -165,7 +165,9 @@ def _poll_from(engine, meta, *, session_factory=None):
     typed error: the ladder records the sighting and, spent, parks the intent
     for a human. A typed error is logged by type and returned as None rather
     than raised so one account's dead token cannot abort the whole sweep.
-    Reads as the owner role (BYPASSRLS, #751) like `ig_credentials`."""
+    Reads under the workspace the reconciler's sweep row names, claimed in the
+    poll's own session (082): a tenant-less read would see nothing once the
+    worker runs as `svc_worker`."""
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -173,8 +175,14 @@ def _poll_from(engine, meta, *, session_factory=None):
 
     maker = session_factory or async_sessionmaker(engine, expire_on_commit=False)
 
-    async def poll(*, intent_id) -> Optional[str]:
+    async def poll(*, intent_id, workspace_id) -> Optional[str]:
         async with maker() as session:
+            # The reconciler's sweep row names the workspace; the read runs
+            # under it (082) — a fresh session with no tenant sees nothing
+            # under the policies once the worker runs as svc_worker.
+            await unit_of_work.apply_gucs(
+                session, tenant_id=str(workspace_id), actor_kind="system"
+            )
             row = (
                 (
                     await session.execute(
