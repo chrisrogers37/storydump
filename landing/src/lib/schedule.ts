@@ -11,14 +11,17 @@
  * The posting window in hours, as `fn_next_slot` (`059`) reads it: `end - start`,
  * wrapping through midnight, and 24 when the two are equal.
  *
- * Exported because the Calendar's Posting Rate card used to recompute it as a
- * bare `end - start` and guard the result on `> 0` (#1367). Both shapes this
+ * Not exported: `slotLabels` and `postingIntervalMinutes` are the two things
+ * that answer with it, and the Calendar asks the second of those. The reason
+ * it exists as its own function is that those two used to disagree — the card
+ * recomputed the window as a bare `end - start` and guarded the result on
+ * `> 0` (#1367). Both shapes this
  * handles fell through that guard — a wrap gives a negative, an equal pair
  * gives zero — so the card read "interval not set" for them. 14 → 2 is the
  * schema DEFAULT for a workspace, so that was what a new tenant saw on the one
  * page whose job is to say when posts go out.
  */
-export function windowHours(
+function windowHours(
   startHour: number | null,
   endHour: number | null,
 ): number | null {

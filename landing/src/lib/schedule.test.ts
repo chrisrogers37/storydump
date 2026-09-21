@@ -5,6 +5,14 @@ import {
   timeZoneOptions,
 } from "./schedule";
 
+/** "10:30 AM" back to minutes since midnight, so a gap can be measured. */
+function minutesOf(label: string): number {
+  const parts = label.match(/^(\d+):(\d+) (AM|PM)$/);
+  expect(parts, `unparseable slot label: ${label}`).not.toBeNull();
+  const [, h, m, suffix] = parts!;
+  return ((Number(h) % 12) + (suffix === "PM" ? 12 : 0)) * 60 + Number(m);
+}
+
 describe("slotLabels — the clock's slots, said in the workspace's own hours", () => {
   it("spreads posts evenly across a window that wraps midnight (fn_next_slot's math)", () => {
     expect(slotLabels(14, 2, 3)).toEqual(["2:00 PM", "6:00 PM", "10:00 PM"]);
@@ -43,11 +51,25 @@ describe("postingIntervalMinutes — the Calendar's Posting Rate (#1367)", () =>
     expect(postingIntervalMinutes(9, 9, 4)).toBe(360);
   });
   it("agrees with the slots it is describing", () => {
-    // The card and the slot list are two renderings of one schedule; the
-    // interval is the gap between consecutive labels. This is the assertion
-    // that would have caught the original divergence.
-    expect(postingIntervalMinutes(9, 23, 20)).toBe(42);
-    expect(slotLabels(9, 23, 20).length).toBe(20);
+    // The card and the slot list are two renderings of one schedule, so the
+    // interval must BE the gap between consecutive labels — measured, not
+    // asserted in a comment. This is the cross-check that would have caught
+    // the original divergence: the two arithmetics disagreed for exactly the
+    // shapes below, and nothing compared them.
+    const shapes: [number, number, number][] = [
+      [9, 23, 20], // ordinary
+      [14, 2, 3], // wraps midnight — the schema default
+      [9, 9, 4], // 24 hours
+      [9, 12, 2], // a division that lands on a half hour
+    ];
+    for (const [start, end, perDay] of shapes) {
+      const labels = slotLabels(start, end, perDay);
+      const where = `${start}:00-${end}:00 x ${perDay}`;
+      expect(labels.length, where).toBe(perDay);
+      const gap =
+        (minutesOf(labels[1]) - minutesOf(labels[0]) + 24 * 60) % (24 * 60);
+      expect(gap, where).toBe(postingIntervalMinutes(start, end, perDay));
+    }
   });
   it("still answers for an ordinary window", () => {
     expect(postingIntervalMinutes(9, 21, 4)).toBe(180);
