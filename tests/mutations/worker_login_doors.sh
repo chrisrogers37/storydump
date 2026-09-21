@@ -59,9 +59,7 @@ check "the prompt sweep forgets to claim the workspace before its writes" src/se
         if ws not in bindings_by_workspace:' '        ws = str(row["workspace_id"])
         if ws not in bindings_by_workspace:' "$GATE -k prompt_sweep_prompts"
 check "the prompt sweep's advance phase forgets to claim the workspace" src/services/target/prompts.py '        await claims.claim(str(row["workspace_id"]))
-        try:
-            await intent_ledger.transition(' '        try:
-            await intent_ledger.transition(' "$GATE -k prompt_sweep_prompts"
+        # A refusal is a Postgres check_violation, which aborts the' '        # A refusal is a Postgres check_violation, which aborts the' "$GATE -k prompt_sweep_prompts"
 check "the settled-card sweep forgets to claim the workspace before its writes" src/services/target/prompts.py '    for row in rows:
         await claims.claim(str(row["workspace_id"]))
 ' '    for row in rows:
