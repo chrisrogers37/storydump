@@ -103,6 +103,7 @@ from typing import Any, NamedTuple, Optional
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
+from src.services.target import bindings
 from src.services.target.rate_counters import increment, window_start
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,10 @@ MAX_CHAT_HOLD_SECONDS = 3600
 #: only a short brake for it — in case it was the bot-wide limit after all —
 #: while the chat's row takes the whole `retry_after`.
 CHAT_SCOPED_GLOBAL_BRAKE_SECONDS = 2
+#: The pacing windows `settle` assumes when a caller passes none (only the
+#: unit seam does; production always passes its budgets).
+DEFAULT_CHAT_WINDOW_SECONDS = 60
+DEFAULT_GLOBAL_WINDOW_SECONDS = 1
 #: An `approval_prompt` (or invitation) is resent after an ambiguous send at
 #: most this many times; past it the row fails and the intent's reaper
 #: handles the rest (phase 3a step 3 — no cap was a resend forever).
@@ -165,6 +170,10 @@ class ChannelRefused(StorydumpError):
 #: merely slow, to have been a timeout rather than a partition. `02` §6's
 #: "retry once after backoff" — this is the backoff.
 AMBIGUOUS_RESOLVE_AFTER_SECONDS = 30
+
+#: How many of a binding's aged `ambiguous` rows one pass resolves. Bounded
+#: like every sweep (H5); the next pass takes the rest.
+AMBIGUOUS_RESOLVE_BATCH = 20
 
 
 class DestinationGone(StorydumpError):
@@ -618,8 +627,7 @@ async def supersede_everywhere_touched(
             text(
                 "WITH b AS ("
                 "  SELECT id FROM channel_bindings"
-                "   WHERE workspace_id = :ws AND state = 'active'"
-                "     AND channel LIKE 'telegram%'"
+                f"   WHERE workspace_id = :ws AND {bindings.PUSH_BINDING_WHERE}"
                 "), sup AS ("
                 "  UPDATE channel_outbox o SET state = 'superseded',"
                 "     payload = CASE WHEN CAST(:o AS text) IS NULL THEN o.payload"
@@ -805,8 +813,7 @@ async def restate_everywhere_touched(
             text(
                 "WITH b AS ("
                 "  SELECT id FROM channel_bindings"
-                "   WHERE workspace_id = :ws AND state = 'active'"
-                "     AND channel LIKE 'telegram%'"
+                f"   WHERE workspace_id = :ws AND {bindings.PUSH_BINDING_WHERE}"
                 "), upd AS ("
                 "  UPDATE channel_outbox o"
                 "     SET payload = o.payload || jsonb_build_object('outcome_text', CAST(:o AS text))"
@@ -955,9 +962,13 @@ async def resolve_aged_ambiguous(session, *, binding_id: str) -> list:
                 "SELECT id FROM channel_outbox"
                 " WHERE binding_id = :b AND state = 'ambiguous'"
                 "   AND updated_at <= now() - make_interval(secs => :age)"
-                " ORDER BY created_at LIMIT 20"
+                " ORDER BY created_at LIMIT :lim"
             ),
-            {"b": binding_id, "age": AMBIGUOUS_RESOLVE_AFTER_SECONDS},
+            {
+                "b": binding_id,
+                "age": AMBIGUOUS_RESOLVE_AFTER_SECONDS,
+                "lim": AMBIGUOUS_RESOLVE_BATCH,
+            },
         )
     ).fetchall()
     resolved = []
@@ -1179,7 +1190,7 @@ async def settle(
                     now=now,
                     seconds=min(error.retry_after_s, MAX_CHAT_HOLD_SECONDS),
                     limit=chat_limit,
-                    window_seconds=chat_window_seconds or 60,
+                    window_seconds=chat_window_seconds or DEFAULT_CHAT_WINDOW_SECONDS,
                 )
             global_seconds = (
                 CHAT_SCOPED_GLOBAL_BRAKE_SECONDS
@@ -1193,7 +1204,7 @@ async def settle(
                 now=now,
                 seconds=min(error.retry_after_s, global_seconds),
                 limit=global_limit,
-                window_seconds=global_window_seconds or 1,
+                window_seconds=global_window_seconds or DEFAULT_GLOBAL_WINDOW_SECONDS,
             )
         # The row goes back to `pending` with the attempt the claim consumed
         # restored: the provider's limit is not this row's failure.

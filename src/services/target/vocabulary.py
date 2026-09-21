@@ -145,6 +145,16 @@ TOKEN_RESOLUTION_REASONS: tuple[str, ...] = (
     "disabled_user",
 )
 
+#: `credentials.provider` / `media_sources.provider` / `oauth_states.provider`
+#: — the values `ck_credentials_provider`, `ck_sources_provider` and
+#: `ck_oauth_state_provider` admit. Spelled here, the one dependency-free
+#: module, because seven modules had a hand copy each (#1325 audit, TD-B6).
+PROVIDER_IG_LOGIN = "ig_login"
+PROVIDER_GDRIVE = "gdrive"
+#: `identities.provider` — who verified the person.
+PROVIDER_GOOGLE = "google"
+PROVIDER_TELEGRAM = "telegram"
+
 # --- the CLI's exit codes -------------------------------------------------
 
 EXIT_OK = 0
@@ -397,6 +407,15 @@ ALLOWED_UPDATES: list[str] = ["message", "callback_query"]
 #: connection budget: one process × `POOL_SIZE_SEAM` (10) today.
 MAX_CONNECTIONS_VAR = "TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS"
 DEFAULT_MAX_CONNECTIONS = 10
+#: Railway names the deployment's environment here. The API's autoregister
+#: guard and the transport's production guard ask the same question of it,
+#: and two literals is how a renamed environment is edited in one of them.
+RAILWAY_ENVIRONMENT_VAR = "RAILWAY_ENVIRONMENT_NAME"
+#: The one environment that owns the bot's webhook.
+PRODUCTION_ENVIRONMENT = "production"
+#: Telegram's Bot API. Spelled here because the CLI's `webhook` verb and the
+#: worker's transport both speak to it, and the CLI reaches `src` only here.
+TELEGRAM_BOT_API_BASE = "https://api.telegram.org"
 
 
 class BadMaxConnections(ValueError):

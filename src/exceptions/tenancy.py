@@ -8,6 +8,7 @@ map a refusal once and survive the swap; the contract outlived the second raiser
 """
 
 from src.exceptions.base import RefusalError
+from src.services.target import vocabulary
 
 
 class TenantResolutionError(RefusalError):
@@ -19,7 +20,8 @@ class TenantResolutionError(RefusalError):
     insufficient_role | unknown_channel | unprovisioned_channel (legacy-era:
     the deployment's global notification channel has no settings row — an
     operator condition, deliberately distinct from unknown_binding so no edge
-    tells an operator to run /start) | invalid_token | expired_token |
+    tells an operator to run /start — no raiser in src as of 2026-09-20
+    (#1325 audit, TD-C9)) | invalid_token | expired_token |
     revoked_token (a bearer API token that did not resolve — the token
     resolver's three answers, mapped like their session twins: 401, and the
     response never says which).
@@ -31,7 +33,10 @@ class TenantResolutionError(RefusalError):
 
     _prefix = "tenant resolution refused"
 
-    REASONS = (
+    #: The chat- and session-plane reasons this module owns, then the
+    #: resolver's token reasons from the vocabulary — `disabled_user` is in
+    #: both lists and is spelled once, here (#1325 audit, TD-C9).
+    REASONS: tuple[str, ...] = (
         "unknown_binding",
         "revoked_binding",
         "invalid_session",
@@ -42,10 +47,7 @@ class TenantResolutionError(RefusalError):
         "insufficient_role",
         "unknown_channel",
         "unprovisioned_channel",
-        "invalid_token",
-        "expired_token",
-        "revoked_token",
-    )
+    ) + tuple(r for r in vocabulary.TOKEN_RESOLUTION_REASONS if r != "disabled_user")
 
     def __init__(self, reason: str, detail: str = ""):
         if reason not in self.REASONS:
@@ -70,7 +72,7 @@ class TokenRefused(RefusalError):
 
     _prefix = "token refused"
 
-    REASONS = ("session_required", "readonly_token", "wrong_workspace")
+    REASONS: tuple[str, ...] = vocabulary.TOKEN_REFUSALS
 
     def __init__(self, reason: str, detail: str = ""):
         if reason not in self.REASONS:

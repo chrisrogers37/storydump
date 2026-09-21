@@ -86,7 +86,11 @@ class WorkerConfig:
     # busy binding yields its lane sooner; the sweep re-mints while rows remain.
     sender_hold_seconds: float = 15.0
     sender_sweep_seconds: float = 3.0  # cadence of the sender-job mint sweep
+    #: H5: a sweep is bounded; the next one takes the rest.
+    sender_mint_limit: int = 200
     prompt_sweep_seconds: float = 5.0  # cadence of the prompt sweep (W3)
+    prompt_sweep_limit: int = 50  # W3 sweep batch (`prompts.sweep_due_prompts`)
+    status_interval_seconds: float = 60.0  # cadence of the status line
     lane_max_consecutive_errors: int = 10  # claim errors before the lane dies loudly
     poller_interval_seconds: float = 2.0  # 05: outbox cadence
     chat_limit: int = 18  # 05: per-chat sends per window
@@ -1079,7 +1083,9 @@ def poller_session_factory(engine, tenant_id: str):
     return factory
 
 
-async def ensure_sender_jobs(session) -> int:
+async def ensure_sender_jobs(
+    session, *, limit: int = WorkerConfig.sender_mint_limit
+) -> int:
     """Mint one `deliver_outbox` job per Telegram binding that has pending
     outbox rows and no live sender job. Idempotent by the live-job check on
     the `tg:<binding>` serialization key; returns rows minted.
@@ -1091,15 +1097,17 @@ async def ensure_sender_jobs(session) -> int:
     quiet binding has none) — so an empty outbox mints nothing and a busy
     one always has exactly one live sender per binding.
     """
+    attempts, deadline_seconds = jobs.LANE_BUDGETS["interactive"]
     result = await session.execute(
         text(
             "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
             " run_at, max_attempts, deadline_at, payload)"
             " SELECT 'deliver_outbox', b.workspace_id, 'interactive',"
-            "        'tg:' || b.id, now(), 3, now() + interval '10 minutes',"
+            "        :prefix || b.id, now(), :attempts,"
+            "        now() + make_interval(secs => :deadline),"
             "        jsonb_build_object('v', 1, 'binding_id', b.id)"
             "   FROM channel_bindings b"
-            "  WHERE b.state = 'active' AND b.channel LIKE 'telegram%'"
+            f"  WHERE {bindings.push_binding_where('b')}"
             # Two EXISTS, not one OR: each arm rides its own partial index
             # (`ix_outbox_due` on pending, `ix_outbox_ambiguous_age`, 075).
             "    AND (EXISTS (SELECT 1 FROM channel_outbox o"
@@ -1108,11 +1116,17 @@ async def ensure_sender_jobs(session) -> int:
             "                     WHERE o.binding_id = b.id AND o.state = 'ambiguous'"
             "                       AND o.updated_at <= now() - make_interval(secs => :age)))"
             "    AND NOT EXISTS (SELECT 1 FROM jobs j"
-            "                     WHERE j.serialization_key = 'tg:' || b.id"
+            "                     WHERE j.serialization_key = :prefix || b.id"
             "                       AND j.state IN ('ready', 'leased'))"
             # H5: a sweep is bounded; the next one takes the rest.
-            "  LIMIT 200"
+            "  LIMIT :lim"
         ),
-        {"age": outbox.AMBIGUOUS_RESOLVE_AFTER_SECONDS},
+        {
+            "age": outbox.AMBIGUOUS_RESOLVE_AFTER_SECONDS,
+            "prefix": jobs.SENDER_KEY_PREFIX,
+            "attempts": attempts,
+            "deadline": deadline_seconds,
+            "lim": int(limit),
+        },
     )
     return result.rowcount

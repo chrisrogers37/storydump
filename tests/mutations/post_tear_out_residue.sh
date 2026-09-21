@@ -65,7 +65,7 @@ checkv() {  # name file old new vitest-file test-name-pattern — the landing's 
 
 check "the health renderer reads pool keys the API never emits again" storydump_cli/output.py 'POOL_FACTS = ("size", "checked_out", "checked_out_peak")' 'POOL_FACTS = ("size", "in_use", "peak")' "tests/storydump_cli/test_env.py -k pools_real_keys"
 check "the renderer spells the old keys inline, bypassing POOL_FACTS" storydump_cli/output.py '                _facts(pool, *POOL_FACTS),' '                _facts(pool, "size", "in_use", "peak"),' "tests/storydump_cli/test_env.py -k pools_real_keys"
-check "the CLI's not_connected hint sends the user to the Integrations tab again" storydump_cli/main.py '"connect the Instagram account under Settings › Accounts"' '"connect the Instagram account under Settings › Integrations"' "tests/storydump_cli/test_writes.py -k not_connected_refusal_points_at_the_accounts_tab"
+check "the CLI's not_connected hint sends the user to the Integrations tab again" storydump_cli/commands/__init__.py '"connect the Instagram account under Settings › Accounts"' '"connect the Instagram account under Settings › Integrations"' "tests/storydump_cli/test_writes.py -k not_connected_refusal_points_at_the_accounts_tab"
 check "the Facebook Graph host returns to the egress allow-list (FC-4)" src/services/target/egress.py '        "graph.instagram.com",
         "api.instagram.com",' '        "graph.instagram.com",
         "graph.facebook.com",

@@ -79,11 +79,12 @@ from urllib.parse import urlencode
 from sqlalchemy import text
 
 from src.exceptions.base import RefusalError, StorydumpError
+from src.services.target import vocabulary
 from src.services.target.google_oidc import AUTHORIZE_URL, code_grant, refresh_grant
 from src.services.target.ig_login_oauth import ring
 
 #: `ck_credentials_provider` / `ck_sources_provider` / `ck_oauth_state_provider`.
-PROVIDER = "gdrive"
+PROVIDER = vocabulary.PROVIDER_GDRIVE
 
 #: The one scope this leg asks for — see the module docstring for the two
 #: narrower ones that were evaluated and rejected, and #327 for the Picker.

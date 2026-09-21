@@ -461,6 +461,9 @@ class TestPromptSweeperConsumesTheSweep:
 
         class _Config:
             prompt_sweep_seconds = 0.01
+            # The door reads its batch from the config too (#1325, TD-A15);
+            # a stub missing it spins the loop's `except Exception` forever.
+            prompt_sweep_limit = 50
 
         class _App:
             engine = object()

@@ -81,14 +81,14 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
-from src.services.target import readers
+from src.services.target import readers, vocabulary
 from src.services.target.intent_ledger import TERMINAL_STATES
 from src.services.target._dbapi import constraint_violated
 
 logger = logging.getLogger(__name__)
 
 #: `media_sources.provider` — `ck_sources_provider`'s entire closed set today.
-GDRIVE_PROVIDER = "gdrive"
+GDRIVE_PROVIDER = vocabulary.PROVIDER_GDRIVE
 
 #: `media_sources.config` shape for a `gdrive` source, per 054's own column
 #: comment: `{v:1, folder_ref:text, root_name?:text}`.
@@ -755,9 +755,7 @@ async def connect_destination(
     return str(ig_account_id), False
 
 
-#: `ig_login_oauth.PROVIDER`, spelled here rather than imported: that module
-#: imports this one for `attach_connected_identity`.
-IG_LOGIN_PROVIDER = "ig_login"
+IG_LOGIN_PROVIDER = vocabulary.PROVIDER_IG_LOGIN
 
 
 async def disable_destination(
@@ -867,10 +865,14 @@ async def pause_media_source(session, *, workspace_id: str, source_id: str) -> b
                 "UPDATE media_sources"
                 "   SET state = 'paused', alerted_at = NULL,"
                 "       config = config || '{\"removed\": true}'::jsonb"
-                " WHERE id = :s AND workspace_id = :ws AND provider = 'gdrive'"
+                " WHERE id = :s AND workspace_id = :ws AND provider = :provider"
                 " RETURNING id"
             ),
-            {"s": str(source_id), "ws": str(workspace_id)},
+            {
+                "s": str(source_id),
+                "ws": str(workspace_id),
+                "provider": vocabulary.PROVIDER_GDRIVE,
+            },
         )
     ).first()
     if row is None:

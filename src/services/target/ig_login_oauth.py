@@ -66,7 +66,7 @@ from sqlalchemy import text
 
 from src.config.constants import IG_LOGIN_API_BASE, IG_LOGIN_GRAPH_BASE
 from src.exceptions import StorydumpError
-from src.services.target import egress
+from src.services.target import egress, vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ REFRESH_URL = f"{IG_LOGIN_GRAPH_BASE}/refresh_access_token"
 #: Who the long-lived token belongs to — the real Meta id and the handle.
 PROFILE_URL = f"{IG_LOGIN_GRAPH_BASE}/me"
 
-PROVIDER = "ig_login"
+PROVIDER = vocabulary.PROVIDER_IG_LOGIN
 
 #: `ck_oauth_state_purpose`'s closed set.
 PURPOSES = ("connect", "reconnect", "signin", "link", "bind")

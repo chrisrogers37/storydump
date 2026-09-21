@@ -128,6 +128,9 @@ LANE_BUDGETS: dict[str, tuple[int, int]] = {
     "interactive": (3, 10 * 60),
     "bulk": (5, 6 * 3600),
 }
+#: The serialization key of a binding's sender job: one live sender per
+#: binding, and `work_loop` parses the binding id back off it (#1325, TD-A4).
+SENDER_KEY_PREFIX = "tg:"
 #: `enqueue(deadline_seconds=NO_DEADLINE)`: the job carries no deadline (`deadline_at`
 #: NULL) — for a kind whose ceiling is its own, like the publish pipeline, whose
 #: slot may be a day away (`05:38`: "deadline = slot end"). Attempts still bound it.

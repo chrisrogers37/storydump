@@ -26,7 +26,7 @@ from src.services.target.start_router import StartResult
 logger = logging.getLogger(__name__)
 
 PROVIDER = identity.PROVIDER_TELEGRAM
-GROUP_CHAT_TYPES = ("group", "supergroup")
+GROUP_CHAT_TYPES = bindings.GROUP_CHAT_TYPES
 
 
 def group_members_of(update: dict) -> list[tuple[str, str, str]]:

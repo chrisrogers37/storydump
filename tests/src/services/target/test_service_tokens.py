@@ -241,7 +241,9 @@ class TestResolve:
         assert principal.name == "ops"
         assert len(ex.calls) == 4
         assert "set_config('app.tenant_id'" in ex.calls[1][0]
-        assert ex.calls[1][1] == {"ws": WS} and ex.calls[2][1] == {"ws": WS}
+        # `apply_gucs` names its binds positionally (`:v0`); the claim is the
+        # same transaction-local `app.tenant_id` the hand-rolled statement set.
+        assert ex.calls[1][1] == {"v0": WS} and ex.calls[2][1] == {"ws": WS}
         assert "workspaces" not in ex.calls[0][0], (
             "the token lookup never joins the tenant plane"
         )
