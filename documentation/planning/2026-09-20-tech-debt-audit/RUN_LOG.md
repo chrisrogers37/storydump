@@ -138,6 +138,26 @@ a second pair of human eyes. The controls that remain are the ones in §2 — th
 the behaviour-preservation invariant, the four guards — plus `/simplify`'s independent read per
 phase. They are real but they are machine checks; none of them is a human reading a diff.
 
+**Second waiver, asked separately once the rail was discovered.** `main` carries an active
+repository *ruleset* (`Protect main branch`, id 11551284) — not classic branch protection, which
+is why a first check via the protection API returned 404 and read as "unprotected". The ruleset
+requires `required_approving_review_count: 1` with `require_code_owner_review: true`, and lists
+RepositoryRole 5 (admin) as a bypass actor with `bypass_mode: always`.
+
+So the merge the owner authorised was not available: `gh pr merge` refused #1335 with "the base
+branch policy prohibits the merge" despite all nine checks passing. Bypassing it is a *different*
+act from merging — it overrides a review rail the repository owner deliberately installed — so it
+was put back to the owner rather than assumed. Shown the consequence in those words, the owner
+chose **`--admin` on every phase**.
+
+**Residual risk:** the code-owner review requirement is bypassed on all 16 merges. The rail stays
+configured and will apply to everyone else; it simply does not apply to this sprint. Combined with
+G7's first waiver, no human reads any diff in this epic before it reaches production.
+
+The runner's own compensating discipline, unchanged by either waiver: **every phase's CI must be
+observed green before its merge** (`gh pr checks <n> --watch`), and every invariant in §2 re-run
+after it.
+
 This waiver covers merging and deploying. It does **not** touch G6: no phase runs the posting
 scheduler, `storydump approve|cancel|resolve`, `storydump tokens revoke`, or
 `storydump webhook register|deregister`, and nothing is run against production.
