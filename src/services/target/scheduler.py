@@ -80,7 +80,6 @@ from sqlalchemy import text
 
 from src.services.target import category_mix, intent_ledger, workspaces
 
-from src.exceptions.base import StorydumpError
 
 #: The advisory-lock key the clock elects on. A single fixed key, because there
 #: is exactly one clock for the deployment — `05`: "clock runs inside an
@@ -90,15 +89,6 @@ CLOCK_ELECTION_KEY = 0x5701_C10C
 
 
 logger = logging.getLogger(__name__)
-
-
-class ClockNotElected(StorydumpError):
-    """This process is not the clock and must not tick.
-
-    Not an error condition: on a multi-replica deployment every replica but
-    one raises this every interval, which is the mechanism working. Callers
-    log at debug and come back.
-    """
 
 
 class ClockElection:

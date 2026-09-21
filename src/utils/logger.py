@@ -71,22 +71,6 @@ def setup_logger(
     return logger_instance
 
 
-def get_logger(name: str = "storydump") -> logging.Logger:
-    """
-    Get an existing logger or create a new one.
-
-    Args:
-        name: Logger name
-
-    Returns:
-        Logger instance
-    """
-    logger_instance = logging.getLogger(name)
-    if not logger_instance.handlers:
-        return setup_logger(name)
-    return logger_instance
-
-
 # Default logger instance
 logger = setup_logger()
 

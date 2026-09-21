@@ -6,7 +6,6 @@
   "telegram_modules": [
     "src/channels/telegram_transport.py",
     "src/channels/telegram_webhook_registration.py",
-    "src/exceptions/telegram.py",
     "src/services/target/telegram_dispatch.py"
   ]
 }

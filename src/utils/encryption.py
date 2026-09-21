@@ -123,13 +123,13 @@ class TokenEncryption:
         for i, fernet in enumerate(self._fernets):
             try:
                 result = fernet.decrypt(ciphertext_bytes).decode()
-                logger.info(f"Token decrypted by key index {i} (per-key fallback)")
+                logger.info("Token decrypted by key index %s (per-key fallback)", i)
                 return result
             except InvalidToken:
                 continue
 
         key_count = len(self._fernets)
-        logger.error(f"Token decryption failed — all {key_count} keys exhausted")
+        logger.error("Token decryption failed — all %s keys exhausted", key_count)
         raise ValueError(
             f"Failed to decrypt token. "
             f"None of the {key_count} configured encryption keys can "
@@ -151,6 +151,10 @@ class TokenEncryption:
 
         Raises:
             ValueError: If decryption fails (no matching key or corrupted data)
+
+        Waits on the `reencrypt_credentials` executor
+        (`work_loop.UNBUILT_KINDS`); driven today only by
+        `tests/src/utils/test_encryption.py` (#1325 audit, TD-C16).
         """
         if not ciphertext:
             raise ValueError("Cannot rotate empty string")

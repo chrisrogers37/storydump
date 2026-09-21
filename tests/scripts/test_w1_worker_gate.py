@@ -18,6 +18,7 @@ import psycopg2
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from src.services.target import jobs
 from src.services.target.work_loop import WorkerConfig
 from src.worker import compose
 from tests.scripts.conftest import async_url, seed_workspace_chain
@@ -180,7 +181,11 @@ class TestFailureBackoffOnTheRealMachinery:
         assert row["state"] == "ready"
         assert row["attempts"] == 1, "a retryable failure keeps its consumed attempt"
         eta = (row["run_at"] - datetime.now(timezone.utc)).total_seconds()
-        assert 30 < eta <= WorkerConfig().retry_backoff_seconds + 30
+        first_rung = jobs.BACKOFF_SECONDS["bulk"][0]
+        # ±20 % jitter (`jobs.backoff_seconds`), plus the clock between the
+        # reschedule and this read. `_insert_job` seeds the bulk lane, which is
+        # the lane `_run_once` drives.
+        assert 0.8 * first_rung - 5 < eta <= 1.2 * first_rung + 30
         _assert_no_stranded_lease(sync_conn)
 
 

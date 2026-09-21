@@ -66,8 +66,11 @@ class IntentTransitionRefused(StorydumpError):
 async def legal_transitions(session) -> set:
     """The edge set, read from `post_intent_transitions`.
 
-    For display only. Never call this to pre-validate a write — see the module
-    docstring on why a second authority is the thing this module avoids.
+    For display only, and NOT yet displayed anywhere: the one caller today is
+    `tests/scripts/test_intent_ledger_gate.py`, which uses it to prove the edge
+    set is READ from `post_intent_transitions` rather than kept in Python
+    (#1325 audit, TD-A16). Never call this to pre-validate a write — see the
+    module docstring on why a second authority is the thing this module avoids.
     """
     rows = await session.execute(
         text("SELECT from_state, to_state FROM post_intent_transitions")

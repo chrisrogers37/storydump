@@ -63,11 +63,6 @@ logger = logging.getLogger(__name__)
 # The tap (W4 — phase 1 of the 2026-09-09 plan)
 # ---------------------------------------------------------------------------
 
-#: Flipped by #1220 step 3 when the worker's publish leg is live. Until then
-#: the `post` answer says what is true (F11): approval is recorded, publishing
-#: is not yet automatic.
-PUBLISH_LEG_LIVE = True
-
 #: `rate_counters` scope for S.2 (`02` §6, `056` `ck_rate_scope`); the window
 #: is the minute `05:51` names.
 ADMISSION_SCOPE = "ws_admission"
@@ -103,7 +98,6 @@ TAP_OUTCOMES = (
     "older_card",
     "no_message",
     "unlinked",
-    "rate_limited",
     "tap_failed",
 )
 
@@ -126,7 +120,6 @@ ANSWERS: dict[str, tuple[str, bool]] = {
         " Settings › Integrations → Link Telegram.",
         True,
     ),
-    "rate_limited": ("Too many actions at once — try again in a minute.", True),
     "tap_failed": (
         f"Something went wrong on our side — try again in a moment, or {_WEB}.",
         True,
@@ -180,9 +173,7 @@ def _executed_text(action: Optional[str], result: CommandResult) -> str:
             return "✅ Approved — dry run, nothing will be published"
         if data.get("paused"):
             return "✅ Approved — posting is paused; it posts when you resume (within 3 days)"
-        if PUBLISH_LEG_LIVE:
-            return "✅ Approved — posting shortly"
-        return "✅ Approved — publishing isn't live yet; it will post when it is"
+        return "✅ Approved — posting shortly"
     if action == "posted" or action == "itposted":
         return "✅ Marked posted"
     if action == "notposted":

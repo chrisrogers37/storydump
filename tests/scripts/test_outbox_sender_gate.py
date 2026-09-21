@@ -1211,7 +1211,14 @@ class TestAStaleSenderCannotOverwriteALiveOne:
 
 class TestThePollerReplacesTheRedisWakeUp:
     """`05` cadence, run for real. TT:P0-07's Redis half is struck, so this
-    loop IS the wake-up mechanism and its liveness is a gate concern."""
+    loop IS the wake-up mechanism and its liveness is a gate concern.
+
+    The loop production runs is `work_loop.deliver_outbox`'s hold: it builds a
+    poller and drives `tick` on the cadence until `sender_hold_seconds`, and
+    the sweep re-mints the job. `OutboxPoller` carried a `start`/`stop`
+    lifecycle wrapper nothing under `src/` ever called; it is gone and the
+    drain below is driven the way the executor drives it (#1325 audit, TD-A16).
+    """
 
     def _factory(self, outbox_db):
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -1224,10 +1231,14 @@ class TestThePollerReplacesTheRedisWakeUp:
         return engine, async_sessionmaker(engine, expire_on_commit=False)
 
     @pytest.mark.asyncio
-    async def test_the_loop_drains_a_queue_on_its_own_timer(self, outbox_db):
-        """Three rows, a short interval, no manual ticks: the loop must find
-        and send them itself. A poller that only works when driven by hand is
-        not a replacement for a wake-up channel."""
+    async def test_the_hold_drains_a_queue_on_its_own_timer(self, outbox_db):
+        """Three rows, a short interval, the executor's own hold loop: the
+        poller must find and send them itself, one per tick, with nothing
+        telling it a row arrived. A poller that only works when driven once
+        per row by hand is not a replacement for a wake-up channel, so the
+        loop below is bounded by TIME and by nothing else — it keeps ticking
+        after the queue is empty and stops on the clock, exactly as
+        `work_loop.deliver_outbox` does."""
         import asyncio
 
         from src.services.target.outbox import OutboxPoller
@@ -1244,36 +1255,35 @@ class TestThePollerReplacesTheRedisWakeUp:
 
         engine, factory = self._factory(outbox_db)
 
+        interval = 0.05  # `05` says 2 s; the gate compresses it
         poller = OutboxPoller(
             _tenant_session_factory(outbox_db, factory),
             binding_id=binding,
             transport=transport,
             clock=_now,
-            interval_seconds=0.05,  # `05` says 2 s; the gate compresses it
+            interval_seconds=interval,
             chat_limit=CHAT_LIMIT,
             chat_window_seconds=CHAT_WINDOW_S,
             global_limit=GLOBAL_LIMIT,
             global_window_seconds=GLOBAL_WINDOW_S,
         )
+        drained_at = None
         try:
-            await poller.start()
             deadline = time.monotonic() + 15
-            while len(sent_refs) < 3 and time.monotonic() < deadline:
-                await asyncio.sleep(0.05)
-            drained_at = poller.ticks
-            # Keep it running on an EMPTY queue: a wake-up replacement must
-            # poll, not merely react to work that was already there when it
-            # started. Three ticks for three rows would satisfy a loop that
-            # ran once per row and then stopped.
-            await asyncio.sleep(0.4)
-            kept_beating = poller.ticks
-            await poller.stop()
+            while time.monotonic() < deadline:
+                await poller.tick()
+                if drained_at is None and len(sent_refs) == 3:
+                    # Do not stop here: an empty queue must keep being polled.
+                    drained_at = poller.ticks
+                    deadline = min(deadline, time.monotonic() + 0.4)
+                await asyncio.sleep(interval)
         finally:
             await engine.dispose()
 
-        assert kept_beating > drained_at, (
+        assert drained_at is not None, f"the queue did not drain in 15 s: {sent_refs}"
+        assert poller.ticks > drained_at, (
             f"the loop stopped beating once the queue emptied"
-            f" ({drained_at} → {kept_beating}) — it is reacting, not polling"
+            f" ({drained_at} → {poller.ticks}) — it is reacting, not polling"
         )
         assert sorted(sent_refs) == sorted(str(i) for i in ids), (
             f"the queue did not drain: {sent_refs}"

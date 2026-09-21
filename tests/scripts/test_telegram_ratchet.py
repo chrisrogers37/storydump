@@ -316,9 +316,31 @@ class TestTheRealBaselineIsHonest:
         `test_a_telegram_module_that_never_says_telegram_IS_counted`,
         `test_a_new_core_telegram_module_reddens_the_core_axis`,
         `test_a_chat_id_parameter_outside_an_adapter_reddens_it` and the
-        adapter-exemption class each light an axis the real tree keeps empty."""
+        adapter-exemption class each light an axis the real tree keeps empty.
+
+        The floor was a hand-written `>= 4` until #1325 retired the unused
+        `src/exceptions/telegram.py` and re-measured the baseline to three. A
+        literal count here is the second source of truth this module's own
+        docstring exists to forbid ("the baseline file stores sets, never
+        counts"), and it goes stale on every deliberate retirement. The
+        property the control actually needs is that the axis is POPULATED and
+        populated with target-tier adapters, which is what is asserted now —
+        the same shape `tests/src/test_legacy_tier_gone.py` already uses on
+        the committed baseline."""
         import pathlib
 
         repo = pathlib.Path(__file__).resolve().parents[2]
         out = measure(repo)
-        assert len(out["telegram_modules"]) >= 4, out["telegram_modules"]
+        assert out["telegram_modules"], (
+            "the adapter axis went empty on the real tree — the gate is"
+            " measuring nothing, which every planted-tree control above would"
+            " still pass"
+        )
+        strays = [
+            m
+            for m in out["telegram_modules"]
+            if not m.startswith(("src/channels/", "src/services/target/"))
+        ]
+        assert strays == [], (
+            f"a Telegram-named module outside the target tier: {strays}"
+        )

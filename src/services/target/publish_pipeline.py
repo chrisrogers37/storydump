@@ -460,10 +460,19 @@ def _slot_at(ctx: _Ctx, now_fn) -> Optional[datetime]:
     return None
 
 
-def _next_slot(ctx: _Ctx, now_fn, backoff_seconds) -> datetime:
-    """The deferral target: the account's next product slot, or one backoff
-    rung when the clock has not stamped one yet."""
-    return _slot_at(ctx, now_fn) or now_fn() + timedelta(seconds=backoff_seconds[0])
+def _next_slot(
+    ctx: _Ctx, now_fn, backoff_seconds
+) -> tuple[Optional[datetime], datetime]:
+    """The deferral target, as `(slot, run_at)`.
+
+    `slot` is the account's next product slot when the clock has stamped one
+    and None otherwise — the three callers each branch their card line on it,
+    which is why this returns the pair rather than the target alone. `run_at`
+    is that slot, or one backoff rung. Written once because it was inlined at
+    three sites before anyone called the helper (#1325 audit, TD-A6).
+    """
+    slot = _slot_at(ctx, now_fn)
+    return slot, slot or now_fn() + timedelta(seconds=backoff_seconds[0])
 
 
 async def _audit_deferral(
@@ -521,8 +530,7 @@ async def _admit(
         # hold one that spends none of it (adversarial review of #1299).
         verdict = await precheck.check(meta, ctx.intent["provider_account_ref"])
         if verdict == DEFER:
-            slot = _slot_at(ctx, now_fn)
-            run_at = slot or now_fn() + timedelta(seconds=backoff_seconds[0])
+            slot, run_at = _next_slot(ctx, now_fn, backoff_seconds)
             async with uow.begin() as session:
                 await reschedule_job(
                     session,
@@ -575,8 +583,7 @@ async def _admit(
                     run_at = now_fn() + timedelta(seconds=seconds)
                     await _bump(session, ctx, busy_waits=waits + 1)
                 else:
-                    slot = _slot_at(ctx, now_fn)
-                    run_at = slot or now_fn() + timedelta(seconds=backoff_seconds[0])
+                    slot, run_at = _next_slot(ctx, now_fn, backoff_seconds)
                 await reschedule_job(
                     session,
                     ctx.job["id"],
@@ -1402,8 +1409,7 @@ async def _ladder(
         except MetaCapDeferral as exc:
             # Error 9 (`02` §8): a cap, not a fault. Definitive non-effect →
             # resolve failed; defer to the next slot; the debit stands.
-            slot = _slot_at(ctx, now_fn)
-            run_at = slot or now_fn() + timedelta(seconds=backoff_seconds[0])
+            slot, run_at = _next_slot(ctx, now_fn, backoff_seconds)
             async with _leased_tx(uow, ctx.job) as session:
                 await provider_ops.resolve_permit(
                     session,

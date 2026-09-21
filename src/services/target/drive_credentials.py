@@ -21,8 +21,9 @@ select another workspace's credential (astrid, #982).
 payload shape — a versioned envelope carrying both tokens, and why (F3 (b)).
 It is decoded here through the writer's own :func:`google_drive_oauth.decode_payload`
 so the two modules cannot drift, and a payload that is not a v1 envelope is
-refused by name, never sent onward as a bearer. Until P5 mints from the
-refresh token, this door hands back the connect-time access token.
+refused by name, never sent onward as a bearer. P5 landed (#1247): this door
+hands back the stored access token while it is still good, and mints a fresh
+one from the refresh token when it is not (:func:`_refresh`, below).
 
 A source with no credential still raises :class:`DriveCredentialDead`, and
 that is deliberately **not** a crash: `media_sync` classifies it persistent,

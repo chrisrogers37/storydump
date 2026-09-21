@@ -401,10 +401,7 @@ class TestTheTap:
         r = await d(None, tap("post"))
         assert seams["log"]["executed"][0].kind == "approve"
         assert r.outcome == "executed"
-        if telegram_dispatch.PUBLISH_LEG_LIVE:
-            assert "posting shortly" in r.answer_text.lower()
-        else:
-            assert "isn't live yet" in r.answer_text
+        assert "posting shortly" in r.answer_text.lower()
 
     @pytest.mark.asyncio
     async def test_an_answered_result_reads_back_the_cards_state(self, seams):

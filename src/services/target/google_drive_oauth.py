@@ -44,8 +44,8 @@ target tier imports nothing legacy). What transfers is knowledge:
 
 `oauth_credentials.encrypted_payload` is ONE column, and F3 (b) needs two
 tokens in it: the durable refresh token, from which short-lived access tokens
-are minted on demand (P5), and — until P5 lands — the access token issued at
-connect time, which the read door hands back as-is. Both ride in one
+are minted on demand (P5, #1247), and the access token issued at connect time,
+which the read door hands back while it is still good. Both ride in one
 encrypted, versioned JSON envelope (:func:`encode_payload` /
 :func:`decode_payload` — the writer's shape and the reader's, one definition);
 `expires_at` is the ACCESS token's expiry. `next_refresh_at` is NULL: the
@@ -150,7 +150,8 @@ class DriveGrant:
 @dataclass(frozen=True)
 class DrivePayload:
     """The envelope, decoded — the two tokens a v1 payload carries. The read
-    door hands back `access_token` today; P5 mints from `refresh_token`."""
+    door hands back `access_token` while it is still good and mints a fresh one
+    from `refresh_token` when it is not (`drive_credentials._refresh`, P5)."""
 
     access_token: str
     refresh_token: str

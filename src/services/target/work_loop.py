@@ -80,7 +80,6 @@ class WorkerConfig:
     ws_lane_cap_interactive: int = 5
     ws_lane_cap_bulk: int = 3
     claim_idle_seconds: float = 1.0  # sleep when a lane has nothing runnable
-    retry_backoff_seconds: float = 60.0  # R8 retryable-failure backoff
     park_seconds: float = 900.0  # executor-less kinds retry this often
     # < lease_seconds: the poller's hold per claim. 45 → 15 in phase 3a so a
     # busy binding yields its lane sooner; the sweep re-mints while rows remain.
@@ -205,7 +204,7 @@ class WorkerDeps:
     transit: Any = None
     #: The Drive read leg (#982) — ONE adapter for W6's listing and W5b's
     #: bytes, so the two workstreams cannot build divergent copies. Duck-typed
-    #: (`list_files` / `fetch_bytes`); `StubDriveAdapter` until M.3 (#862).
+    #: (`list_changes` / `fetch_bytes`); :class:`GoogleDriveAdapter` since M.3.
     drive: Any = None
     media_fetch: Optional[Callable[[dict], Any]] = None
     #: The `07` §1 EmailSender port, or None when no provider is wired (#1092).
@@ -526,18 +525,6 @@ def build_registry(deps: WorkerDeps) -> dict:
             await asyncio.sleep(cfg.poller_interval_seconds)
 
     registry: dict = {kind: Parked(_UNBUILT_REASON) for kind in UNBUILT_KINDS}
-    # W6's two kinds are seam-blocked rather than unbuilt, and the difference is
-    # visible to whoever reads the park reason: an executor that does not exist
-    # needs building, an absent seam needs WIRING. Naming the seam is the
-    # contract W6 parks behind (#982) — a silent park would be indistinguishable
-    # from a kind nobody has started.
-    if deps.drive is None:
-        for _kind in ("sync_media_source", "first_ingest_chunk"):
-            registry[_kind] = Parked(
-                "no Drive read seam configured (WorkerDeps.drive is None;"
-                " build-path #982) — the executor is blocked on the seam, not"
-                " unwritten"
-            )
     registry["plan_slot"] = plan_slot
     registry["reap_expired"] = reap_expired
     # No `deps.drive` gate: this path makes no provider call, and a fleet with
@@ -650,6 +637,10 @@ def build_registry(deps: WorkerDeps) -> dict:
     async def first_ingest_chunk(session, job):
         return await media_sync.first_ingest_chunk(deps, session, job)
 
+    # Seam-blocked, not unbuilt, and the difference is visible to whoever reads
+    # the park reason: an executor that does not exist needs building, an absent
+    # seam needs WIRING (#982). A silent park would be indistinguishable from a
+    # kind nobody has started.
     _NO_DRIVE = Parked(
         "no drive door configured (build-path #982); wiring a test fake into"
         " production is not composition"
