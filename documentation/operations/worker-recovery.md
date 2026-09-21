@@ -104,7 +104,7 @@ heartbeat beats, and it schedules nothing.
 The listener answers 200 with the counters (`lanes`, `clock`, `heartbeat`) and 503 —
 `"reason": "clock has not advanced; the worker is alive but stuck"` — when `clock.ticks` has not
 moved between two probes more than 30 s apart (twice the clock interval;
-`src/services/target/health.py:74-89`). The failure counters are reported and never gate it: a
+`src/services/target/worker_health.py:82-97`). The failure counters are reported and never gate it: a
 database blip must not spend the restart budget. `ticks` advances only on the process that holds
 the election, so a second replica that never wins it would read as stuck here.
 

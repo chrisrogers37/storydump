@@ -474,6 +474,13 @@ def window_start(value: str, now: dt.datetime) -> dt.datetime:
     aware UTC datetime no wider than :data:`MAX_WINDOW_DAYS` and not in the
     future. Anything else raises ``ValueError`` with the sentence to show —
     the one grammar the API's ``since`` and the CLI's ``--since`` share.
+
+    **Not** `rate_counters.window_start`, which shares the name and nothing
+    else: that one truncates a datetime to its fixed counter bucket
+    (`(now, window_seconds)`), this one PARSES a caller's string. They are
+    never interchangeable, and the flagged clash is a naming one the audit
+    read and left alone — renaming either moves a name the API routes, the
+    CLI and the `rate_counters` PK all spell (#1325 audit, TD-A20).
     """
     text = value.strip()
     anchor = now.astimezone(dt.timezone.utc).replace(microsecond=0)

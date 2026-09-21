@@ -163,7 +163,10 @@ check "the lane's list drops the gated pair" $TLANE '            "079_drop_legac
 check "doctor calls a gated migration unapplied (exit 4 and 'deploy main' until the window runs)" storydump_cli/commands/env.py '                missing = sorted(repo - applied - gated)' '                missing = sorted(repo - applied)' "$UNIT" "tests/storydump_cli/test_env.py -k gated_migration_as_owed"
 check "doctor reads a prose mention of the directive as the directive" storydump_cli/commands/env.py '            if marker and marker.group(1) == "manual" and not marker.group(2).strip():' '            if "runner:manual" in line:' "$UNIT" "tests/storydump_cli/test_env.py -k mention_of_the_directive_in_prose"
 # --- the never-run lists ----------------------------------------------------------------------------
-check "the gated door leaves the never-run list" AGENTS.md 'python -m scripts.migration_runner apply --manual <version>   # Applies a gated file: 079 DROPS the legacy schema — the owner runs the window (F7)
+# Re-pointed 2026-09-21 (#1325 audit, doc 12): #1332 rewrote this entry's comment after the
+# owner's window ran, so the anchor matched nothing and the check reported MUTATION NOT APPLIED
+# rather than a verdict — a battery line that can never apply certifies nothing.
+check "the gated door leaves the never-run list" AGENTS.md 'python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 079 dropped the legacy schema in the owner'"'"'s window (2026-09-19); a fresh database still owes both
 ' '' "$UNIT" "$TDOCS -k 'never_run_list_is_not_empty or two_never_run_lists_are_identical'"
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"

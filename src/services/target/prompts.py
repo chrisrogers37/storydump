@@ -227,7 +227,7 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
     tz = intent.get("tz") or "UTC"
     slot_line = f"Slot: {stamp(slot, tz)}"
     file_name = intent.get("file_name") or "media"
-    text = f"📸 {file_name} ({intent.get('media_kind', '?')})\n{slot_line}"
+    card_text = f"📸 {file_name} ({intent.get('media_kind', '?')})\n{slot_line}"
     actions = _ACTIONS_API if api_publishing_enabled else _ACTIONS_MANUAL
     rows = [
         [
@@ -242,7 +242,7 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
     ]
     payload: dict = {
         "v": 2,
-        "text": text,
+        "text": card_text,
         "reply_markup": {"inline_keyboard": [r for r in rows if r]},
     }
     if intent.get("provider_file_ref") and intent.get("source_id"):

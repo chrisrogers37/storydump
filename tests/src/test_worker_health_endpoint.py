@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from src.services.target import health as health_endpoint
+from src.services.target import worker_health
 
 
 class _Loop:
@@ -53,14 +53,14 @@ class TestVerdict:
         # clock is None: connections and the election have not happened yet.
         # Legacy needs a 120s grace because it reports tick staleness from the
         # first moment; this root has nothing stale to report, by construction.
-        status, body = _parse(health_endpoint.HealthState(_App(clock=None)).response())
+        status, body = _parse(worker_health.HealthState(_App(clock=None)).response())
         assert "200" in status
         assert body["status"] == "healthy"
         assert body["observables"]["clock"] == "unstarted"
 
     def test_an_advancing_clock_is_healthy(self):
         clock = _Clock(ticks=5)
-        state = health_endpoint.HealthState(_App(clock=clock))
+        state = worker_health.HealthState(_App(clock=clock))
         assert "200" in _parse(state.response())[0]
         clock.ticks = 6
         assert "200" in _parse(state.response())[0]
@@ -69,11 +69,11 @@ class TestVerdict:
         # Alive but not advancing: supervise() cannot see this — the task has
         # not exited — so it is the one failure this endpoint adds.
         clock = _Clock(ticks=5)
-        state = health_endpoint.HealthState(_App(clock=clock))
+        state = worker_health.HealthState(_App(clock=clock))
         t = [1000.0]
-        monkeypatch.setattr(health_endpoint, "monotonic", lambda: t[0])
+        monkeypatch.setattr(worker_health, "monotonic", lambda: t[0])
         assert "200" in _parse(state.response())[0]  # first observation
-        t[0] += 10.0 * health_endpoint.STALE_INTERVAL_MULTIPLE + 1
+        t[0] += 10.0 * worker_health.STALE_INTERVAL_MULTIPLE + 1
         status, body = _parse(state.response())  # ticks unchanged since
         assert "503" in status
         assert body["status"] == "unhealthy"
@@ -85,12 +85,12 @@ class TestVerdict:
         # through an outage no restart fixes. Diagnostic, not a gate.
         clock = _Clock(ticks=5)
         clock.consecutive_failures = 99
-        status, body = _parse(health_endpoint.HealthState(_App(clock=clock)).response())
+        status, body = _parse(worker_health.HealthState(_App(clock=clock)).response())
         assert "200" in status
         assert body["observables"]["clock"]["consecutive_failures"] == 99
 
     def test_response_framing_is_valid_http(self):
-        raw = health_endpoint.HealthState(_App(clock=_Clock(1))).response()
+        raw = worker_health.HealthState(_App(clock=_Clock(1))).response()
         head, _, body = raw.partition(b"\r\n\r\n")
         assert f"Content-Length: {len(body)}".encode() in head
         assert b"Content-Type: application/json" in head

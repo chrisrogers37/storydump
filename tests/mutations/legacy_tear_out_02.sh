@@ -167,19 +167,25 @@ check "the dead list cannot name a variable the tree reads" $WORKER 'USAGE_PRECH
 DRY_RUN_ENV = "DRY_RUN_MODE"' "$UNIT" "$GUARD -k dead_list_names_nothing_the_tree_reads"
 check "CI may not set a dead variable" $CI '          LOG_LEVEL: DEBUG' '          LOG_LEVEL: DEBUG
           TELEGRAM_BOT_TOKEN: test_token' "$UNIT" "$GUARD -k 'no_setter_names_a_dead_variable and ci.yml'"
+# Re-pointed 2026-09-21 (#1325 audit, doc 12): the guide's env block was reworded by #1332
+# ("# OAuth and the web front end" became "# The API only"), so this anchor matched nothing and
+# reported MUTATION NOT APPLIED forever instead of a verdict. Same mutation, current text.
 check "a guide may not prescribe a dead safety step" $DEPLOY 'LOG_LEVEL=INFO
 
-# OAuth and the web front end' 'LOG_LEVEL=INFO
+# The API only' 'LOG_LEVEL=INFO
 DRY_RUN_MODE=true
 
-# OAuth and the web front end' "$UNIT" "$GUARD -k 'no_setter_names_a_dead_variable and deployment.md'"
+# The API only' "$UNIT" "$GUARD -k 'no_setter_names_a_dead_variable and deployment.md'"
 check "a battery recipe may not set a dead variable" $B01 'PYTHONDONTWRITEBYTECODE=1 DB_PORT=65432' 'PYTHONDONTWRITEBYTECODE=1 TELEGRAM_CHANNEL_ID=1 DB_PORT=65432' "$UNIT" "$GUARD -k batteries_recipes_set_no_dead_variable"
 
 # --- the Makefile ------------------------------------------------------------------------------
 check "validate-env loads the settings that exist" $MAKEFILE '@python -c "from src.config.settings import settings" && \' '@python -c "from src.config.settings import get_settings; get_settings()" && \' "$UNIT" "$GUARD -k makefile_validates_the_settings_that_exist_and_can_fail"
 check "validate-env can fail" $MAKEFILE '(echo "$(RED)✗ Configuration validation failed$(NC)" && exit 1)' 'echo "$(RED)✗ Configuration validation failed$(NC)"' "$UNIT" "$GUARD -k makefile_validates_the_settings_that_exist_and_can_fail"
 check "make install installs the CLI extra" $MAKEFILE "pip install -e '.[cli]'" "pip install -e ." "$UNIT" "$GUARD -k make_install_installs_the_cli_extra"
-check "every file the Makefile feeds psql exists" $MAKEFILE '-f scripts/setup_database.sql 2>&1' '-f scripts/setup_database.sql -f tests/scripts/fixtures/not_on_this_branch.sql 2>&1' "$UNIT" "$GUARD -k every_file_the_makefile_feeds_psql_exists"
+# Re-pointed 2026-09-21 (#1325 audit, doc 12): `init-db` gained the by-hand base fixture, so
+# `-f scripts/setup_database.sql` is no longer the last -f on the line and this anchor matched
+# nothing. Anchored on the LAST file fed instead, which is what the mutation has to follow.
+check "every file the Makefile feeds psql exists" $MAKEFILE '-f tests/scripts/fixtures/legacy_by_hand.sql 2>&1' '-f tests/scripts/fixtures/legacy_by_hand.sql -f tests/scripts/fixtures/not_on_this_branch.sql 2>&1' "$UNIT" "$GUARD -k every_file_the_makefile_feeds_psql_exists"
 check "init-db stands step 0 up before the by-hand base" $MAKEFILE '-f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql ' '' "$UNIT" "$GUARD -k init_db_is_the_lanes_own_sequence"
 check "make dev does not gate a local worker on production's health" $MAKEFILE '	@echo "$(GREEN)✓ Environment file found$(NC)"' '	@echo "$(GREEN)✓ Environment file found$(NC)"
 	@make check-health' "$UNIT" "$GUARD -k make_dev_does_not_gate"

@@ -1,8 +1,12 @@
 """The interaction-layer port (`01` §Interaction-layer port, FC-2; task #1028).
 
-Every inbound channel — the web/API adapter today, the Telegram webhook (W4)
-next — normalizes what it received into a :class:`Command` and hands it to
-:func:`ingest`. Nothing inland sees a chat id, a session cookie, a callback
+Every inbound channel normalizes what it received into a :class:`Command` and
+hands it to :func:`ingest`. The web/API adapter (`api/routes/v1.py`) is the
+one that does so end to end; the W4 Telegram webhook has landed since
+(`/webhooks/telegram` — the `/start` door and the group join path) and builds
+a :class:`Command` in `telegram_dispatch`, while chat-inbound COMMANDS ("approve"
+typed in a group) remain undispatched under #854. Nothing inland sees a chat
+id, a session cookie, a callback
 payload or an HTTP body: a command carries RESOLVED domain ids and nothing
 else, which is the FC-2 discipline made structural rather than reviewed for.
 
