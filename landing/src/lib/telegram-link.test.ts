@@ -12,7 +12,6 @@ import {
   requestTelegramLink,
   telegramIdentityFrom,
   telegramLinkRefusalCopy,
-  telegramLinkedFrom,
   isTelegramGroupLink,
   requestTelegramGroupLink,
   telegramGroupLinkRefusalCopy,
@@ -105,18 +104,6 @@ describe("telegramLinkRefusalCopy", () => {
 
   it("has a sentence for the unknown case that promises nothing", () => {
     expect(telegramLinkRefusalCopy("mystery")).toMatch(/nothing changed/i);
-  });
-});
-
-describe("telegramLinkedFrom", () => {
-  it("is true when a telegram identity is attached", () => {
-    expect(telegramLinkedFrom([{ provider: "google" }, { provider: "telegram" }])).toBe(true);
-  });
-
-  it("is false without one, and for an unreadable list", () => {
-    expect(telegramLinkedFrom([{ provider: "google" }])).toBe(false);
-    expect(telegramLinkedFrom(undefined)).toBe(false);
-    expect(telegramLinkedFrom(null)).toBe(false);
   });
 });
 

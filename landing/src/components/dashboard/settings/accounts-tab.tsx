@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { TONE_CLASS } from "@/components/dashboard/tone";
 import {
   Dialog,
   DialogContent,
@@ -15,56 +16,43 @@ import {
   DialogTrigger,
   DialogClose,
 } from "@/components/ui/dialog";
-import { postApi } from "@/lib/dashboard-api";
 import { disableAccountRefusalCopy, submitDisableAccount } from "@/lib/command-client";
 import {
   connectControlFor,
   destinationConnectRefusalCopy,
   destinationConnectionCaption,
   destinationHandle,
-  destinationIsActive,
   destinationStateBadge,
   requestDestinationConnect,
   requestWorkspaceConnect,
 } from "@/lib/destination";
-import type { DestinationConnectResult, DestinationStateBadge } from "@/lib/destination";
+import type { DestinationConnectResult } from "@/lib/destination";
 import type { Destination } from "@/lib/types";
 
 /**
  * Connect is real and ungated: the header's *Connect Instagram* ADDS a
- * destination through the Instagram Login grant (owner ruling 2026-09-04), and
- * each row's Connect/Reconnect acts on the account it names, and Remove is the
- * port's `disable_account`. `switch-account` is a real control whose route is
- * not wired yet (#1063 / epic P6) — DISABLED WITH A REASON, not removed, so
- * the screen does not lose a capability the user is about to get.
- */
-const DISABLED_REASON =
-  "Not wired up yet — changing accounts is not available on this API version.";
-
-/**
- * Tone to Tailwind. Semantics come from `destinationStateBadge`; the classes
- * live here because that is where the rest of this screen's visual language
- * does. `inert` is deliberately the muted pair rather than a third colour —
- * `disabled` and `moved` differ in their LABEL, and inventing a colour per
- * state would say they differ in kind when they do not.
+ * destination through the Instagram Login grant (owner ruling 2026-09-04),
+ * each row's Connect/Reconnect acts on the account it names, and Remove is
+ * the port's `disable_account`.
  *
- * Keyed on the tone UNION, so adding a tone without a class is a compile
- * error rather than a row that renders an unstyled badge.
+ * SWITCHING IS GONE FROM THIS SCREEN (TD-D3). It was a "Make Active" button
+ * disabled with a reason, on the argument that the screen should not lose a
+ * capability it was about to get. The capability did not arrive: the button
+ * POSTed to `/api/dashboard/switch-account`, a BFF proxy onto a target path
+ * that does not exist and has no entry in `COMMAND_SPECS`. A control that
+ * cannot be pressed is not a promise, it is furniture, and the proxy behind
+ * it was an authenticated door onto 22 routes the API stopped serving. When
+ * P6 lands, switching comes back as a `switch_account` row in
+ * `lib/commands.ts` and a button that calls `submitCommand`, like every
+ * other write on this tab.
  */
-const STATE_TONE_CLASS: Record<DestinationStateBadge["tone"], string> = {
-  active: "bg-green-100 text-green-800",
-  attention: "bg-amber-100 text-amber-900",
-  inert: "bg-muted text-muted-foreground",
-};
 
 interface AccountsTabProps {
-  /** False while the write routes do not exist (#1063). */
-  editable: boolean;
   accounts: Destination[];
   workspaceId: string;
 }
 
-export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProps) {
+export function AccountsTab({ accounts, workspaceId }: AccountsTabProps) {
   const router = useRouter();
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -98,19 +86,6 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
     return startGrant(`connect-${accountId}`, () =>
       requestDestinationConnect(workspaceId, accountId),
     );
-  }
-
-  async function switchAccount(accountId: string) {
-    setError(null);
-    setLoadingAction(`switch-${accountId}`);
-    try {
-      await postApi("switch-account", { account_id: accountId });
-      router.refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to switch account");
-    } finally {
-      setLoadingAction(null);
-    }
   }
 
   /**
@@ -173,7 +148,6 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
             <div className="space-y-3">
               {accounts.map((account) => {
                 const handleText = destinationHandle(account.handle);
-                const isActive = destinationIsActive(account.state);
                 const stateBadge = destinationStateBadge(account.state);
                 const connectControl = connectControlFor(account.credential_status);
                 return (
@@ -192,7 +166,7 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                           thrown component also look like (#1121). */}
                       <Badge
                         variant="secondary"
-                        className={STATE_TONE_CLASS[stateBadge.tone]}
+                        className={TONE_CLASS[stateBadge.tone]}
                       >
                         {stateBadge.label}
                       </Badge>
@@ -220,19 +194,6 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                           : connectControl.label}
                       </Button>
                     )}
-                    {!isActive && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => switchAccount(account.id)}
-                          disabled={!editable || loadingAction === `switch-${account.id}`}
-                          title={editable ? undefined : DISABLED_REASON}
-                        >
-                          {loadingAction === `switch-${account.id}`
-                            ? "Activating..."
-                            : "Make Active"}
-                        </Button>
-                      )}
                       <Dialog open={removingDialogOpen === account.id} onOpenChange={(open) => setRemovingDialogOpen(open ? account.id : null)}>
                         <DialogTrigger asChild>
                           <Button
@@ -275,13 +236,6 @@ export function AccountsTab({ accounts, editable, workspaceId }: AccountsTabProp
                 );
               })}
             </div>
-          )}
-
-          {!editable && (
-            <p className="mt-4 text-xs text-muted-foreground">
-              Switching accounts is not wired up yet — the control is shown
-              disabled rather than hidden, because it is coming back.
-            </p>
           )}
 
         </CardContent>

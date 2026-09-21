@@ -238,7 +238,18 @@ export function isWorkspaceId(value: string | undefined): value is string {
   return isUuid(value);
 }
 
-/** The one UUID-shape predicate: every id this tier forwards to the API is one or nothing. */
+/**
+ * The one UUID-shape predicate: every id this tier forwards to the API is
+ * one or nothing.
+ *
+ * DELIBERATELY SHAPE-ONLY, not RFC-4122. `commands.ts` carried a second,
+ * stricter copy (`isUuidLike`, version nibble `[1-5]`, variant `[89ab]`)
+ * until TD-D8. Postgres `gen_random_uuid()` emits v4, so every id this tier
+ * will ever see passes both — and the strict form REJECTS
+ * `00000000-0000-0000-0000-000000000000`, which is a legal id shape and is
+ * pinned in `session-guards.test.ts`. The job here is to stop a junk cookie
+ * becoming a junk path segment; the API re-validates everything it is sent.
+ */
 export function isUuid(value: unknown): value is string {
   return (
     typeof value === "string" &&

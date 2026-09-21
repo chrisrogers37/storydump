@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { TONE_CLASS } from "@/components/dashboard/tone";
 import {
   Dialog,
   DialogContent,
@@ -550,17 +551,11 @@ export function IntegrationsTab({
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2">
                 {/* GREEN BELONGS TO THE GRANT ALONE: `driveStatusBadge` is
-                    pinned so only `active` ever carries this tone. */}
-                <Badge
-                  variant="secondary"
-                  className={
-                    grant.tone === "active"
-                      ? "bg-green-100 text-green-800"
-                      : grant.tone === "attention"
-                        ? "bg-amber-100 text-amber-900"
-                        : "bg-muted text-muted-foreground"
-                  }
-                >
+                    pinned so only `active` ever carries this tone. The map is
+                    `components/dashboard/tone.ts` now — this was the third
+                    copy, and the only one written as a ternary, which is how
+                    it could have disagreed without a compile error. */}
+                <Badge variant="secondary" className={TONE_CLASS[grant.tone]}>
                   {grant.label}
                 </Badge>
                 <p className="text-sm text-muted-foreground">

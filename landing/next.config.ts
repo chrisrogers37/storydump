@@ -22,18 +22,6 @@ const nextConfig: NextConfig = {
           { key: "X-Content-Type-Options", value: "nosniff" },
         ],
       },
-      // Telegram Login Widget needs 'unsafe-inline' for its injected script
-      // and 'unsafe-eval' because telegram-widget.js eval()s the data-onauth handler
-      {
-        source: "/login",
-        headers: [
-          {
-            key: "Content-Security-Policy",
-            value:
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://telegram.org; frame-src https://oauth.telegram.org;",
-          },
-        ],
-      },
     ];
   },
 };

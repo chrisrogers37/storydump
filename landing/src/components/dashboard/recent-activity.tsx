@@ -4,6 +4,7 @@ import { Clock } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import type { Intent } from "@/lib/intents";
 
 /**
  * Recent activity, from the intent ledger (#1044: a history tab is
@@ -13,13 +14,17 @@ import { EmptyState } from "@/components/dashboard/empty-state";
  * the legacy `posted_at` meant for a posted row and is the only honest reading
  * for a skipped or rejected one — those were never "posted" at any time.
  */
-interface ActivityItem {
-  id: string;
-  state: string;
-  file_name: string;
-  category: string | null;
-  entered_state_at: string;
-}
+
+/**
+ * The five columns this list reads, NARROWED from the intent row rather than
+ * re-declared. `Pick` is the point: the component says what it needs, the
+ * compiler says whether the row still has it, and a column renamed on the
+ * server fails here instead of rendering `undefined`.
+ */
+type ActivityItem = Pick<
+  Intent,
+  "id" | "state" | "file_name" | "category" | "entered_state_at"
+>;
 
 const statusVariant: Record<string, string> = {
   posted: "bg-green-100 text-green-800",

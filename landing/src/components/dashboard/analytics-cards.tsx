@@ -1,4 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import type { SummaryView } from "@/lib/dashboard-payloads";
 
 /**
  * The headline counts, from `stats.intents_by_state` (#1044).
@@ -21,15 +22,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
  * cards name what they now count — publish outcomes — and the bug is excluded
  * by construction rather than by a field that has to keep arriving.
  */
-interface SummaryView {
-  posted: number;
-  skipped: number;
-  rejected: number;
-  failed: number;
-  total: number;
-  success_rate: number | null;
-  avg_per_day: number | null;
-}
 
 /**
  * What a card shows when the figure would have to be invented.
