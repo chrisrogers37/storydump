@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isUuid } from "@/lib/session";
+import { isUuid } from "@/lib/session";
+import { passThrough, requireSessionToken } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -12,9 +13,8 @@ export async function DELETE(
   _request: NextRequest,
   context: { params: Promise<{ tokenId: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token)
-    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const token = await requireSessionToken();
+  if (token instanceof NextResponse) return token;
   const { tokenId } = await context.params;
   if (!isUuid(tokenId)) {
     return NextResponse.json({ error: "invalid_token" }, { status: 400 });
@@ -26,12 +26,7 @@ export async function DELETE(
       method: "DELETE",
     },
   );
-  if (!result.ok) {
-    return NextResponse.json(
-      { error: result.error },
-      { status: result.status },
-    );
-  }
+  if (!result.ok) return passThrough(result);
   // Confirmed only when the API confirmed it. `revoked: true` is the API's
   // contract; anything else is passed through as "not confirmed" rather than
   // promoted to a success the row may not reflect.

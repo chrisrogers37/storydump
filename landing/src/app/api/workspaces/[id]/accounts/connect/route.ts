@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isWorkspaceId } from "@/lib/session";
+import { requireWorkspace } from "@/lib/route-guards";
 import { proxyStartOfGrant } from "@/lib/start-proxy";
 import { isInstagramAuthorizationUrl } from "@/lib/destination";
 
@@ -13,13 +13,9 @@ export async function POST(
   _request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-
-  const { id } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
 
   return proxyStartOfGrant(`/workspaces/${id}/accounts/connect`, token, isInstagramAuthorizationUrl);
 }

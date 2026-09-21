@@ -1,3 +1,5 @@
+import { callBff, postJson } from "./bff";
+
 /**
  * Start an OAuth grant through one of the BFF's `…/connect` proxies and return
  * where the browser goes — the browser twin of `start-proxy.ts`'s
@@ -14,23 +16,13 @@ export async function requestGrant(
   path: string,
   isAllowedUrl: (value: string) => boolean,
 ): Promise<GrantResult> {
-  let response: Response;
-  try {
-    response = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
+  const result = await callBff(path, postJson({}));
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
   }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = typeof data?.error === "string" ? data.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
-  }
-  const url = data?.authorizationUrl;
+  const url = result.data.authorizationUrl;
   if (typeof url !== "string" || !isAllowedUrl(url)) {
-    return { ok: false, error: "malformed_authorization_url", status: response.status };
+    return { ok: false, error: "malformed_authorization_url", status: result.status };
   }
   return { ok: true, authorizationUrl: url };
 }

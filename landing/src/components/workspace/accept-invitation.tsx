@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Loader2 } from "lucide-react";
 
+import { callBff, postJson } from "@/lib/bff";
+
 /**
  * The accept control.
  *
@@ -20,23 +22,17 @@ export function AcceptInvitation({ token }: { token: string }) {
   async function accept() {
     setPending(true);
     setError(null);
-    try {
-      const response = await fetch(
-        `/api/invitations/${encodeURIComponent(token)}/accept`,
-        { method: "POST" },
-      );
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        setError(messageFor(body?.error, response.status));
-        setPending(false);
-        return;
-      }
-      router.push("/dashboard");
-      router.refresh();
-    } catch {
-      setError("We could not reach Storydump. This one is on us.");
+    const result = await callBff(
+      `/api/invitations/${encodeURIComponent(token)}/accept`,
+      postJson({}),
+    );
+    if (!result.ok) {
+      setError(messageFor(result.error, result.status));
       setPending(false);
+      return;
     }
+    router.push("/dashboard");
+    router.refresh();
   }
 
   return (
@@ -73,6 +69,11 @@ function messageFor(reason: unknown, status: number): string {
       return "This invitation was sent to a different address. Sign in with that account.";
     case "already_member":
       return "You are already in this workspace.";
+    // The browser's own `fetch` throwing. It used to arrive in a `catch` beside
+    // this switch with its own sentence; `callBff` reports it as a refusal
+    // named `unreachable` at status 0, so the sentence moves in here unchanged.
+    case "unreachable":
+      return "We could not reach Storydump. This one is on us.";
     default:
       if (status === 503) {
         return "Storydump cannot accept invitations yet. Nothing you did — check back shortly.";

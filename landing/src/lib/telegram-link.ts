@@ -1,3 +1,4 @@
+import { callBff, postJson } from "./bff";
 import { isHttpsUrlOnHost } from "./redirect-guard";
 import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 import { botName } from "./telegram-bot";
@@ -32,6 +33,20 @@ export function isTelegramLink(value: string, bot: string | undefined = botName)
   return start.startsWith(LINK_PREFIX) && start.length > LINK_PREFIX.length;
 }
 
+/**
+ * The API's `STATE_TTL_SECONDS`, mirrored — the fallback when a response
+ * omits `expires_in_seconds`, never `0`.
+ *
+ * Three sites spelled `900` and a fourth spelled the same span as `15`
+ * minutes, in a sentence a person reads ("expires after 15 minutes"). Two
+ * numbers for one fact is how the sentence and the link come to disagree
+ * about when the link dies.
+ */
+export const LINK_TTL_SECONDS_FALLBACK = 900;
+
+/** The same span, as the sentence on the Integrations card says it. */
+export const LINK_TTL_MINUTES_FALLBACK = LINK_TTL_SECONDS_FALLBACK / 60;
+
 export type TelegramLinkResult =
   | { ok: true; link: string; expiresInSeconds: number }
   | { ok: false; error: string; status: number };
@@ -39,28 +54,19 @@ export type TelegramLinkResult =
 /** Ask for a fresh link. Returns it rather than opening it: the caller owns
  *  the navigation, so a refusal renders instead of a page that did nothing. */
 export async function requestTelegramLink(): Promise<TelegramLinkResult> {
-  let response: Response;
-  try {
-    response = await fetch("/api/me/telegram/link", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
+  const result = await callBff("/api/me/telegram/link", postJson({}));
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
   }
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = typeof data?.error === "string" ? data.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
-  }
-
-  const link = data?.link;
+  const link = result.data.link;
   if (typeof link !== "string" || !isTelegramLink(link)) {
-    return { ok: false, error: "malformed_link", status: response.status };
+    return { ok: false, error: "malformed_link", status: result.status };
   }
   const expiresInSeconds =
-    typeof data?.expiresInSeconds === "number" ? data.expiresInSeconds : 0;
+    typeof result.data.expiresInSeconds === "number"
+      ? result.data.expiresInSeconds
+      : 0;
   return { ok: true, link, expiresInSeconds };
 }
 
@@ -117,25 +123,21 @@ export function isTelegramGroupLink(value: string, bot: string | undefined = bot
 }
 
 export async function requestTelegramGroupLink(workspaceId: string): Promise<TelegramLinkResult> {
-  let response: Response;
-  try {
-    response = await fetch(`/api/workspaces/${workspaceId}/telegram/bind-link`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
+  const result = await callBff(
+    `/api/workspaces/${workspaceId}/telegram/bind-link`,
+    postJson({}),
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
   }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = typeof data?.error === "string" ? data.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
-  }
-  const link = data?.link;
+  const link = result.data.link;
   if (typeof link !== "string" || !isTelegramGroupLink(link)) {
-    return { ok: false, error: "malformed_link", status: response.status };
+    return { ok: false, error: "malformed_link", status: result.status };
   }
-  const expiresInSeconds = typeof data?.expiresInSeconds === "number" ? data.expiresInSeconds : 0;
+  const expiresInSeconds =
+    typeof result.data.expiresInSeconds === "number"
+      ? result.data.expiresInSeconds
+      : 0;
   return { ok: true, link, expiresInSeconds };
 }
 

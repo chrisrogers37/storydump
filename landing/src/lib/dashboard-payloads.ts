@@ -49,18 +49,21 @@ export type StatsResponse = {
 };
 
 /**
- * The intent row and its envelope live in `intents.ts` — ONE contract.
+ * The intent row and its envelope live in `intents.ts` — ONE contract. THIS
+ * FILE DOES NOT RE-EXPORT THEM; import `Intent`, `IntentState` and
+ * `IntentsResponse` from `@/lib/intents`.
  *
  * This file used to declare a second `IntentRow`/`IntentsResponse` pair for
  * the three screens that read `?state=`. Structural typing kept both
  * compiling while they drifted: this copy was missing `account_handle` and
  * `account_display_name` (served by `_INTENT_COLUMNS`), and typed
  * `ig_account_id`, `schedule_slot_at` and `approval_mode` as nullable where
- * the server never sends null. Re-exported rather than deleted outright so
- * that a reader who lands here on the name is sent to the owner rather than
- * finding nothing.
+ * the server never sends null. #1338 moved every screen onto the owner and
+ * left a type-only re-export here as a signpost; it ended that change with
+ * zero importers, and a second import path for one contract is how the two
+ * copies came to disagree in the first place. The signpost is this
+ * paragraph, which cannot be imported.
  */
-export type { Intent, IntentState, IntentsResponse } from "./intents";
 
 /** A row of `GET …/media?state=&never_posted=&limit=` — `_MEDIA_COLUMNS`. */
 export type MediaRow = {

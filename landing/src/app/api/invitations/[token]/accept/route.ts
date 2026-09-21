@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  INVITE_COOKIE,
   WORKSPACE_COOKIE,
   WORKSPACE_COOKIE_OPTIONS,
-  getSessionToken,
   isWorkspaceId,
 } from "@/lib/session";
+import { passThrough, requireSessionToken } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
-import { INVITE_COOKIE } from "@/app/join/[token]/start/route";
 
 /**
  * POST /api/invitations/[token]/accept
@@ -25,10 +25,8 @@ export async function POST(
   _request: NextRequest,
   context: { params: Promise<{ token: string }> },
 ) {
-  const sessionToken = await getSessionToken();
-  if (!sessionToken) {
-    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-  }
+  const sessionToken = await requireSessionToken();
+  if (sessionToken instanceof NextResponse) return sessionToken;
 
   const { token } = await context.params;
   if (!token || token.length > 256) {
@@ -43,9 +41,7 @@ export async function POST(
     { method: "POST" },
   );
 
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
 
   const response = NextResponse.json({ workspaceId: result.data.workspace_id });
 

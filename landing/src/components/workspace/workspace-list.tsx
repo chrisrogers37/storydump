@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Check, Loader2 } from "lucide-react";
+import { callBff, postJson } from "@/lib/bff";
 import type { Workspace } from "@/lib/workspaces";
 
 /**
@@ -39,21 +40,16 @@ export function WorkspaceList({
     if (selecting) return;
     setSelecting(id);
     setError(null);
-    try {
-      const response = await fetch(`/api/workspaces/${id}/select`, {
-        method: "POST",
-      });
-      if (!response.ok) {
-        setError("That workspace could not be opened.");
-        setSelecting(null);
-        return;
-      }
-      router.push("/dashboard");
-      router.refresh();
-    } catch {
+    // One branch, not two: the refusal and the unreachable app have always
+    // shown the same sentence here, and `callBff` reports both as `!ok`.
+    const result = await callBff(`/api/workspaces/${id}/select`, postJson({}));
+    if (!result.ok) {
       setError("That workspace could not be opened.");
       setSelecting(null);
+      return;
     }
+    router.push("/dashboard");
+    router.refresh();
   }
 
   return (

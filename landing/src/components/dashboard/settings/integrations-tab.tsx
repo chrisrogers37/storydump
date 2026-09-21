@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { TONE_CLASS } from "@/components/dashboard/tone";
+import { Notice } from "@/components/ui/notice";
 import {
   Dialog,
   DialogContent,
@@ -37,6 +38,7 @@ import {
 } from "@/lib/drive";
 import type { DriveFolder } from "@/lib/drive";
 import {
+  LINK_TTL_MINUTES_FALLBACK,
   requestTelegramGroupLink,
   requestTelegramLink,
   telegramGroupLinkRefusalCopy,
@@ -47,11 +49,13 @@ import { startCommandFor } from "@/lib/telegram-link";
 import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
 
 /**
- * Integrations, read-only (#1063).
+ * Integrations — Google Drive and Telegram, both live.
  *
- * Every action on this tab targets a route that does not exist —
- * `disconnect-gdrive`, `sync-media`, and `oauth-url/google-drive` behind the
- * connect button. All three are wired now; nothing on this card is held off.
+ * Every action here used to target a route that did not exist
+ * (`disconnect-gdrive`, `sync-media`, `oauth-url/google-drive`). All three
+ * are wired: Drive connect is the per-workspace grant (069, #1165),
+ * disconnect is the `disconnect_account` command, and sync is `sync_now`.
+ * Nothing on this tab is held off.
  *
  * The connection facts are now real: `gdrive_connected` and the source's own
  * `state` come from `GET /workspaces/{ws}/sources`, and the media count from
@@ -60,6 +64,7 @@ import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
  * "Auto-sync disabled", which is a claim about the workspace made from a
  * column that does not exist.
  */
+
 /**
  * ── Google Drive is connected ONCE, per workspace (owner ruling 2026-09-05) ──
  *
@@ -281,17 +286,6 @@ export function IntegrationsTab({
   }
 
   /**
-   * Disconnect Google Drive — REVOKE AND PAUSE, never a delete (F5 (a)).
-   *
-   * The executor revokes the workspace's one grant, KEEPS every row, and sets
-   * each folder `paused` rather than `error`: a disconnect is a decision, not
-   * a fault, and `error` is reserved for faults so the stranded-source alert
-   * stays meaningful. The copy says "asked Google to revoke", never
-   * "revoked": the local revocation is immediate and certain, while the
-   * Google-side call is a BEST-EFFORT background job so a provider outage
-   * cannot block the person's disconnect.
-   */
-  /**
    * Mint the Telegram deep link and SHOW it rather than navigate: the tap has
    * to happen inside Telegram, on whatever device the person has it on, so a
    * same-tab `location.assign` to `t.me` would strand a desktop browser on
@@ -314,6 +308,17 @@ export function IntegrationsTab({
     });
   }
 
+  /**
+   * Disconnect Google Drive — REVOKE AND PAUSE, never a delete (F5 (a)).
+   *
+   * The executor revokes the workspace's one grant, KEEPS every row, and sets
+   * each folder `paused` rather than `error`: a disconnect is a decision, not
+   * a fault, and `error` is reserved for faults so the stranded-source alert
+   * stays meaningful. The copy says "asked Google to revoke", never
+   * "revoked": the local revocation is immediate and certain, while the
+   * Google-side call is a BEST-EFFORT background job so a provider outage
+   * cannot block the person's disconnect.
+   */
   async function disconnectDrive() {
     setError(null);
     setNotice(null);
@@ -368,14 +373,14 @@ export function IntegrationsTab({
   return (
     <div className="space-y-6 pt-4">
       {error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <Notice tone="error" className="mb-4">
           {error}
-        </div>
+        </Notice>
       )}
       {notice && (
-        <div className="mb-4 rounded-md border bg-muted/40 p-3 text-sm">
+        <Notice tone="info" className="mb-4">
           {notice}
-        </div>
+        </Notice>
       )}
       <Card>
         <CardHeader>
@@ -405,7 +410,7 @@ export function IntegrationsTab({
                 and the link below works once and expires after{" "}
                 {telegramLink?.expiresInSeconds
                   ? Math.round(telegramLink.expiresInSeconds / 60)
-                  : 15}{" "}
+                  : LINK_TTL_MINUTES_FALLBACK}{" "}
                 minutes.
               </p>
               {telegramLink ? (

@@ -4,7 +4,9 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Loader2 } from "lucide-react";
 
+import { callBff, postJson } from "@/lib/bff";
 import { createWorkspaceRefusalCopy } from "@/lib/refusal-copy";
+import { WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
 
 /**
  * Name a workspace and create it.
@@ -21,20 +23,14 @@ import { createWorkspaceRefusalCopy } from "@/lib/refusal-copy";
  * again would be a lie. Neither is rendered as a form-level "something went
  * wrong", which is the phrasing that makes both look like the user's fault.
  */
-export function CreateWorkspaceForm({
-  submitLabel = "Create workspace",
-  autoFocus = false,
-}: {
-  submitLabel?: string;
-  autoFocus?: boolean;
-}) {
+export function CreateWorkspaceForm({ autoFocus = false }: { autoFocus?: boolean }) {
   const router = useRouter();
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const trimmed = name.trim();
-  const tooLong = trimmed.length > 100;
+  const tooLong = trimmed.length > WORKSPACE_NAME_MAX;
   const canSubmit = trimmed.length > 0 && !tooLong && !pending;
 
   async function onSubmit(event: React.FormEvent) {
@@ -44,31 +40,30 @@ export function CreateWorkspaceForm({
     setPending(true);
     setError(null);
 
-    // The try covers the CREATE ONLY. Everything after it runs in a world where
-    // the workspace exists, and nothing there may report a failure to the person:
-    // telling someone the create failed when it succeeded is the worst outcome
-    // this flow has, and it is a scoping bug rather than a wording one.
-    let created: { outcome?: string; workspace_id?: string } | null = null;
-    try {
-      const response = await fetch("/api/workspaces", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: trimmed }),
-      });
+    // THIS BLOCK COVERS THE CREATE ONLY. Everything after it runs in a world
+    // where the workspace exists, and nothing there may report a failure to the
+    // person: telling someone the create failed when it succeeded is the worst
+    // outcome this flow has, and it is a scoping bug rather than a wording one.
+    // `callBff` does not throw, so the scope is now the `if` rather than a
+    // `try` — the boundary is the same one and the early `return` holds it.
+    const createResult = await callBff("/api/workspaces", postJson({ name: trimmed }));
 
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        setError(createWorkspaceRefusalCopy(body?.error, response.status));
-        setPending(false);
-        return;
-      }
-
-      created = await response.json().catch(() => null);
-    } catch {
-      setError("We could not reach Storydump. This one is on us.");
+    if (!createResult.ok) {
+      // Status 0 is the browser's own `fetch` throwing, which used to arrive in
+      // a `catch` with this sentence. `createWorkspaceRefusalCopy` has no arm
+      // for it — its default reads "That did not work. This one is on us.",
+      // which blames the person for an outage — so the sentence stays here.
+      setError(
+        createResult.status === 0
+          ? "We could not reach Storydump. This one is on us."
+          : createWorkspaceRefusalCopy(createResult.error, createResult.status),
+      );
       setPending(false);
       return;
     }
+
+    const created: { outcome?: string; workspace_id?: string } =
+      createResult.data;
 
     // ── The workspace exists from here down. ────────────────────────────────
     //
@@ -82,18 +77,18 @@ export function CreateWorkspaceForm({
     // `200 {"outcome": "replayed"}` and nothing else. That is not an error — the
     // workspace is real — so it needs a destination rather than a failure, and
     // the id it would need cannot be recovered from the response.
-    const workspaceId = created?.workspace_id;
+    const workspaceId = created.workspace_id;
     let selected = false;
 
     if (workspaceId) {
-      try {
-        const select = await fetch(`/api/workspaces/${workspaceId}/select`, {
-          method: "POST",
-        });
-        selected = select.ok;
-      } catch {
-        // Selection is a cookie convenience. Losing it costs a click, not data.
-      }
+      // Selection is a cookie convenience. Losing it costs a click, not data —
+      // and `callBff` reports an unreachable app as `ok: false` rather than
+      // throwing, so the swallowed `catch` is now simply this `.ok`.
+      const select = await callBff(
+        `/api/workspaces/${workspaceId}/select`,
+        postJson({}),
+      );
+      selected = select.ok;
     }
 
     // `/dashboard` only when the cookie is actually set: the route gate sends a
@@ -115,7 +110,7 @@ export function CreateWorkspaceForm({
           name="name"
           value={name}
           autoFocus={autoFocus}
-          maxLength={120}
+          maxLength={WORKSPACE_NAME_MAX}
           onChange={(event) => setName(event.target.value)}
           placeholder="e.g. Northside Coffee"
           aria-invalid={tooLong || undefined}
@@ -124,7 +119,9 @@ export function CreateWorkspaceForm({
         />
         {(tooLong || error) && (
           <p id="workspace-name-error" role="alert" className="text-sm text-destructive">
-            {tooLong ? "Keep it to 100 characters or fewer." : error}
+            {tooLong
+              ? `Keep it to ${WORKSPACE_NAME_MAX} characters or fewer.`
+              : error}
           </p>
         )}
       </div>
@@ -135,7 +132,7 @@ export function CreateWorkspaceForm({
         className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
       >
         {pending && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
-        {pending ? "Creating…" : submitLabel}
+        {pending ? "Creating…" : "Create workspace"}
       </button>
     </form>
   );

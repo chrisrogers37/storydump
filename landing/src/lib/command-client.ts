@@ -1,4 +1,5 @@
-import { notAuthenticatedCopy } from "./refusal-copy";
+import { callBff, postJson } from "./bff";
+import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 /**
  * The browser's one door to the command route (#1057/#1063, epic P3).
  *
@@ -53,6 +54,11 @@ export type SubmitResult =
  */
 export const REPLAYED_ERROR = "unexpected_replay";
 
+/** The one path spelling for a command. The queue imports this rather than re-typing it. */
+export function commandPath(workspaceId: string, command: string): string {
+  return `/api/workspaces/${workspaceId}/commands/${command}`;
+}
+
 /**
  * POST one command for a workspace, with a fresh submission identity.
  *
@@ -66,37 +72,42 @@ export async function submitCommand(
   command: string,
   body: Record<string, unknown> = {},
 ): Promise<SubmitResult> {
-  let response: Response;
-  try {
-    response = await fetch(`/api/workspaces/${workspaceId}/commands/${command}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      // The id rides in the body because that is where P2's `submissionCommand`
-      // spec reads it; the route derives the header from it and the browser
-      // never sets `Idempotency-Key` itself.
-      body: JSON.stringify({ ...body, submission_id: crypto.randomUUID() }),
-    });
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
-  }
+  const result = await callBff(
+    commandPath(workspaceId, command),
+    // The id rides in the body because that is where P2's `submissionCommand`
+    // spec reads it; the route derives the header from it and the browser
+    // never sets `Idempotency-Key` itself.
+    postJson({ ...body, submission_id: crypto.randomUUID() }),
+  );
 
-  const data = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
+  if (!result.ok) {
+    // THE ONE CALLER THAT READS TWO KEYS, spelled out rather than pushed
+    // into `callBff`. The port's 4xx carry `{"error": …}` and its 409s carry
+    // `{"reason": …}`; `callBff` reads the first and falls back to
+    // `http_<status>`. Re-deriving here keeps the precedence identical to
+    // what shipped (`error`, then `reason`, then whatever `callBff` already
+    // decided) instead of inferring it from the fallback string, which would
+    // misread a route that legitimately answered `{"error": "http_409"}`.
+    //
+    // The last arm is `result.error`, NOT a re-synthesised `http_${status}`:
+    // a thrown `fetch` has no body at all and `callBff` answers it
+    // `unreachable` at status 0, which `settingsRefusalCopy` has a sentence
+    // for. Rebuilding the string here would spell that case `http_0` and
+    // drop it through to the generic refusal.
     const error =
-      typeof data?.error === "string"
-        ? data.error
-        : typeof data?.reason === "string"
-          ? data.reason
-          : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
+      typeof result.body.error === "string"
+        ? result.body.error
+        : typeof result.body.reason === "string"
+          ? result.body.reason
+          : result.error;
+    return { ok: false, error, status: result.status };
   }
 
-  if (data?.outcome === "replayed") {
-    return { ok: false, error: REPLAYED_ERROR, status: response.status };
+  if (result.data.outcome === "replayed") {
+    return { ok: false, error: REPLAYED_ERROR, status: result.status };
   }
 
-  return { ok: true, data: data ?? {} };
+  return { ok: true, data: result.data };
 }
 
 /**
@@ -112,16 +123,6 @@ export function submitSettingsChange(
   return submitCommand(workspaceId, "settings_change", { settings });
 }
 
-/**
- * A sentence for a settings refusal.
- *
- * Deliberately NOT `intents.ts`'s `refusalCopy`, which is not a shared table
- * that happens to be elsewhere — it is the QUEUE's vocabulary. Its reasons
- * (`illegal_transition`, `manual_mode`) cannot arise from a settings write and
- * these cannot arise from a queue action, so folding them together would put
- * "This post is no longer in the queue" on a form about posting hours. Two
- * disjoint vocabularies, not two copies of one decision.
- */
 /** Rename the workspace. `submitCommand` mints the submission id. */
 export function submitRenameWorkspace(workspaceId: string, name: string) {
   return submitCommand(workspaceId, "rename_workspace", { name });
@@ -193,11 +194,21 @@ export function offboardingRefusalCopy(reason: unknown, status?: number): string
       return notAuthenticatedCopy("Nothing changed.");
     case "unreachable":
     case "target_router_unreachable":
-      return "Storydump cannot reach the server right now. Nothing changed — try again shortly.";
+      return unreachableCopy("Nothing changed");
   }
   return "That did not go through. Nothing changed — try again shortly.";
 }
 
+/**
+ * A sentence for a settings refusal.
+ *
+ * Deliberately NOT `intents.ts`'s `refusalCopy`, which is not a shared table
+ * that happens to be elsewhere — it is the QUEUE's vocabulary. Its reasons
+ * (`illegal_transition`, `manual_mode`) cannot arise from a settings write and
+ * these cannot arise from a queue action, so folding them together would put
+ * "This post is no longer in the queue" on a form about posting hours. Two
+ * disjoint vocabularies, not two copies of one decision.
+ */
 export function settingsRefusalCopy(reason: unknown, status?: number): string {
   // A permission refusal carries NO reason to switch on. `insufficient_role`
   // is mapped to 403 and answered `{detail: "forbidden"}` — no `error`, no
@@ -229,7 +240,7 @@ export function settingsRefusalCopy(reason: unknown, status?: number): string {
       return notAuthenticatedCopy("Nothing changed.");
     case "unreachable":
     case "target_router_unreachable":
-      return "Storydump cannot reach the server right now. Nothing changed — try again shortly.";
+      return unreachableCopy("Nothing changed");
   }
   return "That did not save. Nothing changed — try again shortly.";
 }

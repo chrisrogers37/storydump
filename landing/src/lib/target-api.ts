@@ -1,16 +1,12 @@
 /**
  * The client for the target router.
  *
- * `backend.ts` is the legacy client: every call it makes is
- * `/api/onboarding/*` authenticated by `generateUrlToken(chat_id, user_id)`, a
- * credential HMAC'd with the Telegram bot token. A user who never used Telegram
- * cannot produce one, which is why it cannot be extended to serve web sign-up
- * and is being replaced rather than widened.
- *
- * The two are not a dual path and nothing here translates between them. They are
- * one client per era: `backend.ts` serves only the dashboard screens (P6–P9),
- * which are held in this PR, and dies with them in the follow-up that ports
- * those screens onto the target router.
+ * THE ONLY CLIENT. `backend.ts` was the legacy one — every call
+ * `/api/onboarding/*`, authenticated by `generateUrlToken(chat_id, user_id)`,
+ * a credential HMAC'd with the Telegram bot token that a user who had never
+ * used Telegram could not produce. That is why it could not be widened to
+ * serve web sign-up, and it is gone: the screens it served are on this
+ * client now, and there is no second era to translate to.
  *
  * ── The credential ─────────────────────────────────────────────────────────
  *

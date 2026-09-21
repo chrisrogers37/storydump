@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { TONE_CLASS } from "@/components/dashboard/tone";
+import { Notice } from "@/components/ui/notice";
 import {
   Dialog,
   DialogContent,
@@ -114,10 +115,9 @@ export function AccountsTab({ accounts, workspaceId }: AccountsTabProps) {
   return (
     <div className="space-y-6 pt-4">
       {error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 flex items-center justify-between">
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="ml-2 text-red-600 hover:text-red-800 font-medium">Dismiss</button>
-        </div>
+        <Notice tone="error" className="mb-4" onDismiss={() => setError(null)}>
+          {error}
+        </Notice>
       )}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-4">

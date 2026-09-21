@@ -1,13 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { idempotencyKeyFor } from "@/lib/commands";
-import { getSessionToken } from "@/lib/session";
+import {
+  passThrough,
+  readJsonBody,
+  requireSessionToken,
+} from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
+import { workspaceNameValid } from "@/lib/workspace-name";
 import type { Workspace } from "@/lib/workspaces";
 
 /** GET /api/workspaces — the ones this user is a member of. Possibly none. */
 export async function GET() {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const token = await requireSessionToken();
+  if (token instanceof NextResponse) return token;
 
   const result = await targetFetch<{ workspaces: Workspace[] }>(
     "/workspaces",
@@ -17,9 +22,7 @@ export async function GET() {
   // An empty list and an unreachable router are NOT the same answer and must
   // not share a status. "You have no workspaces yet" sends someone to create
   // one; "we could not ask" must not.
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
   return NextResponse.json({ workspaces: result.data.workspaces });
 }
 
@@ -33,20 +36,25 @@ export async function GET() {
  * with an error that points at neither statement.
  */
 export async function POST(request: NextRequest) {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const token = await requireSessionToken();
+  if (token instanceof NextResponse) return token;
 
-  let name: unknown;
-  try {
-    ({ name } = await request.json());
-  } catch {
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody instanceof NextResponse) return parsedBody;
+  // `null` parses as valid JSON, and the destructure this replaces sat INSIDE
+  // the same `try` — so a body of `null` threw there and was answered
+  // `malformed_body`. Named explicitly rather than left to a destructure,
+  // which would now throw where nothing catches it.
+  if (parsedBody.raw == null) {
     return NextResponse.json({ error: "malformed_body" }, { status: 400 });
   }
+  const { name } = parsedBody.raw as { name?: unknown };
 
-  // `workspaces.name` is VARCHAR(100) NOT NULL. Checked here so a blank field
-  // is a field error next to the input rather than a 500 from a constraint.
+  // `workspaces.name` is VARCHAR(100) NOT NULL — `WORKSPACE_NAME_MAX`, which
+  // both forms now cap at too. Checked here so a blank field is a field error
+  // next to the input rather than a 500 from a constraint.
   const trimmed = typeof name === "string" ? name.trim() : "";
-  if (!trimmed || trimmed.length > 100) {
+  if (!workspaceNameValid(trimmed)) {
     return NextResponse.json({ error: "invalid_name" }, { status: 400 });
   }
 
@@ -68,8 +76,6 @@ export async function POST(request: NextRequest) {
     headers: { "Idempotency-Key": idempotencyKeyFor("create_workspace", trimmed) },
   });
 
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
   return NextResponse.json(result.data, { status: 201 });
 }

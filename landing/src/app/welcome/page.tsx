@@ -5,7 +5,7 @@ import { listWorkspaces } from "@/lib/workspaces";
 import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-form";
 import { SignOutButton } from "@/components/auth/sign-out-button";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
-import { INVITE_COOKIE } from "@/app/join/[token]/start/route";
+import { INVITE_COOKIE } from "@/lib/session";
 import { siteConfig } from "@/config/site";
 
 export const metadata = {
@@ -33,8 +33,9 @@ export const metadata = {
  * The previous version offered three connect rows, all disabled. Instagram and
  * Drive belong to a workspace, so they cannot be offered before one exists —
  * that is what made them disabled, and three dead controls is a screen that
- * teaches a new user their first act here is to be refused. They now live in
- * the workspace, on /dashboard/connections.
+ * teaches a new user their first act here is to be refused. They live in the
+ * workspace now, on /dashboard/settings — the Accounts and Integrations
+ * tabs.
  */
 export default async function WelcomePage() {
   const entry = await resolveEntrySession();

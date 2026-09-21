@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Notice } from "@/components/ui/notice";
 import {
   offboardingRefusalCopy,
   submitOffboardWorkspace,
@@ -113,9 +114,7 @@ export function DangerZoneCard({
             will need reconnecting before posting resumes.
           </p>
           {error && (
-            <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-              {error}
-            </div>
+            <Notice tone="error">{error}</Notice>
           )}
           <Button onClick={restore} disabled={busy}>
             {busy ? "Restoring..." : "Restore workspace"}
@@ -138,9 +137,7 @@ export function DangerZoneCard({
           those 30 days you can restore it from here.
         </p>
         {error && !open && (
-          <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-            {error}
-          </div>
+          <Notice tone="error">{error}</Notice>
         )}
         <Button
           variant="destructive"
@@ -173,9 +170,7 @@ export function DangerZoneCard({
               />
             </div>
             {error && (
-              <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-                {error}
-              </div>
+              <Notice tone="error">{error}</Notice>
             )}
             <DialogFooter>
               <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>

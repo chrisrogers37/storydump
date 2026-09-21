@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isUuid, isWorkspaceId } from "@/lib/session";
+import { isUuid } from "@/lib/session";
+import { requireWorkspace } from "@/lib/route-guards";
 import { proxyStartOfGrant } from "@/lib/start-proxy";
 import { isInstagramAuthorizationUrl } from "@/lib/destination";
 
@@ -23,13 +24,11 @@ export async function POST(
   _request: NextRequest,
   context: { params: Promise<{ id: string; accountId: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
 
-  const { id, accountId } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  const { accountId } = await context.params;
   if (!isUuid(accountId)) {
     return NextResponse.json({ error: "invalid_account" }, { status: 400 });
   }

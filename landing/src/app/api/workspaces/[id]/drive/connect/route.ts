@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isWorkspaceId } from "@/lib/session";
+import { requireWorkspace } from "@/lib/route-guards";
 import { proxyStartOfGrant } from "@/lib/start-proxy";
 import { isGoogleAuthorizationUrl } from "@/lib/drive";
 
@@ -9,13 +9,9 @@ import { isGoogleAuthorizationUrl } from "@/lib/drive";
  * folders picked under it. The per-folder sibling this replaces is gone.
  */
 export async function POST(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-
-  const { id } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
 
   return proxyStartOfGrant(`/workspaces/${id}/drive/connect`, token, isGoogleAuthorizationUrl);
 }

@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
-import { getSession, getSessionToken } from "@/lib/session";
+import { getSessionToken } from "@/lib/session";
+import { requireWorkspacePage } from "@/lib/page-guards";
 import { targetFetch } from "@/lib/target-api";
 import { workspaceFetch } from "@/lib/workspaces";
 import {
@@ -20,11 +20,14 @@ import { CategoryWeightsCard } from "@/components/dashboard/settings/category-we
 import type { CategoryMixResponse } from "@/lib/category-mix";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
 import { ApiTokensTab } from "@/components/dashboard/settings/api-tokens-tab";
+import { Notice } from "@/components/ui/notice";
 import { tokenRowsFrom } from "@/lib/tokens";
 
 /**
- * Settings — General writes, Accounts writes ONE thing (adding a destination,
- * #1089), Integrations does not yet (#1057/#1063).
+ * Settings — every tab writes. General is the command client (P3), Accounts
+ * adds and removes destinations (#1089, and `disable_account`), Integrations
+ * connects and disconnects Drive and mints Telegram links, API tokens mints
+ * and revokes.
  *
  * It used to ask for `init`, a route that does not exist and is not planned, so
  * the hard bail below fired on EVERY load and this screen rendered
@@ -32,43 +35,36 @@ import { tokenRowsFrom } from "@/lib/tokens";
  * "Router unavailable" also misdiagnosed: the router was fine; this page was
  * asking it for something it never served.
  *
- * ── `editable` is per TAB, because readiness is per tab ────────────────────
+ * ── `editable` is GONE, and what replaced it ───────────────────────────
  *
- * All six Settings writes used to target routes that do not exist. Four of
- * them — the `settings_change` controls on General — are now on the command
- * client (epic P3), so that tab is editable. Integrations is NOT — and note
- * `editable` is not the same question as "can this tab write": Accounts
- * carries a working destination form (#1089) that was always deliberately
- * outside the flag, because the flag marks controls whose ROUTE does not
- * exist yet. `remove-account` and `disconnect-gdrive` map to
- * `disconnect_account` which is UNBUILT, and `sync-media` is the epic's P4.
- * Flipping those with General would be exactly the shape #1051 refused —
- * "a save button that silently 404s".
- *
- * ACCOUNTS NO LONGER TAKES THE FLAG AT ALL (TD-D3). The one control it gated
- * there was "Make Active", whose `switch-account` had no target-tier home;
- * it POSTed through a BFF proxy onto a path the API does not serve, and both
- * are deleted rather than kept disabled. A flag with nothing behind it is not
- * a promise, so the prop is gone from that tab rather than passed as `false`;
- * it is still passed to General and Integrations, where it means what it
- * always meant.
+ * It marked controls whose ROUTE did not exist yet. Every one of them now
+ * either exists (the General writes are on the command client, epic P3;
+ * `disconnect_account` is a built `COMMAND_SPECS` row and Integrations calls
+ * it; `sync_now` is wired) or has been removed with the door behind it
+ * (#1338 deleted the switch-account control and its BFF proxy). A
+ * permanently-true flag is the mirror image of the permanently-false one
+ * #1070 refused, and neither survives a reader asking what it would take to
+ * flip it.
  *
  * Both connect flows targeted `oauth-url/<provider>` and were DELETED rather
  * than gated (#1070). The Drive one is BACK since 069 (#1165): per-workspace
  * against a per-workspace route, which is the shape it always wanted. That
- * deletion is what made flipping the flag here safe;
- * `editable` gates ONE kind of thing, controls that are pending and coming
- * back, so it cannot resurrect anything removed as invalid.
+ * deletion is what made the flag safe to drop rather than flip: it gated ONE
+ * kind of thing, controls pending and coming back, so it never held anything
+ * that was removed as invalid.
+ *
+ * The one flag left on this screen is `CategoryWeightsCard`'s
+ * `editable={isAdmin}`, which is a different question entirely: a ROLE
+ * floor, variable per person, answered from the session's membership.
  *
  * ── There is no page-level read-only banner, deliberately ──────────────────
  *
  * There was one, and it made a single claim about three tabs. That was true
- * while all three were read-only and became false the moment one was not. The
- * two remaining read-only tabs each carry their own notice at the control it
- * is about (`accounts-tab.tsx`, `integrations-tab.tsx`), which is where a
- * reader meets it; a page-level restatement could only be a coarser copy of
- * those, and after this change a WRONG one. If a third tab ever becomes
- * editable, nothing here needs editing — which is the point.
+ * while all three were read-only and became false the moment one was not.
+ * Now none of them is, and the banner would be wrong about all four. Where a
+ * single control is still held off, the tab that owns it says so at the
+ * control — which is where a reader meets it; a page-level restatement could
+ * only ever be a coarser copy of that, and one more thing to keep true.
  *
  * ── The bail stays hard, and it still is not the whole guard ────────────────
  *
@@ -92,10 +88,7 @@ export default async function SettingsPage({
   // parameter was unreadable by construction and the grant completed in
   // silence — #1090 B3's other half.
   const { connected } = await searchParams;
-  const session = await getSession().catch(() => null);
-  if (!session) redirect("/login");
-  const workspaceId = session.activeWorkspaceId;
-  if (!workspaceId) redirect("/welcome");
+  const { session, workspaceId } = await requireWorkspacePage();
 
   // The name comes from the session's own workspace list rather than a fresh
   // read: the switcher and header already render from it, so a second source
@@ -221,26 +214,20 @@ export default async function SettingsPage({
         which is the signal that actually tracks syncing.
       */}
       {connected === "instagram" && (
-        <div
-          role="status"
-          className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-900"
-        >
+        <Notice tone="success">
           <span className="font-medium">Instagram account connected.</span>{" "}
           Storydump will keep its access fresh. Publishing through Instagram
           directly is not switched on yet; approvals still post by hand.
-        </div>
+        </Notice>
       )}
 
       {connected === "gdrive" && (
-        <div
-          role="status"
-          className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-900"
-        >
+        <Notice tone="success">
           <span className="font-medium">Google Drive access was granted.</span>{" "}
           The grant completed, so an empty library is not a failed connection.
           Its current state is shown on the Google Drive card under
           Integrations.
-        </div>
+        </Notice>
       )}
 
       <Tabs defaultValue={initialTab}>
@@ -256,21 +243,28 @@ export default async function SettingsPage({
             settings={settings}
             workspaceId={workspaceId}
             workspaceName={workspaceName}
-            editable
             workspaceState={configResult.data.state}
             restorableUntil={configResult.data.restorable_until}
             isOwner={isOwner}
             categoryMix={
               <CategoryWeightsCard
+                // Keyed on the server's rows so a refreshed mix REMOUNTS the
+                // card rather than being written into its state by an effect.
+                // Changing this key discards an in-progress edit, which is the
+                // rule the card documents: after a save or a newly connected
+                // folder, the numbers on screen are the server's again.
+                key={
+                  mixResult.ok
+                    ? JSON.stringify(mixResult.data?.rows ?? null)
+                    : "unavailable"
+                }
                 workspaceId={workspaceId}
                 data={
                   mixResult.ok && Array.isArray(mixResult.data?.rows)
                     ? mixResult.data
                     : null
                 }
-                editable={
-                  isAdmin
-                }
+                editable={isAdmin}
               />
             }
             members={
@@ -300,10 +294,11 @@ export default async function SettingsPage({
         </TabsContent>
 
         {/*
-          `editable` stays false HERE too. Nothing on the Drive card is behind
-          it: Connect, the folder picker, Sync Now, Remove and Disconnect all
-          call routes that exist (069, #1165), and gating them would be the
-          reads-without-writes harm inverted, hiding controls that work.
+          No `editable` here either, and by the time it was deleted it had
+          nothing left to gate: Connect, the folder picker, Sync Now, Remove
+          and Disconnect all call routes that exist (069, #1165), and gating
+          them would be the reads-without-writes harm inverted, hiding
+          controls that work.
         */}
         <TabsContent value="integrations">
           <IntegrationsTab

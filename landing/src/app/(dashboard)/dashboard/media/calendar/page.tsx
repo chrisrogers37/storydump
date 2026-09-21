@@ -1,5 +1,4 @@
-import { redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
+import { requireWorkspacePage } from "@/lib/page-guards";
 import { workspaceFetch } from "@/lib/workspaces";
 import {
   HISTORY_STATES,
@@ -32,24 +31,31 @@ function todayIn(tz: string | null): string {
   }
 }
 
+/**
+ * The calendar's three bounded reads (`01` H5). History and the schedule
+ * strip are drawn as dots on a month, so fifteen is what fits; the queue
+ * lane lists rows, so it is the shorter ten. Every COUNT on this page comes
+ * from `stats`, never from these lists.
+ */
+const CALENDAR_HISTORY_LIMIT = 15;
+const CALENDAR_QUEUE_LIMIT = 10;
+const CALENDAR_SCHEDULE_LIMIT = 15;
+
 export default async function CalendarPage() {
-  const session = await getSession().catch(() => null);
-  if (!session) redirect("/login");
-  const workspaceId = session.activeWorkspaceId;
-  if (!workspaceId) redirect("/welcome");
+  const { workspaceId } = await requireWorkspacePage();
 
   const [historyResult, queueResult, scheduleResult, statsResult, configResult] =
     await Promise.all([
       workspaceFetch<IntentsResponse>(
-        `intents?state=${HISTORY_STATES}&limit=15`,
+        `intents?state=${HISTORY_STATES}&limit=${CALENDAR_HISTORY_LIMIT}`,
         workspaceId,
       ),
       workspaceFetch<IntentsResponse>(
-        `intents?state=${QUEUE_STATES}&limit=10`,
+        `intents?state=${QUEUE_STATES}&limit=${CALENDAR_QUEUE_LIMIT}`,
         workspaceId,
       ),
       workspaceFetch<IntentsResponse>(
-        `intents?state=${SCHEDULED_STATES}&limit=15`,
+        `intents?state=${SCHEDULED_STATES}&limit=${CALENDAR_SCHEDULE_LIMIT}`,
         workspaceId,
       ),
       workspaceFetch<StatsResponse>("stats", workspaceId),

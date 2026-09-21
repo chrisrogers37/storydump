@@ -1,3 +1,4 @@
+import { callBff, postJson } from "./bff";
 import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 
 /**
@@ -119,23 +120,17 @@ export async function saveCategoryMix(
   workspaceId: string,
   rows: MixWrite[],
 ): Promise<SaveMixResult> {
-  let response: Response;
-  try {
-    response = await fetch(`/api/workspaces/${workspaceId}/category-mix`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows }),
-    });
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
+  const result = await callBff(
+    `/api/workspaces/${workspaceId}/category-mix`,
+    postJson({ rows }, "PUT"),
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
   }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error =
-      typeof data?.error === "string" ? data.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
-  }
-  return { ok: true, rows: Array.isArray(data?.rows) ? data.rows : [] };
+  return {
+    ok: true,
+    rows: Array.isArray(result.data.rows) ? result.data.rows : [],
+  };
 }
 
 export function mixRefusalCopy(reason: unknown, status?: number): string {

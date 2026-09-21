@@ -105,14 +105,6 @@ function submissionCommand(
   };
 }
 
-/**
- * The commands this tier offers. NOT the port's whole vocabulary — the port
- * re-validates the name, the role floor and the transition, and nothing here is
- * trusted downstream.
- *
- * Adding a row makes the route *capable* of a command. It does not wire a
- * control; that is the epic's P3/P4.
- */
 /** The port's three resolutions — the vocabulary's `RESOLUTIONS` (`wire-contract.test.ts` pins them equal). */
 export const RESOLUTIONS = ["retry", "posted", "cancel"] as const;
 /** The one verdict a resolution may carry — the vocabulary's `NOT_POSTED`. */
@@ -153,6 +145,14 @@ function resolveReviewCommand(): CommandSpec {
   };
 }
 
+/**
+ * The commands this tier offers. NOT the port's whole vocabulary — the port
+ * re-validates the name, the role floor and the transition, and nothing here is
+ * trusted downstream.
+ *
+ * Adding a row makes the route *capable* of a command. It does not wire a
+ * control; that is the epic's P3/P4.
+ */
 export const COMMAND_SPECS: Record<string, CommandSpec> = {
   // Intent-keyed (the queue). Behaviour identical to what the route hard-coded.
   approve: intentCommand(),
@@ -162,7 +162,9 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   // The review card's resolutions (2026-09-12).
   resolve_review: resolveReviewCommand(),
 
-  // Entity-less. Capable, deliberately unwired until P3/P4.
+  // Entity-less: the identity is the submission, not a row. WIRED since
+  // P3 — `command-client.ts`'s `submitSettingsChange` is the caller and
+  // General's four switches and its schedule save are the controls.
   settings_change: submissionCommand((raw) => {
     // Shape only. The port owns which keys and types are legal.
     if (
@@ -173,18 +175,6 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     }
     return { ok: true, body: { settings: raw.settings } };
   }),
-  /**
-   * PER-SOURCE, and the empty body this used to send could never succeed.
-   *
-   * The executor reads `source_id` and refuses `invalid_args` without it
-   * (`command_executors.py:274`, via `_arg`), so `{}` made every call fail —
-   * reachable, but not callable. P2 added the row deliberately unwired and
-   * said so; only a real caller could find it, and P4 is that caller.
-   *
-   * The id is validated here as a UUID for the same reason `intent_id` is: it
-   * becomes a database lookup downstream, and a refusal shaped like "this is
-   * not an id" is more useful than one shaped like "no such source".
-   */
   /**
    * The workspace's own name. Built and reachable at the port since the command
    * vocabulary existed (`admin` floor, satisfied by an owner) — and absent from
@@ -232,27 +222,12 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   resume_workspace: submissionCommand(() => ({ ok: true, body: {} })),
 
   /**
-   * Disconnect a Drive source. Same shape as `sync_now` and for the same
-   * reason: the executor reads `source_id` and refuses `invalid_args` without
-   * one, and the id becomes a database lookup, so "this is not an id" is a
-   * more useful refusal than "no such source".
-   *
-   * Built since #1083 — command, executor, and the background Google revoke —
-   * and unreachable because this table did not list it, while
-   * `storydump.app/privacy` §13 committed to it publicly.
-   */
-  /**
    * Disconnect the WORKSPACE's Google Drive (069, #1165): the one grant is
    * revoked and every folder paused. No arguments — the grant is the
    * workspace's, so there is nothing to name.
    */
   disconnect_account: submissionCommand(() => ({ ok: true, body: {} })),
 
-  /**
-   * Remove a destination (owner decision 2026-09-04): the port's
-   * `active → disabled` edge. The row stays for history and for the connect
-   * that brings the account back, so this is not a delete.
-   */
   /**
    * Remove a person from the workspace (`06`: "an admin removes membership
    * explicitly") — the revoke for every join edge, the Telegram one included.
@@ -264,6 +239,11 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     return { ok: true, body: { user_id: raw.user_id } };
   }),
 
+  /**
+   * Remove a destination (owner decision 2026-09-04): the port's
+   * `active → disabled` edge. The row stays for history and for the connect
+   * that brings the account back, so this is not a delete.
+   */
   disable_account: submissionCommand((raw) => {
     if (!isUuid(raw.ig_account_id)) {
       return { ok: false, error: "invalid_account_id" };
@@ -271,6 +251,18 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     return { ok: true, body: { ig_account_id: raw.ig_account_id } };
   }),
 
+  /**
+   * PER-SOURCE, and the empty body this used to send could never succeed.
+   *
+   * The executor reads `source_id` and refuses `invalid_args` without it
+   * (`command_executors.py:274`, via `_arg`), so `{}` made every call fail —
+   * reachable, but not callable. P2 added the row deliberately unwired and
+   * said so; only a real caller could find it, and P4 is that caller.
+   *
+   * The id is validated here as a UUID for the same reason `intent_id` is: it
+   * becomes a database lookup downstream, and a refusal shaped like "this is
+   * not an id" is more useful than one shaped like "no such source".
+   */
   sync_now: submissionCommand((raw) => {
     if (!isUuid(raw.source_id)) {
       return { ok: false, error: "invalid_source_id" };

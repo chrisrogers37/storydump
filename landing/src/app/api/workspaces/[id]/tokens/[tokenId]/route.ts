@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isUuid, isWorkspaceId } from "@/lib/session";
+import { isUuid } from "@/lib/session";
+import { passThrough, requireWorkspace } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -10,13 +11,10 @@ export async function DELETE(
   _request: NextRequest,
   context: { params: Promise<{ id: string; tokenId: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token)
-    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-  const { id, tokenId } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
+  const { tokenId } = await context.params;
   if (!isUuid(tokenId)) {
     return NextResponse.json({ error: "invalid_token" }, { status: 400 });
   }
@@ -25,12 +23,7 @@ export async function DELETE(
     token,
     { method: "DELETE" },
   );
-  if (!result.ok) {
-    return NextResponse.json(
-      { error: result.error },
-      { status: result.status },
-    );
-  }
+  if (!result.ok) return passThrough(result);
   if (result.data?.revoked !== true) {
     // The API confirms a revoke with `revoked: true` and nothing else; any
     // other answer is malformed, decided here like the mint routes do.

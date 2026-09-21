@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  WORKSPACE_COOKIE,
-  WORKSPACE_COOKIE_OPTIONS,
-  getSessionToken,
-  isWorkspaceId,
-} from "@/lib/session";
+import { WORKSPACE_COOKIE, WORKSPACE_COOKIE_OPTIONS } from "@/lib/session";
+import { passThrough, requireWorkspace } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -20,18 +16,12 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-
-  const { id } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
 
   const result = await targetFetch(`/workspaces/${id}`, token);
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  if (!result.ok) return passThrough(result);
 
   const response = NextResponse.json({ ok: true });
   response.cookies.set(WORKSPACE_COOKIE, id, WORKSPACE_COOKIE_OPTIONS);

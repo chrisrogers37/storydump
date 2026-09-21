@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionToken, isWorkspaceId } from "@/lib/session";
+import {
+  passThrough,
+  readJsonBody,
+  requireWorkspace,
+} from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 import {
   EXPIRY_DAYS_DEFAULT,
@@ -30,22 +34,17 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const token = await getSessionToken();
-  if (!token)
-    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
-  const { id } = await context.params;
-  if (!isWorkspaceId(id)) {
-    return NextResponse.json({ error: "invalid_workspace" }, { status: 400 });
-  }
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
 
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return NextResponse.json({ error: "malformed_body" }, { status: 400 });
-  }
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody instanceof NextResponse) return parsedBody;
 
-  const body = raw as { name?: unknown; expires_in_days?: unknown } | null;
+  const body = parsedBody.raw as {
+    name?: unknown;
+    expires_in_days?: unknown;
+  } | null;
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   if (!tokenNameValid(name)) {
     return NextResponse.json({ error: "invalid_name" }, { status: 400 });
@@ -66,12 +65,7 @@ export async function POST(
       body: JSON.stringify({ name, expires_in_days: expiresInDays }),
     },
   );
-  if (!result.ok) {
-    return NextResponse.json(
-      { error: result.error },
-      { status: result.status },
-    );
-  }
+  if (!result.ok) return passThrough(result);
 
   const minted = mintedTokenFrom(result.data);
   if (!minted) {

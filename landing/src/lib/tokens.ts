@@ -1,3 +1,4 @@
+import { callBff, postJson, type BffResult } from "./bff";
 import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 
 /**
@@ -221,39 +222,15 @@ export type MintTokenResult =
 export type RevokeTokenResult =
   { ok: true } | { ok: false; error: string; status: number };
 
-type WireResult =
-  | { ok: true; status: number; data: Record<string, unknown> }
-  | { ok: false; error: string; status: number };
-
-/** One call to this tier's proxy: a typed result, never a throw. */
-async function call(path: string, init?: RequestInit): Promise<WireResult> {
-  let response: Response;
-  try {
-    response = await fetch(path, init);
-  } catch {
-    return { ok: false, error: "unreachable", status: 0 };
+function mintResultFrom(result: BffResult): MintTokenResult {
+  // RE-PROJECTED, not passed through. `callBff`'s failure arm also carries the
+  // refused `body` (for `command-client.ts`, the one caller that reads a second
+  // key); this function's return value is this module's PUBLIC result, and it
+  // has always been exactly `{ ok, error, status }`. Widening it here would put
+  // the whole refused body on a type that never declared it.
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
   }
-  const data: unknown = await response.json().catch(() => ({}));
-  const body =
-    data && typeof data === "object" ? (data as Record<string, unknown>) : {};
-  if (!response.ok) {
-    const error =
-      typeof body.error === "string" ? body.error : `http_${response.status}`;
-    return { ok: false, error, status: response.status };
-  }
-  return { ok: true, status: response.status, data: body };
-}
-
-function postJson(body: Record<string, unknown>): RequestInit {
-  return {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
-
-function mintResultFrom(result: WireResult): MintTokenResult {
-  if (!result.ok) return result;
   const r = result.data;
   if (
     typeof r.id !== "string" ||
@@ -276,8 +253,10 @@ function mintResultFrom(result: WireResult): MintTokenResult {
 }
 
 /** A revoke the proxy did not confirm is not a success — the row may still be live. */
-function revokeResultFrom(result: WireResult): RevokeTokenResult {
-  if (!result.ok) return result;
+function revokeResultFrom(result: BffResult): RevokeTokenResult {
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
+  }
   if (result.data.revoked !== true) {
     return { ok: false, error: "malformed_response", status: result.status };
   }
@@ -295,7 +274,7 @@ export async function mintMyToken(
   input: MintMyTokenInput,
 ): Promise<MintTokenResult> {
   return mintResultFrom(
-    await call(
+    await callBff(
       "/api/me/tokens",
       postJson({
         name: input.name,
@@ -310,7 +289,7 @@ export async function revokeMyToken(
   tokenId: string,
 ): Promise<RevokeTokenResult> {
   return revokeResultFrom(
-    await call(`/api/me/tokens/${tokenId}`, { method: "DELETE" }),
+    await callBff(`/api/me/tokens/${tokenId}`, { method: "DELETE" }),
   );
 }
 
@@ -327,7 +306,7 @@ export async function mintServiceToken(
   input: MintServiceTokenInput,
 ): Promise<MintTokenResult> {
   return mintResultFrom(
-    await call(
+    await callBff(
       `/api/workspaces/${workspaceId}/tokens`,
       postJson({ name: input.name, expires_in_days: input.expiresInDays }),
     ),
@@ -339,7 +318,7 @@ export async function revokeServiceToken(
   tokenId: string,
 ): Promise<RevokeTokenResult> {
   return revokeResultFrom(
-    await call(`/api/workspaces/${workspaceId}/tokens/${tokenId}`, {
+    await callBff(`/api/workspaces/${workspaceId}/tokens/${tokenId}`, {
       method: "DELETE",
     }),
   );
