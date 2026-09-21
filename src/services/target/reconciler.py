@@ -41,6 +41,10 @@ CONTAINER_EXPIRY_SECONDS = 24 * 60 * 60
 #: publish has NOT landed — not evidence that it failed. Classifying it
 #: authoritative-negative would terminalize a still-live publish as a definite
 #: non-event, which is the one wrong answer that is worse than no answer.
+#:
+#: The second mode and the `stories_check` seam are driven by
+#: `tests/scripts/test_l3_permit_rail.py`; production passes neither
+#: (#1325 audit, TD-A16).
 EVIDENCE_MODES: dict[str, dict[str, frozenset]] = {
     "container_verdict": {
         "positive": frozenset({"PUBLISHED"}),

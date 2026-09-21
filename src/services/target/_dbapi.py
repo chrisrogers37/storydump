@@ -30,9 +30,10 @@ def constraint_violated(exc: BaseException, *names: str) -> bool:
 
     **It covers both drivers, because the tier has both.** asyncpg reports the
     name flat on the exception and arrives wrapped in a SQLAlchemy
-    ``DBAPIError``; psycopg2/3 report it on ``diag.constraint_name`` and, on
-    the sync lane, arrive unwrapped. So the exception itself is a candidate
-    alongside ``driver_candidates``, and both spellings are read.
+    ``DBAPIError``; psycopg2/3 report it on ``diag.constraint_name`` and, from
+    a psycopg2 caller (the gates' fixtures), arrive unwrapped. So the exception
+    itself is a candidate alongside ``driver_candidates``, and both spellings
+    are read.
 
     ``sqlstate`` is checked where it is available (23505 is unique_violation)
     but is not required: a check-constraint violation names a constraint too,

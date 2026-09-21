@@ -538,12 +538,6 @@ def _telegram_transport(env: Mapping[str, str]):
     return transport_from_env(token, env)
 
 
-def _telegram_reply(env: Mapping[str, str]):
-    """The `/start` door's acknowledgement sender, or None without the token."""
-    transport = _telegram_transport(env)
-    return None if transport is None else transport.send_text
-
-
 def create_app(
     *, engine: Optional[AsyncEngine] = None, env: Optional[Mapping[str, str]] = None
 ) -> FastAPI:

@@ -5,7 +5,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from src.utils.logger import setup_logger, get_logger
+from src.utils.logger import setup_logger
 
 
 @pytest.mark.unit
@@ -33,23 +33,6 @@ class TestLogger:
             setup_logger("test_dir", log_file=str(log_file))
 
             assert log_file.parent.exists()
-
-    def test_get_logger_returns_existing_logger(self):
-        """Test that get_logger returns existing logger."""
-        # Create logger
-        logger1 = setup_logger("existing_logger")
-
-        # Get same logger
-        logger2 = get_logger("existing_logger")
-
-        assert logger1 is logger2
-
-    def test_get_logger_creates_new_logger(self):
-        """Test that get_logger creates new logger if it doesn't exist."""
-        logger = get_logger("new_logger")
-
-        assert isinstance(logger, logging.Logger)
-        assert logger.name == "new_logger"
 
     def test_logger_writes_to_file(self):
         """Test that logger writes messages to file."""
