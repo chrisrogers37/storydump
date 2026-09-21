@@ -18,6 +18,7 @@ L.3's own gate, which requires a test per mode.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import timedelta
 from typing import Any, Callable, Optional, Union
@@ -359,14 +360,8 @@ async def _record_evidence(conn, *, intent_id, checks: int, trail: list) -> None
             "     'trail', CAST(:trail AS jsonb)))"
             " WHERE id = :intent"
         ),
-        {"intent": str(intent_id), "checks": checks, "trail": _json(trail)},
+        {"intent": str(intent_id), "checks": checks, "trail": json.dumps(trail)},
     )
-
-
-def _json(payload) -> str:
-    import json
-
-    return json.dumps(payload)
 
 
 async def reconcile_intent(
