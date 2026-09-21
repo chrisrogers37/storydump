@@ -390,7 +390,9 @@ async def reconcile_intent(
     evidence — the L.3 gate requires exactly that, in both modes.
     """
     trail = list(trail or [])
-    status_code = await _maybe_await(poll, intent_id=intent_id)
+    status_code = await _maybe_await(
+        poll, intent_id=intent_id, workspace_id=workspace_id
+    )
     trail.append({"status_code": status_code, "check": checks + 1})
     verdict = classify(status_code, mode)
 

@@ -275,19 +275,20 @@ async def alert_stranded_sources(
     # this one, so a module-level import is a cycle.
     from src.services.target import outbox, prompts
 
-    rows = (
+    from src.services.target import unit_of_work
+
+    # The selection is a door (082): the sweep runs with no tenant and
+    # `media_sources` is policy-covered. The stamp is written per workspace
+    # under that workspace's tenant, re-checking the window so a row stamped
+    # since the read is not alerted twice, and only the rows the UPDATE
+    # returns are alerted — the stamp is still the selection. One sweep runs
+    # at a time (the kind's serialization key), as before.
+    candidates = (
         (
             await session.execute(
                 text(
-                    "UPDATE media_sources SET alerted_at = now()"
-                    " WHERE id IN ("
-                    "   SELECT id FROM media_sources"
-                    "    WHERE state = 'error'"
-                    "      AND (alerted_at IS NULL"
-                    "           OR alerted_at < now() - make_interval(secs => :age))"
-                    "    ORDER BY alerted_at NULLS FIRST"
-                    "    LIMIT :lim"
-                    " ) RETURNING id, workspace_id"
+                    "SELECT o_id AS id, o_workspace_id AS workspace_id"
+                    "  FROM fn_stranded_sources(:age, :lim)"
                 ),
                 {"age": float(stale_after_seconds), "lim": int(limit)},
             )
@@ -295,9 +296,41 @@ async def alert_stranded_sources(
         .mappings()
         .all()
     )
+    by_workspace: dict[str, list[str]] = {}
+    for row in candidates:
+        by_workspace.setdefault(str(row["workspace_id"]), []).append(str(row["id"]))
+    rows: list[dict] = []
+    for workspace_id, ids in by_workspace.items():
+        await unit_of_work.apply_gucs(
+            session, tenant_id=workspace_id, actor_kind="system"
+        )
+        stamped = (
+            (
+                await session.execute(
+                    text(
+                        "UPDATE media_sources SET alerted_at = now()"
+                        " WHERE workspace_id = CAST(:ws AS uuid)"
+                        "   AND id = ANY(CAST(:ids AS uuid[]))"
+                        "   AND (alerted_at IS NULL"
+                        "        OR alerted_at < now() - make_interval(secs => :age))"
+                        " RETURNING id, workspace_id"
+                    ),
+                    {"ws": workspace_id, "ids": ids, "age": float(stale_after_seconds)},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        rows.extend(dict(r) for r in stamped)
 
+    claimed: str | None = None
     for row in rows:
         workspace_id = str(row["workspace_id"])
+        if workspace_id != claimed:
+            await unit_of_work.apply_gucs(
+                session, tenant_id=workspace_id, actor_kind="system"
+            )
+            claimed = workspace_id
         await outbox.fanout_notification(
             session,
             workspace_id=workspace_id,

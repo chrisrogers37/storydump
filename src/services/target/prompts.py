@@ -455,16 +455,29 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
       actionable the moment it is prompted. The guard makes a lost race
       benign.
     """
+    from src.services.target import unit_of_work
+
     counts = {"prompted": 0, "advanced": 0}
 
+    # The two cross-tenant READS are doors (082): the sweep runs with no tenant
+    # and every table here is policy-covered. The WRITES — the cards, the
+    # transitions — run per workspace under that workspace's tenant and the
+    # system actor, exactly as a member's own action does, so the ledger's
+    # triggers attribute them. The claim is transaction-local and is re-made
+    # whenever the workspace changes; the caller's transaction ends it.
     due = (
         (
             await session.execute(
                 text(
-                    _CARD_SELECT
-                    + " WHERE i.state = 'scheduled' AND i.schedule_slot_at <= now()"
-                    "   AND w.state = 'active' AND NOT w.is_paused"
-                    " ORDER BY i.schedule_slot_at LIMIT :lim"
+                    "SELECT o_id AS id, o_state AS state,"
+                    "       o_workspace_id AS workspace_id,"
+                    "       o_schedule_slot_at AS schedule_slot_at,"
+                    "       o_file_name AS file_name, o_media_kind AS media_kind,"
+                    "       o_mime_type AS mime_type, o_source_id AS source_id,"
+                    "       o_provider_file_ref AS provider_file_ref,"
+                    "       o_handle AS handle, o_tz AS tz,"
+                    "       o_api_publishing_enabled AS api_publishing_enabled"
+                    "  FROM fn_prompts_due(:lim)"
                 ),
                 {"lim": limit},
             )
@@ -473,8 +486,14 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
         .all()
     )
     bindings_by_workspace: dict[str, list[str]] = {}  # same tx, same answer
-    for row in due:
+    claimed: str | None = None
+    for row in sorted(
+        due, key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"])
+    ):
         ws = str(row["workspace_id"])
+        if ws != claimed:
+            await unit_of_work.apply_gucs(session, tenant_id=ws, actor_kind="system")
+            claimed = ws
         if ws not in bindings_by_workspace:
             bindings_by_workspace[ws] = await push_bindings(session, ws)
         await prompt_intent(
@@ -486,21 +505,23 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
         (
             await session.execute(
                 text(
-                    "SELECT i.id FROM post_intents i"
-                    " WHERE i.state = 'prompt_pending'"
-                    " LIMIT :lim"
+                    "SELECT o_id AS id, o_workspace_id AS workspace_id"
+                    "  FROM fn_prompts_pending(:lim)"
                 ),
                 {"lim": limit},
             )
         )
-        .scalars()
+        .mappings()
         .all()
     )
-    for intent_id in advanced:
+    for row in sorted(advanced, key=lambda r: str(r["workspace_id"])):
+        ws = str(row["workspace_id"])
+        if ws != claimed:
+            await unit_of_work.apply_gucs(session, tenant_id=ws, actor_kind="system")
+            claimed = ws
         try:
-            await intent_ledger.transition(session, str(intent_id), "awaiting_approval")
+            await intent_ledger.transition(session, str(row["id"]), "awaiting_approval")
             counts["advanced"] += 1
         except intent_ledger.IntentTransitionRefused:
             pass  # raced by the fast path — the state is already right
-
     return counts

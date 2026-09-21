@@ -567,7 +567,7 @@ class TestTheReconcilerPollIsWired:
                 }
             ),
         )
-        assert await poll(intent_id="i-1") == "PUBLISHED"
+        assert await poll(intent_id="i-1", workspace_id="ws-1") == "PUBLISHED"
         assert meta.calls == [("ctr-7", "1784", "ws-1")]
 
     async def test_no_container_or_a_typed_error_is_inconclusive_not_a_crash(self):
@@ -591,7 +591,7 @@ class TestTheReconcilerPollIsWired:
                 }
             ),
         )
-        assert await none(intent_id="i-1") is None
+        assert await none(intent_id="i-1", workspace_id="ws-1") is None
         dead = _poll_from(
             object(),
             _Dead(),
@@ -603,7 +603,7 @@ class TestTheReconcilerPollIsWired:
                 }
             ),
         )
-        assert await dead(intent_id="i-1") is None
+        assert await dead(intent_id="i-1", workspace_id="ws-1") is None
 
 
 def _scripted_session_factory(row):

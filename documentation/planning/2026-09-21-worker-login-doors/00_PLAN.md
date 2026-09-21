@@ -1,7 +1,7 @@
 ---
 title: "The worker's login (#751, part 2): doors for the four tenant-less sweeps, then the switch"
 type: plan
-status: draft
+status: in-progress
 owner: chris
 created: 2026-09-21
 tags: [rls, worker, doors, migration, f4, "#751"]
@@ -71,11 +71,13 @@ bypasses the policies; none of the four paths has ever run as `svc_worker` in a 
   atomic, idempotent `INSERT … SELECT` whose correctness rests on the `NOT EXISTS` live-job check
   being evaluated in the same statement; (b) for the prompt sweep and the stranded alert, whose
   writes are per row, fire ledger triggers that read the actor GUCs, and are the same writes a
-  member's own action makes. *Ratifier:* the owner. *Status:* open.
+  member's own action makes. *Ratifier:* the owner. *Status:* built as leaned (the owner merged
+  the plan, 2026-09-21; migration 082).
 - **F2 — the reconciler's poll.** *Options:* (a) `fn_reconciler_sweep` already returns each
   ambiguous intent's workspace: the poll claims that tenant in its own session before the read;
   (b) a door returns the container id and account reference for an intent id. *Lean:* (a) — no new
-  door, the read stays under the policy it was written for. *Ratifier:* the owner. *Status:* open.
+  door, the read stays under the policy it was written for. *Ratifier:* the owner. *Status:* built
+  as leaned (the poll takes the workspace its sweep row carries).
 
 ## Implementation Plan
 

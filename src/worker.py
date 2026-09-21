@@ -174,8 +174,14 @@ def _poll_from(engine, meta, *, session_factory=None):
 
     maker = session_factory or async_sessionmaker(engine, expire_on_commit=False)
 
-    async def poll(*, intent_id) -> Optional[str]:
+    async def poll(*, intent_id, workspace_id) -> Optional[str]:
         async with maker() as session:
+            # The reconciler's sweep row names the workspace; the read runs
+            # under it (082) — a fresh session with no tenant sees nothing
+            # under the policies once the worker runs as svc_worker.
+            await unit_of_work.apply_gucs(
+                session, tenant_id=str(workspace_id), actor_kind="system"
+            )
             row = (
                 (
                     await session.execute(

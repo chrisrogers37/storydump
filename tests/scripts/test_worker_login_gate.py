@@ -160,11 +160,11 @@ class _Meta:
         return "PUBLISHED"
 
 
-async def _poll(dsn: str, intent_id: str):
+async def _poll(dsn: str, intent_id: str, workspace_id: str):
     engine = create_async_engine(_async_url(dsn))
     try:
         poll = worker_mod._poll_from(engine, _Meta())
-        return await poll(intent_id=intent_id)
+        return await poll(intent_id=intent_id, workspace_id=workspace_id)
     finally:
         await engine.dispose()
 
@@ -200,5 +200,5 @@ def test_the_stranded_alert_finds_the_source_as_svc_worker(world):
 
 
 def test_the_reconciler_poll_reaches_the_container_as_svc_worker(world):
-    assert _run(_poll(world["owner"], world["ambiguous"])) == "PUBLISHED"
-    assert _run(_poll(world["worker"], world["ambiguous"])) == "PUBLISHED"
+    assert _run(_poll(world["owner"], world["ambiguous"], world["ws"])) == "PUBLISHED"
+    assert _run(_poll(world["worker"], world["ambiguous"], world["ws"])) == "PUBLISHED"

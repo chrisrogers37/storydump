@@ -1656,6 +1656,10 @@ class TestTheSenderMintReadsItsOwners:
         class _Result:
             rowcount = 0
 
+            def scalar(self):
+
+                return 0  # the door returns the minted count as a scalar (082)
+
         class _Session:
             def __init__(self):
                 self.calls = []
@@ -1680,6 +1684,9 @@ class TestTheSenderMintReadsItsOwners:
         class _Result:
             rowcount = 0
 
+            def scalar(self):
+                return 0  # the door returns the minted count as a scalar (082)
+
         class _Session:
             def __init__(self):
                 self.calls = []
@@ -1698,11 +1705,17 @@ class TestTheSenderMintReadsItsOwners:
 
         from src.services.target import bindings, outbox, prompts
 
-        assert (
-            inspect.getsource(work_loop.ensure_sender_jobs).count(
-                "bindings.push_binding_where('b')"
-            )
-            == 1
+        # Since 082 the sender sweep's statement is `fn_sender_sweep`'s body — a
+        # door cannot call the Python fragment, so the predicate is spelled in
+        # the door and pinned here to the one owner: the door's body must carry
+        # `push_binding_where('b')` verbatim, and the Python no longer spells it.
+        from scripts.migration_runner import MIGRATIONS_DIR
+
+        ddl = (MIGRATIONS_DIR / "082_worker_doors.sql").read_text()
+        body = ddl.split("CREATE FUNCTION fn_sender_sweep(", 1)[1].split("$$;", 1)[0]
+        assert body.count(bindings.push_binding_where("b")) == 1
+        assert "push_binding_where(" not in inspect.getsource(
+            work_loop.ensure_sender_jobs
         )
         assert (
             inspect.getsource(prompts.push_bindings).count(
