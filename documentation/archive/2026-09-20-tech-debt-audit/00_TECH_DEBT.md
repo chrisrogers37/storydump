@@ -10,6 +10,25 @@ links: []
 
 # Tech-debt audit — storydump, whole repo (2026-09-20)
 
+> **Archived 2026-09-21 — COMPLETED.** All sixteen cleanup PRs merged and live: 01 #1336 ·
+> 02 #1343 · 03 #1345 · 04 #1346 · 05 #1351 · 06 #1356 · 07 #1353 · 08 #1354 · 09 #1355 ·
+> 10 #1337 · 11 #1339 · 12 #1352 · 13 #1340 · 14 #1338 · 15 #1344 · 16 #1350, plus #1335
+> (these plan docs), #1342 and #1348 (two defects the sprint introduced and caught) and #1347
+> (the ledger). The frozen baseline is unregressed — the final tree runs **3,679 passed** with the
+> same two macOS-only failures and two explained skips the sprint began with.
+>
+> **The flagged defects grew from twelve to thirteen and none of them was fixed here.** Doc 02's
+> re-homing of the RLS gate onto the live writers surfaced the thirteenth: `identity.py:83` erases
+> a stored display name when a Google token omits `name`. Each remains owed a ruling or a bug-fix
+> PR. See [`RUN_LOG.md`](RUN_LOG.md) §7 for the queue and §8 for the closeout.
+>
+> **None of the sixteen docs was executed exactly as written.** Roughly sixty corrections are
+> recorded across the PR bodies and in `RUN_LOG.md`: line numbers that had moved, greps that were
+> false when written, counts that were wrong, and about a dozen "these are duplicates" claims that
+> turned out to be two things that merely looked alike. One *withdrawal* was also wrong and was
+> reinstated (doc 08's cap-warning block). Read this document with that caveat: its structural
+> findings held up; its duplication claims needed checking one by one.
+
 ## Summary
 
 The `/artemis-skills:audit tech debt` lens, run on `main` at `0966771` three days after the
