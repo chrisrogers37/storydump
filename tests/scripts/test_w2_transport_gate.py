@@ -12,7 +12,6 @@ worker survives.
 
 import uuid
 
-import psycopg2
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -20,27 +19,9 @@ from src.channels.telegram_transport import TelegramAuthDead
 from src.services.target import unit_of_work
 from src.services.target.work_loop import WorkerConfig, ensure_sender_jobs
 from src.worker import compose
-from tests.scripts.conftest import seed_workspace_chain
-from tests.scripts.test_lineage_lane import run_lane
+from tests.scripts.conftest import async_url, seed_workspace_chain
 
 pytestmark = [pytest.mark.integration]
-
-
-def _async_url(dsn: str) -> str:
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-
-@pytest.fixture()
-def lane_db(bootstrapped_db):
-    run_lane(bootstrapped_db)
-    return bootstrapped_db
-
-
-@pytest.fixture()
-def sync_conn(lane_db):
-    conn = psycopg2.connect(lane_db)
-    yield conn
-    conn.close()
 
 
 def _seed_binding_with_pending(sync_conn, name: str, *, rows: int = 2):
@@ -118,7 +99,7 @@ class TestDeliveryEndToEnd:
         self, lane_db, sync_conn
     ):
         chain, binding = _seed_binding_with_pending(sync_conn, "w2send", rows=2)
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             assert await _sweep(engine) == 1, "one pending binding, one sender job"
             assert await _sweep(engine) == 0, "a live job blocks a duplicate mint"
@@ -174,7 +155,7 @@ class TestDeliveryEndToEnd:
                 (binding,),
             )
         sync_conn.commit()
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             assert await _sweep(engine) == 0, "a fresh ambiguous row waits"
             with sync_conn.cursor() as cur:
@@ -204,7 +185,7 @@ class TestDeadCredentialMidRun:
         self, lane_db, sync_conn
     ):
         chain, binding = _seed_binding_with_pending(sync_conn, "w2dead", rows=1)
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             await _sweep(engine)
             transport = _FakeTransport(fail_with=TelegramAuthDead("getMe: 401"))
@@ -255,7 +236,7 @@ class TestReMintThroughTheRealSweeper:
             poller_interval_seconds=0.05,
             sender_hold_seconds=3.0,
         )
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         app = compose(engine=engine, config=cfg, env={}, transport=transport)
         stop = asyncio.Event()
         runner = asyncio.create_task(run(app, stop=stop))
@@ -315,7 +296,7 @@ class TestTheClaimedRowVouchesForItsWorkspace:
         self, lane_db, sync_conn
     ):
         chain, binding = _seed_binding_with_pending(sync_conn, "w2-ws", rows=2)
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         seen = []
 
         class Recording(_FakeTransport):

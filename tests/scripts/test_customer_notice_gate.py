@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from tests.scripts.conftest import (
     _scratch,
     actor_lacks_createrole,
+    async_url,
     run_bootstrap,
     seed_workspace_chain,
 )
@@ -66,10 +67,6 @@ def _unique_slot() -> datetime:
     """
     n = next(_SLOT)
     return datetime(2026, 9, 1, n % 24, n % 60, tzinfo=timezone.utc)
-
-
-def _async_url(dsn: str) -> str:
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
 @pytest.fixture(scope="module")
@@ -165,7 +162,7 @@ class TestD3TheNoMediaNotice:
         from src.services.target import unit_of_work
         from src.services.target.scheduler import execute_plan_slot
 
-        engine = create_async_engine(_async_url(notice_db["dsn"]))
+        engine = create_async_engine(async_url(notice_db["dsn"]))
         try:
             async with engine.connect() as conn:
                 # `plan_slot` is a TENANT kind, so the worker's session carries
@@ -394,7 +391,7 @@ class TestD4TheParkedIntentNotice:
         """
         from src.services.target import outbox, reconciler, unit_of_work
 
-        engine = create_async_engine(_async_url(notice_db["dsn"]))
+        engine = create_async_engine(async_url(notice_db["dsn"]))
         served, unreachable = [], []
         try:
             async with engine.connect() as conn:

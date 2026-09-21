@@ -20,28 +20,9 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from src.services.target.work_loop import WorkerConfig
 from src.worker import compose
-from tests.scripts.conftest import seed_workspace_chain
-from tests.scripts.test_lineage_lane import run_lane
+from tests.scripts.conftest import async_url, seed_workspace_chain
 
 pytestmark = [pytest.mark.integration]
-
-
-def _async_url(dsn: str) -> str:
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-
-@pytest.fixture()
-def lane_db(bootstrapped_db):
-    """The full-lineage world (legacy schema + target public), once per test."""
-    run_lane(bootstrapped_db)
-    return bootstrapped_db
-
-
-@pytest.fixture()
-def sync_conn(lane_db):
-    conn = psycopg2.connect(lane_db)
-    yield conn
-    conn.close()
 
 
 def _insert_job(
@@ -96,7 +77,7 @@ def _assert_no_stranded_lease(conn, *, allowed: int = 0):
 
 async def _run_once(lane_db, *, registry_override=None, config=None):
     """One WorkLoop cycle on the bulk lane against the real database."""
-    engine = create_async_engine(_async_url(lane_db))
+    engine = create_async_engine(async_url(lane_db))
     try:
         app = compose(engine=engine, config=config or WorkerConfig(), env={})
         wl = next(wl_ for wl_ in app.loops if wl_.lane == "bulk")
@@ -284,7 +265,7 @@ class TestTheWorkerIdlesVisibly:
             clock_interval_seconds=0.5,
             heartbeat_interval_seconds=0.5,
         )
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         app = compose(engine=engine, config=cfg, env={})
         stop = asyncio.Event()
         runner = asyncio.create_task(run(app, stop=stop))
@@ -536,7 +517,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         from src.services.target import jobs
 
         chain = seed_workspace_chain(sync_conn, "w1mint")
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session:
@@ -625,7 +606,7 @@ class TestTheBackpressureSignalOnRealRows:
         sync_conn.commit()
 
         now = datetime.now(timezone.utc)
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             async with engine.connect() as conn:
                 await conn.execute(_t("SET app.actor_kind = 'migration'"))
@@ -712,7 +693,7 @@ class TestASenderPacedByTheProvider:
 
                 return send
 
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             cfg = WorkerConfig(poller_interval_seconds=0.05, sender_hold_seconds=5.0)
             registry = build_registry(
@@ -799,7 +780,7 @@ class TestKLoopsOnOneLane:
             await asyncio.sleep(0.3)
             runs.append((job["serialization_key"], started, time.monotonic()))
 
-        engine = create_async_engine(_async_url(lane_db), pool_size=10, max_overflow=0)
+        engine = create_async_engine(async_url(lane_db), pool_size=10, max_overflow=0)
         watch = unit_of_work.PoolWatch(engine)
         try:
             cfg = _Cfg(
@@ -866,7 +847,7 @@ class TestNoLeaseExpiresDuringAWait:
         async def waits(session, job):
             await asyncio.sleep(4.0)
 
-        engine = create_async_engine(_async_url(lane_db))
+        engine = create_async_engine(async_url(lane_db))
         try:
             cfg = _Cfg(
                 lease_seconds=3.0,

@@ -51,6 +51,7 @@ from psycopg2 import errors as pg_errors
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    async_url,
     replay_advertised_stream,
     seed_intent,
     seed_workspace_chain,
@@ -245,7 +246,7 @@ def _engine(outbox_db, *, pool_size=2):
     from sqlalchemy.ext.asyncio import create_async_engine
 
     return create_async_engine(
-        outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+        async_url(outbox_db["worker"]),
         pool_size=pool_size,
         max_overflow=0,
     )
@@ -517,7 +518,7 @@ class TestStoppedSenderStrandsNothing:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         return create_async_engine(
-            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(outbox_db["worker"]),
             pool_size=2,
             max_overflow=0,
         )
@@ -600,7 +601,7 @@ class TestTheLostAckPolicyIsBoundedPerKind:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         return create_async_engine(
-            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(outbox_db["worker"]),
             pool_size=2,
             max_overflow=0,
         )
@@ -904,7 +905,7 @@ class TestPacingDefersRatherThanFails:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         return create_async_engine(
-            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(outbox_db["worker"]),
             pool_size=2,
             max_overflow=0,
         )
@@ -1046,7 +1047,7 @@ class TestAStaleSenderCannotOverwriteALiveOne:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         return create_async_engine(
-            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(outbox_db["worker"]),
             pool_size=3,
             max_overflow=0,
         )
@@ -1216,7 +1217,7 @@ class TestThePollerReplacesTheRedisWakeUp:
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
         engine = create_async_engine(
-            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(outbox_db["worker"]),
             pool_size=2,
             max_overflow=0,
         )
@@ -1339,7 +1340,7 @@ class TestTheSenderCommitsBeforeItSpeaks:
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
         engine = create_async_engine(
-            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(outbox_db["worker"]),
             pool_size=3,
             max_overflow=0,
         )
@@ -1543,7 +1544,7 @@ class TestAFloodLimitWritesADurableHold:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         return create_async_engine(
-            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(outbox_db["worker"]),
             pool_size=2,
             max_overflow=0,
         )
@@ -1749,7 +1750,7 @@ class TestASlowChatDoesNotDelayAnother:
         from src.services.target import unit_of_work as _uow
 
         engine = create_async_engine(
-            outbox_db["worker"].replace("postgresql://", "postgresql+asyncpg://", 1),
+            async_url(outbox_db["worker"]),
             pool_size=10,
             max_overflow=0,
         )
