@@ -50,6 +50,14 @@ PIPE_WIDTH = 200
 #: rendered blank cells that looked like a quiet pool.
 POOL_FACTS = ("size", "checked_out", "checked_out_peak")
 
+#: The scalar keys of `/health`'s tap block, as `TapMetrics.snapshot()` emits
+#: them (`src/api/routes/webhooks.py`); a test binds the two, for the same
+#: reason `POOL_FACTS` has one. The renderer read `executed` and `replayed` at
+#: the TOP level: `executed` is a real outcome but lives one level down under
+#: `taps`, and `replayed` is not a tap outcome at all (`TAP_OUTCOMES`), so two
+#: of its three cells were always blank (#1360).
+TAP_FACTS = ("taps_total", "answer_failed")
+
 
 def redact(text: str) -> str:
     """*text* with every token, database URL and webhook secret replaced."""
@@ -612,6 +620,18 @@ def _render_write(console: Console, data: Any) -> None:
     console.print(line)
 
 
+def _tap_outcomes(payload: Any) -> str:
+    """The per-outcome counts, which live nested under `taps` rather than at
+    the top of the block. This is what `executed`/`replayed` were reaching
+    for; the outcomes are `telegram_dispatch.TAP_OUTCOMES`, so the renderer
+    shows whatever the API counted instead of guessing the names."""
+    source = payload if isinstance(payload, dict) else {}
+    counts = source.get("taps")
+    if not isinstance(counts, dict):
+        return ""
+    return " · ".join(f"{name} {_cell(n)}" for name, n in sorted(counts.items()))
+
+
 def _facts(payload: Any, *keys: str) -> str:
     source = payload if isinstance(payload, dict) else {}
     return " · ".join(
@@ -647,7 +667,8 @@ def _render_health(console: Console, data: Any) -> None:
             for part in (
                 _facts(api, "version", "db_role", "uptime_seconds", "ingress_workers"),
                 _facts(pool, *POOL_FACTS),
-                _facts(api.get("taps"), "executed", "replayed", "answer_failed"),
+                _facts(api.get("taps"), *TAP_FACTS),
+                _tap_outcomes(api.get("taps")),
                 f"webhook {_cell(webhook.get('bot'))} {_cell(webhook.get('ok'))}"
                 if webhook
                 else "",
