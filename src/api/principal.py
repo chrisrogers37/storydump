@@ -35,9 +35,11 @@ variable, never a silent fallback to the settings-built URL (#1010's class).
 
 from __future__ import annotations
 
+import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Request, Response
@@ -45,11 +47,18 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError, TokenRefused
-from src.services.target import service_tokens, sessions
+from src.services.target import service_tokens, sessions, tenant_resolution
+from src.services.target.unit_of_work import unit_of_work
 from src.services.target.vocabulary import DATABASE_URL_VAR
 
 #: The session cookie. One name, imported by the auth routes and the tests.
 COOKIE = "sd_session"
+
+#: The `command_dedup.channel` and `app.channel` GUC value for the web
+#: surface (`webhook_ingress.CHANNELS`). The browser's sessions, the two
+#: OAuth callbacks and the v1 command adapter are one channel; four
+#: spellings of it is how a dedup row lands under a name nothing reads.
+WEB_CHANNEL = "web"
 
 #: The routes a token may reach, as ``(method, path)`` after the router
 #: prefix. Everything else is session-only by dependency. No minting route
@@ -88,7 +97,7 @@ class Principal:
     session_id: Optional[str]
     user_id: Optional[str]
     kind: str = "session"
-    channel: str = "web"
+    channel: str = WEB_CHANNEL
     token_id: Optional[str] = None
     token_name: Optional[str] = None
     token_role: Optional[str] = None
@@ -263,6 +272,18 @@ def require_own_workspace(principal: Principal, workspace_id: str) -> None:
         raise TokenRefused("wrong_workspace", "this token belongs to another workspace")
 
 
+def not_found() -> HTTPException:
+    """The house 404: a row the caller may not see and a row that is not
+    there answer identically (`07` §5 — no existence oracle).
+
+    A FUNCTION rather than a module constant, deliberately: a raised
+    exception instance carries `__traceback__` and `__context__`, so a
+    shared one would pin a request's frames until the next raise replaced
+    them. The detail string is the thing worth having in one place.
+    """
+    return HTTPException(status_code=404, detail="not found")
+
+
 async def require_session(
     principal: Principal = Depends(current_principal),
 ) -> Principal:
@@ -300,3 +321,69 @@ def clear_session_cookie(response: Response) -> None:
         domain=settings.SESSION_COOKIE_DOMAIN,
         path="/",
     )
+
+
+# --- the tenant seams, shared by every router --------------------------------
+#
+# These four were `v1._open_tenant`, `v1._member`, `v1._admin` and
+# `v1._json_object`: private names in the biggest router that `tokens.py`,
+# `ops.py` and the shared test conftest all reached across for. They are
+# cross-router gates like the ones above, so they live here, as public names.
+#
+# `member_session` and `admin_session` call `open_tenant` as a BARE MODULE
+# GLOBAL, and every caller outside this module reaches these through the
+# module attribute (`principal_mod.open_tenant(...)`). A from-import would
+# bind the original function at import time and the conftest's monkeypatch
+# would not reach it — a unit test that quietly opens a real unit of work.
+
+
+def open_tenant(request: Request, workspace_id: str, principal: Principal):
+    """The request's tenant-scoped unit of work: tenant + actor GUCs applied,
+    one transaction. The one seam the unit gate replaces.
+
+    The GUCs come from the principal: a person is ``user`` on ``web`` or, via
+    a person-bound token, on ``cli``; a service identity is ``operator`` with
+    no user, which the audit triggers read as such. The triggers never see a
+    token's name — that rides the direct `cli_command` row (F4).
+    """
+    return unit_of_work(
+        require_engine(request),
+        workspace_id,
+        actor_kind=principal.actor_kind,
+        actor_user_id=principal.user_id,
+        channel=principal.channel,
+    ).begin()
+
+
+@asynccontextmanager
+async def member_session(request: Request, workspace_id: str, principal: Principal):
+    """Open the tenant's unit of work and run the ONE gate — every read."""
+    async with open_tenant(request, workspace_id, principal) as session:
+        await tenant_resolution.authorize_member(
+            session, workspace_id, principal.user_id, minimum_role="member"
+        )
+        yield session
+
+
+@asynccontextmanager
+async def admin_session(request: Request, workspace_id: str, principal: Principal):
+    """`member_session`, at the admin floor."""
+    async with open_tenant(request, workspace_id, principal) as session:
+        await tenant_resolution.authorize_member(
+            session, workspace_id, principal.user_id, minimum_role="admin"
+        )
+        yield session
+
+
+async def json_object(request: Request) -> dict[str, Any]:
+    """The body as a JSON object; an empty body is an empty object."""
+    raw = await request.body()
+    if not raw.strip():
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="body is not JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    return body

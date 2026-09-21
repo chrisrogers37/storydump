@@ -65,13 +65,9 @@ check "the minting route admits a token" $PR '        ("GET", "/api/v1/me/princi
 
 # --- the app factory --------------------------------------------------------
 check "a dead token is unmapped (500, not 401)" $AP '    "invalid_token": 401,' '' "$UNIT" "$TP -k dead_token_is_401"
-check "session_required is answered without its reason" $AP '        return JSONResponse(
-            status_code=status, content={"detail": str(exc), "reason": exc.reason}
-        )
-
-    @app.exception_handler(TokenArgsInvalid)' '        return JSONResponse(status_code=status, content={"detail": str(exc)})
-
-    @app.exception_handler(TokenArgsInvalid)' "$UNIT" "$TP -k every_route_outside_the_allowlist"
+check "session_required is answered without its reason" $AP '    app.add_exception_handler(TokenRefused, _mapped(_TOKEN_STATUS, _reason_detail))' '    app.add_exception_handler(
+        TokenRefused, _mapped(_TOKEN_STATUS, lambda exc, status: {"detail": str(exc)})
+    )' "$UNIT" "$TP -k every_route_outside_the_allowlist"
 check "a bad mint body is a 500" $AP '    @app.exception_handler(TokenArgsInvalid)
     async def _token_args(request: Request, exc: TokenArgsInvalid):
         return JSONResponse(
@@ -98,8 +94,8 @@ check "no cli_command row is written" $V1 '        if principal.is_token:
 check "the cli_command row is written for sessions too" $V1 '        if principal.is_token:
             await _audit_cli_command(' '        if True:
             await _audit_cli_command(' "$UNIT" "$TT -k session_writes_no_cli_command_row"
-check "the tenant transaction claims the web channel for a token" $V1 '        channel=principal.channel,
-    ).begin()' '        channel=CHANNEL,
+check "the tenant transaction claims the web channel for a token" $PR '        channel=principal.channel,
+    ).begin()' '        channel=WEB_CHANNEL,
     ).begin()' "$GATE" "$GT -k end_to_end"
 check "the cli_command row forgets the story" $V1 '            entity_kind, entity_id = "post_intent", str(uuid.UUID(intent_id))' '            entity_kind, entity_id = "workspace", workspace_id' "$GATE" "$GT -k end_to_end"
 check "the cli_command row forgets the token" $V1 '        "token_id": principal.token_id,' '        "token_id": None,' "$GATE" "$GT -k end_to_end"
@@ -115,9 +111,9 @@ check "a person's mint is open to tokens" $TR 'async def mint_my_token(
 ):' "$UNIT" "$TP -k require_session_is_the_dependency"
 check "a service identity lists any workspace's identities" $TR '    if principal.is_service_identity:
         require_own_workspace(principal, str(ws))
-        async with v1._open_tenant(request, str(ws), principal) as session:
+        async with principal_mod.open_tenant(request, str(ws), principal) as session:
             rows = await service_tokens.list_for_workspace(' '    if principal.is_service_identity:
-        async with v1._open_tenant(request, str(ws), principal) as session:
+        async with principal_mod.open_tenant(request, str(ws), principal) as session:
             rows = await service_tokens.list_for_workspace(' "$UNIT" "$TT -k lists_its_own_workspace_only"
 check "a service identity revokes its siblings" $TR '        if token_id != principal.token_id:
             raise TokenRefused(
