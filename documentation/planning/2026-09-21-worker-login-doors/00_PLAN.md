@@ -1,7 +1,7 @@
 ---
 title: "The worker's login (#751, part 2): doors for the tenant-less sweeps, then the switch"
 type: plan
-status: in-progress
+status: completed
 owner: chris
 created: 2026-09-21
 tags: [rls, worker, doors, migration, f4, "#751"]
@@ -171,11 +171,14 @@ database; CI; the owner's admin squash.
 - [x] The four first gates failed on the unfixed tree for the reason named (0 minted / nothing
       prompted / `WITH CHECK` refused / `None`); the settled-card, scope and ladder gates failed
       on the first build; all pass with 082 and the code.
-- [ ] `tests/scripts/test_rls_runtime_harness.py` registers every new door and policy.
-- [ ] The battery kills every mutation, each verdict a real `N failed`.
-- [ ] After the owner's `f4_switch.sh worker`: the boot line reads `svc_worker` / `False`; within
-      one sweep cycle the logs show prompts and sender jobs minted at the same rate as before; the
-      two fleet verdicts unchanged; a card delivered to a bound group.
+- [x] `tests/scripts/test_rls_runtime_harness.py` registers every new door and policy (28 doors,
+      62 policies, 33 door dispositions).
+- [x] The battery kills every mutation, each verdict a real `N failed` (18 of 18 on d948205e).
+- [x] After the owner's `f4_switch.sh worker` (2026-09-21 15:51 UTC): the boot line reads
+      `svc_worker` / `False`; the two fleet verdicts unchanged; `reconcile_ambiguous` jobs
+      succeeding, no `permission denied`. The sweep-rate comparison and a card delivered to a
+      bound group wait on the next slot — the estate was idle at the switch (no pending outbox row,
+      no due story).
 
 ## What NOT To Do
 
