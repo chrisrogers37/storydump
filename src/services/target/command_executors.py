@@ -399,6 +399,34 @@ def _result(intent: dict[str, Any], state: str, **extra: Any) -> CommandResult:
     )
 
 
+async def _mint_publish_job(session, intent: dict[str, Any], command: Command) -> None:
+    """The `publish_pipeline` job for an intent entering the ladder — the one
+    mint `approve` and `resolve_review` both use.
+
+    It was written out in both (the tech-debt audit, 2026-09-20), and only
+    `approve`'s copy carried the two reasons below, so a reader of the
+    resolution path could not see why the deadline is absent or why the
+    dry-run flag travels.
+    """
+    await jobs.enqueue(
+        session,
+        kind="publish_pipeline",
+        workspace_id=command.workspace_id,
+        serialization_key=f"ig:{intent['provider_account_ref']}",
+        # The pipeline's ceiling is its own (`05:38`: deadline = slot end; the
+        # slot may be a day away) — the loop's deadline would end a deferred
+        # publish on its first escaped error. Attempts still bound it.
+        deadline_seconds=jobs.NO_DEADLINE,
+        # The dry-run decision travels WITH the job: what the tapper was told
+        # is what the run does, whatever the flag says by the time it runs.
+        payload={
+            "v": 1,
+            "intent_id": str(intent["id"]),
+            "dry_run": bool(intent.get("dry_run_mode")),
+        },
+    )
+
+
 async def approve(session, command: Command) -> CommandResult:
     intent = await _intent_row(session, command)
     _refuse_if_cancelling(intent)
@@ -423,23 +451,7 @@ async def approve(session, command: Command) -> CommandResult:
             " Settings › Accounts, or post by hand and use mark_posted",
         )
     await _flip(session, str(intent["id"]), "approved")
-    await jobs.enqueue(
-        session,
-        kind="publish_pipeline",
-        workspace_id=command.workspace_id,
-        serialization_key=f"ig:{intent['provider_account_ref']}",
-        # The pipeline's ceiling is its own (`05:38`: deadline = slot end; the
-        # slot may be a day away) — the loop's deadline would end a deferred
-        # publish on its first escaped error. Attempts still bound it.
-        deadline_seconds=jobs.NO_DEADLINE,
-        # The dry-run decision travels WITH the job: what the tapper was told
-        # is what the run does, whatever the flag says by the time it runs.
-        payload={
-            "v": 1,
-            "intent_id": str(intent["id"]),
-            "dry_run": bool(intent.get("dry_run_mode")),
-        },
-    )
+    await _mint_publish_job(session, intent, command)
     await _record_outcome(session, intent, command, "approved")
     return CommandResult(
         "enqueued",
@@ -624,6 +636,12 @@ RESOLUTIONS: tuple[str, ...] = vocabulary.RESOLUTIONS
 #: is not on Instagram. `retry` needs it when the publish answer was lost.
 NOT_POSTED = vocabulary.NOT_POSTED
 
+#: What a resolution is refused with when the conditional flip matched no row:
+#: the three `publish_cap.resolve_*` calls each race the others, and whichever
+#: loses says the same thing. Local to this file on purpose — it is one
+#: sentence for one reason code, not a shared vocabulary entry.
+_RESOLVED_BY_SOMEONE_ELSE = "the review was resolved by someone else first"
+
 
 async def resolve_review(session, command: Command) -> CommandResult:
     """The review card is the workspace's to resolve (ruling 2026-09-12 —
@@ -677,9 +695,7 @@ async def resolve_review(session, command: Command) -> CommandResult:
                 " — post again, or give up",
             )
         if not await publish_cap.resolve_posted(session, intent_id=intent_id):
-            raise CommandRefused(
-                "illegal_transition", "the review was resolved by someone else first"
-            )
+            raise CommandRefused("illegal_transition", _RESOLVED_BY_SOMEONE_ELSE)
         await _end_op_by_verdict(
             session, op, outcome="succeeded", verdict="posted", command=command
         )
@@ -721,21 +737,8 @@ async def resolve_review(session, command: Command) -> CommandResult:
         attempts_by_step=attempts,
     )
     if not flipped:
-        raise CommandRefused(
-            "illegal_transition", "the review was resolved by someone else first"
-        )
-    await jobs.enqueue(
-        session,
-        kind="publish_pipeline",
-        workspace_id=command.workspace_id,
-        serialization_key=f"ig:{intent['provider_account_ref']}",
-        deadline_seconds=jobs.NO_DEADLINE,
-        payload={
-            "v": 1,
-            "intent_id": intent_id,
-            "dry_run": bool(intent.get("dry_run_mode")),
-        },
-    )
+        raise CommandRefused("illegal_transition", _RESOLVED_BY_SOMEONE_ELSE)
+    await _mint_publish_job(session, intent, command)
     await _restate_outcome(session, intent, command, "approved")
     return CommandResult(
         "enqueued",
@@ -756,9 +759,7 @@ async def _give_up(
     """`review_required → cancelled`, the debit retained; the unresolved op
     ends by verdict; the line reaches every card by ref, without buttons."""
     if not await publish_cap.resolve_cancel(session, intent_id=str(intent["id"])):
-        raise CommandRefused(
-            "illegal_transition", "the review was resolved by someone else first"
-        )
+        raise CommandRefused("illegal_transition", _RESOLVED_BY_SOMEONE_ELSE)
     await _end_op_by_verdict(
         session, op, outcome="failed", verdict="given_up", command=command
     )

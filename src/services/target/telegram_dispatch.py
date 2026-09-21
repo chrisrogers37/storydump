@@ -236,6 +236,42 @@ def _chat_channel(message: dict) -> str:
     return "telegram_dm" if chat_type == "private" else "telegram_group"
 
 
+def _command_for(
+    tap: callback_tokens.Tap,
+    tenant: tenant_resolution.ResolvedTenant,
+    *,
+    user_id: str,
+    actor_label: Optional[str],
+    card_ref: str,
+) -> Command:
+    """The `Command` a parsed tap runs, built from the button's action and the
+    resolved chat — the middle step of `_tap`, lifted out of its body so the
+    tap's sequence reads in one sitting (the tech-debt audit, 2026-09-20).
+    Nothing here reads the database or decides anything: every gate is the
+    executors' own."""
+    args: dict[str, Any] = {"intent_id": tap.intent_id}
+    if tap.action in RESOLUTION_OF:
+        args["resolution"] = RESOLUTION_OF[tap.action]
+    if tap.action in VERDICT_OF:
+        args["verdict"] = VERDICT_OF[tap.action]
+    return Command(
+        kind=ACTION_TO_COMMAND[tap.action],
+        workspace_id=tenant.workspace_id,
+        actor_user_id=user_id,
+        channel="telegram",
+        args=args,
+        # The tapper's name rides with the command — on its own
+        # field, never in `args` — so the outcome line needs no
+        # second identity read (#1286).
+        actor_label=actor_label,
+        # The card this tap came from (2026-09-15): a settled story's
+        # answer adopts a message the ledger never learned — a resend's
+        # twin — and edits it, so no card keeps dead buttons.
+        binding_id=tenant.channel_binding_id,
+        card_ref=card_ref,
+    )
+
+
 @dataclass(frozen=True)
 class TapResult:
     """What a served `callback_query` leaves for the route: the outcome (for
@@ -398,29 +434,16 @@ class TelegramDispatcher:
                 channel="telegram",
                 lock_timeout=TAP_LOCK_TIMEOUT,
             )
-            args: dict[str, Any] = {"intent_id": tap.intent_id}
-            if tap.action in RESOLUTION_OF:
-                args["resolution"] = RESOLUTION_OF[tap.action]
-            if tap.action in VERDICT_OF:
-                args["verdict"] = VERDICT_OF[tap.action]
-            command = Command(
-                kind=ACTION_TO_COMMAND[tap.action],
-                workspace_id=tenant.workspace_id,
-                actor_user_id=str(user_id),
-                channel="telegram",
-                args=args,
-                # The tapper's name rides with the command — on its own
-                # field, never in `args` — so the outcome line needs no
-                # second identity read (#1286).
+            command = _command_for(
+                tap,
+                tenant,
+                user_id=str(user_id),
                 actor_label=actor_label,
-                # The card this tap came from (2026-09-15): a settled story's
-                # answer adopts a message the ledger never learned — a resend's
-                # twin — and edits it, so no card keeps dead buttons.
-                binding_id=tenant.channel_binding_id,
                 card_ref=message_ref,
             )
-            # S.2 for taps (F12): the workspace's window is DEBITED inside the
-            # savepoint below, only for a flip that ran — the increment's own
+            # S.2 for taps (F12): the workspace's window is DEBITED inside
+            # `_execute_with_debit`'s savepoint, only for a flip that ran —
+            # the increment's own
             # `WHERE count < limit` is the check, atomic under the row lock,
             # so at the limit the flip rolls back with the savepoint and the
             # tapper is told; nothing is spent, the delivery is consumed (a
@@ -432,26 +455,9 @@ class TelegramDispatcher:
                 datetime.now(timezone.utc), ADMISSION_WINDOW_SECONDS
             )
             try:
-                # A savepoint: a refusal the database raised mid-executor
-                # (the guard's last line; `mark_posted`'s debit CTE) must not
-                # leave the admission's transaction aborted — the route's
-                # COMMIT would silently become a ROLLBACK and the delivery
-                # would be lost with a 200 (structural review of #1271).
-                begin_nested = getattr(conn, "begin_nested", None)
-                # `tenant_bound`: the GUC statement above already set this
-                # workspace as the transaction's tenant; the gate's own
-                # re-set would be a round trip for nothing (#1286).
-                if callable(begin_nested):
-                    async with begin_nested():
-                        result = await commands.execute(
-                            conn, command, tenant_bound=True
-                        )
-                        await self._debit(
-                            conn, tenant.workspace_id, window, limit, result
-                        )
-                else:
-                    result = await commands.execute(conn, command, tenant_bound=True)
-                    await self._debit(conn, tenant.workspace_id, window, limit, result)
+                result = await self._execute_with_debit(
+                    conn, command, tenant, window, limit
+                )
             except TenantResolutionError as exc:
                 return done(exc.reason)
             except CommandRefused as exc:
@@ -468,6 +474,34 @@ class TelegramDispatcher:
                 payload.get("update_id"),
             )
             return done("tap_failed")
+
+    async def _execute_with_debit(
+        self, conn, command: Command, tenant, window, limit: int
+    ) -> CommandResult:
+        """Run the command and spend the workspace's admission for it, both
+        inside ONE savepoint — the step `_tap` used to spell inline (the
+        tech-debt audit, 2026-09-20). Every refusal still leaves through the
+        caller's `except` arms: the savepoint unwinds here, in this frame,
+        before the exception reaches them, exactly as it did inline.
+
+        A savepoint: a refusal the database raised mid-executor (the guard's
+        last line; `mark_posted`'s debit CTE) must not leave the admission's
+        transaction aborted — the route's COMMIT would silently become a
+        ROLLBACK and the delivery would be lost with a 200 (structural review
+        of #1271).
+        """
+        begin_nested = getattr(conn, "begin_nested", None)
+        # `tenant_bound`: `_tap`'s GUC statement already set this workspace as
+        # the transaction's tenant; the gate's own re-set would be a round trip
+        # for nothing (#1286).
+        if callable(begin_nested):
+            async with begin_nested():
+                result = await commands.execute(conn, command, tenant_bound=True)
+                await self._debit(conn, tenant.workspace_id, window, limit, result)
+        else:
+            result = await commands.execute(conn, command, tenant_bound=True)
+            await self._debit(conn, tenant.workspace_id, window, limit, result)
+        return result
 
     @staticmethod
     async def _debit(conn, workspace_id: str, window, limit: int, result) -> None:
@@ -518,8 +552,10 @@ class TelegramDispatcher:
                 "ingress: group message observed, outcome=%s",
                 seen.outcome,
             )
-            if seen.handled and not result.handled:
-                result = seen
-            elif not result.handled:
+            # One rule, not two: the pair of branches this replaced both
+            # assigned `seen`, and `seen.handled and not result.handled`
+            # implies `not result.handled`, so the second already covered
+            # every case the first did (the tech-debt audit, 2026-09-20).
+            if not result.handled:
                 result = seen
         return result

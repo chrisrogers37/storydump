@@ -45,6 +45,7 @@ nothing in this change moves it.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import re
 from pathlib import Path
@@ -240,12 +241,44 @@ def test_the_publish_pipeline_has_exactly_one_producer_and_it_is_manual_mode_gat
     # flag itself — so the manual-mode gate holds at both doors.
     resolve = source.split("async def resolve_review(")[1].split("\nasync def ")[0]
     assert "manual_mode" in resolve, "the retry resolution must keep approve's gate"
-    assert (
-        len(mints.findall(source)) == 2
-        and mints.search(approve)
-        and mints.search(resolve)
-    ), (
-        "a publish_pipeline job is now minted outside `approve`/`resolve_review` — see above."
+    # WHO CAN REACH THE MINT, not where its text sits. Until the 2026-09-20
+    # tech-debt audit the two doors each wrote the enqueue out, and this read
+    # the literal in both bodies; they now share `_mint_publish_job`, so the
+    # same property is asserted over the call graph instead — which is what
+    # the property always meant, and which a third door cannot slip past by
+    # calling the helper instead of spelling the job kind.
+    module = ast.parse(source)
+    top_level = [
+        node
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    spells_the_kind = sorted(
+        node.name
+        for node in top_level
+        if mints.search(ast.get_source_segment(source, node) or "")
+    )
+    assert len(mints.findall(source)) == 1 and spells_the_kind == [
+        "_mint_publish_job"
+    ], (
+        f"the publish_pipeline job kind is spelled by {spells_the_kind} —"
+        " it is meant to be minted in exactly one place. See above."
+    )
+    reaches_the_mint = sorted(
+        node.name
+        for node in top_level
+        if node.name != "_mint_publish_job"
+        and any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "_mint_publish_job"
+            for call in ast.walk(node)
+        )
+    )
+    assert reaches_the_mint == ["approve", "resolve_review"], (
+        f"the publish_pipeline job is now minted by {reaches_the_mint} — a"
+        " door other than `approve`/`resolve_review` can park an intent."
+        " See above."
     )
     assert '"manual_mode"' in approve, (
         "`approve` no longer refuses in manual mode — the gate that makes the"
