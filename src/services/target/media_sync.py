@@ -46,6 +46,7 @@ import json
 import logging
 import random
 import uuid
+from dataclasses import dataclass
 from typing import Optional, Any
 
 from sqlalchemy import text
@@ -318,7 +319,69 @@ async def _run_sync(deps, job, *, reason) -> str:
     workspace_id = str(job["workspace_id"])
     factory = unit_of_work.poller_session_factory(deps.engine, workspace_id)
 
-    # Phase 1 — read the source, own transaction, committed before the door.
+    start = await _read_source(
+        factory,
+        job,
+        payload=payload,
+        source_id=source_id,
+        workspace_id=workspace_id,
+        reason=reason,
+    )
+    if isinstance(start, str):
+        return start
+
+    page = await _call_provider(
+        deps,
+        factory,
+        job,
+        config=start.config,
+        checkpoint=start.checkpoint,
+        source_id=source_id,
+        workspace_id=workspace_id,
+    )
+    if page is None:
+        return "source-error"
+    items, new_checkpoint = page
+
+    return await _land_page(
+        factory,
+        job,
+        items=items,
+        new_checkpoint=new_checkpoint,
+        stored=start.stored,
+        walk=start.walk,
+        source_id=source_id,
+        workspace_id=workspace_id,
+        reason=reason,
+    )
+
+
+@dataclass(frozen=True)
+class _SyncStart:
+    """What Phase 1 hands the phases after it: the source's config, the cursor
+    this carrier walks FROM, the cursor it READ (the CAS's `old` value, which
+    is not the same thing once a walk is minted) and the walk token every log
+    line on this path names."""
+
+    config: Any
+    checkpoint: Any
+    stored: Any
+    walk: str
+
+
+async def _read_source(
+    factory, job, *, payload, source_id, workspace_id, reason
+) -> str | _SyncStart:
+    """Phase 1 — read the source, own transaction, committed before the door.
+
+    Split out of `_run_sync` (the tech-debt audit, 2026-09-20): the phase
+    comments were already the seams, and they are transaction boundaries, so
+    the split makes `02` §5's rule — a transaction never spans a provider
+    call — structural rather than a thing each reader has to check.
+
+    Returns the outcome that ENDS the job — ``"missing"``, ``"paused"`` or
+    ``"stale"``, each already logged — or the walk for Phase 2 to open.
+    """
     async with factory() as s:
         row = (
             (
@@ -426,11 +489,31 @@ async def _run_sync(deps, job, *, reason) -> str:
                 workspace_id,
                 walk,
             )
+    return _SyncStart(
+        config=row["config"],
+        checkpoint=checkpoint,
+        stored=stored,
+        walk=walk,
+    )
 
-    # Phase 2 — the provider door, outside any transaction.
+
+async def _call_provider(
+    deps, factory, job, *, config, checkpoint, source_id, workspace_id
+) -> Optional[tuple[list, Any]]:
+    """Phase 2 — the provider door, outside any transaction.
+
+    Returns the page and the cursor that resumes it, or None once a
+    classified-persistent fault has been recorded — the source flipped to
+    ``error`` under the `alerted_at` dedup, the cursor dropped with it — and
+    the job is to report ``"source-error"``.
+    """
+    # Local imports, as in `alert_stranded_sources` above: these modules reach
+    # back into this one, so a module-level import is a cycle.
+    from src.services.target import outbox, prompts
+
     try:
         items, new_checkpoint = await deps.drive.list_changes(
-            dict(row["config"] or {}),
+            dict(config or {}),
             checkpoint,
             source_id=source_id,
             workspace_id=workspace_id,
@@ -487,9 +570,23 @@ async def _run_sync(deps, job, *, reason) -> str:
             source_id,
             type(exc).__name__,
         )
-        return "source-error"
+        return None
+    return items, new_checkpoint
 
-    # Phase 3 — checkpoint CAS + upsert + chain-or-rearm, one transaction.
+
+async def _land_page(
+    factory,
+    job,
+    *,
+    items,
+    new_checkpoint,
+    stored,
+    walk,
+    source_id,
+    workspace_id,
+    reason,
+) -> str:
+    """Phase 3 — checkpoint CAS + upsert + chain-or-rearm, one transaction."""
     kept = skipped_kind = refreshed = 0
     async with factory() as s:
         # The cursor advances by compare-and-swap against what THIS carrier

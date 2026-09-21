@@ -22,7 +22,7 @@ import pytest
 from src.api.routes import auth as auth_routes
 from src.services.target import drive_credentials
 from src.services.target import google_drive_oauth as drive
-from src.services.target.ig_login_oauth import (
+from src.services.target.oauth_states import (
     OAuthStateRefused,
     consume_state,
     issue_state,

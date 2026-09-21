@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.services.target import ig_credentials
-from src.services.target.ig_login_oauth import ring
+from src.services.target.oauth_states import ring
 
 REF = "17841400000000001"
 WS = "0d1d7a24-9d69-4c3a-9c2e-6b1f8b0e0b11"

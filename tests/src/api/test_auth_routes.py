@@ -32,7 +32,7 @@ from src.services.target import (
     sessions,
     tenant_resolution,
 )
-from src.services.target.ig_login_oauth import OAuthStateRefused
+from src.services.target.oauth_states import OAuthStateRefused
 from tests.src.services.target.conftest import drive_grant
 from tests.src.api.conftest import (
     API,

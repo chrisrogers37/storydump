@@ -33,7 +33,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.exceptions.base import StorydumpError
-from src.services.target.ig_login_oauth import PROVIDER, ring
+from src.services.target.ig_login_oauth import PROVIDER
+from src.services.target.oauth_states import ring
 from src.services.target.unit_of_work import unit_of_work
 
 USABLE_STATE = "active"
