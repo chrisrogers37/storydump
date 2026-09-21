@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from src.services.target import jobs
 from src.services.target.commands import CommandRefused
 from src.services.target.work_loop import WorkerConfig
 from src.worker import compose
@@ -72,10 +73,20 @@ def _source_row(conn, source_id):
 def _jobs(conn, kind):
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, payload, state FROM jobs WHERE kind = %s ORDER BY created_at",
+            "SELECT id, payload, state, deadline_at, max_attempts FROM jobs"
+            " WHERE kind = %s ORDER BY created_at",
             (kind,),
         )
-        return [{"id": r[0], "payload": r[1], "state": r[2]} for r in cur.fetchall()]
+        return [
+            {
+                "id": r[0],
+                "payload": r[1],
+                "state": r[2],
+                "deadline_at": r[3],
+                "max_attempts": r[4],
+            }
+            for r in cur.fetchall()
+        ]
 
 
 def _items(conn, ws):
@@ -349,6 +360,15 @@ class TestChunkChaining:
         walk = drive.calls[0]["checkpoint"]["walk"]
         assert len(chunks) == 1 and chunks[0]["payload"]["walk"] == walk, (
             "a page remaining must chain a first_ingest_chunk naming the walk"
+        )
+        # #1361: the chain was hand-written INSERT INTO jobs, so it never got
+        # the deadline #1288 added — a stuck chunk sat until its attempts ran
+        # out instead of being reaped. `jobs.enqueue` is what writes it.
+        assert chunks[0]["deadline_at"] is not None, (
+            "a chained chunk must carry the bulk lane's deadline"
+        )
+        assert chunks[0]["max_attempts"] == jobs.LANE_BUDGETS["bulk"][0], (
+            "and the lane's attempt budget, not a hand-copied 5"
         )
         assert (
             _source_row(sync_conn, chain["src"])["sync_checkpoint"]["page_token"]

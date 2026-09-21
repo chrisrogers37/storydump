@@ -309,16 +309,28 @@ async def _mint_successor(
     same serialization key, so the insert and its duplicate guard are written
     out. The guard excludes the current row by id — without that exclusion it
     would never mint, and with no guard at all a re-claimed lease would mint a
-    second workflow for one workspace."""
+    second workflow for one workspace.
+
+    The budget comes from the lane rather than being written out, and the
+    deadline is measured from `run_at`, **not** from `now()` as `enqueue`
+    measures it. `enqueue`'s two are the same instant because it mints at
+    `now()`; here they are up to `GRACE_SECONDS_DEFAULT` apart, so a copied
+    `now() + 6 h` would be thirty days stale before the finalizer was ever
+    runnable and `budget_exhausted` would end the workflow on its first
+    claim. The lane's six hours are six hours of retrying, from the moment
+    the job is due."""
     key = serialization_key(workspace_id)
+    attempts, deadline_seconds = jobs.LANE_BUDGETS[LANE]
     row = (
         await session.execute(
             text(
                 "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
-                " run_at, max_attempts, payload)"
+                " run_at, max_attempts, deadline_at, payload)"
                 " SELECT 'offboard_workspace', CAST(:ws AS uuid), CAST(:lane AS text),"
-                f"        CAST(:key AS text), {run_at_sql}, 5,"
+                "        CAST(:key AS text), due.at, CAST(:attempts AS int),"
+                "        due.at + make_interval(secs => CAST(:deadline AS int)),"
                 "        CAST(:p AS jsonb)"
+                f"   FROM (SELECT {run_at_sql} AS at) due"
                 " WHERE NOT EXISTS (SELECT 1 FROM jobs"
                 "                    WHERE serialization_key = :key"
                 "                      AND kind = 'offboard_workspace'"
@@ -330,6 +342,8 @@ async def _mint_successor(
                 "ws": workspace_id,
                 "lane": LANE,
                 "key": key,
+                "attempts": attempts,
+                "deadline": deadline_seconds,
                 "p": json.dumps({"v": 1}),
                 "self": str(job["id"]),
                 **params,

@@ -31,7 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.services.target import commands
+from src.services.target import commands, jobs, offboarding
 from src.services.target.commands import Command, CommandRefused
 from src.services.target.offboarding import (
     TERMINAL_STATES,
@@ -392,6 +392,20 @@ class TestTheWorkflow:
             (ws["ws"], out["successor"]),
         )
         assert successor == (True,), "the finalizer is scheduled for the window's end"
+
+        # #1361: `_mint_successor` hand-writes its INSERT, so it never got the
+        # deadline #1288 added. It keeps the hand-written statement — it is a
+        # self-excluding, kind-scoped successor mint at a computed `run_at`,
+        # which `jobs.enqueue` does not model — but it must still carry one.
+        deadline, attempts = _one(
+            off_db,
+            "SELECT deadline_at IS NOT NULL, max_attempts FROM jobs WHERE id = %s",
+            (out["successor"],),
+        )
+        assert deadline is True, "the successor must carry a deadline"
+        assert attempts == jobs.LANE_BUDGETS[offboarding.LANE][0], (
+            "and the lane's attempt budget, not a hand-copied 5"
+        )
 
     def test_a_second_run_of_the_same_legs_changes_nothing(self, off_db, ws):
         """Legs are idempotent because a re-claimed lease reruns them; the rows
