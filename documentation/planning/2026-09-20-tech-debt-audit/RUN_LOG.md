@@ -185,7 +185,7 @@ entry. A broken invariant stops the sprint.
 | I1 | The frozen test baseline does not regress | `REQUIRE_TEST_DATABASE=1 .venv/bin/pytest --no-cov -q` (sandbox off); compare pass/fail/skip to §1 G3 | Stop. A cleanup sprint that loses a test has changed behaviour. |
 | I2 | **No phase changes behaviour.** The 12 flagged defects (epic §Questions) stay out of every cleanup PR | Per-phase: the doc's own call-site audit + I1. Any step that would change a rendered value, a wire contract or a stored key stops the phase | Queue to §7. Never fold a defect fix into a cleanup PR. |
 | I3 | The docs guards stay green — the never-run mirror between `CLAUDE.md` and `AGENTS.md`, the legacy-name pins, the satellite copies | `.venv/bin/pytest --no-cov -q tests/test_agent_docs.py` | Docs 12 and 13 rename and delete; a drifted mirror is a real defect, not a test to relax. |
-| I4 | The FC-2 Telegram ratchet stays green | `python scripts/telegram_ratchet.py` | `src/exceptions/telegram.py` **is** in the baseline's `telegram_modules` (4 entries). Doc 02 deleting it must `--write-baseline` deliberately, in the same PR. |
+| I4 | The FC-2 Telegram ratchet stays green | `python scripts/telegram_ratchet.py` | **Discharged as designed.** `src/exceptions/telegram.py` was one of the baseline's 4 `telegram_modules`; doc 02 deleted it (C4) and re-baselined in the same commit. The JSON diff is one line — the module leaves the set, the `predicate` string is untouched, the other three axes are byte-identical, and the ratchet reads `telegram_modules: 3 (baseline 3)`. Exactly the deliberate re-baseline this row was written to require. |
 | I5 | No phase adds a skipped test | Falls out of I1; `MAX_EXPECTED_SKIPS = 1` (`tests/conftest.py:80`) | Docs 02, 11, 13 delete test-only surfaces — deleting a test is fine, skipping one is not. |
 | I6 | Lint stays clean at the repo's own policy | `ruff check .` and `ruff format . --check` | Whole-repo scope including `tests/`. |
 | I7 | `landing/` stays green — docs 14, 15 and 16 all edit it | `npx vitest run` · `npx tsc --noEmit` · `npx eslint`, from `landing/` | Baseline 2026-09-20: **378 passed / 36 files**, `tsc` clean, `eslint` clean. Node 20.19.5. |
@@ -286,22 +286,25 @@ no manual operator command owed. Three consequences the runner holds rather than
 
 | # | Doc | Status | PR | CI | Deploy |
 |---|---|---|---|---|---|
-| 01 | `01_one-spelling.md` | PR open, CI running | #1336 | 8/9 | auto |
-| 02 | `02_dead-lane-and-surfaces.md` | not started | — | — | — |
-| 03 | `03_rule-of-three-services.md` | not started | — | — | — |
-| 04 | `04_rule-of-three-api-cli.md` | not started | — | — | — |
-| 05 | `05_imports-and-homes.md` | not started | — | — | — |
+| 01 | `01_one-spelling.md` | **MERGED** | #1336 | 9/9 | live |
+| 02 | `02_dead-lane-and-surfaces.md` | **MERGED** | #1343 | 9/9 | live |
+| 03 | `03_rule-of-three-services.md` | **MERGED** | #1345 | 9/9 | live |
+| 04 | `04_rule-of-three-api-cli.md` | PR open, CI green, re-verifying | #1346 | 9/9 | auto |
+| 05 | `05_imports-and-homes.md` | W3 — building | — | — | — |
 | 06 | `06_publish-pipeline-shape.md` | not started | — | — | — |
 | 07 | `07_executors-and-tap.md` | not started | — | — | — |
 | 08 | `08_integrations-shape.md` | not started | — | — | — |
 | 09 | `09_composition-roots.md` | not started | — | — | — |
-| 10 | `10_dependencies-and-ci.md` | **CI red — in rework** (`httpx2` is load-bearing) | #1337 | Test ✗ | auto |
-| 11 | `11_test-scaffolding.md` | PR open, CI running | #1339 | — | inert |
-| 12 | `12_stale-words-and-names.md` | not started | — | — | — |
-| 13 | `13_legacy-instruments.md` | suite re-run (one suspected flake) | — | — | inert |
-| 14 | `14_landing-one-contract.md` | PR open, CI running | #1338 | 8/9 | Vercel |
-| 15 | `15_landing-shared-shapes.md` | not started | — | — | — |
-| 16 | `16_landing-integrations-tab.md` | not started | — | — | — |
+| 10 | `10_dependencies-and-ci.md` | **MERGED** | #1337 | 9/9 | live |
+| 11 | `11_test-scaffolding.md` | **MERGED** | #1339 | 9/9 | inert |
+| 12 | `12_stale-words-and-names.md` | W3 — building | — | — | — |
+| 13 | `13_legacy-instruments.md` | **MERGED** | #1340 | 9/9 | inert |
+| 14 | `14_landing-one-contract.md` | **MERGED** | #1338 | 9/9 | live |
+| 15 | `15_landing-shared-shapes.md` | **MERGED** | #1344 | 9/9 | live |
+| 16 | `16_landing-integrations-tab.md` | W3 — building | — | — | — |
+
+
+**Plus one PR the sprint did not plan:** [#1342](https://github.com/chrisrogers37/storydump/pull/1342), **MERGED** — a defect doc 01 introduced and doc 04 found. See §5.
 
 ---
 
@@ -506,6 +509,70 @@ warns, each of those pairs restarted the production posting worker under its 60-
 the read to prefer: `railway link` mutates local state another session depends on.
 
 
+### Wave 2 — what the rebases taught, and the defect the sprint caught in itself
+
+#### The squash topology's real cost is not the rebase, it is the resolutions that need reading
+
+Every phase adds a `CHANGELOG.md` bullet at the same anchor, so each merge conflicts every open
+sibling. That much was planned for in §3. What was not planned for is that **three of those
+conflicts could not be resolved by a rule**, and a blanket "keep both sides" would have shipped
+each one wrong:
+
+1. **Doc 10's superseded bullet.** Its first commit said "Eight packages nothing imports"; its
+   second corrected that to "Seven" plus the `httpx2` story. Keeping both sides produces a
+   CHANGELOG that contradicts itself in adjacent paragraphs. Resolved by dropping the superseded
+   bullet, verified by count afterwards: stale 0, corrected 1.
+2. **Doc 03 onto doc 02, in `src/utils/datetime_utils.py`.** Doc 02 **deleted** `naive_utc` as a
+   test-only surface (C16); doc 03 **added** `utcnow` and `ms_since` to the same file and its diff
+   still carried `naive_utc`, because its base predated the deletion. Keeping both would have
+   silently resurrected a function another phase had just proved dead — the sprint undoing its own
+   work through a merge artifact. Resolved by taking doc 03's additions without `naive_utc`, after
+   confirming against `main` that only `ensure_utc` survives there.
+3. **The tail of that same resolution.** `utcnow`'s docstring still read *"It lives beside
+   `ensure_utc` and `naive_utc`"* — a reference to a function that no longer exists, created by
+   the resolution itself. Corrected, reformatted, re-linted, and the suite re-run: **3670 passed,
+   +74 against main, unchanged by the resolution.**
+
+The general rule this sprint ends with: **a conflict between two phases of the same sprint is more
+likely to be semantic than textual**, because both sides are deliberate changes to the same
+neighbourhood. Read them.
+
+#### A defect doc 01 introduced, doc 04 found, and #1342 fixed
+
+Doc 01 correctly replaced `TokenRefused.REASONS`' hand-written tuple with
+`vocabulary.TOKEN_REFUSALS`. One line away sat
+`assert tuple(TokenRefused.REASONS) == vocabulary.TOKEN_REFUSALS`, which was a real comparison for
+exactly as long as there were two copies. The moment one *became* the other it read `tuple(x) == x`
+— true for any vocabulary, including a wrong one.
+
+Measurable, not theoretical: `cli_v2_01.sh`'s "a token refusal leaves the vocabulary" mutation
+deletes `"wrong_workspace"` from the vocabulary and **survived on `main`**. The pin now asserts the
+literal set; with the mutation applied the test fails again.
+
+**How it was found is the part worth keeping.** Not by CI, which was green, and not by the phase
+that caused it. Doc 04 resolved **all 337 `check` anchors in the eleven mutation batteries**
+mechanically, against both `HEAD` and its working tree, rather than grepping for the identifiers it
+had renamed. Two of the four anchors it broke contain **no renamed identifier at all** — one is an
+exception-handler body, another moved file because its text lived inside a function that moved. A
+grep-based sweep finds neither, and a broken anchor does not fail: it reports `MUTATION NOT
+APPLIED`, so the battery stays green while covering less.
+
+The sweep for siblings was run before fixing: `service_tokens.NAME_MAX`, `commands.REASONS` and
+`workspaces.INTENT_STATES` are the same alias shape but **pre-date this sprint** and no mutation
+targets them; `workspaces.IG_LOGIN_PROVIDER`/`GDRIVE_PROVIDER` were aliased by doc 01 but have no
+alias-equals-source test. One instance of the class, fixed.
+
+#### Doc 15 found two bugs in its own plan document
+
+Both caught by tests it did **not** edit. Step 4's `submitCommand` rewrite re-derives the error
+from the response body only, so a thrown `fetch` (no body, status 0) spelled `http_0` instead of
+`unreachable`, for which the UI has a sentence. Step 3's premise that "adding a field to a union arm
+breaks no existing reader" is false for `tokens.ts`, which passes the wrapper's failure arm through
+as its *public* type — structural typing let it compile while the runtime object grew a `body` key.
+
+Worth folding back into the doc before anyone else runs it.
+
+
 ## 6. Review rounds
 
 _Per round: which findings, the class sweep for each with its command and counts, what closed._
@@ -521,5 +588,8 @@ _Per round: which findings, the class sweep for each with its command and counts
 | Q3 | `.claude/settings.json` still names the deleted legacy CLI verbs and denies none of the `storydump` never-run verbs | Owner edit, noted in `CLAUDE.md`. Out of every phase's scope; recorded so it is not lost. |
 | Q4 | **`greenlet` is absent from a fresh install on Apple Silicon** — SQLAlchemy's environment marker lists `aarch64`/`x86_64`/`amd64`/`win32` but not `arm64`. CI (`x86_64`) is unaffected; a local fresh venv silently loses async SQLAlchemy and produces ~1,252 spurious failures. Pre-existing on `main`, deliberately not fixed inside a cleanup PR. A real finding the audit could not see, because it lives in a dependency's markers rather than in this tree | Discovered by doc 10's fresh-venv verification |
 | Q5 | **`documentation/guides/TEST_COVERAGE.md` is knowingly stale mid-sprint and needs one authoritative recount at the close.** Doc 10 recounted it correctly (158 files / 3,709 tests) — then doc 01 added 10 tests and doc 13 removed 4 files and 88, and the rebased tree collects **3,636**. Nothing enforces the table, so it is documentation rather than a gate; re-deriving it inside every one of sixteen PRs would be churn that is wrong again an hour later. **The sprint's final act recounts it once against the finished tree.** | A snapshot doc in a 16-PR sprint |
-| Q6 | Two egress-floor tests cannot run on macOS | `OSError: could not bind on any address out of [('127.0.0.2', 0)]`. Smallest unblocking action: `sudo ifconfig lo0 alias 127.0.0.2`. They run in CI (Linux), so the sprint is not blind to them — but the local baseline excludes them. |
+| Q6 | **NEW FLAGGED DEFECT (13th) — a Google sign-in without a `name` claim ERASES a stored display name.** `identity.py:83` runs `UPDATE user_identities SET verified_at = now(), display_name = :dn` unconditionally on the returning branch, so a token that omits `name` writes NULL over whatever was there. The retired sync twin kept it. **Found only because doc 02 re-homed the RLS gate onto the live writers** — it was invisible while the gate exercised the twin, which is the exact harm finding B1/C3 described. Asserted as current behaviour in the gate, deliberately not fixed: a fix changes behaviour and belongs in a bug-fix PR or an owner ruling, like the audit's other twelve | Discovered by doc 02's gate re-homing |
+| Q7 | **BLOCKED (doc 03, step 9) — the two-binding supersede gate assertion was not added.** It needs `_seed_card` in `test_l5_pipeline_gate.py` to seed a second active Telegram binding, which ripples through every test using that helper, and the phase could not run `tests/scripts/` to verify the ripple. **Smallest unblocking action:** extend `_seed_card` with an optional second binding and run `test_l5_pipeline_gate.py` alone, which takes the cluster lock for ~30s. Not silently skipped: the invariant it would pin is already covered by `test_outbox_restate.py::TestRestateEverywhere::test_one_statement_addresses_every_binding_by_ref`, so this is a *second* assertion at the gate level, not an uncovered property | Doc 03 |
+| Q8 | **A fourth `driver_candidates` reader that would fold exactly** — `intent_ledger.transition:145`, where `refusals[0]` is equivalent to the first matching candidate. Doc 03 did not fold it because it is not in that doc's site list and `_dbapi`'s own docstring cites it as the origin story. Widening scope mid-phase is how a cleanup PR stops being reviewable; recorded for a later phase instead | Doc 03 |
+| Q9 | Two egress-floor tests cannot run on macOS | `OSError: could not bind on any address out of [('127.0.0.2', 0)]`. Smallest unblocking action: `sudo ifconfig lo0 alias 127.0.0.2`. They run in CI (Linux), so the sprint is not blind to them — but the local baseline excludes them. |
 
