@@ -38,13 +38,24 @@ def _verified_subject(signed_request: str | None) -> tuple[str, str]:
     `verify_signed_request` for why the secret rides along rather than being
     re-read.
     """
+    secrets = meta_callbacks.app_secrets()
     try:
-        payload, secret = meta_callbacks.verify_signed_request(
-            signed_request, meta_callbacks.app_secrets()
-        )
+        payload, secret = meta_callbacks.verify_signed_request(signed_request, secrets)
     except meta_callbacks.SignedRequestInvalid as exc:
         logger.warning("meta callback rejected: %s", exc)
         raise HTTPException(status_code=400, detail="invalid signed_request")
+    # The instrument for #739's ruling: which setting signed this — by name and
+    # position, never by value. Which Meta app the URLs are registered under
+    # is a dashboard fact; this line and one press of Meta's test button
+    # answer it, and once the Instagram secret is the one that verifies, the
+    # legacy Facebook secret can be deleted.
+    position = secrets.index(secret)
+    logger.info(
+        "meta callback verified by %s (candidate %d of %d)",
+        meta_callbacks.app_secret_names()[position],
+        position + 1,
+        len(secrets),
+    )
     subject = meta_callbacks.subject_ref(payload)
     if subject is None:
         logger.warning("meta callback rejected: verified payload named no user_id")

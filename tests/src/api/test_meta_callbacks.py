@@ -373,3 +373,89 @@ class TestTheGuardsMutationFoundUnpinned:
             "the revoke predicate lost its workspace scope — under an owning"
             " role that is a cross-tenant credential write"
         )
+
+
+@pytest.fixture
+def verified_lines():
+    """The app logger does not propagate (`src/utils/logger.py`), so `caplog`
+    never sees it: a handler on the logger itself records the lines."""
+    import logging
+
+    from src.utils.logger import logger as app_logger
+
+    records: list[str] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Grab(level=logging.INFO)
+    previous = app_logger.level
+    if previous > logging.INFO:
+        app_logger.setLevel(logging.INFO)
+    app_logger.addHandler(handler)
+    try:
+        yield lambda: [m for m in records if "meta callback verified by" in m]
+    finally:
+        app_logger.removeHandler(handler)
+        app_logger.setLevel(previous)
+
+
+class TestTheLineNamesWhichSecretVerified:
+    """#739's instrument: after a callback verifies, one INFO line says WHICH
+    setting signed it — by name and position, never by value. Which Meta app
+    the URLs are registered under is a dashboard fact the code cannot read;
+    this line and one press of Meta's test button rule it."""
+
+    def _post(self, client, body):
+        return client.post("/webhooks/meta/deauthorize", data={"signed_request": body})
+
+    def test_the_legacy_secret_alone_is_named_as_candidate_one_of_one(
+        self, client, verified_lines
+    ):
+        assert (
+            self._post(client, make_signed_request(valid_payload())).status_code == 503
+        )
+        assert verified_lines() == [
+            "meta callback verified by FACEBOOK_APP_SECRET (candidate 1 of 1)"
+        ]
+
+    @pytest.mark.parametrize(
+        ("signer", "expected"),
+        [
+            ("ig-secret", "INSTAGRAM_APP_SECRET (candidate 1 of 2)"),
+            (SECRET, "FACEBOOK_APP_SECRET (candidate 2 of 2)"),
+        ],
+    )
+    def test_with_both_configured_the_line_names_the_one_that_signed(
+        self, monkeypatch, verified_lines, signer, expected
+    ):
+        monkeypatch.setattr(
+            settings, "INSTAGRAM_APP_SECRET", "ig-secret", raising=False
+        )
+        monkeypatch.setattr(settings, "FACEBOOK_APP_SECRET", SECRET, raising=False)
+        c = TestClient(create_app(env={}), raise_server_exceptions=False)
+        body = make_signed_request(valid_payload(), secret=signer)
+        assert self._post(c, body).status_code == 503
+        lines = verified_lines()
+        assert lines == [f"meta callback verified by {expected}"]
+        assert signer not in lines[0] and "ig-secret" not in lines[0], (
+            "the value never reaches the log"
+        )
+
+    def test_the_names_and_the_secrets_share_one_order(self, monkeypatch):
+        monkeypatch.setattr(
+            settings, "INSTAGRAM_APP_SECRET", "ig-secret", raising=False
+        )
+        monkeypatch.setattr(settings, "FACEBOOK_APP_SECRET", SECRET, raising=False)
+        assert meta_callbacks.app_secrets() == ["ig-secret", SECRET]
+        assert meta_callbacks.app_secret_names() == [
+            "INSTAGRAM_APP_SECRET",
+            "FACEBOOK_APP_SECRET",
+        ]
+        monkeypatch.setattr(settings, "INSTAGRAM_APP_SECRET", None, raising=False)
+        assert meta_callbacks.app_secret_names() == ["FACEBOOK_APP_SECRET"]
+
+    def test_a_refused_request_logs_no_verified_line(self, client, verified_lines):
+        assert self._post(client, _wrong_secret()).status_code == 400
+        assert verified_lines() == []
