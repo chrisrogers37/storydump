@@ -51,7 +51,7 @@ from typing import Optional, Any
 
 from sqlalchemy import text
 
-from src.services.target import outbox, prompts, unit_of_work, vocabulary
+from src.services.target import jobs, outbox, prompts, unit_of_work, vocabulary
 from src.services.target.drive_adapter import checkpoint_incomplete
 from src.services.target.workspaces import CONNECTED_FLAG_SQL
 
@@ -728,20 +728,20 @@ async def _land_page(
         if checkpoint_incomplete(new_checkpoint):
             # More pages: chain the next chunk and do NOT re-arm — the chain
             # is the carrier. The serialized key orders it after this job.
-            await s.execute(
-                text(
-                    "INSERT INTO jobs (kind, workspace_id, lane,"
-                    " serialization_key, run_at, max_attempts, payload)"
-                    " VALUES ('first_ingest_chunk', :ws, 'bulk', :key, now(), 5,"
-                    " CAST(:p AS jsonb))"
-                ),
-                {
-                    "ws": workspace_id,
-                    "key": f"src:{source_id}",
-                    # The chunk names the walk it belongs to; the row's cursor
-                    # is the one resumed (see the cursor rule above).
-                    "p": _payload_json({"v": 2, "source_id": source_id, "walk": walk}),
-                },
+            # Through `jobs.enqueue`, not a hand-written INSERT (#1361): the
+            # hand-written one omitted `deadline_at` entirely, so a stuck chunk
+            # sat until its attempts ran out instead of being reaped by the
+            # deadline #1288 added, and it copied `max_attempts` as a literal 5
+            # beside `LANE_BUDGETS`. The module owns both; this asks it.
+            await jobs.enqueue(
+                s,
+                kind="first_ingest_chunk",
+                workspace_id=workspace_id,
+                serialization_key=f"src:{source_id}",
+                lane="bulk",
+                # The chunk names the walk it belongs to; the row's cursor is
+                # the one resumed (see the cursor rule above).
+                payload={"v": 2, "source_id": source_id, "walk": walk},
             )
         else:
             # The last page: success stamps, probe recovery, baseline re-arm.
