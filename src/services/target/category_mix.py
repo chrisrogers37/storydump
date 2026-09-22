@@ -51,7 +51,7 @@ class MixInvalid(RefusalError):
     """The mix cannot be stored as sent. `reason` is one of: not_a_list ·
     empty_source · duplicate_source · bad_ratio · sum_not_one ·
     too_many_sources (from `normalize`) · unknown_source · all_off (from
-    `set_mix`, against the connected folders) · ambiguous_name (v1)."""
+    `set_mix`, against the connected folders)."""
 
     _prefix = "mix invalid"
 
@@ -259,47 +259,3 @@ async def mix_view(executor, *, workspace_id: str) -> list[dict]:
     for r in shaped:
         r["effective"] = round(share[r["source_id"]] * 100, 1)
     return shaped
-
-
-# ---- v1 compat — the card deployed before this phase (delete with the v1
-# keys; nothing else here depends on it) ----------------------------------
-
-
-def v1_shape(rows: list[dict]) -> dict:
-    """The keys the old card reads (`mix` by name, `categories` with counts),
-    derived from the view for ONE release so the API can deploy ahead of the
-    web without the Settings page breaking."""
-    return {
-        "mix": [
-            {"category": r["name"], "ratio": r["ratio"]}
-            for r in rows
-            if r["ratio"] is not None and r["ratio"] > 0
-        ],
-        "categories": [
-            {"category": r["name"], "media_count": r["media_count"]} for r in rows
-        ],
-    }
-
-
-def resolve_names(rows: list[dict], mix: Any) -> list[dict]:
-    """The old card's `PUT` body — `[{"category", "ratio"}]` by folder name —
-    turned into rows by source, from the view (which carries name and id). A
-    name that is two connected folders is `ambiguous_name`; one that is none
-    is `unknown_source`."""
-    if not isinstance(mix, list):
-        raise MixInvalid("not_a_list")
-    by_name: dict[str, list[str]] = {}
-    for r in rows:
-        by_name.setdefault(str(r["name"]), []).append(str(r["source_id"]))
-    out: list[dict] = []
-    for entry in mix:
-        if not isinstance(entry, dict):
-            raise MixInvalid("not_a_list", "each entry must be an object")
-        name = entry.get("category")
-        ids = by_name.get(name.strip()) if isinstance(name, str) else None
-        if not ids:
-            raise MixInvalid("unknown_source", str(name)[:40])
-        if len(ids) > 1:
-            raise MixInvalid("ambiguous_name", str(name)[:40])
-        out.append({"source_id": ids[0], "ratio": entry.get("ratio")})
-    return out

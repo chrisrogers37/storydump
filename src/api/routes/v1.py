@@ -719,8 +719,10 @@ async def get_category_mix(
 
 
 def _mix_response(rows: list[dict]) -> dict:
-    # `rows` is the shape; the v1 keys ride along for one release (v1 compat).
-    return {"rows": rows, **category_mix.v1_shape(rows)}
+    # `rows` is the shape. The v1 keys that rode along for one release
+    # (`mix` by folder NAME, `categories`) are gone: the web has been on
+    # `rows` since #1262's card shipped, and reads no other field (#1263).
+    return {"rows": rows}
 
 
 @router.put("/workspaces/{ws}/category-mix")
@@ -731,22 +733,14 @@ async def put_category_mix(
     connected folder is the group — memes 70 / merch 30 as two connected
     folders). A resource, not a command word (F1 (b)). Admin floor. Body
     ``{"rows": [{"source_id", "ratio"}, …]}`` — ratios above 0 summing to one,
-    0 = Off, an empty list makes every folder automatic. The v1 body
-    ``{"mix": [{"category", "ratio"}]}`` by folder name is still accepted for
-    one release (resolved to sources; `ambiguous_name` when two connected
-    folders share a name). Refused by name (400, ``reason =
-    invalid_mix_<reason>``) before anything is written; answers with the
-    GET's shape."""
+    0 = Off, an empty list makes every folder automatic. Refused by name
+    (400, ``reason = invalid_mix_<reason>``) before anything is written;
+    answers with the GET's shape."""
     body = await principal_mod.json_object(request)
     async with principal_mod.admin_session(request, str(ws), principal) as session:
         # `MixInvalid` is answered by the app's handler as 400 with
         # `reason = invalid_mix_<reason>` — the shape the web reads.
         rows = body.get("rows")
-        if rows is None and "mix" in body:  # v1 compat: the old card's body
-            rows = category_mix.resolve_names(
-                await category_mix.mix_view(session, workspace_id=str(ws)),
-                body.get("mix"),
-            )
         await category_mix.set_mix(
             session, workspace_id=str(ws), mix=rows, by_user_id=principal.user_id
         )
