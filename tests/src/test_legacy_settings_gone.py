@@ -467,6 +467,14 @@ ENV_READ_OUTSIDE_SETTINGS = {
     # the deployed roots' database and the runner's
     "TARGET_DATABASE_URL",
     "DATABASE_URL",
+    # a local database's fields, for `make init-db`'s runner URL
+    # (`scripts/app_db_url.py`, which the Makefile runs with its own defaults
+    # exported) — the names `Settings` declares, read as the Makefile sets them
+    "DB_HOST",
+    "DB_PORT",
+    "DB_NAME",
+    "DB_USER",
+    "DB_PASSWORD",
     # the one bot, its webhook and the harness's Telegram double
     "TARGET_TELEGRAM_BOT_TOKEN",
     "TARGET_TELEGRAM_BOT_USERNAME",
