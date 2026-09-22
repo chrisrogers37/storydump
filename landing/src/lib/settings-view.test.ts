@@ -21,6 +21,10 @@ import {
  */
 
 const CONFIG: WorkspaceConfig = {
+  // Deliberately not 30/45: the fixture must not agree with the deployment's
+  // real fallbacks by accident, or a view that dropped `defaults` and a card
+  // that retyped them would look identical here (#1366).
+  defaults: { repost_ttl_days: 11, skip_ttl_days: 12 },
   id: "w1",
   name: "Stub",
   state: "active",
