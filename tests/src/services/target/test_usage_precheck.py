@@ -24,13 +24,63 @@ class FakeClock:
         return self.t
 
 
+class TestTheReadIsTenantScoped:
+    """The token the usage read spends belongs to ONE workspace (#1369).
+
+    The cache is keyed on `provider_account_ref` and that is right: Meta's
+    quota belongs to the real Instagram account, so "shared across duplicate
+    workspace rows of one real account" (module docstring) is the intended
+    behaviour and is unchanged here.
+
+    The TOKEN is a different question. `uq_ig_account_live` is unique on
+    `(workspace_id, provider_account_ref)`, so two workspaces may legitimately
+    hold the same real account — which is the very state the cache note
+    anticipates. This call was the only Meta read in the pipeline that did not
+    name a workspace; `create_container`, `publish` and `container_status` all
+    pass `ctx.workspace_id`. Unscoped, `token_for_account` fell to a bare
+    sessionmaker with no GUCs and an ordering that prefers the freshest active
+    row across every tenant.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_workspace_reaches_the_usage_read(self):
+        seen = {}
+
+        class _Meta:
+            async def usage(self, ref, *, workspace_id=None):
+                seen["ref"], seen["ws"] = ref, workspace_id
+                return {"quota_usage": 1, "quota_total": 50}
+
+        await UsagePrecheck().check(_Meta(), "ig-1", workspace_id="ws-a")
+        assert seen == {"ref": "ig-1", "ws": "ws-a"}
+
+    @pytest.mark.asyncio
+    async def test_the_cache_is_still_keyed_on_the_account_not_the_workspace(self):
+        """Two workspaces on one real account share the quota reading.
+
+        Deliberate, and the reason the fix is to thread the workspace rather
+        than to key the cache by it: the quota is Meta's, per account.
+        """
+        calls = []
+
+        class _Meta:
+            async def usage(self, ref, *, workspace_id=None):
+                calls.append(workspace_id)
+                return {"quota_usage": 1, "quota_total": 50}
+
+        precheck = UsagePrecheck()
+        await precheck.check(_Meta(), "ig-1", workspace_id="ws-a")
+        await precheck.check(_Meta(), "ig-1", workspace_id="ws-b")
+        assert calls == ["ws-a"], "the second workspace rode the cached reading"
+
+
 class TestTheDecision:
     @pytest.mark.asyncio
     async def test_under_cap_proceeds_with_exactly_one_read(self):
         """Mutation that reddens: a second read per check, or defer under cap."""
         stub = StubMetaAdapter(quota_usage=3, quota_total=100)
         check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
-        assert await check.check(stub, "igu-1") == "proceed"
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "proceed"
         assert len(stub.usage_calls) == 1
 
     @pytest.mark.asyncio
@@ -40,7 +90,7 @@ class TestTheDecision:
         Mutation that reddens: compare with > instead of >=."""
         stub = StubMetaAdapter(quota_usage=100, quota_total=100)
         check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
-        assert await check.check(stub, "igu-1") == "defer"
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "defer"
 
     @pytest.mark.asyncio
     async def test_a_provider_error_proceeds_and_is_not_cached(self):
@@ -51,8 +101,8 @@ class TestTheDecision:
             usage_outcomes=["transport", "ok"], quota_usage=1, quota_total=100
         )
         check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
-        assert await check.check(stub, "igu-1") == "proceed"
-        assert await check.check(stub, "igu-1") == "proceed"
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "proceed"
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "proceed"
         assert len(stub.usage_calls) == 2, "the error must not have been cached"
 
 
@@ -66,9 +116,9 @@ class TestTheCache:
         stub = StubMetaAdapter(quota_usage=100, quota_total=100)
         clock = FakeClock()
         check = UsagePrecheck(ttl_seconds=300, clock=clock)
-        assert await check.check(stub, "igu-1") == "defer"
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "defer"
         clock.t += 299
-        assert await check.check(stub, "igu-1") == "defer"
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "defer"
         assert len(stub.usage_calls) == 1
 
     @pytest.mark.asyncio
@@ -78,9 +128,9 @@ class TestTheCache:
         stub = StubMetaAdapter(quota_usage=1, quota_total=100)
         clock = FakeClock()
         check = UsagePrecheck(ttl_seconds=300, clock=clock)
-        await check.check(stub, "igu-1")
+        await check.check(stub, "igu-1", workspace_id="ws-a")
         clock.t += 301
-        await check.check(stub, "igu-1")
+        await check.check(stub, "igu-1", workspace_id="ws-a")
         assert len(stub.usage_calls) == 2
 
     @pytest.mark.asyncio
@@ -89,8 +139,8 @@ class TestTheCache:
         Mutation that reddens: a global (unkeyed) cache."""
         stub = StubMetaAdapter(quota_usage=1, quota_total=100)
         check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
-        await check.check(stub, "igu-1")
-        await check.check(stub, "igu-2")
+        await check.check(stub, "igu-1", workspace_id="ws-a")
+        await check.check(stub, "igu-2", workspace_id="ws-a")
         assert stub.usage_calls == ["igu-1", "igu-2"]
 
 
@@ -104,6 +154,6 @@ class TestADegenerateAnswerIsNotACap:
     async def test_no_quota_total_proceeds_and_is_not_cached(self):
         stub = StubMetaAdapter(quota_usage=0, quota_total=0)
         check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
-        assert await check.check(stub, "acct") == "proceed"
-        assert await check.check(stub, "acct") == "proceed"
+        assert await check.check(stub, "acct", workspace_id="ws-a") == "proceed"
+        assert await check.check(stub, "acct", workspace_id="ws-a") == "proceed"
         assert len(stub.usage_calls) == 2, "a degenerate answer must not be cached"
