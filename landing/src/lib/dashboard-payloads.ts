@@ -110,6 +110,10 @@ export type WorkspaceConfig = {
   offboarding_at: string | null;
   /** When an offboarding workspace can last be restored; server-computed (#1127). */
   restorable_until: string | null;
+  /** The deployment's fallbacks for the columns `053` declares NULL, served
+   *  rather than retyped here — the settings cards show them and must not
+   *  hold a copy (#1366; the same reason as `restorable_until`). */
+  defaults: { repost_ttl_days: number; skip_ttl_days: number };
   created_at: string;
   updated_at: string | null;
 };
@@ -379,7 +383,13 @@ export type SettingsView = {
   enable_ai_captions: boolean | null;
   repost_ttl_days: number | null;
   skip_ttl_days: number | null;
+  /** Carried but NOT rendered: no code in the tier reads `caption_style`, so
+   *  its card is not shown (#1366). Kept so the card can return unchanged the
+   *  day `prompts.render_card` honours it. */
   caption_style: string | null;
+  /** The deployment's fallbacks for the two NULL-on-purpose TTL columns.
+   *  Served, never retyped here — a frontend copy is what #1366 was. */
+  defaults: { repost_ttl_days: number; skip_ttl_days: number };
 
   // ── From `sources` and `stats` ───────────────────────────────────────────
   gdrive_connected: boolean;
@@ -430,6 +440,7 @@ export function deriveSettings(
     repost_ttl_days: config.repost_ttl_days,
     skip_ttl_days: config.skip_ttl_days,
     caption_style: config.caption_style,
+    defaults: config.defaults,
 
     /*
      * #1081 made this the CREDENTIAL's answer rather than the source row's

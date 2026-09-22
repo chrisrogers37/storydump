@@ -39,6 +39,7 @@ from asyncpg.exceptions import CheckViolationError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
 from src.exceptions.base import StorydumpError
 from src.services.target import vocabulary
 from src.services.target import google_drive_oauth, offboarding, readers
@@ -209,7 +210,14 @@ async def get_workspace(executor, *, workspace_id: str) -> Optional[dict]:
 
     Carries `restorable_until` — when an offboarding workspace can last be
     restored — computed here from the one grace constant so the dashboard
-    never derives it from a copied number (#1127)."""
+    never derives it from a copied number (#1127).
+
+    Carries `defaults` for the same reason (#1366). `repost_ttl_days` and
+    `skip_ttl_days` are NULL on purpose, so the settings cards must show what
+    leaving them alone means — and they did it by writing `?? 30` and `?? 45`
+    into TSX. That second copy drifted the moment the worker's own copy did:
+    the card said 30 while a worker publish locked for 7 (#1365). Served, it
+    cannot."""
     row = await readers.row(
         executor,
         f"SELECT {_CONFIG_COLUMNS} FROM workspaces WHERE id = :ws",
@@ -219,6 +227,12 @@ async def get_workspace(executor, *, workspace_id: str) -> Optional[dict]:
         row["restorable_until"] = offboarding.restorable_until(
             row.get("offboarding_at")
         )
+        # The deployment's, not this workspace's — present whether or not the
+        # columns are set, so the client never branches on the payload's shape.
+        row["defaults"] = {
+            "repost_ttl_days": DEFAULT_REPOST_TTL_DAYS,
+            "skip_ttl_days": DEFAULT_SKIP_TTL_DAYS,
+        }
     return row
 
 

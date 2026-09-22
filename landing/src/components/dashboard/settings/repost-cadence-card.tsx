@@ -7,11 +7,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { settingsRefusalCopy, submitSettingsChange } from "@/lib/command-client";
+import { settingField } from "@/lib/settings-defaults";
 
 interface Props {
   workspaceId: string;
   repostTtlDays: number | null;
   skipTtlDays: number | null;
+  /** The deployment's fallbacks, served on the config payload — never typed
+   *  here. A copy in this file is what #1366 was. */
+  defaults: { repost_ttl_days: number; skip_ttl_days: number };
   onError: (message: string | null) => void;
 }
 
@@ -19,24 +23,35 @@ interface Props {
  * Per-workspace repost and skip lock TTLs.
  *
  * NULL means "no workspace value — the deployment's defaults apply"
- * (`REPOST_TTL_DAYS`, `SKIP_TTL_DAYS`), which is not the same as zero and
- * not the same as any particular number. The second half of this note used
- * to describe `chat_settings` and migration 029 — a legacy table this tier
- * no longer reads.
+ * (`DEFAULT_REPOST_TTL_DAYS`, `DEFAULT_SKIP_TTL_DAYS`), which is not the same
+ * as zero and not the same as any particular number. The second half of this
+ * note used to describe `chat_settings` and migration 029 — a legacy table
+ * this tier no longer reads.
+ *
+ * The fields SHOW that fallback, marked as a default, and it arrives on the
+ * payload rather than being written here (#1366). Both halves matter: a copy
+ * in this file drifted once already — it read 30 while a worker publish
+ * locked for 7 (#1365) — and it was also the baseline for change-detection,
+ * so with nothing stored, typing the default read as "no change" and could
+ * never be saved.
  */
 export function RepostCadenceCard({
   repostTtlDays,
   skipTtlDays,
+  defaults,
   workspaceId,
   onError,
 }: Props) {
   const router = useRouter();
-  const [repost, setRepost] = useState<number>(repostTtlDays ?? 30);
-  const [skip, setSkip] = useState<number>(skipTtlDays ?? 45);
+  const repostField = settingField(repostTtlDays, defaults.repost_ttl_days);
+  const skipField = settingField(skipTtlDays, defaults.skip_ttl_days);
+  const [repost, setRepost] = useState<number>(repostField.value);
+  const [skip, setSkip] = useState<number>(skipField.value);
   const [saving, setSaving] = useState<"repost" | "skip" | null>(null);
 
-  const repostChanged = repost !== (repostTtlDays ?? 30);
-  const skipChanged = skip !== (skipTtlDays ?? 45);
+  // Against what is STORED, so an unset field's default can be pinned.
+  const repostChanged = repostField.isChanged(repost);
+  const skipChanged = skipField.isChanged(skip);
 
   /**
    * `update-setting` was a dead BFF path (#1057); this is the same write on
@@ -90,6 +105,9 @@ export function RepostCadenceCard({
                 {saving === "repost" ? "Saving…" : "Save"}
               </Button>
             </div>
+            {repostField.usingDefault && !repostChanged ? (
+              <p className="text-xs text-muted-foreground">Using the default</p>
+            ) : null}
           </div>
           <div className="space-y-2">
             <Label htmlFor="skip-ttl">Skip lock (days)</Label>
@@ -110,6 +128,9 @@ export function RepostCadenceCard({
                 {saving === "skip" ? "Saving…" : "Save"}
               </Button>
             </div>
+            {skipField.usingDefault && !skipChanged ? (
+              <p className="text-xs text-muted-foreground">Using the default</p>
+            ) : null}
           </div>
         </div>
       </CardContent>
