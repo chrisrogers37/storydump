@@ -56,6 +56,70 @@ def full_deps(**over):
     return WorkerDeps(**base)
 
 
+class TestEveryProviderFacingExecutorOwnsItsTransactions:
+    """An executor that reaches the egress floor runs with NO job session.
+
+    `own_transactions` exists so "a task waiting on a provider holds no
+    pooled connection while it waits" (its own docstring). Four executors
+    that reach the floor were missing the mark (#1368), so the loop held a
+    transaction open across a Drive call, a token refresh and a revoke —
+    and handed each of them a session it never touched.
+
+    It is also the precondition for arming `_IN_TRANSACTION` in
+    `make_session_for`. The flag is set for an executor's whole body, so
+    arming it while these four were unmarked would raise
+    `TransactionDisciplineError` on four production paths. The suite cannot
+    see that on its own: the gates inject provider stubs (`refresh=_fake_seam`
+    here, `refresh=refresh_stub` in the W5de gate), so nothing in the test
+    tree reaches `egress.request` from a worker session.
+
+    THE LIST IS EXPLICIT AND MEANT TO NEED EDITING, the way the lineage
+    lane's ratified files are: a new executor that calls a provider has to
+    say so here once.
+    """
+
+    #: Every registry kind whose executor can reach `egress.request`.
+    PROVIDER_FACING = {
+        "publish_pipeline",  # Meta: container create, publish, status
+        "deliver_outbox",  # Telegram: the sender's bounded hold
+        "send_email",  # the email provider
+        "refresh_credential",  # ig_refresh -> egress.request
+        "revoke_workspace_credentials",  # "through the egress floor with a
+        # per-call client, the way ig_refresh does"
+        "sync_media_source",  # deps.drive.list_changes
+        "first_ingest_chunk",  # the same _run_sync, one page at a time
+    }
+
+    def test_the_provider_facing_kinds_are_exactly_the_marked_ones(self):
+        registry = build_registry(full_deps())
+        marked = {
+            kind
+            for kind, entry in registry.items()
+            if getattr(entry, "owns_transactions", False)
+        }
+        assert marked == self.PROVIDER_FACING, (
+            "an executor that reaches the egress floor must own its"
+            " transactions, or the loop holds a pooled connection across the"
+            " provider call — and arming the `_IN_TRANSACTION` tripwire would"
+            " raise on it (#1368)"
+        )
+
+    def test_reap_transit_is_deliberately_not_in_that_set(self):
+        """The one provider-shaped kind that is NOT floor-bound.
+
+        `transit.py:53`: its calls "do not ride the egress floor (the SDK owns
+        its own HTTP)". Named here so the exclusion reads as a decision rather
+        than an omission — it is the obvious candidate for someone to "fix".
+
+        `retention_sweep` and `reencrypt_credentials` are absent from the set
+        for a different reason: they are `UNBUILT_KINDS`, parked with no
+        executor at all, so there is nothing to reach a provider with.
+        """
+        registry = build_registry(full_deps())
+        assert "reap_transit_assets" in registry
+        assert not getattr(registry["reap_transit_assets"], "owns_transactions", False)
+
+
 class TestRegistryCoversTheSchema:
     def test_registry_keys_equal_the_schema_kind_check(self):
         registry = build_registry(full_deps())
