@@ -48,10 +48,13 @@ from __future__ import annotations
 
 from typing import Optional
 
+from asyncpg.exceptions import CheckViolationError, RaiseError
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
 from src.exceptions.base import StorydumpError
+from src.services.target._dbapi import driver_error_is
 
 
 class IntentTransitionRefused(StorydumpError):
@@ -123,33 +126,21 @@ async def transition(session, intent_id: str, to_state: str) -> None:
     not duplicate that check for the same reason it does not duplicate the edge
     set.
     """
-    # Both driver shapes, because the triggers use both deliberately:
-    # `trg_intent_guard` raises WITH `ERRCODE = 'check_violation'` (asyncpg
-    # surfaces `CheckViolationError`), while the audit and insert guards use a
-    # bare `RAISE EXCEPTION`, which arrives as `RaiseError` (P0001). Catching
-    # only one of them was the first version's bug — the illegal-transition
-    # case escaped as a raw IntegrityError.
-    from asyncpg.exceptions import (  # noqa: PLC0415 — driver-specific
-        CheckViolationError,
-        RaiseError,
-    )
-    from sqlalchemy.exc import DBAPIError
-
-    from src.services.target._dbapi import driver_candidates
-
     try:
         await session.execute(
             text("UPDATE post_intents SET state = :s WHERE id = :i"),
             {"s": to_state, "i": intent_id},
         )
     except DBAPIError as exc:
-        refusals = [
-            c
-            for c in driver_candidates(exc)
-            if isinstance(c, (RaiseError, CheckViolationError))
-        ]
-        if refusals:
-            raise IntentTransitionRefused(str(refusals[0])) from exc
+        # Both driver shapes, because the triggers use both deliberately:
+        # `trg_intent_guard` raises WITH `ERRCODE = 'check_violation'`
+        # (asyncpg surfaces `CheckViolationError`), while the audit and insert
+        # guards use a bare `RAISE EXCEPTION`, which arrives as `RaiseError`
+        # (P0001). Catching only one of them was the first version's bug — the
+        # illegal-transition case escaped as a raw IntegrityError.
+        refusal = driver_error_is(exc, RaiseError, CheckViolationError)
+        if refusal is not None:
+            raise IntentTransitionRefused(str(refusal)) from exc
         raise
 
 
