@@ -34,9 +34,12 @@ import json
 import logging
 import threading
 import uuid
+from datetime import timedelta
 
 import psycopg2
 import pytest
+
+from src.services.target import jobs
 from psycopg2 import errors as pg_errors
 
 from tests.scripts.conftest import (
@@ -714,6 +717,75 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                 (account,),
             )
             _owner_exec(clock_db, UQ_INTENT_SLOT_SQL)
+
+
+class TestEveryLegMintsWithADeadline:
+    """083 (#1381): the clock's five legs mint `deadline_at`, from `run_at`.
+
+    `jobs.enqueue` has written a deadline since #1288 and `budget_exhausted`
+    ends a job on either bound; `fn_clock_tick` hand-writes its INSERTs and so
+    minted jobs bounded by attempts alone — the SQL half of #1361.
+
+    THE ASSERTION IS THE ORIGIN, not the presence. A deadline of
+    `now() + 6 hours` is also non-NULL, and for four of the five legs it is
+    even correct, because they mint at `now()`. The singleton leg is the one
+    that separates them: its `run_at` is the last completion plus the cadence,
+    so a deadline anchored at mint is spent before the job is claimable and
+    ends the job on its first run. That is exactly the defect #1361 found at
+    the offboarding site, and the only way to see it is to tick a clock whose
+    next singleton is due well in the FUTURE.
+    """
+
+    def test_a_future_singleton_carries_its_deadline_from_run_at(self, clock_db):
+        kind = _kind()
+        cadence_s = 7 * 24 * 3600
+        _owner_exec(clock_db, "DELETE FROM jobs WHERE kind = %s", (kind,))
+        # A completed run just now, so the next one is due a week out and the
+        # two candidate anchors are a week apart rather than coincident.
+        _owner_exec(
+            clock_db,
+            "INSERT INTO jobs (kind, workspace_id, lane, serialization_key,"
+            " run_at, max_attempts, payload, state, updated_at)"
+            " VALUES (%s, NULL, 'bulk', %s, now(), 3, '{\"v\": 1}'::jsonb,"
+            "         'succeeded', now())",
+            (kind, kind),
+        )
+
+        conn = _worker_conn(clock_db, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                _raw_tick(cur, recurring={"v": 1, kind: cadence_s})
+        finally:
+            conn.close()
+
+        row = _owner_exec(
+            clock_db,
+            "SELECT run_at > now() + interval '6 days',"
+            "       deadline_at IS NOT NULL,"
+            "       deadline_at - run_at,"
+            "       deadline_at > now() + interval '6 days'"
+            "  FROM jobs WHERE kind = %s AND state = 'ready'",
+            (kind,),
+            fetch=True,
+        )
+        assert len(row) == 1, "the tick minted exactly one successor"
+        due_ahead, has_deadline, span, beyond_mint = row[0]
+
+        assert due_ahead is True, (
+            "positive control: this singleton must be due a week out, or the"
+            " two anchors coincide and the test cannot tell them apart"
+        )
+        assert has_deadline is True, "083: every leg mints a deadline"
+        assert span == timedelta(seconds=jobs.LANE_BUDGETS["bulk"][1]), (
+            "the span is the bulk lane's budget — SQL cannot read"
+            " LANE_BUDGETS, so this is what holds the copy in 083 to it"
+        )
+        assert beyond_mint is True, (
+            "measured from RUN_AT, not from now(): a deadline anchored at mint"
+            " would already be spent when this job first becomes claimable,"
+            " and budget_exhausted would end the workflow on its first run"
+        )
+        _owner_exec(clock_db, "DELETE FROM jobs WHERE kind = %s", (kind,))
 
 
 class TestTheTickAndTheSweepAreBounded:

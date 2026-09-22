@@ -287,8 +287,9 @@ class TestAgainstTheRealDocs:
         # edges and the reaper's withdrawn approved leg (076, plan 03) make
         # it 34; §23's person-bound token subject (077, the v2 CLI plan,
         # phase 01) makes it 35; §24's fleet-health doors (081, #751) make it 36;
-        # §25's worker doors (082, #751 part 2) make it 37.
-        assert classes.count("normative") == 37
+        # §25's worker doors (082, #751 part 2) make it 37; and §26's clock
+        # deadlines (083, #1381 — the SQL half of #1361) make it 38.
+        assert classes.count("normative") == 38
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
