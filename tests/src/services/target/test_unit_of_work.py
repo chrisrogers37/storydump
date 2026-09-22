@@ -361,6 +361,84 @@ class _Conn:
         return _Result(self._row)
 
 
+class TestTheWorkerSessionsAreCoveredToo:
+    """The two worker factories set the discipline flag as `begin()` does.
+
+    #1368: they did not, so `_IN_TRANSACTION` covered no worker path at all —
+    while `credential_lifecycle`'s module docstring said "The egress floor
+    enforces this structurally: a provider call inside an open UoW transaction
+    raises, so getting this wrong here is loud, not latent", and
+    `email_sender`'s said "`egress.request` refuses to run inside an open
+    transaction ... enforced in code". Both were true of `UnitOfWork.begin()`
+    and false of every session the worker actually opens.
+
+    THE SUITE COULD NOT SEE THIS, which is why the test is shaped like the
+    composed path above rather than as a flag assertion: every worker gate
+    injects a provider stub (`refresh=_fake_seam`, `refresh=refresh_stub`), so
+    no test reaches `egress.request` from a worker session by accident. This
+    one does it on purpose, against live Postgres, through the real floor.
+
+    #1387 was the prerequisite: the four executors that reach the floor now
+    own their transactions, so arming this refuses a violation rather than
+    breaking four production paths.
+    """
+
+    async def _refuses_inside(self, opener):
+        import httpx
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.egress import EgressPolicy
+        from src.services.target.egress import request as egress_request
+        from src.services.target.unit_of_work import TransactionDisciplineError
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            transport = httpx.MockTransport(lambda r: httpx.Response(200, text="ok"))
+            async with httpx.AsyncClient(transport=transport) as client:
+                async with opener(engine):
+                    with pytest.raises(TransactionDisciplineError):
+                        await egress_request(
+                            client,
+                            "GET",
+                            "https://graph.instagram.com/v1/me",
+                            policy=EgressPolicy(),
+                            resolver=lambda h: ["93.184.216.34"],
+                        )
+                # Outside it the same call goes out, so the refusal above is
+                # the discipline and not a broken call.
+                resp = await egress_request(
+                    client,
+                    "GET",
+                    "https://graph.instagram.com/v1/me",
+                    policy=EgressPolicy(),
+                    resolver=lambda h: ["93.184.216.34"],
+                )
+                assert resp.status_code == 200
+                assert in_transaction() is False, "the flag is reset on the way out"
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_make_session_for_refuses_a_provider_call(self):
+        from src.services.target.unit_of_work import make_session_for
+
+        def opener(engine):
+            return make_session_for(engine)({"workspace_id": TENANT_A})
+
+        await self._refuses_inside(opener)
+
+    @pytest.mark.asyncio
+    async def test_the_poller_factory_refuses_a_provider_call(self):
+        from src.services.target.unit_of_work import poller_session_factory
+
+        def opener(engine):
+            return poller_session_factory(engine, TENANT_A)()
+
+        await self._refuses_inside(opener)
+
+
 class TestConnectionRole:
     """`connection_role` is the one place that asks a live connection who it is.
 
