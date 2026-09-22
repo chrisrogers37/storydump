@@ -22,12 +22,17 @@ DB_PORT ?= 5432
 DB_NAME ?= storydump
 DB_USER ?= $(USER)
 DB_PASSWORD ?=
+# Exported by name: the bare `export` in the `.env` block above exports nothing
+# when there is no `.env`, and `scripts.app_db_url` reads these from the
+# environment.
+export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
 
 # PostgreSQL connection options (respects all connection variables)
 PG_OPTS = -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER)
 
-# PostgreSQL connection string for application database
-APP_DB_URL = postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)
+# The migration runner's URL is built by `scripts.app_db_url`, which
+# percent-encodes every part: pasted raw, a password carrying `@`, `:` or `/`
+# parsed into the host or the port.
 
 # Colors for output
 GREEN  := \033[0;32m
@@ -115,7 +120,7 @@ init-db: ## Build the schema on a FRESH database, the way the lineage lane prove
 		-f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
 		-f scripts/setup_database.sql -f tests/scripts/fixtures/legacy_by_hand.sql 2>&1 || \
 		(echo "$(RED)✗ Failed to build the by-hand base. Check database connection and permissions (step 0 creates the svc_* roles: DB_USER needs CREATEROLE).$(NC)" && exit 1)
-	@DATABASE_URL="$(APP_DB_URL)" python -m scripts.migration_runner apply || \
+	@DATABASE_URL="$$(python -m scripts.app_db_url)" python -m scripts.migration_runner apply || \
 		(echo "$(RED)✗ The migration runner failed; see its output above.$(NC)" && exit 1)
 	@echo "$(GREEN)✓ Schema initialized$(NC)"
 
