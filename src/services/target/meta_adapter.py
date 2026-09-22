@@ -167,6 +167,7 @@ class StubMetaAdapter:
         self.status_calls: list[str] = []
         self.publish_calls: list[dict] = []
         self.usage_calls: list[str] = []
+        self.usage_workspaces: list[Optional[str]] = []
 
     def _raise_scripted(self, script: list) -> None:
         if not script:
@@ -259,7 +260,13 @@ class StubMetaAdapter:
         self._raise_scripted(self._publish_outcomes)
         return f"media-{next(self._ids)}"
 
-    async def usage(self, provider_account_ref: str) -> dict:
+    async def usage(
+        self, provider_account_ref: str, *, workspace_id: Optional[str] = None
+    ) -> dict:
+        # `workspace_id` is recorded, not ignored (#1369): it names whose
+        # credential pays for the read, and a stub that dropped it would let
+        # an unscoped caller look scoped in every test.
         self.usage_calls.append(provider_account_ref)
+        self.usage_workspaces.append(workspace_id)
         self._raise_scripted(self._usage_outcomes)
         return {"quota_usage": self.quota_usage, "quota_total": self.quota_total}
