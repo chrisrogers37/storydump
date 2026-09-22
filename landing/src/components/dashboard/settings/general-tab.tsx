@@ -25,7 +25,6 @@ import {
 import type { SettingsView } from "@/lib/dashboard-payloads";
 import { slotLabels, timeZoneOptions } from "@/lib/schedule";
 import { WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
-import { CaptionStyleCard } from "./caption-style-card";
 import { DangerZoneCard } from "./danger-zone-card";
 import { RepostCadenceCard } from "./repost-cadence-card";
 
@@ -497,11 +496,24 @@ export function GeneralTab({
 
       {categoryMix}
 
-      <CaptionStyleCard
-        captionStyle={settings.caption_style}
-        workspaceId={workspaceId}
-        onError={report}
-      />
+      {/*
+        CaptionStyleCard is NOT rendered, for the reason CategoryMixCard below
+        is not: the control does not work. `caption_style` is read by no code
+        in the tier — `prompts.render_card(intent, *, api_publishing_enabled)`
+        takes no style argument and always emits `📸 {who}` with separators,
+        which is exactly what the card's "Enhanced" option describes. So
+        "Enhanced" was honest and "Simple" was not: selecting it saved
+        successfully, the card re-read and showed "Simple", and every approval
+        card stayed emoji-formatted for ever.
+
+        Removed rather than reduced to a one-option select or a disabled
+        control, which is this file's own argument a few lines down — a
+        permanently-false affordance has a longer half-life than the one being
+        removed. The column, the CHECK and the port's allowlist are untouched,
+        and the card returns here the moment `render_card` can honour it
+        (#1366; the same rule as the sidebar's deleted nav item in #1363 —
+        a control is a promise that something happens).
+      */}
 
       {/*
         CategoryMixCard is NOT rendered, and this is the line alex's #1070
@@ -530,6 +542,7 @@ export function GeneralTab({
       <RepostCadenceCard
         repostTtlDays={settings.repost_ttl_days}
         skipTtlDays={settings.skip_ttl_days}
+        defaults={settings.defaults}
         workspaceId={workspaceId}
         onError={report}
       />
