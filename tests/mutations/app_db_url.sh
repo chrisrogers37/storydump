@@ -61,8 +61,9 @@ check "the harness's asyncpg URL pastes the fields again" src/services/target/un
 check "the gates' dsn pastes the fields again" tests/scripts/conftest.py '    auth = userinfo(user, password)' '    auth = f"{user}:{password}@"' "$T -k gates_dsn"
 # The Makefile: each field quoted as psql gets it, no pasted URL, no exported defaults — each also run through make.
 check "init-db reads the helper as a make variable" Makefile '@DATABASE_URL="$$(DB_USER=' '@DATABASE_URL="$(DB_USER=' "$T -k 'each_field_as_psql or hostile_command_line'"
-check "the password skips psql's quoting" Makefile ' DB_PASSWORD="$(DB_PASSWORD)" DB_HOST=' ' DB_HOST=' "$T -k 'each_field_as_psql or connects_with_what_psql_does'"
-check "the host is quoted where psql's is not" Makefile ' DB_HOST=$(DB_HOST) DB_PORT=' ' DB_HOST="$(DB_HOST)" DB_PORT=' "$T -k 'each_field_as_psql or connects_with_what_psql_does'"
+check "the password skips psql's quoting" Makefile ' DB_PASSWORD="$(DB_PASSWORD)" DB_HOST=' ' DB_HOST=' "$T -k connects_with_what_psql_does"
+check "the user is quoted where psql's is not" Makefile '$$(DB_USER=$(DB_USER) DB_PASSWORD=' '$$(DB_USER="$(DB_USER)" DB_PASSWORD=' "$T -k connects_with_what_psql_does"
+check "the host is quoted where psql's is not" Makefile ' DB_HOST=$(DB_HOST) DB_PORT=' ' DB_HOST="$(DB_HOST)" DB_PORT=' "$T -k connects_with_what_psql_does"
 check "init-db pastes the fields into the URL again" Makefile "$RUNNER" '@DATABASE_URL="postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)" python -m scripts.migration_runner apply' "$T -k 'pastes_no_field or hostile_command_line'"
 check "the Makefile exports its defaults to every target" Makefile 'DB_PASSWORD ?=
 ' 'DB_PASSWORD ?=

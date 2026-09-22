@@ -350,7 +350,9 @@ DOTENV_CASES = {
         f"{AT_VALUE} ",
     ),
     "single-quoted host": ("DB_USER=dev\nDB_HOST='localhost'\n", ""),
-    "double-quoted user": ('DB_USER="dev"\n', ""),
+    # Single-quoted, not double: `DB_USER=""dev""` reads as `dev` too, so a
+    # double-quoted user cannot tell a bare pass from a re-quoted one.
+    "single-quoted user": ("DB_USER='dev'\n", ""),
     "database name with a trailing comment": (
         "DB_USER=dev\nDB_NAME=storydump # local\n",
         "",
