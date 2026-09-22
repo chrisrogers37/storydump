@@ -151,6 +151,80 @@ def _second_workspace(oauth_db):
         conn.close()
 
 
+class TestTheTokenReadCannotCrossATenant:
+    """#1369: two workspaces holding ONE real Instagram account.
+
+    `uq_ig_account_live` is unique on `(workspace_id, provider_account_ref)`,
+    so this is a state the schema allows — and `usage_precheck`'s cache note
+    ("shared across duplicate workspace rows of one real account") says the
+    design expects it. Until this fix, `token_for_account` had a second path
+    for callers with no workspace: a bare sessionmaker, no GUCs, no
+    `a.workspace_id` predicate, and an ORDER BY that prefers the freshest
+    active row — across every tenant.
+
+    Production had not reached the state yet (measured 2026-09-22: no ref in
+    more than one workspace), so this was latent by luck. This test creates
+    the state on purpose, which is the only way to assert the boundary rather
+    than assume it.
+    """
+
+    def _account_with_token(self, oauth_db, *, workspace, ref, token):
+        acct = _exec(
+            oauth_db,
+            "INSERT INTO ig_accounts (workspace_id, provider_account_ref)"
+            " VALUES (%s, %s) RETURNING id",
+            (str(workspace), ref),
+            fetch=True,
+        )[0][0]
+        _call(
+            oauth_db,
+            lambda c: oauth.store_credential(
+                c, workspace_id=str(workspace), ig_account_id=acct, token=token
+            ),
+        )
+        return acct
+
+    def test_each_workspace_reads_its_own_token_for_one_shared_account(self, oauth_db):
+        from src.services.target import ig_credentials
+
+        ref = f"shared-{uuid.uuid4()}"
+        other_ws = _second_workspace(oauth_db)
+        self._account_with_token(
+            oauth_db, workspace=oauth_db["ws"], ref=ref, token="token-of-ws-one"
+        )
+        self._account_with_token(
+            oauth_db, workspace=other_ws, ref=ref, token="token-of-ws-two"
+        )
+
+        first = _run(
+            ig_credentials.token_for_account(
+                oauth_db["engine"], ref, workspace_id=str(oauth_db["ws"])
+            )
+        )
+        second = _run(
+            ig_credentials.token_for_account(
+                oauth_db["engine"], ref, workspace_id=str(other_ws)
+            )
+        )
+        assert first == "token-of-ws-one"
+        assert second == "token-of-ws-two", (
+            "the second workspace was handed the first workspace's token —"
+            " the ordering chose across tenants (#1369)"
+        )
+
+    def test_the_unscoped_read_no_longer_exists(self, oauth_db):
+        """Closed by the signature, so a caller written later cannot reopen
+        it by simply not passing a workspace."""
+        from src.services.target import ig_credentials
+
+        with pytest.raises(TypeError):
+            _run(
+                ig_credentials.token_for_account(
+                    oauth_db["engine"], f"shared-{uuid.uuid4()}"
+                )
+            )
+
+
 class TestTheIsolationLevelIsWhatProductionRuns:
     def test_read_committed(self, oauth_db):
         rows = _exec(

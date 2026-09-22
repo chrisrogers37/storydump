@@ -542,7 +542,14 @@ async def _advisory_precheck(
         # "immediately before the §4 flip transaction"). Never for a dry run:
         # nothing reaches Instagram in a rehearsal, and Meta's cap must not
         # hold one that spends none of it (adversarial review of #1299).
-        verdict = await precheck.check(meta, ctx.intent["provider_account_ref"])
+        # The workspace names whose credential pays for the read (#1369):
+        # every other Meta call in this pipeline passes it, and unscoped
+        # the token read crosses tenants by ordering.
+        verdict = await precheck.check(
+            meta,
+            ctx.intent["provider_account_ref"],
+            workspace_id=ctx.workspace_id,
+        )
         if verdict == DEFER:
             slot, run_at = _next_slot(ctx, now_fn, backoff_seconds)
             async with uow.begin() as session:

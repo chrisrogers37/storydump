@@ -1,6 +1,6 @@
-"""The account token reader (#1220 step 3): the row it joins — within the
-workspace when one is named — the refusals it names, and the plaintext it
-returns under the key ring, never logged."""
+"""The account token reader (#1220 step 3): the row it joins — always within
+one workspace (#1369) — the refusals it names, and the plaintext it returns
+under the key ring, never logged."""
 
 from __future__ import annotations
 
@@ -43,12 +43,14 @@ class _Session:
 
 @pytest.fixture
 def engine(monkeypatch):
-    """Both doors answered by one scripted session: `async_sessionmaker` for
-    the ref-only read, `unit_of_work(...).begin()` for the tenant-scoped one."""
-    holder = {"row": None, "statements": [], "uow": []}
+    """One door, answered by one scripted session: `unit_of_work(...).begin()`.
 
-    def maker(engine_, expire_on_commit=False):
-        return lambda: _Session(holder)
+    There used to be two. The ref-only read went through a bare
+    `async_sessionmaker` with no GUCs, and this fixture scripted that too —
+    which is part of why the hole was easy to keep: the test double made the
+    unscoped path look like a peer of the scoped one rather than a gap in the
+    tenancy gate (#1369)."""
+    holder = {"row": None, "statements": [], "uow": []}
 
     class _Uow:
         def begin(self):
@@ -58,7 +60,6 @@ def engine(monkeypatch):
         holder["uow"].append((tenant_id, gucs))
         return _Uow()
 
-    monkeypatch.setattr(ig_credentials, "async_sessionmaker", maker)
     monkeypatch.setattr(ig_credentials, "unit_of_work", unit_of_work)
     return holder
 
@@ -94,15 +95,34 @@ class TestTheRead:
         )
         assert "updated_at" not in sql, "oauth_credentials carries no such column"
 
-    async def test_without_a_workspace_the_read_prefers_an_active_row(self, engine):
+    async def test_a_read_without_a_workspace_is_REFUSED(self, engine):
+        """**An inversion, not a new assertion.** This test asserted that a
+        ref-only read "prefers an active row" — it pinned the unscoped path as
+        behaviour.
+
+        That path opened a bare sessionmaker with no GUCs and no
+        `a.workspace_id` predicate, so RLS had nothing to key on and
+        `_ORDER` chose the freshest active row across every tenant. It was
+        reachable rather than impossible: `uq_ig_account_live` is unique on
+        `(workspace_id, provider_account_ref)`, so two workspaces may hold one
+        real Instagram account, and `usage_precheck`'s cache note says a quota
+        reading is "shared across duplicate workspace rows of one real
+        account" — the design anticipates that state.
+
+        The signature closes it, so the refusal is a TypeError rather than a
+        runtime check, and no caller written later can reopen it (#1369)."""
         engine["row"] = _row()
-        assert await ig_credentials.token_for_account(object(), REF) == "IGQVJtoken"
-        assert engine["uow"] == []
-        ((sql, params),) = engine["statements"]
-        assert (
-            "ORDER BY (c.state = :usable) DESC" in sql and params["usable"] == "active"
-        )
-        assert "updated_at" not in sql
+        with pytest.raises(TypeError):
+            await ig_credentials.token_for_account(object(), REF)
+        assert engine["statements"] == [], "nothing was read"
+
+    async def test_an_empty_workspace_is_refused_too(self, engine):
+        """A caller that has the argument but nothing to put in it does not
+        get the old behaviour by passing `""`."""
+        engine["row"] = _row()
+        with pytest.raises(ValueError):
+            await ig_credentials.token_for_account(object(), REF, workspace_id="")
+        assert engine["statements"] == [], "nothing was read"
 
     async def test_no_row_names_connect(self, engine):
         engine["row"] = None
@@ -112,21 +132,21 @@ class TestTheRead:
     async def test_a_revoked_credential_names_reauth(self, engine):
         engine["row"] = _row(state="revoked")
         with pytest.raises(ig_credentials.IgCredentialDead, match="re-auth"):
-            await ig_credentials.token_for_account(object(), REF)
+            await ig_credentials.token_for_account(object(), REF, workspace_id=WS)
 
     async def test_an_account_awaiting_reauth_is_refused(self, engine):
         engine["row"] = _row(account_state="reauth_required")
         with pytest.raises(ig_credentials.IgCredentialDead, match="reauth_required"):
-            await ig_credentials.token_for_account(object(), REF)
+            await ig_credentials.token_for_account(object(), REF, workspace_id=WS)
 
     async def test_an_expired_credential_names_the_refresh_leg(self, engine):
         engine["row"] = _row(
             expires_at=datetime.now(timezone.utc) - timedelta(minutes=1)
         )
         with pytest.raises(ig_credentials.IgCredentialDead, match="expired"):
-            await ig_credentials.token_for_account(object(), REF)
+            await ig_credentials.token_for_account(object(), REF, workspace_id=WS)
 
     async def test_an_undecryptable_payload_is_refused_by_name(self, engine):
         engine["row"] = _row(encrypted_payload="gAAAAAnot-a-fernet-token")
         with pytest.raises(ig_credentials.IgCredentialDead, match="decrypted"):
-            await ig_credentials.token_for_account(object(), REF)
+            await ig_credentials.token_for_account(object(), REF, workspace_id=WS)
