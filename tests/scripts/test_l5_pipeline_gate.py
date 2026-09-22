@@ -49,6 +49,7 @@ from src.services.target.publish_pipeline import (
     RETRY_SCHEDULED,
     run_publish_pipeline,
 )
+from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
 from src.services.target.usage_precheck import UsagePrecheck
 from tests.scripts.conftest import (
     _scratch,
@@ -676,7 +677,9 @@ class TestTheHappyPath:
         assert media_row[0] == 1 and media_row[1] is not None
         lock = _exec(
             pipe_db,
-            "SELECT l.kind, l.ig_account_id, l.expires_at FROM post_locks l"
+            "SELECT l.kind, l.ig_account_id, l.expires_at,"
+            "       round(EXTRACT(epoch FROM (l.expires_at - l.created_at))/86400)"
+            "  FROM post_locks l"
             " JOIN post_intents i ON i.media_item_id = l.media_item_id"
             " WHERE i.id = %s",
             (intent,),
@@ -684,6 +687,18 @@ class TestTheHappyPath:
         )
         assert len(lock) == 1 and lock[0][0] == "recent"
         assert lock[0][1] is not None and lock[0][2] is not None
+        # The SPAN, not merely that one exists (#1365). This workspace has no
+        # `repost_ttl_days`, so the lock is the product default — and it must
+        # be the SAME default the manual `posted` path applies, which is the
+        # one `posted_effects` documents and the Settings card shows. The
+        # worker used to shadow it with a `repost_ttl_days_default=7`
+        # parameter, so a worker publish locked for a week and a human's
+        # "mark as posted" for a month, for the same `kind`. Asserting only
+        # `IS NOT NULL` here is what let that run for 94 production locks.
+        assert lock[0][3] == DEFAULT_REPOST_TTL_DAYS, (
+            "a worker publish must lock for the product default, as the manual"
+            " path does — not a span of its own"
+        )
         acct = _exec(
             pipe_db,
             "SELECT last_posted_at FROM ig_accounts WHERE id = %s",
