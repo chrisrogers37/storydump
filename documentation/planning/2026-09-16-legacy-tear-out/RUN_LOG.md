@@ -1789,19 +1789,23 @@ the remaining half of #751.
 - ~~**`railway.toml`'s residue** (F2: untouched here): the build command still runs `mkdir -p
   /tmp/media` for a directory nothing reads, and `drainingSeconds`' comment explains a Telegram polling
   session nothing holds.~~ CLOSED 2026-09-22 (the branch `fix/tearout-queue-residue`): the build no
-  longer makes the legacy dashboard's upload directory; the `drainingSeconds` comment had already been
+  longer makes `/tmp/media`, the legacy tier's `MEDIA_DIR`; the `drainingSeconds` comment had already been
   rewritten on `main`.
 - ~~**The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
   containing `@` mis-parses into the host. Local development only.~~ CLOSED 2026-09-22 (the same
   branch): `scripts/app_db_url.py` percent-encodes every part, and the recipe hands it each field
-  through psql's own quoting, so the runner step connects with what the psql step did; seventeen
-  tests, nine of them through `make` itself.
-- **The Makefile's nine psql, createdb, dropdb and pg_dump recipes paste `DB_PASSWORD` into a shell
-  line** (`PGPASSWORD="$(DB_PASSWORD)"`; #1394's re-verify lens): a password carrying `"` or a
-  backtick breaks the line, a `$` is expanded in it, and a single-quoted `.env` value keeps its
-  quotes. Local development only, and `make init-db`'s runner step now matches psql's rather than
-  diverging from it. Handing the fields over as environment variables would fix all nine at once —
-  the owner's call on whether local tooling is worth it.
+  quoted exactly as psql gets it (the password as in `PGPASSWORD`, the other four bare, as in
+  `PG_OPTS`), so the runner step connects with what the psql step did. The same bug in the test
+  harness's three URL builders (`settings.test_database_url`, `unit_of_work.async_database_url`, the
+  gates' `_dsn`) is fixed with it: all four encode through `src/config/db_url.py`. Twenty-five tests,
+  thirteen of them through `make` itself.
+- **The Makefile's psql, createdb, dropdb and pg_dump recipes paste `DB_PASSWORD` into a shell line**
+  (`PGPASSWORD="$(DB_PASSWORD)"`, nine lines across eight targets; #1394's re-verify lenses): a
+  password carrying `"` or a backtick breaks the line, a `$` that starts a name is expanded in it,
+  and a single-quoted `.env` password keeps its quotes. Local development only, and `make init-db`'s
+  runner step now matches psql's rather than diverging from it. Handing the fields over as
+  environment variables would stop the shell reading them, though a quoted `.env` value would still
+  arrive with its quotes — the owner's call on whether local tooling is worth it.
 - **Found by phase 05's documentation pass, outside a docs phase's scope (code, config, product copy) —
   each with its evidence, none fixed here:** `storydump_cli/output.py:642` reads the pool keys `in_use`
   and `peak`, `/health` emits `checked_out` and `checked_out_peak`, and the fixture at

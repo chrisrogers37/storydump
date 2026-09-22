@@ -1,20 +1,22 @@
-"""`make init-db`'s runner URL, built by `scripts.app_db_url`.
+"""Connection URLs built from `DB_*` fields: `make init-db`'s and the harness's.
 
 `make init-db` connects twice — psql builds the by-hand base, then the migration
 runner applies every file. The recipe pasted ``DB_USER`` and ``DB_PASSWORD``
 into the runner's ``postgresql://`` URL, so a password carrying ``@``, ``/`` or
 ``%`` was misread by libpq after psql had connected with it (the tear-out's
-owner queue; PR #1394's lenses). Every assertion reads the URL back through
-libpq's own parser (``psycopg2.extensions.parse_dsn``), the one the runner's
-driver uses — not ``urllib``, which is not what connects.
+owner queue; PR #1394's lenses). The test harness built its URLs the same way
+in three places. All four now encode through ``src.config.db_url``, and every
+assertion reads the URL back through the parser that will read it — libpq's
+(``psycopg2.extensions.parse_dsn``) or SQLAlchemy's (``make_url``) — never
+``urllib``, which is not what connects.
 
-Three layers: the helper alone; the Makefile's text (the recipe hands each field
-to the helper through psql's own quoting, no field pasted into a URL, no export
-of the ``?=`` defaults); and the Makefile run by ``make`` itself, with a probe
-target built from init-db's two expressions — psql's ``PGPASSWORD`` and the
-runner's ``DATABASE_URL``, copied from the Makefile — so what is asserted is
-that the two steps connect with the same password, however a ``.env`` spells
-it. Local development only: deployed services carry ``DATABASE_URL`` whole.
+For init-db, three layers: the helper alone; the Makefile's text (each field
+reaches the helper quoted exactly as psql gets it, no field pasted into a URL,
+no export of the ``?=`` defaults); and the Makefile run by ``make`` itself,
+with a probe target built from init-db's own psql arguments and runner URL —
+copied from the Makefile — asserting the two steps connect with the same user,
+host, port, database and password however a ``.env`` spells them. Local
+development only: deployed services carry their URLs whole.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ HOSTILE_PASSWORD = "p@ss/w%41rd:?# x"
 HOSTILE_NAME = "café db/x?y"
 SOCKET_DIR = "/var/run/postgresql"
 AT_VALUE = "ab@cd"
+ESCAPED_QUOTE = 'ab\\"cd'  # a .env `\"`, which the shell reads as `"`
 DOLLAR_ON_THE_COMMAND_LINE = "ab$$cd"  # make's `$$` is one `$`
 
 
@@ -55,7 +58,58 @@ def _libpq(url: str) -> dict:
     return parse_dsn(url)
 
 
-# -- the helper ----------------------------------------------------------------
+# -- the one encoding rule and the harness's builders --------------------------
+
+
+def test_userinfo_round_trips_a_hostile_user_and_password():
+    from src.config.db_url import userinfo
+
+    url = f"postgresql://{userinfo(HOSTILE_USER, HOSTILE_PASSWORD)}localhost:5432/s"
+    got = _libpq(url)
+    assert (got["user"], got["password"]) == (HOSTILE_USER, HOSTILE_PASSWORD)
+
+
+def test_the_suites_test_database_url_keeps_a_hostile_password():
+    from src.config.settings import Settings
+
+    s = Settings(
+        _env_file=None,
+        DB_USER=HOSTILE_USER,
+        DB_PASSWORD=HOSTILE_PASSWORD,
+        TEST_DB_NAME="storydump_test",
+    )
+    got = _libpq(s.test_database_url)
+    assert (got["user"], got["password"], got["dbname"]) == (
+        HOSTILE_USER,
+        HOSTILE_PASSWORD,
+        "storydump_test",
+    )
+
+
+def test_the_harness_asyncpg_url_keeps_a_hostile_password(monkeypatch):
+    from sqlalchemy.engine import make_url
+
+    from src.config.settings import settings
+    from src.services.target import unit_of_work
+
+    monkeypatch.setattr(settings, "DB_USER", HOSTILE_USER)
+    monkeypatch.setattr(settings, "DB_PASSWORD", HOSTILE_PASSWORD)
+    url = make_url(unit_of_work.async_database_url("storydump_test"))
+    assert (url.username, url.password, url.database) == (
+        HOSTILE_USER,
+        HOSTILE_PASSWORD,
+        "storydump_test",
+    )
+
+
+def test_the_gates_dsn_keeps_a_hostile_password():
+    from tests.scripts.conftest import _dsn
+
+    got = _libpq(_dsn("storydump_test", user=HOSTILE_USER, password=HOSTILE_PASSWORD))
+    assert (got["user"], got["password"]) == (HOSTILE_USER, HOSTILE_PASSWORD)
+
+
+# -- the init-db helper ---------------------------------------------------------
 
 
 def test_every_part_round_trips_through_libpq():
@@ -122,8 +176,6 @@ def test_run_directly_the_defaults_are_the_makefiles(capsys):
 
 # -- the Makefile's text -------------------------------------------------------
 
-FIELDS = ("DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT", "DB_NAME")
-
 
 @pytest.fixture(scope="module")
 def makefile() -> str:
@@ -140,14 +192,21 @@ def _runner_line(makefile: str) -> str:
 
 def test_init_db_hands_the_helper_each_field_as_psql_gets_it(makefile):
     """`$$(` is make's escape for the shell's `$(` (with one `$` make reads an
-    empty make variable and the runner gets no URL), and each field reaches the
-    helper through the quoting psql's `PGPASSWORD="$(DB_PASSWORD)"` gets."""
+    empty make variable and the runner gets no URL). The password reaches the
+    helper double-quoted, as in psql's `PGPASSWORD="$(DB_PASSWORD)"`; the other
+    four bare, as in `PG_OPTS` and `-d $(DB_NAME)`."""
     line = _runner_line(makefile)
     assert '@DATABASE_URL="$$(' in line and 'python -m scripts.app_db_url)"' in line, (
         line
     )
-    missing = [f for f in FIELDS if f'{f}="$({f})"' not in line]
-    assert missing == [], missing
+    assert 'DB_PASSWORD="$(DB_PASSWORD)"' in line
+    bare = [
+        f
+        for f in ("DB_USER", "DB_HOST", "DB_PORT", "DB_NAME")
+        if f"{f}=$({f}) " not in line
+    ]
+    assert bare == [], bare
+    assert "PG_OPTS = -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER)" in makefile
     assert 'PGPASSWORD="$(DB_PASSWORD)" psql $(PG_OPTS) -d $(DB_NAME) -q' in makefile
 
 
@@ -170,28 +229,41 @@ def test_the_makefile_exports_no_db_field(makefile):
 MAKE = shutil.which("make")
 needs_make = pytest.mark.skipif(MAKE is None, reason="no make on this host")
 
+#: What the probe prints: psql's own arguments (`PG_OPTS` and `-d`, word-split
+#: exactly as psql receives them) with its `PGPASSWORD`, beside libpq's parse
+#: of the runner's URL.
+_SHOW = """\
+import json, os, sys
+from psycopg2.extensions import parse_dsn
+flags = {"-h": "host", "-p": "port", "-U": "user", "-d": "dbname"}
+psql, args, i = {}, sys.argv[1:], 0
+while i < len(args):
+    if args[i] in flags and i + 1 < len(args):
+        psql[flags[args[i]]] = args[i + 1]
+        i += 2
+    else:
+        psql.setdefault("extra", []).append(args[i])
+        i += 1
+psql["password"] = os.environ["PGPASSWORD"]
+print(json.dumps({"psql": psql, "runner": parse_dsn(os.environ["DATABASE_URL"])}))
+"""
+
 
 def _through_make(tmp_path, *, args=(), dotenv=None, target="probe"):
     """`make` run on the repository's Makefile from *tmp_path* (so its
     `include .env` reads *dotenv*), with a probe target built from init-db's
-    own two expressions, copied from the Makefile: psql's `PGPASSWORD` and the
-    runner's `DATABASE_URL`. It prints the password psql would be given and
-    libpq's parse of the URL the runner would be given."""
+    own psql line — its `PGPASSWORD` and its arguments — and its runner URL,
+    all copied from the Makefile."""
     text = (ROOT / "Makefile").read_text()
     url_expr = re.search(
         r'DATABASE_URL="(.*?)" python -m scripts\.migration_runner apply', text
     )
-    pg_expr = re.search(
-        r'PGPASSWORD="(.*?)" psql \$\(PG_OPTS\) -d \$\(DB_NAME\) -q', text
+    psql = re.search(
+        r'PGPASSWORD="(.*?)" psql (\$\(PG_OPTS\) -d \$\(DB_NAME\)) -q', text
     )
-    assert url_expr is not None and pg_expr is not None, "init-db changed shape"
+    assert url_expr is not None and psql is not None, "init-db changed shape"
     show = tmp_path / "show.py"
-    show.write_text(
-        "import json, os\n"
-        "from psycopg2.extensions import parse_dsn\n"
-        "print(json.dumps({'psql': os.environ['PGPASSWORD'],"
-        " 'runner': parse_dsn(os.environ['DATABASE_URL'])}))\n"
-    )
+    show.write_text(_SHOW)
     fields = tmp_path / "fields.py"
     fields.write_text(
         "import json, os\n"
@@ -199,8 +271,8 @@ def _through_make(tmp_path, *, args=(), dotenv=None, target="probe"):
     )
     probe = tmp_path / "probe.mk"
     probe.write_text(
-        f'probe:\n\t@PGPASSWORD="{pg_expr.group(1)}" '
-        f'DATABASE_URL="{url_expr.group(1)}" python {show}\n'
+        f'probe:\n\t@PGPASSWORD="{psql.group(1)}" '
+        f'DATABASE_URL="{url_expr.group(1)}" python {show} {psql.group(2)}\n'
         f"fields:\n\t@python {fields}\n"
     )
     if dotenv is not None:
@@ -209,6 +281,7 @@ def _through_make(tmp_path, *, args=(), dotenv=None, target="probe"):
         "PATH": os.pathsep.join([str(Path(sys.executable).parent), "/usr/bin", "/bin"]),
         "PYTHONPATH": str(ROOT),
         "HOME": str(tmp_path),
+        "USER": "probe_login",  # `DB_USER ?= $(USER)`
     }
     out = subprocess.run(
         [MAKE, "-s", "-f", str(ROOT / "Makefile"), "-f", str(probe), target, *args],
@@ -222,8 +295,19 @@ def _through_make(tmp_path, *, args=(), dotenv=None, target="probe"):
     return json.loads(out.stdout.strip().splitlines()[-1])
 
 
+def _agree(got: dict) -> None:
+    """psql and the runner connect with the same five values (libpq leaves an
+    empty password out of the URL)."""
+    psql, runner = got["psql"], got["runner"]
+    assert "extra" not in psql, psql
+    for key in ("user", "host", "port", "dbname"):
+        assert runner.get(key) == psql.get(key), (key, got)
+    assert runner.get("password", "") == psql["password"], got
+
+
 @needs_make
 def test_make_hands_the_runner_a_hostile_command_line_intact(tmp_path):
+    name = "café-db@x"  # psql gets the name bare, so no space
     got = _through_make(
         tmp_path,
         args=(
@@ -231,60 +315,80 @@ def test_make_hands_the_runner_a_hostile_command_line_intact(tmp_path):
             f"DB_PASSWORD={HOSTILE_PASSWORD}",
             f"DB_HOST={SOCKET_DIR}",
             "DB_PORT=6543",
-            f"DB_NAME={HOSTILE_NAME}",
+            f"DB_NAME={name}",
         ),
     )
-    assert got["psql"] == HOSTILE_PASSWORD
+    _agree(got)
     assert got["runner"] == {
         "user": HOSTILE_USER,
         "password": HOSTILE_PASSWORD,
         "host": SOCKET_DIR,
         "port": "6543",
-        "dbname": HOSTILE_NAME,
+        "dbname": name,
     }
 
 
-# How a `.env` may spell the password, and what the shell makes of each in
-# psql's double-quoted `PGPASSWORD` — and so, now, in the runner's step. The shell's
-# answer is not always the value meant (single quotes are literal inside double
-# quotes; a comment's leading space stays): that is every psql recipe's limit,
-# recorded here, and the property pinned is that the two steps agree. Built
-# from AT_VALUE, never a literal.
-DOTENV_SPELLINGS = {
-    "bare": (AT_VALUE, AT_VALUE),
-    "double-quoted": (f'"{AT_VALUE}"', AT_VALUE),
-    "single-quoted": (f"'{AT_VALUE}'", f"'{AT_VALUE}'"),
-    "escaped quote inside": ('"ab\\"cd"', 'ab"cd'),
-    "trailing comment": (f'"{AT_VALUE}" # a local note', f"{AT_VALUE} "),
+#: How a `.env` may spell the fields, and the password the shell makes of each
+#: in psql's step — and so, now, in the runner's. The shell's answer is not
+#: always the value meant (single quotes are literal inside psql's double
+#: quotes; a comment's leading space stays): that is every psql recipe's limit,
+#: recorded here, and the property pinned is that the two steps agree. Built
+#: from constants, never a literal.
+DOTENV_CASES = {
+    "bare password": (f"DB_USER=dev\nDB_PASSWORD={AT_VALUE}\n", AT_VALUE),
+    "double-quoted password": (f'DB_USER=dev\nDB_PASSWORD="{AT_VALUE}"\n', AT_VALUE),
+    "single-quoted password": (
+        f"DB_USER=dev\nDB_PASSWORD='{AT_VALUE}'\n",
+        f"'{AT_VALUE}'",
+    ),
+    "escaped quote in the password": (
+        f'DB_USER=dev\nDB_PASSWORD="{ESCAPED_QUOTE}"\n',
+        'ab"cd',
+    ),
+    "password with a trailing comment": (
+        f'DB_USER=dev\nDB_PASSWORD="{AT_VALUE}" # a note\n',
+        f"{AT_VALUE} ",
+    ),
+    "single-quoted host": ("DB_USER=dev\nDB_HOST='localhost'\n", ""),
+    "double-quoted user": ('DB_USER="dev"\n', ""),
+    "database name with a trailing comment": (
+        "DB_USER=dev\nDB_NAME=storydump # local\n",
+        "",
+    ),
+    "port with a trailing comment": ("DB_USER=dev\nDB_PORT=5432 # local\n", ""),
 }
 
 
 @needs_make
-@pytest.mark.parametrize("spelling", sorted(DOTENV_SPELLINGS))
-def test_the_runner_connects_with_what_psql_does(tmp_path, spelling):
-    written, expected = DOTENV_SPELLINGS[spelling]
-    got = _through_make(tmp_path, dotenv=f"DB_USER=dev\nDB_PASSWORD={written}\n")
-    assert got["psql"] == expected
-    assert got["runner"].get("password") == got["psql"], got
+@pytest.mark.parametrize("case", sorted(DOTENV_CASES))
+def test_the_runner_connects_with_what_psql_does(tmp_path, case):
+    dotenv, password = DOTENV_CASES[case]
+    got = _through_make(tmp_path, dotenv=dotenv)
+    _agree(got)
+    assert got["psql"]["password"] == password
 
 
 @needs_make
-def test_a_dollar_is_expanded_in_both_steps_alike(tmp_path):
+def test_a_dollar_that_starts_a_name_is_expanded_in_both_steps_alike(tmp_path):
     """make turns `$$` into `$`, then the shell line expands `$cd` — in psql's
-    step and the runner's alike. A password carrying `$` does not survive
-    `make init-db` at all; what is pinned is that neither step disagrees."""
+    step and the runner's alike. What is pinned is that neither step disagrees."""
     got = _through_make(
         tmp_path, args=("DB_USER=dev", f"DB_PASSWORD={DOLLAR_ON_THE_COMMAND_LINE}")
     )
-    assert got["psql"] == "ab"
-    assert got["runner"]["password"] == got["psql"]
+    _agree(got)
+    assert got["psql"]["password"] == "ab"
 
 
 @needs_make
 def test_make_with_nothing_set_hands_the_runner_the_defaults(tmp_path):
     got = _through_make(tmp_path)
-    assert got["psql"] == ""
-    assert got["runner"] == {"host": "localhost", "port": "5432", "dbname": "storydump"}
+    _agree(got)
+    assert got["runner"] == {
+        "user": "probe_login",
+        "host": "localhost",
+        "port": "5432",
+        "dbname": "storydump",
+    }
 
 
 @needs_make

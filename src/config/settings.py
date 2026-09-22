@@ -13,6 +13,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.exceptions import SettingsError as SourceError
 from typing import Optional
 
+from src.config.db_url import userinfo
+
 
 class SettingsError(Exception):
     """Settings failed to load. Carries field NAMES only, never their values."""
@@ -293,10 +295,10 @@ class Settings(BaseSettings):
     @property
     def test_database_url(self) -> str:
         """Get test database URL."""
-        if self.DB_PASSWORD:
-            url = f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.TEST_DB_NAME}"
-        else:
-            url = f"postgresql://{self.DB_USER}@{self.DB_HOST}:{self.DB_PORT}/{self.TEST_DB_NAME}"
+        # The user and password encoded (`src.config.db_url`): pasted raw, one
+        # carrying `@`, `/` or `%` was misread by libpq.
+        auth = userinfo(self.DB_USER, self.DB_PASSWORD)
+        url = f"postgresql://{auth}{self.DB_HOST}:{self.DB_PORT}/{self.TEST_DB_NAME}"
 
         if self.DB_SSLMODE:
             url += f"?sslmode={self.DB_SSLMODE}"

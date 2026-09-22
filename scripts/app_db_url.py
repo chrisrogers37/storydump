@@ -1,23 +1,26 @@
 """The migration runner's URL for a local database, for ``make init-db``.
 
 ``make init-db`` connects twice: psql builds the by-hand base, then the
-migration runner applies every file. The Makefile hands both steps the same
-fields through the same shell quoting — ``PGPASSWORD="$(DB_PASSWORD)"`` for
-psql, ``DB_PASSWORD="$(DB_PASSWORD)"`` (and the other four) for this script —
-so the two connect with identical values: a quoted ``.env`` value, an escape
-inside one, and make's reading of its command line apply to both alike.
+migration runner applies every file. The recipe hands this script each field
+quoted exactly as psql gets it — the password double-quoted, as in
+``PGPASSWORD="$(DB_PASSWORD)"``, the user, host, port and database bare, as in
+``PG_OPTS`` and ``-d $(DB_NAME)`` — so the two steps connect with the same
+values: a quoted ``.env`` value, an escape inside one, a comment's leading
+space and make's reading of its command line reach both alike.
 
 What this adds is the URL encoding. The recipe used to paste the fields into a
 ``postgresql://`` URL, and libpq misread a password carrying ``@``, ``/`` or
 ``%`` — as part of the host, as the end of the authority, as an escape — after
-the psql step had connected with it. Every part is percent-encoded here, a
-socket directory or an IPv6 address given as the host included.
+the psql step had connected with it. Every part is percent-encoded here
+(``src.config.db_url``, the one rule the test harness's URLs share), a socket
+directory or an IPv6 address given as the host included.
 
 What it does not change: the fields still pass through a shell line, as every
 psql recipe in the Makefile passes them, so a password carrying ``"`` or a
-backtick breaks that line, a ``$`` is expanded in it, and a single-quoted
-``.env`` value keeps its quotes — in the psql step and this one alike. Local
-development only: deployed services carry ``DATABASE_URL`` whole.
+backtick breaks that line, a ``$`` that starts a name is expanded in it, and a
+single-quoted ``.env`` password keeps its quotes — in the psql step and this
+one alike. Local development only: deployed services carry ``DATABASE_URL``
+whole.
 
 Run directly, it reads the five variables from the environment and falls back
 to the Makefile's own defaults, the user to libpq's, which is the login name,
@@ -31,7 +34,7 @@ from __future__ import annotations
 import os
 import sys
 from typing import Mapping
-from urllib.parse import quote
+from src.config.db_url import enc, userinfo
 
 #: The Makefile's ``?=`` defaults, for a direct run (the tests pin them against
 #: the Makefile; under ``make`` the recipe passes every field explicitly).
@@ -40,20 +43,12 @@ DEFAULT_PORT = "5432"
 DEFAULT_NAME = "storydump"
 
 
-def _enc(part: str) -> str:
-    # `safe=""`: even `/` is encoded — an unencoded one ends the authority, and
-    # a socket directory given as the host is made of them.
-    return quote(part, safe="")
-
-
 def app_db_url(*, user: str, password: str, host: str, port: str, name: str) -> str:
     """``postgresql://[user[:password]@]host:port/name`` with every part
-    percent-encoded. An empty user or password is left out, so libpq applies
-    its own default."""
-    auth = ""
-    if user or password:
-        auth = _enc(user) + (":" + _enc(password) if password else "") + "@"
-    return f"postgresql://{auth}{_enc(host)}:{_enc(port)}/{_enc(name)}"
+    percent-encoded (``src.config.db_url``; the host too, since a socket
+    directory given as one is made of slashes). An empty user or password is
+    left out, so libpq applies its own default."""
+    return f"postgresql://{userinfo(user, password)}{enc(host)}:{enc(port)}/{enc(name)}"
 
 
 def main(env: Mapping[str, str] = os.environ) -> int:

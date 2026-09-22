@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Mutation battery for make init-db's runner URL (scripts/app_db_url.py; the tear-out's owner queue):
+# Mutation battery for the URLs built from DB_* fields — make init-db's (scripts/app_db_url.py) and the
+# harness's three, all through src/config/db_url.py (the tear-out's owner queue; PR #1394):
 # each behaviour has one named mutation that must make its test FAIL ("killed") — and must PASS on the
 # clean tree first, or the verdict is BASELINE RED; a selector that selects nothing is NO TEST SELECTED,
 # never a kill. Files are restored from the COMMITTED tree after each, so commit first. No database.
@@ -45,24 +46,30 @@ check() {  # name file old new test-selector
 }
 
 T=tests/scripts/test_app_db_url.py
-RUNNER='@DATABASE_URL="$$(DB_USER="$(DB_USER)" DB_PASSWORD="$(DB_PASSWORD)" DB_HOST="$(DB_HOST)" DB_PORT="$(DB_PORT)" DB_NAME="$(DB_NAME)" python -m scripts.app_db_url)" python -m scripts.migration_runner apply'
+RUNNER='@DATABASE_URL="$$(DB_USER=$(DB_USER) DB_PASSWORD="$(DB_PASSWORD)" DB_HOST=$(DB_HOST) DB_PORT=$(DB_PORT) DB_NAME=$(DB_NAME) python -m scripts.app_db_url)" python -m scripts.migration_runner apply'
 
-# The helper: every part encoded, the defaults the Makefile's.
-check "the password is pasted raw" scripts/app_db_url.py '(":" + _enc(password) if password else "")' '(":" + password if password else "")' "$T -k every_part_round_trips"
-check "a slash is left unencoded" scripts/app_db_url.py '    return quote(part, safe="")' '    return quote(part)' "$T -k every_part_round_trips"
-check "the host is pasted raw" scripts/app_db_url.py '{_enc(host)}:' '{host}:' "$T -k ipv6_host"
-check "the database name is pasted raw" scripts/app_db_url.py '/{_enc(name)}"' '/{name}"' "$T -k every_part_round_trips"
-check "the user is pasted raw" scripts/app_db_url.py '        auth = _enc(user) + (' '        auth = user + (' "$T -k every_part_round_trips"
+# The one encoding rule (src/config/db_url.py) and the init-db helper.
+check "the password is pasted raw" src/config/db_url.py '(":" + enc(password) if password else "")' '(":" + password if password else "")' "$T -k 'userinfo_round_trips or every_part_round_trips'"
+check "a slash is left unencoded" src/config/db_url.py '    return quote(str(part), safe="")' '    return quote(str(part))' "$T -k userinfo_round_trips"
+check "the user is pasted raw" src/config/db_url.py '    return enc(user) + (' '    return user + (' "$T -k userinfo_round_trips"
+check "the host is pasted raw" scripts/app_db_url.py '{enc(host)}:' '{host}:' "$T -k ipv6_host"
+check "the database name is pasted raw" scripts/app_db_url.py '/{enc(name)}"' '/{name}"' "$T -k every_part_round_trips"
 check "the default database drifts from the Makefile's" scripts/app_db_url.py 'DEFAULT_NAME = "storydump"' 'DEFAULT_NAME = "storydump_dev"' "$T -k defaults_are_the_makefiles"
-# The Makefile: psql's quoting for every field, no pasted URL, no exported defaults — each also run through make.
+# The harness's three builders, each back to pasting the fields.
+check "the suite's test URL pastes the fields again" src/config/settings.py '        auth = userinfo(self.DB_USER, self.DB_PASSWORD)' '        auth = f"{self.DB_USER}:{self.DB_PASSWORD}@"' "$T -k suites_test_database_url"
+check "the harness's asyncpg URL pastes the fields again" src/services/target/unit_of_work.py '{userinfo(settings.DB_USER, settings.DB_PASSWORD)}' '{settings.DB_USER}:{settings.DB_PASSWORD}@' "$T -k harness_asyncpg_url"
+check "the gates' dsn pastes the fields again" tests/scripts/conftest.py '    auth = userinfo(user, password)' '    auth = f"{user}:{password}@"' "$T -k gates_dsn"
+# The Makefile: each field quoted as psql gets it, no pasted URL, no exported defaults — each also run through make.
 check "init-db reads the helper as a make variable" Makefile '@DATABASE_URL="$$(DB_USER=' '@DATABASE_URL="$(DB_USER=' "$T -k 'each_field_as_psql or hostile_command_line'"
 check "the password skips psql's quoting" Makefile ' DB_PASSWORD="$(DB_PASSWORD)" DB_HOST=' ' DB_HOST=' "$T -k 'each_field_as_psql or connects_with_what_psql_does'"
+check "the host is quoted where psql's is not" Makefile ' DB_HOST=$(DB_HOST) DB_PORT=' ' DB_HOST="$(DB_HOST)" DB_PORT=' "$T -k 'each_field_as_psql or connects_with_what_psql_does'"
 check "init-db pastes the fields into the URL again" Makefile "$RUNNER" '@DATABASE_URL="postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)" python -m scripts.migration_runner apply' "$T -k 'pastes_no_field or hostile_command_line'"
 check "the Makefile exports its defaults to every target" Makefile 'DB_PASSWORD ?=
 ' 'DB_PASSWORD ?=
 export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
 ' "$T -k 'exports_no_db_field or reaches_another_target'"
-# Not a mutation: writing `dev:@` for an empty password is EQUIVALENT under libpq, which reads it as `dev@`
-# (parse_dsn drops an empty password either way), so no behavioural test can kill it.
+# Not mutations — EQUIVALENT under libpq, so no behavioural test can kill them: writing `dev:@` for an empty
+# password (parse_dsn reads it as `dev@`), and leaving the port unencoded (a port is digits, which encode to
+# themselves).
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"
