@@ -570,12 +570,23 @@ def build_registry(deps: WorkerDeps) -> dict:
         else Parked("no channel transport configured (build-path W2)")
     )
 
+    # `own_transactions` (#1368): this opens its own `poller_session_factory`
+    # and commits Phase 1 before `deps.refresh` — "outside any transaction",
+    # as its comment says. It was true of its OWN session and false of the
+    # loop's, which stayed open across the provider call. It never touches
+    # the session passed here.
+    @own_transactions
     async def refresh_credential(session, job):
         return await credential_lifecycle.refresh_credential(deps, session, job)
 
     async def reauth_prompt(session, job):
         return await credential_lifecycle.reauth_prompt(deps, session, job)
 
+    # `own_transactions` (#1368): its docstring states that a provider call
+    # inside a unit of work violates this codebase's checkpoint discipline,
+    # and lists "a floor refusal" among its retryable dispositions — so it
+    # reaches the floor, and did so with the loop's session open.
+    @own_transactions
     async def revoke_workspace_credentials(session, job):
         return await credential_lifecycle.revoke_workspace_credentials(
             deps, session, job
@@ -632,9 +643,15 @@ def build_registry(deps: WorkerDeps) -> dict:
     # to park behind (#1083).
     registry["revoke_workspace_credentials"] = revoke_workspace_credentials
 
+    # `own_transactions` (#1368): `_run_sync` reaches Drive through the
+    # egress floor (`deps.drive.list_changes`) and owns its own sessions;
+    # the session passed here is unused.
+    @own_transactions
     async def sync_media_source(session, job):
         return await media_sync.sync_media_source(deps, session, job)
 
+    # `own_transactions` (#1368): the same `_run_sync`, one page at a time.
+    @own_transactions
     async def first_ingest_chunk(session, job):
         return await media_sync.first_ingest_chunk(deps, session, job)
 
