@@ -1785,6 +1785,37 @@ README's F.4 row is ✅ with the tracker marked closed. #739's ruling stays the 
 callback URLs under the Instagram app at submission, press Meta's test button, read the line, then
 the deletion PR.
 
+## #751 — the morning after, and the path both measurements missed (2026-09-22)
+
+**A day on both logins, read as the owner at 17:11 UTC.** Since the worker's switch: 18 stories
+posted; 1,510 reconciler, 46 delivery, 23 planning, 14 publish, 110 ingest-chunk and 10 sync jobs
+succeeded; no job failed. The API admitted 17 Telegram taps under `svc_ingress`, each audited as the
+tapping user — the approvals and skips behind the posts. `/health` reports `svc_ingress` / `bypassrls: false`
+at version 1.6.0; scheduling `healthy`, posting `posting` (135 posted). One planning job parked for
+review, at 14:00 UTC, for a reason unrelated to the logins: the `aftersaftersafters` workspace is
+active with no media source, no media and no Telegram binding, so its slot found nothing to post and
+nobody to tell, and #1090's rule parked the job rather than record a delivery. Each of its slots
+will do the same until a folder is connected, a group bound or the account paused — the owner's
+call.
+
+**A seventh tenant-less path, missed by both measurements and every lens.**
+`ig_credentials.token_for_account` opened a bare `async_sessionmaker` with no GUCs at all when called
+without a workspace — the class the measurements hunted, under a third spelling (they looked for
+`apply_gucs(tenant_id="")` and the GUC-less sessions already known). The tech-debt audit flagged it
+as TD-B17 (#1369) before either switch; #1390 deleted the branch on 2026-09-22 at 15:56 UTC. It was
+latent in production: only the usage pre-check called it that way, and the pre-check is armed by
+`TARGET_USAGE_PRECHECK_ENABLED`, which the worker does not set — no deploy log in the window carries
+its "armed" line, and the worker that ran the window's first two posts logged no pre-check failure.
+Armed, it would have failed open (proceed; Meta's error 9 stays the arbiter).
+
+**The class sweep, after the fact, on `main` at `29acea2e`:** every site in `src/` that opens a
+session outside the unit of work — raw `engine.begin()` / `engine.connect()`, bare
+`async_sessionmaker`, and `apply_gucs(tenant_id="")` — either claims its tenant before touching a
+policy-covered table, reads through a door (081, 082, `fn_memberships_for_caller`,
+`fn_invitation_accept`, the clock and claim doors), or touches only tables whose policies admit it
+with no tenant (the auth and user planes, `rate_counters`, the system lane's `jobs`, the catalogs).
+No eighth path.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
