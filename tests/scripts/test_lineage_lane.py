@@ -382,6 +382,8 @@ class TestTheBoundaryIsDerivedAndLoud:
             "081_fleet_health_doors.sql",
             # 082 appends §25, the worker's doors (#751 part 2).
             "082_worker_doors.sql",
+            # 083 appends §26, the clock's deadlines (#1381, #1361's SQL half).
+            "083_clock_tick_deadlines.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
