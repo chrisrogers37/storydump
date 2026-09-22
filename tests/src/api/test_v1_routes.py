@@ -1199,9 +1199,17 @@ class TestCategoryMix:
         },
     ]
 
-    def test_get_reads_the_view_and_carries_the_v1_keys(
+    def test_get_reads_the_view_and_carries_ONLY_rows(
         self, client, signed_in, tenant, monkeypatch
     ):
+        """`rows` is the whole shape (#1263).
+
+        The v1 keys `mix` (by folder NAME) and `categories` rode along for one
+        release so the API could deploy ahead of the web. The web has been on
+        `rows` since #1262's card shipped and reads no other field, so they are
+        gone — and asserted ABSENT rather than simply unasserted, because an
+        unasserted key is one a later change can quietly put back."""
+
         async def mix_view(session, *, workspace_id):
             return list(self.ROWS)
 
@@ -1209,15 +1217,9 @@ class TestCategoryMix:
         resp = client.get(self.URL)
         assert resp.status_code == 200
         body = resp.json()
-        assert body["rows"] == self.ROWS and "explicit_total" not in body
-        assert body["mix"] == [
-            {"category": "memes", "ratio": 0.7},
-            {"category": "merch", "ratio": 0.3},
-        ]
-        assert body["categories"] == [
-            {"category": "memes", "media_count": 30},
-            {"category": "merch", "media_count": 10},
-        ]
+        assert body == {"rows": self.ROWS}, (
+            "the response is rows and nothing else — no v1 keys, no explicit_total"
+        )
         assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
 
     def test_put_by_source_replaces_the_mix_at_the_admin_floor(
@@ -1248,32 +1250,6 @@ class TestCategoryMix:
         assert resp.json()["rows"] == self.ROWS, "the PUT answers with the GET shape"
         assert seen == {"ws": WS, "mix": body["rows"], "by": PRINCIPAL.user_id}
         assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
-
-    def test_a_v1_body_by_name_is_resolved_to_sources_for_one_release(
-        self, client, signed_in, tenant, monkeypatch
-    ):
-        seen = {}
-
-        def resolve_names(rows, mix):
-            seen["names"] = mix
-            return [{"source_id": "11111111-1111-4111-8111-111111111111", "ratio": 1.0}]
-
-        async def set_mix(session, *, workspace_id, mix, by_user_id):
-            seen["mix"] = mix
-            return mix
-
-        async def mix_view(session, *, workspace_id):
-            return list(self.ROWS)
-
-        monkeypatch.setattr(category_mix, "resolve_names", resolve_names)
-        monkeypatch.setattr(category_mix, "set_mix", set_mix)
-        monkeypatch.setattr(category_mix, "mix_view", mix_view)
-        resp = client.put(self.URL, json={"mix": [{"category": "memes", "ratio": 1.0}]})
-        assert resp.status_code == 200, resp.text
-        assert seen["names"] == [{"category": "memes", "ratio": 1.0}]
-        assert seen["mix"] == [
-            {"source_id": "11111111-1111-4111-8111-111111111111", "ratio": 1.0}
-        ]
 
     def test_a_refused_mix_is_400_with_the_reason_the_web_reads(
         self, client, signed_in, tenant, monkeypatch

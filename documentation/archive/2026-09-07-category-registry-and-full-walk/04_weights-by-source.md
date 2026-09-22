@@ -9,7 +9,7 @@ tags: [plan, scheduler, category-mix, api, web, phase-2]
 
 # Phase 2 (revised) — weights by connected folder
 
-> **Status:** COMPLETE — built 2026-09-08 as PR #1262 (`/build`; challenge round folded the same day: a typed 0 is Off, stats tiles unchanged, nested picks refused in the same PR). Step 7 (removing the v1 keys after the Vercel deploy) is the one follow-up.
+> **Status:** COMPLETE — built 2026-09-08 as PR #1262 (`/build`; challenge round folded the same day: a typed 0 is Off, stats tiles unchanged, nested picks refused in the same PR). Step 7 (removing the v1 keys after the Vercel deploy) landed 2026-09-22 as #1263 — the web reads and writes only `rows`, so the `mix`/`categories` keys and the by-name PUT body are gone and the GET's shape is asserted exactly. The step-7 plan below is left as written; it is the record of what was planned, not a live checklist.
 
 ## Summary
 
