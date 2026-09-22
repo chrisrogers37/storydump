@@ -8,7 +8,7 @@ tags: [legacy-retirement, migrations, worker, api, docs, run-log]
 links: ["https://github.com/chrisrogers37/storydump/issues/1216", "https://github.com/chrisrogers37/storydump/pull/1315"]
 ---
 
-> **Closed 2026-09-20.** Five phases merged (#1316, #1319, #1318, #1321, #1322), the window run on 2026-09-19, the residue #1324 and the docs PR #1325 merged 2026-09-20, the marker branch retired and the dead variables deleted. What the owner-decision queue still lists is outside the tear-out: #751 (the runtime logins), #739 (the Facebook secret fallback), the PITR floor (`05` §DR 7 d vs Neon's 24 h), the l8 admission flake, `.claude/settings.json`'s legacy rules, `railway.toml`'s `mkdir -p /tmp/media`. The 2026-12-16 expiry of the `archive.*_pre_cutover_20260917` snapshots is tracked at #1326; the sweeper it would need (`retention_sweep`, unbuilt) at #1327; the PITR floor at #1328.
+> **Closed 2026-09-20.** Five phases merged (#1316, #1319, #1318, #1321, #1322), the window run on 2026-09-19, the residue #1324 and the docs PR #1325 merged 2026-09-20, the marker branch retired and the dead variables deleted. What the owner-decision queue still lists is outside the tear-out: #751 (the runtime logins), #739 (the Facebook secret fallback), the PITR floor (`05` §DR 7 d vs Neon's 24 h), the l8 admission flake, `.claude/settings.json`'s legacy rules, `railway.toml`'s `mkdir -p /tmp/media`. (Since then: #751 closed 2026-09-21, the l8 flake by #1372, the `mkdir` by #1394.) The 2026-12-16 expiry of the `archive.*_pre_cutover_20260917` snapshots is tracked at #1326; the sweeper it would need (`retention_sweep`, unbuilt) at #1327; the PITR floor at #1328.
 
 ## Summary
 
@@ -1793,8 +1793,15 @@ the remaining half of #751.
   rewritten on `main`.
 - ~~**The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
   containing `@` mis-parses into the host. Local development only.~~ CLOSED 2026-09-22 (the same
-  branch): `scripts/app_db_url.py` percent-encodes every part and the Makefile exports its defaults by
-  name; seven tests, seven mutations killed.
+  branch): `scripts/app_db_url.py` percent-encodes every part, and the recipe hands it each field
+  through psql's own quoting, so the runner step connects with what the psql step did; seventeen
+  tests, nine of them through `make` itself.
+- **The Makefile's nine psql, createdb, dropdb and pg_dump recipes paste `DB_PASSWORD` into a shell
+  line** (`PGPASSWORD="$(DB_PASSWORD)"`; #1394's re-verify lens): a password carrying `"` or a
+  backtick breaks the line, a `$` is expanded in it, and a single-quoted `.env` value keeps its
+  quotes. Local development only, and `make init-db`'s runner step now matches psql's rather than
+  diverging from it. Handing the fields over as environment variables would fix all nine at once —
+  the owner's call on whether local tooling is worth it.
 - **Found by phase 05's documentation pass, outside a docs phase's scope (code, config, product copy) —
   each with its evidence, none fixed here:** `storydump_cli/output.py:642` reads the pool keys `in_use`
   and `peak`, `/health` emits `checked_out` and `checked_out_peak`, and the fixture at
@@ -1822,7 +1829,8 @@ the remaining half of #751.
   comments (the source modules' headers and the coverage policy's clock-skip note on `main`; the
   migration gate's docstring, which still listed the parity-against-models arm phase 01 deleted, on
   the branch `fix/tearout-queue-residue`), `test-quick`'s coverage, the mission page and the LICENSE (#1325), the landing example's two
-  dead variables, and the schema-drift summary (the branch `fix/tearout-queue-residue`). Open, each
+  dead variables, and the schema-drift workflow's "dormant" (gone on `main`; the branch drops a second
+  stale line, the summary's "`legacy` is not compared"). Open, each
   with a home: `reap_expired`'s 6 h cadence is #1329, where the case of a worker dying while it holds
   the reaper's own lease is now recorded (nothing would recover a lease again); `start_router.REFUSAL`
   belongs to the `inv-` lane, designed and deliberately unwired (#1172); the `instagram_business_basic`

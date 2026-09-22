@@ -468,8 +468,8 @@ ENV_READ_OUTSIDE_SETTINGS = {
     "TARGET_DATABASE_URL",
     "DATABASE_URL",
     # a local database's fields, for `make init-db`'s runner URL
-    # (`scripts/app_db_url.py`, which the Makefile runs with its own defaults
-    # exported) — the names `Settings` declares, read as the Makefile sets them
+    # (`scripts/app_db_url.py`, which init-db's recipe hands them through psql's
+    # own quoting) — the names `Settings` declares
     "DB_HOST",
     "DB_PORT",
     "DB_NAME",

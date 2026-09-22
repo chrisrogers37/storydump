@@ -45,14 +45,24 @@ check() {  # name file old new test-selector
 }
 
 T=tests/scripts/test_app_db_url.py
+RUNNER='@DATABASE_URL="$$(DB_USER="$(DB_USER)" DB_PASSWORD="$(DB_PASSWORD)" DB_HOST="$(DB_HOST)" DB_PORT="$(DB_PORT)" DB_NAME="$(DB_NAME)" python -m scripts.app_db_url)" python -m scripts.migration_runner apply'
 
-check "the password is pasted raw" scripts/app_db_url.py 'auth += ":" + quote(password, safe="")' 'auth += ":" + password' "$T -k password_with_reserved"
-check "a slash in the password is left unencoded" scripts/app_db_url.py 'auth += ":" + quote(password, safe="")' 'auth += ":" + quote(password)' "$T -k password_with_reserved"
-check "the user is pasted raw" scripts/app_db_url.py 'auth = quote(user, safe="")' 'auth = user' "$T -k user_with_reserved"
-check "an empty password still writes its colon" scripts/app_db_url.py '    if password:
-        auth += ":" + quote(password, safe="")' '    auth += ":" + quote(password, safe="")' "$T -k no_password"
-check "the default host drifts from the Makefile's" scripts/app_db_url.py 'host=env.get("DB_HOST", "localhost"),' 'host=env.get("DB_HOST", "127.0.0.1"),' "$T -k makefiles_defaults"
-check "init-db pastes the fields into the URL again" Makefile '@DATABASE_URL="$$(python -m scripts.app_db_url)" python -m scripts.migration_runner apply' '@DATABASE_URL="postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)" python -m scripts.migration_runner apply' "$T -k 'takes_its_url or pastes_no_field'"
-check "the defaults are not exported without a .env" Makefile 'export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD' '# (no named export)' "$T -k reach_the_helper"
+# The helper: every part encoded, the defaults the Makefile's.
+check "the password is pasted raw" scripts/app_db_url.py '(":" + _enc(password) if password else "")' '(":" + password if password else "")' "$T -k every_part_round_trips"
+check "a slash is left unencoded" scripts/app_db_url.py '    return quote(part, safe="")' '    return quote(part)' "$T -k every_part_round_trips"
+check "the host is pasted raw" scripts/app_db_url.py '{_enc(host)}:' '{host}:' "$T -k ipv6_host"
+check "the database name is pasted raw" scripts/app_db_url.py '/{_enc(name)}"' '/{name}"' "$T -k every_part_round_trips"
+check "the user is pasted raw" scripts/app_db_url.py '        auth = _enc(user) + (' '        auth = user + (' "$T -k every_part_round_trips"
+check "the default database drifts from the Makefile's" scripts/app_db_url.py 'DEFAULT_NAME = "storydump"' 'DEFAULT_NAME = "storydump_dev"' "$T -k defaults_are_the_makefiles"
+# The Makefile: psql's quoting for every field, no pasted URL, no exported defaults — each also run through make.
+check "init-db reads the helper as a make variable" Makefile '@DATABASE_URL="$$(DB_USER=' '@DATABASE_URL="$(DB_USER=' "$T -k 'each_field_as_psql or hostile_command_line'"
+check "the password skips psql's quoting" Makefile ' DB_PASSWORD="$(DB_PASSWORD)" DB_HOST=' ' DB_HOST=' "$T -k 'each_field_as_psql or connects_with_what_psql_does'"
+check "init-db pastes the fields into the URL again" Makefile "$RUNNER" '@DATABASE_URL="postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)" python -m scripts.migration_runner apply' "$T -k 'pastes_no_field or hostile_command_line'"
+check "the Makefile exports its defaults to every target" Makefile 'DB_PASSWORD ?=
+' 'DB_PASSWORD ?=
+export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
+' "$T -k 'exports_no_db_field or reaches_another_target'"
+# Not a mutation: writing `dev:@` for an empty password is EQUIVALENT under libpq, which reads it as `dev@`
+# (parse_dsn drops an empty password either way), so no behavioural test can kill it.
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"
