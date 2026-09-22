@@ -1786,11 +1786,15 @@ the remaining half of #751.
   app's own two on Vercel stay); replace `.claude/settings.json:54-59`'s four deny rules that
   name the deleted legacy CLI's commands (commands that no longer exist) — the `python -m src.main`
   rules stay.
-- **`railway.toml`'s residue** (F2: untouched here): the build command still runs `mkdir -p
+- ~~**`railway.toml`'s residue** (F2: untouched here): the build command still runs `mkdir -p
   /tmp/media` for a directory nothing reads, and `drainingSeconds`' comment explains a Telegram polling
-  session nothing holds. A comment-and-build-line edit, the owner's call on when.
-- **The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
-  containing `@` mis-parses into the host. Local development only.
+  session nothing holds.~~ CLOSED 2026-09-22 (the branch `fix/tearout-queue-residue`): the build no
+  longer makes the legacy dashboard's upload directory; the `drainingSeconds` comment had already been
+  rewritten on `main`.
+- ~~**The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
+  containing `@` mis-parses into the host. Local development only.~~ CLOSED 2026-09-22 (the same
+  branch): `scripts/app_db_url.py` percent-encodes every part and the Makefile exports its defaults by
+  name; seven tests, seven mutations killed.
 - **Found by phase 05's documentation pass, outside a docs phase's scope (code, config, product copy) —
   each with its evidence, none fixed here:** `storydump_cli/output.py:642` reads the pool keys `in_use`
   and `peak`, `/health` emits `checked_out` and `checked_out_peak`, and the fixture at
@@ -1813,6 +1817,19 @@ the remaining half of #751.
   safety block's "All bot interactions go through the database or the user's own device" predates the
   CLI; `landing/.env.local.example` still lists `JWT_SECRET` and `NEXT_PUBLIC_SITE_URL`, which nothing
   reads.
+  **Status, measured on `main` at `29acea2e` (2026-09-22).** Fixed: the CLI's pool keys and settings
+  hint (#1324), the `/start inv-` docstrings (they now say the lane is unregistered), the stale legacy
+  comments (the source modules' headers and the coverage policy's clock-skip note on `main`; the
+  migration gate's docstring, which still listed the parity-against-models arm phase 01 deleted, on
+  the branch `fix/tearout-queue-residue`), `test-quick`'s coverage, the mission page and the LICENSE (#1325), the landing example's two
+  dead variables, and the schema-drift summary (the branch `fix/tearout-queue-residue`). Open, each
+  with a home: `reap_expired`'s 6 h cadence is #1329, where the case of a worker dying while it holds
+  the reaper's own lease is now recorded (nothing would recover a lease again); `start_router.REFUSAL`
+  belongs to the `inv-` lane, designed and deliberately unwired (#1172); the `instagram_business_basic`
+  copy is the owner's to settle before submitting (`meta-app-review.md` now says so at the copy); the
+  safety block's Telegram sentence is the owner's. The worker probe (`worker_health.py` since the
+  rename) still reads a replica that never wins the clock election as stalled — latent at production's
+  one replica (`numReplicas: 1`), live the day a second is added; no issue filed.
 - **The epic's closure list (#1216's Blocks), measured 2026-09-18 — an agent closes none of them:**
   #1205 and #1222 closed with phase 02. #941 (the sixteenth legacy table "with no disposition") has
   one: `archive.posting_history_dedup_archive_pre_cutover_20260917` exists in production (078) and 079
