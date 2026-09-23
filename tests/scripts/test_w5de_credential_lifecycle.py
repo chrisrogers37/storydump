@@ -670,7 +670,6 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
         job = _jobs_of_kind(sync_conn, "revoke_workspace_credentials")[0]
         assert job["state"] == "succeeded", f"{status} is settled ({why})"
 
-
     @pytest.mark.asyncio
     async def test_the_revoke_failed_record_survives_the_workers_transaction(
         self, lane_db, sync_conn
@@ -719,6 +718,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
             " because the factory yields uncommitted and audit.record writes"
             " in the caller's transaction"
         )
+
 
 class TestReauthPromptStale:
     @pytest.mark.asyncio
