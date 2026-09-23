@@ -224,7 +224,15 @@ class RevokeRetryable(StorydumpError):
 
 async def _audit_revoke_failed(factory, workspace_id, credential_id, reason) -> None:
     """The `revoke_failed` record `06` §lifecycles names. Its own transaction,
-    so the record survives whatever the caller does next."""
+    so the record survives whatever the caller does next.
+
+    The commit is what makes that true, and it is this helper's to make:
+    `poller_session_factory` applies the GUCs and yields, so closing the
+    session rolls back, and `audit.record` writes "in the CALLER's
+    transaction" by contract. Without it the row is written and discarded --
+    and this is the only trace of a revoke that failed, on a branch that
+    deliberately lets the job SUCCEED.
+    """
     async with factory() as s:
         await audit.record(
             s,
@@ -236,6 +244,7 @@ async def _audit_revoke_failed(factory, workspace_id, credential_id, reason) -> 
             detail={"event": "revoke_failed", "reason": reason},
             cid=credential_id,
         )
+        await s.commit()
 
 
 async def refresh_credential(deps, session, job) -> str:

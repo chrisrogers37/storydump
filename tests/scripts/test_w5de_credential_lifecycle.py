@@ -671,6 +671,55 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
         assert job["state"] == "succeeded", f"{status} is settled ({why})"
 
 
+    @pytest.mark.asyncio
+    async def test_the_revoke_failed_record_survives_the_workers_transaction(
+        self, lane_db, sync_conn
+    ):
+        """#1123. This row is the ONLY trace of the disposition: the payload
+        cannot be decrypted, so the grant cannot be revoked, and the branch
+        deliberately lets the job SUCCEED. Abandoning without a record is the
+        swallowed failure this module's own docstring says it exists to stop.
+
+        The read happens through a SEPARATE connection after the worker's
+        transaction has ended, and that is the entire point. The defect was a
+        missing commit, so an assertion made inside that transaction sees the
+        row and passes while the row is rolled back at session close -- the
+        shape that made this invisible to the suite for a month.
+
+        An `ig_login` payload is the lever: the revoke path decodes with
+        `google_drive_oauth.decode_payload`, so this credential takes the
+        `undecryptable` branch and Google is never called.
+        """
+        chain = seed_workspace_chain(sync_conn, "w5d-revoke-audit")
+        cred_id = await _store_cred(lane_db, chain)
+        self._arm(sync_conn, chain, cred_id)
+
+        _wl, claimed = await _run_once_w5(lane_db, None)
+        assert claimed is True
+
+        job = _jobs_of_kind(sync_conn, "revoke_workspace_credentials")[0]
+        assert job["state"] == "succeeded", (
+            "the undecryptable branch audits and abandons rather than"
+            " retrying -- if the job did not finalize, this test has stopped"
+            " exercising that branch and the assertion below means nothing"
+        )
+
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM audit_events"
+                " WHERE workspace_id = %s"
+                "   AND detail->>'event' = 'revoke_failed'"
+                "   AND detail->>'reason' = 'undecryptable'",
+                (chain["ws"],),
+            )
+            found = cur.fetchone()[0]
+        assert found == 1, (
+            "the revoke_failed row did not survive the worker's transaction:"
+            " _audit_revoke_failed opens its own session and must commit it,"
+            " because the factory yields uncommitted and audit.record writes"
+            " in the caller's transaction"
+        )
+
 class TestReauthPromptStale:
     @pytest.mark.asyncio
     async def test_a_reconnected_account_gets_no_prompt(self, lane_db, sync_conn):
