@@ -23,6 +23,17 @@ export default function DashboardLoading() {
         <Skeleton className="h-4 w-56 mt-2" />
       </div>
 
+      {/* Condition panel — sized to its all-clear, the common case */}
+      <Card className="py-4">
+        <CardContent className="flex items-start gap-3">
+          <Skeleton className="h-5 w-5 shrink-0 rounded-full" />
+          <div className="flex-1 space-y-2">
+            <Skeleton className="h-4 w-48" />
+            <Skeleton className="h-3 w-full max-w-md" />
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Analytics cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {Array.from({ length: 4 }).map((_, i) => (
