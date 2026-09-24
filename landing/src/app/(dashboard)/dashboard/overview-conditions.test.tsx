@@ -1,16 +1,9 @@
 /**
- * The overview's condition panel is only ever rendered from reads that
- * ANSWERED.
- *
- * The panel's all-clear is a claim — "nothing needs your attention" — and a
- * list that could not be read must never become that claim. So a failed
- * accounts, sources or stats read is the page's unavailable state, and the
- * panel is not in the tree at all. When every read answers, the panel is the
- * first thing under the heading, above the analytics.
- *
- * The page is an async server component; it is called directly with its two
- * doors mocked — the session guard and the target fetch — and the returned
- * element tree is read without rendering it (`environment: "node"`).
+ * Where the overview puts its condition panel, and that a failed read renders
+ * the unavailable state instead of it (the rule is stated on
+ * `ConditionsPanel`). The page, an async server component, is called directly
+ * with its two doors mocked — the session guard and the target fetch — and the
+ * returned element tree is read without rendering it (`environment: "node"`).
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";

@@ -92,6 +92,32 @@ export function driveStatusBadge(
   );
 }
 
+/** The vocabulary `ck_sources_state` admits. */
+export type SourceState = "active" | "paused" | "error";
+
+/**
+ * A folder's operating state in words — the Drive card's badge and the
+ * overview's condition line read the same label for the same row. `error` is
+ * what a failed sync leaves (the folder stops until a reconnect or a re-pick
+ * re-arms it); `paused` is a removal or a disconnect, a decision rather than a
+ * fault. A `Record` over the closed set, so a state without a label is a
+ * compile error; a value outside it prints itself rather than a guess.
+ */
+const SOURCE_STATE_LABEL: Record<SourceState, string> = {
+  active: "Active",
+  paused: "Paused",
+  error: "Stopped syncing",
+};
+
+export function sourceStateLabel(state: string | null | undefined): string {
+  return SOURCE_STATE_LABEL[state as SourceState] ?? (state || "Unknown state");
+}
+
+/** What a folder is called on screen: the name the picker gave it, if any. */
+export function sourceFolderName(source: { folder_name: string | null }): string {
+  return source.folder_name ?? "Drive folder";
+}
+
 export type DriveConnectControl = {
   label: string;
   kind: "connect" | "reconnect";

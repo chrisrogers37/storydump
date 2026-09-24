@@ -16,6 +16,8 @@ import {
   removeDriveFolder,
   removeFolderRefusalCopy,
   requestDriveConnect,
+  sourceFolderName,
+  sourceStateLabel,
 } from "@/lib/drive";
 import { settingsRefusalCopy, submitCommand } from "@/lib/command-client";
 import { DriveFolderPickerDialog } from "./drive-folder-picker";
@@ -257,7 +259,7 @@ export function DriveCard({
                   <div className="space-y-0.5">
                     <div className="flex items-center gap-2">
                       <p className="font-medium">
-                        {source.folder_name ?? "Drive folder"}
+                        {sourceFolderName(source)}
                       </p>
                       {/* The source's own operating state, coloured only
                           when it is a problem: healthy is unremarkable. */}
@@ -266,7 +268,7 @@ export function DriveCard({
                           variant="secondary"
                           className="bg-amber-100 text-amber-900"
                         >
-                          {source.state}
+                          {sourceStateLabel(source.state)}
                         </Badge>
                       )}
                     </div>
