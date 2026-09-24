@@ -60,22 +60,20 @@ T="tests/src/services/target/test_transit.py"
 D="tests/src/utils/test_datetime_utils.py"
 
 # The sweep: reaping needs an age that was READ.
-check "an unreadable age is reaped" src/services/target/transit.py '                    if created is None:
-                        unread.append((row.get("public_id"), raw))
-                    elif created < cutoff:' '                    if created is None:
-                        unread.append((row.get("public_id"), raw))
-                    if created is None or created < cutoff:' "$T -k unreadable_age"
-check "an unreadable age is reaped, at the door that deletes" src/services/target/transit.py '                    if created is None:
-                        unread.append((row.get("public_id"), raw))
-                    elif created < cutoff:' '                    if created is None:
-                        unread.append((row.get("public_id"), raw))
-                    if created is None or created < cutoff:' "$T -k destroys_nothing_in_flight"
-check "the unreadable rows go unnamed" src/services/target/transit.py '        if unread:
-            logger.error(' '        if False:
+REAP_OLD='                    elif created < cutoff:'
+REAP_NEW='                    if created is None or created < cutoff:'
+LOG_OLD='        if unread:
+            logger.error('
+check "an unreadable age is reaped" src/services/target/transit.py "$REAP_OLD" "$REAP_NEW" "$T -k unreadable_age"
+check "an unreadable age is reaped, at the door that deletes" src/services/target/transit.py "$REAP_OLD" "$REAP_NEW" "$T -k destroys_nothing_in_flight"
+check "the unreadable rows go unnamed" src/services/target/transit.py "$LOG_OLD" '        if False:
             logger.error(' "$T -k unreadable_age"
-check "one error per row, not one per sweep" src/services/target/transit.py '        if unread:
-            logger.error(' '        for _ in unread:
+check "one error per row, not one per sweep" src/services/target/transit.py "$LOG_OLD" '        for _ in range(unread):
             logger.error(' "$T -k unreadable_age"
+check "the error names every row" src/services/target/transit.py '                        if unread <= _UNREAD_SAMPLE:' '                        if True:' "$T -k counts_every_unreadable_row"
+check "the error counts only the named rows" src/services/target/transit.py '                unread,
+                "; ".join(' '                len(examples),
+                "; ".join(' "$T -k counts_every_unreadable_row"
 check "a non-string age reaches the parse" src/services/target/transit.py '        if not isinstance(value, str):
             return None
 ' '' "$T -k unreadable_age"

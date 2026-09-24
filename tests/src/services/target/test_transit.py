@@ -509,6 +509,30 @@ class TestListStaleFC36:
         assert "ws/a/unreadable" in message and "ws/b/also" in message
 
     @pytest.mark.asyncio
+    async def test_the_error_counts_every_unreadable_row_but_names_a_sample(
+        self, caplog
+    ):
+        """A corpus-wide shift makes every row unreadable, so the error gives
+        the WHOLE count but names a bounded sample — naming every row would
+        print the corpus on every tick, and counting only the sample would
+        understate the outage.
+        Mutations that redden: name every row; count only the named rows."""
+        rows = [{"public_id": f"ws/a/row-{i}"} for i in range(7)]
+        sdk = RecordingSdk(
+            resources_pages={
+                "image": [{"resources": rows}],
+                "video": [{"resources": []}],
+            }
+        )
+        with caplog.at_level("ERROR", logger="src.services.target.transit"):
+            assert await _stale(sdk) == []
+        (error,) = [r for r in caplog.records if r.levelname == "ERROR"]
+        message = error.getMessage()
+        assert "7 transit asset(s)" in message
+        named = [i for i in range(7) if f"ws/a/row-{i} " in message]
+        assert named == [0, 1, 2, 3, 4]
+
+    @pytest.mark.asyncio
     async def test_each_stale_asset_carries_what_the_deleter_needs(self):
         """The lister's rows feed destroy_asset: public_id + resource_type.
         Mutation that reddens: drop resource_type from the row."""
@@ -579,10 +603,7 @@ class TestTheSweepComposes:
                     },
                     {
                         "resources": [
-                            {
-                                "public_id": "ws/b/in-flight-3",
-                                "created_at": "Wed, 19 Aug 2026 21:00:00 GMT",
-                            }
+                            {"public_id": "ws/b/in-flight-3", **_UNREADABLE["rfc-2822"]}
                         ]
                     },
                 ],

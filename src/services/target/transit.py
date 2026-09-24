@@ -637,7 +637,8 @@ class TransitStore:
         """
         cutoff = self._now_fn() - timedelta(seconds=older_than_seconds)
         stale: list[dict[str, Any]] = []
-        unread: list[tuple[Any, Any]] = []
+        unread = 0
+        examples: list[tuple[Any, Any]] = []
         for resource_type in _SWEEP_RESOURCE_TYPES:
             cursor: Optional[str] = None
             while True:
@@ -655,7 +656,9 @@ class TransitStore:
                     raw = row.get("created_at")
                     created = self._created_at(raw)
                     if created is None:
-                        unread.append((row.get("public_id"), raw))
+                        unread += 1
+                        if unread <= _UNREAD_SAMPLE:
+                            examples.append((row.get("public_id"), raw))
                     elif created < cutoff:
                         stale.append(
                             {
@@ -670,10 +673,9 @@ class TransitStore:
             logger.error(
                 "transit sweep: %d transit asset(s) NOT REAPED — no age could be "
                 "read from created_at, so none is proven past the TTL; e.g. %s",
-                len(unread),
+                unread,
                 "; ".join(
-                    f"{public_id} created_at={raw!r}"
-                    for public_id, raw in unread[:_UNREAD_SAMPLE]
+                    f"{public_id} created_at={raw!r}" for public_id, raw in examples
                 ),
             )
         return stale
@@ -681,13 +683,9 @@ class TransitStore:
     @staticmethod
     def _created_at(value: Any) -> Optional[datetime]:
         """The asset's upload instant, or None when *value* yields no age.
-
-        The parse is extended-format ISO-8601 — any fraction width, any offset
-        spelling — and the SAME on every supported interpreter
-        (:func:`parse_iso_timestamp`): not one frozen format string, and not
-        whatever this interpreter's ``fromisoformat`` happens to accept. A
-        benign re-spelling must keep the sweep reaping, not merely keep it
-        safe."""
+        :func:`parse_iso_timestamp` reads every fraction width and offset
+        spelling alike on every interpreter, so a benign re-spelling keeps the
+        sweep reaping rather than merely safe."""
         if not isinstance(value, str):
             return None
         try:
