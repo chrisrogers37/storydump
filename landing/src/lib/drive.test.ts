@@ -9,6 +9,8 @@ import {
   requestDriveConnect,
   addFolderRefusalCopy,
   connectedFolderRefs,
+  sourceFolderName,
+  sourceStateLabel,
 } from "./drive";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -163,5 +165,21 @@ describe("connected folders and nested picks", () => {
   it("says why a nested folder pick was refused", () => {
     expect(addFolderRefusalCopy("source_nested")).toMatch(/already connected/);
     expect(addFolderRefusalCopy("sources_changed")).toMatch(/Try again/);
+  });
+});
+
+describe("sourceStateLabel / sourceFolderName", () => {
+  // One set of words for a folder, shared by the Drive card and the overview.
+  it("names every source state in words, and prints a value outside the vocabulary as itself", () => {
+    expect(sourceStateLabel("error")).toBe("Stopped syncing");
+    expect(sourceStateLabel("paused")).toBe("Paused");
+    expect(sourceStateLabel("active")).toBe("Active");
+    expect(sourceStateLabel("resyncing")).toBe("resyncing");
+    expect(sourceStateLabel(null)).toBe("Unknown state");
+  });
+
+  it("names a folder by the picker's name, else as a Drive folder", () => {
+    expect(sourceFolderName({ folder_name: "Summer" })).toBe("Summer");
+    expect(sourceFolderName({ folder_name: null })).toBe("Drive folder");
   });
 });

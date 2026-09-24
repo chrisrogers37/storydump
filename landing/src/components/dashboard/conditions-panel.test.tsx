@@ -1,12 +1,8 @@
 /**
  * The condition panel, read as a returned element tree (this suite's
  * `environment: "node"` — no DOM; the component is a plain function of its
- * conditions, so the tree is the whole behaviour).
- *
- * The property under test is that the panel is always an ANSWER: an all-clear
- * that is said in words, or a line per condition that says where it is
- * resolved. An empty list is neither — it looks exactly like a panel that
- * failed to load.
+ * conditions, so the tree is the whole behaviour). The rule it pins is stated
+ * on `ConditionsPanel`.
  */
 
 import { describe, expect, it } from "vitest";

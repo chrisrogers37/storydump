@@ -473,7 +473,7 @@ export function deriveSettings(
 // The target returns `handle`/`state`, not `instagram_username`/`is_active`.
 // Typed as `InstagramAccount` this compiled and rendered a bare `@` for every
 // row — the type asserted a shape nothing produced (#1048's class, #1089).
-export type AccountsResponse = { accounts?: import("./types").Destination[] };
+export type AccountsResponse = { accounts: import("./types").Destination[] };
 
 // The `init`/`SetupState` pair that used to close this file is deleted
 // (TD-D4). It carried a paragraph saying the settings screen "stays on `init`

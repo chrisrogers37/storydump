@@ -65,8 +65,8 @@ export default async function DashboardPage() {
   const summary = deriveSummary(stats);
   const categories = deriveCategories(stats);
   const conditions = deriveConditions({
-    accounts: accountsResult.data.accounts ?? [],
-    sources: sourcesResult.data.sources ?? [],
+    accounts: accountsResult.data.accounts,
+    sources: sourcesResult.data.sources,
     intentsByState: stats.intents_by_state,
   });
 
