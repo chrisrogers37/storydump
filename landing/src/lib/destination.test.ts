@@ -12,6 +12,7 @@ import {
   destinationConnectionCaption,
   destinationHandle,
   destinationIsActive,
+  destinationName,
   destinationStateBadge,
   isInstagramAuthorizationUrl,
   requestDestinationConnect,
@@ -244,5 +245,16 @@ describe("destinationConnectionCaption", () => {
   it("says posting is by hand when nothing is connected", () => {
     expect(destinationConnectionCaption("none")).toMatch(/by hand/i);
     expect(destinationConnectionCaption(undefined)).toMatch(/by hand/i);
+  });
+});
+
+describe("destinationName", () => {
+  // The Accounts row's title. Every surface that names a destination uses it,
+  // so a person told about one can find it by the same words.
+  it("prefers the name Instagram gave, then the typed handle, then says it has neither", () => {
+    expect(destinationName({ display_name: "Story Co", handle: "storyco" })).toBe("Story Co");
+    expect(destinationName({ display_name: null, handle: "  storyco " })).toBe("storyco");
+    expect(destinationName({ display_name: null, handle: "   " })).toBe("Unnamed destination");
+    expect(destinationName({ display_name: null, handle: null })).toBe("Unnamed destination");
   });
 });

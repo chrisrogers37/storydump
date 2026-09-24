@@ -3,6 +3,7 @@ import { isHttpsUrlOnHost } from "./redirect-guard";
 import { requestGrant } from "./start-grant";
 import type { GrantResult } from "./start-grant";
 import type { BadgeTone } from "@/components/dashboard/tone";
+import type { Destination } from "./types";
 /**
  * Destinations, browser side (#1089).
  *
@@ -23,11 +24,27 @@ export function destinationHandle(handle: string | null | undefined): string | n
 }
 
 /**
+ * What a destination is called on screen: the name Instagram gave it, else the
+ * handle a person typed. It titles the destination's row on the Accounts tab,
+ * and every other surface that names a destination uses it too — a person
+ * told about a destination finds it by the same words.
+ */
+export function destinationName(
+  destination: Pick<Destination, "display_name" | "handle">,
+): string {
+  return (
+    destination.display_name ??
+    destinationHandle(destination.handle) ??
+    "Unnamed destination"
+  );
+}
+
+/**
  * Whether a destination is one the clock will act on.
  *
- * Kept, and kept a BOOLEAN, because one caller genuinely asks a yes/no
- * question — whether to offer "Make Active" on a row that is not active. It is
- * NOT how the state is displayed: see `destinationStateBadge`.
+ * A BOOLEAN for the callers that genuinely ask a yes/no question — the
+ * condition surface asks whether a destination needs attention. It is NOT how
+ * the state is displayed: see `destinationStateBadge`.
  */
 export function destinationIsActive(state: string | null | undefined): boolean {
   return state === "active";

@@ -23,6 +23,7 @@ import {
   destinationConnectRefusalCopy,
   destinationConnectionCaption,
   destinationHandle,
+  destinationName,
   destinationStateBadge,
   requestDestinationConnect,
   requestWorkspaceConnect,
@@ -158,7 +159,7 @@ export function AccountsTab({ accounts, workspaceId }: AccountsTabProps) {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <p className="font-medium truncate">
-                        {account.display_name ?? handleText ?? "Unnamed destination"}
+                        {destinationName(account)}
                       </p>
                       {/* Unconditional. A row that renders at all states what
                           it is: the three non-active values used to render as
