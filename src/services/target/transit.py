@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -68,7 +69,9 @@ from typing import Any, Callable, Optional
 
 from src.exceptions.base import StorydumpError
 from src.services.target.egress import TIMEOUT_CLASSES
-from src.utils.datetime_utils import ensure_utc, ms_since
+from src.utils.datetime_utils import ensure_utc, ms_since, parse_iso_timestamp
+
+logger = logging.getLogger(__name__)
 
 
 #: The Instagram story frame (owner, 2026-09-10 — parity with the legacy
@@ -279,6 +282,11 @@ _PAGE_SIZE = 500
 #: (a future media_kind mapping onto an existing resource_type must not add
 #: a duplicate full paged walk).
 _SWEEP_RESOURCE_TYPES = tuple(sorted(set(_RESOURCE_TYPES.values())))
+
+#: How many unreadable rows the sweep's error names by example. The count it
+#: gives is always whole; a corpus-wide format shift would otherwise print
+#: every row on every tick.
+_UNREAD_SAMPLE = 5
 
 
 class TransitDestroyRefused(StorydumpError):
@@ -616,13 +624,20 @@ class TransitStore:
         """Every transit asset older than the TTL — one GLOBAL paged walk over
         the ``ws/`` prefix per resource_type, filtered by ``created_at``.
 
-        Rows carry exactly what :meth:`destroy_asset` needs. A row whose
-        ``created_at`` cannot be parsed is treated as STALE, not skipped: the
-        sweep is the backstop, and an unparseable age must fail toward
-        reaping a transit asset, never toward immortalizing one.
+        Rows carry exactly what :meth:`destroy_asset` needs. Reaping needs an
+        age that was READ: a row whose ``created_at`` is missing, not a string
+        or not ISO-8601 is KEPT, and the sweep names such rows in one error.
+        ``created_at`` is rendered by the provider — one serializer for every
+        row — so an unreadable age is the signature of a format shift across
+        the whole corpus far more often than of one garbled row, and failing
+        toward reaping would destroy every in-flight asset mid-publish on the
+        next tick: the backstop must not be the outage. Kept is the
+        recoverable failure — an asset outlives its TTL only until the parse
+        reads its age, and the error repeats on every sweep until then.
         """
         cutoff = self._now_fn() - timedelta(seconds=older_than_seconds)
         stale: list[dict[str, Any]] = []
+        unread: list[tuple[Any, Any]] = []
         for resource_type in _SWEEP_RESOURCE_TYPES:
             cursor: Optional[str] = None
             while True:
@@ -637,7 +652,11 @@ class TransitStore:
                     **self._credentials,
                 )
                 for row in page.get("resources", []):
-                    if self._is_stale(row.get("created_at"), cutoff):
+                    raw = row.get("created_at")
+                    created = self._created_at(raw)
+                    if created is None:
+                        unread.append((row.get("public_id"), raw))
+                    elif created < cutoff:
                         stale.append(
                             {
                                 "public_id": row["public_id"],
@@ -647,22 +666,31 @@ class TransitStore:
                 cursor = page.get("next_cursor")
                 if not cursor:
                     break
+        if unread:
+            logger.error(
+                "transit sweep: %d transit asset(s) NOT REAPED — no age could be "
+                "read from created_at, so none is proven past the TTL; e.g. %s",
+                len(unread),
+                "; ".join(
+                    f"{public_id} created_at={raw!r}"
+                    for public_id, raw in unread[:_UNREAD_SAMPLE]
+                ),
+            )
         return stale
 
     @staticmethod
-    def _is_stale(created_at: Optional[str], cutoff: datetime) -> bool:
-        """Fail-toward-stale is a ROW-level rule: only a genuinely garbled
-        timestamp reaps early. The parse is general ISO-8601 (fractional
-        seconds, explicit offsets), NOT one frozen format string — under a
-        strict single-format parse a benign provider format shift would read
-        the ENTIRE corpus as stale on the next tick and destroy in-flight
-        transit media mid-publish; the backstop must not be the outage."""
-        if not created_at:
-            return True
+    def _created_at(value: Any) -> Optional[datetime]:
+        """The asset's upload instant, or None when *value* yields no age.
+
+        The parse is extended-format ISO-8601 — any fraction width, any offset
+        spelling — and the SAME on every supported interpreter
+        (:func:`parse_iso_timestamp`): not one frozen format string, and not
+        whatever this interpreter's ``fromisoformat`` happens to accept. A
+        benign re-spelling must keep the sweep reaping, not merely keep it
+        safe."""
+        if not isinstance(value, str):
+            return None
         try:
-            created = ensure_utc(
-                datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            )
+            return ensure_utc(parse_iso_timestamp(value))
         except ValueError:
-            return True
-        return created < cutoff
+            return None
