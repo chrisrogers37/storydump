@@ -1,4 +1,4 @@
-import type { SourceRow } from "./dashboard-payloads";
+import { REVIEW_REQUIRED_STATE, type SourceRow } from "./dashboard-payloads";
 import {
   connectControlFor,
   destinationConnectionCaption,
@@ -6,6 +6,7 @@ import {
   destinationName,
   destinationStateBadge,
 } from "./destination";
+import { sourceFolderName, sourceStateLabel } from "./drive";
 import type { Destination } from "./types";
 
 /**
@@ -23,9 +24,12 @@ import type { Destination } from "./types";
  * never gated on a channel. Whatever was or was not pushed, it renders here.
  */
 
-export const ACCOUNTS_HREF = "/dashboard/settings?tab=accounts";
-export const INTEGRATIONS_HREF = "/dashboard/settings?tab=integrations";
-export const QUEUE_HREF = "/dashboard/queue";
+/** Where each kind of condition is resolved: the tab, and the label that says so. */
+export const RESOLVED_IN = {
+  accounts: { href: "/dashboard/settings?tab=accounts", action: "Open Accounts" },
+  integrations: { href: "/dashboard/settings?tab=integrations", action: "Open Integrations" },
+  queue: { href: "/dashboard/queue", action: "Open Queue" },
+} as const;
 
 /**
  * The all-clear, naming every kind of condition `deriveConditions` checks, so
@@ -84,8 +88,7 @@ export function deriveConditions({
     conditions.push({
       key: `account:${account.id}`,
       text: `${destinationName(account)} — ${reason}`,
-      href: ACCOUNTS_HREF,
-      action: "Open Accounts",
+      ...RESOLVED_IN.accounts,
     });
   }
 
@@ -96,21 +99,19 @@ export function deriveConditions({
     if (source.state !== "error") continue;
     conditions.push({
       key: `source:${source.id}`,
-      text: `${source.folder_name ?? "Drive folder"} — Stopped syncing`,
-      href: INTEGRATIONS_HREF,
-      action: "Open Integrations",
+      text: `${sourceFolderName(source)} — ${sourceStateLabel(source.state)}`,
+      ...RESOLVED_IN.integrations,
     });
   }
 
   // `review_required` is the one intent state that waits on the workspace:
   // the Queue resolves it. Every other open state is the Queue's ordinary work.
-  const review = intentsByState.review_required ?? 0;
+  const review = intentsByState[REVIEW_REQUIRED_STATE] ?? 0;
   if (review > 0) {
     conditions.push({
-      key: "review_required",
+      key: REVIEW_REQUIRED_STATE,
       text: review === 1 ? "1 post needs a decision" : `${review} posts need a decision`,
-      href: QUEUE_HREF,
-      action: "Open Queue",
+      ...RESOLVED_IN.queue,
     });
   }
 

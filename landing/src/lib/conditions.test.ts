@@ -3,18 +3,16 @@
  * become a line on the overview, in which words, pointing where.
  *
  * The words are asserted against the tabs' own vocabularies
- * (`destinationStateBadge`, `destinationConnectionCaption`) rather than
- * retyped, because the property is that the panel and the tab say the same
+ * (`destinationStateBadge`, `destinationConnectionCaption`, `sourceStateLabel`,
+ * `sourceFolderName`) rather than retyped, because the property is that the panel and the tab say the same
  * thing about the same row — a person told "Reconnect needed" here must find
  * "Reconnect needed" when they follow the link.
  */
 
 import { describe, expect, it } from "vitest";
 import {
-  ACCOUNTS_HREF,
   ALL_CLEAR_DETAIL,
-  INTEGRATIONS_HREF,
-  QUEUE_HREF,
+  RESOLVED_IN,
   deriveConditions,
   type ConditionInputs,
 } from "./conditions";
@@ -22,6 +20,7 @@ import {
   destinationConnectionCaption,
   destinationStateBadge,
 } from "./destination";
+import { sourceFolderName, sourceStateLabel } from "./drive";
 
 type AccountInput = ConditionInputs["accounts"][number];
 type SourceInput = ConditionInputs["sources"][number];
@@ -67,8 +66,7 @@ describe("deriveConditions — destinations (Accounts)", () => {
       {
         key: "account:acc-1",
         text: "storyco — Reconnect needed",
-        href: ACCOUNTS_HREF,
-        action: "Open Accounts",
+        ...RESOLVED_IN.accounts,
       },
     ]);
   });
@@ -78,7 +76,7 @@ describe("deriveConditions — destinations (Accounts)", () => {
     (state) => {
       const [line] = deriveConditions({ ...NOTHING, accounts: [account({ state })] });
       expect(line.text).toBe(`storyco — ${destinationStateBadge(state).label}`);
-      expect(line.href).toBe(ACCOUNTS_HREF);
+      expect(line.href).toBe(RESOLVED_IN.accounts.href);
     },
   );
 
@@ -90,7 +88,7 @@ describe("deriveConditions — destinations (Accounts)", () => {
         accounts: [account({ credential_status })],
       });
       expect(line.text).toBe(`storyco — ${destinationConnectionCaption(credential_status)}`);
-      expect(line.href).toBe(ACCOUNTS_HREF);
+      expect(line.href).toBe(RESOLVED_IN.accounts.href);
     },
   );
 
@@ -123,9 +121,8 @@ describe("deriveConditions — folders (Integrations)", () => {
     expect(deriveConditions({ ...NOTHING, sources: [source({ state: "error" })] })).toEqual([
       {
         key: "source:src-1",
-        text: "Summer — Stopped syncing",
-        href: INTEGRATIONS_HREF,
-        action: "Open Integrations",
+        text: `Summer — ${sourceStateLabel("error")}`,
+        ...RESOLVED_IN.integrations,
       },
     ]);
   });
@@ -135,7 +132,9 @@ describe("deriveConditions — folders (Integrations)", () => {
       ...NOTHING,
       sources: [source({ state: "error", folder_name: null })],
     });
-    expect(line.text).toBe("Drive folder — Stopped syncing");
+    expect(line.text).toBe(
+      `${sourceFolderName({ folder_name: null })} — ${sourceStateLabel("error")}`,
+    );
   });
 
   it("a paused folder — removed, or its grant disconnected — is a decision, not a condition", () => {
@@ -150,7 +149,7 @@ describe("deriveConditions — posts (Queue)", () => {
   ])("%i review_required post(s) read as %j and send the person to the Queue", (n, text) => {
     expect(
       deriveConditions({ ...NOTHING, intentsByState: { review_required: n } }),
-    ).toEqual([{ key: "review_required", text, href: QUEUE_HREF, action: "Open Queue" }]);
+    ).toEqual([{ key: "review_required", text, ...RESOLVED_IN.queue }]);
   });
 
   it("only review_required is a decision the workspace owes — the rest is the Queue's ordinary work", () => {
