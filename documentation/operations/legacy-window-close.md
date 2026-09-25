@@ -1,7 +1,7 @@
 # Closing the legacy window — 3g and the stand-down (the owner's runbook)
 
 > **This window ran on 2026-09-19 at 21:34 UTC** (the tear-out's ledger,
-> [`RUN_LOG.md`](../planning/2026-09-16-legacy-tear-out/RUN_LOG.md)): 079 applied in 1.341 s,
+> [`RUN_LOG.md`](../archive/2026-09-16-legacy-tear-out/RUN_LOG.md)): 079 applied in 1.341 s,
 > 080 in 1.019 s, the gate green on every line, the database 43.8 MB smaller, the schemas left
 > `archive`, `public`, `runner`; the marker branch `pre-3g-20260919-2134` was retired on
 > 2026-09-20. **Nothing below is to be run again** — `apply --manual` refuses a version the

@@ -10,6 +10,8 @@ links: ["documentation/operations/runtime-database-roles.md", "documentation/pla
 
 # The worker's login (#751, part 2)
 
+> **Archived 2026-09-22 — COMPLETED.** The doors landed as migration 082 (#1349) and the worker switched to `svc_worker` (#1358). With the API switched to `svc_ingress` on 2026-09-21 — 081's doors (#1333), the switch recorded by #1379 — #751 is done.
+
 ## Summary
 
 Part 1 (PR #1333, migration 081) gave the API's estate-wide reads doors so the API can run as

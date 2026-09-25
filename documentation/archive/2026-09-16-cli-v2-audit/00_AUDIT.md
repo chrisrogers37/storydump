@@ -9,6 +9,8 @@ tags: [system, cli, audit]
 
 # System review of the v2 CLI surface (2026-09-16)
 
+> **Archived 2026-09-22 — COMPLETED** (its findings folded in #1314).
+
 **Scope.** The surface merged by the v2 CLI plan (#1310 tokens, #1311 reads,
 #1312 writes + env verbs + the legacy CLI's deletion; `main` at `d8f5c72`):
 `storydump_cli/`, the API side it talks to (`src/api/principal.py`,
