@@ -56,7 +56,7 @@ from sqlalchemy import text
 from src.config.settings import settings
 from src.services.target import egress, google_drive_oauth
 from src.services.target.drive_adapter import DriveLostResponse, DriveRetryableError
-from src.services.target.oauth_states import RingUnavailable, ring
+from src.services.target.oauth_states import ring
 from src.services.target.media_sync import DriveCredentialDead
 from src.services.target.unit_of_work import poller_session_factory, unit_of_work
 
@@ -94,22 +94,16 @@ async def token_for_workspace(engine, workspace_id: str, *, fresh: bool = False)
     (connect Drive, re-auth, refresh, rotate the ring) and one generic
     "credential unavailable" would send whoever reads the alert to guess.
 
-    A key ring this process cannot build is none of the four, so it is not a
-    :class:`DriveCredentialDead`: that flips every source of the workspace to
-    ``error`` and alerts its owner to reconnect, and no reconnect fixes a
-    missing key. It is OUR misconfiguration, refused retryably and named like
-    the missing Google client in :func:`_refresh`; the sources stay ``active``.
+    A key ring this process cannot build is none of the four, and it is never
+    a :class:`DriveCredentialDead` — that would flip every source of the
+    workspace to ``error`` and alert its owner, and no reconnect fixes a
+    missing key. It passes as `oauth_states.RingUnavailable`, which each
+    consumer already treats as the fault it is: the sync rides its ladder with
+    the sources ``active``, the publish fetch retries, and a card's media fetch
+    is loud and counted (`src/worker.py` `_card_media_fetch`), not a blip.
     """
-    # Built before the read and outside the decrypt's `try` below — inside it,
-    # a ring that cannot load was indistinguishable from a corrupt row.
-    try:
-        keys = ring()
-    except RingUnavailable as exc:
-        raise DriveRetryableError(
-            f"{PROVIDER} credential for workspace {workspace_id} cannot be read by"
-            f" this process: its key ring cannot load ({exc}) — fix ENCRYPTION_KEY"
-            " on this service; the stored grant stands"
-        ) from exc
+    # Outside the decrypt's `try` below.
+    keys = ring()
     # Workspace-scoped, not a bare session: `oauth_credentials` is under RLS,
     # so without the tenant GUC the read returns nothing and "no credential"
     # becomes indistinguishable from "cannot see the credential" — the

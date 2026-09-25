@@ -14,8 +14,8 @@ with its own credential row; a read keyed on the account alone could pick
 another tenant's row — a revoked one, failing a healthy publish with the wrong
 remedy, or a live one, posting on another tenant's token. With
 ``workspace_id`` the read runs as that tenant (`unit_of_work`, system actor),
-which is also what the F.4 runtime login's row policies require. Without it
-(the quota precheck seam carries no workspace) the read prefers an active row.
+which is also what the F.4 runtime login's row policies require — and since
+#1369 there is no read without it.
 
 Every refusal is a :class:`IgCredentialDead` naming its cause — absent, not
 active, expired, undecryptable — because they have different remedies
@@ -92,9 +92,7 @@ async def token_for_account(
     ref = str(provider_account_ref)
     if not workspace_id:
         raise ValueError("workspace_id is required — the read is tenant-scoped")
-    # Built before the read and outside the `try` below: a ring that cannot be
-    # built is this process's configuration (`RingUnavailable`), not this
-    # account's credential, and must never reach the pipeline as a dead token.
+    # Outside the `try` below, so `RingUnavailable` never reads as a dead token.
     keys = ring()
     params: dict = {
         "ref": ref,

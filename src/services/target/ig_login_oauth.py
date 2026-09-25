@@ -217,11 +217,10 @@ async def load_credential(conn, *, credential_id) -> str:
     and the account `reauth_required`. It never guesses and never logs
     ciphertext — the exception carries the credential id and nothing else.
 
-    The ring is built FIRST, outside the `try`: a ring that cannot be built
-    (:class:`~src.services.target.oauth_states.RingUnavailable`) is this
-    process's configuration, and it propagates having read and flipped
-    nothing. Inside the `try` it was indistinguishable from a corrupt row, and
-    fixing the key does not undo the flip.
+    The ring is built FIRST, outside the `try`: one that cannot be built
+    (:class:`~src.services.target.oauth_states.RingUnavailable`) propagates
+    having read and flipped nothing — a flip made on a missing key would
+    outlive the fix.
     """
     keys = ring()
     result = await conn.execute(

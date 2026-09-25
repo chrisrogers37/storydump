@@ -1,5 +1,5 @@
 """A key ring this process cannot build is its configuration's fault, never a
-credential's.
+credential's (#1401).
 
 Before `oauth_states.RingUnavailable`, a missing or malformed `ENCRYPTION_KEY`
 reached every decrypt door inside its `try`, as the same `ValueError` a corrupt
@@ -11,13 +11,15 @@ source of the workspace to `error`, and the revoke audited the grant as
 undecryptable and abandoned it with the grant still live at Google.
 
 Every door now builds the ring BEFORE its `try`. These tests break the ring
-for real — the settings the ring reads, the singleton reset — and for each
-door answer a row that would otherwise decrypt-fail, so a door that builds the
-ring back inside its `try` takes the per-credential branch and fails here.
+for real (`ring_env`, `tests/src/conftest.py`) and hand each door a row that
+would otherwise decrypt-fail, so a door that builds the ring back inside its
+`try` takes the per-credential branch and fails here. Each has a control: a
+corrupt row under a working ring still takes that branch.
 """
 
 from __future__ import annotations
 
+import traceback
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -33,16 +35,10 @@ from src.services.target import (
     oauth_states,
     unit_of_work,
 )
-from src.services.target.drive_adapter import DriveRetryableError
 from src.services.target.instagram_graph import InstagramGraphAdapter
 from src.services.target.meta_adapter import MetaRetryableError
 from src.services.target.publish_pipeline import _dead_credential
-from src.utils import encryption
-from src.utils.encryption import TokenEncryption
-
-#: Planted as a malformed key. The refusal is printed and logged by both
-#: roots, so no message may ever carry it.
-SENTINEL = "not-a-fernet-key-SENTINEL-7f3a"
+from tests.src.conftest import MALFORMED_KEY
 
 #: What a door would read for a live credential: active, unexpired, and a
 #: payload no ring decrypts — the corrupt-row branch, if the ring gets that far.
@@ -55,21 +51,8 @@ LIVE_ROW = {
 }
 
 
-@pytest.fixture
-def ring_env(monkeypatch):
-    """Configure the ring for real: the settings `TokenEncryption` reads,
-    with the singleton reset on the way in and on the way out."""
-
-    def configure(*, key=None, keys=None):
-        monkeypatch.setattr(
-            encryption,
-            "settings",
-            SimpleNamespace(ENCRYPTION_KEY=key, ENCRYPTION_KEYS=keys),
-        )
-        TokenEncryption.reset()
-
-    yield configure
-    TokenEncryption.reset()
+def _working_key() -> str:
+    return Fernet.generate_key().decode()
 
 
 class _Conn:
@@ -112,26 +95,22 @@ class _Rows:
         )
 
 
-def _factory_over(conn):
-    """`poller_session_factory`'s shape: a factory of sessions, all `conn`."""
+def _factory_over(session):
+    """`poller_session_factory`'s shape: a factory of sessions, all `session`."""
 
     @asynccontextmanager
-    async def session():
-        yield conn
+    async def factory():
+        yield session
 
-    return lambda engine, workspace_id: session
+    return lambda engine, workspace_id: factory
 
 
 def _uow_answering(row):
     """`unit_of_work(...)`'s shape for a read: `begin()` → one mapped row."""
 
-    class _Session:
-        async def execute(self, *args, **kwargs):
-            return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: row))
-
     @asynccontextmanager
     async def begin():
-        yield _Session()
+        yield _Rows(row)
 
     return lambda *args, **kwargs: SimpleNamespace(begin=begin)
 
@@ -150,21 +129,61 @@ class TestTheDoor:
         with pytest.raises(oauth_states.RingUnavailable, match="ENCRYPTION_KEY"):
             oauth_states.ring()
 
-    def test_a_malformed_key_is_refused_and_never_echoed(self, ring_env):
-        ring_env(key=SENTINEL)
+    def test_no_key_warns_that_a_new_key_cannot_read_what_is_stored(self, ring_env):
+        """Both roots print this at a refused boot, and the tempting remedy is
+        the damaging one: a generated key boots, then cannot read a stored
+        credential — so generating is offered for a first install only."""
+        ring_env()
         with pytest.raises(oauth_states.RingUnavailable) as caught:
             oauth_states.ring()
-        assert "ENCRYPTION_KEY" in str(caught.value)
-        assert SENTINEL not in str(caught.value)
+        message = str(caught.value)
+        assert "a newly generated key cannot read them" in message
+        assert "Only on a first install" in message
 
-    def test_a_malformed_entry_in_the_rotation_list_is_refused_too(self, ring_env):
-        ring_env(keys=f"{Fernet.generate_key().decode()},{SENTINEL}")
+    def test_a_malformed_key_is_refused_and_never_echoed(self, ring_env):
+        ring_env(key=MALFORMED_KEY)
         with pytest.raises(oauth_states.RingUnavailable) as caught:
             oauth_states.ring()
-        assert SENTINEL not in str(caught.value)
+        assert "Invalid ENCRYPTION_KEY format" in str(caught.value)
+        assert MALFORMED_KEY not in str(caught.value)
+
+    def test_the_rotation_list_names_itself_and_the_bad_entry(self, ring_env):
+        """ENCRYPTION_KEYS overrides ENCRYPTION_KEY, so a refusal that named
+        the single key would send the operator to a variable that is fine."""
+        ring_env(key=_working_key(), keys=f"{_working_key()},{MALFORMED_KEY}")
+        with pytest.raises(oauth_states.RingUnavailable) as caught:
+            oauth_states.ring()
+        message = str(caught.value)
+        assert "Invalid ENCRYPTION_KEYS format: entry 2 of 2" in message
+        assert MALFORMED_KEY not in message
+
+    def test_a_rotation_list_of_separators_names_no_key(self, ring_env):
+        ring_env(key=_working_key(), keys=" , ")
+        with pytest.raises(oauth_states.RingUnavailable, match="ENCRYPTION_KEYS"):
+            oauth_states.ring()
+
+    def test_a_blank_rotation_list_is_absent_not_a_shadow(self, ring_env):
+        """Saved blank, it is unset — the working ENCRYPTION_KEY is used."""
+        ring_env(key=_working_key(), keys="   ")
+        keys = oauth_states.ring()
+        assert keys.decrypt(keys.encrypt("a token")) == "a token"
+
+    def test_a_key_that_is_not_ascii_is_refused_without_quoting_it(self, ring_env):
+        """The codec's own error quotes the offending character; neither the
+        message nor any exception in the chain may carry it."""
+        ring_env(key="not-a-key-\udcff-SENTINEL")
+        with pytest.raises(oauth_states.RingUnavailable) as caught:
+            oauth_states.ring()
+        rendered = "".join(
+            traceback.format_exception(
+                type(caught.value), caught.value, caught.value.__traceback__
+            )
+        )
+        assert "not ASCII" in rendered
+        assert "udcff" not in rendered and "\udcff" not in rendered
 
     def test_a_working_ring_is_built(self, ring_env):
-        ring_env(key=Fernet.generate_key().decode())
+        ring_env(key=_working_key())
         keys = oauth_states.ring()
         assert keys.decrypt(keys.encrypt("a token")) == "a token"
 
@@ -179,7 +198,7 @@ class TestTheRefreshLegFlipsNothing:
         conn = _Conn()
         with pytest.raises(oauth_states.RingUnavailable):
             await ig_login_oauth.load_credential(conn, credential_id="cred-1")
-        assert conn.writes() == [] and conn.commits == 0
+        assert conn.statements == [] and conn.commits == 0
 
     async def test_the_refresh_executor_raises_it_and_calls_no_provider(
         self, ring_env, monkeypatch
@@ -203,9 +222,9 @@ class TestTheRefreshLegFlipsNothing:
     async def test_control_a_corrupt_row_under_a_working_ring_still_fails_closed(
         self, ring_env
     ):
-        """The fake answers faithfully: the flip this PR keeps for a corrupt
-        row is still made, and committed."""
-        ring_env(key=Fernet.generate_key().decode())
+        """The fake answers faithfully: the flip kept for a corrupt row is
+        still made, and committed."""
+        ring_env(key=_working_key())
         conn = _Conn()
         with pytest.raises(ig_login_oauth.CredentialUndecryptable):
             await ig_login_oauth.load_credential(conn, credential_id="cred-1")
@@ -229,7 +248,7 @@ class TestThePublishReadIsNotADeadToken:
     async def test_control_a_corrupt_row_under_a_working_ring_is_dead(
         self, ring_env, monkeypatch
     ):
-        ring_env(key=Fernet.generate_key().decode())
+        ring_env(key=_working_key())
         monkeypatch.setattr(ig_credentials, "unit_of_work", _uow_answering(LIVE_ROW))
         with pytest.raises(ig_credentials.IgCredentialDead):
             await ig_credentials.token_for_account(
@@ -276,25 +295,24 @@ class TestThePublishReadIsNotADeadToken:
 
 
 class TestTheDriveReadIsNotADeadGrant:
-    async def test_token_for_workspace_is_retryable_and_names_the_fix(
+    async def test_token_for_workspace_raises_it_not_a_dead_grant(
         self, ring_env, monkeypatch
     ):
         """`DriveCredentialDead` flips every source of the workspace to
-        `error` and alerts its owner to reconnect; a retryable refusal leaves
-        the sources `active` on the lane's ladder."""
+        `error` and alerts its owner to reconnect. `RingUnavailable` rides the
+        sync's ladder with the sources `active`, and a card's media fetch is
+        loud about it rather than resending it as a blip."""
         ring_env()
         monkeypatch.setattr(
             drive_credentials, "poller_session_factory", _factory_over(_Rows(LIVE_ROW))
         )
-        with pytest.raises(DriveRetryableError) as caught:
+        with pytest.raises(oauth_states.RingUnavailable):
             await drive_credentials.token_for_workspace(object(), "ws-1")
-        assert "ENCRYPTION_KEY" in str(caught.value)
-        assert "stored grant stands" in str(caught.value)
 
     async def test_control_a_corrupt_row_under_a_working_ring_is_dead(
         self, ring_env, monkeypatch
     ):
-        ring_env(key=Fernet.generate_key().decode())
+        ring_env(key=_working_key())
         monkeypatch.setattr(
             drive_credentials, "poller_session_factory", _factory_over(_Rows(LIVE_ROW))
         )
@@ -303,16 +321,15 @@ class TestTheDriveReadIsNotADeadGrant:
 
 
 class TestTheRevokeIsNotAbandoned:
-    async def test_revoke_raises_it_audits_nothing_and_calls_no_provider(
+    async def test_revoke_raises_it_reads_nothing_and_audits_nothing(
         self, ring_env, monkeypatch
     ):
         """RETRYABLE, like a 5xx: the payload is fine and the fixed key reads
         it. Audited as undecryptable, the job succeeded and the revocation was
         abandoned for good, with the grant still live at Google."""
         ring_env()
-        monkeypatch.setattr(
-            unit_of_work, "poller_session_factory", _factory_over(_Conn())
-        )
+        conn = _Conn()
+        monkeypatch.setattr(unit_of_work, "poller_session_factory", _factory_over(conn))
         audits = []
 
         async def audit(*args):  # pragma: no cover — must not be reached
@@ -329,12 +346,12 @@ class TestTheRevokeIsNotAbandoned:
             await credential_lifecycle.revoke_workspace_credentials(
                 SimpleNamespace(engine=object()), object(), _job()
             )
-        assert audits == []
+        assert audits == [] and conn.statements == []
 
     async def test_control_a_corrupt_row_under_a_working_ring_is_audited(
         self, ring_env, monkeypatch
     ):
-        ring_env(key=Fernet.generate_key().decode())
+        ring_env(key=_working_key())
         monkeypatch.setattr(
             unit_of_work, "poller_session_factory", _factory_over(_Conn())
         )

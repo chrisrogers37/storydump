@@ -55,25 +55,48 @@ class TokenEncryption:
         if self._cipher is not None:
             return
 
-        keys_raw = getattr(settings, "ENCRYPTION_KEYS", None)
-        single_key = settings.ENCRYPTION_KEY
+        # A variable saved blank is absent, as every blank variable here is —
+        # so a blank rotation list never shadows a working ENCRYPTION_KEY.
+        keys_raw = (getattr(settings, "ENCRYPTION_KEYS", None) or "").strip()
+        single_key = (settings.ENCRYPTION_KEY or "").strip()
 
         if keys_raw:
+            source = "ENCRYPTION_KEYS"
             key_strings = [k.strip() for k in keys_raw.split(",") if k.strip()]
         elif single_key:
+            source = "ENCRYPTION_KEY"
             key_strings = [single_key]
         else:
+            # Both roots print this at a refused boot (#1401), so the remedy is
+            # the production one first: a NEW key boots and then cannot read a
+            # single stored credential.
             raise ValueError(
-                "ENCRYPTION_KEY not configured. "
-                'Generate one with: python -c "from src.utils.encryption import TokenEncryption; print(TokenEncryption.generate_key())"'
+                "ENCRYPTION_KEY not configured (nor ENCRYPTION_KEYS). Where credentials"
+                " are already stored, set the key they were encrypted with — a newly"
+                " generated key cannot read them. Only on a first install, generate"
+                ' one with: python -c "from src.utils.encryption import TokenEncryption;'
+                ' print(TokenEncryption.generate_key())"'
             )
 
-        try:
-            fernets = [Fernet(k.encode()) for k in key_strings]
-            self._fernets = fernets
-            self._cipher = MultiFernet(fernets)
-        except (ValueError, binascii.Error) as e:
-            raise ValueError(f"Invalid ENCRYPTION_KEY format: {e}")
+        # The message names the variable that was read and, for the rotation
+        # list, the entry's position — never a value. A non-ASCII key's own
+        # error would quote the offending character, so it is not repeated.
+        fernets = []
+        for position, key in enumerate(key_strings, 1):
+            try:
+                fernets.append(Fernet(key.encode()))
+            except (ValueError, binascii.Error) as e:
+                why = "it is not ASCII" if isinstance(e, UnicodeError) else str(e)
+                where = (
+                    f"entry {position} of {len(key_strings)} is not a Fernet key: {why}"
+                    if source == "ENCRYPTION_KEYS"
+                    else why
+                )
+                raise ValueError(f"Invalid {source} format: {where}") from None
+        if not fernets:
+            raise ValueError(f"Invalid {source} format: it names no key")
+        self._fernets = fernets
+        self._cipher = MultiFernet(fernets)
 
     def encrypt(self, plaintext: str) -> str:
         """

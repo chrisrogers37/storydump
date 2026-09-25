@@ -21,10 +21,11 @@ live iff all three are set), a dead or wrong-bot token parks the channel at the
 startup probe. `fn_clock_tick`'s account/credential/source legs are the door's
 own; this process only chooses the recurring singletons it can actually run.
 
-Two absences refuse to BOOT instead of parking (:func:`main`): no database URL,
-and a credential key ring that cannot load. The ring is not one seam among
-many — every Instagram token the worker posts with and every Drive grant it
-syncs with is decrypted through it — so there is nothing to park it to.
+Configuration the worker cannot run on at all refuses to BOOT instead
+(:func:`main`): no database URL, a credential key ring that cannot load, a lane
+concurrency the pool cannot hold. Parking the ring's kinds would be possible and
+worse — a parked worker passes the health check and replaces a working deploy
+with one that cannot read a single credential; refusing keeps the old one.
 """
 
 from __future__ import annotations
@@ -843,10 +844,13 @@ def main() -> None:
     try:
         oauth_states.ring()
     except oauth_states.RingUnavailable as exc:
+        # The remedy is named because the tempting one is wrong: a newly
+        # generated key boots, and then cannot read a stored credential.
         print(
-            f"FATAL: the credential key ring cannot load ({exc}). The worker"
-            " decrypts every token it posts and syncs with; set a valid"
-            " ENCRYPTION_KEY on this service. Refusing to boot.",
+            f"FATAL: the credential key ring cannot load. {exc}\nThe worker decrypts"
+            " every token it posts and syncs with, so it needs the key the stored"
+            " credentials were encrypted with — the API service holds the same one."
+            " Refusing to boot.",
             file=sys.stderr,
         )
         raise SystemExit(2)

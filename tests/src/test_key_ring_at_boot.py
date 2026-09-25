@@ -1,47 +1,31 @@
 """Both roots build the credential key ring at startup and refuse to boot
-without one.
+without one (#1401).
 
 Built lazily, a missing or malformed `ENCRYPTION_KEY` let either service pass
 Railway's health check and fail later, one credential at a time: the worker at
 its first token read, the API at the first connect callback — after the person
 had granted access at Meta or Google. Refused at startup, the deploy fails its
 check and the previous deploy keeps serving. What the doors do if a process
-gets past this anyway is `tests/src/services/target/test_ring_unavailable.py`.
+gets past this anyway is `tests/src/services/target/test_ring_unavailable.py`;
+the ring is broken for real through `ring_env` (`tests/src/conftest.py`).
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from src.services.target import oauth_states
-from src.utils import encryption
-from src.utils.encryption import TokenEncryption
-
-#: Planted as a malformed key; the refusal must name the variable, not echo it.
-SENTINEL = "not-a-fernet-key-SENTINEL-7f3a"
+from tests.src.conftest import MALFORMED_KEY
 
 DATABASE_URL = "postgresql://nobody@localhost:1/nothing"
 
-
-@pytest.fixture
-def ring_env(monkeypatch):
-    """Configure the ring for real: the settings `TokenEncryption` reads,
-    with the singleton reset on the way in and on the way out."""
-
-    def configure(*, key=None, keys=None):
-        monkeypatch.setattr(
-            encryption,
-            "settings",
-            SimpleNamespace(ENCRYPTION_KEY=key, ENCRYPTION_KEYS=keys),
-        )
-        TokenEncryption.reset()
-
-    yield configure
-    TokenEncryption.reset()
+#: The remedy both roots name, because the tempting one — generate a key — boots
+#: and then cannot read a single stored credential.
+REMEDY = "the key the stored credentials were encrypted with"
 
 
 class _WentPastTheRefusal(Exception):
@@ -52,7 +36,8 @@ def _nothing_past_the_refusal_may_run(monkeypatch, worker) -> None:
     """The tests' own safety, as the database-URL refusal's tests do it
     (`tests/src/test_legacy_settings_gone.py`): under the regression these
     exist to catch, `worker.main()` would build an engine and run a live
-    worker inside pytest. Everything past the refusal stops the test instead."""
+    worker inside pytest. Everything past the refusal stops the test instead —
+    by raising, so the working-key control can see it was reached."""
 
     def refuse(*_args, **_kwargs):
         raise _WentPastTheRefusal("the worker went past its refusal and tried to boot")
@@ -74,6 +59,7 @@ class TestTheWorkerRefusesToBoot:
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "ENCRYPTION_KEY" in err and "Refusing to boot" in err
+        assert REMEDY in err
 
     def test_with_a_malformed_key_and_never_echoes_it(
         self, ring_env, monkeypatch, capsys
@@ -82,13 +68,13 @@ class TestTheWorkerRefusesToBoot:
 
         _nothing_past_the_refusal_may_run(monkeypatch, worker)
         monkeypatch.setenv("TARGET_DATABASE_URL", DATABASE_URL)
-        ring_env(key=SENTINEL)
+        ring_env(key=MALFORMED_KEY)
         with pytest.raises(SystemExit) as exc:
             worker.main()
         assert exc.value.code == 2
         err = capsys.readouterr().err
-        assert "ENCRYPTION_KEY" in err
-        assert SENTINEL not in err
+        assert "Invalid ENCRYPTION_KEY format" in err and REMEDY in err
+        assert MALFORMED_KEY not in err
 
     def test_control_with_a_working_key_it_goes_on_to_connect(
         self, ring_env, monkeypatch
@@ -129,21 +115,21 @@ class TestTheApiRefusesToStart:
                 pass  # pragma: no cover — startup refuses
         assert started == []
 
-    def test_a_malformed_key_is_refused_without_being_logged(self, ring_env, caplog):
+    def test_the_refusal_names_the_remedy_and_never_the_key(self, ring_env, caplog):
         from src.api.app import create_app
         from src.utils.logger import logger
 
         # The app's logger does not propagate to the root, where caplog listens.
         logger.addHandler(caplog.handler)
         try:
-            ring_env(key=SENTINEL)
+            ring_env(key=MALFORMED_KEY)
             with pytest.raises(oauth_states.RingUnavailable):
                 with TestClient(create_app(env={})):
                     pass  # pragma: no cover — startup refuses
         finally:
             logger.removeHandler(caplog.handler)
-        assert "Refusing to start" in caplog.text
-        assert SENTINEL not in caplog.text
+        assert "Refusing to start" in caplog.text and REMEDY in caplog.text
+        assert MALFORMED_KEY not in caplog.text
 
     def test_control_with_a_working_key_it_starts_and_answers(self, ring_env):
         from src.api.app import create_app
@@ -151,3 +137,19 @@ class TestTheApiRefusesToStart:
         ring_env(key=Fernet.generate_key().decode())
         with TestClient(create_app(env={})) as client:
             assert client.get("/health").status_code == 200
+
+
+def test_make_validate_env_builds_the_ring_the_roots_refuse_without():
+    """`make validate-env` said "Configuration is valid" for a configuration
+    both services now refuse to boot on; it builds the ring too."""
+    lines = (Path(__file__).resolve().parents[2] / "Makefile").read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("validate-env:"))
+    recipe = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("\t"):
+            break
+        recipe.append(line)
+    assert any(
+        "from src.services.target.oauth_states import ring; ring()" in line
+        for line in recipe
+    ), recipe

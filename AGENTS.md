@@ -176,10 +176,12 @@ and `make validate-env` loads the settings the way every process does. Neither
 the worker nor the database-gated tests run before this.
 
 `src/config/settings.py` requires **no variable** (the tear-out's phase 02;
-#1222): every field has a default, so the web service, the tests and the
-`storydump` CLI load with an empty environment. A process needs what it reads:
-the worker refuses to boot without `TARGET_DATABASE_URL` (exit 2, naming it),
-the API answers 503 on every data route without it, and the CLI imports from
+#1222): every field has a default, so the settings load with an empty
+environment — in the web service, the tests and the `storydump` CLI. A process
+needs what it reads: the worker refuses to boot without `TARGET_DATABASE_URL`
+(exit 2, naming it), the API answers 503 on every data route without it, both
+refuse to start without a credential key ring that loads (`ENCRYPTION_KEY`, or
+`ENCRYPTION_KEYS`; #1401), and the CLI imports from
 `src` only `src/services/target/vocabulary.py` (plus the two stdlib-only fleet
 monitors under `scripts/`, for `health`) and needs no variable but its token. Tests
 additionally need `ENCRYPTION_KEY`, a Fernet key. `.env.example` names every

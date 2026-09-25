@@ -461,21 +461,26 @@ def _require_key_ring() -> None:
     """Build the credential key ring, or refuse to start.
 
     The connect callbacks encrypt every Instagram token and Drive grant
-    through it (`oauth_states.ring`). Built lazily, a missing or malformed key
-    passed Railway's health check and failed the first connect — after the
-    person had already granted access at Meta or Google. A missing engine is
-    answered differently (503 per data route, `/health` saying so) because it
-    is visible from the probe; a missing key is visible nowhere until someone
-    connects. Raised from startup, uvicorn exits, the deploy fails its check,
-    and the previous deploy keeps serving.
+    through it, and the Drive folder browser decrypts the workspace's grant
+    (`oauth_states.ring`). Built lazily, a missing or malformed key passed
+    Railway's health check and failed at those routes — a connect only after
+    the person had granted access at Meta or Google. A missing engine is
+    answered per route instead (503, and `/health` says so); nothing on the
+    probe would say the key is missing. Raised from startup, the lifespan
+    fails and uvicorn exits (one process: `WEB_CONCURRENCY` is unset in
+    production), the deploy fails its check, and the previous deploy keeps
+    serving.
     """
     try:
         oauth_states.ring()
     except oauth_states.RingUnavailable as exc:
+        # The remedy is named because the tempting one is wrong: a newly
+        # generated key starts, and then cannot read a stored credential.
         logger.error(
-            "the credential key ring cannot load (%s): the connect callbacks"
-            " encrypt every token through it; set a valid ENCRYPTION_KEY on this"
-            " service. Refusing to start.",
+            "the credential key ring cannot load. %s The API encrypts every token"
+            " it connects and decrypts the Drive grant it browses with, so it needs"
+            " the key the stored credentials were encrypted with — the worker"
+            " service holds the same one. Refusing to start.",
             exc,
         )
         raise

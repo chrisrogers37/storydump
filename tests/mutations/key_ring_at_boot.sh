@@ -68,22 +68,33 @@ B=tests/src/test_key_ring_at_boot.py
 LAZY='type("Lazy", (), {"decrypt": staticmethod(lambda c: ring().decrypt(c))})'
 LAZY_OS='type("Lazy", (), {"decrypt": staticmethod(lambda c: oauth_states.ring().decrypt(c))})'
 
-# The door: a ring that cannot be built is its own type, and names the variable without echoing a key.
+E=src/utils/encryption.py
+RAISE='                raise ValueError(f"Invalid {source} format: {where}") from None'
+
+# The door: a ring that cannot be built is its own type, and its message names the variable read — never a key.
 check "the door raises the bare ValueError again" src/services/target/oauth_states.py $'    try:\n        return TokenEncryption()\n    except ValueError as exc:\n        raise RingUnavailable(str(exc)) from exc' '    return TokenEncryption()' "$R -k TestTheDoor"
-check "the refusal echoes the malformed key" src/utils/encryption.py '            raise ValueError(f"Invalid ENCRYPTION_KEY format: {e}")' '            raise ValueError(f"Invalid ENCRYPTION_KEY format: {e} ({keys_raw or single_key})")' "$R -k never_echoed"
-# The roots: each refuses to start, the worker with the database URL's exit code, the API before any task.
+check "the refusal echoes the malformed key" $E "$RAISE" '                raise ValueError(f"Invalid {source} format: {where} ({key})") from None' "$R -k never_echoed"
+check "the rotation list's refusal blames the single key" $E "$RAISE" '                raise ValueError(f"Invalid ENCRYPTION_KEY format: {where}") from None' "$R -k rotation_list_names_itself"
+check "a blank rotation list shadows the working key" $E '        keys_raw = (getattr(settings, "ENCRYPTION_KEYS", None) or "").strip()' '        keys_raw = getattr(settings, "ENCRYPTION_KEYS", None) or ""' "$R -k blank_rotation_list"
+check "a non-ASCII key's character is quoted" $E '                why = "it is not ASCII" if isinstance(e, UnicodeError) else str(e)' '                why = str(e)' "$R -k not_ascii"
+check "a non-ASCII key's character rides the exception chain" $E "$RAISE" '                raise ValueError(f"Invalid {source} format: {where}")' "$R -k not_ascii"
+check "the missing-key refusal offers a new key first" $E '" generated key cannot read them. Only on a first install, generate"' '" generated key cannot read them. Generate"' "$R -k warns_that_a_new_key"
+# The roots: each refuses to start, the worker with the database URL's exit code, the API before any task,
+# and each names the remedy that is safe in production.
 check "the worker boots without a ring" src/worker.py $'        oauth_states.ring()\n' $'        pass\n' "$B -k TestTheWorkerRefusesToBoot"
-check "the worker's refusal is not the database URL's exit 2" src/worker.py $'ENCRYPTION_KEY on this service. Refusing to boot.",\n            file=sys.stderr,\n        )\n        raise SystemExit(2)' $'ENCRYPTION_KEY on this service. Refusing to boot.",\n            file=sys.stderr,\n        )\n        raise SystemExit(1)' "$B -k 'TestTheWorkerRefusesToBoot and test_without_a_key'"
+check "the worker's refusal is not the database URL's exit 2" src/worker.py $'" Refusing to boot.",\n            file=sys.stderr,\n        )\n        raise SystemExit(2)' $'" Refusing to boot.",\n            file=sys.stderr,\n        )\n        raise SystemExit(1)' "$B -k 'TestTheWorkerRefusesToBoot and test_without_a_key'"
+check "the worker's refusal names no remedy" src/worker.py '" every token it posts and syncs with, so it needs the key the stored"' '" every token it posts and syncs with, so it needs a key; the stored"' "$B -k 'TestTheWorkerRefusesToBoot and test_without_a_key'"
 check "the API starts without a ring" src/api/app.py $'        _require_key_ring()\n        # The role sample' '        # The role sample' "$B -k TestTheApiRefusesToStart"
 check2 "the API starts its tasks before the ring check" src/api/app.py $'        _require_key_ring()\n        # The role sample' '        # The role sample' $'            asyncio.create_task(_sample_webhook_live(app_, env)),\n        ]\n' $'            asyncio.create_task(_sample_webhook_live(app_, env)),\n        ]\n        _require_key_ring()\n' "$B -k startup_fails_before_any_task"
+check "the API's refusal names no remedy" src/api/app.py '" the key the stored credentials were encrypted with — the worker"' '" a valid key — the worker"' "$B -k remedy_and_never_the_key"
+check "make validate-env stops building the ring" Makefile $'\t\tpython -c "from src.services.target.oauth_states import ring; ring()" && \\\n' '' "$B -k validate_env"
 # The doors: each builds the ring before its `try` — back inside it, the ring's failure is a corrupt row.
 check "the refresh leg's load builds the ring inside its try" src/services/target/ig_login_oauth.py $'    keys = ring()\n' "    keys = $LAZY"$'\n' "$R -k 'TestTheRefreshLegFlipsNothing and not control'"
 check "the publish read builds the ring inside its try" src/services/target/ig_credentials.py $'    keys = ring()\n' "    keys = $LAZY"$'\n' "$R -k token_for_account_raises_it"
-check "the Drive read builds the ring inside its try" src/services/target/drive_credentials.py $'        keys = ring()\n' "        keys = $LAZY"$'\n' "$R -k token_for_workspace_is_retryable"
+check "the Drive read builds the ring inside its try" src/services/target/drive_credentials.py $'    keys = ring()\n' "    keys = $LAZY"$'\n' "$R -k token_for_workspace_raises_it"
 check "the revoke builds the ring inside its try" src/services/target/credential_lifecycle.py $'    keys = oauth_states.ring()\n' "    keys = $LAZY_OS"$'\n' "$R -k revoke_raises_it"
-# The classifications: nothing sent and no account blamed; our misconfiguration, not a dead grant.
+# The adapter: nothing sent and no account blamed.
 check "the adapter lets the ring's failure out untyped" src/services/target/instagram_graph.py '        except RingUnavailable as exc:' '        except ZeroDivisionError as exc:' "$R -k adapter_sends_nothing"
 check "the adapter blames the account (code 190)" src/services/target/instagram_graph.py $'                code=0,\n                message=f"no call made' $'                code=OAUTH_ERROR_CODE,\n                message=f"no call made' "$R -k adapter_sends_nothing"
-check "the Drive read calls the ring's failure a dead grant" src/services/target/drive_credentials.py $'    except RingUnavailable as exc:\n        raise DriveRetryableError(' $'    except RingUnavailable as exc:\n        raise DriveCredentialDead(' "$R -k token_for_workspace_is_retryable"
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"

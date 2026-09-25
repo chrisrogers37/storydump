@@ -68,7 +68,7 @@ No variable is required to load settings; a process needs what it reads:
 - `TARGET_DATABASE_URL`: the database the API and the worker run against (the runtime login). The worker exits 2 without it; the API answers 503 on every data route.
 - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`: what `make create-db`, `make init-db` and the test harness connect with. No deployed process reads them.
 - `DATABASE_URL`: the database-owner login the migration runner applies the schema with. Locally `make init-db` builds it from the `DB_*` components.
-- `ENCRYPTION_KEY`: a Fernet key for the stored credentials (the test suite needs one too).
+- `ENCRYPTION_KEY`: a Fernet key for the stored credentials, the same one on the API and the worker; neither starts without a valid one (the test suite needs one too).
 - `TARGET_TELEGRAM_BOT_TOKEN` and `TARGET_TELEGRAM_BOT_USERNAME`: the bot the worker sends with. Without them the worker runs with its Telegram channel parked.
 - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`: all three, or the publish kind parks by name.
 - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`: the OAuth client a Drive grant is minted and refreshed with.

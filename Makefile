@@ -201,9 +201,10 @@ quickstart: env-example install setup-db ## Quick start: setup everything for fi
 	@echo "  4. Run: make run"
 	@echo ""
 
-validate-env: ## Load the settings from the environment and .env, the way every process does
+validate-env: ## Load the settings, and build the key ring both services refuse to boot without
 	@echo "$(GREEN)Validating environment configuration...$(NC)"
 	@python -c "from src.config.settings import settings" && \
+		python -c "from src.services.target.oauth_states import ring; ring()" && \
 		echo "$(GREEN)✓ Configuration is valid$(NC)" || \
 		(echo "$(RED)✗ Configuration validation failed$(NC)" && exit 1)
 

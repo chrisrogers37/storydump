@@ -44,10 +44,11 @@ cp .env.example .env
 ```
 
 No variable is required to load the settings (`src/config/settings.py`): the
-API, the tests and the `storydump` CLI load with an empty environment (the
-tests additionally need `ENCRYPTION_KEY`, a Fernet key). A process needs what
-it reads — the worker refuses to boot without `TARGET_DATABASE_URL`, and the
-API answers 503 on every data route without it.
+API, the tests and the `storydump` CLI load them with an empty environment
+(the tests additionally need `ENCRYPTION_KEY`, a Fernet key). A process needs
+what it reads — the worker refuses to boot without `TARGET_DATABASE_URL`, the
+API answers 503 on every data route without it, and both refuse to start
+without an `ENCRYPTION_KEY` that is a Fernet key (#1401).
 
 ### 2. Database Options
 

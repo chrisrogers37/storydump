@@ -35,6 +35,10 @@ here is loud, not latent.
   dead flips before raising; the job's work is therefore DONE — the executor
   returns success rather than retrying a payload that cannot become readable.
 
+A ring this process cannot BUILD (`oauth_states.RingUnavailable`) takes none
+of the three: it raises before anything is read, into the retry budget like a
+transient, and nothing flips — the payload is fine and the fixed key reads it.
+
 The token never appears in any raise, log, or error detail, on any path.
 """
 
@@ -161,11 +165,10 @@ async def revoke_workspace_credentials(deps, session, job) -> str:
       retry budget runs and a persistent inability lands as a dead job row.
       Auditing here instead would report a failure on the first blip.
 
-    A key ring this process cannot build (`RingUnavailable`) is RETRYABLE, not
-    terminal: the payload is fine and fixing the key makes it readable. So the
-    ring is built first, outside the decrypt's `try` — inside it, a missing key
-    was audited as an undecryptable credential and the revocation abandoned for
-    good, with the grant still live at Google.
+    A key ring this process cannot build (`RingUnavailable`) is RETRYABLE: the
+    payload is fine and the fixed key reads it. So the ring is built first,
+    outside the decrypt's `try` — inside it, a missing key was audited
+    `undecryptable` and the revocation abandoned with the grant still live.
 
     It reads the token only to spend it, never logs it, and never returns it.
     """
