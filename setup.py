@@ -25,7 +25,7 @@ setup(
         "python-dotenv>=1.0.0",
         "python-multipart>=0.0.9",
         "rich>=13.7.0",
-        "sqlalchemy>=2.0.23",
+        "sqlalchemy[asyncio]>=2.0.23",
         "uvicorn>=0.27.0",
     ],
     # The v2 CLI's own dependencies (decision F2: `keyring` never ships to

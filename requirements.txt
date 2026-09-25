@@ -4,7 +4,9 @@ pydantic==2.13.3
 pydantic-settings==2.14.2
 
 # Database
-sqlalchemy==2.0.49
+# `[asyncio]` brings greenlet on every platform; SQLAlchemy's own marker leaves
+# it out on arm64 (Apple Silicon) — tests/test_dependency_declarations.py holds it.
+sqlalchemy[asyncio]==2.0.49
 psycopg2-binary==2.9.12
 # L.0 (#857): SQLAlchemy's async Postgres driver for the target-side unit of
 # work. psycopg2 stays for the migration runner and the DB gates (the legacy
