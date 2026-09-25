@@ -296,12 +296,45 @@ async def reap_expired_states(conn, *, limit: int = 500) -> int:
 # ---------------------------------------------------------------------------
 
 
+class RingUnavailable(StorydumpError):
+    """The ring itself cannot be built: no key is configured, or a configured
+    key is not a Fernet key.
+
+    A fault of the PROCESS's configuration, never a fact about a credential,
+    so nothing may record it as one. The per-credential failure is a payload
+    that no key in a WORKING ring decrypts — `07` §3's fail-closed flip in
+    `ig_login_oauth.load_credential`, the Drive read's dead grant, the revoke's
+    `undecryptable` audit. Before this type existed, a missing key reached all
+    three as the same `ValueError` a corrupt row raises, and the first refresh
+    after a deploy without `ENCRYPTION_KEY` would have flipped a live Instagram
+    account to `reauth_required` and messaged its owner to reconnect. So every
+    door that classifies a decrypt failure builds the ring BEFORE its `try`,
+    and this propagates past it.
+
+    Both roots build the ring at startup and refuse to boot on this
+    (`src/worker.py` `main`, `src/api/app.py` `_lifespan`), so a deployed
+    process that reaches a credential already holds a working ring: Railway's
+    health check fails the deploy and the previous one keeps serving. The
+    doors' ordering is for every entry point that skips a root.
+
+    The message is `TokenEncryption`'s: it names the variable, never a key.
+    """
+
+
 def ring():
     """The ONE ring door in the tier. Every credential writer and reader —
     `ig_login_oauth`'s, and the Drive leg's in `google_drive_oauth` and
     `drive_credentials` — encrypts and decrypts through this, so a ring change
     lands once. `07` §3 keeps the shipped env name `ENCRYPTION_KEYS`; the
-    import is lazy so `cryptography` loads on first use, not at import."""
+    import is lazy so `cryptography` loads on first use, not at import.
+
+    A ring that cannot be built raises :class:`RingUnavailable` — never the
+    bare `ValueError` a per-row decrypt failure also raises, because the two
+    must be told apart by type and a caller that parsed the message would be
+    one reworded error away from flipping every credential it touched."""
     from src.utils.encryption import TokenEncryption
 
-    return TokenEncryption()
+    try:
+        return TokenEncryption()
+    except ValueError as exc:
+        raise RingUnavailable(str(exc)) from exc

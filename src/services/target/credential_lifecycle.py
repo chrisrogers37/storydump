@@ -161,12 +161,19 @@ async def revoke_workspace_credentials(deps, session, job) -> str:
       retry budget runs and a persistent inability lands as a dead job row.
       Auditing here instead would report a failure on the first blip.
 
+    A key ring this process cannot build (`RingUnavailable`) is RETRYABLE, not
+    terminal: the payload is fine and fixing the key makes it readable. So the
+    ring is built first, outside the decrypt's `try` — inside it, a missing key
+    was audited as an undecryptable credential and the revocation abandoned for
+    good, with the grant still live at Google.
+
     It reads the token only to spend it, never logs it, and never returns it.
     """
     payload = job.get("payload") or {}
     credential_id = str(payload["credential_id"])
     workspace_id = str(job["workspace_id"])
     factory = unit_of_work.poller_session_factory(deps.engine, workspace_id)
+    keys = oauth_states.ring()
 
     # Phase 1 — read and decrypt in its own transaction, committed before any
     # provider talk. Same ordering as `refresh_credential` and for the same
@@ -189,7 +196,7 @@ async def revoke_workspace_credentials(deps, session, job) -> str:
 
     try:
         refresh_token = google_drive_oauth.decode_payload(
-            oauth_states.ring().decrypt(row[0])
+            keys.decrypt(row[0])
         ).refresh_token
     except Exception:
         # Deliberately not logging the exception: it can carry ciphertext.

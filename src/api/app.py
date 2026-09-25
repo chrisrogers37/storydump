@@ -65,6 +65,7 @@ from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
 from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError, TokenRefused
+from src.services.target import oauth_states
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import MixInvalid
@@ -456,6 +457,30 @@ async def _sample_db_role(app: FastAPI) -> None:
         logger.warning("database role not sampled at startup: %s", exc)
 
 
+def _require_key_ring() -> None:
+    """Build the credential key ring, or refuse to start.
+
+    The connect callbacks encrypt every Instagram token and Drive grant
+    through it (`oauth_states.ring`). Built lazily, a missing or malformed key
+    passed Railway's health check and failed the first connect — after the
+    person had already granted access at Meta or Google. A missing engine is
+    answered differently (503 per data route, `/health` saying so) because it
+    is visible from the probe; a missing key is visible nowhere until someone
+    connects. Raised from startup, uvicorn exits, the deploy fails its check,
+    and the previous deploy keeps serving.
+    """
+    try:
+        oauth_states.ring()
+    except oauth_states.RingUnavailable as exc:
+        logger.error(
+            "the credential key ring cannot load (%s): the connect callbacks"
+            " encrypt every token through it; set a valid ENCRYPTION_KEY on this"
+            " service. Refusing to start.",
+            exc,
+        )
+        raise
+
+
 def _cors_origins() -> list[str]:
     """The ONE browser origin admitted (`settings.web_app_origin`); never "*",
     and with no origin configured no origin is admitted."""
@@ -492,6 +517,9 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(app_: FastAPI):
+        # First, so a process that cannot encrypt starts no task — in
+        # particular it never re-registers the production bot's webhook.
+        _require_key_ring()
         # The role sample and the webhook registration run as background
         # tasks so startup never waits on the database or on Telegram (see
         # `app.state.db_role` / `app.state.webhook` below); a task still

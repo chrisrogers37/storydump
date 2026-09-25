@@ -22,6 +22,11 @@ active, expired, undecryptable — because they have different remedies
 (connect, re-auth, wait for the refresh leg, rotate the ring). The Graph
 adapter maps it to the retryable Meta error with code 190, which the pipeline
 hands straight to a human as `review_required` with the reason on the intent.
+
+A ring that cannot be built is none of those: no account's remedy fixes a
+missing key. :class:`~src.services.target.oauth_states.RingUnavailable`
+propagates instead, and the adapter maps it to the code-0 retryable — nothing
+left the process, so the ladder may retry and the account is left as it is.
 """
 
 from __future__ import annotations
@@ -87,6 +92,10 @@ async def token_for_account(
     ref = str(provider_account_ref)
     if not workspace_id:
         raise ValueError("workspace_id is required — the read is tenant-scoped")
+    # Built before the read and outside the `try` below: a ring that cannot be
+    # built is this process's configuration (`RingUnavailable`), not this
+    # account's credential, and must never reach the pipeline as a dead token.
+    keys = ring()
     params: dict = {
         "ref": ref,
         "provider": PROVIDER,
@@ -117,7 +126,7 @@ async def token_for_account(
             " — the refresh leg re-mints it, or reconnect"
         )
     try:
-        return ring().decrypt(row["encrypted_payload"])
+        return keys.decrypt(row["encrypted_payload"])
     except Exception as exc:
         raise IgCredentialDead(
             f"{PROVIDER} credential for {who} could not be decrypted by any ring entry"
