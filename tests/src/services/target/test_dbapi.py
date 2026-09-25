@@ -1,7 +1,7 @@
 """`_dbapi.driver_error_is` — "which class", asked once.
 
-Three sites were walking `driver_candidates` by hand (`invitations` twice,
-`workspaces` once). The ordering case is the one that matters: a caller
+The sites that walked `driver_candidates` by hand are listed on
+`driver_error_is` itself. The ordering case is the one that matters: a caller
 discriminating between two classes must see the FIRST candidate that matches
 either, not the first candidate matching the class it happens to test first.
 """

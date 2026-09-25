@@ -1,10 +1,9 @@
 """The one place the SQLAlchemy→asyncpg error chain is unwrapped.
 
 SQLAlchemy's asyncpg dialect wraps the driver exception one level deeper than
-`exc.orig` — catching only one level was the intent ledger's first bug
-(`intent_ledger.transition`'s comment records it), and the jobs service then
-re-derived the same fact independently. Two finders, no signal between them;
-hence this helper.
+`exc.orig`. The intent ledger found that first, and the jobs service then
+re-derived the same fact independently — two finders, no signal between
+them; hence this helper.
 
 Two questions are asked of the unwrapped chain, and they are different
 questions: **which constraint** (:func:`constraint_violated`, where the DDL
@@ -29,12 +28,12 @@ def driver_candidates(exc: BaseException) -> tuple:
 def driver_error_is(exc: BaseException, *classes: type) -> Optional[BaseException]:
     """The first buried driver exception that is one of *classes*, else None.
 
-    The OTHER question, and the one three siblings were asking by hand
-    (`invitations` twice, `workspaces` once): not "which constraint" but
-    "which class". They ask it where the DDL names no constraint they could
-    rely on — `fn_invitation_accept` raises `no_data_found`, and a
-    check-violation's name is read off the exception itself rather than
-    matched against a literal.
+    The OTHER question, and the one four sites were asking by hand
+    (`invitations` twice, `workspaces` once, `intent_ledger.transition` once):
+    not "which constraint" but "which class". They ask it where the DDL names
+    no constraint they could rely on — `fn_invitation_accept` raises
+    `no_data_found`, and a check-violation's name is read off the exception
+    itself rather than matched against a literal.
 
     Candidate order is the caller's tie-breaker: the FIRST candidate matching
     any of *classes* is returned, so a caller discriminating between two
