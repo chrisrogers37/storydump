@@ -19,7 +19,6 @@ corrupt row under a working ring still takes that branch.
 
 from __future__ import annotations
 
-import traceback
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -38,7 +37,7 @@ from src.services.target import (
 from src.services.target.instagram_graph import InstagramGraphAdapter
 from src.services.target.meta_adapter import MetaRetryableError
 from src.services.target.publish_pipeline import _dead_credential
-from tests.src.conftest import MALFORMED_KEY
+from tests.src.conftest import MALFORMED_KEY, leaks
 
 #: What a door would read for a live credential: active, unexpired, and a
 #: payload no ring decrypts — the corrupt-row branch, if the ring gets that far.
@@ -139,23 +138,32 @@ class TestTheDoor:
         message = str(caught.value)
         assert "a newly generated key cannot read them" in message
         assert "Only on a first install" in message
+        assert message.index("set the key they were encrypted with") < (
+            message.lower().index("generate one")
+        ), "the safe remedy must come before the offer to generate a key"
+
+    def test_a_blank_key_is_absent_not_malformed(self, ring_env):
+        ring_env(key="   ")
+        with pytest.raises(oauth_states.RingUnavailable, match="not configured"):
+            oauth_states.ring()
 
     def test_a_malformed_key_is_refused_and_never_echoed(self, ring_env):
         ring_env(key=MALFORMED_KEY)
         with pytest.raises(oauth_states.RingUnavailable) as caught:
             oauth_states.ring()
         assert "Invalid ENCRYPTION_KEY format" in str(caught.value)
-        assert MALFORMED_KEY not in str(caught.value)
+        assert not leaks(str(caught.value))
 
     def test_the_rotation_list_names_itself_and_the_bad_entry(self, ring_env):
         """ENCRYPTION_KEYS overrides ENCRYPTION_KEY, so a refusal that named
-        the single key would send the operator to a variable that is fine."""
-        ring_env(key=_working_key(), keys=f"{_working_key()},{MALFORMED_KEY}")
+        the single key would send the operator to a variable that is fine. The
+        position is the one the operator counts: a blank entry is an entry."""
+        ring_env(key=_working_key(), keys=f"{_working_key()},,{MALFORMED_KEY}")
         with pytest.raises(oauth_states.RingUnavailable) as caught:
             oauth_states.ring()
         message = str(caught.value)
-        assert "Invalid ENCRYPTION_KEYS format: entry 2 of 2" in message
-        assert MALFORMED_KEY not in message
+        assert "Invalid ENCRYPTION_KEYS format: entry 3 of 3" in message
+        assert not leaks(message)
 
     def test_a_rotation_list_of_separators_names_no_key(self, ring_env):
         ring_env(key=_working_key(), keys=" , ")
@@ -168,19 +176,26 @@ class TestTheDoor:
         keys = oauth_states.ring()
         assert keys.decrypt(keys.encrypt("a token")) == "a token"
 
-    def test_a_key_that_is_not_ascii_is_refused_without_quoting_it(self, ring_env):
-        """The codec's own error quotes the offending character; neither the
-        message nor any exception in the chain may carry it."""
-        ring_env(key="not-a-key-\udcff-SENTINEL")
+    def test_an_undecodable_byte_is_refused_and_nothing_in_the_chain_holds_it(
+        self, ring_env
+    ):
+        """A byte the environment could not decode arrives as a lone surrogate
+        and fails to encode. The codec's error quotes it — and, attached as any
+        exception's `__context__`, carries the whole key as `.object`, rendered
+        or not. Nothing reachable from the refusal may hold either."""
+        ring_env(key=MALFORMED_KEY + "\udcff")
         with pytest.raises(oauth_states.RingUnavailable) as caught:
             oauth_states.ring()
-        rendered = "".join(
-            traceback.format_exception(
-                type(caught.value), caught.value, caught.value.__traceback__
-            )
-        )
-        assert "not ASCII" in rendered
-        assert "udcff" not in rendered and "\udcff" not in rendered
+        assert "undecodable byte" in str(caught.value)
+        chain, exc = [], caught.value
+        while exc is not None and exc not in chain:
+            chain.append(exc)
+            exc = exc.__cause__ or exc.__context__
+        for link in chain:
+            text = str(link) + repr(link.args)
+            assert not isinstance(link, UnicodeError), chain
+            assert "udcff" not in text and "\udcff" not in text
+            assert not leaks(text)
 
     def test_a_working_ring_is_built(self, ring_env):
         ring_env(key=_working_key())
@@ -318,6 +333,51 @@ class TestTheDriveReadIsNotADeadGrant:
         )
         with pytest.raises(drive_credentials.DriveCredentialDead):
             await drive_credentials.token_for_workspace(object(), "ws-1")
+
+    async def test_the_sync_does_not_file_it_as_a_dead_source(self):
+        """`media_sync` flips a source to `error` and alerts only for its two
+        persistent classes. `RingUnavailable` is a `StorydumpError` like them,
+        so a broad catch there would bring this PR's bug back: it must pass
+        to the lane's ladder with the source untouched."""
+        from src.services.target import media_sync
+
+        async def list_changes(config, checkpoint, *, source_id, workspace_id):
+            raise oauth_states.RingUnavailable("ENCRYPTION_KEY not configured.")
+
+        def factory():  # pragma: no cover — the fault must not reach a write
+            raise AssertionError("the source was written to")
+
+        deps = SimpleNamespace(drive=SimpleNamespace(list_changes=list_changes))
+        with pytest.raises(oauth_states.RingUnavailable):
+            await media_sync._call_provider(
+                deps,
+                factory,
+                _job(),
+                config={},
+                checkpoint=None,
+                source_id="src-1",
+                workspace_id="ws-1",
+            )
+
+    async def test_a_cards_media_fetch_is_loud_not_a_blip(self):
+        """`_card_media_fetch` resends a blip (`MediaTransient`) quietly, as
+        ambiguous. A fault that is neither the file's nor the network's stays
+        loud and counted, as a dead grant does — so it must pass unwrapped."""
+        from src.worker import _card_media_fetch
+
+        async def fetch_bytes(**kwargs):
+            raise oauth_states.RingUnavailable("ENCRYPTION_KEY not configured.")
+
+        fetch = _card_media_fetch(SimpleNamespace(fetch_bytes=fetch_bytes))
+        with pytest.raises(oauth_states.RingUnavailable):
+            await fetch(
+                {
+                    "kind": "image",
+                    "source_id": "src-1",
+                    "workspace_id": "ws-1",
+                    "ref": "file-1",
+                }
+            )
 
 
 class TestTheRevokeIsNotAbandoned:

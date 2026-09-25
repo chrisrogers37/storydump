@@ -97,7 +97,7 @@ drop of `legacy`) and 080 are gated (`-- runner:manual`), so `apply` reports
 them as owed and never runs them. Nothing under `src/` reads either schema.
 Production is past that point — the owner applied 079 and 080 by hand on
 2026-09-19 — so "owed" on a fresh laptop is expected, not a defect.
-`make validate-env` loads the settings the way every process does, and
+`make validate-env` loads the settings and builds the key ring, as both services do at startup, and
 `make check-health` asks the deployed API.
 
 ### 4. Run the API and the worker

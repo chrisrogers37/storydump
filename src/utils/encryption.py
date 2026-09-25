@@ -62,10 +62,10 @@ class TokenEncryption:
 
         if keys_raw:
             source = "ENCRYPTION_KEYS"
-            key_strings = [k.strip() for k in keys_raw.split(",") if k.strip()]
+            entries = keys_raw.split(",")
         elif single_key:
             source = "ENCRYPTION_KEY"
-            key_strings = [single_key]
+            entries = [single_key]
         else:
             # Both roots print this at a refused boot (#1401), so the remedy is
             # the production one first: a NEW key boots and then cannot read a
@@ -79,20 +79,34 @@ class TokenEncryption:
             )
 
         # The message names the variable that was read and, for the rotation
-        # list, the entry's position — never a value. A non-ASCII key's own
-        # error would quote the offending character, so it is not repeated.
-        fernets = []
-        for position, key in enumerate(key_strings, 1):
+        # list, the entry's position as the operator counts it — never a value.
+        fernets, bad = [], None
+        for position, entry in enumerate(entries, 1):
+            key = entry.strip()
+            if not key:
+                continue
             try:
                 fernets.append(Fernet(key.encode()))
             except (ValueError, binascii.Error) as e:
-                why = "it is not ASCII" if isinstance(e, UnicodeError) else str(e)
-                where = (
-                    f"entry {position} of {len(key_strings)} is not a Fernet key: {why}"
+                # A byte the environment could not decode fails to encode, and
+                # the codec's error quotes it — so it is not repeated.
+                why = (
+                    "it holds an undecodable byte"
+                    if isinstance(e, UnicodeError)
+                    else str(e)
+                )
+                bad = (
+                    f"entry {position} of {len(entries)} is not a Fernet key: {why}"
                     if source == "ENCRYPTION_KEYS"
                     else why
                 )
-                raise ValueError(f"Invalid {source} format: {where}") from None
+                break
+        # Raised OUTSIDE the handler, as `src/config/settings.py` does and for its
+        # reason: `from None` only hides the codec's error from a rendered
+        # traceback, and as `__context__` it would still carry the whole key
+        # (`UnicodeEncodeError.object`).
+        if bad is not None:
+            raise ValueError(f"Invalid {source} format: {bad}")
         if not fernets:
             raise ValueError(f"Invalid {source} format: it names no key")
         self._fernets = fernets

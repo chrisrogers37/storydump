@@ -172,8 +172,9 @@ Then the database: `make create-db init-db` builds the schema on a fresh
 PostgreSQL the way the lineage lane proves it — step 0 (the service roles and
 the DDL door), the by-hand base, then every runner file. It needs `psql` on
 your `PATH` and a `DB_USER` with `CREATEROLE`; `README.md` §3 walks through it,
-and `make validate-env` loads the settings the way every process does. Neither
-the worker nor the database-gated tests run before this.
+and `make validate-env` loads the settings and builds the key ring, as both
+services do at startup. Neither the worker nor the database-gated tests run
+before this.
 
 `src/config/settings.py` requires **no variable** (the tear-out's phase 02;
 #1222): every field has a default, so the settings load with an empty

@@ -36,8 +36,8 @@ here is loud, not latent.
   returns success rather than retrying a payload that cannot become readable.
 
 A ring this process cannot BUILD (`oauth_states.RingUnavailable`) takes none
-of the three: it raises before anything is read, into the retry budget like a
-transient, and nothing flips — the payload is fine and the fixed key reads it.
+of the three: it raises before the payload is read, into the retry budget like
+a transient, and nothing flips — the payload is fine and the fixed key reads it.
 
 The token never appears in any raise, log, or error detail, on any path.
 """

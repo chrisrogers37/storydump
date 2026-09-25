@@ -12,6 +12,9 @@ the ring is broken for real through `ring_env` (`tests/src/conftest.py`).
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,7 +22,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from src.services.target import oauth_states
-from tests.src.conftest import MALFORMED_KEY
+from tests.src.conftest import MALFORMED_KEY, leaks
 
 DATABASE_URL = "postgresql://nobody@localhost:1/nothing"
 
@@ -74,7 +77,7 @@ class TestTheWorkerRefusesToBoot:
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "Invalid ENCRYPTION_KEY format" in err and REMEDY in err
-        assert MALFORMED_KEY not in err
+        assert not leaks(err)
 
     def test_control_with_a_working_key_it_goes_on_to_connect(
         self, ring_env, monkeypatch
@@ -129,7 +132,7 @@ class TestTheApiRefusesToStart:
         finally:
             logger.removeHandler(caplog.handler)
         assert "Refusing to start" in caplog.text and REMEDY in caplog.text
-        assert MALFORMED_KEY not in caplog.text
+        assert not leaks(caplog.text)
 
     def test_control_with_a_working_key_it_starts_and_answers(self, ring_env):
         from src.api.app import create_app
@@ -139,17 +142,43 @@ class TestTheApiRefusesToStart:
             assert client.get("/health").status_code == 200
 
 
-def test_make_validate_env_builds_the_ring_the_roots_refuse_without():
-    """`make validate-env` said "Configuration is valid" for a configuration
-    both services now refuse to boot on; it builds the ring too."""
-    lines = (Path(__file__).resolve().parents[2] / "Makefile").read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.startswith("validate-env:"))
-    recipe = []
-    for line in lines[start + 1 :]:
-        if not line.startswith("\t"):
-            break
-        recipe.append(line)
-    assert any(
-        "from src.services.target.oauth_states import ring; ring()" in line
-        for line in recipe
-    ), recipe
+def _validate_env(tmp_path, **env) -> subprocess.CompletedProcess:
+    """`make validate-env`, run from an empty directory so that neither make's
+    `include .env` nor the settings' own `.env` can lend it a key; `python`
+    is this interpreter and `src` imports from the checkout."""
+    repo = Path(__file__).resolve().parents[2]
+    run_env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("ENCRYPTION_KEY", "ENCRYPTION_KEYS")
+    }
+    run_env.update(
+        PATH=f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
+        PYTHONPATH=str(repo),
+        **env,
+    )
+    return subprocess.run(
+        ["make", "-f", str(repo / "Makefile"), "validate-env"],
+        cwd=tmp_path,
+        env=run_env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+class TestMakeValidateEnv:
+    """It said "Configuration is valid" for a configuration both services now
+    refuse to boot on: it builds the ring too, and fails when that fails."""
+
+    def test_it_fails_where_both_roots_would_refuse(self, tmp_path):
+        run = _validate_env(tmp_path)
+        output = run.stdout + run.stderr
+        assert run.returncode != 0, output
+        assert "Configuration validation failed" in output
+        assert "Configuration is valid" not in output
+
+    def test_control_with_a_working_key_it_passes(self, tmp_path):
+        run = _validate_env(tmp_path, ENCRYPTION_KEY=Fernet.generate_key().decode())
+        assert run.returncode == 0, run.stdout + run.stderr
+        assert "Configuration is valid" in run.stdout

@@ -14,9 +14,16 @@ import pytest
 from src.utils import encryption
 from src.utils.encryption import TokenEncryption
 
-#: Planted as a malformed key. The refusal is printed and logged by both
-#: roots, so no message may ever carry it.
-MALFORMED_KEY = "not-a-fernet-key-SENTINEL-7f3a"
+#: Planted as a malformed key (19 characters; a Fernet key is 44). The refusal
+#: is printed and logged by both roots, so no message may carry any of it —
+#: and it reads like no word, so `leaks` can look for fragments.
+MALFORMED_KEY = "ZqXj7Wv3Kp9Ls2Rt8Yh"
+
+
+def leaks(text: str, secret: str = MALFORMED_KEY, width: int = 4) -> bool:
+    """Whether *text* carries any *width*-character run of *secret* — a
+    refusal that printed the key's first or last few characters leaks too."""
+    return any(secret[i : i + width] in text for i in range(len(secret) - width + 1))
 
 
 @pytest.fixture

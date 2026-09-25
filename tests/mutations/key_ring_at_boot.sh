@@ -69,32 +69,40 @@ LAZY='type("Lazy", (), {"decrypt": staticmethod(lambda c: ring().decrypt(c))})'
 LAZY_OS='type("Lazy", (), {"decrypt": staticmethod(lambda c: oauth_states.ring().decrypt(c))})'
 
 E=src/utils/encryption.py
-RAISE='                raise ValueError(f"Invalid {source} format: {where}") from None'
+RAISE='            raise ValueError(f"Invalid {source} format: {bad}")'
 
-# The door: a ring that cannot be built is its own type, and its message names the variable read — never a key.
+# The door: a ring that cannot be built is its own type, and its message names the variable read — never a key,
+# nor a fragment of one, nor (through the exception chain) the codec error that holds a whole one.
 check "the door raises the bare ValueError again" src/services/target/oauth_states.py $'    try:\n        return TokenEncryption()\n    except ValueError as exc:\n        raise RingUnavailable(str(exc)) from exc' '    return TokenEncryption()' "$R -k TestTheDoor"
-check "the refusal echoes the malformed key" $E "$RAISE" '                raise ValueError(f"Invalid {source} format: {where} ({key})") from None' "$R -k never_echoed"
-check "the rotation list's refusal blames the single key" $E "$RAISE" '                raise ValueError(f"Invalid ENCRYPTION_KEY format: {where}") from None' "$R -k rotation_list_names_itself"
+check "the refusal echoes the start of a malformed key" $E "$RAISE" '            raise ValueError(f"Invalid {source} format: {bad} ({key[:6]})")' "$R -k never_echoed"
+check "the rotation list's refusal echoes the end of the bad entry" $E "$RAISE" '            raise ValueError(f"Invalid {source} format: {bad} ({key[-4:]})")' "$R -k rotation_list_names_itself"
+check "the rotation list's refusal blames the single key" $E "$RAISE" '            raise ValueError(f"Invalid ENCRYPTION_KEY format: {bad}")' "$R -k rotation_list_names_itself"
+check "the rotation list counts only its non-blank entries" $E '            entries = keys_raw.split(",")' '            entries = [e for e in keys_raw.split(",") if e.strip()]' "$R -k rotation_list_names_itself"
 check "a blank rotation list shadows the working key" $E '        keys_raw = (getattr(settings, "ENCRYPTION_KEYS", None) or "").strip()' '        keys_raw = getattr(settings, "ENCRYPTION_KEYS", None) or ""' "$R -k blank_rotation_list"
-check "a non-ASCII key's character is quoted" $E '                why = "it is not ASCII" if isinstance(e, UnicodeError) else str(e)' '                why = str(e)' "$R -k not_ascii"
-check "a non-ASCII key's character rides the exception chain" $E "$RAISE" '                raise ValueError(f"Invalid {source} format: {where}")' "$R -k not_ascii"
-check "the missing-key refusal offers a new key first" $E '" generated key cannot read them. Only on a first install, generate"' '" generated key cannot read them. Generate"' "$R -k warns_that_a_new_key"
+check "a blank key reads as a malformed one" $E '        single_key = (settings.ENCRYPTION_KEY or "").strip()' '        single_key = settings.ENCRYPTION_KEY or ""' "$R -k blank_key_is_absent"
+check "an undecodable byte is quoted" $E '                    "it holds an undecodable byte"' '                    f"it holds an undecodable byte: {e}"' "$R -k undecodable_byte"
+check "the codec's error rides the exception chain" $E '                break' '                raise ValueError(f"Invalid {source} format: {bad}") from None' "$R -k undecodable_byte"
+check "the missing-key refusal leads with generating a key" $E '"ENCRYPTION_KEY not configured (nor ENCRYPTION_KEYS). Where credentials"' '"ENCRYPTION_KEY not configured (nor ENCRYPTION_KEYS). Generate one first. Where credentials"' "$R -k warns_that_a_new_key"
+check "the missing-key refusal drops 'first install only'" $E '" generated key cannot read them. Only on a first install, generate"' '" generated key cannot read them. Generate"' "$R -k warns_that_a_new_key"
 # The roots: each refuses to start, the worker with the database URL's exit code, the API before any task,
-# and each names the remedy that is safe in production.
+# and each names the remedy that is safe in production; make validate-env fails where they would.
 check "the worker boots without a ring" src/worker.py $'        oauth_states.ring()\n' $'        pass\n' "$B -k TestTheWorkerRefusesToBoot"
 check "the worker's refusal is not the database URL's exit 2" src/worker.py $'" Refusing to boot.",\n            file=sys.stderr,\n        )\n        raise SystemExit(2)' $'" Refusing to boot.",\n            file=sys.stderr,\n        )\n        raise SystemExit(1)' "$B -k 'TestTheWorkerRefusesToBoot and test_without_a_key'"
 check "the worker's refusal names no remedy" src/worker.py '" every token it posts and syncs with, so it needs the key the stored"' '" every token it posts and syncs with, so it needs a key; the stored"' "$B -k 'TestTheWorkerRefusesToBoot and test_without_a_key'"
 check "the API starts without a ring" src/api/app.py $'        _require_key_ring()\n        # The role sample' '        # The role sample' "$B -k TestTheApiRefusesToStart"
 check2 "the API starts its tasks before the ring check" src/api/app.py $'        _require_key_ring()\n        # The role sample' '        # The role sample' $'            asyncio.create_task(_sample_webhook_live(app_, env)),\n        ]\n' $'            asyncio.create_task(_sample_webhook_live(app_, env)),\n        ]\n        _require_key_ring()\n' "$B -k startup_fails_before_any_task"
 check "the API's refusal names no remedy" src/api/app.py '" the key the stored credentials were encrypted with — the worker"' '" a valid key — the worker"' "$B -k remedy_and_never_the_key"
-check "make validate-env stops building the ring" Makefile $'\t\tpython -c "from src.services.target.oauth_states import ring; ring()" && \\\n' '' "$B -k validate_env"
+check "make validate-env stops building the ring" Makefile $'\t\tpython -c "from src.services.target.oauth_states import ring; ring()" && \\\n' '' "$B -k 'TestMakeValidateEnv and fails'"
+check "make validate-env reports valid after the ring refuses" Makefile $'ring()" && \\\n' $'ring()" ; \\\n' "$B -k 'TestMakeValidateEnv and fails'"
 # The doors: each builds the ring before its `try` — back inside it, the ring's failure is a corrupt row.
 check "the refresh leg's load builds the ring inside its try" src/services/target/ig_login_oauth.py $'    keys = ring()\n' "    keys = $LAZY"$'\n' "$R -k 'TestTheRefreshLegFlipsNothing and not control'"
 check "the publish read builds the ring inside its try" src/services/target/ig_credentials.py $'    keys = ring()\n' "    keys = $LAZY"$'\n' "$R -k token_for_account_raises_it"
 check "the Drive read builds the ring inside its try" src/services/target/drive_credentials.py $'    keys = ring()\n' "    keys = $LAZY"$'\n' "$R -k token_for_workspace_raises_it"
 check "the revoke builds the ring inside its try" src/services/target/credential_lifecycle.py $'    keys = oauth_states.ring()\n' "    keys = $LAZY_OS"$'\n' "$R -k revoke_raises_it"
-# The adapter: nothing sent and no account blamed.
+# The consumers: nothing sent and no account blamed; no source filed dead; no card's fault called a blip.
 check "the adapter lets the ring's failure out untyped" src/services/target/instagram_graph.py '        except RingUnavailable as exc:' '        except ZeroDivisionError as exc:' "$R -k adapter_sends_nothing"
 check "the adapter blames the account (code 190)" src/services/target/instagram_graph.py $'                code=0,\n                message=f"no call made' $'                code=OAUTH_ERROR_CODE,\n                message=f"no call made' "$R -k adapter_sends_nothing"
+check "the sync files the ring's failure as a dead source" src/services/target/media_sync.py '    except (DriveSourceGone, DriveCredentialDead) as exc:' '    except (DriveSourceGone, DriveCredentialDead, StorydumpError) as exc:' "$R -k sync_does_not_file_it"
+check "a card's media fetch calls the ring's failure a blip" src/worker.py '        except (DriveRetryableError, DriveLostResponse) as exc:' '        except (DriveRetryableError, DriveLostResponse, oauth_states.RingUnavailable) as exc:' "$R -k cards_media_fetch"
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"
