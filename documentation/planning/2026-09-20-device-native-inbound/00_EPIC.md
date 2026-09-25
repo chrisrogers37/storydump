@@ -16,23 +16,24 @@ Two ways for media to reach a workspace's library straight from a phone. A linke
 
 ## Evidence
 
-The epic-level facts; each phase carries its own. Every citation was re-verified on `main` at `ea788875` on 2026-09-21, after the tech-debt sprint (#1336–#1357) moved most of the cited files.
+The epic-level facts; each phase carries its own. Every citation was re-verified on `main` at `ea788875` on 2026-09-21, after the tech-debt sprint (#1336–#1357) moved most of the cited files; the citations into the files `main` changed since were re-verified on `29acea2e` on 2026-09-25. Three of those commits changed the pattern the worker's provider-facing executors follow (f5088231, 7561f7f7) and how a chunk chain carries its deadline (bbbb6f52); phases 03 and 04 follow the new pattern.
 
 - The media-source port is pull-only, `list_changes` / `fetch_bytes` / `probe`, and v1 implements one adapter; "there is no upload/write operation" is recorded as a non-goal with the port as the extension seam (`documentation/planning/2026-08-02-consolidated-design-plan/01-target-architecture.md:74-82`; D37 at `03-decision-record.md:151`). The Drive adapter implements `list_changes` and `fetch_bytes` only; nothing implements `probe` today.
 - The Drive grant asks for exactly one scope, `drive.readonly` (`src/services/target/google_drive_oauth.py:91`), one per workspace with no owner column (`src/models/target/accounts_sources_media.py:182-246`; ruling 2026-09-05 at `03-decision-record.md:201`).
 - A media message in a bound group reaches `TelegramDispatcher.__call__` and is routed to `_observe_all` for membership; the media is ignored (`src/services/target/telegram_dispatch.py:327-340`; `membership_sync.group_members_of` at `:32-57`).
 - The ingress role holds SELECT/INSERT/UPDATE on `jobs`, `media_items`, `media_sources`, `category_post_case_mix`, `channel_outbox` (`scripts/migrations/057_grant_matrix_and_archive_schema.sql:100-106`).
 - The posting mix is keyed on the source; `category_mix.weights` splits the automatic pool by file count and caps it at `r_min / (1 + r_min)` (`src/services/target/category_mix.py:106-145`); the card's copy states the same rule (`landing/src/components/dashboard/settings/category-weights-card.tsx:22-28`).
-- Both fetch seams call the Drive adapter directly (`src/worker.py:117-133`, `:776-810`); the outbox `notification` kind exists (`src/models/target/machinery.py:153-156`) and its `{"v": 1, "text"}` envelope is built by `outbox.fanout_notification` (`src/services/target/outbox.py:232-262`); the jobs kind set is a CHECK (`:77-85`) and the executor registry is a dict whose completeness test derives from that CHECK (`work_loop.py:231`, the dict assembled at `:528-633`; `tests/src/services/target/test_work_loop.py:59`).
+- Both fetch seams call the Drive adapter directly (`src/worker.py:117-133`, `:776-810`); the outbox `notification` kind exists (`src/models/target/machinery.py:153-156`) and its `{"v": 1, "text"}` envelope is built by `outbox.fanout_notification` (`src/services/target/outbox.py:232-262`); the jobs kind set is a CHECK (`:77-85`) and the executor registry is a dict whose completeness test derives from that CHECK (`work_loop.py:231`, the dict assembled at `:528-672`; `tests/src/services/target/test_work_loop.py:123`).
 - The egress floor allows exact host names only (`src/services/target/egress.py:133-141`, `:286-289`); the address pinning #871 landed (`:44`, closed 2026-08-27).
-- Schema changes are advertised: the latest post-ratification section is §25 for migration 082 (`07-security-model.md:1438`; §24 is 081; `scripts/advertised_ddl_manifest.json`, 41 blocks), so this epic's two migrations are 083 with §26 (phase 03) and 084 with §27 (phase 06); a widened CHECK is a new section carrying the `DROP CONSTRAINT` / `ADD CONSTRAINT` pair (precedent: 065, §11), listed in `tests/scripts/test_lineage_lane.py` and matched by the model in the same PR (`.claude/rules/migrations.md`).
+- Schema changes are advertised: each migration is mirrored as a numbered section of `07-security-model.md`, classified in `scripts/advertised_ddl_manifest.json`. On `main` at `29acea2e` the latest are migration 083 and §26 (`083_clock_tick_deadlines.sql`, #1381). Both numbers moved twice while this plan was open, so the plan names none: phase 03's migration and section take the next free number and section at build time, and phase 06's the ones after. A widened CHECK is a new section carrying the `DROP CONSTRAINT` / `ADD CONSTRAINT` pair (precedent: 065, §11), listed in `tests/scripts/test_lineage_lane.py` and matched by the model in the same PR (`.claude/rules/migrations.md`).
 - Platform facts verified 2026-09-20 against the primary pages: Telegram bots download at most 20 MB via getFile and `setMessageReaction` exists; Google lists `drive.file` as non-sensitive and `drive`/`drive.readonly` as restricted; Google verification is pending submission (`documentation/operations/google-oauth-verification.md:3`).
 
 ## Architecture
 
 ```
 phone ──Telegram group──▶ webhook (svc_ingress) ──enqueue──▶ relay_telegram_drop (worker, interactive lane)
-                                                              │ 1. find/create drop source (+ admit to mix)   [tx]
+                                                              │ 1. find/create the drop folder in Drive        [floor]
+                                                              │    then the source row and its 20% admit       [tx]
                                                               │ 2. getFile → download (≤ 20 MB)                [floor]
                                                               │ 3. Drive resumable upload into the drop folder [floor]
                                                               │ 4. mint sync_media_source{reason: demand}      [tx]
@@ -46,7 +47,7 @@ adapters = {"gdrive": GoogleDriveAdapter, "icloud_album": ICloudAlbumAdapter}   
                 consumed by: media_sync (deps.adapters), worker._publish_media_fetch, worker._card_media_fetch
 ```
 
-Layer boundaries hold: the API's webhook route only admits and enqueues; the worker does every provider call outside a transaction; services never import channels; the CLI and the web are untouched except Settings.
+Layer boundaries hold: the API's webhook route only admits and enqueues; the worker does every provider call outside a transaction (the relay executor is marked `@own_transactions` and makes each provider call after its session block has closed, as commit f5088231 requires of every provider-facing executor); services never import channels; the CLI and the web are untouched except Settings.
 
 ## Decision Forks
 
