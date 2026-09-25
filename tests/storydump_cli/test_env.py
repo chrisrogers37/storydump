@@ -48,7 +48,15 @@ HEALTH = {
     "db_role": "svc_ingress",
     "pool": {"size": 10, "checked_out": 1, "checked_out_peak": 3},
     "ingress_workers": 1,
-    "taps": {"executed": 12, "replayed": 1, "answer_failed": 0},
+    # `TapMetrics.snapshot()`'s real shape: two scalars and the per-outcome
+    # map nested under `taps`. It used to be spelled the renderer's way
+    # (`executed`/`replayed` at the top level), which is why nothing
+    # caught the blank cells (#1360).
+    "taps": {
+        "taps_total": 13,
+        "taps": {"executed": 12, "older_card": 1},
+        "answer_failed": 0,
+    },
     "webhook": {"ok": True, "bot": "storydump_app_bot", "url": "https://api/x"},
     "webhook_live": {
         "at": "2026-09-15T14:59:30+00:00",
@@ -1227,6 +1235,41 @@ def test_doctor_reads_a_bad_config_file_as_wrong(tmp_path):
     checks = checks_of(one_envelope(result))
     assert checks["config"]["state"] == "wrong"
     assert result.exit_code != EXIT_OK
+
+
+def test_the_health_renderer_reads_the_taps_real_keys(tmp_path):
+    """`/health`'s tap block is `TapMetrics.snapshot()` — `taps_total`,
+    `answer_failed`, and the per-outcome counts nested under `taps`
+    (`src/api/routes/webhooks.py`). The renderer once read `executed` and
+    `replayed` at the TOP level: `executed` is a real outcome but lives one
+    level down, and `replayed` is not a tap outcome at all (`TAP_OUTCOMES`).
+    Two of its three cells were always blank, and the fixture above spelled
+    them the renderer's way so nothing caught it — the same defect the pool
+    block had, fixed as `POOL_FACTS` in #1324."""
+    from src.api.routes.webhooks import TapMetrics
+    from storydump_cli.output import TAP_FACTS, TAP_OUTCOMES
+
+    snapshot = TapMetrics().snapshot()
+    emitted = set(snapshot)
+    assert set(TAP_FACTS) <= emitted, (
+        f"the renderer reads {set(TAP_FACTS) - emitted} — the API emits {sorted(emitted)}"
+    )
+    # The NESTED key too, and that it is a map. `_tap_outcomes` renders
+    # nothing at all for a key the API does not emit or a scalar where it
+    # expects counts — silently, which is the whole defect. Binding only the
+    # scalars would have left the one key the new helper depends on resting
+    # on the fixture below, and a fixture cannot notice the API renaming it.
+    assert TAP_OUTCOMES in emitted, (
+        f"`_tap_outcomes` reads {TAP_OUTCOMES!r} — the API emits {sorted(emitted)}"
+    )
+    assert isinstance(snapshot[TAP_OUTCOMES], dict), (
+        f"{TAP_OUTCOMES!r} must be the per-outcome map, not a scalar"
+    )
+    rt = env_runtime(tmp_path, health_api())
+    result = run(rt, "health")
+    # the scalars, and the per-outcome breakdown the old spelling was reaching for
+    assert "taps_total 13" in result.output and "answer_failed 0" in result.output
+    assert "executed 12" in result.output and "older_card 1" in result.output
 
 
 def test_the_health_renderer_reads_the_pools_real_keys(tmp_path):

@@ -31,7 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.services.target import commands
+from src.services.target import commands, jobs, offboarding
 from src.services.target.commands import Command, CommandRefused
 from src.services.target.offboarding import (
     TERMINAL_STATES,
@@ -392,6 +392,32 @@ class TestTheWorkflow:
             (ws["ws"], out["successor"]),
         )
         assert successor == (True,), "the finalizer is scheduled for the window's end"
+
+        # #1361: `_mint_successor` hand-writes its INSERT, so it never got the
+        # deadline #1288 added. It keeps the hand-written statement — it is a
+        # self-excluding, kind-scoped successor mint at a computed `run_at`,
+        # which `jobs.enqueue` does not model — but it must still carry one.
+        # Measured from `run_at`, NOT from `now()`. Asserted as the exact
+        # interval rather than as `IS NOT NULL`, because `IS NOT NULL` is
+        # satisfied by `now() + 6 h` — which is the failure this whole change
+        # exists to avoid: the finalizer is minted up to
+        # `GRACE_SECONDS_DEFAULT` (thirty days) before it is due, so a deadline
+        # anchored at mint is already spent when the job becomes runnable and
+        # `budget_exhausted` ends the workflow on its first claim. Checked
+        # against that mutant: with `IS NOT NULL` it passed.
+        budget_attempts, budget_seconds = jobs.LANE_BUDGETS[offboarding.LANE]
+        from_run_at, attempts = _one(
+            off_db,
+            "SELECT deadline_at = run_at + make_interval(secs => %s), max_attempts"
+            "  FROM jobs WHERE id = %s",
+            (budget_seconds, out["successor"]),
+        )
+        assert from_run_at is True, (
+            "the successor's deadline must be the lane's budget from RUN_AT"
+        )
+        assert attempts == budget_attempts, (
+            "and the lane's attempt budget, not a hand-copied 5"
+        )
 
     def test_a_second_run_of_the_same_legs_changes_nothing(self, off_db, ws):
         """Legs are idempotent because a re-claimed lease reruns them; the rows

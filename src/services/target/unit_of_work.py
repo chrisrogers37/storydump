@@ -467,14 +467,24 @@ def make_session_for(engine):
     def session_for(job: dict):
         @asynccontextmanager
         async def ctx():
-            async with maker() as session:
-                async with session.begin():
-                    await apply_gucs(
-                        session,
-                        tenant_id=str(job.get("workspace_id") or ""),
-                        actor_kind="system",
-                    )
-                    yield session
+            # The §5 discipline flag, as `UnitOfWork.begin` sets it (#1368).
+            # Without it the tripwire covered no worker path at all, while two
+            # modules' docstrings said the floor enforced the rule here. Reset
+            # from the token in `finally`, never bare — see the module
+            # docstring. #1387 is what makes arming safe: the four executors
+            # that reach the floor now run with NO job session open.
+            token = _IN_TRANSACTION.set(True)
+            try:
+                async with maker() as session:
+                    async with session.begin():
+                        await apply_gucs(
+                            session,
+                            tenant_id=str(job.get("workspace_id") or ""),
+                            actor_kind="system",
+                        )
+                        yield session
+            finally:
+                _IN_TRANSACTION.reset(token)
 
         return ctx()
 
@@ -493,9 +503,18 @@ def poller_session_factory(engine, tenant_id: str):
 
     @asynccontextmanager
     async def factory():
-        async with maker() as session:
-            await apply_gucs(session, tenant_id=tenant_id, actor_kind="system")
-            yield session
+        # The §5 discipline flag (#1368), for the same reason and with the
+        # same token discipline as `make_session_for` above. The refresh
+        # executor's three phases each take one of these, and its "the
+        # provider call, outside any transaction (floor-enforced)" is true
+        # of the process only once this is set.
+        token = _IN_TRANSACTION.set(True)
+        try:
+            async with maker() as session:
+                await apply_gucs(session, tenant_id=tenant_id, actor_kind="system")
+                yield session
+        finally:
+            _IN_TRANSACTION.reset(token)
 
     return factory
 

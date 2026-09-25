@@ -291,6 +291,13 @@
       "label": "§25 the worker's doors: the tenant-less sweeps read the estate through svc_maintenance (082, #751 part 2)",
       "doc": "07-security-model.md",
       "ordinal": 23
+    },
+    {
+      "sha256": "2e8dd3982035262b12366fe7ee2de1aa42f339ac67c519a71adb14528ef37a39",
+      "class": "normative",
+      "label": "§26 the clock's five legs mint with a deadline (083, #1381) — fn_clock_tick replace adding deadline_at to all five INSERTs, measured from run_at",
+      "doc": "07-security-model.md",
+      "ordinal": 24
     }
   ],
   "policy_expansion": {

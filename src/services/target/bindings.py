@@ -260,13 +260,22 @@ async def repoint(session, *, binding_id: str, external_ref: str) -> bool:
     still holds one chat to one workspace."""
     _, ref = _clean("supergroup", external_ref)
     try:
-        result = await session.execute(
-            text(
-                "UPDATE channel_bindings SET external_ref = :ref, channel = 'telegram_group'"
-                " WHERE id = :b AND state <> 'revoked'"
-            ),
-            {"b": str(binding_id), "ref": ref},
-        )
+        # SAVEPOINT, not a bare statement (#1362): answering False here is only
+        # useful if the caller can still act on it, and `work_loop`'s hold does
+        # exactly that — `if not followed: await revoke_by_id(writer, ...)` on
+        # THIS session. A unique violation aborts the whole transaction in
+        # Postgres, so without the savepoint that revoke raises
+        # InFailedSQLTransactionError and the binding is left neither
+        # re-pointed nor revoked. The savepoint scopes the rollback to this
+        # statement and leaves the caller's transaction usable.
+        async with session.begin_nested():
+            result = await session.execute(
+                text(
+                    "UPDATE channel_bindings SET external_ref = :ref, channel = 'telegram_group'"
+                    " WHERE id = :b AND state <> 'revoked'"
+                ),
+                {"b": str(binding_id), "ref": ref},
+            )
     except DBAPIError as exc:
         if constraint_violated(exc, "uq_binding_external"):
             return False

@@ -23,12 +23,19 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 
+from src import __version__
 from src.services.target import backpressure, posting_health, scheduling_health
 from src.services.target.work_loop import WorkerConfig
 
 #: The one version string: the OpenAPI document's and `/health`'s. Read by
 #: `src/api/app.py` for `FastAPI(version=…)` so the two cannot disagree.
-VERSION = "0.2.0"
+#:
+#: Read from the package rather than typed (#1359). The hand-written literal
+#: said "0.2.0" from #1035 until 2026-09-21 while `src/__init__.py` reached
+#: 1.6.0, so `/health`, the OpenAPI document and `storydump doctor` — which
+#: prints it — all reported a version the deployment had not been for months.
+#: A number that has to be remembered in two places is a number that drifts.
+VERSION = __version__
 _START_TIME = time.time()
 
 router = APIRouter()

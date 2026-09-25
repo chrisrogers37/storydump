@@ -276,7 +276,6 @@ async def run_publish_pipeline(
     media_fetch: Callable[[dict], Any],
     precheck=None,
     backoff_seconds: tuple = DEFAULT_BACKOFF_SECONDS,
-    repost_ttl_days_default: int = 7,
     now_fn: Callable[[], datetime] = utcnow,
     sleep: Callable[[float], Any] = asyncio.sleep,
 ) -> str:
@@ -330,7 +329,6 @@ async def run_publish_pipeline(
             return await _confirm_dry_run(
                 uow,
                 ctx,
-                repost_ttl_days_default=repost_ttl_days_default,
                 now_fn=now_fn,
             )
 
@@ -343,7 +341,6 @@ async def run_publish_pipeline(
             return await _confirm_dry_run(
                 uow,
                 ctx,
-                repost_ttl_days_default=repost_ttl_days_default,
                 now_fn=now_fn,
             )
         if ctx.intent.get("is_paused") and not ctx.intent["cancel_requested"]:
@@ -382,7 +379,6 @@ async def run_publish_pipeline(
         transit=transit,
         media_fetch=media_fetch,
         backoff_seconds=backoff_seconds,
-        repost_ttl_days_default=repost_ttl_days_default,
         now_fn=now_fn,
         sleep=sleep,
     )
@@ -546,7 +542,14 @@ async def _advisory_precheck(
         # "immediately before the §4 flip transaction"). Never for a dry run:
         # nothing reaches Instagram in a rehearsal, and Meta's cap must not
         # hold one that spends none of it (adversarial review of #1299).
-        verdict = await precheck.check(meta, ctx.intent["provider_account_ref"])
+        # The workspace names whose credential pays for the read (#1369):
+        # every other Meta call in this pipeline passes it, and unscoped
+        # the token read crosses tenants by ordering.
+        verdict = await precheck.check(
+            meta,
+            ctx.intent["provider_account_ref"],
+            workspace_id=ctx.workspace_id,
+        )
         if verdict == DEFER:
             slot, run_at = _next_slot(ctx, now_fn, backoff_seconds)
             async with uow.begin() as session:
@@ -1092,7 +1095,6 @@ async def _ladder(
     transit,
     media_fetch,
     backoff_seconds,
-    repost_ttl_days_default,
     now_fn,
     sleep,
 ) -> str:
@@ -1543,7 +1545,6 @@ async def _ladder(
             permit=permit,
             media_id=media_id,
             transit=transit,
-            repost_ttl_days_default=repost_ttl_days_default,
             now_fn=now_fn,
         )
 
@@ -1675,9 +1676,7 @@ async def _defer_paused(uow, ctx: _Ctx, now_fn) -> str:
     return DEFERRED_PAUSED
 
 
-async def _confirm_dry_run(
-    uow, ctx: _Ctx, *, repost_ttl_days_default: int, now_fn
-) -> str:
+async def _confirm_dry_run(uow, ctx: _Ctx, *, now_fn) -> str:
     """The dry-run terminal transaction: the `posted` row with
     `published_via = 'dry_run'` (no container, no media id from Meta), the
     same rotation effects a real post has (`times_posted`, the recent lock,
@@ -1705,7 +1704,13 @@ async def _confirm_dry_run(
             media_item_id=str(ctx.intent["media_item_id"]),
             ig_account_id=str(ctx.intent["ig_account_id"]),
             intent_id=ctx.intent_id,
-            ttl_days=int(ctx.intent["repost_ttl_days"] or repost_ttl_days_default),
+            # The raw column, as `command_executors._posted_effects` passes it:
+            # NULL means "no workspace value", and `posted_effects` owns the
+            # fallback (`DEFAULT_REPOST_TTL_DAYS`) for all three of its writers.
+            # Resolving it here with a default of this function's own is what
+            # made a worker publish lock for 7 days and a human's "mark as
+            # posted" for 30, for the same `kind` (#1365).
+            ttl_days=ctx.intent["repost_ttl_days"],
         )
         line = prompts.outcome_line(
             "dry_run",
@@ -2081,7 +2086,6 @@ async def _confirm(
     permit: dict,
     media_id: str,
     transit,
-    repost_ttl_days_default: int,
     now_fn=None,
 ) -> str:
     """The terminal domain transaction (`02` §4 publishing→posted row):
@@ -2116,7 +2120,13 @@ async def _confirm(
             media_item_id=str(ctx.intent["media_item_id"]),
             ig_account_id=str(ctx.intent["ig_account_id"]),
             intent_id=ctx.intent_id,
-            ttl_days=int(ctx.intent["repost_ttl_days"] or repost_ttl_days_default),
+            # The raw column, as `command_executors._posted_effects` passes it:
+            # NULL means "no workspace value", and `posted_effects` owns the
+            # fallback (`DEFAULT_REPOST_TTL_DAYS`) for all three of its writers.
+            # Resolving it here with a default of this function's own is what
+            # made a worker publish lock for 7 days and a human's "mark as
+            # posted" for 30, for the same `kind` (#1365).
+            ttl_days=ctx.intent["repost_ttl_days"],
         )
         # The card said "✅ Approved by … — posting shortly"; now it says
         # posted. The tap already superseded the card (its buttons are gone),

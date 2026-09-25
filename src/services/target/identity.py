@@ -61,6 +61,25 @@ async def upsert_google_identity(
         raise ValueError("sub is required")
     claim = email or None
 
+    # `hashtext` (32-bit), NOT `hashtextextended` (64-bit), and the asymmetry
+    # with `provisioning.py` is deliberate rather than an oversight (#1370).
+    #
+    # A hash collision here can only ever OVER-serialize — two unrelated
+    # subjects would share one lock and briefly queue. It can never fail to
+    # serialize, because the key is what the lock is on. So the only cost is
+    # false contention, and the only question is its rate. At a 32-bit width
+    # the chance of ANY collision reaches 1% at ~9,884 distinct keys;
+    # `user_identities` held 3 when this was measured (2026-09-22). The
+    # provisioning lock took the wide variant because folder keys are dense
+    # "at estate scale"; subjects are not, and will not be until the estate
+    # has ten thousand identities.
+    #
+    # Unifying them is NOT a cleanup. Changing the function changes every
+    # key's value, so during a rolling deploy old and new processes compute
+    # different keys for the same subject and the lock does not hold for the
+    # length of the rollout. That needs a quiesce or a dual-take release, so
+    # it is a deploy plan, not a patch. `tests/src/services/target/
+    # test_advisory_lock_widths.py` is the ratchet that says so.
     await executor.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
         {"k": f"identity:{PROVIDER_GOOGLE}:{sub}"},
@@ -80,7 +99,15 @@ async def upsert_google_identity(
         user_id, held = str(row[0]), row[1]
         await executor.execute(
             text(
-                "UPDATE user_identities SET verified_at = now(), display_name = :dn"
+                # COALESCE, not a bare assignment (#1364): `google_oidc` maps an
+                # absent, non-string or blank `name` claim to None before it
+                # reaches here, so NULL means "this token said nothing about the
+                # name" — which is not the same as "the name is now empty", and
+                # only the second would justify a write. A bare `= :dn` erased a
+                # stored name on every sign-in whose token omitted the claim.
+                # `verified_at` stays unconditional: the identity was seen.
+                "UPDATE user_identities SET verified_at = now(),"
+                "       display_name = COALESCE(:dn, display_name)"
                 " WHERE provider = :p AND external_id = :sub"
             ),
             {"dn": display_name, "p": PROVIDER_GOOGLE, "sub": sub},
@@ -257,6 +284,9 @@ async def link_identity(
     if not user_id or not external_id:
         raise ValueError("user_id and external_id are required")
 
+    # The same 32-bit width, and it must stay the same as the site above:
+    # both lock the `identity:` namespace, so they only exclude each other
+    # while they agree on the function (#1370).
     await executor.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
         {"k": f"identity:{provider}:{external_id}"},

@@ -49,15 +49,31 @@ class UsagePrecheck:
         self._clock = clock
         self._cache: dict[str, tuple[float, int, int]] = {}
 
-    async def check(self, meta, provider_account_ref: str) -> str:
-        """One decision, at most one provider read. Never raises."""
+    async def check(self, meta, provider_account_ref: str, *, workspace_id: str) -> str:
+        """One decision, at most one provider read. Never raises.
+
+        *workspace_id* names whose credential pays for the read (#1369). It is
+        required, not optional: this was the only Meta read in the publish
+        pipeline that did not name a workspace — `create_container`, `publish`
+        and `container_status` all pass `ctx.workspace_id` — and unscoped,
+        `token_for_account` fell to a bare sessionmaker with no GUCs and an
+        ordering that prefers the freshest active row ACROSS tenants.
+        `uq_ig_account_live` is unique on `(workspace_id, provider_account_ref)`,
+        so two workspaces holding one real account is a state the schema allows
+        and this module's own cache note anticipates.
+
+        The CACHE key is unchanged and stays the account ref: Meta's quota
+        belongs to the real Instagram account, so a reading is shared across
+        duplicate workspace rows of it. Only the token is per workspace."""
         now = self._clock()
         cached = self._cache.get(provider_account_ref)
         if cached is not None and now - cached[0] < self._ttl:
             _, usage, total = cached
         else:
             try:
-                payload = await meta.usage(provider_account_ref)
+                payload = await meta.usage(
+                    provider_account_ref, workspace_id=workspace_id
+                )
                 usage = int(payload["quota_usage"])
                 total = int(payload["quota_total"])
             except Exception:  # noqa: BLE001 — §8: error ⇒ proceed, uncached

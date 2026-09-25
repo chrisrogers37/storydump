@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 import pytest
 from fastapi.testclient import TestClient
 
+from src import __version__
 from src.api.app import create_app
 from src.config.settings import settings
 from src.services.target import backpressure, posting_health, scheduling_health
@@ -38,6 +39,34 @@ class TestEngineConfiguration:
         assert app.state.engine is not None
         assert app.state.engine.url.drivername == "postgresql+asyncpg"
         assert TestClient(app).get("/health").json()["target_database"] is True
+
+
+class TestTheVersionIsThePackages:
+    """`/health.version` and the OpenAPI document both report the package.
+
+    They were a hand-typed `"0.2.0"` that had not moved since #1035 while
+    `src.__version__` reached 1.6.0 — so `/health` and `storydump doctor`,
+    which prints it, told whoever was debugging a deploy the wrong number
+    (#1359).
+    """
+
+    def test_health_reports_the_package_version(self):
+        app = create_app(env={})
+        assert TestClient(app).get("/health").json()["version"] == __version__
+
+    def test_the_openapi_document_reports_the_same_one(self):
+        """The two must not be able to drift apart again.
+
+        `app.py` imports `VERSION` for `FastAPI(version=…)`, so this is one
+        object in two places today — and this pins that, not just the value.
+        """
+        app = create_app(env={})
+        client = TestClient(app)
+        assert (
+            client.get("/openapi.json").json()["info"]["version"]
+            == client.get("/health").json()["version"]
+            == __version__
+        )
 
 
 class TestCors:

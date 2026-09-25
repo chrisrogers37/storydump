@@ -27,10 +27,8 @@ hands straight to a human as `review_required` with the reason on the intent.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.exceptions.base import StorydumpError
 from src.services.target.ig_login_oauth import PROVIDER
@@ -62,27 +60,45 @@ class IgCredentialDead(StorydumpError):
 
 
 async def token_for_account(
-    engine, provider_account_ref: str, *, workspace_id: Optional[str] = None
+    engine, provider_account_ref: str, *, workspace_id: str
 ) -> str:
-    """The active Instagram token for the account ``provider_account_ref``
-    posts as — in *workspace_id* when given — or :class:`IgCredentialDead`."""
-    ref = str(provider_account_ref)
-    params: dict = {"ref": ref, "provider": PROVIDER, "usable": USABLE_STATE}
-    if workspace_id is not None:
-        sql = _SELECT + " AND a.workspace_id = :ws" + _ORDER
-        params["ws"] = str(workspace_id)
-        uow = unit_of_work(engine, str(workspace_id), actor_kind="system")
-        async with uow.begin() as session:
-            row = (await session.execute(text(sql), params)).mappings().first()
-    else:
-        sql = _SELECT + _ORDER
-        maker = async_sessionmaker(engine, expire_on_commit=False)
-        async with maker() as session:
-            row = (await session.execute(text(sql), params)).mappings().first()
+    """The active Instagram token the account ``provider_account_ref`` posts
+    as IN *workspace_id*, or :class:`IgCredentialDead`.
 
-    who = f"Instagram account {ref}"
-    if workspace_id is not None:
-        who += f" in workspace {workspace_id}"
+    *workspace_id* is REQUIRED (#1369). There used to be a second path for
+    callers that had none: a bare `async_sessionmaker`, no GUCs, no
+    `a.workspace_id` predicate — so row-level security had nothing to key on
+    and `_ORDER`'s "active first, freshest first" chose across every tenant.
+
+    It was reachable rather than impossible. `uq_ig_account_live` is unique on
+    `(workspace_id, provider_account_ref)`, so two workspaces may hold the same
+    real Instagram account, and `usage_precheck`'s own note says a quota
+    reading is "shared across duplicate workspace rows of one real account" —
+    the design anticipates exactly the state that would have made this return
+    a stranger's token. It had not happened yet: measured in production on
+    2026-09-22, no `provider_account_ref` lived in more than one workspace.
+    Latent by luck, not by construction.
+
+    The one caller that had no workspace to pass now has one — the publish
+    pipeline's usage pre-check, which was the only Meta read in that pipeline
+    not already naming `ctx.workspace_id`. So the branch is gone rather than
+    guarded: a tenancy hole closed by a signature is closed for callers that
+    have not been written yet."""
+    ref = str(provider_account_ref)
+    if not workspace_id:
+        raise ValueError("workspace_id is required — the read is tenant-scoped")
+    params: dict = {
+        "ref": ref,
+        "provider": PROVIDER,
+        "usable": USABLE_STATE,
+        "ws": str(workspace_id),
+    }
+    sql = _SELECT + " AND a.workspace_id = :ws" + _ORDER
+    uow = unit_of_work(engine, str(workspace_id), actor_kind="system")
+    async with uow.begin() as session:
+        row = (await session.execute(text(sql), params)).mappings().first()
+
+    who = f"Instagram account {ref} in workspace {workspace_id}"
     if row is None:
         raise IgCredentialDead(
             f"no {PROVIDER} credential for {who} — connect Instagram for this destination"
