@@ -11,7 +11,9 @@ links: []
 
 > **Status:** approved 2026-09-20 — the design approved section by section in the kindle discovery,
 > the spec text reviewed by the owner the same day; handed to `forge`, whose plan is
-> [`2026-09-20-device-native-inbound/`](2026-09-20-device-native-inbound/00_EPIC.md) (ratified 2026-09-20). The two junctions this spec builds on were weighed
+> [`2026-09-20-device-native-inbound/`](2026-09-20-device-native-inbound/00_EPIC.md) (ratified 2026-09-20).
+>
+> **2026-09-25:** ironclad cycle 1 on that plan reopened three points as its open forks: §1's trigger and refusals (F11), §3's admit mechanism (F12), and whether §5's album ships at all (F10). It also corrected parts of §1 in the plan's phases — GIFs are not drops, drops are capped at the story path's limits, the drop folder is found by workspace — and where this text and the folded phases differ, the phases win. The two junctions this spec builds on were weighed
 > and ratified in [`2026-09-20-device-native-inbound-decision.md`](2026-09-20-device-native-inbound-decision.md);
 > this spec inherits those picks and does not re-decide them.
 

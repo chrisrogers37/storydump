@@ -8,11 +8,11 @@ tags: [plan, posting-mix, services]
 links: []
 ---
 
-> Phase 01 of [`00_EPIC.md`](00_EPIC.md), ratified 2026-09-20 at the forge gate. Spec: [`2026-09-20-device-native-inbound-spec.md`](../2026-09-20-device-native-inbound-spec.md). The ledger is [`RUN_LOG.md`](RUN_LOG.md); its entry for this phase records where the build departs from this text.
+> Phase 01 of [`00_EPIC.md`](00_EPIC.md), ratified 2026-09-20 at the forge gate and folded after ironclad cycle 1 (2026-09-25). **Waits on F12 (open):** this text implements F12(a), M1 with its freeze as cycle 1 corrected it; under F12(b) the phase is rewritten as a reserved share inside `weights()`. Spec: [`2026-09-20-device-native-inbound-spec.md`](../2026-09-20-device-native-inbound-spec.md). The ledger is [`RUN_LOG.md`](RUN_LOG.md); its entry for this phase records where the build departs from this text.
 
 ## Summary
 
-One new service function beside the mix's existing writer: `category_mix.admit_source`. Given a source the system created, it enters the workspace's mix at an explicit 20% and every existing explicit share is scaled by 0.8; a workspace with no explicit mix first has its current automatic shares frozen into explicit rows, so the newcomer has something to take room from. Same per-workspace lock, same supersede-then-insert, same SCD history; `weights()` is untouched. Nothing calls it yet: phase 03 (the drop folder) and phase 06 (an album) do. The rule is ratified as M1 in the decision doc; this phase builds it and records it in the design record.
+One new service function beside the mix's existing writer: `category_mix.admit_source`. Given a source the system created, it enters the workspace's mix at an explicit 20% and every existing explicit share is scaled by 0.8; a workspace with no explicit mix first has its current automatic shares frozen into explicit rows, so the newcomer has something to take room from. Same per-workspace lock, same supersede-then-insert, same SCD history; `weights()` is untouched. Nothing calls it yet: phase 03 (the drop folder) and phase 06 (an album, if F10 keeps it) do. The rule is ratified as M1 in the decision doc; this phase builds it and records it in the design record. Cycle 1 corrected the freeze twice: it keeps Off rows Off, and a frozen share never rounds down to Off. Its larger finding — that the freeze moves the starvation to folders picked later — is F12, the owner's.
 
 ## Evidence
 
@@ -30,11 +30,11 @@ One new service function beside the mix's existing writer: `category_mix.admit_s
 
 ### Dependencies
 
-None.
+F12 locked as (a). Otherwise none.
 
 ### Blocks
 
-Phase 03 (the relay job admits the drop source) and phase 06 (the album's connect route admits the album).
+Phase 03 (the relay job admits the drop source), and phase 06 if F10 keeps the album (its connect route admits it).
 
 ### Steps
 
@@ -49,27 +49,29 @@ Phase 03 (the relay job admits the drop source) and phase 06 (the album's connec
    - Take the advisory lock first (same key as `set_mix`), then read: the connected sources (`_connected`), the current rows (`x.ratio` joined on `effective_to IS NULL`), and the available-media count per source (the `mix_view` subquery at `:222-224`), all in the caller's transaction.
    - `source_id` not connected → `MixInvalid("unknown_source")`. `source_id` already carrying a current row → return the current mix unchanged (idempotent; no supersede).
    - Explicit rows exist (any current `ratio > 0`): new rows = every current row with `ratio > 0` scaled by `(1 - ratio)`, every `ratio == 0` row carried over as Off, plus `(source_id, ratio)`.
-   - No explicit rows: compute `share = weights(shaped)` over the connected sources with `n = media_count` (an `error` source `n = 0`, as `mix_view` does); new rows = every source with `share > 0` at `round(share * (1 - ratio), 4)`, plus `(source_id, ratio)`. Sources with no media get no row and stay automatic.
+   - No explicit rows: compute `share = weights(shaped)` over the connected sources with `n = media_count` (an `error` source `n = 0`, as `mix_view` does) and their current rows, so an Off row weighs nothing; new rows = every current `ratio == 0` row carried over as Off (a mix of Off rows and Automatic folders is legal, `category_mix.py:174-179`, and superseding it must not turn an Off folder back on), every source with `share > 0` at `max(round(share * (1 - ratio), 4), 0.0001)` so a frozen share never rounds to Off, plus `(source_id, ratio)`. Sources with no media and no row stay automatic.
    - Round to four places; put the rounding residue on the largest row so `_sum_to_one` holds; then `_write_mix`. The label for each row is `_connected`'s label (the album's name key arrives in phase 06 via `_LABEL`).
-2. **The design record.** `documentation/planning/2026-08-02-consolidated-design-plan/03-decision-record.md`, post-ratification rulings: one paragraph, "A system-created source enters the mix at a default share (owner, 2026-09-20)", citing the decision doc and the F4 intent it restores. The advertised-DDL pin is unaffected (no SQL fence changes).
-3. **Card copy.** `category-weights-card.tsx` near `:123-128`: one sentence — a folder Storydump creates for the workspace, such as Telegram drops or an album, starts at 20% and the other weights make room; change it here any time.
+2. **The design record.** `documentation/planning/2026-08-02-consolidated-design-plan/03-decision-record.md`, post-ratification rulings: one paragraph, "A system-created source enters the mix at a default share (owner, 2026-09-20)", citing the decision doc and the intent it restores — the posting mix's own fork F4 of the 2026-09-07 category-registry plan (`documentation/archive/2026-09-07-category-registry-and-full-walk/00_EPIC.md`, "a sensible rate, never takes over, never goes silent"), not this epic's F4. The advertised-DDL pin is unaffected (no SQL fence changes).
+3. **No card copy in this phase.** Nothing calls `admit_source` until phase 03, so the weights card's sentence about system-created sources, the marking of the system row, and the statement of what the freeze does land with phase 03 (its Steps 8).
 4. **CHANGELOG** under Unreleased.
 
 ## Test Plan
 
-- Unit, `tests/src/services/target/test_category_mix.py`, a new `TestAdmitSource` on the `_Exec` executor: 70/30 explicit → 56/24/20; all automatic with counts 300/50 → 69/11/20 (frozen); an Off row stays 0; an automatic source with no media gets no row; a second admit of the same source is a no-op (no supersede statement recorded); an unconnected source is `unknown_source`; `ratio = 0` is `bad_ratio`; a three-way split sums to one within `SUM_TOLERANCE`; the lock is the first statement issued. `set_mix`'s existing tests stay green through the `_write_mix` factoring.
-- Gate, `tests/scripts/test_scheduler_clock_gate.py` beside `TestTheCategoryMixShapesTheDraw`: after `admit_source` as `svc_worker`, exactly one current row per source, the superseded rows carry `effective_to`, `created_by_user_id` is NULL, and the draw gives the new source its 20% on the gate's shaped rows.
+- Unit, `tests/src/services/target/test_category_mix.py`, a new `TestAdmitSource` on the `_Exec` executor: 70/30 explicit → 56/24/20; all automatic with counts 300/50 → 69/11/20 (frozen); one Off and two Automatic → the Off row stays 0 and the two freeze; a frozen share below 0.00005 floors at 0.0001; an Off row stays 0 beside explicit rows; an automatic source with no media gets no row; a second admit of the same source is a no-op (no supersede statement recorded); an unconnected source is `unknown_source`; `ratio = 0` is `bad_ratio`; a three-way split sums to one within `SUM_TOLERANCE`; the lock is the first statement issued. `set_mix`'s existing tests stay green through the `_write_mix` factoring.
+- Gate, `tests/scripts/test_scheduler_clock_gate.py` beside `TestTheCategoryMixShapesTheDraw`: after `admit_source` as `svc_worker`, exactly one current row per source, the superseded rows carry `effective_to`, `created_by_user_id` is NULL, an Off row survives the freeze, and the draw gives the new source its 20% on the gate's shaped rows.
+- Mutation battery `tests/mutations/device_native_01.sh` per `.claude/rules/testing.md:171-197`: one named mutation each for the Off carry-over, the 0.0001 floor, the idempotent re-admit and the lock order.
 
 ## Verification Checklist
 
 - [ ] `.venv/bin/pytest tests/src/services/target/test_category_mix.py --no-cov -q` green, including the new class.
-- [ ] The clock gate's mix class green with the new admit test, on the real database.
+- [ ] The clock gate's mix class green with the new admit tests, on the real database.
+- [ ] `tests/mutations/device_native_01.sh` ends `ran N of N mutations` with every mutation killed.
 - [ ] `git diff` shows no change inside `weights()` (`category_mix.py:106-145`).
 - [ ] The design record's new ruling paragraph present; the docs guard battery green.
 
 ## What NOT To Do
 
-Do not change `weights()` or the automatic rule (M3 rejected). Do not add a column or a migration. Do not call `admit_source` from the Drive folder pick (picked folders keep Automatic, by ruling). Do not write a current row for a source that already has one.
+Do not change `weights()` or the automatic rule (M3 rejected; under F12(b) this phase is rewritten instead). Do not add a column or a migration. Do not call `admit_source` from the Drive folder pick (picked folders keep Automatic, by ruling). Do not write a current row for a source that already has one. Do not let a supersede turn an Off row back on.
 
 ## Context
 

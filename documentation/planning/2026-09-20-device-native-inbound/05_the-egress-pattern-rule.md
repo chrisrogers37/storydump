@@ -8,7 +8,7 @@ tags: [plan, security, egress]
 links: []
 ---
 
-> Phase 05 of [`00_EPIC.md`](00_EPIC.md), ratified 2026-09-20 at the forge gate. Spec: [`2026-09-20-device-native-inbound-spec.md`](../2026-09-20-device-native-inbound-spec.md). The ledger is [`RUN_LOG.md`](RUN_LOG.md); its entry for this phase records where the build departs from this text.
+> Phase 05 of [`00_EPIC.md`](00_EPIC.md), ratified 2026-09-20 at the forge gate and folded after ironclad cycle 1 (2026-09-25). **Waits on F10 (open): built only if the owner keeps the album.** Spec: [`2026-09-20-device-native-inbound-spec.md`](../2026-09-20-device-native-inbound-spec.md). The ledger is [`RUN_LOG.md`](RUN_LOG.md); its entry for this phase records where the build departs from this text.
 
 ## Summary
 
@@ -25,7 +25,7 @@ The floor's allow-list matches exact host names. Apple's shared-album feed answe
 
 ### Dependencies
 
-The live probe (step 1). No code dependency.
+F10 locked as (a). The live probe (step 1) is an external gate: it needs a real public album from the owner. No code dependency.
 
 ### Blocks
 
@@ -33,8 +33,8 @@ Phase 06.
 
 ### Steps
 
-1. **The probe.** `scripts/probe_icloud_album.py`: given a public album link, resolve the partition host, call the web stream and the asset-URL endpoints, and print the album's name, item count, the derivative keys of one item, the change tag, and the distinct asset hosts, with the token redacted. Run it once against the owner's album; paste the output into `RUN_LOG.md`; save the two responses, token redacted, as `tests/fixtures/icloud_album/webstream.json` and `webasseturls.json` for phase 06.
-2. **The policy.** `EgressPolicy` gains `allowed_host_patterns: tuple[re.Pattern[str], ...] = ()`. `DEFAULT_ALLOWED_HOST_PATTERNS = (re.compile(r"p\d{1,3}-sharedstreams\.icloud\.com"), re.compile(r"<the asset host family the probe recorded>"))`, defined beside `DEFAULT_ALLOWED_HOSTS` and not folded into the default policy: only the album adapter's policy names them (F6).
+1. **The probe.** `scripts/probe_icloud_album.py`: given a public album link, resolve the partition host, call the web stream and the asset-URL endpoints, and print the album's name, item count, the derivative keys of one item, the change tag, and the distinct asset hosts, with the token redacted. Run it only after F10 keeps the album — making an album public just to test the feed is the exposure F10 decides — and then once against the owner's album; paste the output into `RUN_LOG.md`; save the two responses, token redacted, as `tests/fixtures/icloud_album/webstream.json` and `webasseturls.json` for phase 06.
+2. **The policy.** `EgressPolicy` gains `allowed_host_patterns: tuple[re.Pattern[str], ...] = ()`. `DEFAULT_ALLOWED_HOST_PATTERNS = (re.compile(r"p\d{1,3}-sharedstreams\.icloud\.com"), re.compile(r"<the asset host family the probe records>"))`, the second pattern written the day the probe runs, with its look-alike tests in the same commit, defined beside `DEFAULT_ALLOWED_HOSTS` and not folded into the default policy: only the album adapter's policy names them (F6).
 3. **The check.** `validate_target:286-289` becomes: allowed when `host in policy.allowed_hosts` or any pattern `fullmatch`es `host`; the refusal message names both lists. `host` is `urlsplit(...).hostname`, already lower-cased and port-free; the private-address check and pinning run after, unchanged.
 4. **The comment.** `egress.py:125-132` already records that #871 landed (rewritten 2026-09-21); one sentence is added saying pattern hosts are admitted deliberately and reviewed.
 5. **Docs.** The module docstring's allow-list paragraph (`:33-42`); `.claude/rules/development-patterns.md` if it names the allow-list (check at build).
@@ -56,4 +56,4 @@ No suffix matching, no widening of the exact-host set, no disabling of resolutio
 
 ## Context
 
-Area: services (`egress`) · Effort: S · Risk: medium (a security control) · Priority: high for train two.
+Area: services (`egress`) · Effort: S · Risk: medium (a security control) · Priority: high for train two, if F10 keeps it.

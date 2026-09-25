@@ -13,6 +13,8 @@ links: []
 > [`2026-09-20-device-native-inbound-spec.md`](2026-09-20-device-native-inbound-spec.md). The
 > build's documentation step records both picks in `03-decision-record.md` as post-ratification
 > rulings; until then this page is their home.
+>
+> **2026-09-25:** ironclad cycle 1 on the plan reopened Junction 2's mechanism — the freeze — as the plan's fork F12, not its pick or its intent. Junction 1's pick stands; cycle 1 found the plan's drop-folder lookup unscoped by workspace, a defect in the plan's steps and not in this decision, and the plan now scopes it.
 
 ## Summary
 
