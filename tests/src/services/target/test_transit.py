@@ -334,7 +334,9 @@ def _spelled(t: datetime, *, digits: int = 0, sign: str = ".", offset: str = "Z"
 #: ISO-8601 spellings a provider can render ``created_at`` in. Python 3.10's
 #: ``fromisoformat`` accepts only fraction widths 0, 3 and 6 and the ``Z`` /
 #: ``±HH:MM`` offsets; every other entry is a format shift the sweep must read
-#: on every supported interpreter.
+#: on every supported interpreter. A spelling with no offset parses NAIVE on
+#: every interpreter, and the sweep must still read it — as UTC — rather than
+#: compare it raw against an aware cutoff.
 _SPELLINGS = {
     "seconds": {},
     "width-1": {"digits": 1},
@@ -350,6 +352,7 @@ _SPELLINGS = {
     "offset-basic": {"offset": "+0000"},
     "offset-hours": {"offset": "+00"},
     "offset-lowercase-z": {"offset": "z"},
+    "offset-dropped": {"offset": ""},
 }
 
 #: ``created_at`` values no age can be read from: absent, empty, not a string,
@@ -444,10 +447,11 @@ class TestListStaleFC36:
         format shift reaches EVERY row at once. Each case is a whole corpus
         re-spelled: the in-flight asset must survive AND the past-TTL one must
         still go — a sweep that stops reaping is safe only by having stopped.
-        Mutation that reddens: parse with the interpreter's bare
+        Mutations that redden: parse with the interpreter's bare
         ``fromisoformat`` — on 3.10, CI's interpreter, every width but 0/3/6
         and every offset but ``Z``/``±HH:MM`` then reads as no age at all (on
-        3.11+, ``z`` alone does)."""
+        3.11+, ``z`` alone does); compare the parse raw, without
+        ``ensure_utc`` — the offset-less spelling then crashes the sweep."""
         sdk = RecordingSdk(
             resources_pages={
                 "image": [

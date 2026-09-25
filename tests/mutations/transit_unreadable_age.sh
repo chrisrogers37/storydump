@@ -78,6 +78,7 @@ check "a non-string age reaches the parse" src/services/target/transit.py '     
             return None
 ' '' "$T -k unreadable_age"
 check "the sweep parses with the interpreter's bare fromisoformat" src/services/target/transit.py '            return ensure_utc(parse_iso_timestamp(value))' '            return ensure_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))' "$T -k provider_format_shift_does_not_reap"
+check "a naive age is compared raw, without ensure_utc" src/services/target/transit.py '            return ensure_utc(parse_iso_timestamp(value))' '            return parse_iso_timestamp(value)' "$T -k provider_format_shift_does_not_reap"
 
 # The parse: one shape, the same answer on every interpreter.
 check "a short fraction pads on the wrong side" src/utils/datetime_utils.py '        canonical += "." + fraction[:6].ljust(6, "0")' '        canonical += "." + fraction[:6].rjust(6, "0")' "$D -k fraction_width"
