@@ -94,6 +94,26 @@ def test_clock_recurring_kinds_are_a_subset_of_the_live_registry():
     )
 
 
+def test_the_monitors_stale_threshold_spans_three_beats_of_the_fastest_kind():
+    """`DEFAULT_WORKER_STALE_S` (`scripts/scheduling_monitor.py`) rests on the
+    fastest recurring kind of the bare composition — the set every deployment
+    mints. It must span three beats — two plus one of slack — or one late beat
+    pages a healthy worker. Retiring or slowing `reconcile_ambiguous` breaks this: raise the
+    threshold with the cadence, never loosen this assertion.
+    """
+    from scripts.scheduling_monitor import DEFAULT_WORKER_STALE_S
+
+    app = compose(engine=object(), config=WorkerConfig(), env={})
+    cadences = {kind: secs for kind, secs in app.recurring.items() if kind != "v"}
+    beat = min(cadences.values())
+    assert 3 * beat <= DEFAULT_WORKER_STALE_S, (
+        f"the fastest recurring kind beats every {beat:.0f}s, so three beats — two "
+        f"plus one of slack — ({3 * beat:.0f}s) no longer fit inside the monitor's "
+        f"{DEFAULT_WORKER_STALE_S}s worker-down threshold — raise "
+        f"DEFAULT_WORKER_STALE_S with the cadence: {cadences}"
+    )
+
+
 def test_both_lanes_are_served():
     app = compose(engine=object(), config=WorkerConfig(), env={})
     assert {loop.lane for loop in app.loops} == {"interactive", "bulk"}

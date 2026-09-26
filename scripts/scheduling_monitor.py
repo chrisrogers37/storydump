@@ -128,13 +128,26 @@ WORKER_DOWN = "worker-down"
 #: better-understood one.
 WORKER_UNKNOWN = "worker-unknown"
 
-#: No system job finished within this long => the worker is not working. The
-#: recurring cadence is 6h, so this is two beats plus slack; a deployment that
-#: changes the cadence must move it.
-DEFAULT_WORKER_STALE_S = 13 * 3600
+#: No system job finished within this long => the worker is not working.
+#:
+#: **It rests on the FASTEST unconditional recurring system kind**, not the
+#: slowest: `last_success_age_seconds` is the age of the freshest success, so the
+#: kind that beats most often sets how stale a healthy worker can ever read. That
+#: is `reconcile_ambiguous`, every 60 s (`src/worker.py`'s `recurring`), so 600 s
+#: is ten beats. A late beat or an ordinary restart never reaches it; a worker
+#: that has stopped finishing work does — dead, stuck, or a deploy that left
+#: nothing serving — and that is an outage to page on, not noise.
+#:
+#: **Retire or slow that beat and this must rise with it.** The six-hourly kinds
+#: alone need at least 18 h (three six-hour beats); 600 s against them pages a
+#: healthy worker every cycle. `tests/src/test_worker.py` fails when three beats
+#: (two plus one of slack) of the bare composition's fastest recurring kind no
+#: longer fit.
+DEFAULT_WORKER_STALE_S = 600
 
-#: A due system job nobody claimed for this long. Far tighter than the staleness
-#: floor because it needs no cadence to elapse — the job is already late.
+#: A due system job nobody claimed for this long. It sees what the staleness
+#: floor cannot: one kind left unclaimed while another keeps finishing and keeps
+#: the age fresh — a stuck lane. For a dead worker the staleness floor fires first.
 DEFAULT_WORKER_OVERDUE_S = 900
 
 #: Nothing to say. Distinct from the alerting codes so a supervisor can route on
@@ -486,7 +499,8 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=DEFAULT_WORKER_STALE_S,
         help="seconds since the last finished system job before the worker is "
-        "called down; must exceed the recurring cadence",
+        "called down; must span three beats (two plus one of slack) of the fastest "
+        "recurring system kind",
     )
     ap.add_argument(
         "--worker-overdue-threshold",
