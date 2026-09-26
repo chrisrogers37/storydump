@@ -1834,7 +1834,17 @@ No eighth path.
 - ~~A latent CI flake: the skip ceiling meets a clock-of-day skip.~~ CLOSED by #1317 (`deb29c2`): the
   cap-wait test gives its account a noon timezone and no longer skips, after the flake blocked the API's
   deploy three times.
-- **A startup secret check for the target tier?** The legacy `ConfigValidator` (deleted with phase 01) checked `ENCRYPTION_KEY` at boot; nothing in the target tier does the same at import. A decision, not a regression.
+- ~~**A startup secret check for the target tier?**~~ BUILT by #1401 (ruled in chat on 2026-09-25, after
+  the assessment: a true need, and the small version of it). The legacy `ConfigValidator` (deleted with
+  phase 01) had checked `ENCRYPTION_KEY` at boot, and its absence was worse than a decision: every decrypt
+  door caught a ring that could not load as a corrupt row, so the first refresh after a deploy without the
+  key would have flipped the one live Instagram account to `reauth_required` and messaged its owner to
+  reconnect. Both roots now refuse to boot on `RingUnavailable`, and every door builds the ring before its
+  `try`. Measured 2026-09-25: both services hold the same `ENCRYPTION_KEY` (compared without printing it),
+  `ENCRYPTION_KEYS` is unset on both, and there is one live `ig_login` and one `gdrive` credential.
+  **Deferred, the owner's, for when a rotation is planned:** a canary that decrypts one stored ciphertext at
+  boot — the only check that catches a wrong key that is still a valid Fernet key (a dev key pasted into
+  production). It needs a door: both runtime logins read `oauth_credentials` only under a workspace claim.
 - **Phase 02 premise findings from round 1:** `unit_of_work.async_database_url()` falls back to the
   legacy `DB_*` fields when `TARGET_DATABASE_URL` is unset — with the legacy loops gone, a boot
   without the variable (a local `make run`, a preview service) runs the target worker against the

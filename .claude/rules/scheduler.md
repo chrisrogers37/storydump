@@ -22,7 +22,9 @@ does.
 
 ## Composition (`src/worker.py`)
 
-- `main` refuses to boot without `TARGET_DATABASE_URL` (exit 2, `:810`).
+- `main` refuses to boot without `TARGET_DATABASE_URL`, or without a credential
+  key ring that loads (`oauth_states.RingUnavailable`, #1401) — exit 2 for both,
+  before anything connects.
 - `compose` (`:262`) builds the whole graph without touching the network. A seam
   the deployment lacks **parks** its kinds with the reason named, rather than
   running them against a fake: no `TARGET_TELEGRAM_BOT_TOKEN` (or a dead or

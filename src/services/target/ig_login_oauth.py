@@ -216,7 +216,13 @@ async def load_credential(conn, *, credential_id) -> str:
     `07` §3: a payload no ring entry decrypts flips the credential `expired`
     and the account `reauth_required`. It never guesses and never logs
     ciphertext — the exception carries the credential id and nothing else.
+
+    The ring is built FIRST, outside the `try`: one that cannot be built
+    (:class:`~src.services.target.oauth_states.RingUnavailable`) propagates
+    having read and flipped nothing — a flip made on a missing key would
+    outlive the fix.
     """
+    keys = ring()
     result = await conn.execute(
         text("SELECT encrypted_payload FROM oauth_credentials WHERE id = :cid"),
         {"cid": str(credential_id)},
@@ -225,7 +231,7 @@ async def load_credential(conn, *, credential_id) -> str:
     if row is None:
         raise OAuthStateRefused(f"no credential {credential_id}")
     try:
-        return ring().decrypt(row[0])
+        return keys.decrypt(row[0])
     except Exception as exc:
         # COMMIT the flip before raising. Fail-closed means the state change
         # SURVIVES the failure — if it rides on the caller's transaction it is

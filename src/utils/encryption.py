@@ -55,25 +55,62 @@ class TokenEncryption:
         if self._cipher is not None:
             return
 
-        keys_raw = getattr(settings, "ENCRYPTION_KEYS", None)
-        single_key = settings.ENCRYPTION_KEY
+        # A variable saved blank is absent, as every blank variable here is —
+        # so a blank rotation list never shadows a working ENCRYPTION_KEY.
+        keys_raw = (getattr(settings, "ENCRYPTION_KEYS", None) or "").strip()
+        single_key = (settings.ENCRYPTION_KEY or "").strip()
 
         if keys_raw:
-            key_strings = [k.strip() for k in keys_raw.split(",") if k.strip()]
+            source = "ENCRYPTION_KEYS"
+            entries = keys_raw.split(",")
         elif single_key:
-            key_strings = [single_key]
+            source = "ENCRYPTION_KEY"
+            entries = [single_key]
         else:
+            # Both roots print this at a refused boot (#1401), so the remedy is
+            # the production one first: a NEW key boots and then cannot read a
+            # single stored credential.
             raise ValueError(
-                "ENCRYPTION_KEY not configured. "
-                'Generate one with: python -c "from src.utils.encryption import TokenEncryption; print(TokenEncryption.generate_key())"'
+                "ENCRYPTION_KEY not configured (nor ENCRYPTION_KEYS). Where credentials"
+                " are already stored, set the key they were encrypted with — a newly"
+                " generated key cannot read them. Only on a first install, generate"
+                ' one with: python -c "from src.utils.encryption import TokenEncryption;'
+                ' print(TokenEncryption.generate_key())"'
             )
 
-        try:
-            fernets = [Fernet(k.encode()) for k in key_strings]
-            self._fernets = fernets
-            self._cipher = MultiFernet(fernets)
-        except (ValueError, binascii.Error) as e:
-            raise ValueError(f"Invalid ENCRYPTION_KEY format: {e}")
+        # The message names the variable that was read and, for the rotation
+        # list, the entry's position as the operator counts it — never a value.
+        fernets, bad = [], None
+        for position, entry in enumerate(entries, 1):
+            key = entry.strip()
+            if not key:
+                continue
+            try:
+                fernets.append(Fernet(key.encode()))
+            except (ValueError, binascii.Error) as e:
+                # A byte the environment could not decode fails to encode, and
+                # the codec's error quotes it — so it is not repeated.
+                why = (
+                    "it holds an undecodable byte"
+                    if isinstance(e, UnicodeError)
+                    else str(e)
+                )
+                bad = (
+                    f"entry {position} of {len(entries)} is not a Fernet key: {why}"
+                    if source == "ENCRYPTION_KEYS"
+                    else why
+                )
+                break
+        # Raised OUTSIDE the handler, as `src/config/settings.py` does and for its
+        # reason: `from None` only hides the codec's error from a rendered
+        # traceback, and as `__context__` it would still carry the whole key
+        # (`UnicodeEncodeError.object`).
+        if bad is not None:
+            raise ValueError(f"Invalid {source} format: {bad}")
+        if not fernets:
+            raise ValueError(f"Invalid {source} format: it names no key")
+        self._fernets = fernets
+        self._cipher = MultiFernet(fernets)
 
     def encrypt(self, plaintext: str) -> str:
         """

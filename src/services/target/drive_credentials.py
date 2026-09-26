@@ -93,7 +93,17 @@ async def token_for_workspace(engine, workspace_id: str, *, fresh: bool = False)
     absent, wrong state, expired, undecryptable. They have different remedies
     (connect Drive, re-auth, refresh, rotate the ring) and one generic
     "credential unavailable" would send whoever reads the alert to guess.
+
+    A key ring this process cannot build is none of the four, and it is never
+    a :class:`DriveCredentialDead` — that would flip every source of the
+    workspace to ``error`` and alert its owner, and no reconnect fixes a
+    missing key. It passes as `oauth_states.RingUnavailable`, which each
+    consumer already treats as the fault it is: the sync rides its ladder with
+    the sources ``active``, the publish fetch retries, and a card's media fetch
+    is loud and counted (`src/worker.py` `_card_media_fetch`), not a blip.
     """
+    # Outside the decrypt's `try` below.
+    keys = ring()
     # Workspace-scoped, not a bare session: `oauth_credentials` is under RLS,
     # so without the tenant GUC the read returns nothing and "no credential"
     # becomes indistinguishable from "cannot see the credential" — the
@@ -132,7 +142,7 @@ async def token_for_workspace(engine, workspace_id: str, *, fresh: bool = False)
             f" {USABLE_STATE!r} — re-auth required"
         )
     try:
-        plaintext = ring().decrypt(row["encrypted_payload"])
+        plaintext = keys.decrypt(row["encrypted_payload"])
     except Exception as exc:
         # Never log ciphertext, and never guess — `07` §3's fail-closed posture.
         # The state flip that ig_login performs here is deliberately NOT done:

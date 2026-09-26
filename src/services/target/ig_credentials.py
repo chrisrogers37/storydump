@@ -14,14 +14,19 @@ with its own credential row; a read keyed on the account alone could pick
 another tenant's row — a revoked one, failing a healthy publish with the wrong
 remedy, or a live one, posting on another tenant's token. With
 ``workspace_id`` the read runs as that tenant (`unit_of_work`, system actor),
-which is also what the F.4 runtime login's row policies require. Without it
-(the quota precheck seam carries no workspace) the read prefers an active row.
+which is also what the F.4 runtime login's row policies require — and since
+#1369 there is no read without it.
 
 Every refusal is a :class:`IgCredentialDead` naming its cause — absent, not
 active, expired, undecryptable — because they have different remedies
 (connect, re-auth, wait for the refresh leg, rotate the ring). The Graph
 adapter maps it to the retryable Meta error with code 190, which the pipeline
 hands straight to a human as `review_required` with the reason on the intent.
+
+A ring that cannot be built is none of those: no account's remedy fixes a
+missing key. :class:`~src.services.target.oauth_states.RingUnavailable`
+propagates instead, and the adapter maps it to the code-0 retryable — nothing
+left the process, so the ladder may retry and the account is left as it is.
 """
 
 from __future__ import annotations
@@ -87,6 +92,8 @@ async def token_for_account(
     ref = str(provider_account_ref)
     if not workspace_id:
         raise ValueError("workspace_id is required — the read is tenant-scoped")
+    # Outside the `try` below, so `RingUnavailable` never reads as a dead token.
+    keys = ring()
     params: dict = {
         "ref": ref,
         "provider": PROVIDER,
@@ -117,7 +124,7 @@ async def token_for_account(
             " — the refresh leg re-mints it, or reconnect"
         )
     try:
-        return ring().decrypt(row["encrypted_payload"])
+        return keys.decrypt(row["encrypted_payload"])
     except Exception as exc:
         raise IgCredentialDead(
             f"{PROVIDER} credential for {who} could not be decrypted by any ring entry"

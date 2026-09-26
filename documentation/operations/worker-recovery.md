@@ -20,6 +20,10 @@ composition root, `src.worker` (`src/main.py:18-22`). `src.worker.main()` (`src/
 
 - refuses to boot without `TARGET_DATABASE_URL` — `FATAL: TARGET_DATABASE_URL is unset …` on
   stderr, exit 2 (`src/worker.py:799-810`; pinned by `tests/src/test_legacy_settings_gone.py`);
+- refuses to boot when the credential key ring cannot load — `FATAL: the credential key ring
+  cannot load. …` on stderr, exit 2, before anything connects (#1401; pinned by
+  `tests/src/test_key_ring_at_boot.py`). Give it the key the stored credentials were encrypted
+  with — the API holds the same one; a newly generated key boots and cannot read them;
 - composes the registry of job kinds and **parks** any kind whose seam it cannot build, by name
   (`src/services/target/work_loop.py:524-616`): no `TARGET_TELEGRAM_BOT_TOKEN` parks
   `deliver_outbox`; an incomplete `CLOUDINARY_*` trio parks `publish_pipeline` and
