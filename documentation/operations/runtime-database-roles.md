@@ -2,13 +2,14 @@
 
 ## Why this matters
 
-The API still connects to Neon as `neondb_owner`; the worker has connected as
-`svc_worker` since 2026-09-21 15:51 UTC (step 4 below, run by the owner once
-082 was live). The owner role owns every table and holds `BYPASSRLS`, so on
-the API's path every row-level-security policy the target schema installs
-(`058` and `060`, 58 policies between them) is still inert: there the
-application code is the only thing keeping one workspace's rows away from
-another's. Measured 2026-08-25 on #751; the worker's half closed 2026-09-21.
+Both services now connect to Neon as their own logins: the worker as
+`svc_worker` since 2026-09-21 15:51 UTC, the API as `svc_ingress` since
+2026-09-21 19:45 UTC (the steps below, run by the owner once 081 and 082 were
+live). `neondb_owner` — the role that owns every table and holds `BYPASSRLS`
+— is the migration runner's login alone, so the row-level-security policies
+the target schema installs (`058` and `060`, 58 policies between them) are
+live on every deployed path. Measured 2026-08-25 on #751 as the owner login on
+both services; the worker's half closed 2026-09-21 15:51 UTC, the API's 19:45.
 
 The plan's runtime posture (`02` §7, `04` F.4) is: the API connects as
 `svc_ingress`, the worker as `svc_worker`, and only the migration runner uses
@@ -102,10 +103,13 @@ each step below is verified rather than assumed.
 
 - `/health` on production reads `svc_ingress` / `bypassrls: false` and the
   worker's boot line reads `svc_worker` / `False`. The worker's half: observed
-  2026-09-21 15:52 UTC (deployment `c33ec782`).
+  2026-09-21 15:52 UTC (deployment `c33ec782`). The API's: observed 2026-09-21
+  19:47 UTC (deployment `0a554321`, `db_role user=svc_ingress bypassrls=no`).
 - `/health/scheduling` and `/health/posting` report the estate — the same
   counts as under the owner login — and the fleet monitors' verdicts are
-  unchanged across the switch.
+  unchanged across the switch. Observed at both switches: scheduling
+  `healthy` (2 active accounts, 0 overdue), posting `posting` (119 posted,
+  248 intents at the API's), identical before and after.
 - After the worker's switch, the worker's log shows, within one sweep
   cycle, prompts and sender jobs minted at the rate the previous deployment's
   log showed (compare its last sweep lines with the new deployment's first),
