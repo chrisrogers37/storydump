@@ -317,6 +317,58 @@ def _aged(public_id: str, hours_old: float, now: datetime) -> dict:
     }
 
 
+#: An in-flight and a past-TTL upload instant, each with a non-zero fraction so
+#: every fractional width below spells a real value (FRESH at width 5 is
+#: `.05024`).
+FRESH = NOW - timedelta(hours=1) + timedelta(microseconds=50240)
+STALE = NOW - timedelta(hours=30) + timedelta(microseconds=123456)
+
+
+def _spelled(t: datetime, *, digits: int = 0, sign: str = ".", offset: str = "Z"):
+    """*t* (UTC) in ISO-8601 with *digits* fractional digits (up to 9) after
+    *sign*, closed by *offset*."""
+    fraction = f"{sign}{t.microsecond:06d}000"[: digits + 1] if digits else ""
+    return t.strftime("%Y-%m-%dT%H:%M:%S") + fraction + offset
+
+
+#: ISO-8601 spellings a provider can render ``created_at`` in. Python 3.10's
+#: ``fromisoformat`` accepts only fraction widths 0, 3 and 6 and the ``Z`` /
+#: ``±HH:MM`` offsets; every other entry is a format shift the sweep must read
+#: on every supported interpreter. A spelling with no offset parses NAIVE on
+#: every interpreter, and the sweep must still read it — as UTC — rather than
+#: compare it raw against an aware cutoff.
+_SPELLINGS = {
+    "seconds": {},
+    "width-1": {"digits": 1},
+    "width-2": {"digits": 2},
+    "width-3": {"digits": 3},
+    "width-4": {"digits": 4},
+    "width-5": {"digits": 5},
+    "width-6": {"digits": 6},
+    "width-7": {"digits": 7},
+    "width-9": {"digits": 9},
+    "decimal-comma": {"digits": 3, "sign": ","},
+    "offset-colon": {"offset": "+00:00"},
+    "offset-basic": {"offset": "+0000"},
+    "offset-hours": {"offset": "+00"},
+    "offset-lowercase-z": {"offset": "z"},
+    "offset-dropped": {"offset": ""},
+}
+
+#: ``created_at`` values no age can be read from: absent, empty, not a string,
+#: or not ISO-8601 at all. The field is provider-rendered, so each one stands
+#: for a whole corpus in that shape.
+_UNREADABLE = {
+    "absent": {},
+    "null": {"created_at": None},
+    "empty": {"created_at": ""},
+    "prose": {"created_at": "yesterday-ish"},
+    "rfc-2822": {"created_at": "Wed, 19 Aug 2026 21:00:00 GMT"},
+    "epoch-text": {"created_at": "1787000000"},
+    "epoch-number": {"created_at": 1787000000},
+}
+
+
 class TestListStaleFC36:
     def _sdk(self):
         return RecordingSdk(
@@ -387,28 +439,31 @@ class TestListStaleFC36:
             )
 
     @pytest.mark.asyncio
-    async def test_a_provider_format_shift_does_not_reap_the_corpus(self):
-        """Fail-toward-stale is a ROW-level rule; a benign provider format
-        change (fractional seconds, explicit offset) must not parse as
-        garbage — under a strict single-format parse, one format shift makes
-        EVERY in-flight asset 'stale' on the next tick and the backstop
-        becomes the outage that destroys mid-publish media.
-        Mutation that reddens: narrow the parse back to one strptime format."""
-        fresh = NOW - timedelta(hours=1)
+    @pytest.mark.parametrize(
+        "spelling", list(_SPELLINGS.values()), ids=list(_SPELLINGS)
+    )
+    async def test_a_provider_format_shift_does_not_reap_the_corpus(self, spelling):
+        """The provider renders ``created_at`` with one serializer, so a
+        format shift reaches EVERY row at once. Each case is a whole corpus
+        re-spelled: the in-flight asset must survive AND the past-TTL one must
+        still go — a sweep that stops reaping is safe only by having stopped.
+        Mutations that redden: parse with the interpreter's bare
+        ``fromisoformat`` — on 3.10, CI's interpreter, every width but 0/3/6
+        and every offset but ``Z``/``±HH:MM`` then reads as no age at all (on
+        3.11+, ``z`` alone does); compare the parse raw, without
+        ``ensure_utc`` — the offset-less spelling then crashes the sweep."""
         sdk = RecordingSdk(
             resources_pages={
                 "image": [
                     {
                         "resources": [
                             {
-                                "public_id": "ws/a/frac",
-                                "created_at": fresh.strftime(
-                                    "%Y-%m-%dT%H:%M:%S.123456Z"
-                                ),
+                                "public_id": "ws/a/in-flight",
+                                "created_at": _spelled(FRESH, **spelling),
                             },
                             {
-                                "public_id": "ws/a/offset",
-                                "created_at": fresh.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                                "public_id": "ws/a/past-ttl",
+                                "created_at": _spelled(STALE, **spelling),
                             },
                         ]
                     }
@@ -416,35 +471,70 @@ class TestListStaleFC36:
                 "video": [{"resources": []}],
             }
         )
-        assert await _stale(sdk) == []
+        assert [a["public_id"] for a in await _stale(sdk)] == ["ws/a/past-ttl"]
 
     @pytest.mark.asyncio
-    async def test_an_unparseable_created_at_fails_toward_reaping(self):
-        """The sweep is the BACKSTOP: an asset whose age cannot be read must be
-        treated as stale (reaped), never skipped (immortalized past the hard
-        TTL). Missing and malformed created_at both count.
-        Mutation that reddens: skip rows whose created_at cannot be parsed."""
+    @pytest.mark.parametrize(
+        "unreadable", list(_UNREADABLE.values()), ids=list(_UNREADABLE)
+    )
+    async def test_an_unreadable_age_is_kept_and_logged_never_reaped(
+        self, unreadable, caplog
+    ):
+        """Reaping needs a READ age. An asset whose ``created_at`` cannot be
+        read may be mid-publish, and the field is provider-rendered, so an
+        unreadable age is the shape of a corpus-wide format shift far more
+        often than of one garbled row — failing toward reaping would destroy
+        every in-flight asset on the next tick. The asset is kept and named in
+        ONE error per sweep until the parse reads it; a readable past-TTL
+        asset in the same walk still goes.
+        Mutations that redden: reap a row whose age cannot be read; drop the
+        error; log it once per row instead of once per sweep; let a non-string
+        age reach the parse (the sweep dies on it)."""
         sdk = RecordingSdk(
             resources_pages={
                 "image": [
                     {
                         "resources": [
-                            {"public_id": "ws/a/no-date"},
-                            {
-                                "public_id": "ws/a/bad-date",
-                                "created_at": "yesterday-ish",
-                            },
-                            _aged("ws/a/fresh", 1, NOW),
+                            {"public_id": "ws/a/unreadable", **unreadable},
+                            _aged("ws/a/past-ttl", 30, NOW),
                         ]
                     }
                 ],
+                "video": [{"resources": [{"public_id": "ws/b/also", **unreadable}]}],
+            }
+        )
+        with caplog.at_level("ERROR", logger="src.services.target.transit"):
+            reaped = await _stale(sdk)
+        assert [a["public_id"] for a in reaped] == ["ws/a/past-ttl"]
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1, "one error per sweep, not one per row"
+        message = errors[0].getMessage()
+        assert "2 transit asset(s)" in message
+        assert "ws/a/unreadable" in message and "ws/b/also" in message
+
+    @pytest.mark.asyncio
+    async def test_the_error_counts_every_unreadable_row_but_names_a_sample(
+        self, caplog
+    ):
+        """A corpus-wide shift makes every row unreadable, so the error gives
+        the WHOLE count but names a bounded sample — naming every row would
+        print the corpus on every tick, and counting only the sample would
+        understate the outage.
+        Mutations that redden: name every row; count only the named rows."""
+        rows = [{"public_id": f"ws/a/row-{i}"} for i in range(7)]
+        sdk = RecordingSdk(
+            resources_pages={
+                "image": [{"resources": rows}],
                 "video": [{"resources": []}],
             }
         )
-        assert {a["public_id"] for a in await _stale(sdk)} == {
-            "ws/a/no-date",
-            "ws/a/bad-date",
-        }
+        with caplog.at_level("ERROR", logger="src.services.target.transit"):
+            assert await _stale(sdk) == []
+        (error,) = [r for r in caplog.records if r.levelname == "ERROR"]
+        message = error.getMessage()
+        assert "7 transit asset(s)" in message
+        named = [i for i in range(7) if f"ws/a/row-{i} " in message]
+        assert named == [0, 1, 2, 3, 4]
 
     @pytest.mark.asyncio
     async def test_each_stale_asset_carries_what_the_deleter_needs(self):
@@ -493,6 +583,56 @@ class TestTheSweepComposes:
             ("ws/a/old1", "image", "authenticated"),
             ("ws/b/old2", "video", "authenticated"),
         }
+
+    @pytest.mark.asyncio
+    async def test_a_provider_format_shift_destroys_nothing_in_flight(self):
+        """The invariant at the door that deletes: a sweep over an in-flight
+        corpus the provider has re-spelled — fractions at widths 3.10 rejects,
+        an age missing, an age in a non-ISO format — destroys NOTHING, on
+        every page and both resource types.
+        Mutation that reddens: reap a row whose age cannot be read."""
+        from src.services.target.scheduler import execute_reap_transit_assets
+
+        sdk = RecordingSdk(
+            resources_pages={
+                "image": [
+                    {
+                        "resources": [
+                            {
+                                "public_id": "ws/a/in-flight-1",
+                                "created_at": _spelled(FRESH, digits=5),
+                            },
+                            {"public_id": "ws/a/in-flight-2"},
+                        ]
+                    },
+                    {
+                        "resources": [
+                            {"public_id": "ws/b/in-flight-3", **_UNREADABLE["rfc-2822"]}
+                        ]
+                    },
+                ],
+                "video": [
+                    {
+                        "resources": [
+                            {
+                                "public_id": "ws/c/in-flight-4",
+                                "created_at": _spelled(FRESH, digits=9),
+                            }
+                        ]
+                    }
+                ],
+            }
+        )
+        store = _store(sdk)
+        reaped = await execute_reap_transit_assets(
+            None,
+            lister=store.list_stale,
+            deleter=store.destroy_asset,
+            older_than_seconds=24 * 3600,
+        )
+        assert sdk.destroy_calls == []
+        assert reaped == 0
+        assert len(sdk.resources_calls) == 3, "every page of both types was walked"
 
     @pytest.mark.asyncio
     async def test_a_refused_destroy_leaves_the_rest_of_the_sweep_intact(self):
