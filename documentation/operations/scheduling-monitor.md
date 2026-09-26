@@ -88,8 +88,8 @@ caused it.
 
 **Anything under six hours depends on that beat.** If `reconcile_ambiguous` is
 retired, made conditional or slowed, `DEFAULT_WORKER_STALE_S` must rise with it —
-the six-hourly kinds alone need roughly 13 h — and `tests/src/test_worker.py`
-fails until it does.
+the six-hourly kinds alone need at least 18 h, three six-hour beats — and
+`tests/src/test_worker.py` fails until it does.
 
 ## Deploying it
 

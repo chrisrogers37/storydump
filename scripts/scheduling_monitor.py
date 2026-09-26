@@ -139,9 +139,10 @@ WORKER_UNKNOWN = "worker-unknown"
 #: nothing serving — and that is an outage to page on, not noise.
 #:
 #: **Retire or slow that beat and this must rise with it.** The six-hourly kinds
-#: alone need roughly 13 h (two beats plus slack); 600 s against them pages a
-#: healthy worker every cycle. `tests/src/test_worker.py` fails when two beats
-#: plus slack of the bare composition's fastest recurring kind no longer fit.
+#: alone need at least 18 h (three six-hour beats); 600 s against them pages a
+#: healthy worker every cycle. `tests/src/test_worker.py` fails when three beats
+#: (two plus one of slack) of the bare composition's fastest recurring kind no
+#: longer fit.
 DEFAULT_WORKER_STALE_S = 600
 
 #: A due system job nobody claimed for this long. It sees what the staleness
@@ -498,7 +499,8 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=DEFAULT_WORKER_STALE_S,
         help="seconds since the last finished system job before the worker is "
-        "called down; must span two beats of the fastest recurring system kind",
+        "called down; must span three beats (two plus one of slack) of the fastest "
+        "recurring system kind",
     )
     ap.add_argument(
         "--worker-overdue-threshold",
