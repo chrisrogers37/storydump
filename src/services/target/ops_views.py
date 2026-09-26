@@ -1,5 +1,5 @@
 """The read views behind `storydump story|cards|floating|account|jobs|outbox|burst|posture`
-(phase 02 of the v2 CLI, `documentation/planning/2026-09-15-cli-v2/02_reads.md`).
+(phase 02 of the v2 CLI, `documentation/archive/2026-09-15-cli-v2/02_reads.md`).
 
 Each view is a bounded, tenant-scoped read — one statement per list it
 returns (a story's timeline is four, a burst's sections six): an explicit

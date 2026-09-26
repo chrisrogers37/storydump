@@ -5,7 +5,7 @@ probes are eight `storydump` verbs (the v2 CLI plan, phase 02). Each is one boun
 tenant-scoped read through the API — never a database connection — under your token, for every
 workspace you belong to (or one, with `--workspace`). `psql` through Railway stays the escape
 hatch for a question these do not answer; the probes the verbs were built from are kept at
-`documentation/planning/2026-09-15-cli-v2/probes/`.
+`documentation/archive/2026-09-15-cli-v2/probes/`.
 
 Sign in once (`storydump login`, a token minted under Settings › API tokens). Add `--json` to
 any verb for one envelope `{"v": 1, "kind", "data", "error"}` — a workspace read's `data` is

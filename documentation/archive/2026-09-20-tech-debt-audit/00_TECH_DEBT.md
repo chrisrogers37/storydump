@@ -28,6 +28,15 @@ links: []
 > turned out to be two things that merely looked alike. One *withdrawal* was also wrong and was
 > reinstated (doc 08's cap-warning block). Read this document with that caveat: its structural
 > findings held up; its duplication claims needed checking one by one.
+>
+> **Update 2026-09-22 — all thirteen are resolved, and the sixteen phase docs are deleted.** After the
+> closeout the defects were worked as their own PRs: A1 #1384 · C1 #1377 · B4 #1376 · B3 #1380 ·
+> C5 #1375 · B2 #1387 + #1388 · B17 #1390 · B16 #1391 · D2 #1383 · D11 #1382 · D10 #1385 · the
+> thirteenth (the display-name erasure) #1374. B19, the two advisory-lock hash widths, was ruled
+> deliberate — measured, said at each call site and ratcheted — rather than changed (#1389). With
+> every phase merged, `01_…`–`16_…` were deleted from this folder: `RUN_LOG.md` keeps the per-phase
+> record, and each doc is in git history
+> (`git show 29acea2ec4d9cf72b5e6d8ddcbff23080d4da06e:documentation/archive/2026-09-20-tech-debt-audit/<file>`).
 
 ## Summary
 
@@ -367,17 +376,15 @@ on it).
 
 | Doc | Status | PR |
 |---|---|---|
-| 01–16 | draft — not started | — |
+| 01–16 | merged | the banner lists each |
 
-(Update this table as `/build` lands each PR; when every row is merged, move this directory to
-`documentation/archive/` with a banner and a row in `documentation/archive/README.md`.)
+(Every row merged by 2026-09-21; the directory was archived that day, #1357.)
 
 ## Related
 
-- The phase docs `01_…` – `16_…` in this directory.
-- `documentation/planning/2026-09-16-legacy-tear-out/00_EPIC.md` — the tear-out whose residue
+- `documentation/archive/2026-09-16-legacy-tear-out/00_EPIC.md` — the tear-out whose residue
   half of this audit is.
-- `documentation/planning/2026-09-16-cli-v2-audit/00_AUDIT.md` — the previous audit (system lens)
+- `documentation/archive/2026-09-16-cli-v2-audit/00_AUDIT.md` — the previous audit (system lens)
   of the CLI surface, whose fold #1314 already took the CLI's share.
 - `documentation/operations/legacy-window-close.md` — the window that makes 13 executable.
 

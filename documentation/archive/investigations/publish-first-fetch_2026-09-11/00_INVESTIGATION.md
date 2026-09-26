@@ -6,6 +6,8 @@ owner: chris
 created: 2026-09-11
 ---
 
+> **Archived 2026-09-22 — RESOLVED.**
+
 ## Summary
 
 At 12:37 ET on 2026-09-11 the owner approved four stories at once via Telegram taps; two posted, two failed at Meta's container call with error 9004 / subcode 2207052 ("the media could not be fetched from this uri"), and the failed cards kept reading "✅ Approved" with no notification. The same failure hit one post the night before and one at 16:02 ET: 4 of the last 7 publishes. A live re-test that evening (8 taps, 6 approvals) posted 6 of 6, including the three files that had failed earlier — the failure is transient, not the file.

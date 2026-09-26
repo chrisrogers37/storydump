@@ -208,7 +208,7 @@ environment; the section below walks it.
 
 `storydump` is the developer and agent console over the API — a pure HTTP
 client, never a database connection
-(`documentation/planning/2026-09-15-cli-v2/`). Install it with
+(`documentation/archive/2026-09-15-cli-v2/`). Install it with
 `pip install -e '.[cli]'`.
 
 1. Mint a token on the web: **Settings › API tokens**. A person-bound token

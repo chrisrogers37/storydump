@@ -4,10 +4,10 @@
 Deleting the package is one commit; the name lingering in a runbook, a
 Makefile target, a console script or a ratchet baseline is a pointer to a
 command nobody can run. `storydump-cli` may survive only where it is
-HISTORY: the CHANGELOG, the archive (the dated updates live there since the
-tear-out's phase 05), the CLI plan that
-ordered the deletion — and the owner's own Claude Code permission file,
-which is not the repository's to edit (queued to the owner).
+HISTORY: the CHANGELOG, the archive (the dated updates since the tear-out's
+phase 05, and since 2026-09-22 the CLI plan that ordered the deletion) — and
+the owner's own Claude Code permission file, which is not the repository's
+to edit (queued to the owner).
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ NAME = "storydump-cli"
 HISTORY = (
     "CHANGELOG.md",
     "documentation/archive/",
-    "documentation/planning/2026-09-15-cli-v2/",
     ".claude/settings.json",
     ".claude/settings.local.json",
     "tests/test_legacy_cli_gone.py",

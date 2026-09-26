@@ -30,7 +30,7 @@ connects as. Merging this PR arms nothing; the owner runs the window (F7).
   <current_user>`, `REVOKE CREATE ON DATABASE … FROM svc_migration`, then the printed gate
   (identity first, then the steady-state shape).
 - `04:93` — "The stand-down legs rehearsed below still govern 3g when it is scheduled";
-  `../../archive/2026-08-17-m2-rehearsal-spec/README.md` — the rehearsal on a PITR branch.
+  `../2026-08-17-m2-rehearsal-spec/README.md` — the rehearsal on a PITR branch.
 - `railway.toml:19` `preDeployCommand = "python -m scripts.migration_runner apply"` — every
   pending file runs at the next deploy of either service. `scripts/migration_runner.py:72-75`
   knows four markers — `no-transaction`, `postcondition`, `reapply-safe`, `schema-move`;
@@ -130,7 +130,7 @@ instruments, #1046 and #1113 close with it (#945 closes in phase 01 as stale).
    as comments with their expected answers on the PG16+ branch (production is 17.10). The
    `03-decision-record.md` amendment F8 (a) requires ships in this PR, beside `03:189`.
 4. **The runbook** `documentation/operations/legacy-window-close.md`: the M.2 rehearsal on a Neon
-   PITR branch — the spec's 3g and step-8 legs only (`../../archive/2026-08-17-m2-rehearsal-spec/README.md`;
+   PITR branch — the spec's 3g and step-8 legs only (`../2026-08-17-m2-rehearsal-spec/README.md`;
    3a–3d ran by hand in production and are not rehearsed again; the branch is the owner's to
    provision) — (branch, `apply --manual 079`, `apply --manual 080`, the gate, ONE
    door-replacing migration applied after the stand-down as the positive control for F8 — the
