@@ -65,6 +65,7 @@ from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
 from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError, TokenRefused
+from src.services.target import oauth_states
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import MixInvalid
@@ -456,6 +457,35 @@ async def _sample_db_role(app: FastAPI) -> None:
         logger.warning("database role not sampled at startup: %s", exc)
 
 
+def _require_key_ring() -> None:
+    """Build the credential key ring, or refuse to start.
+
+    The connect callbacks encrypt every Instagram token and Drive grant
+    through it, and the Drive folder browser decrypts the workspace's grant
+    (`oauth_states.ring`). Built lazily, a missing or malformed key passed
+    Railway's health check and failed at those routes — a connect only after
+    the person had granted access at Meta or Google. A missing engine is
+    answered per route instead (503, and `/health` says so); nothing on the
+    probe would say the key is missing. Raised from startup, the lifespan
+    fails and uvicorn exits (one process: `WEB_CONCURRENCY` is unset in
+    production), the deploy fails its check, and the previous deploy keeps
+    serving.
+    """
+    try:
+        oauth_states.ring()
+    except oauth_states.RingUnavailable as exc:
+        # The remedy is named because the tempting one is wrong: a newly
+        # generated key starts, and then cannot read a stored credential.
+        logger.error(
+            "the credential key ring cannot load. %s The API encrypts every token"
+            " it connects and decrypts the Drive grant it browses with, so it needs"
+            " the key the stored credentials were encrypted with — the worker"
+            " service holds the same one. Refusing to start.",
+            exc,
+        )
+        raise
+
+
 def _cors_origins() -> list[str]:
     """The ONE browser origin admitted (`settings.web_app_origin`); never "*",
     and with no origin configured no origin is admitted."""
@@ -492,6 +522,9 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(app_: FastAPI):
+        # First, so a process that cannot encrypt starts no task — in
+        # particular it never re-registers the production bot's webhook.
+        _require_key_ring()
         # The role sample and the webhook registration run as background
         # tasks so startup never waits on the database or on Telegram (see
         # `app.state.db_role` / `app.state.webhook` below); a task still

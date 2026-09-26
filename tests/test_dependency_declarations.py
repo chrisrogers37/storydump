@@ -249,3 +249,53 @@ def test_httpx2_stays_pinned_for_the_testclient():
     assert "httpx2" not in requirement_names(), (
         "httpx2 belongs under the `# Testing` header, not in the runtime set"
     )
+
+
+# --- an extra that carries weight ------------------------------------------
+
+#: The extras a requirement asks for — `name[a,b]` → {"a", "b"}. `_REQUIREMENT`
+#: drops them on purpose (the agreement tests compare names), so an extra that
+#: matters is held by name below rather than by the parity checks.
+_EXTRAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\s*\[([^\]]*)\]")
+
+
+def _extras_of(requirement: str) -> set[str]:
+    match = _EXTRAS.match(requirement)
+    return {e.strip() for e in match.group(1).split(",")} if match else set()
+
+
+def _named(requirements: list[str], name: str) -> list[str]:
+    return [
+        r
+        for r in requirements
+        if (m := _REQUIREMENT.match(r)) and normalize(m.group(1)) == normalize(name)
+    ]
+
+
+def test_sqlalchemy_asks_for_the_asyncio_extra():
+    """`sqlalchemy[asyncio]`, not `sqlalchemy`, in both files — the extra is how
+    `greenlet` reaches an Apple Silicon Mac, and nothing else would notice it
+    leaving (#1392).
+
+    The async engine needs `greenlet`. SQLAlchemy 2.0 declares it behind a
+    platform marker that lists `aarch64`, `ppc64le`, `x86_64`, `amd64` and `win32`
+    but not `arm64` — what an Apple Silicon Mac reports — so a fresh install there
+    went without it and 555 tests failed at runtime. The `asyncio` extra
+    requires it on every platform. Dropping the extra would stay green where it
+    matters least: CI runs on `x86_64`, where the marker pulls `greenlet` in
+    anyway, and an existing venv keeps the copy it already has.
+    """
+    pinned = _named(_requirements_lines(), "sqlalchemy")
+    assert pinned, "sqlalchemy is no longer pinned in requirements.txt"
+    assert "asyncio" in _extras_of(pinned[0]), (
+        f"requirements.txt pins {pinned[0]!r} — it must be `sqlalchemy[asyncio]`,"
+        " or a fresh Apple Silicon install goes without greenlet"
+    )
+    declared = _named(
+        [e.value for e in _keyword("install_requires").elts], "sqlalchemy"
+    )
+    assert declared, "sqlalchemy is no longer declared in install_requires"
+    assert "asyncio" in _extras_of(declared[0]), (
+        f"setup.py declares {declared[0]!r} — it must be `sqlalchemy[asyncio]`,"
+        " or a `pip install -e .` on Apple Silicon goes without greenlet"
+    )

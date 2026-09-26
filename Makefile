@@ -26,8 +26,15 @@ DB_PASSWORD ?=
 # PostgreSQL connection options (respects all connection variables)
 PG_OPTS = -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER)
 
-# PostgreSQL connection string for application database
-APP_DB_URL = postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)
+# init-db's migration runner gets its URL from `scripts.app_db_url`, which
+# percent-encodes every part: pasted into the URL raw, a password carrying `@`,
+# `/` or `%` was misread by libpq after psql had connected with it. The recipe
+# hands the helper each field quoted exactly as psql gets it — the password as
+# in `PGPASSWORD="$(DB_PASSWORD)"`, the other four bare, as in `PG_OPTS` and
+# `-d $(DB_NAME)` — so both steps connect with the same values. Like every psql
+# recipe here, a password carrying `"` or a backtick still breaks the shell
+# line, a `$` that starts a name is expanded in it, and a single-quoted `.env`
+# password keeps its quotes.
 
 # Colors for output
 GREEN  := \033[0;32m
@@ -115,7 +122,7 @@ init-db: ## Build the schema on a FRESH database, the way the lineage lane prove
 		-f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
 		-f scripts/setup_database.sql -f tests/scripts/fixtures/legacy_by_hand.sql 2>&1 || \
 		(echo "$(RED)✗ Failed to build the by-hand base. Check database connection and permissions (step 0 creates the svc_* roles: DB_USER needs CREATEROLE).$(NC)" && exit 1)
-	@DATABASE_URL="$(APP_DB_URL)" python -m scripts.migration_runner apply || \
+	@DATABASE_URL="$$(DB_USER=$(DB_USER) DB_PASSWORD="$(DB_PASSWORD)" DB_HOST=$(DB_HOST) DB_PORT=$(DB_PORT) DB_NAME=$(DB_NAME) python -m scripts.app_db_url)" python -m scripts.migration_runner apply || \
 		(echo "$(RED)✗ The migration runner failed; see its output above.$(NC)" && exit 1)
 	@echo "$(GREEN)✓ Schema initialized$(NC)"
 
@@ -201,9 +208,10 @@ quickstart: env-example install setup-db ## Quick start: setup everything for fi
 	@echo "  4. Run: make run"
 	@echo ""
 
-validate-env: ## Load the settings from the environment and .env, the way every process does
+validate-env: ## Load the settings, and build the key ring both services refuse to boot without
 	@echo "$(GREEN)Validating environment configuration...$(NC)"
 	@python -c "from src.config.settings import settings" && \
+		python -c "from src.services.target.oauth_states import ring; ring()" && \
 		echo "$(GREEN)✓ Configuration is valid$(NC)" || \
 		(echo "$(RED)✗ Configuration validation failed$(NC)" && exit 1)
 
