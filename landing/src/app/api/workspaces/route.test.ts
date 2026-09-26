@@ -16,9 +16,20 @@
  * certain way.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { callBff, postJson } from "@/lib/bff";
+import { createWorkspaceRefusalCopy } from "@/lib/refusal-copy";
 
 const captured: Array<{ path: string; init?: Record<string, unknown> }> = [];
+
+const CREATED = {
+  ok: true,
+  data: { id: "ws-1", name: "Northside", role: "owner", state: "active" },
+} as const;
+
+/** What the port answers the next create. A refusal is `{ ok: false, status, error }`. */
+let portAnswer: unknown = CREATED;
 
 vi.mock("@/lib/session", () => ({
   getSessionToken: async () => "tok-test",
@@ -29,7 +40,7 @@ vi.mock("@/lib/session", () => ({
 vi.mock("@/lib/target-api", () => ({
   targetFetch: async (path: string, _token: string | null, init?: Record<string, unknown>) => {
     captured.push({ path, init });
-    return { ok: true, data: { id: "ws-1", name: "Northside", role: "owner", state: "active" } };
+    return portAnswer;
   },
 }));
 
@@ -76,5 +87,55 @@ describe("POST /api/workspaces", () => {
     const res = await POST(req({ name: "   " }));
     expect(res.status).toBe(400);
     expect(captured).toHaveLength(0);
+  });
+});
+
+/**
+ * The sentence a failed create shows is often the only artifact a report
+ * carries, so each refusal this route gives must render a sentence of its own.
+ * Driven through the browser's own wrapper (`callBff`) and the form's own table
+ * (`createWorkspaceRefusalCopy`), with only the network hop replaced by a call
+ * to the handler, so what is compared is what a person would see.
+ */
+describe("POST /api/workspaces — a refusal names its exit", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", (input: string, init?: RequestInit) =>
+      POST(
+        new Request(new URL(input, "https://storydump.app"), init) as unknown as Parameters<
+          typeof POST
+        >[0],
+      ),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    portAnswer = CREATED;
+  });
+
+  async function refusal(init: RequestInit) {
+    const result = await callBff("/api/workspaces", init);
+    if (result.ok) throw new Error("expected the create to be refused");
+    return {
+      error: result.error,
+      status: result.status,
+      sentence: createWorkspaceRefusalCopy(result.error, result.status),
+    };
+  }
+
+  it.each([
+    ["a body that is not JSON", '{"name":'],
+    ["a body of null", "null"],
+  ])("renders %s apart from a refusal relayed from the port", async (_case, body) => {
+    const unreadable = await refusal({ method: "POST", body });
+    // A port refusal whose body carries no `reason`, which `readError` reports
+    // as `http_<status>`. Same status as the local refusal, so only the reason
+    // can separate the two.
+    portAnswer = { ok: false, status: 400, error: "http_400" };
+    const relayed = await refusal(postJson({ name: "Northside" }));
+
+    expect(unreadable).toMatchObject({ error: "malformed_body", status: 400 });
+    expect(relayed).toMatchObject({ error: "http_400", status: 400 });
+    expect(unreadable.sentence).not.toBe(relayed.sentence);
   });
 });

@@ -87,9 +87,22 @@ export function notAuthenticatedCopy(outcome: RefusalOutcome): string {
  * `invalid_name` is the person's to fix, `target_router_unreachable` is not
  * theirs at all — and the final fallback is deliberately untouched: it names no
  * cause and takes the blame, which is what the rest of this now does too.
+ *
+ * The fallback is for a cause this function cannot name. A refusal whose cause
+ * the app does know gets its own arm: `malformed_body` is decided by the route,
+ * before the port is asked, so it can say that nothing was created. Rendered as
+ * the fallback, a known cause is indistinguishable from an unknown one on the
+ * screen — the one artifact a report usually carries.
  */
 export function createWorkspaceRefusalCopy(reason: unknown, status: number): string {
   if (reason === "invalid_name") return "Give the workspace a name.";
+  if (reason === "malformed_body") {
+    return (
+      "Storydump could not read what this form sent. Nothing was created." +
+      " Trying again may help — if it does not, this one is on us and worth" +
+      " reporting."
+    );
+  }
   if (status === 503 || reason === "target_router_unreachable") {
     return "Storydump cannot create workspaces yet. Nothing you did — check back shortly.";
   }
