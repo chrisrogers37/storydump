@@ -133,7 +133,7 @@ jobs:
               echo "**CLEAN** — the audited database matches the target schema this repo declares."
               echo
               echo "Scope: \`public\` schema only; columns, CHECK constraints, uniqueness and foreign keys."
-              echo "\`legacy\` is not compared, and data is never read."
+              echo "Data is never read."
               echo
               echo "**What a clean result does NOT cover** (measured, not assumed):"
               echo "- **Materialized views, sequences and functions are invisible** to this check — none appear in the comparison at all. Production currently holds 1 sequence and 20 functions in \`public\`, and a change to any of them reports clean."
