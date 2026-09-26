@@ -25,7 +25,7 @@ suppressing it.
 
 | reading | state | what happens |
 |---|---|---|
-| `200`, `worker.max_overdue_seconds > 900` or `worker.last_success_age_seconds > 13 h` — whatever the cursors say | **`worker-down`** | FLEET ALERT on the **first** reading; repeats every 6h; ranked above every cursor reading, because a dead worker explains a stalled cursor and is invisible to the cursor axis on an empty estate |
+| `200`, `worker.max_overdue_seconds > 900` or `worker.last_success_age_seconds > 600 s` — whatever the cursors say | **`worker-down`** | FLEET ALERT on the **first** reading; repeats every 6h; ranked above every cursor reading, because a dead worker explains a stalled cursor and is invisible to the cursor axis on an empty estate |
 | `200`, `accounts_active == 0`, and no system job has ever finished (or no `worker` block) | **`worker-unknown`** | says so once, then quiet; re-states weekly. Neither axis can answer: **not an alert, not an all-clear** |
 | `200`, `accounts_active == 0`, the worker provably alive | **`no-signal`** | says so once, then quiet; re-states weekly. **Never an alert, never an all-clear.** |
 | `200`, `accounts_active > 0`, lag ≤ threshold or null | `healthy` | quiet; announces RECOVERED / SIGNAL ACQUIRED on entry from another state |
@@ -72,8 +72,27 @@ and costs false alarms.
 
 The worker axis has two thresholds of its own (#1120): `--worker-overdue-threshold`,
 default **900 s** — how long a due system job may sit unclaimed — and
-`--worker-stale-threshold`, default **13 h** — how old the last finished system
+`--worker-stale-threshold`, default **600 s** — how old the last finished system
 job may be. Either breached is `worker-down`.
+
+### The stale threshold rests on the 60-second beat
+
+`last_success_age_seconds` is the age of the **freshest** system-job success, so
+the fastest recurring kind decides how stale a healthy worker can ever read. That
+is `reconcile_ambiguous`, which the clock mints every 60 s whatever the estate
+holds (`src/worker.py`'s `recurring`). 600 s is ten of those beats: a late beat or
+an ordinary restart never reaches it, while a worker that has stopped finishing
+work does — dead, stuck on a claim, or a deploy that left nothing serving. That
+last one pages on purpose: ten minutes with no worker is an outage, whatever
+caused it.
+
+**Anything under six hours depends on that beat.** Retire `reconcile_ambiguous`,
+make it conditional, or slow it, and this threshold must rise with it: the
+six-hourly kinds alone need roughly **13 h** (two beats plus slack), and 600 s
+against them pages a healthy worker every cycle. `tests/src/test_worker.py` fails
+when two beats of the bare composition's fastest recurring kind no longer fit
+inside `DEFAULT_WORKER_STALE_S`, so the change that breaks the coupling is the
+change that is told about it.
 
 ## Deploying it
 

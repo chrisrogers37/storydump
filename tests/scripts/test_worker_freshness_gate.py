@@ -33,6 +33,7 @@ import psycopg2
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from scripts.scheduling_monitor import DEFAULT_WORKER_STALE_S
 from tests.scripts.conftest import async_url, seed_workspace_chain
 from src.services.target import scheduling_health
 
@@ -95,7 +96,8 @@ class TestTheAgeIsComputedFromRealTimestamps:
     ):
         """The arithmetic the alert rests on, executed against real rows.
 
-        14h is past the poller's 13h (46800s) default, so this is the reading
+        14h is far past the poller's default (`DEFAULT_WORKER_STALE_S`), so this
+        is the reading
         that produces `WORKER_DOWN` — the one shape neither the stubbed unit
         tests nor the healthy production read had ever exercised.
         """
@@ -115,15 +117,17 @@ class TestTheAgeIsComputedFromRealTimestamps:
         assert age is not None
         # 14h == 50400s, bounded rather than exact so clock drift cannot flake it.
         assert 50000 < age < 51000, age
-        assert age > 46800, "would not have tripped the shipped default threshold"
+        assert age > DEFAULT_WORKER_STALE_S, (
+            "would not have tripped the shipped default threshold"
+        )
 
     @pytest.mark.asyncio
     async def test_the_age_is_finish_time_not_enqueue_time(self, conn, lane_db):
         """`updated_at`, never `created_at` — and production is why.
 
         A system job is enqueued a full cadence before it is worked. Reading
-        `created_at` here would report 20h against a job that finished 1h ago
-        and fire the alert on a healthy worker.
+        `created_at` here would report 20h against a job that finished two
+        minutes ago and fire the alert on a healthy worker.
         """
         _seed_system_job(
             conn,
@@ -131,13 +135,15 @@ class TestTheAgeIsComputedFromRealTimestamps:
             state="succeeded",
             run_at="- interval '20 hours'",
             created_at="- interval '20 hours'",
-            updated_at="- interval '1 hour'",
+            updated_at="- interval '2 minutes'",
         )
 
         age = (await _freshness(lane_db))["last_success_age_seconds"]
 
-        assert 3000 < age < 4200, age
-        assert age < 46800, "a healthy worker would have been reported down"
+        assert 90 < age < 200, age
+        assert age < DEFAULT_WORKER_STALE_S, (
+            "a healthy worker would have been reported down"
+        )
 
     @pytest.mark.asyncio
     async def test_only_succeeded_rows_count_toward_freshness(self, conn, lane_db):
@@ -168,7 +174,7 @@ class TestTheAgeIsComputedFromRealTimestamps:
         out = await _freshness(lane_db)
 
         assert out["succeeded_ever"] == 1
-        assert out["last_success_age_seconds"] > 46800, out
+        assert out["last_success_age_seconds"] > DEFAULT_WORKER_STALE_S, out
 
 
 class TestTheBacklogIsComputedFromRealTimestamps:
@@ -289,16 +295,18 @@ class TestTheTwoSurvivorsFromTheFirstMutationRun:
             state="succeeded",
             run_at="- interval '2 hours'",
             created_at="- interval '2 hours'",
-            updated_at="- interval '1 hour'",
+            updated_at="- interval '2 minutes'",
         )
 
         out = await _freshness(lane_db)
 
         assert out["succeeded_ever"] == 2
         age = out["last_success_age_seconds"]
-        # ~1h (the fresher). `max` would answer ~30h and trip the threshold.
-        assert 3000 < age < 4200, age
-        assert age < 46800, "the oldest success was reported as the latest"
+        # ~2 min (the fresher). `max` would answer ~30h and trip the threshold.
+        assert 90 < age < 200, age
+        assert age < DEFAULT_WORKER_STALE_S, (
+            "the oldest success was reported as the latest"
+        )
 
     @pytest.mark.asyncio
     async def test_a_tenant_jobs_success_is_not_proof_the_system_lane_lives(
@@ -339,6 +347,6 @@ class TestTheTwoSurvivorsFromTheFirstMutationRun:
         out = await _freshness(lane_db)
 
         assert out["succeeded_ever"] == 1, "a tenant job was counted"
-        assert out["last_success_age_seconds"] > 46800, (
+        assert out["last_success_age_seconds"] > DEFAULT_WORKER_STALE_S, (
             "a tenant job's success was read as proof the system lane is alive"
         )

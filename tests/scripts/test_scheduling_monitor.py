@@ -55,9 +55,11 @@ def step(verdict, prior, now):
 #: Kept as the DEFAULT so the cursor-axis tests below go on testing the cursor:
 #: without it every empty-estate case would answer `WORKER_UNKNOWN`, which is
 #: correct for a payload lacking the axis and is covered by its own test.
+#: The age is a healthy one against the 60 s recurring beat — well inside
+#: `DEFAULT_WORKER_STALE_S`, which is what "provably alive" has to mean here.
 ALIVE_WORKER = {
     "succeeded_ever": 78,
-    "last_success_age_seconds": 3600,
+    "last_success_age_seconds": 45,
     "overdue_ready": 0,
     "max_overdue_seconds": None,
 }
@@ -507,14 +509,17 @@ def test_the_worker_thresholds_are_reachable_from_the_command_line(
     import scripts.scheduling_monitor as m
 
     sent = []
+    # Both derived from the default, so this keeps meaning "healthy under the
+    # default, an outage only under the flag" whatever the default becomes.
+    age = m.DEFAULT_WORKER_STALE_S // 2
     raw = body(
         active=0,
-        worker={**ALIVE_WORKER, "last_success_age_seconds": 4000},
+        worker={**ALIVE_WORKER, "last_success_age_seconds": age},
     )
     monkeypatch.setattr(m, "fetch", lambda url, timeout: (200, raw))
     monkeypatch.setattr(m, "notify", lambda cmd, msg: sent.append(msg) or True)
 
-    # 4000s is well inside the 13h default — nothing to say.
+    # Half the default is inside it — nothing to say.
     assert m.classify(200, raw, threshold_s=T).state == NO_SIGNAL
 
     rc = m.main(
@@ -526,7 +531,7 @@ def test_the_worker_thresholds_are_reachable_from_the_command_line(
             "--notify-command",
             "/bin/true",
             "--worker-stale-threshold",
-            "60",
+            str(age // 2),
         ]
     )
 

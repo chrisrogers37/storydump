@@ -324,6 +324,13 @@ def compose(
         # walked and #1090 D4's customer notification had no beat to ride. The
         # kind is now live regardless of the poll seam (its notify half needs
         # none), so it satisfies the `recurring <= live` assert below.
+        #
+        # It is also the FASTEST unconditional beat, and the fleet monitor's
+        # worker-down threshold rests on it: `scripts/scheduling_monitor.py`
+        # `DEFAULT_WORKER_STALE_S` (600 s) reads "no system job finished" as a
+        # dead worker. Retiring this kind, or slowing it past half that
+        # threshold, means raising the threshold with it — the six-hourly kinds
+        # alone need roughly 13 h. `tests/src/test_worker.py` holds the two.
         "reconcile_ambiguous": 60.0,
     }
     if "reap_transit_assets" in live:
