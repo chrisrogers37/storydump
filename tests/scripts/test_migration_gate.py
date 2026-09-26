@@ -6,14 +6,15 @@
   both ends of the live uncertainty (at-45 and at-49) — the design
   requirement that adopt works without knowing which world it is in.
 - Tamper: a deliberately-removed floor constraint fails adoption loudly.
-- Parity: the runner-replayed schema equals the models-built schema.
+- Parity: the comparator itself can fail. (The replayed-vs-models parity test
+  went with the legacy models in the tear-out's phase 01.)
 
 **Every replay here is bounded to ``LEGACY_LINEAGE_MAX`` (#746, F.2.1b), and
 the bound is load-bearing rather than tidy.** From 051 the corpus holds two
 lineages in one directory: the legacy schema this file guards, and the target
 schema created into the empty ``public`` the 3c move leaves behind. An
 unbounded replay runs the move, so ``public`` ends the run empty and every
-assertion below — parity against the legacy models, the ``schema_version``
+assertion below — the ``schema_version``
 self-stamp, the adopt fixtures' queue rows — is asserted against a schema that
 is no longer there. `test_lineage_lane.py` replays *across* the boundary and
 asserts that emptiness on purpose; these tests replay up to it. The bound is

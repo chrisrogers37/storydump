@@ -151,6 +151,8 @@ TARGET_DATABASE_URL=postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=req
 # The bot (documentation/operations/telegram-webhook.md for the webhook)
 TARGET_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 TARGET_TELEGRAM_BOT_USERNAME=your_bot
+# The SAME key on both services; neither starts without a valid one. Generate it
+# on a first install only — a new key cannot read credentials already stored.
 ENCRYPTION_KEY=<generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
 GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=GOCSPX-...

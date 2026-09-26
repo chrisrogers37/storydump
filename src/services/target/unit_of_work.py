@@ -73,6 +73,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from src.config.db_url import userinfo
 from src.config.settings import settings
 from src.services.target.vocabulary import DATABASE_URL_VAR
 from src.utils.logger import logger
@@ -159,9 +160,11 @@ def async_database_url(database: Optional[str] = None) -> str:
     worker booted without its variable ran against the legacy-configured
     database).
     """
+    # The user and password encoded (`src.config.db_url`), which SQLAlchemy
+    # decodes back: pasted raw, one carrying `@`, `/` or `%` was misread.
     return (
-        f"postgresql+asyncpg://{settings.DB_USER}:{settings.DB_PASSWORD}"
-        f"@{settings.DB_HOST}:{settings.DB_PORT}/{database or settings.DB_NAME}"
+        f"postgresql+asyncpg://{userinfo(settings.DB_USER, settings.DB_PASSWORD)}"
+        f"{settings.DB_HOST}:{settings.DB_PORT}/{database or settings.DB_NAME}"
     )
 
 

@@ -8,7 +8,7 @@ tags: [legacy-retirement, migrations, worker, api, docs, run-log]
 links: ["https://github.com/chrisrogers37/storydump/issues/1216", "https://github.com/chrisrogers37/storydump/pull/1315"]
 ---
 
-> **Closed 2026-09-20.** Five phases merged (#1316, #1319, #1318, #1321, #1322), the window run on 2026-09-19, the residue #1324 and the docs PR #1325 merged 2026-09-20, the marker branch retired and the dead variables deleted. What the owner-decision queue still lists is outside the tear-out: #751 (the runtime logins), #739 (the Facebook secret fallback), the PITR floor (`05` §DR 7 d vs Neon's 24 h), the l8 admission flake, `.claude/settings.json`'s legacy rules, `railway.toml`'s `mkdir -p /tmp/media`. The 2026-12-16 expiry of the `archive.*_pre_cutover_20260917` snapshots is tracked at #1326; the sweeper it would need (`retention_sweep`, unbuilt) at #1327; the PITR floor at #1328.
+> **Closed 2026-09-20.** Five phases merged (#1316, #1319, #1318, #1321, #1322), the window run on 2026-09-19, the residue #1324 and the docs PR #1325 merged 2026-09-20, the marker branch retired and the dead variables deleted. What the owner-decision queue still lists is outside the tear-out: #751 (the runtime logins), #739 (the Facebook secret fallback), the PITR floor (`05` §DR 7 d vs Neon's 24 h), the l8 admission flake, `.claude/settings.json`'s legacy rules, `railway.toml`'s `mkdir -p /tmp/media`. (Since then: #751 closed 2026-09-21, the l8 flake by #1372, the `mkdir` by #1394.) The 2026-12-16 expiry of the `archive.*_pre_cutover_20260917` snapshots is tracked at #1326; the sweeper it would need (`retention_sweep`, unbuilt) at #1327; the PITR floor at #1328.
 
 ## Summary
 
@@ -1469,7 +1469,8 @@ The branch and the three worktrees are removed.
   registered under (a dashboard fact); `meta_callbacks.py::app_secrets` accepts either configured
   secret, Instagram first; the Facebook one is the last legacy-named credential. The ruling is
   which app the URLs are registered under; the offered instrument is a log line naming which
-  candidate verified — by position, never by value — and one press of Meta's test button.
+  candidate verified — by position, never by value — and one press of Meta's test button. (The
+  instrument shipped 2026-09-21 as PR #1373 — the entry of that day below.)
 - **The README, a LICENSE and the mission page** are the docs PR this entry ships in: the README
   said "see LICENSE file" with none in the tree; `PROJECT_MISSION.md` described the retired tier's
   model (a Telegram identity managing "instances" that were group chats) and now describes the one
@@ -1753,6 +1754,68 @@ prompt sweeps had nothing to mint; the first card delivered as `svc_worker` is t
 slot's logs. `/health` still reports the API as `neondb_owner` / `bypassrls: yes`: the API's switch is
 the remaining half of #751.
 
+## #751 — the API switched; both services off the owner login (2026-09-21)
+
+**The API switched** — the owner ran `f4_switch.sh api` at 19:45:08 UTC (the state file's fourth
+line; the first attempt, on 2026-09-20, was rolled back within the hour when the fleet surfaces went
+blind, which 081 then fixed). Before: `db_role user=neondb_owner bypassrls=yes`, scheduling
+`healthy` (2 active accounts, 0 overdue), posting `posting` (posted_ever 119, intents_ever 248).
+After, on deployment `0a554321` (live within four minutes): `db_role user=svc_ingress
+bypassrls=no`, the same two verdicts with the same counts, the webhook registered, the pool at its
+ingress shape (10, the 1 s wait), the runner reporting nothing owed; the deployment's log carries
+only 200s — no permission denied, no traceback. The worker, on `svc_worker` since 15:51 UTC, kept
+its cadence through the API's switch (four reconciler jobs succeeded in the following five minutes,
+heartbeat 51 s, no failed or parked job since either switch, three cards sent since its own).
+
+**The first card as `svc_worker`** — seen at 16:30 UTC: `plan_slot` succeeded 16:30:03 (a story
+entered `awaiting_approval`), its approval card `sent` 16:30:07, `deliver_outbox` succeeded
+16:30:09. The runbook's worker half is fully observed.
+
+**Not done by the agent:** the runbook's page checks (sign in at storydump.app; Queue, Media
+Library, Settings) — the browser extension was not connected, and the sign-in is the owner's. They
+were the owner's confirmation before #751 closed, and the close records that they rendered.
+
+**Also this day:** #1372 (`41352195`) — the L.8 admission burst's wait is the worker's 3 s, which
+closes the queue's tolerance item below; #1373 (`e25b90b2`) — a verified Meta callback logs which app
+secret signed it, the instrument #739's ruling was waiting on, live on the API since 18:49 UTC.
+
+**#751 closed** by the owner at 19:54 UTC with the two observations quoted (the runbook's done-when)
+and the page checks — Queue, Media Library, Settings — rendered under `svc_ingress`; the plan
+README's F.4 row is ✅ with the tracker marked closed. #739's ruling stays the owner's: register the
+callback URLs under the Instagram app at submission, press Meta's test button, read the line, then
+the deletion PR.
+
+## #751 — the morning after, and the path both measurements missed (2026-09-22)
+
+**A day on both logins, read as the owner at 17:11 UTC.** Since the worker's switch: 18 stories
+posted; 1,510 reconciler, 46 delivery, 23 planning, 14 publish, 110 ingest-chunk and 10 sync jobs
+succeeded; no job failed. The API admitted 17 Telegram taps under `svc_ingress`, each audited as the
+tapping user — the approvals and skips behind the posts. `/health` reports `svc_ingress` / `bypassrls: false`
+at version 1.6.0; scheduling `healthy`, posting `posting` (135 posted). One planning job parked for
+review, at 14:00 UTC, for a reason unrelated to the logins: the `aftersaftersafters` workspace is
+active with no media source, no media and no Telegram binding, so its slot found nothing to post and
+nobody to tell, and #1090's rule parked the job rather than record a delivery. Each of its slots
+will do the same until a folder is connected, a group bound or the account paused — the owner's
+call.
+
+**A seventh tenant-less path, missed by both measurements and every lens.**
+`ig_credentials.token_for_account` opened a bare `async_sessionmaker` with no GUCs at all when called
+without a workspace — the class the measurements hunted, under a third spelling (they looked for
+`apply_gucs(tenant_id="")` and the GUC-less sessions already known). The tech-debt audit flagged it
+as TD-B17 (#1369) before either switch; #1390 deleted the branch on 2026-09-22 at 15:56 UTC. It was
+latent in production: only the usage pre-check called it that way, and the pre-check is armed by
+`TARGET_USAGE_PRECHECK_ENABLED`, which the worker does not set — no deploy log in the window carries
+its "armed" line, and the worker that ran the window's first two posts logged no pre-check failure.
+Armed, it would have failed open (proceed; Meta's error 9 stays the arbiter).
+
+**The class sweep, after the fact, on `main` at `29acea2e`:** every site in `src/` that opens a
+session outside the unit of work — raw `engine.begin()` / `engine.connect()`, bare
+`async_sessionmaker`, and `apply_gucs(tenant_id="")` — either claims its tenant before touching a
+policy-covered table, reads through a door (081, 082, `fn_memberships_for_caller`,
+`fn_invitation_accept`, the clock and claim doors), or touches only tables whose policies admit it
+with no tenant (the auth and user planes, `rate_counters`, the system lane's `jobs`, the catalogs).
+No eighth path.
+
 ## Owner-decision queue
 
 - **The PITR window is 24 hours, not 7 days.** The project's `history_retention_seconds` is 86400;
@@ -1771,7 +1834,17 @@ the remaining half of #751.
 - ~~A latent CI flake: the skip ceiling meets a clock-of-day skip.~~ CLOSED by #1317 (`deb29c2`): the
   cap-wait test gives its account a noon timezone and no longer skips, after the flake blocked the API's
   deploy three times.
-- **A startup secret check for the target tier?** The legacy `ConfigValidator` (deleted with phase 01) checked `ENCRYPTION_KEY` at boot; nothing in the target tier does the same at import. A decision, not a regression.
+- ~~**A startup secret check for the target tier?**~~ BUILT by #1401 (ruled in chat on 2026-09-25, after
+  the assessment: a true need, and the small version of it). The legacy `ConfigValidator` (deleted with
+  phase 01) had checked `ENCRYPTION_KEY` at boot, and its absence was worse than a decision: every decrypt
+  door caught a ring that could not load as a corrupt row, so the first refresh after a deploy without the
+  key would have flipped the one live Instagram account to `reauth_required` and messaged its owner to
+  reconnect. Both roots now refuse to boot on `RingUnavailable`, and every door builds the ring before its
+  `try`. Measured 2026-09-25: both services hold the same `ENCRYPTION_KEY` (compared without printing it),
+  `ENCRYPTION_KEYS` is unset on both, and there is one live `ig_login` and one `gdrive` credential.
+  **Deferred, the owner's, for when a rotation is planned:** a canary that decrypts one stored ciphertext at
+  boot — the only check that catches a wrong key that is still a valid Fernet key (a dev key pasted into
+  production). It needs a door: both runtime logins read `oauth_credentials` only under a workspace claim.
 - **Phase 02 premise findings from round 1:** `unit_of_work.async_database_url()` falls back to the
   legacy `DB_*` fields when `TARGET_DATABASE_URL` is unset — with the legacy loops gone, a boot
   without the variable (a local `make run`, a preview service) runs the target worker against the
@@ -1786,11 +1859,26 @@ the remaining half of #751.
   app's own two on Vercel stay); replace `.claude/settings.json:54-59`'s four deny rules that
   name the deleted legacy CLI's commands (commands that no longer exist) — the `python -m src.main`
   rules stay.
-- **`railway.toml`'s residue** (F2: untouched here): the build command still runs `mkdir -p
+- ~~**`railway.toml`'s residue** (F2: untouched here): the build command still runs `mkdir -p
   /tmp/media` for a directory nothing reads, and `drainingSeconds`' comment explains a Telegram polling
-  session nothing holds. A comment-and-build-line edit, the owner's call on when.
-- **The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
-  containing `@` mis-parses into the host. Local development only.
+  session nothing holds.~~ CLOSED 2026-09-22 (the branch `fix/tearout-queue-residue`): the build no
+  longer makes `/tmp/media`, the legacy tier's `MEDIA_DIR`; the `drainingSeconds` comment had already been
+  rewritten on `main`.
+- ~~**The Makefile's `APP_DB_URL` does not URL-encode `DB_PASSWORD`** (pre-existing): a password
+  containing `@` mis-parses into the host. Local development only.~~ CLOSED 2026-09-22 (the same
+  branch): `scripts/app_db_url.py` percent-encodes every part, and the recipe hands it each field
+  quoted exactly as psql gets it (the password as in `PGPASSWORD`, the other four bare, as in
+  `PG_OPTS`), so the runner step connects with what the psql step did. The same bug in the test
+  harness's three URL builders (`settings.test_database_url`, `unit_of_work.async_database_url`, the
+  gates' `_dsn`) is fixed with it: all four encode through `src/config/db_url.py`. Twenty-five tests,
+  thirteen of them through `make` itself.
+- **The Makefile's psql, createdb, dropdb and pg_dump recipes paste `DB_PASSWORD` into a shell line**
+  (`PGPASSWORD="$(DB_PASSWORD)"`, nine lines across eight targets; #1394's re-verify lenses): a
+  password carrying `"` or a backtick breaks the line, a `$` that starts a name is expanded in it,
+  and a single-quoted `.env` password keeps its quotes. Local development only, and `make init-db`'s
+  runner step now matches psql's rather than diverging from it. Handing the fields over as
+  environment variables would stop the shell reading them, though a quoted `.env` value would still
+  arrive with its quotes — the owner's call on whether local tooling is worth it.
 - **Found by phase 05's documentation pass, outside a docs phase's scope (code, config, product copy) —
   each with its evidence, none fixed here:** `storydump_cli/output.py:642` reads the pool keys `in_use`
   and `peak`, `/health` emits `checked_out` and `checked_out_peak`, and the fixture at
@@ -1813,6 +1901,20 @@ the remaining half of #751.
   safety block's "All bot interactions go through the database or the user's own device" predates the
   CLI; `landing/.env.local.example` still lists `JWT_SECRET` and `NEXT_PUBLIC_SITE_URL`, which nothing
   reads.
+  **Status, measured on `main` at `29acea2e` (2026-09-22).** Fixed: the CLI's pool keys and settings
+  hint (#1324), the `/start inv-` docstrings (they now say the lane is unregistered), the stale legacy
+  comments (the source modules' headers and the coverage policy's clock-skip note on `main`; the
+  migration gate's docstring, which still listed the parity-against-models arm phase 01 deleted, on
+  the branch `fix/tearout-queue-residue`), `test-quick`'s coverage, the mission page and the LICENSE (#1325), the landing example's two
+  dead variables, and the schema-drift workflow's "dormant" (gone on `main`; the branch drops a second
+  stale line, the summary's "`legacy` is not compared"). Open, each
+  with a home: `reap_expired`'s 6 h cadence is #1329, where the case of a worker dying while it holds
+  the reaper's own lease is now recorded (nothing would recover a lease again); `start_router.REFUSAL`
+  belongs to the `inv-` lane, designed and deliberately unwired (#1172); the `instagram_business_basic`
+  copy is the owner's to settle before submitting (`meta-app-review.md` now says so at the copy); the
+  safety block's Telegram sentence is the owner's. The worker probe (`worker_health.py` since the
+  rename) still reads a replica that never wins the clock election as stalled — latent at production's
+  one replica (`numReplicas: 1`), live the day a second is added; no issue filed.
 - **The epic's closure list (#1216's Blocks), measured 2026-09-18 — an agent closes none of them:**
   #1205 and #1222 closed with phase 02. #941 (the sixteenth legacy table "with no disposition") has
   one: `archive.posting_history_dedup_archive_pre_cutover_20260917` exists in production (078) and 079
@@ -1854,6 +1956,6 @@ the remaining half of #751.
 - ~~**#751 part 2 — the worker's switch, after PR #1349 merges (the owner's).**~~ DONE 2026-09-21 —
   the entry above: #1349 merged as `ea788875` (15:39 UTC), 082 applied by the worker's predeploy at
   15:40:49 UTC, the owner ran `f4_switch.sh worker` at 15:51:15 UTC and the worker runs as
-  `svc_worker`. **Still owed: the API's own switch** (`f4_switch.sh api`), independent, its
-  precondition met since 081; and the first card delivered as `svc_worker`, to be read off the next
-  slot's logs.
+  `svc_worker`. The API's own switch followed at 19:45 UTC and the first card as `svc_worker` was
+  seen at 16:30 UTC (the entry of 2026-09-21 below): both of #751's switches are done; the close is
+  the owner's.

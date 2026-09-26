@@ -67,6 +67,13 @@ the leak:
    workspace's, whenever the oldest due story is elsewhere — and the finalization's `UPDATE jobs
    … WHERE id = :id AND lease_token = :token` matches no row under the policies: `JobFenced` on
    every planned slot after the switch. *(Found in review.)*
+8. **The credential read's workspace-less branch** — `ig_credentials.token_for_account` opened a
+   bare `async_sessionmaker` with no GUCs at all when called without a workspace, which only the
+   usage pre-check did. *(Missed by both measurements and every lens, which looked for empty-tenant
+   claims and the GUC-less sessions already known; found by the tech-debt audit as TD-B17, #1369,
+   and deleted by #1390 on 2026-09-22.)* Latent in production: the pre-check is armed only by
+   `TARGET_USAGE_PRECHECK_ENABLED`, which the worker does not set, and no deploy log carries its
+   "armed" line. Armed, it would have failed open — proceed, Meta's error 9 stays the arbiter.
 
 Grants (production, 2026-09-20): `svc_worker` holds SELECT, INSERT and UPDATE on all 26
 policy-covered tables and no DELETE; EXECUTE on every worker-side door. `svc_maintenance` holds

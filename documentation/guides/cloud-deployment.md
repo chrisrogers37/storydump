@@ -147,7 +147,7 @@ commands.
 
 | Key | Value | Effect |
 |---|---|---|
-| `buildCommand` | `pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media` | no `[cli]` extra: `keyring` does not ship to a service (`setup.py`) |
+| `buildCommand` | `pip install -r requirements.txt && pip install -e .` | no `[cli]` extra: `keyring` does not ship to a service (`setup.py`) |
 | `preDeployCommand` | `python -m scripts.migration_runner apply` | every deploy of either service applies pending migrations first; the runner's advisory lock serializes the two, and a failing migration aborts the deploy with the old version still serving |
 | `healthcheckPath` | `/health` | both services answer it (below) |
 | `restartPolicyType` | `ON_FAILURE`, 10 retries | |
@@ -195,7 +195,7 @@ reads. Variables are per service on Railway.
 | `TARGET_DATABASE_URL` | The runtime login. The worker refuses to boot without it (exit 2, naming it); the API answers 503 on every data route | `postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=require` |
 | `TARGET_TELEGRAM_BOT_TOKEN` | The one bot. The worker sends with it; the API registers the webhook and answers taps with it. Without it the worker runs with its Telegram channel parked | `123456:ABC-DEF1234ghIkl` |
 | `TARGET_TELEGRAM_BOT_USERNAME` | That bot's @username, without the @. A token whose bot is not this one parks the channel too | `storydump_app_bot` |
-| `ENCRYPTION_KEY` | Fernet key for the stored OAuth credentials (`ENCRYPTION_KEYS`, newest first, for rotation) | Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `ENCRYPTION_KEY` | Fernet key for the stored OAuth credentials (`ENCRYPTION_KEYS`, newest first, for rotation) — the SAME key on both services. Neither boots without a valid one: the deploy fails its health check and the previous deploy keeps serving (#1401) | Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The one Google OAuth client: sign-in and the Drive grant on the API, the hourly Drive token refresh on the worker (#1247) — the worker warns at boot without both | `xxx.apps.googleusercontent.com`, `GOCSPX-...` |
 | `WEB_APP_URL` | The web front end's origin: the one origin CORS admits, where a finished sign-in or OAuth leg lands, and the origin of the links the worker sends | `https://app.example.com` |
 
@@ -463,7 +463,7 @@ rate- or quota-limited.
 | Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. |
 | No cards arrive in the group | `storydump health` reports the webhook and scheduling; `storydump outbox --since 3h` shows what is owed or lost on the chats; verify `TARGET_TELEGRAM_BOT_TOKEN` is the bot named by `TARGET_TELEGRAM_BOT_USERNAME`. Check the worker's log for a parked channel. |
 | Taps on a card do nothing | `storydump webhook status`: the registration must include `callback_query`, and the door must accept the secret ([`telegram-webhook.md`](../operations/telegram-webhook.md)). |
-| `ENCRYPTION_KEY not configured` | Generate one: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| A deploy fails its health check, and its log shows `FATAL: the credential key ring cannot load` (worker) or `Refusing to start` (API) — e.g. `ENCRYPTION_KEY not configured` | `ENCRYPTION_KEY` is unset on that service or not a Fernet key, or `ENCRYPTION_KEYS` (which overrides it) holds a bad entry; the message names which. Set the key the other service holds — a NEW key cannot read the stored credentials. Only on a first install, generate one: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | An OAuth leg answers `503 … oauth not configured: set …` | Set the variables the message names on the API (`src/api/oauth_client.py:23-32`). |
 | OAuth callback fails with Meta's or Google's "redirect_uri" error | `OAUTH_REDIRECT_BASE_URL` must be the API's public origin, and the exact callback URI must be registered with the provider. |
 | An old Telegram button opens the web's sign-in page | That is the retired Mini App's URL answering as designed (`src/api/routes/retired.py`). |
