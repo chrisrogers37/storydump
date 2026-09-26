@@ -313,9 +313,9 @@ The `Procfile` names the two deployed processes; both run the one tier.
   `/health/scheduling` and `/health/posting`, the surfaces the fleet monitors
   poll), schema at `/openapi.json`, the resource and command surface under
   `/api/v1`, sign-in under `/auth`. Telegram's deliveries — `/start` links,
-  group joins, taps on a card — land here, on `POST /webhooks/telegram`. The
-  API registers that webhook on the bot at startup only in Railway's
-  `production` environment
+  group joins, a group's move to a supergroup, taps on a card — land here, on
+  `POST /webhooks/telegram`. The API registers that webhook on the bot at
+  startup only in Railway's `production` environment
   (`src/channels/telegram_webhook_registration.py::autoregister_enabled`), so a
   local API leaves the production bot alone unless
   `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` is switched on — never do that with

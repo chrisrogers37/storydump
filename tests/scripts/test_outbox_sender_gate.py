@@ -1910,3 +1910,99 @@ class TestACardIsRenderedAgainAtClaimTime:
             fetch=True,
         )[0][0]
         assert f"v1:post:{intent}" in stored and "📸 old" not in stored
+
+
+class TestTheSenderFollowsAGroupThatMoved:
+    """#743's backstop on the real worker: a group that became a supergroup
+    and whose migration notice never reached the ingress is found by its next
+    delivery — Telegram refuses the send to the old id and names the new one.
+    The binding follows, and the chat keeps receiving: the next sender for the
+    binding delivers to the successor. (The row that discovered the move is
+    the settle taxonomy's — a gone destination fails it outright.)"""
+
+    @pytest.mark.asyncio
+    async def test_the_next_delivery_reaches_the_new_chat(self, outbox_db):
+        import asyncio
+        import time as _time
+
+        from src.channels.telegram_transport import TelegramChatGone
+        from src.services.target.work_loop import WorkerConfig as _Cfg
+        from src.worker import compose
+        from tests.scripts.conftest import sweep_as_worker
+
+        old, new = (
+            f"-4{uuid.uuid4().int % 10**9:09d}",
+            "-100" + str(uuid.uuid4().int % 10**10).zfill(10),
+        )
+        binding = str(
+            _owner_exec(
+                outbox_db,
+                "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+                " VALUES (%s, 'telegram_group', %s) RETURNING id",
+                (outbox_db["ws"], old),
+                fetch=True,
+            )[0][0]
+        )
+        _enqueue(outbox_db, binding=binding, payload={"v": 1, "text": "a"})
+        follows = _enqueue(outbox_db, binding=binding, payload={"v": 1, "text": "b"})
+        _seed_sender_job(outbox_db, binding=binding)
+        delivered: list[tuple[str, str]] = []
+
+        class _Transport:
+            def for_chat(self, external_ref):
+                async def send(row):
+                    if external_ref == old:
+                        raise TelegramChatGone(
+                            "sendMessage: 400 Bad Request: group chat was"
+                            " upgraded to a supergroup chat",
+                            migrate_to=new,
+                        )
+                    delivered.append((external_ref, str(row["id"])))
+                    return f"tg-{row['id']}"
+
+                return send
+
+        def ref_now():
+            return _owner_exec(
+                outbox_db,
+                "SELECT external_ref, state FROM channel_bindings WHERE id = %s",
+                (binding,),
+                fetch=True,
+            )[0]
+
+        async def run_senders_until(done):
+            engine = _engine(outbox_db, pool_size=10)
+            try:
+                cfg = _Cfg(
+                    lane_concurrency={"interactive": 1, "bulk": 1},
+                    poller_interval_seconds=0.1,
+                    sender_hold_seconds=1.0,
+                    claim_idle_seconds=0.05,
+                    chat_limit=CHAT_LIMIT,
+                    chat_window_seconds=CHAT_WINDOW_S,
+                    global_limit=GLOBAL_LIMIT,
+                    global_window_seconds=GLOBAL_WINDOW_S,
+                )
+                app = compose(engine=engine, config=cfg, env={}, transport=_Transport())
+                loops = [wl for wl in app.loops if wl.lane == "interactive"]
+                tasks = [asyncio.create_task(wl.run()) for wl in loops]
+                deadline = _time.monotonic() + 10
+                while not done() and _time.monotonic() < deadline:
+                    await asyncio.sleep(0.05)
+                for wl in loops:
+                    wl.stop()
+                await asyncio.gather(*tasks)
+            finally:
+                await engine.dispose()
+
+        # The first sender meets the move, and the binding follows it.
+        await run_senders_until(lambda: ref_now()[0] == new)
+        assert ref_now() == (new, "active")
+
+        # The worker's sender sweep mints the binding's next sender while a row
+        # is pending; whatever reaches the chat from here goes to the new id.
+        await asyncio.to_thread(sweep_as_worker, outbox_db["worker"])
+        await run_senders_until(lambda: _state(outbox_db, follows)[0] == "sent")
+        assert _state(outbox_db, follows)[0] == "sent"
+        assert (new, str(follows)) in delivered
+        assert {ref for ref, _ in delivered} == {new}

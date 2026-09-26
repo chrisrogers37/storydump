@@ -565,18 +565,13 @@ class TestRetiringAndFollowingAChat:
         )
 
     def test_a_refused_repoint_leaves_the_session_usable_for_the_revoke(self, world):
-        """The caller's real shape: repoint, and revoke on the SAME session.
+        """The callers' real shape: repoint, and revoke on the SAME session.
 
-        `work_loop.py:485` does exactly this —
-
-            async with short() as writer:
-                followed = bool(moved) and await bindings.repoint(writer, ...)
-                if not followed:
-                    await bindings.revoke_by_id(writer, binding_id=...)
-
-        so when `repoint` swallows the unique violation and answers False, the
-        very next statement runs on a transaction Postgres has already
-        aborted. Every other test here calls `repoint` in a session of its
+        `follow_or_retire` does exactly this for both of them — the deliverer
+        and the migration notice — so when `repoint` swallows the unique
+        violation and answers False, the very next statement runs on a
+        transaction Postgres has already aborted unless the savepoint scoped
+        it (#1362). Every other test here calls `repoint` in a session of its
         own, which is why this survived: the abort is invisible once the
         session ends.
 
@@ -593,16 +588,15 @@ class TestRetiringAndFollowingAChat:
         # Workspace B already holds the id the upgrade would land on.
         _bind(world, "-1009000000030", ids=world["b"])
 
-        async def repoint_then_revoke(s):
-            followed = await bindings.repoint(
-                s, binding_id=str(row[0]), external_ref="-1009000000030"
-            )
-            assert followed is False, "the taken id must refuse the repoint"
-            # The caller does not open a new session for this.
-            return await bindings.revoke_by_id(s, binding_id=str(row[0]))
-
-        assert run(world, repoint_then_revoke) is True
+        followed = run(
+            world,
+            lambda s: bindings.follow_or_retire(
+                s, binding_id=str(row[0]), successor="-1009000000030"
+            ),
+        )
+        assert followed is False, "the taken id must refuse the repoint"
         assert _row(world, "-777000002")[1] == "revoked"
+        assert str(_row(world, "-1009000000030")[0]) == str(world["b"]["ws"])
 
 
 class TestTheJoinPathThroughTheDoors:
@@ -797,3 +791,242 @@ class TestTheJoinPathThroughTheDoors:
                 ),
             )
         assert self._role(world, world["a"]["ws"], world["a"]["user"]) == "owner"
+
+
+def _basic_group() -> str:
+    """A basic group's chat id — negative, without the `-100` a supergroup
+    carries. The id a migration retires."""
+    return f"-4{uuid.uuid4().int % 10**9:09d}"
+
+
+def _migrated_to(old: str, new: str, update_id: int) -> dict:
+    """The service message Telegram posts in the OLD group as it retires it
+    (Bot API `Message.migrate_to_chat_id`)."""
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": 41,
+            "date": 1790000000,
+            "from": {"id": 4040, "is_bot": False, "first_name": "admin"},
+            "chat": {"id": int(old), "type": "group", "title": "team"},
+            "migrate_to_chat_id": int(new),
+        },
+    }
+
+
+def _migrated_from(old: str, new: str, update_id: int) -> dict:
+    """The service message Telegram posts in the NEW supergroup (Bot API
+    `Message.migrate_from_chat_id`)."""
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": 1,
+            "date": 1790000000,
+            "from": {"id": 4040, "is_bot": False, "first_name": "admin"},
+            "chat": {"id": int(new), "type": "supergroup", "title": "team"},
+            "migrate_from_chat_id": int(old),
+        },
+    }
+
+
+def _dispatch(world, payload: dict):
+    """One admitted update through the real ingress dispatcher, on the door's
+    own connection shape: bare `svc_ingress`, no GUCs, the route's commit."""
+    from src.services.target.telegram_dispatch import TelegramDispatcher
+
+    async def go():
+        engine = create_async_engine(asyncpg_url(world["ingress"]), poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                who = (await conn.execute(text("SELECT current_user"))).scalar()
+                assert who == "svc_ingress", who
+                result = await TelegramDispatcher()(conn, payload)
+                await conn.commit()
+                return result
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(go())
+
+
+def _resolve(world, ref: str):
+    """What every inbound update from *ref* resolves to — a tap, a member
+    speaking: the one resolver, as `svc_ingress`."""
+    from src.services.target import tenant_resolution
+
+    async def go():
+        engine = create_async_engine(asyncpg_url(world["ingress"]), poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                return await tenant_resolution.resolve_chat(conn, "telegram_group", ref)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(go())
+
+
+def _held(world, ref: str):
+    """(workspace, state) of the binding holding *ref*, ids as text."""
+    row = _row(world, ref)
+    return None if row is None else (str(row[0]), row[1])
+
+
+def _binding_id(world, ref: str) -> str:
+    row = fetch_one(
+        world["stream"],
+        "SELECT id FROM channel_bindings WHERE external_ref = %s",
+        (ref,),
+    )
+    assert row is not None, f"no binding holds {ref}"
+    return str(row[0])
+
+
+class TestAGroupThatBecameASupergroupKeepsItsWorkspace:
+    """#743 on the target tier. Telegram retires a group's chat id when the
+    group is upgraded to a supergroup, and says so twice as it happens: a
+    service message in the old group naming its successor, and one in the new
+    supergroup naming its predecessor. Everything inbound resolves through the
+    binding's `external_ref`, so the binding has to follow the chat or the
+    workspace is unreachable from its own group."""
+
+    def test_the_old_groups_notice_moves_the_binding_to_the_new_id(self, world):
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        before = _binding_id(world, old)
+        other = _chat()  # the second tenant, which must not move
+        _bind(world, other, ids=world["b"])
+
+        _dispatch(world, _migrated_to(old, new, 700001))
+
+        after = _resolve(world, new)
+        assert after.workspace_id == str(world["a"]["ws"])
+        assert after.channel_binding_id == before, "the SAME binding, not a new one"
+        from src.exceptions.tenancy import TenantResolutionError
+
+        with pytest.raises(TenantResolutionError) as gone:
+            _resolve(world, old)
+        assert gone.value.reason == "unknown_binding"
+        assert _held(world, other) == (str(world["b"]["ws"]), "active")
+
+    def test_the_new_supergroups_notice_moves_it_just_the_same(self, world):
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        before = _binding_id(world, old)
+
+        _dispatch(world, _migrated_from(old, new, 700002))
+
+        after = _resolve(world, new)
+        assert (after.workspace_id, after.channel_binding_id) == (
+            str(world["a"]["ws"]),
+            before,
+        )
+
+    @pytest.mark.parametrize("to_first", [True, False], ids=["to-first", "from-first"])
+    def test_both_notices_arriving_move_it_once(self, world, to_first):
+        """Telegram sends both, in either order, and the second finds the old
+        id already released. It must be a quiet no-op — not an error, which
+        would roll the admission back and have Telegram redeliver it forever,
+        and not a second binding."""
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        before = _binding_id(world, old)
+        notices = [_migrated_to(old, new, 700011), _migrated_from(old, new, 700012)]
+        for notice in notices if to_first else reversed(notices):
+            _dispatch(world, notice)
+
+        (n,) = fetch_one(
+            world["stream"],
+            "SELECT count(*) FROM channel_bindings WHERE external_ref IN (%s, %s)",
+            (old, new),
+        )
+        assert n == 1
+        assert _resolve(world, new).channel_binding_id == before
+
+    def test_a_member_speaking_in_the_supergroup_joins_the_same_workspace(self, world):
+        """The join path is what a group does all day; after the move it has
+        to land in the workspace the group always belonged to."""
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        speaker = 500_000_000 + uuid.uuid4().int % 10**8
+        conn = psycopg2.connect(world["stream"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
+                (joiner,) = cur.fetchone()
+                cur.execute(
+                    "INSERT INTO user_identities (user_id, provider, external_id,"
+                    " display_name) VALUES (%s, 'telegram', %s, 'mover')",
+                    (str(joiner), str(speaker)),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _dispatch(world, _migrated_from(old, new, 700021))
+        said = _dispatch(
+            world,
+            {
+                "update_id": 700022,
+                "message": {
+                    "message_id": 2,
+                    "date": 1790000060,
+                    "text": "hello",
+                    "from": {"id": speaker, "is_bot": False},
+                    "chat": {"id": int(new), "type": "supergroup"},
+                },
+            },
+        )
+
+        assert said.outcome == "joined", said.outcome
+        (role,) = fetch_one(
+            world["stream"],
+            "SELECT role FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+            (str(world["a"]["ws"]), str(joiner)),
+        )
+        assert role == "member"
+
+    def test_a_successor_another_workspace_holds_retires_the_old_binding(self, world):
+        """The deliverer's rule, applied the moment Telegram says the chat
+        moved: the old id will never take a message again, and the new one is
+        already another binding's — one chat, one workspace — so the old
+        binding is revoked and the holder is left exactly as it was."""
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        _bind(world, new, ids=world["b"])
+
+        _dispatch(world, _migrated_from(old, new, 700031))
+
+        assert _held(world, old) == (str(world["a"]["ws"]), "revoked")
+        assert _held(world, new) == (str(world["b"]["ws"]), "active")
+
+    def test_a_chat_nobody_bound_is_followed_nowhere(self, world):
+        """Guards over-reach, and passes against a handler that does nothing,
+        so it is not evidence for the fix: a migration of a chat no workspace
+        holds must never mint a binding for the new id. That mint is exactly
+        how #743 stranded tenants on the legacy tier."""
+        old, new = _basic_group(), _chat()
+
+        _dispatch(world, _migrated_to(old, new, 700041))
+        _dispatch(world, _migrated_from(old, new, 700042))
+
+        assert _row(world, old) is None and _row(world, new) is None
+
+    def test_the_move_is_audited_as_the_system_on_telegrams_word(self, world):
+        """Nobody commanded the move: Telegram reported it. A row naming the
+        admin who upgraded the group would put a decision in their name."""
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        binding = _binding_id(world, old)
+
+        _dispatch(world, _migrated_to(old, new, 700051))
+
+        row = fetch_one(
+            world["stream"],
+            "SELECT actor_kind, actor_user_id, channel FROM audit_events"
+            " WHERE entity_kind = 'channel_binding' AND entity_id::text = %s"
+            "   AND detail->>'op' = 'UPDATE'"
+            " ORDER BY created_at DESC LIMIT 1",
+            (binding,),
+        )
+        assert row == ("system", None, "telegram")

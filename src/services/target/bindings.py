@@ -73,6 +73,7 @@ choice and should be reviewed as such.
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -255,19 +256,19 @@ async def revoke_by_id(session, *, binding_id: str) -> bool:
 
 async def repoint(session, *, binding_id: str, external_ref: str) -> bool:
     """A group became a supergroup: Telegram retires the old chat id and names
-    the new one. The binding follows the chat. If the new id is already
-    another binding's, the row is revoked instead — `uq_binding_external`
-    still holds one chat to one workspace."""
+    the new one, and the binding follows the chat. False when the new id is
+    already another binding's — `uq_binding_external` still holds one chat to
+    one workspace — and :func:`follow_or_retire` then revokes the row."""
     _, ref = _clean("supergroup", external_ref)
     try:
         # SAVEPOINT, not a bare statement (#1362): answering False here is only
-        # useful if the caller can still act on it, and `work_loop`'s hold does
-        # exactly that — `if not followed: await revoke_by_id(writer, ...)` on
-        # THIS session. A unique violation aborts the whole transaction in
-        # Postgres, so without the savepoint that revoke raises
-        # InFailedSQLTransactionError and the binding is left neither
-        # re-pointed nor revoked. The savepoint scopes the rollback to this
-        # statement and leaves the caller's transaction usable.
+        # useful if the caller can still act on it, and :func:`follow_or_retire`
+        # does exactly that — it revokes the binding on THIS session. A unique
+        # violation aborts the whole transaction in Postgres, so without the
+        # savepoint that revoke raises InFailedSQLTransactionError and the
+        # binding is left neither re-pointed nor revoked. The savepoint scopes
+        # the rollback to this statement and leaves the caller's transaction
+        # usable.
         async with session.begin_nested():
             result = await session.execute(
                 text(
@@ -281,3 +282,27 @@ async def repoint(session, *, binding_id: str, external_ref: str) -> bool:
             return False
         raise
     return result.rowcount > 0
+
+
+async def follow_or_retire(
+    session, *, binding_id: str, successor: Optional[str]
+) -> bool:
+    """The chat stopped taking messages at this binding's id: follow it to
+    *successor* — a group that became a supergroup, whose new id Telegram
+    names — or retire the binding when there is none, or when the successor is
+    already another binding's (:func:`repoint` refuses: one chat, one
+    workspace). The old id never takes a message again, so a binding that
+    cannot follow is revoked rather than left active on it. Returns whether
+    the binding followed.
+
+    The one rule for both places that learn a chat moved: the deliverer, from
+    a send refused with the successor named, and the live migration notice
+    (`chat_migration`). Two spellings are how they would come to disagree
+    about what a moved chat means. Runs in the caller's transaction;
+    :func:`repoint`'s savepoint is what leaves it usable for the revoke."""
+    if successor and await repoint(
+        session, binding_id=binding_id, external_ref=str(successor)
+    ):
+        return True
+    await revoke_by_id(session, binding_id=binding_id)
+    return False

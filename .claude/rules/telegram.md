@@ -43,8 +43,10 @@ was not executed is destroyed, wearing the shape of a successful dedup.
 
 ## The dispatcher (`telegram_dispatch.py`)
 
-Served (`TelegramDispatcher.__call__`, `:297`): a `callback_query` (the tap);
-`/start <payload>` for the prefixes `build_router` registers (`:274`) — `link-`
+Served (`TelegramDispatcher.__call__`, `:332`): a `callback_query` (the tap);
+a group's migration notice — Telegram retired the group's chat id for a
+supergroup's, and the binding follows it (`chat_migration.follow`, #743);
+`/start <payload>` for the prefixes `build_router` registers (`:308`) — `link-`
 (link a Telegram identity) and `bind-` (a group joins a workspace); and a
 message in a bound group (the people it shows become workspace members through
 `fn_group_member_seen`). Chat-typed COMMANDS are not served (#854): such an
@@ -122,7 +124,9 @@ and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
   provider's `retry_after` as a durable hold — never an in-task sleep.
 - A gone chat (`DestinationGone`: kicked, blocked, deleted, migrated) fails the
   row outright, and the sender re-points the binding at the successor chat or
-  revokes it (`work_loop.py:475`). It is a chat-level fact, never the
+  revokes it (`bindings.follow_or_retire`, the rule the migration notice uses
+  too — the notice normally moves the binding first, and this is the backstop
+  for one that never arrived). It is a chat-level fact, never the
   credential's.
 - The transport (`src/channels/telegram_transport.py`) probes `getMe` at worker
   start: a dead token, or a token for a bot other than

@@ -1,6 +1,7 @@
-"""The ingress dispatcher — the `/start` door (#1183) and the group join path (#1242).
+"""The ingress dispatcher — the `/start` door (#1183), the group join path (#1242)
+and a group's move to a supergroup (#743).
 
-Two things are served, and the bound is still worth stating:
+Three things are served, and the bound is still worth stating:
 
 - **`/start <payload>`** — `link-` (identity) and `bind-` (a group joins a
   workspace); `build_router` registers those two lanes and no other. The
@@ -11,6 +12,9 @@ Two things are served, and the bound is still worth stating:
   can see (the sender; the people a `new_chat_members` service message names)
   become members of the workspace the group is bound to, through the
   `fn_group_member_seen` door (`07` §14, built on #854's resolver door).
+- **A group's migration notice** — Telegram retired the group's chat id for a
+  supergroup's; the binding follows it (`chat_migration`), before anything
+  from the new id has to resolve through it.
 
 **Still not served: chat-inbound COMMANDS.** An "approve" typed in a group is
 not dispatched here; the resolver door exists now (`fn_resolve_binding`), so
@@ -43,6 +47,7 @@ from src.services.target import (
     rate_counters,
     callback_tokens,
     channel_bind,
+    chat_migration,
     commands,
     identity,
     identity_link,
@@ -330,6 +335,10 @@ class TelegramDispatcher:
         """
         if isinstance(payload.get("callback_query"), dict):
             return await self._tap(conn, payload)
+        moved = chat_migration.migration_of(payload)
+        if moved is not None:
+            old_ref, new_ref = moved
+            return await chat_migration.follow(conn, old_ref=old_ref, new_ref=new_ref)
         start_payload = StartRouter.payload_of(payload)
         people = membership_sync.group_members_of(payload)
         if people and (start_payload is None or start_payload == ""):

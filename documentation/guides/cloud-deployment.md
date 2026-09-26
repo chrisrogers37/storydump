@@ -280,8 +280,9 @@ The deployment runs **one** bot.
 No command list is registered with `/setcommands`. The bot serves `/start` with
 the two deep-link payloads the web mints — `link-` (a person's Telegram
 identity) and `bind-` (a group joins a workspace), the lanes `build_router`
-registers (`src/services/target/telegram_dispatch.py:274-282`) — group
-membership, and the buttons on the cards it sends. Commands typed in a chat are
+registers (`src/services/target/telegram_dispatch.py:308-318`) — group
+membership, a group's move to a supergroup (its binding follows the new chat
+id), and the buttons on the cards it sends. Commands typed in a chat are
 not dispatched (#854), and an invitation is accepted on the web, not in the
 chat.
 

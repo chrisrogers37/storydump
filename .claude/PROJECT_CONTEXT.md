@@ -121,7 +121,7 @@ names every one something reads.
 | `src/services/target/publish_pipeline.py` | Publishing a story to Instagram |
 | `src/services/target/media_sync.py` | Drive sync into the media pool |
 | `src/services/target/prompts.py`, `outbox.py` | The approval card and its delivery record |
-| `src/services/target/telegram_dispatch.py` | Inbound Telegram: taps, `/start`, group joins |
+| `src/services/target/telegram_dispatch.py` | Inbound Telegram: taps, `/start`, group joins, a group's move to a supergroup |
 | `src/channels/telegram_transport.py` | The Telegram HTTP transport |
 | `src/services/target/ops_views.py` | The ledger read views the CLI shows |
 | `src/services/target/vocabulary.py` | The closed vocabularies and the CLI's wire contract |
