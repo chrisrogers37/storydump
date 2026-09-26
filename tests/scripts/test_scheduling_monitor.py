@@ -509,8 +509,7 @@ def test_the_worker_thresholds_are_reachable_from_the_command_line(
     import scripts.scheduling_monitor as m
 
     sent = []
-    # Both derived from the default, so this keeps meaning "healthy under the
-    # default, an outage only under the flag" whatever the default becomes.
+    # Derived from the default, so both halves hold whatever it becomes.
     age = m.DEFAULT_WORKER_STALE_S // 2
     raw = body(
         active=0,
@@ -519,7 +518,6 @@ def test_the_worker_thresholds_are_reachable_from_the_command_line(
     monkeypatch.setattr(m, "fetch", lambda url, timeout: (200, raw))
     monkeypatch.setattr(m, "notify", lambda cmd, msg: sent.append(msg) or True)
 
-    # Half the default is inside it — nothing to say.
     assert m.classify(200, raw, threshold_s=T).state == NO_SIGNAL
 
     rc = m.main(

@@ -116,7 +116,7 @@ the election, so a second replica that never wins it would read as stuck here.
 
 | Instrument | What it reads | The reading that means trouble |
 |---|---|---|
-| `storydump health` | the API's `/health/scheduling`, judged by `scripts/scheduling_monitor.py`'s `classify` | `worker-down`: a due system job unclaimed for more than 900 s, or no system job finished for more than 600 s (ten beats of the 60 s `reconcile_ambiguous` sweep). `stalled`: an active account's slot cursor more than 600 s behind |
+| `storydump health` | the API's `/health/scheduling`, judged by `scripts/scheduling_monitor.py`'s `classify` | `worker-down`: a due system job unclaimed for more than 900 s, or no system job finished for more than 600 s. `stalled`: an active account's slot cursor more than 600 s behind |
 | `storydump deploys` | each service's latest deployments on Railway | the worker's latest row `CRASHED`, `FAILED` or `REMOVED` |
 | `storydump jobs --since 3h` | the workspace's jobs by kind × lane × state: `count`, `oldest run at`; a `failed` or `review_required` group carries samples (`id`, `attempts`, `run at`, `error`). `ready` and `leased` rows are listed at any age | a `ready` group whose `oldest run at` keeps receding; a `leased` group that never clears (a lapsed lease, above) |
 | `storydump outbox --since 3h` | pending, sending, ambiguous and failed cards by binding | `pending` growing for a binding: nothing is sending |

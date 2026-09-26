@@ -94,27 +94,23 @@ def test_clock_recurring_kinds_are_a_subset_of_the_live_registry():
     )
 
 
-def test_the_monitors_stale_threshold_spans_two_beats_of_the_fastest_kind():
-    """The fleet monitor calls the worker down when no system job has finished
-    for `DEFAULT_WORKER_STALE_S` (`scripts/scheduling_monitor.py`). It reads the
-    FRESHEST success, so the fastest recurring kind sets how stale a healthy
-    worker can look — and the bare composition is the set every deployment
-    mints, whatever else is configured.
-
-    Two beats must fit inside the threshold, or one late beat pages a healthy
-    worker. Retiring or slowing `reconcile_ambiguous` breaks this; the fix is to
-    raise the threshold with the cadence, never to loosen this assertion.
+def test_the_monitors_stale_threshold_spans_two_beats_plus_slack():
+    """`DEFAULT_WORKER_STALE_S` (`scripts/scheduling_monitor.py`) rests on the
+    fastest recurring kind of the bare composition — the set every deployment
+    mints. It must span two beats plus slack, or one late beat pages a healthy
+    worker. Retiring or slowing `reconcile_ambiguous` breaks this: raise the
+    threshold with the cadence, never loosen this assertion.
     """
     from scripts.scheduling_monitor import DEFAULT_WORKER_STALE_S
 
     app = compose(engine=object(), config=WorkerConfig(), env={})
-    cadences = {k: v for k, v in app.recurring.items() if k != "v"}
-    fastest = min(cadences.values())
-    assert 2 * fastest < DEFAULT_WORKER_STALE_S, (
-        f"a healthy worker can read {2 * fastest:.0f}s stale (two beats of the "
-        f"fastest recurring kind), past the monitor's {DEFAULT_WORKER_STALE_S}s "
-        f"worker-down threshold — raise DEFAULT_WORKER_STALE_S with the cadence: "
-        f"{cadences}"
+    cadences = {kind: secs for kind, secs in app.recurring.items() if kind != "v"}
+    beat = min(cadences.values())
+    assert 3 * beat <= DEFAULT_WORKER_STALE_S, (
+        f"the fastest recurring kind beats every {beat:.0f}s, so two beats plus "
+        f"slack ({3 * beat:.0f}s) no longer fit inside the monitor's "
+        f"{DEFAULT_WORKER_STALE_S}s worker-down threshold — raise "
+        f"DEFAULT_WORKER_STALE_S with the cadence: {cadences}"
     )
 
 

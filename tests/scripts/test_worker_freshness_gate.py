@@ -97,9 +97,8 @@ class TestTheAgeIsComputedFromRealTimestamps:
         """The arithmetic the alert rests on, executed against real rows.
 
         14h is far past the poller's default (`DEFAULT_WORKER_STALE_S`), so this
-        is the reading
-        that produces `WORKER_DOWN` — the one shape neither the stubbed unit
-        tests nor the healthy production read had ever exercised.
+        is the reading that produces `WORKER_DOWN` — the one shape neither the
+        stubbed unit tests nor the healthy production read had ever exercised.
         """
         _seed_system_job(
             conn,

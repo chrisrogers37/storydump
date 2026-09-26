@@ -86,13 +86,10 @@ work does — dead, stuck on a claim, or a deploy that left nothing serving. Tha
 last one pages on purpose: ten minutes with no worker is an outage, whatever
 caused it.
 
-**Anything under six hours depends on that beat.** Retire `reconcile_ambiguous`,
-make it conditional, or slow it, and this threshold must rise with it: the
-six-hourly kinds alone need roughly **13 h** (two beats plus slack), and 600 s
-against them pages a healthy worker every cycle. `tests/src/test_worker.py` fails
-when two beats of the bare composition's fastest recurring kind no longer fit
-inside `DEFAULT_WORKER_STALE_S`, so the change that breaks the coupling is the
-change that is told about it.
+**Anything under six hours depends on that beat.** If `reconcile_ambiguous` is
+retired, made conditional or slowed, `DEFAULT_WORKER_STALE_S` must rise with it —
+the six-hourly kinds alone need roughly 13 h — and `tests/src/test_worker.py`
+fails until it does.
 
 ## Deploying it
 

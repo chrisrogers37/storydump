@@ -141,11 +141,12 @@ WORKER_UNKNOWN = "worker-unknown"
 #: **Retire or slow that beat and this must rise with it.** The six-hourly kinds
 #: alone need roughly 13 h (two beats plus slack); 600 s against them pages a
 #: healthy worker every cycle. `tests/src/test_worker.py` fails when two beats
-#: of the bare composition's fastest recurring kind no longer fit inside this.
+#: plus slack of the bare composition's fastest recurring kind no longer fit.
 DEFAULT_WORKER_STALE_S = 600
 
-#: A due system job nobody claimed for this long. Far tighter than the staleness
-#: floor because it needs no cadence to elapse — the job is already late.
+#: A due system job nobody claimed for this long. It sees what the staleness
+#: floor cannot: one kind left unclaimed while another keeps finishing and keeps
+#: the age fresh — a stuck lane. For a dead worker the staleness floor fires first.
 DEFAULT_WORKER_OVERDUE_S = 900
 
 #: Nothing to say. Distinct from the alerting codes so a supervisor can route on
