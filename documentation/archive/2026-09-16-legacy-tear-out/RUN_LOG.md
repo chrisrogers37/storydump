@@ -1451,7 +1451,7 @@ The branch and the three worktrees are removed.
   `f03af19` at 00:42 UTC 2026-09-21.** `main`'s CI green (run 35548548648); the predeploy applied
   081 (ledger head 81, nine doors, twelve EXECUTE rows for the runtime logins); both services then
   redeployed on `2edf0cc` (#1335) with nothing to apply; health unchanged on the owner login. Part
-  2 is planned: `documentation/planning/2026-09-21-worker-login-doors/00_PLAN.md` — the worker's
+  2 is planned: `documentation/archive/2026-09-21-worker-login-doors/00_PLAN.md` — the worker's
   four tenant-less sweeps. Then the API switch again (`f4_switch.sh api`, which now prints
   the two fleet verdicts before and after; they must read the same), the runbook's page checks, and
   #751 stays open for part 2: the worker (`svc_worker` has no access to `oauth_states`, which the

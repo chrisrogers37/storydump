@@ -157,7 +157,7 @@ CREATE POLICY p_auth_sweep_states   ON oauth_states   FOR ALL TO svc_maintenance
 | EmailSender port + Resend default + bounce webhook | X.3 (the `send_email` job kind exists from L.2's registry; the `email_global` budget scope from L.2) — port and Resend sender built, parked without a provider ack; bounce webhook unbuilt |
 | rate_counters pre-auth scope (`preauth_ip`) | schema at L.2 (`02` §6); consumed here at X.3 |
 | `archive` schema (audit exports + M.3 snapshots) | created by the `02` §7-DDL block (F.2 schema landing); M.3 snapshot tables ALTER OWNER to svc_maintenance; exports live from S.4; access rules §4 |
-| service_tokens + CLI routing | X.2 (pass 5 — relocated from the deleted W.6); the person-bound subject (077, §23), the bearer principal with its route allowlist, the minting routes and the web's Settings › API tokens panel land with the v2 CLI plan's phase 01 (`documentation/planning/2026-09-15-cli-v2/`) |
+| service_tokens + CLI routing | X.2 (pass 5 — relocated from the deleted W.6); the person-bound subject (077, §23), the bearer principal with its route allowlist, the minting routes and the web's Settings › API tokens panel land with the v2 CLI plan's phase 01 (`documentation/archive/2026-09-15-cli-v2/`) |
 | hygiene ratchet patterns (provider_account_ref out of logs) | F.6 (second pattern list on the same ratchet) |
 
 ## §8. Intent self-transition guard (integrity, not auth — #883)
@@ -1454,7 +1454,7 @@ the prompt sweep inside a tenant job's transaction and then finalizes that job, 
 would fence under the last workspace prompted. The reconciler's poll and ladder count need no
 door: the sweep row names the workspace, and both read after claiming it. `svc_maintenance` gains
 the three SELECT policies it lacked and INSERT on `jobs`; EXECUTE for `svc_worker` on all five
-(`documentation/planning/2026-09-21-worker-login-doors/`).
+(`documentation/archive/2026-09-21-worker-login-doors/`).
 
 ```sql
 -- [§25 the worker's doors: the tenant-less sweeps read the estate through svc_maintenance]

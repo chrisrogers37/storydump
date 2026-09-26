@@ -15,12 +15,8 @@ documentation/
 ├── README.md (this file)          # Documentation index
 ├── ROADMAP.md                     # Historical: the v1.0.0 – v1.6.0 product roadmap and version history
 ├── planning/                       # Live plans and increment specs
+│   ├── README.md                              # what planning/ holds, and where a completed plan goes
 │   ├── 2026-08-02-consolidated-design-plan/   # THE authoritative plan (ratified, in execution)
-│   ├── 2026-09-09-telegram-interaction-at-throughput/  # the Telegram tap, built for throughput
-│   ├── 2026-09-15-cli-v2/                     # the `storydump` CLI — completed (spec: 2026-09-15-cli-v2-spec.md)
-│   ├── 2026-09-16-cli-v2-audit/               # the system review of the CLI surface
-│   ├── 2026-09-16-legacy-tear-out/            # retiring the legacy tier (#1216): five phases and the RUN_LOG
-│   ├── 2026-09-21-worker-login-doors/         # #751 part 2: doors for the worker's four tenant-less sweeps, then its switch
 │   └── investigations/                        # production investigations, one folder per incident (resolved ones move to archive/investigations/)
 ├── archive/                        # Completed, superseded and abandoned plans, and the legacy tier's pages (see archive/README.md)
 ├── guides/                         # How-to guides and tutorials
@@ -31,7 +27,7 @@ documentation/
 
 ## Planning & Architecture
 
-- `planning/investigations/` — production investigations (`/investigate-app`): one folder per incident, the record plus its fix plans — [2026-09-11 approved but never posted: the first fetch](planning/investigations/publish-first-fetch_2026-09-11/00_INVESTIGATION.md) (with its three follow-ups: the failure reporting, the fetch path, the float). Resolved: [2026-09-04 the sign-in bounce and the Instagram redirect](archive/investigations/2026-09-04-signin-bounce-and-instagram-redirect/00_INVESTIGATION.md) and [2026-09-06 the empty library after the first sync](archive/investigations/2026-09-06-empty-library-after-first-sync/00_INVESTIGATION.md), archived 2026-09-20.
+- `planning/investigations/` — production investigations (`/investigate-app`): one folder per incident, the record plus its fix plans. None is open. Resolved and archived: [2026-09-04 the sign-in bounce and the Instagram redirect](archive/investigations/2026-09-04-signin-bounce-and-instagram-redirect/00_INVESTIGATION.md) and [2026-09-06 the empty library after the first sync](archive/investigations/2026-09-06-empty-library-after-first-sync/00_INVESTIGATION.md) (2026-09-20), and [2026-09-11 approved but never posted: the first fetch](archive/investigations/publish-first-fetch_2026-09-11/00_INVESTIGATION.md) with its three follow-ups — the failure reporting, the fetch path, the float (2026-09-22).
 
 ### Consolidated design plan (2026-08-02) — authoritative
 **[2026-08-02-consolidated-design-plan/](planning/2026-08-02-consolidated-design-plan/README.md)** - RATIFIED, IN EXECUTION
@@ -40,14 +36,12 @@ documentation/
 - Position: Phases 0, F and L built · the M.3 window applied by hand; 3f ran as migration 078; 3g and the stand-down ran as the gated 079 and 080 in the owner's window on 2026-09-19 ([operations/legacy-window-close.md](operations/legacy-window-close.md)) · X.3 in progress (#1172) · S partly built
 
 ### Increment specs (live; each carries a status banner)
-- **[2026-09-09-telegram-interaction-at-throughput/](planning/2026-09-09-telegram-interaction-at-throughput/00_EPIC.md)** — the Telegram tap (W4) built for throughput: the tap, the API under load, worker throughput, tenant fairness (flagged) — RATIFIED 2026-09-09 (forks F1–F12 locked); phases 1, 2, 3a and 3b BUILT (2026-09-10/11, per the consolidated plan's *Live status*); phase 4 (tenant fairness) stays evidence-gated
-- **[2026-09-15-cli-v2/](planning/2026-09-15-cli-v2/00_EPIC.md)** — the `storydump` v2 CLI: API tokens, the eight read views, the write verbs, `health`/`deploys`/`webhook`/`doctor`, and the deletion of the legacy `cli/` — COMPLETED 2026-09-15 (spec: [2026-09-15-cli-v2-spec.md](planning/2026-09-15-cli-v2-spec.md), approved; the production probes the read views were built from are under `probes/`)
-- **[2026-09-16-cli-v2-audit/](planning/2026-09-16-cli-v2-audit/00_AUDIT.md)** — the system review of the v2 CLI surface and the fold of its findings
-- **[2026-09-16-legacy-tear-out/](planning/2026-09-16-legacy-tear-out/00_EPIC.md)** — retiring the legacy tier (#1216) in five PRs: delete the code, retire the settings and entry points, snapshot every legacy table into `archive` (078), ship the gated drop and stand-down (079, 080), bring the documentation to the end state — RATIFIED; all five phases shipped (#1316, #1319, #1318, #1321, #1322) and the owner's window ran on 2026-09-19: the `legacy` schema is dropped (079) and the migration window stood down (080). [RUN_LOG.md](planning/2026-09-16-legacy-tear-out/RUN_LOG.md) is the ledger
-- **[2026-09-21-worker-login-doors/](planning/2026-09-21-worker-login-doors/00_PLAN.md)** — #751 part 2: the worker measured statement by statement — four tenant-less sweeps of the class that blinded the health surfaces (the sender sweep, the prompt sweep, the stranded alert, the reconciler's poll) get doors for their reads and tenant claims for their writes; then the worker's switch.
+None open.
 
 ### Archive
 **[archive/README.md](archive/README.md)** — index of completed, superseded and abandoned plans, moved out of `planning/` on 2026-09-02: the two 2026-07-29 design packages the consolidated plan adjudicated, the 2026-07 full-system review, the 2026-05/06 Instagram investigations, the pre-refactor product phases (Shopify, Printify, LLM, order email, dashboard) and roadmap, and the completed credential-refactor, session-isolation, web-app-migration and Meta-launch plans.
+
+Moved on 2026-09-22: five completed plans — the Telegram tap at throughput, the v2 CLI and its spec, the CLI audit, the legacy tear-out, the worker's login doors — and the resolved first-fetch investigation. [archive/README.md](archive/README.md) carries their outcomes.
 
 Moved on 2026-09-20 (this audit), the five window-era increment specs — each with an archived banner:
 - **[2026-08-11-f1-ownership-inventory/](archive/2026-08-11-f1-ownership-inventory/README.md)** — F.1 ownership inventory and fail-closed interface spec — COMPLETED as legacy, then SUPERSEDED by `unit_of_work.py` / `tenant_resolution.py`; BUILT (#846) as the legacy repository layer's fail-closed interface, and RETIRED with that layer in the tear-out (phase 01, #1316); the target's equivalent is the unit of work, unconstructible without a tenant (`src/services/target/unit_of_work.py`)

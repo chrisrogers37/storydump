@@ -9,6 +9,8 @@ tags: [plan, cli, api, auth, devx, legacy-retirement, epic]
 links: []
 ---
 
+> **Archived 2026-09-22 — COMPLETED** (#1310, #1311, #1312; corrected by #1314).
+
 ## Summary
 
 Three PRs deliver the CLI the approved spec describes (`../2026-09-15-cli-v2-spec.md`): a pure
@@ -145,7 +147,7 @@ Lean: (a). Ratifier: owner. Status: locked — (a), owner 2026-09-15 (ironclad c
 - `../2026-09-15-cli-v2-spec.md` — the approved spec; `01_tokens.md`, `02_reads.md`,
   `03_writes-and-deletion.md` — the phases; `decisions/F2-token-storage.md`; `probes/*.sql` —
   the read views' definitions as validated against production 2026-09-13..15.
-- `../2026-08-02-consolidated-design-plan/04-execution-sequence.md` — X.2 (service tokens, CLI
+- `../../planning/2026-08-02-consolidated-design-plan/04-execution-sequence.md` — X.2 (service tokens, CLI
   over the API); `07-security-model.md` §1 and §7; `02-domain-model.md` §7.
 - #1216 — retire the legacy tier: this epic delivers its step 4 and the `cli/` part of step 3.
   #1124 — the operator principal in the command port (what F10(b) would have been).

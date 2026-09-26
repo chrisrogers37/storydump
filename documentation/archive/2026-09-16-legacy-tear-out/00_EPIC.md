@@ -8,6 +8,8 @@ tags: [plan, legacy-retirement, migrations, worker, api, docs, epic]
 links: [https://github.com/chrisrogers37/storydump/issues/1216]
 ---
 
+> **Archived 2026-09-22 — COMPLETED** (see **Completed 2026-09-19** under *Verification Checklist*).
+
 ## Summary
 
 Nothing deployed runs the legacy tier: the worker dispatches to the target composition root
@@ -273,9 +275,9 @@ picks (b) knowing its cost is a door change. Ratifier: owner. Status: locked (ch
 
 ## Companion Plans
 
-- `../2026-08-02-consolidated-design-plan/04-execution-sequence.md` — the M.3 window (3f, 3g,
+- `../../planning/2026-08-02-consolidated-design-plan/04-execution-sequence.md` — the M.3 window (3f, 3g,
   step 8) this epic completes; `00-fixed-constraints.md` FC-7 §6–§8 (legacy data untransformed).
-- `../../archive/2026-08-17-m2-rehearsal-spec/README.md` — the rehearsal that governs 3g (archived 2026-09-20).
+- `../2026-08-17-m2-rehearsal-spec/README.md` — the rehearsal that governs 3g (archived 2026-09-20).
 - `../2026-09-15-cli-v2/` — the CLI that replaced the legacy one (step 4, done).
 - `../2026-09-16-cli-v2-audit/00_AUDIT.md` — the docs population this epic's last phase finishes;
   it lands with PR #1314 (the audit fold), which merges before this plan's first phase begins —
