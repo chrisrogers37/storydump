@@ -34,9 +34,9 @@ Production lags `main` by design between merge and deploy, so prod-versus-repo
 is legitimately red for every migration PR from merge until deploy. Red would
 be its normal state, and a gate whose normal state is red gets weakened by
 whoever hits it first. It therefore SKIPS unless a target DSN is supplied, and
-only the scheduled `schema-drift` workflow supplies one. The blocking version
-of this belongs at deploy time — `railway.toml`'s dormant `preDeployCommand` —
-which is #1195's other half and an operator decision.
+only the scheduled `schema-drift` workflow supplies one. A blocking version of
+this would run at deploy time, beside the migration runner that `railway.toml`'s
+`preDeployCommand` has run since 2026-09-02 — an operator decision, not taken.
 
 ## Bounds — what this cannot see
 

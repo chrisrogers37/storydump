@@ -38,6 +38,7 @@ from sqlalchemy.pool import NullPool
 
 from scripts.migration_runner import MIGRATIONS_DIR, legacy_lineage_max
 
+from src.config.db_url import userinfo
 from src.config.settings import settings
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.conftest import SESSION_DB_SUFFIX as SESSION_TOKEN
@@ -259,8 +260,10 @@ def _dsn(database: str, user: str | None = None, password: str | None = None) ->
         if password is None and user == settings.DB_USER
         else (password if password is not None else TEST_ACTOR_PASSWORD)
     )
-    auth = user if not password else f"{user}:{password}"
-    return f"postgresql://{auth}@{settings.DB_HOST}:{settings.DB_PORT}/{database}"
+    # The user and password encoded (`src.config.db_url`): pasted raw, one
+    # carrying `@`, `/` or `%` was misread by libpq.
+    auth = userinfo(user, password)
+    return f"postgresql://{auth}{settings.DB_HOST}:{settings.DB_PORT}/{database}"
 
 
 def as_user(dsn: str, user: str) -> str:

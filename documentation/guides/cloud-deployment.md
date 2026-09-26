@@ -147,7 +147,7 @@ commands.
 
 | Key | Value | Effect |
 |---|---|---|
-| `buildCommand` | `pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media` | no `[cli]` extra: `keyring` does not ship to a service (`setup.py`) |
+| `buildCommand` | `pip install -r requirements.txt && pip install -e .` | no `[cli]` extra: `keyring` does not ship to a service (`setup.py`) |
 | `preDeployCommand` | `python -m scripts.migration_runner apply` | every deploy of either service applies pending migrations first; the runner's advisory lock serializes the two, and a failing migration aborts the deploy with the old version still serving |
 | `healthcheckPath` | `/health` | both services answer it (below) |
 | `restartPolicyType` | `ON_FAILURE`, 10 retries | |

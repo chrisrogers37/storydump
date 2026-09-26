@@ -67,7 +67,7 @@ normal state. Without its secret it reports **NOT CHECKED** rather than passing.
 Railway deploys both services from `main` (`ci.yml:4`). For each service,
 `railway.toml` decides what a deploy does:
 
-1. **Build** — `pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media`
+1. **Build** — `pip install -r requirements.txt && pip install -e .`
 2. **Pre-deploy** — `python -m scripts.migration_runner apply`: pending
    migrations are applied first, under the runner's advisory lock, so the two
    services' pre-deploys serialize and the second finds nothing pending. A
