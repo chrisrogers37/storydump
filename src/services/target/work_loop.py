@@ -482,11 +482,9 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # hold ends — the sweep will not mint for a revoked binding.
                 moved = result.get("migrate_to")
                 async with short() as writer:
-                    followed = bool(moved) and await bindings.repoint(
-                        writer, binding_id=binding_id, external_ref=str(moved)
+                    followed = await bindings.follow_or_retire(
+                        writer, binding_id=binding_id, successor=moved
                     )
-                    if not followed:
-                        await bindings.revoke_by_id(writer, binding_id=binding_id)
                 logger.warning(
                     "deliver_outbox %s: binding %s %s (chat gone%s)",
                     job["id"],

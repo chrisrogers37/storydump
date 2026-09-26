@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import bindings, outbox, prompts
 from src.services.target.bindings import BOUND, REBOUND, TAKEN, BindingRefused
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
@@ -27,6 +28,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     fetch_one,
+    in_user_plane,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -102,6 +104,16 @@ def _row(world, ref):
         "SELECT workspace_id, state FROM channel_bindings WHERE external_ref = %s",
         (ref,),
     )
+
+
+def _binding_id(world, ref: str) -> str:
+    row = fetch_one(
+        world["stream"],
+        "SELECT id FROM channel_bindings WHERE external_ref = %s",
+        (ref,),
+    )
+    assert row is not None, f"no binding holds {ref}"
+    return row[0]
 
 
 def _migrate(world, sql, params=()):
@@ -520,33 +532,24 @@ class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
 class TestRetiringAndFollowingAChat:
     def test_revoke_by_id_keeps_the_row_and_flips_it(self, world):
         _bind(world, "-1009000000010")
-        row = fetch_one(
-            world["stream"],
-            "SELECT id FROM channel_bindings WHERE external_ref = %s",
-            ("-1009000000010",),
-        )
-        moved = run(world, lambda s: bindings.revoke_by_id(s, binding_id=str(row[0])))
+        binding = _binding_id(world, "-1009000000010")
+        moved = run(world, lambda s: bindings.revoke_by_id(s, binding_id=binding))
         assert moved is True
         assert _row(world, "-1009000000010")[1] == "revoked"
         assert (
-            run(world, lambda s: bindings.revoke_by_id(s, binding_id=str(row[0])))
-            is False
+            run(world, lambda s: bindings.revoke_by_id(s, binding_id=binding)) is False
         )
 
     def test_repoint_follows_a_supergroup_upgrade_unless_the_new_id_is_taken(
         self, world
     ):
         _bind(world, "-777000001")
-        row = fetch_one(
-            world["stream"],
-            "SELECT id FROM channel_bindings WHERE external_ref = %s",
-            ("-777000001",),
-        )
+        binding = _binding_id(world, "-777000001")
         assert (
             run(
                 world,
-                lambda s: bindings.repoint(
-                    s, binding_id=str(row[0]), external_ref="-1009000000020"
+                lambda s: bindings._repoint(
+                    s, binding_id=binding, external_ref="-1009000000020"
                 ),
             )
             is True
@@ -557,26 +560,21 @@ class TestRetiringAndFollowingAChat:
         assert (
             run(
                 world,
-                lambda s: bindings.repoint(
-                    s, binding_id=str(row[0]), external_ref="-1009000000021"
+                lambda s: bindings._repoint(
+                    s, binding_id=binding, external_ref="-1009000000021"
                 ),
             )
             is False
         )
 
     def test_a_refused_repoint_leaves_the_session_usable_for_the_revoke(self, world):
-        """The caller's real shape: repoint, and revoke on the SAME session.
+        """The callers' real shape: repoint, and revoke on the SAME session.
 
-        `work_loop.py:485` does exactly this —
-
-            async with short() as writer:
-                followed = bool(moved) and await bindings.repoint(writer, ...)
-                if not followed:
-                    await bindings.revoke_by_id(writer, binding_id=...)
-
-        so when `repoint` swallows the unique violation and answers False, the
-        very next statement runs on a transaction Postgres has already
-        aborted. Every other test here calls `repoint` in a session of its
+        `follow_or_retire` does exactly this for both of them — the deliverer
+        and the migration notice — so when `_repoint` swallows the unique
+        violation and answers False, the very next statement runs on a
+        transaction Postgres has already aborted unless the savepoint scoped
+        it (#1362). Every other test here calls `_repoint` in a session of its
         own, which is why this survived: the abort is invisible once the
         session ends.
 
@@ -585,24 +583,19 @@ class TestRetiringAndFollowingAChat:
         it through one transaction.
         """
         _bind(world, "-777000002")
-        row = fetch_one(
-            world["stream"],
-            "SELECT id FROM channel_bindings WHERE external_ref = %s",
-            ("-777000002",),
-        )
+        binding = _binding_id(world, "-777000002")
         # Workspace B already holds the id the upgrade would land on.
         _bind(world, "-1009000000030", ids=world["b"])
 
-        async def repoint_then_revoke(s):
-            followed = await bindings.repoint(
-                s, binding_id=str(row[0]), external_ref="-1009000000030"
-            )
-            assert followed is False, "the taken id must refuse the repoint"
-            # The caller does not open a new session for this.
-            return await bindings.revoke_by_id(s, binding_id=str(row[0]))
-
-        assert run(world, repoint_then_revoke) is True
+        followed = run(
+            world,
+            lambda s: bindings.follow_or_retire(
+                s, binding_id=binding, successor="-1009000000030"
+            ),
+        )
+        assert followed is False, "the taken id must refuse the repoint"
         assert _row(world, "-777000002")[1] == "revoked"
+        assert _row(world, "-1009000000030") == (world["b"]["ws"], "active")
 
 
 class TestTheJoinPathThroughTheDoors:
@@ -797,3 +790,188 @@ class TestTheJoinPathThroughTheDoors:
                 ),
             )
         assert self._role(world, world["a"]["ws"], world["a"]["user"]) == "owner"
+
+
+def _basic_group() -> str:
+    """A basic group's chat id — negative, without the `-100` a supergroup
+    carries. The id a migration retires."""
+    return f"-4{uuid.uuid4().int % 10**9:09d}"
+
+
+def _message(update_id: int, chat_id: str, chat_type: str, *, sender=4040, **fields):
+    """One Telegram `message` update, in the Bot API's shape."""
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": update_id % 1000,
+            "date": 1790000000,
+            "from": {"id": sender, "is_bot": False, "first_name": "admin"},
+            "chat": {"id": int(chat_id), "type": chat_type},
+            **fields,
+        },
+    }
+
+
+def _migrated_to(old: str, new: str, update_id: int) -> dict:
+    """The notice Telegram posts in the OLD group as it retires it."""
+    return _message(update_id, old, "group", migrate_to_chat_id=int(new))
+
+
+def _migrated_from(old: str, new: str, update_id: int) -> dict:
+    """The notice Telegram posts in the NEW supergroup."""
+    return _message(update_id, new, "supergroup", migrate_from_chat_id=int(old))
+
+
+def _dispatch(world, payload: dict):
+    """One admitted update through the real ingress dispatcher, on the door's
+    own connection shape: bare `svc_ingress`, no GUCs, the route's commit."""
+    from src.services.target.telegram_dispatch import TelegramDispatcher
+
+    return asyncio.run(
+        in_user_plane(world["ingress"], lambda c: TelegramDispatcher()(c, payload))
+    )
+
+
+def _resolve(world, ref: str):
+    """What every inbound update from *ref* resolves to — a tap, a member
+    speaking: the one resolver, as `svc_ingress`."""
+    from src.services.target import tenant_resolution
+
+    return asyncio.run(
+        in_user_plane(
+            world["ingress"],
+            lambda c: tenant_resolution.resolve_chat(c, "telegram_group", ref),
+        )
+    )
+
+
+class TestAGroupThatBecameASupergroupKeepsItsWorkspace:
+    """#743 on the target tier. Telegram retires a group's chat id when the
+    group is upgraded to a supergroup, and says so twice as it happens: a
+    service message in the old group naming its successor, and one in the new
+    supergroup naming its predecessor. Everything inbound resolves through the
+    binding's `external_ref`, so the binding has to follow the chat or the
+    workspace is unreachable from its own group."""
+
+    def test_the_old_groups_notice_moves_the_binding_to_the_new_id(self, world):
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        before = _binding_id(world, old)
+        other = _chat()  # the second tenant, which must not move
+        _bind(world, other, ids=world["b"])
+
+        _dispatch(world, _migrated_to(old, new, 700001))
+
+        after = _resolve(world, new)
+        assert after.workspace_id == str(world["a"]["ws"])
+        assert after.channel_binding_id == before, "the SAME binding, not a new one"
+        with pytest.raises(TenantResolutionError) as gone:
+            _resolve(world, old)
+        assert gone.value.reason == "unknown_binding"
+        assert _row(world, other) == (world["b"]["ws"], "active")
+
+    def test_the_new_supergroups_notice_moves_it_just_the_same(self, world):
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        before = _binding_id(world, old)
+
+        _dispatch(world, _migrated_from(old, new, 700002))
+
+        after = _resolve(world, new)
+        assert (after.workspace_id, after.channel_binding_id) == (
+            str(world["a"]["ws"]),
+            before,
+        )
+
+    @pytest.mark.parametrize("to_first", [True, False], ids=["to-first", "from-first"])
+    def test_both_notices_arriving_move_it_once(self, world, to_first):
+        """Telegram sends both, in either order, and the second finds the old
+        id already released. It must be a quiet no-op — not an error, which
+        would roll the admission back and have Telegram redeliver it forever,
+        and not a second binding."""
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        before = _binding_id(world, old)
+        notices = [_migrated_to(old, new, 700011), _migrated_from(old, new, 700012)]
+        for notice in notices if to_first else reversed(notices):
+            _dispatch(world, notice)
+
+        (n,) = fetch_one(
+            world["stream"],
+            "SELECT count(*) FROM channel_bindings WHERE external_ref IN (%s, %s)",
+            (old, new),
+        )
+        assert n == 1
+        assert _resolve(world, new).channel_binding_id == before
+
+    def test_a_member_speaking_in_the_supergroup_joins_the_same_workspace(self, world):
+        """The join path is what a group does all day; after the move it has
+        to land in the workspace the group always belonged to."""
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        joiner, speaker = str(uuid.uuid4()), 500_000_000 + uuid.uuid4().int % 10**8
+        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (joiner,))
+        _migrate(
+            world,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'telegram', %s, 'mover')",
+            (joiner, str(speaker)),
+        )
+
+        _dispatch(world, _migrated_from(old, new, 700021))
+        said = _dispatch(
+            world, _message(700022, new, "supergroup", sender=speaker, text="hello")
+        )
+
+        assert said.outcome == "joined", said.outcome
+        (role,) = fetch_one(
+            world["stream"],
+            "SELECT role FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+            (world["a"]["ws"], joiner),
+        )
+        assert role == "member"
+
+    def test_a_successor_another_workspace_holds_retires_the_old_binding(self, world):
+        """The deliverer's rule, applied the moment Telegram says the chat
+        moved: the old id will never take a message again, and the new one is
+        already another binding's — one chat, one workspace — so the old
+        binding is revoked and the holder is left exactly as it was."""
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        _bind(world, new, ids=world["b"])
+
+        _dispatch(world, _migrated_from(old, new, 700031))
+
+        assert _row(world, old) == (world["a"]["ws"], "revoked")
+        assert _row(world, new) == (world["b"]["ws"], "active")
+
+    def test_a_chat_nobody_bound_is_followed_nowhere(self, world):
+        """Guards over-reach, and passes against a handler that does nothing,
+        so it is not evidence for the fix: a migration of a chat no workspace
+        holds must never mint a binding for the new id. That mint is exactly
+        how #743 stranded tenants on the legacy tier."""
+        old, new = _basic_group(), _chat()
+
+        _dispatch(world, _migrated_to(old, new, 700041))
+        _dispatch(world, _migrated_from(old, new, 700042))
+
+        assert _row(world, old) is None and _row(world, new) is None
+
+    def test_the_move_is_audited_as_the_system_on_telegrams_word(self, world):
+        """Nobody commanded the move: Telegram reported it. A row naming the
+        admin who upgraded the group would put a decision in their name."""
+        old, new = _basic_group(), _chat()
+        _bind(world, old, chat_type="group")
+        binding = _binding_id(world, old)
+
+        _dispatch(world, _migrated_to(old, new, 700051))
+
+        row = fetch_one(
+            world["stream"],
+            "SELECT actor_kind, actor_user_id, channel FROM audit_events"
+            " WHERE entity_kind = 'channel_binding' AND entity_id::text = %s"
+            "   AND detail->>'op' = 'UPDATE'"
+            " ORDER BY created_at DESC LIMIT 1",
+            (binding,),
+        )
+        assert row == ("system", None, "telegram")

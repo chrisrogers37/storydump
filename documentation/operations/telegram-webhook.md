@@ -139,7 +139,10 @@ committed. Refusals stay silent.
 **A kicked bot is not a dead token.** A bound group that removes the bot (or a
 deleted chat) makes the next delivery fail definitively; the worker revokes the
 binding and stops minting for it. A group upgraded to a supergroup is followed
-to its new chat id. Only a 401 from Telegram means the credential itself died.
+to its new chat id when Telegram announces the upgrade. A delivery that reaches
+the old id before then — the notice never arrived, or a send was already under
+way — finds the move itself: that one message fails, and the binding follows.
+Only a 401 from Telegram means the credential itself died.
 
 **Members.** Anyone who speaks in a bound group and has linked their Telegram
 (Settings › Integrations › Link Telegram) becomes a member of that workspace

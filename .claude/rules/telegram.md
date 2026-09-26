@@ -43,8 +43,10 @@ was not executed is destroyed, wearing the shape of a successful dedup.
 
 ## The dispatcher (`telegram_dispatch.py`)
 
-Served (`TelegramDispatcher.__call__`, `:297`): a `callback_query` (the tap);
-`/start <payload>` for the prefixes `build_router` registers (`:274`) — `link-`
+Served (`TelegramDispatcher.__call__`, `:332`): a `callback_query` (the tap);
+a group's migration notice — Telegram retired the group's chat id for a
+supergroup's, and the binding follows it (`chat_migration.follow`, #743);
+`/start <payload>` for the prefixes `build_router` registers (`:308`) — `link-`
 (link a Telegram identity) and `bind-` (a group joins a workspace); and a
 message in a bound group (the people it shows become workspace members through
 `fn_group_member_seen`). Chat-typed COMMANDS are not served (#854): such an
@@ -52,13 +54,13 @@ update is the named outcome `not_a_start`, logged — not a silent drop, and not
 a raise, because the delivery is already admitted and a raise would make
 Telegram redeliver it forever.
 
-The tap (`_tap`, `:321`): parse the token (`callback_tokens.parse`,
+The tap (`_tap`, `:360`): parse the token (`callback_tokens.parse`,
 `v1:<action>:<intent-uuid>`; actions `post`, `posted`, `skip`, `reject`, and the
 review card's `itposted`, `notposted`, `giveup`) → resolve the chat
 (`tenant_resolution.resolve_chat`, the `fn_resolve_binding` door) → resolve the
 tapper (`user_identities`; none is `unlinked`) → `apply_gucs` with the tenant,
 the actor and a 2 s `lock_timeout` → `commands.execute` as that member, inside a
-savepoint. Action → command is `ACTION_TO_COMMAND` (`:80`); the review buttons
+savepoint. Action → command is `ACTION_TO_COMMAND` (`:82`); the review buttons
 all run `resolve_review` with the resolution in `args`, and `notposted` carries
 the member's `not_posted` verdict.
 
@@ -122,8 +124,10 @@ and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
   provider's `retry_after` as a durable hold — never an in-task sleep.
 - A gone chat (`DestinationGone`: kicked, blocked, deleted, migrated) fails the
   row outright, and the sender re-points the binding at the successor chat or
-  revokes it (`work_loop.py:475`). It is a chat-level fact, never the
-  credential's.
+  revokes it (`bindings.follow_or_retire`, the rule the migration notice uses
+  too — the notice normally moves the binding first; this is the backstop for
+  a send that reaches the old id before it has). It is a chat-level fact,
+  never the credential's.
 - The transport (`src/channels/telegram_transport.py`) probes `getMe` at worker
   start: a dead token, or a token for a bot other than
   `TARGET_TELEGRAM_BOT_USERNAME`, parks `deliver_outbox` with the reason. The
