@@ -149,3 +149,13 @@ describe("createWorkspaceRefusalCopy keeps the branches that were already right"
     );
   });
 });
+
+describe("createWorkspaceRefusalCopy names a body the app could not read", () => {
+  it("says nothing was created, so trying again is an informed choice", () => {
+    // `malformed_body` is refused before the port is asked, so this much is
+    // known — unlike the fallback, which cannot say whether the port wrote.
+    expect(createWorkspaceRefusalCopy("malformed_body", 400)).toContain(
+      "Nothing was created.",
+    );
+  });
+});
