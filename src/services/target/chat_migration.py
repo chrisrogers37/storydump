@@ -13,10 +13,11 @@ whatever arrives from the new id — a tap, a member speaking — resolves to no
 workspace. :func:`follow` moves the binding when Telegram says the chat moved.
 
 The deliverer follows a moved chat too (`work_loop`'s sender hold), but only
-when a send to the old id comes back refused with the successor named: at the
-workspace's next delivery, and that delivery is the one that fails. It stays
-the backstop for a notice this never saw. Both apply one rule,
-`bindings.follow_or_retire`.
+when a send to the old id comes back refused with the successor named — and
+that send is the one that fails. It stays the backstop for any delivery that
+reaches the old id before the binding has moved: a notice this never saw, or
+a sender already mid-hold when it arrived (a hold keeps the chat id it read
+when it began). Both apply one rule, `bindings.follow_or_retire`.
 
 Why the notice can be acted on: the pair is Telegram's own — a service message
 is minted by Telegram, not typed by a person, and the delivery reached the
@@ -47,7 +48,8 @@ CHANNEL = bindings.channel_for_chat_type("group")
 
 #: The binding now holds the successor id.
 FOLLOWED = "chat_followed"
-#: The successor is already another binding's; the old binding was revoked.
+#: The binding did not follow and is revoked: the successor is another
+#: binding's (or the binding was revoked meanwhile).
 RETIRED = "chat_retired"
 
 
@@ -111,21 +113,13 @@ async def follow(conn, *, old_ref: str, new_ref: str) -> StartResult:
             tenant.channel_binding_id,
         )
         return StartResult(outcome=f"migration_{exc.reason}", handled=False)
-    if followed:
-        logger.info(
-            "chat migration %s -> %s: binding %s of workspace %s followed",
-            old_ref,
-            new_ref,
-            tenant.channel_binding_id,
-            tenant.workspace_id,
-        )
-        return StartResult(outcome=FOLLOWED, handled=True)
-    logger.warning(
-        "chat migration %s -> %s: the new id is another binding's; binding %s of"
-        " workspace %s revoked",
+    logger.log(
+        logging.INFO if followed else logging.WARNING,
+        "chat migration %s -> %s: binding %s of workspace %s %s",
         old_ref,
         new_ref,
         tenant.channel_binding_id,
         tenant.workspace_id,
+        "followed" if followed else "did not follow — revoked",
     )
-    return StartResult(outcome=RETIRED, handled=True)
+    return StartResult(outcome=FOLLOWED if followed else RETIRED, handled=True)

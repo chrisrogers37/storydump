@@ -3,12 +3,12 @@
 ## What this is
 
 **The one writer of `channel_bindings`.** :func:`bind`, :func:`revoke`,
-:func:`revoke_by_id` and :func:`repoint` are the whole write surface, and
-`channel_bind.handle_bind` — the `bind-` lane of the `/start` door — is what
-calls :func:`bind` when a group's ``/start bind-<state>`` consumes its
-one-shot state. Routing every write through one module is what makes
-`uq_binding_external` (a chat binds once) and D13 (`0..n` per workspace) hold
-by construction rather than by review.
+:func:`revoke_by_id` and :func:`follow_or_retire` are the whole write
+surface, and `channel_bind.handle_bind` — the `bind-` lane of the `/start`
+door — is what calls :func:`bind` when a group's ``/start bind-<state>``
+consumes its one-shot state. Routing every write through one module is what
+makes `uq_binding_external` (a chat binds once) and D13 (`0..n` per
+workspace) hold by construction rather than by review.
 
 `06`/D13 ratifies `0..n` bindings per workspace as a deliberate widening of
 #721's one-chat v1, and that widening is what the table's shape encodes.
@@ -240,10 +240,11 @@ async def revoke(
 
 
 async def revoke_by_id(session, *, binding_id: str) -> bool:
-    """Mark one binding revoked by its id — the deliverer's spelling, for the
-    moment a send comes back "chat gone" (the bot kicked or blocked, the chat
-    deleted). Same row-kept semantics as :func:`revoke`; the sweep stops
-    minting for it on its next pass (`work_loop`: `b.state = 'active'`)."""
+    """Mark one binding revoked by its id — what :func:`follow_or_retire` does
+    to a chat that will not take messages and cannot be followed (the bot
+    kicked or blocked, the chat deleted, a successor another binding holds).
+    Same row-kept semantics as :func:`revoke`; the sweep stops minting for it
+    on its next pass (`work_loop`: `b.state = 'active'`)."""
     result = await session.execute(
         text(
             "UPDATE channel_bindings SET state = 'revoked'"
@@ -254,11 +255,13 @@ async def revoke_by_id(session, *, binding_id: str) -> bool:
     return result.rowcount > 0
 
 
-async def repoint(session, *, binding_id: str, external_ref: str) -> bool:
+async def _repoint(session, *, binding_id: str, external_ref: str) -> bool:
     """A group became a supergroup: Telegram retires the old chat id and names
     the new one, and the binding follows the chat. False when the new id is
     already another binding's — `uq_binding_external` still holds one chat to
-    one workspace — and :func:`follow_or_retire` then revokes the row."""
+    one workspace. Private: a False left unacted on is a binding still active
+    on a dead id, so the only caller is :func:`follow_or_retire`, which
+    revokes the row."""
     _, ref = _clean("supergroup", external_ref)
     try:
         # SAVEPOINT, not a bare statement (#1362): answering False here is only
@@ -290,7 +293,7 @@ async def follow_or_retire(
     """The chat stopped taking messages at this binding's id: follow it to
     *successor* — a group that became a supergroup, whose new id Telegram
     names — or retire the binding when there is none, or when the successor is
-    already another binding's (:func:`repoint` refuses: one chat, one
+    already another binding's (:func:`_repoint` refuses: one chat, one
     workspace). The old id never takes a message again, so a binding that
     cannot follow is revoked rather than left active on it. Returns whether
     the binding followed.
@@ -299,9 +302,9 @@ async def follow_or_retire(
     a send refused with the successor named, and the live migration notice
     (`chat_migration`). Two spellings are how they would come to disagree
     about what a moved chat means. Runs in the caller's transaction;
-    :func:`repoint`'s savepoint is what leaves it usable for the revoke."""
-    if successor and await repoint(
-        session, binding_id=binding_id, external_ref=str(successor)
+    :func:`_repoint`'s savepoint is what leaves it usable for the revoke."""
+    if successor and await _repoint(
+        session, binding_id=binding_id, external_ref=successor
     ):
         return True
     await revoke_by_id(session, binding_id=binding_id)

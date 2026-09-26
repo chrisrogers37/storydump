@@ -54,13 +54,13 @@ update is the named outcome `not_a_start`, logged — not a silent drop, and not
 a raise, because the delivery is already admitted and a raise would make
 Telegram redeliver it forever.
 
-The tap (`_tap`, `:321`): parse the token (`callback_tokens.parse`,
+The tap (`_tap`, `:360`): parse the token (`callback_tokens.parse`,
 `v1:<action>:<intent-uuid>`; actions `post`, `posted`, `skip`, `reject`, and the
 review card's `itposted`, `notposted`, `giveup`) → resolve the chat
 (`tenant_resolution.resolve_chat`, the `fn_resolve_binding` door) → resolve the
 tapper (`user_identities`; none is `unlinked`) → `apply_gucs` with the tenant,
 the actor and a 2 s `lock_timeout` → `commands.execute` as that member, inside a
-savepoint. Action → command is `ACTION_TO_COMMAND` (`:80`); the review buttons
+savepoint. Action → command is `ACTION_TO_COMMAND` (`:82`); the review buttons
 all run `resolve_review` with the resolution in `args`, and `notposted` carries
 the member's `not_posted` verdict.
 
@@ -125,9 +125,9 @@ and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
 - A gone chat (`DestinationGone`: kicked, blocked, deleted, migrated) fails the
   row outright, and the sender re-points the binding at the successor chat or
   revokes it (`bindings.follow_or_retire`, the rule the migration notice uses
-  too — the notice normally moves the binding first, and this is the backstop
-  for one that never arrived). It is a chat-level fact, never the
-  credential's.
+  too — the notice normally moves the binding first; this is the backstop for
+  a send that reaches the old id before it has). It is a chat-level fact,
+  never the credential's.
 - The transport (`src/channels/telegram_transport.py`) probes `getMe` at worker
   start: a dead token, or a token for a bot other than
   `TARGET_TELEGRAM_BOT_USERNAME`, parks `deliver_outbox` with the reason. The

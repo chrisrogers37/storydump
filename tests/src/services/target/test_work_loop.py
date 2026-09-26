@@ -849,7 +849,7 @@ class TestDeliverOutboxRetiresAGoneChat:
 
         monkeypatch.setattr(work_loop.outbox, "OutboxPoller", _Poller)
         monkeypatch.setattr(work_loop.bindings, "revoke_by_id", revoke_by_id)
-        monkeypatch.setattr(work_loop.bindings, "repoint", repoint)
+        monkeypatch.setattr(work_loop.bindings, "_repoint", repoint)
         return seen
 
     async def test_a_kicked_bot_revokes_the_binding(self, gone):

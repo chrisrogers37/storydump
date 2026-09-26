@@ -194,8 +194,9 @@ def _tenant_session_factory(outbox_db, sessionmaker):
     return _factory
 
 
-def _new_binding(outbox_db) -> str:
-    """A binding nobody else is using.
+def _new_binding(outbox_db, external_ref=None) -> str:
+    """A binding nobody else is using — on *external_ref* when the scenario
+    needs a real chat id.
 
     The fixture is module-scoped (a role-carrying template cannot be held),
     so every scenario mints its own binding rather than sharing one — the
@@ -208,7 +209,7 @@ def _new_binding(outbox_db) -> str:
             outbox_db,
             "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
             " VALUES (%s, 'telegram_group', %s) RETURNING id",
-            (outbox_db["ws"], f"tg-{uuid.uuid4().hex[:10]}"),
+            (outbox_db["ws"], external_ref or f"tg-{uuid.uuid4().hex[:10]}"),
             fetch=True,
         )[0][0]
     )
@@ -1924,7 +1925,6 @@ class TestTheSenderFollowsAGroupThatMoved:
     @pytest.mark.asyncio
     async def test_the_next_delivery_reaches_the_new_chat(self, outbox_db):
         import asyncio
-        import time as _time
 
         from src.channels.telegram_transport import TelegramChatGone
         from src.services.target.work_loop import WorkerConfig as _Cfg
@@ -1934,15 +1934,7 @@ class TestTheSenderFollowsAGroupThatMoved:
             f"-4{uuid.uuid4().int % 10**9:09d}",
             "-100" + str(uuid.uuid4().int % 10**10).zfill(10),
         )
-        binding = str(
-            _owner_exec(
-                outbox_db,
-                "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
-                " VALUES (%s, 'telegram_group', %s) RETURNING id",
-                (outbox_db["ws"], old),
-                fetch=True,
-            )[0][0]
-        )
+        binding = _new_binding(outbox_db, external_ref=old)
         _enqueue(outbox_db, binding=binding, payload={"v": 1, "text": "a"})
         follows = _enqueue(outbox_db, binding=binding, payload={"v": 1, "text": "b"})
         delivered: list[tuple[str, str]] = []
@@ -1982,8 +1974,8 @@ class TestTheSenderFollowsAGroupThatMoved:
             loops = [wl for wl in app.loops if wl.lane == "interactive"]
             tasks = [asyncio.create_task(wl.run()) for wl in loops]
             tasks.append(asyncio.create_task(SenderSweeper(app).run(stop)))
-            deadline = _time.monotonic() + 30
-            while _time.monotonic() < deadline:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
                 state = await asyncio.to_thread(_state, outbox_db, follows)
                 if state[0] == "sent":
                     break
