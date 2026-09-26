@@ -18,6 +18,12 @@ the typed taxonomy the pipeline routes on:
   effect definitively did not happen and the ladder may retry — never a park;
 - no token for the account (:class:`IgCredentialDead`) → the retryable Meta
   error with code 190 (OAuth), which the pipeline hands straight to a human;
+- a key ring this process cannot build (:class:`RingUnavailable`) → code 0,
+  as the floor's refusal: nothing left the process, and the account is not
+  what is broken, so 190 would hand a healthy destination to a human with the
+  wrong remedy. Left untyped it would be worse — the pipeline reads an
+  untyped exception out of ``publish`` as a lost response, and a story that
+  was never sent would park as "maybe posted";
 - anything untyped propagates: a bug must look like a crash, not a retry.
 
 **One attempt per effect.** The floor's default policy retries a transport
@@ -58,6 +64,7 @@ from src.services.target.meta_adapter import (
     MetaRetryableError,
     classify_error,
 )
+from src.services.target.oauth_states import RingUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +233,12 @@ class InstagramGraphAdapter:
             )
         except IgCredentialDead as exc:
             raise MetaRetryableError(code=OAUTH_ERROR_CODE, message=str(exc)) from exc
+        except RingUnavailable as exc:
+            # The header's code-0 case: nothing was sent, the account stands.
+            raise MetaRetryableError(
+                code=0,
+                message=f"no call made: this process's key ring cannot load ({exc})",
+            ) from exc
 
     @staticmethod
     def _id_of(body: dict, method: str) -> str:

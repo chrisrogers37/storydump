@@ -20,6 +20,12 @@ sender, no `CLOUDINARY_*` trio parks the publish kind (the transit store goes
 live iff all three are set), a dead or wrong-bot token parks the channel at the
 startup probe. `fn_clock_tick`'s account/credential/source legs are the door's
 own; this process only chooses the recurring singletons it can actually run.
+
+Configuration the worker cannot run on at all refuses to BOOT instead
+(:func:`main`): no database URL, a credential key ring that cannot load, a lane
+concurrency the pool cannot hold. Parking the ring's kinds would be possible and
+worse — a parked worker passes the health check and replaces a working deploy
+with one that cannot read a single credential; refusing keeps the old one.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ from src.services.target import (
     email_sender,
     google_drive_adapter,
     jobs,
+    oauth_states,
     scheduler,
     unit_of_work,
     worker_health,
@@ -825,6 +832,25 @@ def main() -> None:
             f"FATAL: {unit_of_work.DATABASE_URL_VAR} is unset. The worker runs the"
             " target tier only and has no database to run it against; set"
             f" {unit_of_work.DATABASE_URL_VAR} on this service. Refusing to boot.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    # The key ring, before anything connects or binds. Built lazily, a missing
+    # or malformed key booted a worker that answered its health check and then
+    # failed credential reads one at a time — and before `RingUnavailable`
+    # existed, the refresh leg recorded each as a dead Instagram account and
+    # messaged its owner to reconnect. Refused here, ahead of `run`'s health
+    # listener, the deploy fails Railway's check and the previous one serves on.
+    try:
+        oauth_states.ring()
+    except oauth_states.RingUnavailable as exc:
+        # The remedy is named because the tempting one is wrong: a newly
+        # generated key boots, and then cannot read a stored credential.
+        print(
+            f"FATAL: the credential key ring cannot load. {exc}\nThe worker decrypts"
+            " every token it posts and syncs with, so it needs the key the stored"
+            " credentials were encrypted with — the API service holds the same one."
+            " Refusing to boot.",
             file=sys.stderr,
         )
         raise SystemExit(2)

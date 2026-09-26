@@ -296,12 +296,48 @@ async def reap_expired_states(conn, *, limit: int = 500) -> int:
 # ---------------------------------------------------------------------------
 
 
+class RingUnavailable(StorydumpError):
+    """The ring itself cannot be built: no key is configured, or a configured
+    key is not a Fernet key.
+
+    A fault of the PROCESS's configuration, never a fact about a credential,
+    so nothing may record it as one. The per-credential failure is a payload
+    that no key in a WORKING ring decrypts, and four doors classify it:
+    `ig_login_oauth.load_credential` (`07` §3's fail-closed flip, committed),
+    `ig_credentials.token_for_account` (a dead token, handed to review),
+    `drive_credentials.token_for_workspace` (a dead grant: the sources go to
+    `error` and the owner is alerted) and the revoke executor (`undecryptable`,
+    audited and abandoned). Before this type existed a missing key reached all
+    four as the same `ValueError` a corrupt row raises — the first refresh
+    after a deploy without `ENCRYPTION_KEY` would have flipped a live Instagram
+    account to `reauth_required` and messaged its owner to reconnect. So each
+    door builds the ring BEFORE its `try`: this passes the `try`, and each
+    door's own comment says where it goes from there.
+
+    Both roots build the ring at startup and refuse to boot on this
+    (`src/worker.py` `main`, `src/api/app.py` `_lifespan`), so a deployed
+    process that reaches a credential already holds a working ring: Railway's
+    health check fails the deploy and the previous one keeps serving. The
+    doors' ordering is for every entry point that skips a root.
+
+    The message is `TokenEncryption`'s: it names the variable that was read
+    (and a rotation entry's position), never a key.
+    """
+
+
 def ring():
     """The ONE ring door in the tier. Every credential writer and reader —
     `ig_login_oauth`'s, and the Drive leg's in `google_drive_oauth` and
     `drive_credentials` — encrypts and decrypts through this, so a ring change
     lands once. `07` §3 keeps the shipped env name `ENCRYPTION_KEYS`; the
-    import is lazy so `cryptography` loads on first use, not at import."""
+    import is lazy so `cryptography` loads on first use, not at import.
+
+    A ring that cannot be built raises :class:`RingUnavailable`, never the
+    bare `ValueError` a per-row decrypt failure also raises: the two are told
+    apart by type, not by parsing a message."""
     from src.utils.encryption import TokenEncryption
 
-    return TokenEncryption()
+    try:
+        return TokenEncryption()
+    except ValueError as exc:
+        raise RingUnavailable(str(exc)) from exc
