@@ -92,7 +92,7 @@ class WorkerConfig:
     chat_window_seconds: int = 60
     global_limit: int = 25  # 05: global sends per window
     global_window_seconds: int = 1
-    reap_limit: int = 200
+    reap_limit: int = 500  # 05: the reap's total per sweep; the card sweep reuses it
     # 05 §4: 1,440 min (24 h) when the workspace's approval_ttl_minutes is NULL.
     approval_ttl_seconds: int = 24 * 3600
     approved_ttl_seconds: int = 72 * 3600

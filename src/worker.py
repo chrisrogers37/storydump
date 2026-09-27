@@ -313,7 +313,7 @@ def compose(
     live = {k for k, e in registry.items() if not isinstance(e, Parked)}
     recurring = {
         "v": 1,
-        "reap_expired": 6 * 3600.0,
+        "reap_expired": 60.0,  # 05: every lapsed lease waits for this beat
         # #1061: a source stranded in `error` is never re-scheduled, so the
         # branch that alerts never runs again. This beat is the only thing
         # that re-opens its mouth. Cadence is the clock's; the per-source
@@ -325,11 +325,11 @@ def compose(
         # kind is now live regardless of the poll seam (its notify half needs
         # none), so it satisfies the `recurring <= live` assert below.
         #
-        # It is also the fastest unconditional beat, which the fleet monitor's
-        # worker-down threshold (`DEFAULT_WORKER_STALE_S` in
-        # `scripts/scheduling_monitor.py`) rests on: retire or slow it and that
-        # threshold must rise with it. `tests/src/test_worker.py` fails until
-        # it does.
+        # With `reap_expired` it is the fastest unconditional beat, which the
+        # fleet monitor's worker-down threshold (`DEFAULT_WORKER_STALE_S` in
+        # `scripts/scheduling_monitor.py`) rests on: slow both and that
+        # threshold must rise with them. `tests/src/test_worker.py` fails
+        # until it does.
         "reconcile_ambiguous": 60.0,
     }
     if "reap_transit_assets" in live:

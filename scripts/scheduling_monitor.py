@@ -130,17 +130,17 @@ WORKER_UNKNOWN = "worker-unknown"
 
 #: No system job finished within this long => the worker is not working.
 #:
-#: **It rests on the FASTEST unconditional recurring system kind**, not the
+#: **It rests on the FASTEST unconditional recurring system kinds**, not the
 #: slowest: `last_success_age_seconds` is the age of the freshest success, so the
-#: kind that beats most often sets how stale a healthy worker can ever read. That
-#: is `reconcile_ambiguous`, every 60 s (`src/worker.py`'s `recurring`), so 600 s
-#: is ten beats. A late beat or an ordinary restart never reaches it; a worker
-#: that has stopped finishing work does — dead, stuck, or a deploy that left
-#: nothing serving — and that is an outage to page on, not noise.
+#: kind that beats most often sets how stale a healthy worker can ever read.
+#: Those are `reap_expired` and `reconcile_ambiguous`, every 60 s (`src/worker.py`'s
+#: `recurring`), so 600 s is ten beats. A late beat or an ordinary restart never
+#: reaches it; a worker that has stopped finishing work does — dead, stuck, or a
+#: deploy that left nothing serving — and that is an outage to page on, not noise.
 #:
-#: **Retire or slow that beat and this must rise with it.** The six-hourly kinds
-#: alone need at least 18 h (three six-hour beats); 600 s against them pages a
-#: healthy worker every cycle. `tests/src/test_worker.py` fails when three beats
+#: **Retire or slow those beats and this must rise with them.** The six-hourly
+#: kinds alone need at least 18 h (three six-hour beats); 600 s against them pages
+#: a healthy worker every cycle. `tests/src/test_worker.py` fails when three beats
 #: (two plus one of slack) of the bare composition's fastest recurring kind no
 #: longer fit.
 DEFAULT_WORKER_STALE_S = 600

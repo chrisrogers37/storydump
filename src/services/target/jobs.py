@@ -54,7 +54,8 @@ needed here:
   this is a predicate miss reported as `rows=0`.
 * **Expiry recovery is the reaper's, not ours.** `fn_reaper_sweep`'s first leg
   re-readies expired leases (liveness-priority, budget-limited). This module
-  does not duplicate it.
+  does not duplicate it; the clock revives its own singletons' leases (084,
+  `07` §27), the reaper's among them.
 * **`jobs` has NO transition guard, and this contract is written against
   that measured fact** (#883 follow-on; the gate pins the absence as a
   tripwire). What makes that safe is the MECHANISM on each

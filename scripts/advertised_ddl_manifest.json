@@ -298,6 +298,13 @@
       "label": "§26 the clock's five legs mint with a deadline (083, #1381) — fn_clock_tick replace adding deadline_at to all five INSERTs, measured from run_at",
       "doc": "07-security-model.md",
       "ordinal": 24
+    },
+    {
+      "sha256": "3bc62e29e69b81e5728373a0013b3d16e248600bfb3f51360f70c56b30c93bfb",
+      "class": "normative",
+      "label": "§27 the clock revives its own singletons' expired leases (084, #1329) — fn_clock_tick replace re-readying the kind's own expired lease before the mint guard, plus svc_clock's column UPDATE on the four lease columns of jobs",
+      "doc": "07-security-model.md",
+      "ordinal": 25
     }
   ],
   "policy_expansion": {

@@ -78,17 +78,17 @@ job may be. Either breached is `worker-down`.
 ### The stale threshold rests on the 60-second beat
 
 `last_success_age_seconds` is the age of the **freshest** system-job success, so
-the fastest recurring kind decides how stale a healthy worker can ever read. That
-is `reconcile_ambiguous`, which the clock mints every 60 s whatever the estate
-holds (`src/worker.py`'s `recurring`). 600 s is ten of those beats: a late beat or
-an ordinary restart never reaches it, while a worker that has stopped finishing
-work does — dead, stuck on a claim, or a deploy that left nothing serving. That
-last one pages on purpose: ten minutes with no worker is an outage, whatever
-caused it.
+the fastest recurring kinds decide how stale a healthy worker can ever read:
+`reap_expired` and `reconcile_ambiguous`, which the clock mints every 60 s
+whatever the estate holds (`src/worker.py`'s `recurring`). 600 s is ten of those
+beats: a late beat or an ordinary restart never reaches it, while a worker that
+has stopped finishing work does — dead, stuck on a claim, or a deploy that left
+nothing serving. That last one pages on purpose: ten minutes with no worker is an
+outage, whatever caused it.
 
-**Anything under six hours depends on that beat.** If `reconcile_ambiguous` is
-retired, made conditional or slowed, `DEFAULT_WORKER_STALE_S` must rise with it —
-the six-hourly kinds alone need at least 18 h, three six-hour beats — and
+**Anything under six hours depends on those beats.** If both are retired, made
+conditional or slowed, `DEFAULT_WORKER_STALE_S` must rise with them — the
+six-hourly kinds alone need at least 18 h, three six-hour beats — and
 `tests/src/test_worker.py` fails until it does.
 
 ## Deploying it

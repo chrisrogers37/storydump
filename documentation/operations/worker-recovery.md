@@ -70,11 +70,14 @@ token is stale — the job was claimed again after its lease lapsed, or it is al
 
 **What a dead process leaves behind.** A clean stop (SIGTERM) lets each lane finish the job it
 holds before the process exits (`src/worker.py:721-727`). A job cut off by a kill or a crash stays
-`leased` past its `locked_until`, and only `fn_reaper_sweep`'s first leg returns it to `ready`
+`leased` past its `locked_until`, and `fn_reaper_sweep`'s first leg returns it to `ready`
 (`scripts/migrations/076_publish_wait_edges.sql:29-31`). That door is called by the `reap_expired`
 kind alone (`src/services/target/scheduler.py:508-540`), which this root asks the clock to mint
-every **6 hours** (`src/worker.py:296`; the plan's `05` row says 60 s — the number above is the one
-that runs). Until then the job's serialization key is held: the claim door skips a `ready` row
+every **60 seconds** (`src/worker.py:316`, the plan's `05` number). The one lease the reaper cannot
+return is its own: when the dead process held `reap_expired`, the clock's next tick returns that
+lease to `ready` itself, as it does for every recurring singleton it mints
+(`scripts/migrations/084_clock_revives_singleton_leases.sql`), and the revived reaper then frees
+the rest. Until the next sweep the job's serialization key is held: the claim door skips a `ready` row
 whose key has a `leased` holder without reading the lease's expiry (`059:103-104`), and the sender
 sweep mints no second `deliver_outbox` job for that binding (`work_loop.py:1110-1112`). No verb
 returns a lapsed lease sooner; if the wait is not acceptable, that is the owner's decision and a
@@ -87,9 +90,9 @@ There is one clock per deployment. Each worker process tries
 (`scheduler.py:89`, `104-138`) and, when it wins, calls `fn_clock_tick` every 15 s
 (`clock_interval_seconds`). A tick mints due work — the recurring system singletons, due account
 slots, credential refreshes, source syncs, reauth prompts — at most 500 rows
-(`clock_max_inserts`). The recurring set this root hands it is `reap_expired` (6 h),
+(`clock_max_inserts`). The recurring set this root hands it is `reap_expired` (60 s),
 `alert_stranded_sources` (6 h), `reconcile_ambiguous` (60 s) and, with Cloudinary configured,
-`reap_transit_assets` (6 h) (`src/worker.py:294-310`).
+`reap_transit_assets` (6 h) (`src/worker.py:314-337`).
 
 Losing the election is not a failure: the loser returns at once and tries again next interval
 (`scheduler.py:609-615`). A clean stop releases the lock (`Clock.stop`, `pg_advisory_unlock`); a

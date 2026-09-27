@@ -48,22 +48,25 @@ does.
   (`pg_try_advisory_lock`, `CLOCK_ELECTION_KEY`, `:89`-`:134`). Losing the
   election is the mechanism working, not a failure. The clock mints jobs; it
   executes nothing.
-- A tick (15 s, at most 500 inserts) is one call to the `fn_clock_tick` door
-  (063's definition): recurring system singletons, due accounts → `plan_slot`
-  jobs with the slot cursor (`ig_accounts.next_slot_at`) advanced in the same
-  statement, due credential refreshes, due source syncs, weekly reauth prompts.
-  The five legs share one transaction and one insert budget.
+- A tick (15 s, at most 500 inserts) is one call to the `fn_clock_tick` door:
+  recurring system singletons, due accounts → `plan_slot` jobs with the slot
+  cursor (`ig_accounts.next_slot_at`) advanced in the same statement, due
+  credential refreshes, due source syncs, weekly reauth prompts. The five legs
+  share one transaction and one insert budget.
 - Slots are the account's effective `posts_per_day` spread evenly across its
   posting hours in its `tz` — the account's override, else the workspace's
   (`fn_next_slot`, 059). A paused or inactive workspace mints no `plan_slot`.
 - Every scheduling decision reads the DATABASE clock (`now()` inside the door);
   the loop paces on `asyncio.sleep`. Do not pass a host timestamp into a door.
-- The recurring kinds this worker asks for are `compose`'s (`worker.py:294`):
-  `reap_expired` and `alert_stranded_sources` every 6 h, `reconcile_ambiguous`
-  every 60 s, `reap_transit_assets` every 6 h when a transit store exists.
-  The 60 s beat is what the fleet monitor's worker-down threshold rests on
-  (`DEFAULT_WORKER_STALE_S` in `scripts/scheduling_monitor.py`): retire or slow
-  `reconcile_ambiguous` and that threshold must rise with it —
+- The recurring kinds this worker asks for are `compose`'s (`worker.py:314`):
+  `reap_expired` and `reconcile_ambiguous` every 60 s, `alert_stranded_sources`
+  every 6 h, `reap_transit_assets` every 6 h when a transit store exists. The
+  reaper's 60 s and its 500-row budget (`WorkerConfig.reap_limit`, the sweep's
+  total across every leg) are `05`'s, pinned by `tests/src/test_worker.py`:
+  an expired lease holds its serialization key until the next sweep.
+  The fleet monitor's worker-down threshold (`DEFAULT_WORKER_STALE_S` in
+  `scripts/scheduling_monitor.py`) rests on the fastest of these beats, today
+  60 s: slow every 60 s kind and that threshold must rise with them —
   `tests/src/test_worker.py` fails until it does.
 
 ## Folder selection (`scheduler.execute_plan_slot` + `category_mix.weights`)
@@ -91,7 +94,10 @@ is eligible the slot lapses and the workspace is told at most once per 24 h
 - A lease is 90 s, extended by the heartbeat every 20 s. `finalize_job` is a
   lease-token CAS in the job's own domain transaction and does not commit; a
   stale owner matches zero rows (`JobFenced`). Expired leases are re-readied by
-  `fn_reaper_sweep`, not here.
+  `fn_reaper_sweep`, not here — with one exception: the tick returns an
+  expired lease of its OWN recurring singletons to `ready` before its mint
+  guard reads it (084), because the reaper is one of those singletons and
+  cannot revive itself. Every other kind's expired lease is the reaper's.
 - Per-workspace lane caps (interactive 5, bulk 3) are the claim's, so one
   workspace cannot own a lane.
 - An executor that waits on a provider is marked `own_transactions`

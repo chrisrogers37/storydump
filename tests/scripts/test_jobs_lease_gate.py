@@ -33,6 +33,8 @@ winner's commit — the #883 block-then-reevaluate window, driven on purpose.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import threading
 import time
 import uuid
@@ -42,10 +44,18 @@ import psycopg2
 import pytest
 from psycopg2 import errors as pg_errors
 
+from scripts.migration_runner import MIGRATIONS_DIR
+from src.services.target import jobs
+from src.services.target.work_loop import WorkerConfig
+from src.worker import compose
 from tests.scripts.conftest import (
     _scratch,
     as_user,
     async_url,
+    execute,
+    fetch_all,
+    fetch_one,
+    ingress_engine,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -153,13 +163,13 @@ def _seed_job(
     return rows[0][0]
 
 
-def _claim(conn, *, worker="w", lease="60 seconds"):
+def _claim(conn, *, worker="w", lease="60 seconds", lane="interactive"):
     """Run the claim door on *conn*; returns the job row as a dict or None.
 
     Does NOT commit — the caller owns the transaction, which is what lets the
     race tests hold a claim open deliberately."""
     with conn.cursor() as cur:
-        cur.execute(CLAIM_SQL, ("interactive", worker, lease, 5))
+        cur.execute(CLAIM_SQL, (lane, worker, lease, 5))
         row = cur.fetchone()
         if row is None:
             return None
@@ -437,6 +447,238 @@ class TestKillResumeExpiryAndFencing:
             fetch=True,
         )[0][0]
         assert final == "succeeded"
+
+
+# --- #1329: lease recovery survives the death of the reaper's own holder -----
+#
+# `fn_reaper_sweep`'s first leg (above) is the only lease recovery for every
+# kind, and the reaper is itself a recurring singleton the clock mints. These
+# classes kill THAT holder. They live here for this module's empty jobs table:
+# the claim door hands out the oldest ready job on a lane, whatever its kind.
+
+#: Only the reaper recurs here, so every job a tick mints is one a test names.
+RECURRING = {"v": 1, "reap_expired": 60.0}
+NOTHING_MINTED, REAPER_MINTED = (0, 0, 0, 0, 0), (0, 0, 0, 1, 0)
+#: A lease that runs out while the test waits, as a killed worker's does.
+DYING_LEASE, LAPSE_S = "300 milliseconds", 0.5
+#: The four columns 084 grants `svc_clock` on `jobs`.
+LEASE_COLUMNS = "state, locked_by, lease_token, locked_until"
+
+
+def _tick(jobs_db, recurring=RECURRING) -> tuple:
+    """One tick with the elected clock's own arguments: `svc_worker` on the
+    door, whose body runs as `svc_clock`. The five legs' counts."""
+    config = WorkerConfig()
+    conn = _worker_conn(jobs_db)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT o_slot_jobs, o_refresh_jobs, o_sync_jobs, o_recurring_jobs,"
+                " o_reauth_jobs"
+                " FROM fn_clock_tick(%s, make_interval(secs => %s), %s::jsonb)",
+                (
+                    config.clock_max_inserts,
+                    config.refresh_cadence_seconds,
+                    json.dumps(recurring),
+                ),
+            )
+            return tuple(cur.fetchone())
+    finally:
+        conn.close()
+
+
+def _claimed(jobs_db, *, lane, worker, lease="60 seconds"):
+    """`_claim`, committed: a lease that outlives its connection, as a worker's
+    does."""
+    conn = _worker_conn(jobs_db, autocommit=False)
+    try:
+        row = _claim(conn, worker=worker, lease=lease, lane=lane)
+        conn.commit()
+        return row
+    finally:
+        conn.close()
+
+
+def _rows(jobs_db, kind) -> list:
+    """Every *kind* row by column name, oldest first."""
+    return fetch_all(
+        jobs_db["owner_stream"],
+        "SELECT id::text AS id, state, locked_by, locked_until < now() AS lapsed"
+        " FROM jobs WHERE kind = %s ORDER BY created_at, id",
+        (kind,),
+    )
+
+
+@contextlib.contextmanager
+def _ticking_on_083(jobs_db):
+    """083's tick — the one production runs before 084 — installed from its
+    own file for the duration, and the replayed tick restored afterwards, so
+    every other test here meets the current definition."""
+    owner = jobs_db["owner_stream"]
+    ddl, comment = fetch_one(
+        owner,
+        "SELECT pg_get_functiondef(oid), obj_description(oid, 'pg_proc')"
+        " FROM pg_proc WHERE oid = 'fn_clock_tick(int, interval, jsonb)'::regprocedure",
+    )
+    execute(owner, (MIGRATIONS_DIR / "083_clock_tick_deadlines.sql").read_text())
+    try:
+        yield
+    finally:
+        execute(owner, ddl)
+        execute(
+            owner,
+            "COMMENT ON FUNCTION fn_clock_tick(int, interval, jsonb) IS %s",
+            (comment,),
+        )
+
+
+def _sender_key() -> str:
+    return f"{jobs.SENDER_KEY_PREFIX}{uuid.uuid4()}"
+
+
+class TestTheReapersOwnDeadLease:
+    """084 (#1329): the tick returns its own kind's expired lease to `ready`
+    before its mint guard reads it — the one lease the reaper cannot re-ready
+    is its own."""
+
+    async def test_083s_tick_leaves_the_job_system_wedged_and_084s_recovers_it(
+        self, jobs_db
+    ):
+        # A worker claims the reaper the clock minted, and a delivery on one
+        # binding with a second queued behind it on the same key. Then it dies.
+        assert _tick(jobs_db) == REAPER_MINTED, (
+            "positive control: the tick minted the reaper and nothing else"
+        )
+        reaper = _claimed(jobs_db, lane="bulk", worker="w-dead", lease=DYING_LEASE)
+        assert reaper["kind"] == "reap_expired"
+        key = _sender_key()
+        first = _seed_job(jobs_db, key=key, kind="deliver_outbox", run_at_offset_s=-2)
+        queued = _seed_job(jobs_db, key=key, kind="deliver_outbox", run_at_offset_s=-1)
+        held = _claimed(jobs_db, lane="interactive", worker="w-dead", lease=DYING_LEASE)
+        assert held["id"] == first
+        await asyncio.sleep(LAPSE_S)
+        dead = {"state": "leased", "locked_by": "w-dead", "lapsed": True}
+        waiting = {"state": "ready", "locked_by": None, "lapsed": None}
+
+        with _ticking_on_083(jobs_db):
+            assert _tick(jobs_db) == NOTHING_MINTED
+            assert _rows(jobs_db, "reap_expired") == [{"id": reaper["id"], **dead}], (
+                "083 reads the dead lease as live: no successor, no revive — and"
+                " its leg 1 writes nothing, so no later tick differs"
+            )
+            assert _claimed(jobs_db, lane="bulk", worker="w-new") is None, (
+                "the dead reaper is never handed out again: the door takes ready rows"
+            )
+            assert _claimed(jobs_db, lane="interactive", worker="w-new") is None, (
+                "the queued delivery waits behind a dead lease on its key"
+            )
+
+        # 084's tick: the reaper's own lease is `ready` again and nothing is
+        # minted beside it; the delivery's dead lease is left to the reaper.
+        assert _tick(jobs_db) == NOTHING_MINTED
+        assert _rows(jobs_db, "reap_expired") == [{"id": reaper["id"], **waiting}]
+        assert _rows(jobs_db, "deliver_outbox") == [
+            {"id": first, **dead},
+            {"id": queued, **waiting},
+        ], "the tick revives only its own kinds; a tenant's lease is the reaper's"
+
+        # A new worker's bulk lane, exactly as the worker composes it, runs
+        # the revived reaper, which frees the delivery's dead lease.
+        async with ingress_engine(jobs_db["worker"]) as engine:
+            app = compose(engine=engine, config=WorkerConfig(), env={})
+            lane = next(loop for loop in app.loops if loop.lane == "bulk")
+            assert await lane.run_once() is True, "the bulk lane claimed nothing"
+        assert (lane.processed, lane.failures, lane.fenced) == (1, 0, 0)
+        assert _rows(jobs_db, "reap_expired") == [
+            {
+                "id": reaper["id"],
+                "state": "succeeded",
+                "locked_by": lane._worker_name,
+                "lapsed": False,
+            }
+        ], "the revived row itself ran, and it is still the only reaper row"
+        again = _claimed(jobs_db, lane="interactive", worker="w-new")
+        assert again["id"] == first and again["attempts"] == 2, (
+            "the delivery the dead worker held goes first: its key's order holds"
+        )
+        assert _claimed(jobs_db, lane="interactive", worker="w-new-2") is None, (
+            "the key still serializes: the queued delivery waits for the first"
+        )
+        lapsed = fetch_one(
+            jobs_db["owner_stream"],
+            "SELECT count(*) FROM jobs WHERE state = 'leased' AND locked_until < now()",
+        )[0]
+        assert lapsed == 0, "no expired lease is left anywhere"
+
+    def test_a_live_lease_is_never_revived(self, jobs_db):
+        assert _tick(jobs_db) == REAPER_MINTED
+        live = _claimed(jobs_db, lane="bulk", worker="w-live")
+        assert _tick(jobs_db) == NOTHING_MINTED, "a live lease blocks the mint"
+        assert _rows(jobs_db, "reap_expired") == [
+            {
+                "id": live["id"],
+                "state": "leased",
+                "locked_by": "w-live",
+                "lapsed": False,
+            }
+        ]
+
+    async def test_the_tick_revives_only_the_kinds_it_mints(self, jobs_db):
+        """Three dead leases lapse together. The tick revives the reaper's —
+        the positive control — and neither a system kind it was not asked to
+        mint nor a tenant kind named in its recurring set, which
+        `workspace_id IS NULL` keeps the reaper's."""
+        assert _tick(jobs_db) == REAPER_MINTED
+        email = _seed_job(
+            jobs_db,
+            key=f"email:{uuid.uuid4()}",
+            kind="send_email",
+            lane="bulk",
+            tenant=False,
+            run_at_offset_s=-1,
+        )
+        claimed = [
+            _claimed(jobs_db, lane="bulk", worker="w-dead", lease=DYING_LEASE)
+            for _ in range(2)
+        ]
+        reaper = next(row["id"] for row in claimed if row["kind"] == "reap_expired")
+        delivery = _seed_job(jobs_db, key=_sender_key(), kind="deliver_outbox")
+        held = _claimed(jobs_db, lane="interactive", worker="w-dead", lease=DYING_LEASE)
+        assert held["id"] == delivery
+        await asyncio.sleep(LAPSE_S)
+
+        # Naming a tenant kind in the recurring set is a caller's mistake, not
+        # a supported shape: with no live row of it the guard's INSERT fails
+        # `ck_jobs_system_kinds`. The leased row stops the mint, which leaves
+        # the revive's predicate as the one thing under test.
+        assert _tick(jobs_db, {**RECURRING, "deliver_outbox": 60.0}) == NOTHING_MINTED
+        dead = {"state": "leased", "locked_by": "w-dead", "lapsed": True}
+        assert _rows(jobs_db, "reap_expired") == [
+            {"id": reaper, "state": "ready", "locked_by": None, "lapsed": None}
+        ], "positive control: the reaper's own lease was revived in the same tick"
+        assert _rows(jobs_db, "send_email") == [{"id": email, **dead}], (
+            "a kind the clock does not mint stays the reaper's"
+        )
+        assert _rows(jobs_db, "deliver_outbox") == [{"id": delivery, **dead}], (
+            "a tenant kind in the recurring set revives nothing"
+        )
+
+
+class TestTheReviveRidesItsOwnGrant:
+    """084's column grant is load-bearing on EVERY tick, not only when a lease
+    is dead: the revive's UPDATE is checked when it is planned, so without the
+    grant the tick itself is refused. Removed, restored."""
+
+    def test_without_the_column_grant_the_tick_is_refused(self, jobs_db):
+        owner = jobs_db["owner_stream"]
+        assert _tick(jobs_db) == REAPER_MINTED, "positive control: the grant is in"
+        execute(owner, f"REVOKE UPDATE ({LEASE_COLUMNS}) ON jobs FROM svc_clock")
+        try:
+            with pytest.raises(pg_errors.InsufficientPrivilege, match="jobs"):
+                _tick(jobs_db)
+        finally:
+            execute(owner, f"GRANT UPDATE ({LEASE_COLUMNS}) ON jobs TO svc_clock")
+        assert _tick(jobs_db) == NOTHING_MINTED, "restored: the tick runs again"
 
 
 class TestRawSqlInvariants:

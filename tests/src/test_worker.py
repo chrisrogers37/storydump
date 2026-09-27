@@ -98,8 +98,9 @@ def test_the_monitors_stale_threshold_spans_three_beats_of_the_fastest_kind():
     """`DEFAULT_WORKER_STALE_S` (`scripts/scheduling_monitor.py`) rests on the
     fastest recurring kind of the bare composition — the set every deployment
     mints. It must span three beats — two plus one of slack — or one late beat
-    pages a healthy worker. Retiring or slowing `reconcile_ambiguous` breaks this: raise the
-    threshold with the cadence, never loosen this assertion.
+    pages a healthy worker. Slowing the fastest kinds (today `reap_expired` and
+    `reconcile_ambiguous`, both 60 s) breaks this: raise the threshold with the
+    cadence, never loosen this assertion.
     """
     from scripts.scheduling_monitor import DEFAULT_WORKER_STALE_S
 
@@ -843,10 +844,10 @@ class TestTheUsagePrecheckIsWiredBehindItsFlag:
         assert seen["precheck"] is sentinel
 
 
-def test_the_approval_ttl_default_is_the_documented_number():
-    """`05`'s row is normative and the worker's default is pinned TO IT — not
-    to a literal copied from it (the first slice shipped 72 h against a doc
-    that said 24, and three-day-old cards were live on 2026-09-12)."""
+def _documented_numbers(label: str, pattern: str) -> tuple:
+    """The numbers *pattern* captures in the `05-operational-numbers.md` row
+    that names *label*, commas stripped — failing with the row itself when its
+    wording no longer matches."""
     import re
     from pathlib import Path
 
@@ -854,6 +855,29 @@ def test_the_approval_ttl_default_is_the_documented_number():
         Path(__file__).resolve().parents[2]
         / "documentation/planning/2026-08-02-consolidated-design-plan/05-operational-numbers.md"
     ).read_text()
-    row = next(line for line in doc.splitlines() if "Approval TTL default" in line)
-    minutes = int(re.search(r"\|\s*([\d,]+) min", row).group(1).replace(",", ""))
+    row = next(line for line in doc.splitlines() if label in line)
+    found = re.search(pattern, row)
+    assert found, f"05's {label!r} row no longer reads as {pattern!r}: {row}"
+    return tuple(int(group.replace(",", "")) for group in found.groups())
+
+
+def test_the_approval_ttl_default_is_the_documented_number():
+    """`05`'s row is normative and the worker's default is pinned TO IT — not
+    to a literal copied from it (the first slice shipped 72 h against a doc
+    that said 24, and three-day-old cards were live on 2026-09-12)."""
+    (minutes,) = _documented_numbers("Approval TTL default", r"\|\s*([\d,]+) min")
     assert WorkerConfig().approval_ttl_seconds == minutes * 60
+
+
+def test_the_reaper_cadence_and_budget_are_the_documented_numbers():
+    """Both halves of `05`'s reaper row are pinned TO IT (#1329): the first
+    build minted `reap_expired` every 6 h at 200 against a row that said 60 s
+    and 500, and every expired lease waits for this beat — its serialization
+    key stays held until the reaper re-readies it."""
+    seconds, budget = _documented_numbers(
+        "Reaper cadence + budget", r"\|\s*every (\d+) s, ([\d,]+) per sweep"
+    )
+    config = WorkerConfig()
+    app = compose(engine=object(), config=config, env={})
+    assert app.recurring["reap_expired"] == seconds
+    assert config.reap_limit == budget

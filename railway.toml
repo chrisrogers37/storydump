@@ -23,8 +23,7 @@ restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
 # Give the old worker up to 60s to finish an in-flight step before SIGKILL
 # fires: a publish or a delivery it is mid-way through completes and commits,
-# and a lease it still holds lapses within 90s, after which the clock's reaper
-# re-readies the job (059; the worker heartbeats every 20s). The number dates
-# from the legacy tier's Telegram polling session (#392) and stays for the
-# reason above.
+# and a lease it still holds lapses within 90s and is then re-readied
+# (documentation/operations/worker-recovery.md). The number dates from the
+# legacy tier's Telegram polling session (#392) and stays for the reason above.
 drainingSeconds = 60
