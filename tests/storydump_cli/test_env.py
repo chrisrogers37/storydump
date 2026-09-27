@@ -22,6 +22,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from scripts.scheduling_monitor import DEFAULT_WORKER_STALE_S
 from src.services.target.vocabulary import (
     EXIT_API_UNREACHABLE,
     EXIT_NOT_AUTHORIZED,
@@ -283,7 +284,10 @@ def test_health_reads_a_due_job_inside_the_grace_as_well(tmp_path):
 def test_health_reads_a_stale_worker_as_not_well(tmp_path):
     stale = {
         **SCHEDULING,
-        "worker": {**SCHEDULING["worker"], "last_success_age_seconds": 14 * 3600},
+        "worker": {
+            **SCHEDULING["worker"],
+            "last_success_age_seconds": 2 * DEFAULT_WORKER_STALE_S,
+        },
     }
     api = health_api({("GET", "/health/scheduling"): (200, stale)})
     assert run(env_runtime(tmp_path, api), "health").exit_code == EXIT_API_UNREACHABLE

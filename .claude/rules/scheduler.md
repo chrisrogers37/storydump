@@ -61,6 +61,10 @@ does.
 - The recurring kinds this worker asks for are `compose`'s (`worker.py:294`):
   `reap_expired` and `alert_stranded_sources` every 6 h, `reconcile_ambiguous`
   every 60 s, `reap_transit_assets` every 6 h when a transit store exists.
+  The 60 s beat is what the fleet monitor's worker-down threshold rests on
+  (`DEFAULT_WORKER_STALE_S` in `scripts/scheduling_monitor.py`): retire or slow
+  `reconcile_ambiguous` and that threshold must rise with it —
+  `tests/src/test_worker.py` fails until it does.
 
 ## Folder selection (`scheduler.execute_plan_slot` + `category_mix.weights`)
 
