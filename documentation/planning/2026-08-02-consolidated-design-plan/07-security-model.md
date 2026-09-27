@@ -718,7 +718,12 @@ path to a workspace and its ids become the transaction-local tenant/actor GUCs
 `channel_bindings` and the tenant policies require. A bound chat that later
 refuses delivery — the bot kicked or blocked, the chat deleted — is a
 chat-level fact, never the credential's: the deliverer fails the row and
-revokes the binding, or follows a group that became a supergroup.
+revokes the binding, or follows a group that became a supergroup. The ingress
+follows that group first, on Telegram's own migration notice (#743): the old
+chat id resolves through `fn_resolve_binding`, that binding's workspace becomes
+the tenant claim with `system` as the actor — nobody commanded the move — and
+the same writer re-points the row, or revokes it when the new id is already
+another binding's (`uq_binding_external`).
 
 ```sql
 -- The bind purpose (#1175 D-3, owner ruling 2026-09-05): an admin's one-shot

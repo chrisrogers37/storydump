@@ -194,8 +194,9 @@ def _tenant_session_factory(outbox_db, sessionmaker):
     return _factory
 
 
-def _new_binding(outbox_db) -> str:
-    """A binding nobody else is using.
+def _new_binding(outbox_db, external_ref=None) -> str:
+    """A binding nobody else is using — on *external_ref* when the scenario
+    needs a real chat id.
 
     The fixture is module-scoped (a role-carrying template cannot be held),
     so every scenario mints its own binding rather than sharing one — the
@@ -208,7 +209,7 @@ def _new_binding(outbox_db) -> str:
             outbox_db,
             "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
             " VALUES (%s, 'telegram_group', %s) RETURNING id",
-            (outbox_db["ws"], f"tg-{uuid.uuid4().hex[:10]}"),
+            (outbox_db["ws"], external_ref or f"tg-{uuid.uuid4().hex[:10]}"),
             fetch=True,
         )[0][0]
     )
@@ -1910,3 +1911,88 @@ class TestACardIsRenderedAgainAtClaimTime:
             fetch=True,
         )[0][0]
         assert f"v1:post:{intent}" in stored and "📸 old" not in stored
+
+
+class TestTheSenderFollowsAGroupThatMoved:
+    """#743's backstop on the real worker: a group that became a supergroup
+    and whose migration notice never reached the ingress is found by its next
+    delivery — Telegram refuses the send to the old id and names the new one.
+    The binding follows, and the chat keeps receiving: the worker's own sender
+    sweep mints the binding's next sender, which delivers to the successor.
+    (The row that discovered the move is the settle taxonomy's — a gone
+    destination fails it outright.)"""
+
+    @pytest.mark.asyncio
+    async def test_the_next_delivery_reaches_the_new_chat(self, outbox_db):
+        import asyncio
+
+        from src.channels.telegram_transport import TelegramChatGone
+        from src.services.target.work_loop import WorkerConfig as _Cfg
+        from src.worker import SenderSweeper, compose
+
+        old, new = (
+            f"-4{uuid.uuid4().int % 10**9:09d}",
+            "-100" + str(uuid.uuid4().int % 10**10).zfill(10),
+        )
+        binding = _new_binding(outbox_db, external_ref=old)
+        _enqueue(outbox_db, binding=binding, payload={"v": 1, "text": "a"})
+        follows = _enqueue(outbox_db, binding=binding, payload={"v": 1, "text": "b"})
+        delivered: list[tuple[str, str]] = []
+
+        class _Transport:
+            def for_chat(self, external_ref):
+                async def send(row):
+                    if external_ref == old:
+                        raise TelegramChatGone(
+                            "sendMessage: 400 Bad Request: group chat was"
+                            " upgraded to a supergroup chat",
+                            migrate_to=new,
+                        )
+                    delivered.append((external_ref, str(row["id"])))
+                    return f"tg-{row['id']}"
+
+                return send
+
+        # The module's other scenarios leave rows and jobs of their own behind;
+        # the lanes and the sweep serve those too, so only THIS binding's rows
+        # are asserted on.
+        engine = _engine(outbox_db, pool_size=10)
+        stop = asyncio.Event()
+        try:
+            cfg = _Cfg(
+                lane_concurrency={"interactive": 2, "bulk": 1},
+                poller_interval_seconds=0.1,
+                sender_hold_seconds=1.0,
+                claim_idle_seconds=0.05,
+                sender_sweep_seconds=0.2,
+                chat_limit=CHAT_LIMIT,
+                chat_window_seconds=CHAT_WINDOW_S,
+                global_limit=GLOBAL_LIMIT,
+                global_window_seconds=GLOBAL_WINDOW_S,
+            )
+            app = compose(engine=engine, config=cfg, env={}, transport=_Transport())
+            loops = [wl for wl in app.loops if wl.lane == "interactive"]
+            tasks = [asyncio.create_task(wl.run()) for wl in loops]
+            tasks.append(asyncio.create_task(SenderSweeper(app).run(stop)))
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                state = await asyncio.to_thread(_state, outbox_db, follows)
+                if state[0] == "sent":
+                    break
+                await asyncio.sleep(0.1)
+            stop.set()
+            for wl in loops:
+                wl.stop()
+            await asyncio.gather(*tasks)
+        finally:
+            await engine.dispose()
+
+        ref = _owner_exec(
+            outbox_db,
+            "SELECT external_ref, state FROM channel_bindings WHERE id = %s",
+            (binding,),
+            fetch=True,
+        )[0]
+        assert ref == (new, "active"), "the binding follows the chat"
+        assert _state(outbox_db, follows)[0] == "sent"
+        assert (new, str(follows)) in delivered, "and the next card reaches it"

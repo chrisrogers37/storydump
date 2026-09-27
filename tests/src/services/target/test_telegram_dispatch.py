@@ -182,6 +182,40 @@ class TestGroupMessagesReachTheMembershipStep:
         assert r.outcome == telegram_dispatch.NOT_A_START
 
 
+class TestAMigrationNoticeIsFollowedNotObserved:
+    """A group that became a supergroup (#743): the notice goes to the
+    binding's move, not the join path — it carries a sender, so the membership
+    step would otherwise take it for speech in a chat nothing holds yet."""
+
+    @pytest.mark.asyncio
+    async def test_the_notice_reaches_the_move_and_only_the_move(self, monkeypatch):
+        from src.services.target.start_router import StartResult
+
+        seen = {}
+
+        async def follow(conn, *, old_ref, new_ref):
+            seen.update(old_ref=old_ref, new_ref=new_ref)
+            return StartResult(outcome="chat_followed", handled=True)
+
+        async def observe(conn, **kw):
+            raise AssertionError("a migration notice must not be observed as speech")
+
+        monkeypatch.setattr(telegram_dispatch.chat_migration, "follow", follow)
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        r = await telegram_dispatch.TelegramDispatcher()(
+            None,
+            {
+                "message": {
+                    "from": {"id": 42},
+                    "chat": {"id": -1009876543210, "type": "supergroup"},
+                    "migrate_from_chat_id": -4012345678,
+                }
+            },
+        )
+        assert r.outcome == "chat_followed"
+        assert seen == {"old_ref": "-4012345678", "new_ref": "-1009876543210"}
+
+
 class TestABareStartInAGroupIsSpeechNotAGreeting:
     @pytest.mark.asyncio
     async def test_bare_start_in_a_group_is_observed_and_never_greets(

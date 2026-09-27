@@ -113,7 +113,7 @@ snapshots (078); no code reads them.
 | `src/services/target/unit_of_work.py` | The tenant-scoped transaction |
 | `src/services/target/work_loop.py` | Lanes and the job registry |
 | `src/services/target/publish_pipeline.py` | Publishing to Instagram |
-| `src/services/target/telegram_dispatch.py` | Inbound Telegram: taps, `/start`, group joins |
+| `src/services/target/telegram_dispatch.py` | Inbound Telegram: taps, `/start`, group joins, a group's move to a supergroup |
 | `src/services/target/outbox.py` | Outbound Telegram: the delivery record |
 
 ---
