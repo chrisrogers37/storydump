@@ -18,6 +18,7 @@ is paired with a proof that it CAN fail.
 import pytest
 
 from tests.scripts.conftest import F2_2_END, F2_6_END, advertised_stream
+from scripts.advertised_ddl import normalize_statements
 from scripts.tenancy_gate import (
     _tenancy_entry,
     expected_tenancy,
@@ -597,3 +598,100 @@ class TestConstraintEditsAreBoundedTheSameWay:
             [self.BASE, self.ADMITTED["add_check"], self.ADMITTED["drop_constraint"]]
         )
         assert with_edit == without
+
+
+class TestTheCompoundGuardIsBoundedByQuoting:
+    """Parenthesis depth is itself a scope claim, and quoting bounds it: a
+    paren or comma inside a string literal or a quoted identifier is text, not
+    structure. Every REFUSED statement carries a real second action at the top
+    level, which a quote-blind depth count loses — a quoted `(` holds the depth
+    above zero past the comma, and a quoted `)` drives it negative so that no
+    later comma reads as top-level.
+
+    The guard fails toward the refusal on text it cannot bound, so those cases
+    are pinned too: the lexical forms it does not model, each written so that
+    lexing it as plain code would hide the comma, and text whose quotes or
+    parens do not balance. The two RAW cases go through `normalize_statements`
+    because normalized text is what the guard sees: a line comment there has
+    lost the line end that bounds it, and a literal's continuation line that
+    starts with `--` has been dropped whole, closing quote included.
+
+    The ADMITTED cases are the control. A guard that refused every quote would
+    pass every REFUSED case, so literal text that looks like structure must
+    still read as a single action.
+    """
+
+    BASE = "CREATE TABLE t ( id uuid, workspace_id uuid )"
+
+    REFUSED = {
+        "quoted_open_paren": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT '(', DROP COLUMN workspace_id"
+        ),
+        "quoted_close_paren": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT ')', DROP COLUMN workspace_id"
+        ),
+        "quoted_parens_balanced": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT '(', DROP COLUMN workspace_id,"
+            " ALTER COLUMN foo SET DEFAULT ')'"
+        ),
+        "quoted_paren_in_check": (
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (kind <> '('),"
+            " DROP COLUMN workspace_id"
+        ),
+        "paren_in_quoted_identifier": (
+            'ALTER TABLE t ADD COLUMN foo text COLLATE "(", DROP COLUMN workspace_id'
+        ),
+        # Lexical forms the guard does not model.
+        "escape_string": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT E'\\'', DROP COLUMN workspace_id,"
+            " ALTER COLUMN foo SET DEFAULT E'\\''"
+        ),
+        "dollar_quoted": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT $$($$, DROP COLUMN workspace_id,"
+            " ALTER COLUMN foo SET DEFAULT $$)$$"
+        ),
+        "block_comment": (
+            "ALTER TABLE t ADD COLUMN foo text /* ( */, DROP COLUMN workspace_id /* ) */"
+        ),
+        # Parens that do not balance.
+        "unclosed_paren": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT (, DROP COLUMN workspace_id"
+        ),
+        "lone_close_paren": (
+            "ALTER TABLE t ADD COLUMN foo text ), DROP COLUMN workspace_id ("
+        ),
+    }
+    REFUSED_RAW = {
+        "line_comment": (
+            "ALTER TABLE t ADD COLUMN foo text -- don't\n"
+            ", DROP COLUMN workspace_id -- won't\n"
+        ),
+        "literal_line_dropped": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc\n"
+            "--x'\n"
+            ", DROP COLUMN workspace_id\n"
+        ),
+    }
+    ADMITTED = {
+        "comma_in_literal": "ALTER TABLE t ADD COLUMN foo text DEFAULT 'a,b'",
+        "doubled_quote": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'it''s (fine), really'"
+        ),
+        "comma_in_quoted_identifier": 'ALTER TABLE t ADD COLUMN foo text COLLATE "x,y"',
+        "markers_in_literal": "ALTER TABLE t ADD COLUMN foo text DEFAULT '), -- /* $ ('",
+    }
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_a_second_action_behind_quoting_is_refused(self, name):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy([self.BASE, self.REFUSED[name]])
+
+    @pytest.mark.parametrize("name", sorted(REFUSED_RAW))
+    def test_normalized_text_it_cannot_bound_is_refused(self, name):
+        (stmt,) = normalize_statements(self.REFUSED_RAW[name])
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy([self.BASE, stmt])
+
+    @pytest.mark.parametrize("name", sorted(ADMITTED))
+    def test_literal_text_is_not_structure(self, name):
+        expected_tenancy([self.BASE, self.ADMITTED[name]])

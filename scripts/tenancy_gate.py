@@ -175,16 +175,48 @@ def tenancy_signature(dsn: str) -> dict:
 
 
 def _top_level_comma(stmt: str) -> bool:
-    """A comma outside every parenthesis — the mark of a compound ALTER."""
+    """A comma outside every parenthesis — the mark of a compound ALTER.
+
+    Depth is counted over structure only. A `'…'` literal or a `"…"`
+    identifier is skipped whole, because a paren or comma in quoted text moves
+    nothing; a doubled quote inside one lexes as close-and-reopen and lands in
+    the same place. Literals are read as PostgreSQL reads them with
+    standard_conforming_strings on, its default, so a backslash in `'…'` is
+    plain text.
+
+    Everything else fails toward True, the refusal: text this scan cannot
+    bound reads as compound rather than being guessed at. That is each form it
+    does not model, where lexing the form as plain code could hide a comma —
+    an `E'…'` string (a backslash escapes its quote), a dollar-quoted body, a
+    comment (normalized text has already turned a line comment's line end into
+    a space, so nothing marks where it stops) — and quotes or parens that do
+    not balance.
+    """
     depth = 0
-    for ch in stmt:
-        if ch == "(":
+    quote = None
+    for i, ch in enumerate(stmt):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            # Only the letter before the quote marks an E'…' string, so an
+            # identifier ending in e run into a literal (DATE'…') refuses too.
+            if ch == "'" and i > 0 and stmt[i - 1] in "eE":
+                return True
+            quote = ch
+        elif ch == "$" or (ch in "-/" and stmt.startswith(("--", "/*"), i)):
+            # A `$` inside an identifier refuses too: only a tokenizer tells
+            # it apart from a dollar quote.
+            return True
+        elif ch == "(":
             depth += 1
         elif ch == ")":
             depth -= 1
+            if depth < 0:
+                return True
         elif ch == "," and depth == 0:
             return True
-    return False
+    return quote is not None or depth != 0
 
 
 def expected_tenancy(statements) -> dict:
@@ -287,11 +319,12 @@ def expected_tenancy(statements) -> dict:
         # anchors only the start, so a compound statement — ADD COLUMN foo,
         # DROP COLUMN workspace_id — matches as a prefix and would ride the
         # continue past the refusal. A single ADD COLUMN never carries a
-        # comma OUTSIDE parentheses (numeric(10,2) legitimately carries one
-        # inside), so a top-level comma means a second action and falls
-        # through to the loud refusal below — whatever the second action is,
-        # including the fact-MOVING ones a verb denylist would have to keep
-        # chasing (ADD COLUMN workspace_id, FORCE ROW LEVEL SECURITY).
+        # comma OUTSIDE parentheses and quotes (numeric(10,2) legitimately
+        # carries one inside), so a top-level comma means a second action
+        # and falls through to the loud refusal below — whatever the second
+        # action is, including the fact-MOVING ones a verb denylist would
+        # have to keep chasing (ADD COLUMN workspace_id, FORCE ROW LEVEL
+        # SECURITY).
         m = re.match(r"ALTER TABLE (?:public\.)?(\w+) ADD COLUMN (\w+)", stmt)
         if m and not _top_level_comma(stmt):
             if m.group(2) == "workspace_id" and m.group(1) in sig:
