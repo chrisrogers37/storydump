@@ -10,7 +10,7 @@ links: []
 
 # The Telegram tap, built for throughput
 
-> **Archived 2026-09-22 — phases 1–3b COMPLETED; phase 4 deferred, and its trigger may have fired.** Phases 1, 2, 3a and 3b are built and live (the consolidated plan's *Live status*: W4, #1271). Phase 4, tenant fairness (`04_tenant-fairness.md`), was deferred by ruling (F9 (c)) until its trigger fires, which that doc states as "the worker status line's `ws_oldest_wait=` past a lane's deadline or `tg_global_paced=` sustained (`src/services/target/backpressure.py`), or a second live workspace". #1383's CHANGELOG entry (merged 2026-09-21) records two live workspaces in production, so the last arm reads as met; whether phase 4 is now owed is an owner decision; if it is, revive it from here.
+> **Archived 2026-09-22 — phases 1–3b COMPLETED; phase 4 deferred, re-armed on measurements (2026-09-28).** Phases 1, 2, 3a and 3b are built and live (the consolidated plan's *Live status*: W4, #1271). Phase 4 (`04_tenant-fairness.md`) stays deferred (F9 (c)); its banner gives the measured trigger that replaced "a second live workspace", and its *Evidence* the reading. Revive it from here when the trigger opens.
 
 ## Summary
 

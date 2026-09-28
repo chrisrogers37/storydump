@@ -110,7 +110,8 @@ railway logs --service worker | grep -E "worker up|database role|telegram channe
 Once a minute the worker logs one `status:` line (`src/worker.py:414-481`): per
 lane `tasks processed parked failures exhausted fenced waits`, then
 `clock[elected ticks inserts errs]`, `heartbeat[beats short errs]`, the
-transport, the two sweepers, and the queue's depth and age per lane. Counters
+transport, the two sweepers, the queue's depth and age per lane, and the backpressure pair
+`tg_global_paced=` and `ws_oldest_wait=` — [tenant fairness's trigger](../archive/2026-09-09-telegram-interaction-at-throughput/04_tenant-fairness.md). Counters
 that stop moving between two lines are a stuck worker; `worker-recovery.md`
 reads the line field by field. At boot it logs the login it connected as
 (`worker database role: {...}`), the kinds it can run (`worker up: … live_kinds=…`

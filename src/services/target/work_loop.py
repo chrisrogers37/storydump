@@ -70,9 +70,13 @@ class WorkerConfig:
     lane_concurrency: Mapping[str, int] = field(
         default_factory=lambda: {"interactive": 3, "bulk": 2}
     )
-    # `05:33` row 3 — per-workspace, per-lane: a workspace can never own a
-    # lane. Interactive 5 (half one replica's interactive pool), bulk 3
-    # (one publish + one sync + one misc). Raised from 2/2 in phase 3a.
+    # `05:33` row 3 — per-workspace, per-lane: interactive 5, bulk 3 (one
+    # publish + one sync + one misc); raised from 2/2 in phase 3a. They bind
+    # only across several replicas: `fn_claim_job` counts the deployment's
+    # leases, and under today's pool (`POOL_SIZE_SEAM`) one process never
+    # runs more tasks per lane than these — `assert_concurrency_fits` checks
+    # the pool, not the caps — so on a single worker one workspace can hold
+    # a whole lane (#1428 pins the relation).
     ws_lane_cap_interactive: int = 5
     ws_lane_cap_bulk: int = 3
     claim_idle_seconds: float = 1.0  # sleep when a lane has nothing runnable

@@ -5,6 +5,9 @@ GitHub tracker and the recorded production probes (issue #1212), then one at a t
 banner at its top; this index says why it is here and where its successor lives. Nothing in this
 directory is normative — the authoritative plan is
 [`../planning/2026-08-02-consolidated-design-plan/`](../planning/2026-08-02-consolidated-design-plan/README.md).
+The one exception: a deferred phase's banner carries its live trigger — today
+[`2026-09-09-telegram-interaction-at-throughput/04_tenant-fairness.md`](2026-09-09-telegram-interaction-at-throughput/04_tenant-fairness.md),
+which the runbooks point at.
 
 Status vocabulary: **COMPLETED** (built or fixed) · **SUPERSEDED** (replaced by something newer, named) ·
 **ABANDONED** (no code, no issue, contradicted by current direction) · **STALE / PARKED** (pending with no
@@ -27,7 +30,7 @@ activity; revive by filing an issue).
 | `2026-08-17-m3-parity-bar-mapping/` | SUPERSEDED | The parity bar was retired as a window precondition (`00` FC-7 §8, 2026-09-02); its two forks were ruled 2026-08-21 (`src/services/target/prompts.py`: the tap IS `approve`; parity is out); every bar item is served on a target surface today; chat-inbound typed commands (#854) remain owed. Moved 2026-09-20 |
 | `investigations/2026-09-04-signin-bounce-and-instagram-redirect/` | RESOLVED | `OAUTH_REDIRECT_BASE_URL` restored and the Meta redirect-URI list corrected (2026-09-04); the entry-page fix #1236. Unbuilt: `/health`'s OAuth-presence booleans (#1229). Moved 2026-09-20 |
 | `investigations/2026-09-06-empty-library-after-first-sync/` | RESOLVED | The full-depth Drive walk (#1256, 070) and the posting mix keyed on the connected folder (#1262, 071), re-ruled 2026-09-08. Moved 2026-09-20 |
-| `2026-09-09-telegram-interaction-at-throughput/` | COMPLETED except phase 4 (deferred; its trigger may have fired — see the banner) | The Telegram tap built for throughput: phases 1, 2, 3a and 3b built (W4, #1271). Phase 4, tenant fairness, waits for its trigger, one arm of which — a second live workspace — #1383 (merged 2026-09-21) records as met: an owner decision. Moved 2026-09-22 |
+| `2026-09-09-telegram-interaction-at-throughput/` | COMPLETED except phase 4 (deferred; re-armed on measurements 2026-09-28) | The Telegram tap built for throughput: phases 1, 2, 3a and 3b built (W4, #1271). Phase 4, tenant fairness, waits for its trigger (its banner). Moved 2026-09-22 |
 | `2026-09-15-cli-v2/` + `2026-09-15-cli-v2-spec.md` | COMPLETED | The `storydump` v2 CLI and its approved spec: #1310 tokens, #1311 reads, #1312 writes and environment verbs, corrected by #1314. Live description: `AGENTS.md` › "The `storydump` CLI (v2)". Moved 2026-09-22 |
 | `2026-09-16-cli-v2-audit/` | COMPLETED audit record | The system review of the v2 CLI surface; its findings folded in #1314. Moved 2026-09-22 |
 | `2026-09-16-legacy-tear-out/` | COMPLETED | Retiring the legacy tier (#1216): #1316, #1319, #1318, #1321, #1322, and the owner's window on 2026-09-19 (079, 080). `RUN_LOG.md` is the ledger. Moved 2026-09-22 |

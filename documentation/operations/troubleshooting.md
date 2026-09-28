@@ -192,7 +192,7 @@ railway logs --service storydump | grep -iE 'exception|traceback|refused'
 | `refused <METHOD> <path>: …` | the API refused a request (the reason follows) |
 | `pool_saturated` | the API is shedding load |
 | `telegram webhook not registered` | the startup registration failed; `storydump webhook status` |
-| `status: interactive[…] bulk[…] clock[…] heartbeat[…]` | the worker's one-a-minute status line; counters that stop moving are a stuck worker (`worker-recovery.md`) |
+| `status: interactive[…] bulk[…] clock[…] heartbeat[…]` | the worker's one-a-minute status line; counters that stop moving are a stuck worker (`worker-recovery.md`); its `ws_oldest_wait=` and `tg_global_paced=` are [tenant fairness's trigger](../archive/2026-09-09-telegram-interaction-at-throughput/04_tenant-fairness.md) |
 | `clock tick failed (N consecutive) — NO JOBS WERE MINTED` | a clock tick raised and minted nothing. Once is a blip; on every tick it is a row the schema refuses — the deployed code ahead of the migration ledger (`worker-recovery.md`) |
 | `parked kind <kind> (job <id>): <reason>` | a kind this worker cannot run, and the variable or seam it is missing |
 
