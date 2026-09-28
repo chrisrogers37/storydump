@@ -62,6 +62,16 @@ from src.exceptions.base import StorydumpError
 from src.services.target._dbapi import driver_error_is
 
 
+class IntentNotVisible(StorydumpError):
+    """The UPDATE matched no row: the intent does not exist, or row-level
+    security hides it from this session's tenant (#1423).
+
+    A caller's bug, not a ledger refusal, so it is deliberately not an
+    :class:`IntentTransitionRefused`: the callers that catch a refusal and
+    carry on (the prompt sweep, the offboarding drain) do not swallow it.
+    """
+
+
 class IntentTransitionRefused(StorydumpError):
     """The database refused a transition: a `check_violation` from a guard or a
     state-completeness CHECK, or the audit trigger's refusal of an actor-less
@@ -141,9 +151,13 @@ async def transition(session, intent_id: str, to_state: str) -> None:
     `trg_intent_audit` refuses an anonymous state change, and this module does
     not duplicate that check for the same reason it does not duplicate the edge
     set.
+
+    An UPDATE that matches no row (an id that does not exist, or a row this
+    session's tenant cannot see) raises :class:`IntentNotVisible` instead of
+    passing as a success (#1423).
     """
     try:
-        await session.execute(
+        result = await session.execute(
             text("UPDATE post_intents SET state = :s WHERE id = :i"),
             {"s": to_state, "i": intent_id},
         )
@@ -158,6 +172,11 @@ async def transition(session, intent_id: str, to_state: str) -> None:
         if refusal is not None:
             raise IntentTransitionRefused(str(refusal)) from exc
         raise
+    if result.rowcount == 0:
+        raise IntentNotVisible(
+            f"post_intent {intent_id} matched no row: it does not exist, or this"
+            " session's tenant cannot see it"
+        )
 
 
 async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:

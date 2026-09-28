@@ -41,12 +41,15 @@ would go stale silently the first time the plan adds an edge.
 from __future__ import annotations
 
 import re
+import uuid
 
 import psycopg2
 import pytest
 
 from tests.scripts.conftest import (
+    as_user,
     async_url,
+    ingress_engine,
     replay_advertised_stream,
     seed_workspace_chain,
 )
@@ -865,6 +868,52 @@ class TestTheServicePathAgreesWithTheTrigger:
                     await transition(session, intent, "prompt_pending")
         finally:
             await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_transition_that_matches_no_row_raises_IntentNotVisible(
+        self, ledger
+    ):
+        """#1423, the plain case: an id that does not exist. The UPDATE touches
+        no row, and that is not a success."""
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.intent_ledger import IntentNotVisible, transition
+        from src.services.target.unit_of_work import unit_of_work
+
+        engine = create_async_engine(
+            self._async_dsn(ledger), pool_size=1, max_overflow=0
+        )
+        try:
+            uow = unit_of_work(engine, ledger["chain"]["ws"], actor_kind="system")
+            with pytest.raises(IntentNotVisible, match="matched no row"):
+                async with uow.begin() as session:
+                    await transition(session, str(uuid.uuid4()), "prompt_pending")
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_another_tenants_intent_is_NOT_VISIBLE_under_row_level_security(
+        self, ledger
+    ):
+        """#1423's real case. Both services run as their own logins without
+        BYPASSRLS (#1379), so a session claimed for another workspace cannot see
+        this one's intent, and the UPDATE matches no row. Run as `svc_worker`,
+        because the gate's own login is the owner, which bypasses the policies.
+        The same login, claimed for the intent's own workspace, moves it: the
+        pair shows that the policy hides the row, not that the row is missing.
+        """
+        from src.services.target.intent_ledger import IntentNotVisible, transition
+        from src.services.target.unit_of_work import unit_of_work
+
+        intent = _new_intent(ledger, "scheduled")  # committed: the fixture autocommits
+        async with ingress_engine(as_user(ledger["dsn"], "svc_worker")) as engine:
+            stranger = unit_of_work(engine, str(uuid.uuid4()), actor_kind="system")
+            with pytest.raises(IntentNotVisible, match="matched no row"):
+                async with stranger.begin() as session:
+                    await transition(session, intent, "prompt_pending")
+            owner = unit_of_work(engine, ledger["chain"]["ws"], actor_kind="system")
+            async with owner.begin() as session:
+                await transition(session, intent, "prompt_pending")
 
     @pytest.mark.asyncio
     async def test_the_service_holds_no_copy_of_the_edge_set(self, ledger):

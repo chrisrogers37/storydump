@@ -272,9 +272,10 @@ def test_the_sender_sweep_mints_the_delivery_job_as_svc_worker(world):
 def test_the_prompt_sweep_prompts_the_due_stories_and_advances_the_pending_one_as_svc_worker(
     world,
 ):
-    """The count a sweep reports is not the effect: `intent_ledger.transition`
-    does not check its rowcount, so a sweep whose writes the policy silently
-    filtered would still report `prompted == 2`. The check reads the effect
+    """The count a sweep reports is not the effect. Before #1423
+    `intent_ledger.transition` did not check its rowcount, so a sweep whose
+    writes the policy silently filtered still reported `prompted == 2`; such
+    a write now raises `IntentNotVisible`. The check still reads the effect
     under each workspace's own tenant: A's due story moved on and its card is
     in the outbox; C's `prompt_pending` story — a workspace the prompting
     phase never claimed — advanced too."""

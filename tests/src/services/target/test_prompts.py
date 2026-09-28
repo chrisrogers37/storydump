@@ -618,3 +618,19 @@ class TestTheAdvancePhaseSurvivesARefusal:
         assert (
             "set_config('app.tenant_id'" in last_sql and "" in last_params.values()
         ), "the caller's scope is handed back after the refusal"
+
+    async def test_an_intent_it_cannot_see_is_NOT_swallowed(self, monkeypatch):
+        """#1423: `IntentNotVisible` is a caller's bug, not a refusal, so it
+        escapes the savepoint that refusals ride. As a subclass of
+        `IntentTransitionRefused` it would be swallowed right here, which is
+        why the owner ruled it a distinct type."""
+        from src.services.target import intent_ledger, prompts
+
+        session = _SweepSession(pending=[{"id": "i-1", "workspace_id": "ws-1"}])
+
+        async def transition(s, intent_id, to_state):
+            raise intent_ledger.IntentNotVisible("matched no row")
+
+        monkeypatch.setattr(prompts.intent_ledger, "transition", transition)
+        with pytest.raises(intent_ledger.IntentNotVisible):
+            await prompts.sweep_due_prompts(session, limit=5)

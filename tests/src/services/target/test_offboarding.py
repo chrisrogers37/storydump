@@ -10,9 +10,12 @@ computes it from a copied number.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from src.services.target import offboarding, workspaces
+import pytest
+
+from src.services.target import intent_ledger, offboarding, workspaces
 
 OFFBOARDED_AT = datetime(2026, 9, 2, 15, 0, tzinfo=timezone.utc)
 
@@ -53,6 +56,45 @@ class _Executor:
 
     async def execute(self, statement, params=None):
         return _Result(self._row)
+
+
+class _DrainSession:
+    """`drain`'s session double: its SELECT answers with *ids*, and a
+    savepoint is offered."""
+
+    def __init__(self, ids):
+        self._ids = ids
+
+    def begin_nested(self):
+        @asynccontextmanager
+        async def _savepoint():
+            yield self
+
+        return _savepoint()
+
+    async def execute(self, statement, params=None):
+        ids = self._ids
+
+        class _Rows:
+            def all(self):
+                return [(i,) for i in ids]
+
+        return _Rows()
+
+
+class TestTheDrainDoesNotSwallowAnIntentItCannotSee:
+    async def test_IntentNotVisible_escapes_the_drain(self, monkeypatch):
+        """#1423: the drain catches a refusal and goes on to the next intent.
+        `IntentNotVisible` is a caller's bug, not a refusal, and must fail the
+        job instead; as a subclass of `IntentTransitionRefused` it would be
+        swallowed here."""
+
+        async def transition(session, intent_id, to_state):
+            raise intent_ledger.IntentNotVisible("matched no row")
+
+        monkeypatch.setattr(offboarding.intent_ledger, "transition", transition)
+        with pytest.raises(intent_ledger.IntentNotVisible):
+            await offboarding.drain(_DrainSession(["i-1"]), "ws-1", limit=5)
 
 
 class TestTheWorkspaceReadCarriesTheDeadline:
