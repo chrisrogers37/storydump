@@ -166,14 +166,18 @@ async def drain(session, workspace_id: str, *, limit: int) -> dict[str, Any]:
     ).all()
     cancelled, refused = 0, 0
     for (intent_id,) in rows:
+        # A refusal aborts the transaction; the savepoint is what lets the drain
+        # go on to the next intent after one (`intent_ledger.transition`, #1422).
         try:
-            await intent_ledger.transition(session, intent_id, "cancelled")
+            async with session.begin_nested():
+                await intent_ledger.transition(session, intent_id, "cancelled")
             cancelled += 1
-        except IntentTransitionRefused:
+        except IntentTransitionRefused as exc:
             logger.warning(
-                "offboard drain: intent %s refused the cancel edge; leaving it"
-                " for the finalize guard to catch",
+                "offboard drain: intent %s refused the cancel edge (%s); leaving"
+                " it for the finalize guard to catch",
                 intent_id,
+                exc,
             )
             refused += 1
     return {"cancelled": cancelled, "refused": refused}

@@ -98,7 +98,7 @@ def _one(off_db, sql, params=()):
     return fetch_one(off_db["owner_stream"], sql, params)
 
 
-def _intent(off_db, ws, state="awaiting_approval", transit=None):
+def _intent(off_db, ws, state="awaiting_approval", transit=None, intent_id=None):
     (media,) = _migrate(
         off_db["owner_stream"],
         "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name,"
@@ -113,11 +113,12 @@ def _intent(off_db, ws, state="awaiting_approval", transit=None):
     draining = state in ("publishing", "publishing_ambiguous")
     (intent,) = _migrate(
         off_db["owner_stream"],
-        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        "INSERT INTO post_intents (id, workspace_id, ig_account_id, media_item_id,"
         " provider_account_ref, approval_mode, schedule_slot_at, state,"
         " transit_asset_ref, publish_step, cap_consumed_on)"
-        " VALUES (%s, %s, %s, %s, 'manual', now(), %s, %s, %s, %s) RETURNING id",
+        " VALUES (%s, %s, %s, %s, %s, 'manual', now(), %s, %s, %s, %s) RETURNING id",
         (
+            str(intent_id or uuid.uuid4()),
             ws["ws"],
             ws["iga"],
             media,
@@ -537,6 +538,45 @@ class TestTheWorkflow:
                 await deps.engine.dispose()
 
         assert asyncio.run(_go()) == {"outcome": "already_finalized"}
+
+    def test_a_refused_cancel_does_not_abort_the_rest_of_the_drain(self, off_db, ws):
+        """#1422: the drain promises "a refusal on one intent is recorded and the
+        rest continue". A refusal is a Postgres error and aborts the
+        transaction, so without a savepoint per row the NEXT cancel fails on
+        the aborted transaction and the whole offboard fails with it.
+
+        In production a refusal needs a race — the row moved between the
+        drain's SELECT and its UPDATE. Here the `approved → cancelled` edge is
+        removed for the run, so the guard refuses deterministically, and the
+        refused intent sorts FIRST (the drain walks `ORDER BY id`), so every
+        other cancel runs after the refusal.
+        """
+        refused = _intent(
+            off_db, ws, state="approved", intent_id="00000000" + uuid.uuid4().hex[8:]
+        )
+        cancelled = _intent(off_db, ws)  # awaiting_approval: its edge stays
+        offboard(off_db, ws, confirm=True)
+        _migrate(
+            off_db["owner_stream"],
+            "DELETE FROM post_intent_transitions"
+            " WHERE from_state = 'approved' AND to_state = 'cancelled'",
+        )
+        try:
+            out = run_job(off_db, ws, grace=3600)
+        finally:  # the database is the module's: put the edge back
+            _migrate(
+                off_db["owner_stream"],
+                "INSERT INTO post_intent_transitions (from_state, to_state)"
+                " VALUES ('approved', 'cancelled')",
+            )
+
+        # Two cancels (the chain's own `scheduled` intent and `cancelled`) and
+        # one refusal, which must not also count as a cancel.
+        assert out["outcome"] == "drained", out
+        assert (out["cancelled"], out["refused"]) == (2, 1), out
+        state = "SELECT state FROM post_intents WHERE id = %s"
+        assert _one(off_db, state, (refused,))[0] == "approved"
+        assert _one(off_db, state, (cancelled,))[0] == "cancelled"
 
 
 class TestTheDrainPark:

@@ -71,6 +71,11 @@ class IntentTransitionRefused(StorydumpError):
     rule fired (terminal-immutable, illegal edge, same-state write, incomplete
     row, missing actor), and a friendlier string here would lose the
     distinction the operator needs.
+
+    Raised after Postgres has aborted the transaction: a caller that means to
+    go on after catching it runs :func:`transition` inside
+    `session.begin_nested()` and catches it outside that block, so the
+    savepoint rolls back, as the prompt sweep and the offboarding drain do.
     """
 
 
@@ -127,7 +132,10 @@ async def transition(session, intent_id: str, to_state: str) -> None:
     """Move an intent to *to_state*, or raise.
 
     No pre-check. The UPDATE goes out and the triggers decide; a refusal comes
-    back as :class:`IntentTransitionRefused`.
+    back as :class:`IntentTransitionRefused`. A refusal is a Postgres error, so
+    it aborts the caller's transaction: to go on after catching one, call this
+    inside `session.begin_nested()` and catch the refusal outside that block,
+    so the savepoint rolls back (#1422).
 
     The caller must be inside a unit of work that has set `app.actor_kind` —
     `trg_intent_audit` refuses an anonymous state change, and this module does
