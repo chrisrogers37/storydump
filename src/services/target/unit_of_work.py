@@ -364,7 +364,10 @@ async def apply_gucs(
     every unit of work, and four round trips for four `set_config` calls was
     measured as the largest avoidable cost on the read path (#1028). Only the
     non-None pairs are sent — `set_config(x, NULL, true)` stores the empty
-    string, and the audit triggers must keep seeing an UNSET actor as unset.
+    string. Not sending is not enough on its own, though: a pooled connection
+    that set `app.actor_kind` in an earlier transaction reads it as `''`, not
+    NULL, so the audit triggers' `IS NULL` test cannot see an unset actor
+    there — a known gap (#1421), pinned in the intent-ledger gate.
 
     Known coverage note: a raw-connection transaction (the permit path) never
     sets `_IN_TRANSACTION`, so the §5 discipline tripwire does not cover the

@@ -250,7 +250,7 @@ class TestTheTransitionMatrixIsEnforcedByTheTriggerNotTheService:
 
     def test_every_ILLEGAL_edge_is_refused_by_the_trigger(self, ledger):
         """The exhaustive half: all non-edges over the full state cross-product,
-        excluding same-state (a no-op by design — see its own test) and
+        excluding same-state (refused by `061` — see its own test) and
         terminal sources (covered by immutability)."""
         accepted = []
         checked = 0
@@ -280,9 +280,9 @@ class TestTheTransitionMatrixIsEnforcedByTheTriggerNotTheService:
 
 
 class TestDoubleTransition:
-    """The gate says "reject every illegal/double transition". Measured, a
-    same-state write is a NO-OP rather than a refusal — so this asserts the
-    property that actually holds, not the phrasing."""
+    """The gate says "reject every illegal/double transition". A same-state
+    write was measured a NO-OP until #883; `061` makes it a refusal, and that
+    is what this asserts."""
 
     def test_a_same_state_write_is_REFUSED_and_moves_nothing(self, ledger):
         """#883 closed this. Before `061` a same-state write SUCCEEDED as a
@@ -787,6 +787,82 @@ class TestTheServicePathAgreesWithTheTrigger:
             with pytest.raises(IntentTransitionRefused, match="illegal transition"):
                 async with uow.begin() as session:
                     await transition(session, intent, "approved")
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_ACTOR_LESS_transition_is_refused_on_a_FRESH_connection_by_the_AUDIT_TRIGGER(
+        self, ledger
+    ):
+        """The one refusal that is not a `check_violation` (#1402).
+
+        `trg_intent_audit` refuses an anonymous state change with a bare
+        `RAISE EXCEPTION`, which asyncpg surfaces as `RaiseError` — so this is
+        the test that proves `transition()` catches both driver shapes. The edge
+        is legal, so the guard passes and the missing actor is the only
+        objection left; on a fresh connection the unset setting reads NULL,
+        which is what the trigger tests.
+        """
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.intent_ledger import (
+            IntentTransitionRefused,
+            transition,
+        )
+        from src.services.target.unit_of_work import unit_of_work
+
+        intent = _new_intent(ledger, "scheduled")
+        engine = create_async_engine(
+            self._async_dsn(ledger), pool_size=1, max_overflow=0
+        )
+        try:
+            anonymous = unit_of_work(engine, ledger["chain"]["ws"])
+            with pytest.raises(IntentTransitionRefused, match="app.actor_kind"):
+                async with anonymous.begin() as session:
+                    await transition(session, intent, "prompt_pending")
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_ACTOR_LESS_transition_is_refused_on_a_REUSED_connection_by_CK_AUDIT_ACTOR(
+        self, ledger
+    ):
+        """A KNOWN GAP, pinned as it stands (found under #1402; the fix is #1421).
+
+        A pooled connection that has carried an actor reads the unset setting
+        as '' rather than NULL, and the audit trigger's `IS NULL` test lets ''
+        through. The state change is still refused, but only because the audit
+        row then fails `ck_audit_actor` — an accident of this table, not the
+        rule: `trg_governance_audit` has the same test and writes no audit row
+        for its machinery columns, so there nothing refuses at all. When the
+        triggers read '' as unset, this refusal will name `app.actor_kind`
+        instead — change the match then.
+        """
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.intent_ledger import (
+            IntentTransitionRefused,
+            transition,
+        )
+        from src.services.target.unit_of_work import unit_of_work
+
+        intent = _new_intent(ledger, "scheduled")
+        engine = create_async_engine(
+            self._async_dsn(ledger), pool_size=1, max_overflow=0
+        )
+        try:
+            primed = unit_of_work(engine, ledger["chain"]["ws"], actor_kind="system")
+            async with primed.begin():  # the one connection carries an actor once
+                pass
+            anonymous = unit_of_work(engine, ledger["chain"]["ws"])
+            with pytest.raises(IntentTransitionRefused, match="ck_audit_actor"):
+                async with anonymous.begin() as session:  # pool_size=1: the same one
+                    unset = await session.execute(
+                        text("SELECT current_setting('app.actor_kind', true)")
+                    )
+                    assert unset.scalar_one() == ""  # the premise: '', not NULL
+                    await transition(session, intent, "prompt_pending")
         finally:
             await engine.dispose()
 

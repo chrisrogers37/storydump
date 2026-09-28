@@ -522,9 +522,9 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
     )
     for row in sorted(advanced, key=lambda r: str(r["workspace_id"])):
         await claims.claim(str(row["workspace_id"]))
-        # A refusal is a Postgres check_violation, which aborts the
-        # transaction: the savepoint is what lets the sweep go on to the next
-        # row, and hand the caller's scope back, after one.
+        # A refusal is a Postgres error, which aborts the transaction: the
+        # savepoint is what lets the sweep go on to the next row, and hand the
+        # caller's scope back, after one.
         try:
             async with session.begin_nested():
                 await intent_ledger.transition(
@@ -532,6 +532,6 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
                 )
             counts["advanced"] += 1
         except intent_ledger.IntentTransitionRefused:
-            pass  # raced by the fast path — the state is already right
+            pass  # the ledger refused; most often the fast path moved it first
     await claims.release()
     return counts

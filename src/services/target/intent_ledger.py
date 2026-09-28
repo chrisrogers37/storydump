@@ -2,8 +2,9 @@
 
 A deliberately thin layer over `post_intents`. Everything that *enforces*
 anything lives in the database: migration `055` ships `trg_intent_guard`,
-`trg_intent_audit` and `trg_intent_insert_guard`, and `04` §L.1's gate says
-outright that **the trigger, not the service, is the authority**.
+`trg_intent_audit` and `trg_intent_insert_guard`, `061` adds
+`trg_intent_no_self_transition` (#883), and `04` §L.1's gate says outright
+that **the trigger, not the service, is the authority**.
 
 ## Why this module validates nothing
 
@@ -16,9 +17,8 @@ one it forbids), and every test that goes through the service keeps passing
 because it is asserting the copy.
 
 So this module issues the UPDATE and lets the trigger decide. Its only job
-beyond that is to translate the database's `check_violation` into a typed
-error, which is a *presentation* concern and cannot disagree with the
-authority.
+beyond that is to translate the database's refusal into a typed error, which
+is a *presentation* concern and cannot disagree with the authority.
 
 :func:`legal_transitions` exists for callers that need to *show* the edge set —
 a UI, an operator report. It reads the table. It is never consulted before a
@@ -32,16 +32,21 @@ the gate's phrasing and the trigger's behaviour are not identical:
 * **Terminal rows reject EVERY update**, not only state changes — an attempt to
   set `ig_permalink` on a `cancelled` intent raises. The guard tests
   `OLD.state` first, before it looks at what changed.
-* **A same-state update is a no-op, not a refusal.** `scheduled → scheduled`
-  succeeds. The guard only compares when `NEW.state IS DISTINCT FROM
-  OLD.state`, so the "double transition" the gate names is prevented
-  *structurally* — after A→B you are no longer in A, so the edge no longer
-  matches — rather than by rejecting a repeat. The same-state write also
-  produces **no audit row** (the AFTER trigger carries `WHEN OLD.state IS
-  DISTINCT FROM NEW.state`) and does **not** advance `entered_state_at`, so it
-  cannot forge a second ledger entry. That is the property worth relying on,
-  and it is what the gate asserts.
-* **An actor-less state change raises**, from `trg_intent_audit`.
+* **A same-state write is refused** (#883, migration `061`). `trg_intent_guard`
+  compares only when `NEW.state IS DISTINCT FROM OLD.state`, so under `055`
+  alone `scheduled → scheduled` succeeded as a no-op — and the loser of a
+  concurrent transition, re-evaluated against the winner's row, was told it
+  had won. `061`'s `BEFORE UPDATE OF state` trigger refuses any write that
+  names `state` with its current value; an update that never names `state` (a
+  checkpoint) does not fire it. The gate asserts both halves.
+* **An actor-less state change raises, from `trg_intent_audit` — on a fresh
+  connection.** A pooled connection that has carried an actor reads the unset
+  `app.actor_kind` as `''`, not NULL, and the trigger's `IS NULL` test lets it
+  through. That is a known gap (#1421), not a design: here the change is still
+  refused, because the audit row fails `ck_audit_actor`, but
+  `trg_governance_audit` has the same test and writes no audit row for its
+  machinery columns, so an actor-less machinery write on a reused connection
+  is not refused at all. The gate pins both connection states.
 """
 
 from __future__ import annotations
@@ -58,11 +63,14 @@ from src.services.target._dbapi import driver_error_is
 
 
 class IntentTransitionRefused(StorydumpError):
-    """The database refused a transition. Raised from its `check_violation`.
+    """The database refused a transition: a `check_violation` from a guard or a
+    state-completeness CHECK, or the audit trigger's refusal of an actor-less
+    change.
 
-    Carries the driver's message rather than a reworded one: the trigger names
-    which rule fired (terminal-immutable vs illegal-edge) and a friendlier
-    string here would lose the distinction the operator needs.
+    Carries the driver's message rather than a reworded one: it names which
+    rule fired (terminal-immutable, illegal edge, same-state write, incomplete
+    row, missing actor), and a friendlier string here would lose the
+    distinction the operator needs.
     """
 
 
@@ -118,8 +126,8 @@ EVIDENCE_MERGE = (
 async def transition(session, intent_id: str, to_state: str) -> None:
     """Move an intent to *to_state*, or raise.
 
-    No pre-check. The UPDATE goes out and `trg_intent_guard` decides; a
-    `check_violation` comes back as :class:`IntentTransitionRefused`.
+    No pre-check. The UPDATE goes out and the triggers decide; a refusal comes
+    back as :class:`IntentTransitionRefused`.
 
     The caller must be inside a unit of work that has set `app.actor_kind` —
     `trg_intent_audit` refuses an anonymous state change, and this module does
