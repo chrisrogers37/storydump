@@ -293,9 +293,10 @@ class TestAgainstTheRealDocs:
         # §25's worker doors (082, #751 part 2) make it 37; §26's clock
         # deadlines (083, #1381 — the SQL half of #1361) make it 38;
         # §27's clock reviving its own singletons' leases (084, #1329) makes
-        # it 39; and §28's audit triggers reading an empty actor as unset
-        # (085, #1421) make it 40.
-        assert classes.count("normative") == 40
+        # it 39; §28's audit triggers reading an empty actor as unset (085,
+        # #1421) make it 40; and §29's reaper ending a ready job past its
+        # deadline (086, #1429) makes it 41.
+        assert classes.count("normative") == 41
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
@@ -476,15 +477,16 @@ class TestWhatTheCommentRuleChangedInTheStream:
     """#1406 changed what the prefix gate compares, and this pins the change.
 
     Normalization now drops every comment outside a literal and keeps every
-    literal whole. Against the rule it replaced, 41 of the stream's 438
+    literal whole. Against the rule it replaced, 42 of the stream's 441
     statements normalize differently, and in two directions:
 
     - 31 STOP comparing a comment that sits outside every literal — after a
       column, in a trigger or function header — which the old rule kept.
-    - 15 START comparing the `--` lines inside a function body, which the old
+    - 16 START comparing the `--` lines inside a function body, which the old
       rule dropped although PostgreSQL stores them in `pg_proc.prosrc`. The
-      last two are `085`'s (#1421): each audit trigger's replacement carries
-      a `-- 085:` line in its body.
+      last three are `085`'s two (#1421), whose audit trigger replacements
+      carry a `-- 085:` line, and `086`'s reaper (#1429), whose new leg
+      carries a `-- 086:` block.
 
     Five statements are in both: the five definitions of `fn_clock_tick`.
     Nothing else changed.
@@ -543,6 +545,7 @@ class TestWhatTheCommentRuleChangedInTheStream:
         "CREATE FUNCTION trg_governance_audit",
         "CREATE FUNCTION trg_intent_guard",
         "CREATE FUNCTION trg_intent_insert_guard",
+        "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION trg_governance_audit",
         "CREATE OR REPLACE FUNCTION trg_intent_audit",
     ]

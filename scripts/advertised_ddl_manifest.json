@@ -312,6 +312,13 @@
       "label": "§28 the audit triggers read an empty actor as unset (085, #1421) — trg_intent_audit and trg_governance_audit replaced so NULLIF(current_setting('app.actor_kind', true), '') IS NULL refuses an actor-less write on a reused connection too",
       "doc": "07-security-model.md",
       "ordinal": 26
+    },
+    {
+      "sha256": "fec2463bda9c256d637069b82a1e1ab42bfcbfaafa3b043e85fe990787d94cd1",
+      "class": "normative",
+      "label": "§29 the reaper ends a ready job past its deadline (086, #1429) — fn_reaper_sweep replace adding a last leg that ends a ready job of a re-minted kind past deadline_at as failed and re-arms a sync kind's source, plus svc_maintenance's column UPDATE on media_sources.next_sync_at with its policy",
+      "doc": "07-security-model.md",
+      "ordinal": 27
     }
   ],
   "policy_expansion": {

@@ -151,6 +151,13 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_maintenance",),
     ): "door:fn_stranded_sources",
+    # 086: the reaper re-arms the source of a sync it ends past its deadline.
+    (
+        "p_maint_sources_rearm",
+        "media_sources",
+        "UPDATE",
+        ("svc_maintenance",),
+    ): "door:fn_reaper_sweep",
     ("p_tenant", "provider_quarantine", "ALL", T): "matrix",
     (
         "p_claim_quar",
@@ -787,7 +794,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 62
+        assert len(POLICY_CENSUS) == 63
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -804,9 +811,9 @@ class TestRuntimeTenantIsolationMatrix:
         }
         # Exact split, so a re-tagged disposition is a visible diff:
         assert len(by_kind["matrix"]) == 16
-        assert (
-            len(by_kind["door"]) == 33
-        )  # 081: p_maint_accts; 082: the three maintenance reads
+        # 081: p_maint_accts; 082: the three maintenance reads; 086: the
+        # reaper's source re-arm.
+        assert len(by_kind["door"]) == 34
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():

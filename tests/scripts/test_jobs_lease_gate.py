@@ -35,17 +35,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import pytest
 from psycopg2 import errors as pg_errors
 
 from scripts.migration_runner import MIGRATIONS_DIR
-from src.services.target import jobs
+from src.services.target import jobs, work_loop
 from src.services.target.work_loop import WorkerConfig
 from src.worker import compose
 from tests.scripts.conftest import (
@@ -148,16 +149,29 @@ def _seed_job(
     lane="interactive",
     tenant=True,
     run_at_offset_s=0.0,
+    deadline_s=None,
+    payload=None,
 ):
-    """Insert one `ready` job as the owner; returns its id."""
+    """Insert one `ready` job as the owner; returns its id. Its deadline is
+    *deadline_s* from now, or none (as `jobs.NO_DEADLINE` mints a publish). A
+    job past its deadline wants a `run_at` before it, as every mint's is."""
     ws = jobs_db["ws"] if tenant else None
     rows = _owner_exec(
         jobs_db,
         "INSERT INTO jobs (workspace_id, kind, lane, serialization_key,"
-        " run_at, payload, max_attempts)"
+        " run_at, deadline_at, payload, max_attempts)"
         " VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s),"
-        " '{\"v\": 1}', %s) RETURNING id",
-        (str(ws) if ws else None, kind, lane, key, run_at_offset_s, 3),
+        " now() + make_interval(secs => %s), %s, %s) RETURNING id",
+        (
+            str(ws) if ws else None,
+            kind,
+            lane,
+            key,
+            run_at_offset_s,
+            deadline_s,
+            json.dumps(payload or {"v": 1}),
+            3,
+        ),
         fetch=True,
     )
     return rows[0][0]
@@ -375,12 +389,7 @@ class TestKillResumeExpiryAndFencing:
 
         # Expired work recovers — via the reaper's first leg, not by magic.
         time.sleep(0.5)
-        recovered = _owner_exec(
-            jobs_db,
-            "SELECT fn_reaper_sweep(50, '72 hours'::interval, '72 hours'::interval)",
-            fetch=True,
-        )
-        assert recovered[0][0] >= 1, "the sweep must re-ready the expired lease"
+        assert _sweep(jobs_db) >= 1, "the sweep must re-ready the expired lease"
         state = _owner_exec(
             jobs_db,
             "SELECT state, lease_token FROM jobs WHERE id = %s",
@@ -483,6 +492,20 @@ def _tick(jobs_db, recurring=RECURRING) -> tuple:
                 ),
             )
             return tuple(cur.fetchone())
+    finally:
+        conn.close()
+
+
+def _sweep(jobs_db) -> int:
+    """One reaper sweep as the reap executor makes it: `svc_worker` on the
+    door, whose body runs as `svc_maintenance`. The rows it touched."""
+    conn = _worker_conn(jobs_db)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT fn_reaper_sweep(50, '72 hours'::interval, '72 hours'::interval)"
+            )
+            return cur.fetchone()[0]
     finally:
         conn.close()
 
@@ -679,6 +702,267 @@ class TestTheReviveRidesItsOwnGrant:
         finally:
             execute(owner, f"GRANT UPDATE ({LEASE_COLUMNS}) ON jobs TO svc_clock")
         assert _tick(jobs_db) == NOTHING_MINTED, "restored: the tick runs again"
+
+
+class TestTheReaperEndsAReadyJobPastItsDeadline:
+    """086 (#1429): the reaper ends a `ready` job past its deadline `failed`,
+    and says so in its payload, when a sweep re-mints its kind."""
+
+    #: The kinds a sweep re-mints, which 086's leg may end: the clock's
+    #: recurring singletons and its slot, refresh and reauth legs, the sender
+    #: sweep's `deliver_outbox`, and the sync kinds, whose source it re-arms.
+    RE_MINTED = frozenset(
+        {
+            "reap_expired",
+            "reconcile_ambiguous",
+            "alert_stranded_sources",
+            "reap_transit_assets",
+            "plan_slot",
+            "refresh_credential",
+            "reauth_prompt",
+            "deliver_outbox",
+            "sync_media_source",
+            "first_ingest_chunk",
+        }
+    )
+    #: Nothing re-mints these, so ending one would only lose its work.
+    KEPT = frozenset(
+        {
+            "publish_pipeline",
+            "send_email",
+            "offboard_workspace",
+            "revoke_workspace_credentials",
+            "retention_sweep",
+            "reencrypt_credentials",
+        }
+    )
+
+    def _kinds(self, jobs_db, constraint):
+        """The job kinds a CHECK on `jobs` names, read from the live schema."""
+        (definition,) = _owner_exec(
+            jobs_db,
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = %s",
+            (constraint,),
+            fetch=True,
+        )[0]
+        return set(re.findall(r"'([a-z_]+)'", definition))
+
+    def _past(self, jobs_db, *, kind="plan_slot", payload=None, tenant=True):
+        """A `ready` job a minute past its deadline, minted two minutes ago:
+        as every mint's, its `run_at` is before its deadline."""
+        return _seed_job(
+            jobs_db,
+            key=_key(),
+            kind=kind,
+            lane="bulk",
+            tenant=tenant,
+            run_at_offset_s=-120,
+            deadline_s=-60,
+            payload=payload,
+        )
+
+    def _source(self, jobs_db, *, arm_s=None, state="active"):
+        """A connected folder, disarmed unless *arm_s* arms it that far ahead.
+        Returns its id and `next_sync_at`."""
+        return tuple(
+            _owner_exec(
+                jobs_db,
+                "INSERT INTO media_sources"
+                " (workspace_id, provider, config, next_sync_at, state)"
+                " VALUES (%s, 'gdrive', '{\"v\": 1}',"
+                "  now() + make_interval(secs => %s), %s)"
+                " RETURNING id, next_sync_at",
+                (str(jobs_db["ws"]), arm_s, state),
+                fetch=True,
+            )[0]
+        )
+
+    def _state(self, jobs_db, job_id):
+        return tuple(
+            _owner_exec(
+                jobs_db,
+                "SELECT state, payload->>'ended' FROM jobs WHERE id = %s",
+                (job_id,),
+                fetch=True,
+            )[0]
+        )
+
+    def _next_sync_at(self, jobs_db, source):
+        return _owner_exec(
+            jobs_db,
+            "SELECT next_sync_at FROM media_sources WHERE id = %s",
+            (source,),
+            fetch=True,
+        )[0][0]
+
+    def test_a_ready_job_past_its_deadline_ends_failed_and_says_why(self, jobs_db):
+        # Claimed first: `_claimed` takes the oldest ready row on its lane.
+        running = self._past(jobs_db)
+        assert _claimed(jobs_db, lane="bulk", worker="w")["id"] == running
+        spent = self._past(jobs_db)
+        early = _seed_job(
+            jobs_db, key=_key(), kind="plan_slot", lane="bulk", deadline_s=3600
+        )
+        story = _seed_job(jobs_db, key=_key(), lane="bulk")  # no deadline
+        _sweep(jobs_db)
+        assert self._state(jobs_db, spent) == ("failed", "deadline")
+        assert self._state(jobs_db, early) == ("ready", None), "before its deadline"
+        assert self._state(jobs_db, story) == ("ready", None), "no deadline at all"
+        assert self._state(jobs_db, running) == ("leased", None), (
+            "a live lease is its runner's to end, never the reaper's"
+        )
+
+    def test_every_kind_is_either_re_minted_or_kept(self, jobs_db):
+        """The leg ends only the kinds a sweep re-mints (owner ruling,
+        2026-09-28). Every kind the schema allows is on one side, so a new
+        kind fails here until someone decides which, and each side is driven:
+        one job of every kind, past its deadline, and one sweep."""
+        kinds = self._kinds(jobs_db, "ck_jobs_kind")
+        assert self.RE_MINTED | self.KEPT == kinds, (
+            f"classify these job kinds: {sorted(kinds - self.RE_MINTED - self.KEPT)}"
+        )
+        assert not self.RE_MINTED & self.KEPT
+        system = self._kinds(jobs_db, "ck_jobs_system_kinds")
+        seeded = {
+            kind: self._past(jobs_db, kind=kind, tenant=kind not in system)
+            for kind in sorted(kinds)
+        }
+        _sweep(jobs_db)
+        ended = {
+            kind
+            for kind, job in seeded.items()
+            if self._state(jobs_db, job)[0] == "failed"
+        }
+        assert ended == self.RE_MINTED
+
+    @pytest.mark.parametrize("then_park", [False, True], ids=["claimed", "parked"])
+    def test_a_job_changed_while_the_sweep_runs_is_not_ended_under_it(
+        self, jobs_db, then_park
+    ):
+        """At READ COMMITTED a changed row is rechecked against the UPDATE's own
+        quals, not its subquery's, so the outer UPDATE repeats `state` and the
+        deadline test. Driven deterministically: a claim holds its transaction
+        open, the sweep is seen waiting on the row, and the claim commits first,
+        either leased or parked again with its deadline moved (as
+        `jobs.reschedule_job` parks it)."""
+        job = self._past(jobs_db)
+        claimer = _worker_conn(jobs_db, autocommit=False)
+        swept: dict = {}
+
+        def sweep():
+            try:
+                swept["n"] = _sweep(jobs_db)
+            except Exception as exc:  # noqa: BLE001 — the assertion target
+                swept["error"] = exc
+
+        try:
+            assert _claim(claimer, lane="bulk")["id"] == job
+            if then_park:
+                with claimer.cursor() as cur:
+                    # The worker's own tenant claim: under `p_jobs` a tenant
+                    # job is invisible to an unclaimed `svc_worker` session.
+                    cur.execute(
+                        "SELECT set_config('app.tenant_id', %s, true)",
+                        (str(jobs_db["ws"]),),
+                    )
+                    cur.execute(
+                        "UPDATE jobs SET state = 'ready', locked_by = NULL,"
+                        " lease_token = NULL, locked_until = NULL,"
+                        " deadline_at = deadline_at"
+                        "   + ((now() + interval '15 minutes') - run_at),"
+                        " run_at = now() + interval '15 minutes',"
+                        " attempts = GREATEST(attempts - 1, 0)"
+                        " WHERE id = %s",
+                        (job,),
+                    )
+                    assert cur.rowcount == 1, "the park must move the claimed row"
+            t = threading.Thread(target=sweep)
+            t.start()
+            waiting = 0
+            for _ in range(100):  # the sweep must be seen WAITING on the row
+                waiting = _owner_exec(
+                    jobs_db,
+                    "SELECT count(*) FROM pg_locks WHERE NOT granted",
+                    fetch=True,
+                )[0][0]
+                if waiting:
+                    break
+                time.sleep(0.05)
+            assert waiting, "the sweep never waited on the row: the race was not run"
+            claimer.commit()
+            t.join(timeout=10)
+            assert not t.is_alive() and "error" not in swept, swept
+        finally:
+            claimer.close()
+        assert self._state(jobs_db, job) == (
+            ("ready", None) if then_park else ("leased", None)
+        )
+
+    def test_an_ended_sync_re_arms_its_source_for_tomorrow(self, jobs_db):
+        """What `work_loop._rearm_source` does on a spent budget, for both sync
+        kinds, and only for the job's own active, disarmed source: an armed
+        source keeps its time, and a paused one or another workspace's is left
+        as it was."""
+        armed, armed_at = self._source(jobs_db, arm_s=3600)
+        paused, _ = self._source(jobs_db, state="paused")
+        conn = psycopg2.connect(jobs_db["owner_stream"])
+        try:
+            foreign = seed_workspace_chain(conn, f"l2-foreign-{uuid.uuid4().hex[:6]}")[
+                "src"
+            ]
+        finally:
+            conn.close()
+        ended = {}
+        for kind in sorted(work_loop._SYNC_KINDS):
+            source, _ = self._source(jobs_db)
+            ended[kind] = (
+                source,
+                self._past(
+                    jobs_db, kind=kind, payload={"v": 1, "source_id": str(source)}
+                ),
+            )
+        for other in (armed, paused, foreign):
+            self._past(
+                jobs_db,
+                kind="sync_media_source",
+                payload={"v": 1, "source_id": str(other)},
+            )
+        _sweep(jobs_db)
+        for kind, (source, job) in ended.items():
+            (span,) = _owner_exec(
+                jobs_db,
+                "SELECT s.next_sync_at - j.updated_at FROM media_sources s, jobs j"
+                " WHERE s.id = %s AND j.id = %s",
+                (source, job),
+                fetch=True,
+            )[0]
+            # One statement stamps both, so the span is exact; a kind missing
+            # from 086's re-arm list leaves the source NULL.
+            assert span == timedelta(seconds=work_loop.REARM_AFTER_SECONDS), (
+                f"{kind}: a sync kind must be named in 086's re-arm too"
+            )
+        assert self._next_sync_at(jobs_db, armed) == armed_at, "armed: keeps its time"
+        assert self._next_sync_at(jobs_db, paused) is None, "paused: not re-armed"
+        assert self._next_sync_at(jobs_db, foreign) is None, (
+            "another workspace's source: the re-arm is bound to the job's own tenant"
+        )
+
+    def test_the_re_arm_rides_its_own_grant(self, jobs_db):
+        """086's column grant is load-bearing: without it the sweep is refused
+        (the re-arm's UPDATE is checked when it is planned). Removed, restored."""
+        owner = jobs_db["owner_stream"]
+        _sweep(jobs_db)  # positive control: the grant is in
+        execute(
+            owner, "REVOKE UPDATE (next_sync_at) ON media_sources FROM svc_maintenance"
+        )
+        try:
+            with pytest.raises(pg_errors.InsufficientPrivilege, match="media_sources"):
+                _sweep(jobs_db)
+        finally:
+            execute(
+                owner, "GRANT UPDATE (next_sync_at) ON media_sources TO svc_maintenance"
+            )
+        _sweep(jobs_db)
 
 
 class TestRawSqlInvariants:

@@ -390,6 +390,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 085 appends §28, the audit triggers reading an empty actor as
             # unset (#1421).
             "085_audit_triggers_empty_actor.sql",
+            # 086 appends §29, the reaper ending a ready job past its
+            # deadline (#1429).
+            "086_reaper_ends_ready_jobs_past_deadline.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
