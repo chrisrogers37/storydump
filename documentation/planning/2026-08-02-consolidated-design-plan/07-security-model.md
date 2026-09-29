@@ -1982,3 +1982,66 @@ REVOKE ALL ON FUNCTION fn_clock_tick(int, interval, jsonb) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_clock_tick(int, interval, jsonb) TO svc_worker;
 ```
+
+
+### §29. The ledger learns 'planned' (086, #1413)
+
+**Why:** the content schedule (#1413) lets a person put one chosen item before approval at a
+chosen time, on top of the cadence. Such a story is a `post_intents` row like any other, told apart
+by its origin, and three rules must hold for it from the first row: it never absorbs a cadence
+slot's mint, no system path ever approves it, and it is `manual` whatever the workspace's stored
+approval settings say. This section is the ledger's half of that; the verbs that create a planned
+row are a later increment, so nothing here changes what the product does yet.
+
+**The columns.** `origin` (`'cadence'` or `'planned'`, default `'cadence'`, so every existing row
+reads as what it is) and `scheduled_by_user_id`, one `ADD` per statement: the tenancy gate refuses a
+compound `ALTER`. `ck_intent_planned_manual` makes a planned row `approval_mode = 'manual'`.
+
+**The slot key, expand half.** `uq_intent_slot` (`02` §3, key 1) exists so that re-running slot
+planning cannot double-create; a planned row is not slot planning. `uq_intent_slot_cadence` is the
+same key restricted to cadence rows. The unconditional key stays for now: `plan_slot`'s conflict
+target carries `WHERE origin = 'cadence'`, which resolves against either index, but a worker still
+running the predicate-less spelling finds no arbiter in the partial index alone and raises on every
+mint. Both spellings were checked on PostgreSQL with both indexes present. The unconditional key is
+dropped by a later increment, once this one has deployed and drained on every worker.
+
+**Only a person approves a planned row.** `trg_intent_planned_person` refuses
+`awaiting_approval -> approved` on a planned row unless `app.actor_kind = 'user'` and
+`app.actor_user_id` is set, which is what the person paths stamp. A service identity stamps
+`operator` with no user, and the worker stamps `system`; both are refused. The same trigger fixes
+`origin` at birth, because a rule keyed on a column that one `UPDATE` could rewrite would not hold.
+Every other edge is untouched, the pipeline's `publishing -> approved` wait among them.
+
+```sql
+-- [§29 the ledger learns 'planned']
+
+ALTER TABLE post_intents ADD COLUMN origin TEXT NOT NULL DEFAULT 'cadence'
+  CONSTRAINT ck_intent_origin CHECK (origin IN ('cadence','planned'));
+
+ALTER TABLE post_intents ADD COLUMN scheduled_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL;
+
+ALTER TABLE post_intents ADD CONSTRAINT ck_intent_planned_manual
+  CHECK (origin = 'cadence' OR approval_mode = 'manual');
+
+CREATE UNIQUE INDEX uq_intent_slot_cadence ON post_intents (workspace_id, ig_account_id, schedule_slot_at)
+  WHERE origin = 'cadence';
+
+CREATE FUNCTION trg_intent_planned_person() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.origin IS DISTINCT FROM OLD.origin THEN
+    RAISE EXCEPTION 'post_intent % origin is fixed at birth (% -> %)', OLD.id, OLD.origin, NEW.origin
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF OLD.origin = 'planned' AND OLD.state = 'awaiting_approval' AND NEW.state = 'approved'
+     AND (COALESCE(current_setting('app.actor_kind', true), '') <> 'user'
+          OR NULLIF(current_setting('app.actor_user_id', true), '') IS NULL) THEN
+    RAISE EXCEPTION 'post_intent % is planned: only a person approves it (actor %)',
+      OLD.id, COALESCE(NULLIF(current_setting('app.actor_kind', true), ''), 'none')
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER tg_intent_planned_person BEFORE UPDATE OF state, origin ON post_intents
+  FOR EACH ROW EXECUTE FUNCTION trg_intent_planned_person();
+```

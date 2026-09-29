@@ -102,7 +102,7 @@ def ledger(owner_window_db, owner_actor, admin_conn):
     conn.close()
 
 
-def _new_intent(ledger, state: str) -> str:
+def _new_intent(ledger, state: str, *, origin: str = "cadence") -> str:
     """An intent born directly in *state*, on its own fresh media item.
 
     Two constraints shape this and both were found by running it:
@@ -125,6 +125,10 @@ def _new_intent(ledger, state: str) -> str:
     is still testable, and these assertions are about the update rule rather
     than about how the row got there. The insert guard is tested separately,
     including that this exemption still exists.
+
+    *origin* is written only when it is not the column default, so a cadence
+    row is inserted exactly as it was before 086 (`origin` is fixed at birth:
+    a planned row has to be BORN planned).
     """
     c = ledger["chain"]
     extra_cols, extra_vals = "", []
@@ -140,6 +144,10 @@ def _new_intent(ledger, state: str) -> str:
             "2026-01-01",
             "publish_called" if state == "publishing_ambiguous" else "none",
         ]
+
+    if origin != "cadence":
+        extra_cols += ", origin"
+        extra_vals = [*extra_vals, origin]
 
     with ledger["conn"].cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
@@ -182,7 +190,7 @@ COMPLETION = {
 }
 
 
-def _attempt(ledger, sql, params, *, actor="system"):
+def _attempt(ledger, sql, params, *, actor="system", user_id=None):
     """Run *sql* on a fresh connection. Returns (ok, message, rowcount)."""
     conn = psycopg2.connect(ledger["dsn"])
     conn.autocommit = True
@@ -190,6 +198,8 @@ def _attempt(ledger, sql, params, *, actor="system"):
         with conn.cursor() as cur:
             if actor is not None:
                 cur.execute("SET app.actor_kind = %s", (actor,))
+            if user_id is not None:
+                cur.execute("SET app.actor_user_id = %s", (str(user_id),))
             cur.execute(sql, params)
             return True, "", cur.rowcount
     except Exception as exc:  # noqa: BLE001 — the message is the assertion
@@ -610,6 +620,195 @@ class TestTheInsertGuard:
         assert ok and rows == 1, msg
 
 
+#: The approval edge the person rule is about, as raw SQL.
+APPROVE = "UPDATE post_intents SET state = 'approved' WHERE id = %s"
+
+
+def _new_media(ledger) -> str:
+    """A fresh media item on the chain's source (`uq_intent_live_subject`
+    admits one live intent per item and account)."""
+    c = ledger["chain"]
+    ledger["seq"] += 1
+    tag = f"l1m-{ledger['seq']}"
+    with ledger["conn"].cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+            " file_name, media_kind, provider_file_ref)"
+            " VALUES (%s, %s, %s, %s, 'image', %s) RETURNING id",
+            (c["ws"], c["src"], tag, f"{tag}.jpg", tag),
+        )
+        return cur.fetchone()[0]
+
+
+class TestAPlannedRowIsApprovedOnlyByAPerson:
+    """086: `awaiting_approval -> approved` on a PLANNED row needs a person,
+    `app.actor_kind = 'user'` with an `app.actor_user_id`, whatever issues the
+    UPDATE. Each refusal has its rowcount-checked positive control: the same
+    statement as a person lands, and on a cadence row the rule is silent."""
+
+    @pytest.mark.parametrize(
+        "actor, with_user",
+        [("system", False), ("system", True), ("operator", True), ("user", False)],
+    )
+    def test_anything_but_a_person_is_refused(self, ledger, actor, with_user):
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        user = ledger["chain"]["user"] if with_user else None
+        ok, msg, _ = _attempt(ledger, APPROVE, (intent,), actor=actor, user_id=user)
+        assert not ok and "only a person approves it" in msg, msg
+
+    def test_a_person_approves_it(self, ledger):
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        ok, msg, rows = _attempt(
+            ledger, APPROVE, (intent,), actor="user", user_id=ledger["chain"]["user"]
+        )
+        assert ok and rows == 1, msg
+
+    def test_a_cadence_row_is_untouched_by_the_rule(self, ledger):
+        intent = _new_intent(ledger, "awaiting_approval")
+        ok, msg, rows = _attempt(ledger, APPROVE, (intent,), actor="system")
+        assert ok and rows == 1, msg
+
+    def test_the_pipelines_step_back_is_untouched_on_a_planned_row(self, ledger):
+        """`publishing -> approved` is the float's step back (076), issued by
+        the worker as `system`: the rule is about approval, not about every
+        edge that lands in `approved`."""
+        intent = _new_intent(ledger, "publishing", origin="planned")
+        ok, msg, rows = _attempt(ledger, APPROVE, (intent,), actor="system")
+        assert ok and rows == 1, msg
+
+
+class TestOriginIsFixedAtBirthAndAPlannedRowIsManual:
+    """The person rule keys on `origin`, so `origin` must not move: a rule one
+    UPDATE could step around would not hold. And a planned row is `manual`
+    whatever the workspace's stored approval settings say (086's CHECK)."""
+
+    @pytest.mark.parametrize(
+        "born, becomes", [("planned", "cadence"), ("cadence", "planned")]
+    )
+    def test_origin_cannot_be_rewritten(self, ledger, born, becomes):
+        intent = _new_intent(ledger, "awaiting_approval", origin=born)
+        ok, msg, _ = _attempt(
+            ledger,
+            "UPDATE post_intents SET origin = %s WHERE id = %s",
+            (becomes, intent),
+        )
+        assert not ok and "fixed at birth" in msg, msg
+
+    def test_a_rewrite_that_would_admit_a_system_approval_is_refused(self, ledger):
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        ok, msg, _ = _attempt(
+            ledger,
+            "UPDATE post_intents SET origin = 'cadence', state = 'approved' WHERE id = %s",
+            (intent,),
+        )
+        assert not ok and "fixed at birth" in msg, msg
+
+    def test_a_write_that_leaves_origin_alone_is_untouched(self, ledger):
+        """Positive control for the two refusals above."""
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        ok, msg, rows = _attempt(
+            ledger,
+            "UPDATE post_intents SET last_error = CAST(%s AS jsonb) WHERE id = %s",
+            ('{"v": 1, "class": "probe", "message": "m"}', intent),
+        )
+        assert ok and rows == 1, msg
+
+    @pytest.mark.parametrize("mode, lands", [("auto", False), ("manual", True)])
+    def test_a_planned_row_is_born_manual(self, ledger, mode, lands):
+        c = ledger["chain"]
+        ok, msg, rows = _attempt(
+            ledger,
+            "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+            " provider_account_ref, approval_mode, schedule_slot_at, origin)"
+            " VALUES (%s, %s, %s, %s, %s, now(), 'planned')",
+            (c["ws"], c["iga"], _new_media(ledger), f"born-{mode}", mode),
+        )
+        if lands:
+            assert ok and rows == 1, msg
+        else:
+            assert not ok and "ck_intent_planned_manual" in msg, msg
+
+
+class TestTheCadenceSlotKey:
+    """086 is the EXPAND half: the unconditional `uq_intent_slot` and the
+    cadence-only `uq_intent_slot_cadence` coexist, and `plan_slot` spells its
+    conflict target with `WHERE origin = 'cadence'`. Both spellings run here
+    as raw SQL, with both keys and with the cadence key alone (the contract a
+    later file makes), because a spelling that raises against the deployed
+    index set is an outage on every cadence mint."""
+
+    SLOT = "2026-10-03 14:00:00+00"
+    CADENCE = (
+        " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
+        " WHERE origin = 'cadence' DO NOTHING RETURNING id"
+    )
+    BARE = (
+        " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
+        " DO NOTHING RETURNING id"
+    )
+
+    def _mint(self, ledger, spelling: str, origin: str = "cadence"):
+        """One insert in `plan_slot`'s shape at SLOT, on a fresh item."""
+        c = ledger["chain"]
+        cols = (
+            "workspace_id, ig_account_id, media_item_id, provider_account_ref,"
+            " approval_mode, schedule_slot_at"
+        )
+        vals = "%s, %s, %s, %s, 'manual', %s"
+        params = [c["ws"], c["iga"], _new_media(ledger), f"slot-{uuid.uuid4().hex[:8]}"]
+        params.append(self.SLOT)
+        if origin != "cadence":
+            cols += ", origin"
+            vals += ", %s"
+            params.append(origin)
+        return _attempt(
+            ledger,
+            f"INSERT INTO post_intents ({cols}) VALUES ({vals})" + spelling,
+            tuple(params),
+        )
+
+    def _cadence_key_alone(self, ledger) -> None:
+        with ledger["conn"].cursor() as cur:
+            cur.execute("DROP INDEX uq_intent_slot")
+
+    @pytest.mark.parametrize("spelling", ["CADENCE", "BARE"])
+    def test_with_both_keys_either_spelling_mints_once(self, ledger, spelling):
+        first = self._mint(ledger, getattr(self, spelling))
+        second = self._mint(ledger, getattr(self, spelling))
+        assert first[0] and first[2] == 1, first
+        assert second[0] and second[2] == 0, second
+
+    def test_on_the_cadence_key_alone_the_cadence_spelling_mints_once(self, ledger):
+        self._cadence_key_alone(ledger)
+        first = self._mint(ledger, self.CADENCE)
+        second = self._mint(ledger, self.CADENCE)
+        assert first[0] and first[2] == 1, first
+        assert second[0] and second[2] == 0, second
+
+    def test_on_the_cadence_key_alone_the_bare_spelling_raises(self, ledger):
+        """Why the contract waits until every worker runs the new spelling."""
+        self._cadence_key_alone(ledger)
+        ok, msg, _ = self._mint(ledger, self.BARE)
+        assert not ok and "no unique or exclusion constraint matching" in msg, msg
+
+    def test_on_the_cadence_key_alone_a_planned_row_shares_the_instant(self, ledger):
+        self._cadence_key_alone(ledger)
+        planned = self._mint(ledger, "", origin="planned")
+        cadence = self._mint(ledger, self.CADENCE)
+        assert planned[0] and planned[2] == 1, planned
+        assert cadence[0] and cadence[2] == 1, cadence
+
+    def test_with_both_keys_a_planned_row_still_holds_the_instant(self, ledger):
+        """The expand half alone does not yet let the two share an instant:
+        the unconditional key still decides. Nothing creates a planned row
+        before the verbs (a later phase), so this is the stated interim."""
+        planned = self._mint(ledger, "", origin="planned")
+        cadence = self._mint(ledger, self.CADENCE)
+        assert planned[0] and planned[2] == 1, planned
+        assert cadence[0] and cadence[2] == 0, cadence
+
+
 class TestTheGuardsAreLoadBearing:
     """Each refusal above is caused by the trigger it names — proven by
     removing the trigger and watching the refusal disappear.
@@ -737,6 +936,19 @@ class TestTheGuardsAreLoadBearing:
         self._drop(ledger, "tg_audit_workspaces", "workspaces")
         ok2, msg2, rows2 = _attempt(ledger, sql, (ws,), actor=None)
         assert ok2 and rows2 == 1, f"still refused without tg_audit_workspaces: {msg2}"
+
+    def test_the_person_trigger_is_what_refuses_a_system_approval_of_a_planned_row(
+        self, ledger
+    ):
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        ok, msg, _ = _attempt(ledger, APPROVE, (intent,), actor="system")
+        assert not ok and "only a person approves it" in msg, msg
+
+        self._drop(ledger, "tg_intent_planned_person", "post_intents")
+        ok2, msg2, rows2 = _attempt(ledger, APPROVE, (intent,), actor="system")
+        assert ok2 and rows2 == 1, (
+            f"still refused without tg_intent_planned_person: {msg2}"
+        )
 
 
 class TestTheServicePathAgreesWithTheTrigger:

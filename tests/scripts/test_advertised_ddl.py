@@ -293,8 +293,8 @@ class TestAgainstTheRealDocs:
         # §25's worker doors (082, #751 part 2) make it 37; §26's clock
         # deadlines (083, #1381 — the SQL half of #1361) make it 38; and
         # §27's clock reviving its own singletons' leases (084, #1329) makes
-        # it 39.
-        assert classes.count("normative") == 39
+        # it 39; and §29's ledger learning 'planned' (086, #1413) makes it 40.
+        assert classes.count("normative") == 40
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

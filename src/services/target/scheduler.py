@@ -337,6 +337,15 @@ async def execute_plan_slot(
     resolves only names in ``pg_constraint``; the prose form does not run. The
     inference form is equivalent and is what the gate exercises.
 
+    The target carries ``WHERE origin = 'cadence'`` because the slot key is a
+    cadence rule: a planned row (a story a person scheduled for a chosen time)
+    must not absorb a slot's mint. Postgres infers any unique index the
+    predicate satisfies, partial or not, so this spelling resolves against
+    `uq_intent_slot_cadence` (086) and against the unconditional
+    `uq_intent_slot` alike, while both exist. The predicate-less spelling
+    would not survive the unconditional key's removal: against the partial
+    index alone it finds no arbiter and raises on every mint.
+
     Selection (`06` §3), keyed on the CONNECTED FOLDER since 2026-09-08: the
     connected folders that have eligible media are drawn by
     `category_mix.weights` (explicit weights by ratio; folders without a
@@ -483,6 +492,7 @@ async def execute_plan_slot(
                 " provider_account_ref, approval_mode, schedule_slot_at, state)"
                 " VALUES (:ws, :acct, :media, :ref, :mode, :slot, 'scheduled')"
                 " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
+                " WHERE origin = 'cadence'"
                 " DO NOTHING RETURNING id"
             ),
             {

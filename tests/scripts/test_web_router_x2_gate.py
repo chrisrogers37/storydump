@@ -64,7 +64,9 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _seed_intent(dsn: str, workspace_id: str, tag: str) -> str:
+def _seed_intent(
+    dsn: str, workspace_id: str, tag: str, origin: str | None = None
+) -> str:
     """Fixture data INTO an API-created workspace, as the migration actor —
     the suite's one spelling of the chain, with the state the gate reads."""
     conn = psycopg2.connect(dsn)
@@ -72,7 +74,9 @@ def _seed_intent(dsn: str, workspace_id: str, tag: str) -> str:
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute("SET app.actor_kind = 'migration'")
-            chain = seed_intent_chain(cur, workspace_id, tag, state="awaiting_approval")
+            chain = seed_intent_chain(
+                cur, workspace_id, tag, state="awaiting_approval", origin=origin
+            )
             # the account column the queue renders (`06` §3): a handle to read back
             cur.execute(
                 "UPDATE ig_accounts SET handle = %s WHERE id = %s",
@@ -339,3 +343,61 @@ class TestMembershipListingUnderTheProductionRole:
                     assert unclaimed == 0
 
         _run(main())
+
+
+def test_a_planned_story_is_approved_through_the_web_route_by_its_person(
+    world, google_configured, monkeypatch
+):
+    """086 lets only a person approve a planned story. The web route is a
+    person: the session principal opens the tenant as `user` with the
+    signed-in id (`principal.open_tenant`), so the trigger admits it, and the
+    audit row names who approved."""
+
+    async def main():
+        async with api_client(world["ingress"]) as (client, engine):
+            owner = await sign_in(
+                client, monkeypatch, sub="sub-planned", email="planned@example.test"
+            )
+            me = await client.get("/api/v1/me", headers=owner)
+            assert me.status_code == 200, me.text
+            owner_id = me.json()["user"]["id"]
+            created = await client.post(
+                "/api/v1/workspaces",
+                json={"name": "Planned", "tz": "America/New_York"},
+                headers={**owner, "Idempotency-Key": "create-planned"},
+            )
+            assert created.status_code == 201, created.text
+            ws = created.json()["workspace_id"]
+            flipped = await client.post(
+                f"/api/v1/workspaces/{ws}/commands/settings_change",
+                json={"settings": {"api_publishing_enabled": True}},
+                headers={**owner, "Idempotency-Key": "settings-planned"},
+            )
+            assert flipped.status_code == 200, flipped.text
+
+            intent_id = _seed_intent(world["stream"], ws, "planned", origin="planned")
+            assert fetch_one(
+                world["stream"],
+                "SELECT origin, state FROM post_intents WHERE id = %s",
+                (intent_id,),
+            ) == ("planned", "awaiting_approval"), "positive control: a planned card"
+
+            approved = await client.post(
+                f"/api/v1/workspaces/{ws}/commands/approve",
+                json={"intent_id": intent_id},
+                headers={**owner, "Idempotency-Key": "approve-planned"},
+            )
+            assert approved.status_code == 202, approved.text
+            assert fetch_one(
+                world["stream"],
+                "SELECT state FROM post_intents WHERE id = %s",
+                (intent_id,),
+            ) == ("approved",)
+            assert fetch_one(
+                world["stream"],
+                "SELECT actor_kind, actor_user_id::text, channel FROM audit_events"
+                " WHERE entity_id = %s AND to_state = 'approved'",
+                (intent_id,),
+            ) == ("user", owner_id, "web")
+
+    _run(main())

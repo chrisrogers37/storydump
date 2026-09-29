@@ -406,3 +406,95 @@ def test_a_workspace_name_resolves_through_the_real_principal(world, people, tmp
             assert code == EXIT_NOT_AUTHORIZED, doc
 
     _run(main())
+
+
+def test_a_planned_story_is_approved_through_the_real_cli_by_its_person(
+    world, tmp_path
+):
+    """086 lets only a person approve a planned story. The CLI's write is a
+    person: a person-bound operator token opens the tenant as `user` with the
+    token's own user (`principal.open_tenant`), so the trigger admits it.
+    Its own workspace, because `people`'s stays in manual mode for the other
+    tests of this module."""
+    tag = "cli-planned"
+
+    async def main():
+        async with api_client(world["ingress"]) as (client, engine):
+            mp = pytest.MonkeyPatch()
+            for name, value in (
+                ("GOOGLE_CLIENT_ID", api_conftest.CLIENT_ID),
+                ("GOOGLE_CLIENT_SECRET", "sec"),
+                ("OAUTH_REDIRECT_BASE_URL", api_conftest.API),
+                ("WEB_APP_URL", api_conftest.FRONT),
+                ("SESSION_COOKIE_DOMAIN", api_conftest.COOKIE_DOMAIN),
+            ):
+                mp.setattr(api_conftest.settings, name, value, raising=False)
+            try:
+                owner = await sign_in(
+                    client, mp, sub=f"sub-{tag}", email=f"{tag}@example.test"
+                )
+                me = await client.get("/api/v1/me", headers=owner)
+                assert me.status_code == 200, me.text
+                owner_id = me.json()["user"]["id"]
+                created = await client.post(
+                    "/api/v1/workspaces",
+                    json={"name": "CLI planned", "tz": "America/New_York"},
+                    headers={**owner, "Idempotency-Key": f"create-{tag}"},
+                )
+                assert created.status_code == 201, created.text
+                ws = created.json()["workspace_id"]
+                flipped = await client.post(
+                    f"/api/v1/workspaces/{ws}/commands/settings_change",
+                    json={"settings": {"api_publishing_enabled": True}},
+                    headers={**owner, "Idempotency-Key": f"settings-{tag}"},
+                )
+                assert flipped.status_code == 200, flipped.text
+                minted = await client.post(
+                    "/api/v1/me/tokens",
+                    json={"name": "agent-planned", "role": "operator"},
+                    headers=owner,
+                )
+                assert minted.status_code == 201, minted.text
+                secret = minted.json()["secret"]
+            finally:
+                mp.undo()
+
+            conn = psycopg2.connect(world["stream"])
+            try:
+                conn.autocommit = False
+                with conn.cursor() as cur:
+                    cur.execute("SET app.actor_kind = 'migration'")
+                    chain = seed_intent_chain(
+                        cur, ws, tag, state="awaiting_approval", origin="planned"
+                    )
+                    # `approve` refuses a post without a usable Instagram
+                    # token (`not_connected`, #1276), as the web gate notes.
+                    cur.execute(
+                        "INSERT INTO oauth_credentials (workspace_id, ig_account_id,"
+                        " provider, encrypted_payload, state)"
+                        " VALUES (%s, %s, 'ig_login', 'ciphertext', 'active')",
+                        (ws, str(chain["iga"])),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            story = str(chain["intent"])
+            assert _sql(
+                world["stream"],
+                "SELECT origin FROM post_intents WHERE id = %s",
+                (story,),
+            ) == [("planned",)], "positive control: the story really is planned"
+
+            bridge = LoopBridge(client._transport, asyncio.get_running_loop())
+            rt = _runtime(secret, bridge, tmp_path)
+            code, doc = await _cli(rt, "approve", story, "--workspace", ws)
+            assert code == EXIT_OK, doc
+            assert _state(world["stream"], story) == "approved"
+            assert _sql(
+                world["stream"],
+                "SELECT actor_kind, actor_user_id::text, channel FROM audit_events"
+                " WHERE entity_id = %s AND to_state = 'approved'",
+                (story,),
+            ) == [("user", owner_id, "cli")]
+
+    _run(main())

@@ -65,6 +65,16 @@ UQ_INTENT_SLOT_SQL = (
     " (workspace_id, ig_account_id, schedule_slot_at)"
 )
 
+#: 086's cadence-only slot key, verbatim — re-added after its drop proof.
+UQ_INTENT_SLOT_CADENCE_SQL = (
+    "CREATE UNIQUE INDEX uq_intent_slot_cadence ON post_intents"
+    " (workspace_id, ig_account_id, schedule_slot_at) WHERE origin = 'cadence'"
+)
+
+#: Key 1 is two indexes while 086's expand stands: whichever refuses a
+#: duplicate cadence slot, it is one of these, by name.
+SLOT_KEYS = ("uq_intent_slot", "uq_intent_slot_cadence")
+
 
 @pytest.fixture(scope="module")
 def clock_db(admin_conn, owner_actor):
@@ -687,13 +697,16 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                             slot,
                         ),
                     )
-                assert exc.value.diag.constraint_name == "uq_intent_slot", (
+                assert exc.value.diag.constraint_name in SLOT_KEYS, (
                     exc.value.diag.constraint_name
                 )
         finally:
             conn.close()
 
+        # Both halves of key 1 go: with either one left, a duplicate cadence
+        # slot is still refused, and the proof would prove nothing.
         _owner_exec(clock_db, "DROP INDEX uq_intent_slot")
+        _owner_exec(clock_db, "DROP INDEX uq_intent_slot_cadence")
         try:
             assert (
                 _owner_exec(
@@ -717,6 +730,79 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                 (account,),
             )
             _owner_exec(clock_db, UQ_INTENT_SLOT_SQL)
+            _owner_exec(clock_db, UQ_INTENT_SLOT_CADENCE_SQL)
+
+    @pytest.mark.asyncio
+    async def test_the_executor_holds_on_the_cadence_key_alone(self, clock_db):
+        """086's spelling as `plan_slot` runs it. With the unconditional key
+        gone (the contract a later file makes), a duplicate execution still
+        mints one intent, and a planned row at the slot's instant no longer
+        absorbs the cadence mint. The predicate-less spelling raises on the
+        first execution here: no arbiter is left for it to infer."""
+        from src.services.target.scheduler import execute_plan_slot
+
+        account = _new_account(clock_db)
+        planned_media = _new_media(clock_db)
+        _new_media(clock_db)
+        slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
+        _owner_exec(clock_db, "DROP INDEX uq_intent_slot")
+        engine = self._engine(clock_db)
+        try:
+            assert (
+                _owner_exec(
+                    clock_db,
+                    "INSERT INTO post_intents (workspace_id, ig_account_id,"
+                    " media_item_id, provider_account_ref, approval_mode,"
+                    " schedule_slot_at, origin)"
+                    " VALUES (%s, %s, %s, %s, 'manual', %s, 'planned')",
+                    (
+                        clock_db["ws"],
+                        account,
+                        planned_media,
+                        f"r-{uuid.uuid4().hex[:8]}",
+                        slot,
+                    ),
+                )
+                == 1
+            ), "positive control: the planned row lands at the slot's instant"
+            outcomes = []
+            for _ in range(2):
+                async with engine.connect() as conn:
+                    await self._tenant(conn, clock_db)
+                    outcomes.append(
+                        await execute_plan_slot(
+                            conn,
+                            workspace_id=clock_db["ws"],
+                            ig_account_id=account,
+                            slot_at=slot,
+                            provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
+                            approval_mode="manual",
+                            no_media_notice_after_seconds=24 * 3600,
+                        )
+                    )
+                    await conn.commit()
+            by_origin = dict(
+                _owner_exec(
+                    clock_db,
+                    "SELECT origin, count(*) FROM post_intents"
+                    " WHERE ig_account_id = %s AND schedule_slot_at = %s"
+                    " GROUP BY origin",
+                    (account, slot),
+                    fetch=True,
+                )
+            )
+        finally:
+            await engine.dispose()
+            _owner_exec(
+                clock_db,
+                "DELETE FROM post_intents WHERE ig_account_id = %s",
+                (account,),
+            )
+            _owner_exec(clock_db, UQ_INTENT_SLOT_SQL)
+
+        assert outcomes[0].intent_id is not None, "the planned row absorbed the mint"
+        assert outcomes[1].intent_id is None, "the duplicate minted a second intent"
+        assert by_origin == {"cadence": 1, "planned": 1}, by_origin
 
 
 class TestEveryLegMintsWithADeadline:

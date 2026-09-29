@@ -72,8 +72,12 @@ does.
 ## Folder selection (`scheduler.execute_plan_slot` + `category_mix.weights`)
 
 `plan_slot` mints at most one intent for its slot: the insert is
-`ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at) DO NOTHING`
-(`scheduler.py:492`), so a duplicate job mints nothing.
+`ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at) WHERE origin = 'cadence' DO NOTHING`
+(`scheduler.py:494`), so a duplicate job mints nothing. The predicate is 086's: the slot key
+is a cadence rule, so a planned story (`origin = 'planned'`) never absorbs a slot. The spelling
+resolves against both `uq_intent_slot` and the cadence-only `uq_intent_slot_cadence` while
+both exist. Keep the predicate: once the unconditional key is dropped, a bare `ON CONFLICT`
+finds no arbiter and every cadence mint raises.
 
 The draw is weighted over the CONNECTED FOLDERS that have eligible media —
 explicit ratios; automatic folders in proportion to their files, together never

@@ -387,6 +387,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 084 appends §27, the clock reviving its own singletons' expired
             # leases (#1329).
             "084_clock_revives_singleton_leases.sql",
+            # 086 appends §29, the ledger learning 'planned': the origin
+            # columns, the cadence-only slot key and the person-only approval
+            # trigger (#1413, phase 2).
+            "086_intent_origin_planned.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
