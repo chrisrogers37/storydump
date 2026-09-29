@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // `next dev` writes AGENTS.md and CLAUDE.md into this directory when it
+  // detects an AI coding agent. Agents run here and load CLAUDE.md as
+  // instructions, so a framework-written one would be instructions this
+  // repository never wrote.
+  agentRules: false,
   async redirects() {
     return [
       // Retired setup pages. Both walked the reader through registering their
