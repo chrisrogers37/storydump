@@ -14,10 +14,13 @@ is a separate, actor-coupled suite):
    the manifest is consciously updated — the F.6-ratchet shape.
 """
 
-import pytest
-
+import re
+from collections import Counter
 from pathlib import Path
 
+import pytest
+
+from scripts.migration_runner import split_statements
 from scripts.advertised_ddl import (
     DEFAULT_DOCS as REAL_DOCS,
     DEFAULT_MANIFEST as REAL_MANIFEST,
@@ -385,6 +388,178 @@ class TestNormalizeStatements:
         )
         stmts = normalize_statements(sql)
         assert stmts == ["CREATE TABLE t ( id INT )", "CREATE INDEX ix ON t (id)"]
+
+    def test_a_literal_line_that_starts_with_dashes_is_kept(self):
+        """#1406: the quote-blind rule dropped every line starting with `--`, so
+        a literal's continuation line vanished and took the clauses on it with
+        it. Here that was a DROP COLUMN workspace_id no scan downstream could
+        see; PostgreSQL runs it."""
+        sql = (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc\n"
+            "--x', DROP COLUMN workspace_id, ALTER COLUMN foo SET DEFAULT 'y\n"
+            "z';"
+        )
+        assert normalize_statements(sql) == [
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc --x', DROP COLUMN"
+            " workspace_id, ALTER COLUMN foo SET DEFAULT 'y z'"
+        ]
+
+    def test_a_comment_after_code_goes_too(self):
+        """Normalized text is one line, so a comment left in it has no end: its
+        `--` would run over the rest of the statement for any scan that reads
+        quotes. Every comment is dropped — trailing, block — never just the
+        lines that hold nothing else."""
+        sql = (
+            "CREATE TABLE t (\n"
+            "    id uuid, -- the row's id\n"
+            "    workspace_id uuid /* the tenant */\n"
+            ");"
+        )
+        assert normalize_statements(sql) == [
+            "CREATE TABLE t ( id uuid, workspace_id uuid )"
+        ]
+
+    def test_a_line_in_a_function_body_is_kept(self):
+        """A dollar-quoted body is a literal: PostgreSQL stores it verbatim
+        (`pg_proc.prosrc`), its comment lines included, so the prefix gate has
+        to see a change to one."""
+        sql = (
+            "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$\n"
+            "    -- one, always\n"
+            "    SELECT 1\n"
+            "$$;"
+        )
+        assert normalize_statements(sql) == [
+            "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ -- one, always SELECT 1 $$"
+        ]
+
+    def test_a_comment_still_separates_what_it_sat_between(self):
+        """PostgreSQL reads a comment as whitespace, so `a/* x */b` is two
+        names; removed without a space, they would read as one."""
+        assert normalize_statements("SELECT a/* x */b;") == ["SELECT a b"]
+
+    def test_layout_around_a_literal_is_not_a_moved_quote(self):
+        """The refusal below compares what the quotes bound, not the blanks
+        between them: a statement that ends in a literal loses its trailing
+        line break to normalization and must still normalize."""
+        assert normalize_statements("COMMENT ON TABLE t IS 'x'\n;") == [
+            "COMMENT ON TABLE t IS 'x'"
+        ]
+
+    def test_comment_markers_inside_a_literal_are_text(self):
+        sql = "SELECT '-- not a comment /* nor this */' AS v;"
+        assert normalize_statements(sql) == [
+            "SELECT '-- not a comment /* nor this */' AS v"
+        ]
+
+    def test_text_whose_quotes_would_move_is_refused(self):
+        """An escape string continued across a line break keeps its escape
+        rules only while the break is there: collapsed onto one line, the
+        continuation becomes a standard string and `\\'` ends it. No normalized
+        form keeps the quotes where PostgreSQL has them, so the statement is
+        refused rather than handed to a scan that trusts its quotes."""
+        sql = "SELECT E'a\\''\n'b\\'c';"
+        with pytest.raises(AdvertisedDDLError, match="quotes"):
+            normalize_statements(sql)
+
+
+def _retired_normalize(raw):
+    """The comment rule #1406 retired, kept as the reference the pin below is
+    measured against: drop every line that starts with `--`, inside a literal
+    or not, and keep every comment that follows code on its line."""
+    kept = [line for line in raw.split("\n") if not line.strip().startswith("--")]
+    return re.sub(r"\s+", " ", "\n".join(kept)).strip()
+
+
+class TestWhatTheCommentRuleChangedInTheStream:
+    """#1406 changed what the prefix gate compares, and this pins the change.
+
+    Normalization now drops every comment outside a literal and keeps every
+    literal whole. Against the rule it replaced, 39 of the stream's 436
+    statements normalize differently, and in two directions:
+
+    - 31 STOP comparing a comment that sits outside every literal — after a
+      column, in a trigger or function header — which the old rule kept.
+    - 13 START comparing the `--` lines inside a function body, which the old
+      rule dropped although PostgreSQL stores them in `pg_proc.prosrc`.
+
+    Five statements are in both: the five definitions of `fn_clock_tick`.
+    Nothing else changed.
+
+    The lists are measured against the retired rule, kept above as the
+    reference, so they go red whenever the stream gains or loses a comment
+    outside a literal or a `--` line inside a function body: the statements
+    the two rules disagree on are then no longer the ones reviewed, and the
+    edit has to say so here, on purpose.
+    """
+
+    STOPS_COMPARING = [
+        "CREATE CONSTRAINT TRIGGER ct_members_owner_exists",
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE TABLE audit_events",
+        "CREATE TABLE category_post_case_mix",
+        "CREATE TABLE channel_bindings",
+        "CREATE TABLE channel_outbox",
+        "CREATE TABLE command_dedup",
+        "CREATE TABLE daily_post_counts",
+        "CREATE TABLE ig_accounts",
+        "CREATE TABLE jobs",
+        "CREATE TABLE media_items",
+        "CREATE TABLE media_sources",
+        "CREATE TABLE oauth_credentials",
+        "CREATE TABLE oauth_states",
+        "CREATE TABLE onboarding_sessions",
+        "CREATE TABLE post_intent_transitions",
+        "CREATE TABLE post_intents",
+        "CREATE TABLE post_locks",
+        "CREATE TABLE provider_operations",
+        "CREATE TABLE provider_quarantine",
+        "CREATE TABLE rate_counters",
+        "CREATE TABLE service_tokens",
+        "CREATE TABLE session_tokens",
+        "CREATE TABLE user_identities",
+        "CREATE TABLE workspace_invitations",
+        "CREATE TABLE workspaces",
+        "CREATE TRIGGER tg_intent_audit",
+    ]
+    STARTS_COMPARING = [
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE FUNCTION fn_clock_tick",
+        "CREATE FUNCTION fn_group_member_seen",
+        "CREATE FUNCTION fn_invitation_accept",
+        "CREATE FUNCTION fn_next_slot",
+        "CREATE FUNCTION fn_reaper_sweep",
+        "CREATE FUNCTION fn_retention_batch",
+        "CREATE FUNCTION trg_governance_audit",
+        "CREATE FUNCTION trg_intent_guard",
+        "CREATE FUNCTION trg_intent_insert_guard",
+    ]
+
+    def test_the_statements_that_normalize_differently_are_exactly_these(self):
+        stops, starts = [], []
+        stream = build_stream(REAL_DOCS, load_manifest(REAL_MANIFEST))
+        for raw in split_statements(stream):
+            (current,) = normalize_statements(raw)
+            retired = _retired_normalize(raw)
+            if current == retired:
+                continue
+            label = re.match(r"CREATE (?:CONSTRAINT )?\w+ \w+|.{0,80}", current).group()
+            lost = Counter(retired.split()) - Counter(current.split())
+            gained = Counter(current.split()) - Counter(retired.split())
+            assert lost or gained, f"{label}: changed in a way this pin cannot name"
+            if lost:
+                stops.append(label)
+            if gained:
+                starts.append(label)
+        assert sorted(stops) == self.STOPS_COMPARING
+        assert sorted(starts) == self.STARTS_COMPARING
 
 
 class TestF2PrefixReport:

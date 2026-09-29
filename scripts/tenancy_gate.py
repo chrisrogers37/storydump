@@ -38,6 +38,17 @@ import re
 
 import psycopg2
 
+from scripts.sql_lexer import (
+    CODE,
+    COMMENTS,
+    DOLLAR,
+    ESCAPE_STRING,
+    IDENTIFIER,
+    WORD,
+    name_of,
+    segments,
+)
+
 #: The column that marks a table as belonging to a tenant (`02` §1, FC-1).
 TENANT_KEY = "workspace_id"
 
@@ -174,49 +185,85 @@ def tenancy_signature(dsn: str) -> dict:
     return sig
 
 
+#: The forms this gate's two text reads — the compound guard and the column
+#: names of a `CREATE TABLE` — refuse rather than read through. Any comment:
+#: normalized text carries none, so one means text that never came through
+#: `normalize_statements`, and a line comment on one line has lost the line end
+#: that bounds it. An escape string and a dollar-quoted body, since their ends
+#: turn on escape and tag rules, and a read that trusted them would turn a lexer
+#: defect in those rules into an admission — the one failure these reads exist
+#: to prevent. Unclosed text of any kind refuses too.
+_UNREAD = frozenset({ESCAPE_STRING, DOLLAR}) | COMMENTS
+
+
+#: The column an `ADD COLUMN` adds, read as the `CREATE TABLE` read reads one:
+#: `sql_lexer.name_of` over a whole word, so `WORKSPACE_ID` is the key and
+#: `workspace_id$old` is not. `IF NOT EXISTS` is skipped and never taken for the
+#: name — the lookahead stops a backtrack reading `IF` as the column when a
+#: quoted name follows it. A quoted name matches nothing here and falls through
+#: to the refusal.
+_ADD_COLUMN = re.compile(
+    r"ALTER TABLE (?:public\.)?(\w+) ADD COLUMN (?:IF NOT EXISTS )?"
+    rf"(?!IF NOT EXISTS\b)({WORD.pattern})"
+)
+
+
 def _top_level_comma(stmt: str) -> bool:
     """A comma outside every parenthesis — the mark of a compound ALTER.
 
-    Depth is counted over structure only. A `'…'` literal or a `"…"`
-    identifier is skipped whole, because a paren or comma in quoted text moves
-    nothing; a doubled quote inside one lexes as close-and-reopen and lands in
-    the same place. Literals are read as PostgreSQL reads them with
-    standard_conforming_strings on, its default, so a backslash in `'…'` is
-    plain text.
+    Depth is counted over code only. A literal or a quoted identifier is text,
+    because a paren or comma in it moves nothing, and `scripts/sql_lexer.py`
+    says where each one ends, shared with the splitter and the normalizer
+    (#983, #1406).
 
-    Everything else fails toward True, the refusal: text this scan cannot
-    bound reads as compound rather than being guessed at. That is each form it
-    does not model, where lexing the form as plain code could hide a comma —
-    an `E'…'` string (a backslash escapes its quote), a dollar-quoted body, a
-    comment (normalized text has already turned a line comment's line end into
-    a space, so nothing marks where it stops) — and quotes or parens that do
-    not balance.
+    Everything else fails toward True, the refusal: text this scan will not
+    read through (`_UNREAD`, or unclosed) reads as compound rather than being
+    guessed at, and so do parens that do not balance.
     """
     depth = 0
-    quote = None
-    for i, ch in enumerate(stmt):
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "'\"":
-            # Only the letter before the quote marks an E'…' string, so an
-            # identifier ending in e run into a literal (DATE'…') refuses too.
-            if ch == "'" and i > 0 and stmt[i - 1] in "eE":
-                return True
-            quote = ch
-        elif ch == "$" or (ch in "-/" and stmt.startswith(("--", "/*"), i)):
-            # A `$` inside an identifier refuses too: only a tokenizer tells
-            # it apart from a dollar quote.
+    for seg in segments(stmt):
+        if seg.kind in _UNREAD or not seg.closed:
             return True
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth < 0:
+        if seg.kind != CODE:
+            continue
+        for ch in seg.text:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    return True
+            elif ch == "," and depth == 0:
                 return True
-        elif ch == "," and depth == 0:
-            return True
-    return quote is not None or depth != 0
+    return depth != 0
+
+
+def _names_the_tenant_key(columns: str) -> bool:
+    """Whether a `CREATE TABLE` column list names `TENANT_KEY` — as a name in
+    code, never as text in a literal: a DEFAULT string that merely mentions it
+    is not the column (#1406). Each name is read by `sql_lexer.name_of`, as
+    PostgreSQL resolves it.
+
+    Refuses what it cannot read a name through (`_UNREAD`, unclosed), and a
+    name `name_of` cannot resolve (`U&"…"`). A literal this read could not bound
+    would hide the columns after it, and a keyed table read as unkeyed is the
+    silent direction: nothing then asks it for RLS.
+    """
+    names = []  # None: a stretch of text no name can be read from
+    for seg in segments(columns):
+        if seg.kind in _UNREAD or not seg.closed:
+            names.append(None)
+        elif seg.kind == CODE:
+            names += [name_of(word) for word in WORD.findall(seg.text)]
+        elif seg.kind == IDENTIFIER:
+            names.append(name_of(seg.text))
+    if None in names:
+        raise AssertionError(
+            "this derivation cannot bound every name in the column list — an"
+            " escape string, a dollar body, a comment, an unclosed quote or a U&"
+            f" name — so it cannot say which columns the table has: {columns[:120]}"
+        )
+    return TENANT_KEY in names
 
 
 def expected_tenancy(statements) -> dict:
@@ -284,8 +331,7 @@ def expected_tenancy(statements) -> dict:
         if m:
             name, body = m.group(1), m.group(2)
             sig[name] = _tenancy_entry(
-                tenant_keyed=bool(re.search(rf"\b{TENANT_KEY}\b", body))
-                or name == TENANT_ROOT
+                tenant_keyed=_names_the_tenant_key(body) or name == TENANT_ROOT
             )
             continue
 
@@ -325,9 +371,9 @@ def expected_tenancy(statements) -> dict:
         # action is, including the fact-MOVING ones a verb denylist would
         # have to keep chasing (ADD COLUMN workspace_id, FORCE ROW LEVEL
         # SECURITY).
-        m = re.match(r"ALTER TABLE (?:public\.)?(\w+) ADD COLUMN (\w+)", stmt)
+        m = _ADD_COLUMN.match(stmt)
         if m and not _top_level_comma(stmt):
-            if m.group(2) == "workspace_id" and m.group(1) in sig:
+            if name_of(m.group(2)) == TENANT_KEY and m.group(1) in sig:
                 sig[m.group(1)]["tenant_keyed"] = True
             continue
 

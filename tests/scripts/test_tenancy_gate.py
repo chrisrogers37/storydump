@@ -609,16 +609,27 @@ class TestTheCompoundGuardIsBoundedByQuoting:
     later comma reads as top-level.
 
     The guard fails toward the refusal on text it cannot bound, so those cases
-    are pinned too: the lexical forms it does not model, each written so that
-    lexing it as plain code would hide the comma, and text whose quotes or
-    parens do not balance. The two RAW cases go through `normalize_statements`
-    because normalized text is what the guard sees: a line comment there has
-    lost the line end that bounds it, and a literal's continuation line that
-    starts with `--` has been dropped whole, closing quote included.
+    are pinned too: the forms it does not read through, each written so that
+    reading it as plain code would hide the comma, and text whose quotes or
+    parens do not balance. UNREAD pins that refusal on its own, with no second
+    action behind it: an escape string, a dollar-quoted body or a comment is
+    refused because of what it IS, which is the only thing that keeps a lexer
+    defect in those forms from ever becoming an admission (#1406).
+
+    The RAW cases go through `normalize_statements`, because normalized text is
+    what the guard sees and each is a shape normalization once damaged: a
+    trailing comment it left with no line end to bound it, and a literal's
+    continuation lines it dropped whole when they started with `--` — alone,
+    which left an unterminated quote, or in a pair, which left a balanced
+    literal and took the second action out of the text (#1406). Normalization
+    now drops every comment and keeps every literal, so the action reaches the
+    guard.
 
     The ADMITTED cases are the control. A guard that refused every quote would
     pass every REFUSED case, so literal text that looks like structure must
-    still read as a single action.
+    still read as a single action — and so must the two forms only a lexer
+    tells apart from a quote: a `$` inside an identifier, and a type name run
+    into its literal (`DATE'…'`).
     """
 
     BASE = "CREATE TABLE t ( id uuid, workspace_id uuid )"
@@ -653,7 +664,10 @@ class TestTheCompoundGuardIsBoundedByQuoting:
         "block_comment": (
             "ALTER TABLE t ADD COLUMN foo text /* ( */, DROP COLUMN workspace_id /* ) */"
         ),
-        # Parens that do not balance.
+        # Quotes or parens that do not balance.
+        "unterminated_literal": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc, DROP COLUMN workspace_id"
+        ),
         "unclosed_paren": (
             "ALTER TABLE t ADD COLUMN foo text DEFAULT (, DROP COLUMN workspace_id"
         ),
@@ -671,6 +685,16 @@ class TestTheCompoundGuardIsBoundedByQuoting:
             "--x'\n"
             ", DROP COLUMN workspace_id\n"
         ),
+        "literal_lines_dropped_in_a_pair": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc\n"
+            "--x', DROP COLUMN workspace_id, ALTER COLUMN foo SET DEFAULT 'y\n"
+            "z'\n"
+        ),
+    }
+    UNREAD = {
+        "escape_string": "ALTER TABLE t ADD COLUMN foo text DEFAULT E'x'",
+        "dollar_quoted": "ALTER TABLE t ADD COLUMN foo text DEFAULT $$x$$",
+        "block_comment": "ALTER TABLE t ADD COLUMN foo text /* x */",
     }
     ADMITTED = {
         "comma_in_literal": "ALTER TABLE t ADD COLUMN foo text DEFAULT 'a,b'",
@@ -679,6 +703,8 @@ class TestTheCompoundGuardIsBoundedByQuoting:
         ),
         "comma_in_quoted_identifier": 'ALTER TABLE t ADD COLUMN foo text COLLATE "x,y"',
         "markers_in_literal": "ALTER TABLE t ADD COLUMN foo text DEFAULT '), -- /* $ ('",
+        "dollar_inside_an_identifier": "ALTER TABLE t ADD COLUMN foo$bar text",
+        "typed_literal": "ALTER TABLE t ADD COLUMN d date DEFAULT DATE'2026-01-01'",
     }
 
     @pytest.mark.parametrize("name", sorted(REFUSED))
@@ -687,11 +713,132 @@ class TestTheCompoundGuardIsBoundedByQuoting:
             expected_tenancy([self.BASE, self.REFUSED[name]])
 
     @pytest.mark.parametrize("name", sorted(REFUSED_RAW))
-    def test_normalized_text_it_cannot_bound_is_refused(self, name):
+    def test_a_second_action_survives_normalization_and_is_refused(self, name):
         (stmt,) = normalize_statements(self.REFUSED_RAW[name])
         with pytest.raises(AssertionError, match="does not classify"):
             expected_tenancy([self.BASE, stmt])
 
+    @pytest.mark.parametrize("name", sorted(UNREAD))
+    def test_a_form_it_does_not_read_through_is_refused_alone(self, name):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy([self.BASE, self.UNREAD[name]])
+
     @pytest.mark.parametrize("name", sorted(ADMITTED))
     def test_literal_text_is_not_structure(self, name):
         expected_tenancy([self.BASE, self.ADMITTED[name]])
+
+
+class TestTheTenantKeyIsAColumnName:
+    """`CREATE TABLE` derives `tenant_keyed` from its column list, and read it
+    with a regex over the raw text (#1406): a DEFAULT string that merely
+    mentions `workspace_id` made a table without that column read as keyed.
+    The key is now read as a NAME in code — an identifier, folded to lower case
+    as PostgreSQL folds an unquoted one, or a quoted identifier spelled exactly.
+
+    Reading names only in code is a bound in its own right, and it fails in the
+    silent direction: a literal the read cannot bound could HIDE a real column,
+    and a keyed table read as unkeyed is never asked for RLS. So KEYED holds
+    columns after a literal that a mis-bounded quote would swallow, and the
+    forms the read does not go through are REFUSED rather than guessed at —
+    the escape string and dollar body the compound guard refuses, a comment
+    (normalized text carries none, so one means text that never came through
+    `normalize_statements`), an unterminated literal, and a `U&"…"` identifier,
+    whose escapes can spell the key.
+    """
+
+    KEYED = {
+        "plain_column": "CREATE TABLE t ( id uuid, workspace_id uuid )",
+        "upper_case_column": "CREATE TABLE t ( id uuid, WORKSPACE_ID uuid )",
+        "quoted_column": 'CREATE TABLE t ( id uuid, "workspace_id" uuid )',
+        "after_a_doubled_quote": (
+            "CREATE TABLE t ( note text DEFAULT 'it''s', workspace_id uuid )"
+        ),
+        "after_a_backslash_in_a_literal": (
+            "CREATE TABLE t ( note text DEFAULT 'C:\\', workspace_id uuid )"
+        ),
+    }
+    UNKEYED = {
+        "named_only_in_a_default": (
+            "CREATE TABLE audit_log ( id uuid,"
+            " note text DEFAULT 'workspace_id backfill marker' )"
+        ),
+        "a_longer_identifier": "CREATE TABLE t ( id uuid, workspace_id$old uuid )",
+        "a_quoted_name_in_another_case": 'CREATE TABLE t ( id uuid, "Workspace_Id" uuid )',
+    }
+    REFUSED = {
+        "escape_string": (
+            "CREATE TABLE t ( note text DEFAULT E'\\'', workspace_id uuid )"
+        ),
+        "dollar_quoted": "CREATE TABLE t ( note text DEFAULT $$x$$, workspace_id uuid )",
+        "comment": "CREATE TABLE t ( id uuid, -- don't\n workspace_id uuid )",
+        "block_comment": "CREATE TABLE t ( id uuid, /* x */ workspace_id uuid )",
+        "unterminated_literal": "CREATE TABLE t ( note text DEFAULT 'x, workspace_id uuid )",
+        "unicode_escaped_identifier": (
+            'CREATE TABLE t ( id uuid, U&"\\0077orkspace_id" uuid )'
+        ),
+    }
+
+    @staticmethod
+    def _keyed(stmt):
+        (entry,) = expected_tenancy([stmt]).values()
+        return entry["tenant_keyed"]
+
+    @pytest.mark.parametrize("name", sorted(KEYED))
+    def test_a_column_named_the_key_marks_the_table(self, name):
+        assert self._keyed(self.KEYED[name]) is True
+
+    @pytest.mark.parametrize("name", sorted(UNKEYED))
+    def test_anything_else_that_spells_the_key_does_not(self, name):
+        assert self._keyed(self.UNKEYED[name]) is False
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_a_column_list_it_cannot_bound_is_refused(self, name):
+        with pytest.raises(AssertionError, match="cannot bound"):
+            expected_tenancy([self.REFUSED[name]])
+
+    ADDED = {
+        "upper_case_column": ("ALTER TABLE t ADD COLUMN WORKSPACE_ID uuid", True),
+        "if_not_exists": (
+            "ALTER TABLE t ADD COLUMN IF NOT EXISTS workspace_id uuid",
+            True,
+        ),
+        "a_longer_identifier": (
+            "ALTER TABLE t ADD COLUMN workspace_id$old uuid",
+            False,
+        ),
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADDED))
+    def test_an_added_column_is_read_by_the_same_rule(self, name):
+        """ADD COLUMN is the other place a table gains the key, so it reads the
+        column's name the way the CREATE TABLE read does — two rules for one
+        name would key a table on one branch that the other leaves unkeyed."""
+        stmt, keyed = self.ADDED[name]
+        sig = expected_tenancy(["CREATE TABLE t ( id uuid )", stmt])
+        assert sig["t"]["tenant_keyed"] is keyed
+
+    ADD_REFUSED = {
+        "a_quoted_name": 'ALTER TABLE t ADD COLUMN "workspace_id" uuid',
+        "a_quoted_name_after_if_not_exists": (
+            'ALTER TABLE t ADD COLUMN IF NOT EXISTS "workspace_id" uuid'
+        ),
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADD_REFUSED))
+    def test_an_added_name_it_does_not_read_is_refused(self, name):
+        """A quoted name falls through to the refusal rather than being read,
+        and `IF NOT EXISTS` in front of one is never taken for the name: that
+        would read the column as `if`, and the key as absent."""
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(["CREATE TABLE t ( id uuid )", self.ADD_REFUSED[name]])
+
+    def test_a_trailing_comment_cannot_hide_a_column_after_it(self):
+        """The case that made normalization drop every comment: left in the
+        one-line text, a trailing `--` would run over the columns after it, and
+        a read that skips comments would lose them — measured on the real
+        stream, three tenant-keyed tables. It is a column here, and so it
+        reads."""
+        (stmt,) = normalize_statements(
+            "CREATE TABLE t (\n    id uuid, -- the row's id\n    workspace_id uuid\n);"
+        )
+        assert self._keyed(stmt) is True

@@ -64,6 +64,9 @@ from pathlib import Path
 
 import psycopg2
 
+from scripts.sql_lexer import CODE, COMMENTS, segments
+
+
 # One fixed key for every runner invocation against a given database: the
 # whole run holds pg_advisory_lock(RUNNER_LOCK_KEY), so concurrent deploys
 # serialize and the loser finds the versions applied and no-ops.
@@ -237,12 +240,10 @@ def _execution_mode(no_transaction: bool, statements) -> str:
     if no_transaction:
         return "no-transaction"
     for statement in statements:
-        content = "\n".join(
-            line
-            for line in statement.splitlines()
-            if line.strip() and not line.strip().startswith("--")
-        ).strip()
-        if content.upper() == "BEGIN":
+        code = "".join(
+            " " if s.kind in COMMENTS else s.text for s in segments(statement)
+        )
+        if code.strip().upper() == "BEGIN":
             return "self-managed"
     return "wrapped"
 
@@ -377,63 +378,27 @@ def legacy_lineage_max(migrations_dir) -> int:
 
 
 def split_statements(sql: str) -> list:
-    """Split a file into single statements.
+    """Split a file into single statements, where PostgreSQL would: at a `;` in
+    code, never inside a literal, a quoted identifier, a dollar-quoted body or
+    a comment. `scripts/sql_lexer.py` owns those bounds.
 
-    Aware of single quotes, double quotes, dollar-quoted bodies, and line
-    comments — enough for the DDL migration files are restricted to.
+    Comments stay in the statement they sit in, because the text is what the
+    runner executes and reads its execution mode from. A fragment of nothing
+    but comments and whitespace is dropped.
     """
-    statements = []
-    buf = []
-    i = 0
-    in_single = in_double = False
-    dollar_tag = None
-    while i < len(sql):
-        ch = sql[i]
-        if dollar_tag:
-            if sql.startswith(dollar_tag, i):
-                buf.append(dollar_tag)
-                i += len(dollar_tag)
-                dollar_tag = None
-                continue
-        elif in_single:
-            if ch == "'":
-                in_single = False
-        elif in_double:
-            if ch == '"':
-                in_double = False
-        elif ch == "-" and sql.startswith("--", i):
-            end = sql.find("\n", i)
-            end = len(sql) if end == -1 else end
-            buf.append(sql[i:end])
-            i = end
-            continue
-        elif ch == "'":
-            in_single = True
-        elif ch == '"':
-            in_double = True
-        elif ch == "$":
-            match = re.match(r"\$[A-Za-z_]*\$", sql[i:])
-            if match:
-                dollar_tag = match.group(0)
-                buf.append(dollar_tag)
-                i += len(dollar_tag)
-                continue
-        elif ch == ";":
-            statements.append("".join(buf))
-            buf = []
-            i += 1
-            continue
-        buf.append(ch)
-        i += 1
-    statements.append("".join(buf))
-    return [s for s in statements if s.strip() and not _is_only_comments(s)]
-
-
-def _is_only_comments(fragment: str) -> bool:
-    return all(
-        not line.strip() or line.strip().startswith("--")
-        for line in fragment.splitlines()
-    )
+    statements, pieces, has_code = [], [], False
+    for seg in segments(sql):
+        parts = seg.text.split(";") if seg.kind == CODE else [seg.text]
+        for n, part in enumerate(parts):
+            if n:  # a `;` in code ended the statement before this part
+                if has_code:
+                    statements.append("".join(pieces))
+                pieces, has_code = [], False
+            pieces.append(part)
+            has_code = has_code or (seg.kind not in COMMENTS and bool(part.strip()))
+    if has_code:
+        statements.append("".join(pieces))
+    return statements
 
 
 def _connect(dsn: str):

@@ -27,6 +27,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from scripts.sql_lexer import CODE, COMMENTS, segments
+
 _HERE = Path(__file__).resolve().parent
 _PLAN_DIR = (
     _HERE.parent / "documentation" / "planning" / "2026-08-02-consolidated-design-plan"
@@ -248,30 +250,48 @@ def _declares_policy_lists(sql: str) -> bool:
 # divergence between the plan and its implementation.
 
 
-def _strip_comment_lines(sql: str) -> str:
-    kept = []
-    for line in sql.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("--"):
-            continue
-        kept.append(line)
-    return "\n".join(kept)
-
-
 def normalize_statements(sql: str) -> list:
-    """Split into statements (reusing the runner's quote/dollar-aware splitter),
-    drop comment lines, collapse whitespace runs to single spaces. Two SQL
-    texts that install the same objects normalize to the same statement list
-    regardless of layout."""
+    """Split into statements (the runner's own splitter), drop every comment,
+    collapse whitespace runs to single spaces. Two SQL texts that install the
+    same objects normalize to the same statement list regardless of layout.
+
+    Comments go and literals stay, each whole, because this text is what the
+    prefix gate compares and what the tenancy gate scans (#1406). EVERY comment
+    goes, not only the lines that hold nothing else: the result is one line, so
+    a comment left in it would have no end, and a scan that reads quotes could
+    not tell where the statement resumes. EVERY literal stays whole — only its
+    runs of whitespace collapse, as everywhere — dollar-quoted bodies and their
+    `--` lines included, since PostgreSQL stores a function body verbatim and
+    the prefix gate has to see a change to one.
+
+    Refuses a statement whose quotes normalizing would move, so that a scan of
+    the normalized text can trust them. An escape string continued across a
+    line break keeps its escape rules only while the break is there, and no
+    single-line form of it lexes the same.
+    """
     from scripts.migration_runner import split_statements
 
     out = []
     for raw in split_statements(sql):
-        body = _strip_comment_lines(raw)
-        collapsed = re.sub(r"\s+", " ", body).strip()
-        if collapsed:
-            out.append(collapsed)
+        text = "".join(" " if s.kind in COMMENTS else s.text for s in segments(raw))
+        collapsed = re.sub(r"\s+", " ", text).strip()
+        if _shape(collapsed) != _shape(text):
+            raise AdvertisedDDLError(
+                "normalizing this statement would move its quotes, so no scan of"
+                " the normalized text could trust where a literal ends — an"
+                " escape string continued across a line break does this; write"
+                f" it on one line: {raw.strip()[:120]}"
+            )
+        out.append(collapsed)
     return out
+
+
+def _shape(sql: str) -> tuple:
+    """Every segment of ``sql`` but blank code, in order, and whether each is
+    closed: what normalization must leave as it found it."""
+    return tuple(
+        (s.kind, s.closed) for s in segments(sql) if s.kind != CODE or s.text.strip()
+    )
 
 
 @dataclass(frozen=True)

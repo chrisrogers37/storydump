@@ -1108,10 +1108,10 @@ def advertised_stream():
     rewrites either targets `tmp_path`), so there is no invalidation to miss.
 
     NORMALIZED IS A COMPARISON KEY AND NOT EXECUTABLE SQL, which matters when
-    writing the next increment's migration: normalization collapses whitespace
-    and drops full-line comments, and `02` prints an inline `--` inside
-    `CREATE TABLE onboarding_sessions`, so a normalized statement run as SQL
-    comments out its own tail.
+    writing the next increment's migration: normalization collapses each
+    statement onto one line and keeps a function body whole, so a `--` line
+    inside a body (`fn_clock_tick` carries many) comments out the rest of that
+    body when the normalized statement runs.
     """
     from scripts.advertised_ddl import (
         DEFAULT_DOCS,

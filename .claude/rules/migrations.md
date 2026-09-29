@@ -23,7 +23,7 @@ so **merged is applied**. The ledger is `runner.schema_migrations`.
 - Carry `-- runner:postcondition <SQL returning bool>` lines. They are also the
   file's permanent adoption probe, so assert only state this file creates, never
   an absence, and use `>=` for counts a later file will raise (058's header).
-- Markers are a closed grammar (`migration_runner.py:76`-`:101`):
+- Markers are a closed grammar (`migration_runner.py:79`-`:104`):
   `postcondition`, `no-transaction`, `reapply-safe`, `schema-move`,
   `unadvertised`, `manual`. A misspelt one is a hard failure at discovery, and a
   comment must not open with `runner` plus a marker word.
@@ -34,7 +34,7 @@ so **merged is applied**. The ledger is `runner.schema_migrations`.
   of the fenced `sql` blocks in the consolidated plan's `02-domain-model.md`
   and `07-security-model.md`, classified in
   `scripts/advertised_ddl_manifest.json`; which files count is one function,
-  `target_lineage_files` (`scripts/advertised_ddl.py:307`).
+  `target_lineage_files` (`scripts/advertised_ddl.py:327`).
   A new statement is appended to the plan and the manifest in the same PR, and
   the file is added to the ratified list at
   `tests/scripts/test_lineage_lane.py:270`. `-- runner:unadvertised` is for a

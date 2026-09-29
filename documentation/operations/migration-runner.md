@@ -27,7 +27,7 @@ at first contact. It lives in the dedicated `runner` schema — never `public`
 ride into `legacy` mid-run. It supersedes the legacy lineage's own version
 table — the one the 001–050 files stamp themselves into, with known gaps; a
 replay still stamps it and the runner never reads it
-(`scripts/migration_runner.py:793`). In production that table rode into
+(`scripts/migration_runner.py:758`). In production that table rode into
 `legacy` with the rest at the 051 move, is snapshotted as
 `archive.schema_version_pre_cutover_20260917` (078), and was dropped with
 `legacy` by 079 in the owner's window on 2026-09-19 (`legacy-window-close.md`).
