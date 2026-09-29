@@ -387,6 +387,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 084 appends §27, the clock reviving its own singletons' expired
             # leases (#1329).
             "084_clock_revives_singleton_leases.sql",
+            # 085 appends §28, the audit triggers reading an empty actor as
+            # unset (#1421).
+            "085_audit_triggers_empty_actor.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

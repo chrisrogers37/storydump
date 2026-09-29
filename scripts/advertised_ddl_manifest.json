@@ -305,6 +305,13 @@
       "label": "§27 the clock revives its own singletons' expired leases (084, #1329) — fn_clock_tick replace re-readying the kind's own expired lease before the mint guard, plus svc_clock's column UPDATE on the four lease columns of jobs",
       "doc": "07-security-model.md",
       "ordinal": 25
+    },
+    {
+      "sha256": "a1a06f5e9bf3032099a000fe78c60feffc1145a373bf02a26a12f60042ae9dce",
+      "class": "normative",
+      "label": "§28 the audit triggers read an empty actor as unset (085, #1421) — trg_intent_audit and trg_governance_audit replaced so NULLIF(current_setting('app.actor_kind', true), '') IS NULL refuses an actor-less write on a reused connection too",
+      "doc": "07-security-model.md",
+      "ordinal": 26
     }
   ],
   "policy_expansion": {

@@ -291,10 +291,11 @@ class TestAgainstTheRealDocs:
         # it 34; §23's person-bound token subject (077, the v2 CLI plan,
         # phase 01) makes it 35; §24's fleet-health doors (081, #751) make it 36;
         # §25's worker doors (082, #751 part 2) make it 37; §26's clock
-        # deadlines (083, #1381 — the SQL half of #1361) make it 38; and
+        # deadlines (083, #1381 — the SQL half of #1361) make it 38;
         # §27's clock reviving its own singletons' leases (084, #1329) makes
-        # it 39.
-        assert classes.count("normative") == 39
+        # it 39; and §28's audit triggers reading an empty actor as unset
+        # (085, #1421) make it 40.
+        assert classes.count("normative") == 40
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
@@ -475,13 +476,15 @@ class TestWhatTheCommentRuleChangedInTheStream:
     """#1406 changed what the prefix gate compares, and this pins the change.
 
     Normalization now drops every comment outside a literal and keeps every
-    literal whole. Against the rule it replaced, 39 of the stream's 436
+    literal whole. Against the rule it replaced, 41 of the stream's 438
     statements normalize differently, and in two directions:
 
     - 31 STOP comparing a comment that sits outside every literal — after a
       column, in a trigger or function header — which the old rule kept.
-    - 13 START comparing the `--` lines inside a function body, which the old
-      rule dropped although PostgreSQL stores them in `pg_proc.prosrc`.
+    - 15 START comparing the `--` lines inside a function body, which the old
+      rule dropped although PostgreSQL stores them in `pg_proc.prosrc`. The
+      last two are `085`'s (#1421): each audit trigger's replacement carries
+      a `-- 085:` line in its body.
 
     Five statements are in both: the five definitions of `fn_clock_tick`.
     Nothing else changed.
@@ -540,6 +543,8 @@ class TestWhatTheCommentRuleChangedInTheStream:
         "CREATE FUNCTION trg_governance_audit",
         "CREATE FUNCTION trg_intent_guard",
         "CREATE FUNCTION trg_intent_insert_guard",
+        "CREATE OR REPLACE FUNCTION trg_governance_audit",
+        "CREATE OR REPLACE FUNCTION trg_intent_audit",
     ]
 
     def test_the_statements_that_normalize_differently_are_exactly_these(self):
@@ -550,7 +555,9 @@ class TestWhatTheCommentRuleChangedInTheStream:
             retired = _retired_normalize(raw)
             if current == retired:
                 continue
-            label = re.match(r"CREATE (?:CONSTRAINT )?\w+ \w+|.{0,80}", current).group()
+            label = re.match(
+                r"CREATE (?:OR REPLACE )?(?:CONSTRAINT )?\w+ \w+|.{0,80}", current
+            ).group()
             lost = Counter(retired.split()) - Counter(current.split())
             gained = Counter(current.split()) - Counter(retired.split())
             assert lost or gained, f"{label}: changed in a way this pin cannot name"
