@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isUuid } from "@/lib/session";
-import { requireWorkspace } from "@/lib/route-guards";
+import { refuseCrossSite, requireWorkspace } from "@/lib/route-guards";
 import { proxyStartOfGrant } from "@/lib/start-proxy";
 import { isInstagramAuthorizationUrl } from "@/lib/destination";
 
@@ -21,9 +21,12 @@ import { isInstagramAuthorizationUrl } from "@/lib/destination";
  * unchanged.
  */
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ id: string; accountId: string }> },
 ) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const guard = await requireWorkspace(context);
   if (guard instanceof NextResponse) return guard;
   const { token, id } = guard;

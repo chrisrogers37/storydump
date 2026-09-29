@@ -77,11 +77,17 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         {children}
+        {/* An invite link's path is the invitation token, a bearer credential
+            that goes nowhere but the router. The exclusions build sends no
+            pageview for a path matching data-exclude. It excludes pageviews
+            only, so no page under /join may fire a custom event either
+            (join-fires-no-analytics-event-contract.test.ts holds this). */}
         {plausibleDomain && (
           <Script
             defer
             data-domain={plausibleDomain}
-            src="https://plausible.io/js/script.js"
+            data-exclude="/join/**"
+            src="https://plausible.io/js/script.exclusions.js"
             strategy="afterInteractive"
           />
         )}

@@ -784,7 +784,7 @@ async def cancel(session, command: Command) -> CommandResult:
         {"id": str(intent["id"])},
     )
     # The card loses its buttons now: a cancelling card offers no lever, and
-    # the worker's terminalization (#1235) is a later checkpoint.
+    # the worker's terminalization is a later checkpoint (the reaper, 087).
     await _record_outcome(session, intent, command, "cancelled")
     return _result(intent, intent["state"], cancel_requested=True)
 

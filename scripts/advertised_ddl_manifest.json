@@ -319,6 +319,13 @@
       "label": "§29 the reaper ends a ready job past its deadline (086, #1429) — fn_reaper_sweep replace adding a last leg that ends a ready job of a re-minted kind past deadline_at as failed and re-arms a sync kind's source, plus svc_maintenance's column UPDATE on media_sources.next_sync_at with its policy",
       "doc": "07-security-model.md",
       "ordinal": 27
+    },
+    {
+      "sha256": "16faec987d1d33c0fb7f112f66eef59f8d21ef56b5a3b3d58087647f49adfc66",
+      "class": "normative",
+      "label": "§30 the reaper ends a cancel the user asked for (087, #1235) — fn_reaper_sweep replace adding the cancel leg for flagged, undebited waiting intents after the lease leg and ahead of the expiry legs, 086's deadline leg still last",
+      "doc": "07-security-model.md",
+      "ordinal": 28
     }
   ],
   "policy_expansion": {
