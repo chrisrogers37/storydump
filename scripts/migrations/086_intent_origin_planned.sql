@@ -32,11 +32,13 @@
 --
 -- Adoption evidence (#997): the two columns, the two CHECKs, the partial key and the trigger are
 -- catalog state this file alone creates. Each probe reads false, without raising, on a database
--- that has no `post_intents` at all.
+-- that has no `post_intents` at all. The partial key is probed by its definition, never its name:
+-- the contract half gives it the unconditional key's name, and a probe keyed on the name would
+-- then read false below a true one, which `runner adopt` refuses as an incoherent chain.
 --
 -- runner:postcondition SELECT count(*) = 2 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'post_intents' AND column_name IN ('origin', 'scheduled_by_user_id')
 -- runner:postcondition SELECT count(*) = 2 FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public' AND t.relname = 'post_intents' AND c.conname IN ('ck_intent_origin', 'ck_intent_planned_manual')
--- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'post_intents' AND indexname = 'uq_intent_slot_cadence' AND indexdef LIKE '%WHERE (origin = ''cadence''::text)')
+-- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'post_intents' AND indexdef LIKE 'CREATE UNIQUE INDEX % (workspace_id, ig_account_id, schedule_slot_at) WHERE (origin = ''cadence''::text)')
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_trigger g JOIN pg_class t ON t.oid = g.tgrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public' AND t.relname = 'post_intents' AND g.tgname = 'tg_intent_planned_person' AND NOT g.tgisinternal)
 
 ALTER TABLE post_intents ADD COLUMN origin TEXT NOT NULL DEFAULT 'cadence'
