@@ -1180,16 +1180,31 @@ class TestFetchBytes:
             )
 
     @pytest.mark.asyncio
-    async def test_the_adapter_built_without_a_policy_still_fetches(self):
+    async def test_the_adapter_built_without_a_policy_still_fetches(self, monkeypatch):
         """The worker constructs the adapter with no policy (the floor's
         default applies per call); the media policy must derive from that,
-        never from None (review of #1259 — the fetch crashed on every card)."""
+        never from None (review of #1259 — the fetch crashed on every card).
+
+        That default resolves each host before any request, so the lookup is
+        answered through the floor's own `resolver=` seam rather than by real
+        DNS, and the test needs no network. The media request then reaches the
+        stub's address: the derived policy kept the check and pinned to it."""
+        from functools import partial
+
+        from src.services.target import egress
+
+        public = "93.184.216.34"
+        monkeypatch.setattr(
+            egress, "request", partial(egress.request, resolver=lambda host: [public])
+        )
         adapter, calls = self._drive()
         adapter._policy = None
         content, name, mime = await adapter.fetch_bytes(
             source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
         )
-        assert content == b"12345" and any("alt=media" in c for c in calls)
+        media = [c for c in calls if "alt=media" in c]
+        assert content == b"12345" and media
+        assert httpx.URL(media[0]).host == public, media
 
     @pytest.mark.asyncio
     async def test_a_body_larger_than_the_metadata_said_is_still_refused(self):

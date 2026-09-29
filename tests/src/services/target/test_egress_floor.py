@@ -944,6 +944,26 @@ REDIRECT_HOST = "pinned-hop.invalid"
 POOL_HOST = "pinned-pool.invalid"
 
 
+def _second_loopback_or_skip() -> None:
+    """Skip, saying why, where 127.0.0.2 cannot be bound.
+
+    Linux routes all of 127/8 to the loopback interface; macOS configures only
+    127.0.0.1 there, so nothing can listen on 127.0.0.2 until the address is
+    aliased. The ADDRESS is probed rather than the platform, so a Mac with the
+    alias still runs these tests. CI runs on Linux, where they always run.
+    """
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.2", 0))
+    except OSError as exc:
+        pytest.skip(
+            f"cannot bind 127.0.0.2 ({exc.strerror}); on macOS,"
+            " 'sudo ifconfig lo0 alias 127.0.0.2 up' lets this test run"
+        )
+    finally:
+        probe.close()
+
+
 def _free_port_on_both_loopbacks() -> int:
     """A port free on 127.0.0.1 AND 127.0.0.2, so two servers can share it.
 
@@ -952,6 +972,7 @@ def _free_port_on_both_loopbacks() -> int:
     the second call would reuse the first connection and the second server would
     never be hit.
     """
+    _second_loopback_or_skip()
     for _ in range(20):
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
@@ -1052,6 +1073,7 @@ class TestARedirectHopIsPinnedToItsOwnValidation:
         return respond
 
     async def test_a_hop_resolving_to_a_forbidden_address_is_refused(self, monkeypatch):
+        _second_loopback_or_skip()
         assert _name_cannot_resolve(REDIRECT_HOST)
         port_two, stop_two, hits_two = await _serve(host="127.0.0.2")
         port_one, stop_one, _ = await _serve(respond=self._hop_one(port_two))
@@ -1090,6 +1112,7 @@ class TestARedirectHopIsPinnedToItsOwnValidation:
     ):
         """The other half. Without it, the refusal above could be a hop that is
         never reached for some unrelated reason."""
+        _second_loopback_or_skip()
         assert _name_cannot_resolve(REDIRECT_HOST)
         port_two, stop_two, hits_two = await _serve(host="127.0.0.2")
         port_one, stop_one, hits_one = await _serve(respond=self._hop_one(port_two))

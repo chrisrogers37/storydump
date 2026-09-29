@@ -226,7 +226,23 @@ class TestReMintThroughTheRealSweeper:
         from src.worker import run
 
         chain, binding = _seed_binding_with_pending(sync_conn, "w2remint", rows=0)
+        # The chain's intent is due as soon as it is seeded, so the live worker
+        # would prompt it onto this binding: a second card, whose send and
+        # sender job would satisfy the checks below in the late row's place,
+        # and which the reaper may expire in the same beat. Its slot moves a
+        # day out, so the late row is the binding's only card.
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE post_intents SET schedule_slot_at = now() + interval '1 day'"
+                " WHERE id = %s",
+                (chain["intent"],),
+            )
+        sync_conn.commit()
         transport = _FakeTransport()
+
+        def delivered():
+            return any(text == "late card" for _, text in transport.sent)
+
         cfg = WorkerConfig(
             lease_seconds=10.0,
             claim_idle_seconds=0.1,
@@ -247,13 +263,14 @@ class TestReMintThroughTheRealSweeper:
                 cur.execute(
                     "INSERT INTO channel_outbox (workspace_id, binding_id, kind,"
                     " payload) VALUES (%s, %s, 'approval_prompt',"
-                    " jsonb_build_object('v', 1, 'text', 'late card'))",
+                    " jsonb_build_object('v', 1, 'text', 'late card')) RETURNING id",
                     (chain["ws"], binding),
                 )
+                late = cur.fetchone()[0]
             sync_conn.commit()
 
             deadline = asyncio.get_running_loop().time() + 12.0
-            while not transport.sent and asyncio.get_running_loop().time() < deadline:
+            while not delivered() and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.2)
         finally:
             # Wait for the third sweep on its own bounded clock before
@@ -271,16 +288,17 @@ class TestReMintThroughTheRealSweeper:
             stop.set()
             await asyncio.wait_for(runner, timeout=20.0)
 
-        assert transport.sent, "the late row was never delivered — re-mint is broken"
+        assert delivered(), "the late row was never delivered — re-mint is broken"
         assert app.sweeper is not None and app.sweeper.sweeps >= 3, (
             "the sweeper must still be sweeping, not dead after one pass"
         )
         assert app.sweeper.mints >= 1, "the sender job must come from the SWEEPER"
         with sync_conn.cursor() as cur:
             cur.execute(
-                "SELECT state FROM channel_outbox WHERE binding_id = %s", (binding,)
+                "SELECT id, state FROM channel_outbox WHERE binding_id = %s",
+                (binding,),
             )
-            assert cur.fetchone()[0] == "sent"
+            assert cur.fetchall() == [(late, "sent")]
             cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
             assert cur.fetchone()[0] == 0
 
