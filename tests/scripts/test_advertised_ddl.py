@@ -475,13 +475,15 @@ class TestWhatTheCommentRuleChangedInTheStream:
     """#1406 changed what the prefix gate compares, and this pins the change.
 
     Normalization now drops every comment outside a literal and keeps every
-    literal whole. Against the rule it replaced, 39 of the stream's 436
+    literal whole. Against the rule it replaced, 40 of the stream's 442
     statements normalize differently, and in two directions:
 
     - 31 STOP comparing a comment that sits outside every literal — after a
       column, in a trigger or function header — which the old rule kept.
-    - 13 START comparing the `--` lines inside a function body, which the old
-      rule dropped although PostgreSQL stores them in `pg_proc.prosrc`.
+    - 14 START comparing the `--` lines inside a function body, which the old
+      rule dropped although PostgreSQL stores them in `pg_proc.prosrc`. The
+      fourteenth is 086's `trg_intent_planned_person`, whose body says why it
+      may assume the approval: its trigger's WHEN admits nothing else.
 
     Five statements are in both: the five definitions of `fn_clock_tick`.
     Nothing else changed.
@@ -540,6 +542,7 @@ class TestWhatTheCommentRuleChangedInTheStream:
         "CREATE FUNCTION trg_governance_audit",
         "CREATE FUNCTION trg_intent_guard",
         "CREATE FUNCTION trg_intent_insert_guard",
+        "CREATE FUNCTION trg_intent_planned_person",
     ]
 
     def test_the_statements_that_normalize_differently_are_exactly_these(self):
