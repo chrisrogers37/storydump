@@ -780,8 +780,8 @@ async def disable_destination(
     a unit of work — `disconnect_account`'s scope statement); its live intents
     are flagged `cancel_requested`, the overlay `cancel` uses (`02` §4: the
     user never writes a terminal state; the pipeline honours the flag at
-    admission, the Queue offers a flagged card no action, and the worker leg
-    that terminalizes the waiting states is #1235); and any grant issued for
+    admission, the Queue offers a flagged card no action, and the reaper's
+    cancel leg (087) ends the waiting states); and any grant issued for
     the row before the removal is retired, so it cannot land afterwards.
 
     The row stays. `oauth_credentials` and the intent history hang off it, and
@@ -826,8 +826,8 @@ async def disable_destination(
     # actor is the worker, and the user never writes a terminal state (the
     # rule `cancel` follows). The pipeline honours the flag at admission; the
     # Queue shows a flagged card as cancelling and offers it no action; the
-    # worker leg that terminalizes the WAITING states is the follow-up the
-    # docstring names.
+    # reaper's cancel leg (087) ends the WAITING states at its next sweep;
+    # the caller retires the cards now (`_supersede_everywhere`).
     terminal = ", ".join(f"'{state}'" for state in TERMINAL_STATES)
     flagged = await executor.execute(
         text(

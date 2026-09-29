@@ -2207,3 +2207,113 @@ BEGIN
   RETURN n;
 END $$;
 ```
+
+### §30. The reaper ends a cancel the user asked for (087, #1235)
+
+**Why:** `cancel` and `disable_account` set `cancel_requested` and nothing else — the user never
+writes a waiting story's terminal state, and every `→ cancelled` edge out of a waiting state is
+the worker's (`02` §4). The one
+worker that honoured the flag was publish admission, for an `approved` row at its job's next run. A
+flagged row in `scheduled`, `prompt_pending` or `awaiting_approval` had no worker checkpoint at all:
+it stayed live until the approval TTL ended it as `expired`, the wrong label, and while it stayed
+live it held `uq_intent_live_subject`, refusing that item for that account.
+
+**The leg** ends a flagged row in any of the four waiting states as `cancelled` at the next sweep,
+drawing on the sweep's running remainder like every other leg, audited under the door's `reaper`
+actor. It sits **after the lease leg**, because liveness comes first (the door's order since 059), and
+**before the expiry legs**, because a flagged row they reached first would end `expired`. Its candidates are
+only flagged rows, each ended once, so a full budget delays the expiry legs and never blocks them.
+The publish job also cancels a flagged `approved` story, so the outer UPDATE repeats the waiting
+states: at READ COMMITTED a row changed under the sweep is rechecked against the UPDATE's own
+quals, not its subquery's (§29's leg does the same), and a sweep that wrote to a row the job had
+just cancelled would meet the terminal freeze and roll every leg back.
+The flag's writers strip the story's cards themselves; a card sent after the flag (the prompt sweep
+does not read it) is retired by the settled-card sweep that follows the reap (§25), the backstop
+for every terminal intent.
+
+**A row carrying a debit is not this leg's.** A floating story steps back `publishing → approved`
+with its cap debit (§22), and a cancel owes that debit back first: the terminal freeze refuses every
+write to a cancelled row, a refund included. The two paths that cancel a debited story already
+refund before the flip — its own job at admission, and the reap executor's stale-approved leg,
+which runs after this door — so the leg takes only rows with no `cap_consumed_on`. Cancelled here,
+the debit would be stranded: nothing refunds a terminal row, and the freeze would refuse a late
+refund anyway. The same guard means no provider work is owed: a transit asset is written only
+while `publishing`, which is always debited. The rest of the function is §29's, byte-for-byte:
+§22's six legs and §29's deadline leg, still last.
+
+```sql
+-- [§30 the reaper ends a cancel the user asked for]
+
+CREATE OR REPLACE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval)
+RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE n int := 0; c int; rem int := GREATEST(p_lim, 0);
+BEGIN
+  PERFORM set_config('app.actor_kind', 'reaper', true);
+  UPDATE jobs SET state = 'ready', locked_by = NULL, lease_token = NULL, locked_until = NULL
+   WHERE id IN (SELECT id FROM jobs
+                 WHERE state = 'leased' AND locked_until < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  -- 087: a cancel the user asked for ends `cancelled` (#1235), ahead of the
+  -- expiry legs; a debited row is left to the paths that refund it first.
+  UPDATE post_intents SET state = 'cancelled'
+   WHERE id IN (SELECT id FROM post_intents
+                 WHERE cancel_requested AND cap_consumed_on IS NULL
+                   AND state IN ('scheduled','prompt_pending','awaiting_approval','approved')
+                 LIMIT rem)
+     AND state IN ('scheduled','prompt_pending','awaiting_approval','approved');  -- rechecked on a changed row
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE post_intents SET state = 'expired'
+   WHERE id IN (SELECT id FROM post_intents
+                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
+                 LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE post_intents i SET state = 'expired'
+   WHERE i.id IN (
+     SELECT i2.id FROM post_intents i2 JOIN workspaces w ON w.id = i2.workspace_id
+      WHERE i2.state = 'awaiting_approval'
+        AND i2.entered_state_at
+            < now() - COALESCE(w.approval_ttl_minutes * interval '1 minute', p_approval_ttl)
+      LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  DELETE FROM post_locks
+   WHERE id IN (SELECT id FROM post_locks
+                 WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE workspace_invitations SET state = 'expired'
+   WHERE id IN (SELECT id FROM workspace_invitations
+                 WHERE state = 'pending' AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  DELETE FROM onboarding_sessions
+   WHERE id IN (SELECT id FROM onboarding_sessions WHERE expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  -- 086: a `ready` job past its deadline ends `failed`, and says so (#1429),
+  -- for the kinds a sweep re-mints; a sync kind's source is re-armed, as
+  -- `work_loop._rearm_source` does on a spent budget. Last, so a backlog of
+  -- expired jobs cannot take the budget of the legs above.
+  WITH ended AS (
+    UPDATE jobs SET state = 'failed',
+                    payload = payload || jsonb_build_object('ended', 'deadline')
+     WHERE id IN (SELECT id FROM jobs
+                   WHERE state = 'ready' AND deadline_at <= now()
+                     AND kind IN ('reap_expired', 'reconcile_ambiguous',
+                                  'alert_stranded_sources', 'reap_transit_assets',
+                                  'plan_slot', 'refresh_credential', 'reauth_prompt',
+                                  'deliver_outbox', 'sync_media_source',
+                                  'first_ingest_chunk')   -- the kinds a sweep re-mints
+                   ORDER BY deadline_at LIMIT rem)
+       AND state = 'ready' AND deadline_at <= now()   -- rechecked on a changed row
+    RETURNING kind, workspace_id, payload->>'source_id' AS source_id
+  ), rearmed AS (
+    UPDATE media_sources s
+       SET next_sync_at = now() + interval '24 hours'           -- work_loop.REARM_AFTER_SECONDS
+      FROM ended e
+     WHERE e.kind IN ('sync_media_source', 'first_ingest_chunk')  -- work_loop._SYNC_KINDS
+       AND s.id::text = e.source_id   -- as text: a malformed payload must not abort the sweep
+       AND s.workspace_id = e.workspace_id
+       AND s.state = 'active' AND s.next_sync_at IS NULL
+  )
+  SELECT count(*) INTO c FROM ended;
+  n := n + c;
+  RETURN n;
+END $$;
+```
