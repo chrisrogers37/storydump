@@ -1202,9 +1202,8 @@ class TestFetchBytes:
         content, name, mime = await adapter.fetch_bytes(
             source_id=SRC, workspace_id=WS, file_ref="FILE1", max_bytes=10
         )
-        media = [c for c in calls if "alt=media" in c]
-        assert content == b"12345" and media
-        assert httpx.URL(media[0]).host == public, media
+        media_hosts = [httpx.URL(c).host for c in calls if "alt=media" in c]
+        assert content == b"12345" and media_hosts == [public], calls
 
     @pytest.mark.asyncio
     async def test_a_body_larger_than_the_metadata_said_is_still_refused(self):

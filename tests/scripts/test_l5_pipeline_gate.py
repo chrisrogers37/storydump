@@ -746,7 +746,7 @@ class TestTheHappyPath:
             _seed_card(pipe_db, intent),
             _seed_card(pipe_db, intent, chat=f"-200{intent[:8]}"),
         ]
-        deps = _deps(pipe_db, StubMetaAdapter(), FakeTransit())
+        deps = _deps(pipe_db, StubMetaAdapter())
         assert _run(run_publish_pipeline(job, **deps)) == POSTED
         edits = _exec(
             pipe_db,
