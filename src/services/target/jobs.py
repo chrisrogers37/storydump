@@ -55,7 +55,11 @@ needed here:
 * **Expiry recovery is the reaper's, not ours.** `fn_reaper_sweep`'s first leg
   re-readies expired leases (liveness-priority, budget-limited). This module
   does not duplicate it; the clock revives its own singletons' leases (084,
-  `07` §27), the reaper's among them.
+  `07` §27), the reaper's among them. `fn_reaper_sweep`'s last leg ends a
+  `ready` job past its `deadline_at` when a sweep re-mints its kind (086,
+  `07` §29): `budget_exhausted` below is only ever asked after a run has
+  failed, so without that leg a job nothing claims would never reach its
+  deadline. A deferral carries the deadline with it (`reschedule_job`).
 * **`jobs` has NO transition guard, and this contract is written against
   that measured fact** (#883 follow-on; the gate pins the absence as a
   tripwire). What makes that safe is the MECHANISM on each
@@ -379,11 +383,21 @@ async def reschedule_job(
     normal operation (`06`), not a failure, and the attempts budget is R8's
     retryable-failure budget — §4 names the approval-TTL reaper, not attempts,
     as the bound on endless deferral. A retryable FAILURE keeps its attempt.
+
+    A deferral also carries the job's deadline: `deadline_at` moves by as much
+    as `run_at` does (both SET expressions read the row as it was), so a park,
+    a pacing wait or a budget deferral keeps the job's slack: both the
+    reaper's deadline leg (086, #1429) and `budget_exhausted` measure from the
+    moved deadline. A retryable failure keeps its deadline, as it keeps its
+    attempt.
     """
     result = await session.execute(
         text(
             "UPDATE jobs SET state = 'ready', locked_by = NULL,"
             "  lease_token = NULL, locked_until = NULL, run_at = :run_at,"
+            "  deadline_at = CASE WHEN :restore"
+            "                THEN deadline_at + (CAST(:run_at AS timestamptz) - run_at)"
+            "                ELSE deadline_at END,"
             "  attempts = CASE WHEN :restore THEN GREATEST(attempts - 1, 0)"
             "                  ELSE attempts END"
             " WHERE id = :job AND lease_token = :token AND state = 'leased'"

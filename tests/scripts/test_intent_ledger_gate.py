@@ -144,7 +144,7 @@ def _new_intent(ledger, state: str, *, origin: str = "cadence") -> str:
     including that this exemption still exists.
 
     *origin* is written only when it is not the column default, so a cadence
-    row is inserted exactly as it was before 086 (`origin` is fixed at birth:
+    row is inserted exactly as it was before 088 (`origin` is fixed at birth:
     a planned row has to be BORN planned).
     """
     c = ledger["chain"]
@@ -200,12 +200,18 @@ COMPLETION = {
 }
 
 
-def _attempt(ledger, sql, params, *, actor="system", user_id=None):
-    """Run *sql* on a fresh connection. Returns (ok, message, rowcount)."""
+def _attempt(ledger, sql, params, *, actor="system", user_id=None, reused=False):
+    """Run *sql* on a fresh connection. Returns (ok, message, rowcount).
+
+    *reused* first commits a transaction that claims an actor, which is the
+    state a pooled connection is in: an unset `app.actor_kind` then reads ''
+    rather than NULL (#1421), and a refusal must not depend on which."""
     conn = psycopg2.connect(ledger["dsn"])
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
+            if reused:
+                cur.execute("BEGIN; SET LOCAL app.actor_kind = 'system'; COMMIT")
             if actor is not None:
                 cur.execute("SET app.actor_kind = %s", (actor,))
             if user_id is not None:
@@ -216,6 +222,14 @@ def _attempt(ledger, sql, params, *, actor="system", user_id=None):
         return False, str(exc).strip(), 0
     finally:
         conn.close()
+
+
+def _names_the_guc(msg: str) -> bool:
+    """The refusal is the trigger's own. Only the error's first line counts:
+    psycopg2 appends a CONTEXT quoting the audit INSERT, which reads
+    `current_setting('app.actor_kind')`, so a `ck_audit_actor` failure also
+    contains the name further down."""
+    return "app.actor_kind" in msg.splitlines()[0]
 
 
 class TestTheTransitionMatrixIsEnforcedByTheTriggerNotTheService:
@@ -516,15 +530,17 @@ class TestTerminalRowsRejectEveryUpdate:
 
 
 class TestAnActorLessStateChangeRaises:
-    def test_it_raises_and_names_the_guc(self, ledger):
+    @pytest.mark.parametrize("reused", [False, True], ids=["fresh", "reused"])
+    def test_it_raises_and_names_the_guc(self, ledger, reused):
         intent = _new_intent(ledger, "scheduled")
         ok, msg, _ = _attempt(
             ledger,
             "UPDATE post_intents SET state='prompt_pending' WHERE id=%s",
             (intent,),
             actor=None,
+            reused=reused,
         )
-        assert not ok and "app.actor_kind" in msg, msg
+        assert not ok and _names_the_guc(msg), msg
 
     def test_the_same_change_WITH_an_actor_succeeds(self, ledger):
         """Rowcount-checked positive control — otherwise the refusal above
@@ -570,32 +586,117 @@ class TestActorLessGovernanceMutationsRaiseOnAllFiveTables:
         "oauth_credentials": "UPDATE oauth_credentials SET state='revoked' WHERE workspace_id=%s",
     }
 
+    #: Writes that move only a dual-role table's machinery columns. The trigger
+    #: exits before its audit INSERT for these, so its actor test is the only
+    #: thing that refuses them: on a reused connection under `055`, nothing did
+    #: (#1421).
+    MACHINERY = {
+        "ig_accounts": "UPDATE ig_accounts SET next_slot_at = now() WHERE workspace_id=%s",
+        "oauth_credentials": (
+            "UPDATE oauth_credentials SET next_refresh_at = now() WHERE workspace_id=%s"
+        ),
+    }
+
+    def _statements(self):
+        return [(table, self.STATEMENTS[table]) for table in GOVERNANCE_TABLES] + [
+            (f"{table} machinery", sql) for table, sql in self.MACHINERY.items()
+        ]
+
     def test_the_statements_ACTUALLY_TOUCH_A_ROW(self, ledger, seeded):
         """The control that makes the refusal test below mean anything. It is a
         SEPARATE test, deliberately: a vacuous refusal then reports as "matched
         0 rows" rather than hiding inside a passing assertion."""
         vacuous = []
-        for table in GOVERNANCE_TABLES:
-            ok, msg, rows = _attempt(ledger, self.STATEMENTS[table], (seeded["ws"],))
+        for label, sql in self._statements():
+            ok, msg, rows = _attempt(ledger, sql, (seeded["ws"],))
             if not ok:
-                vacuous.append((table, f"control failed: {msg.splitlines()[0]}"))
+                vacuous.append((label, f"control failed: {msg.splitlines()[0]}"))
             elif rows < 1:
-                vacuous.append((table, "matched 0 rows"))
+                vacuous.append((label, "matched 0 rows"))
         assert vacuous == [], (
             f"these refusal tests would pass vacuously — seed a row first: {vacuous}"
         )
 
-    def test_without_an_actor_they_raise_naming_the_guc(self, ledger, seeded):
+    @pytest.mark.parametrize("reused", [False, True], ids=["fresh", "reused"])
+    def test_without_an_actor_they_raise_naming_the_guc(self, ledger, seeded, reused):
         bad = []
-        for table in GOVERNANCE_TABLES:
+        for label, sql in self._statements():
             ok, msg, _ = _attempt(
-                ledger, self.STATEMENTS[table], (seeded["ws"],), actor=None
+                ledger, sql, (seeded["ws"],), actor=None, reused=reused
             )
             if ok:
-                bad.append((table, "SUCCEEDED with no actor"))
-            elif "app.actor_kind" not in msg:
-                bad.append((table, f"wrong reason: {msg.splitlines()[0]}"))
+                bad.append((label, "SUCCEEDED with no actor"))
+            elif not _names_the_guc(msg):
+                bad.append((label, f"wrong reason: {msg.splitlines()[0]}"))
         assert bad == [], f"governance tables not guarded by actor_kind: {bad}"
+
+
+class TestEveryGucReadTreatsEmptyAsUnset:
+    """#1421's class, not its two instances. A `SET LOCAL`'s value dies with
+    its transaction but the setting stays defined, so a pooled connection reads
+    an unset `app.*` setting as '', and a read that tests only for NULL is
+    right on a fresh connection alone. Every `current_setting('app.…', true)`
+    in the live schema, in a function body or a policy, must treat '' as unset:
+    `NULLIF(…, '')` makes both NULL, `COALESCE(…, '')` makes both ''. `055`'s
+    two audit triggers were the only reads that did not, until `085`.
+
+    The check is syntactic. It also refuses the two folds that undo themselves
+    (`COALESCE(…, '') IS NULL`, `NULLIF(…, '') = ''`), and any spelling of the
+    read it does not recognise, so a new form fails loudly rather than going
+    uncounted. A read built in dynamic SQL is invisible to it."""
+
+    ANY_READ = re.compile(r"current_setting\s*\(\s*'app\.", re.IGNORECASE)
+    STRICT = re.compile(
+        r"current_setting\s*\(\s*'app\.[a-z0-9_]+'(?:::text)?\s*\)", re.IGNORECASE
+    )
+    READ = re.compile(
+        r"current_setting\s*\(\s*'app\.[a-z0-9_]+'(?:::text)?\s*,\s*"
+        r"(?:missing_ok\s*=>\s*)?(?:true|'t(?:rue)?'|'on')(?:::boolean)?\s*\)",
+        re.IGNORECASE,
+    )
+    FOLD_BEFORE = re.compile(r"(NULLIF|COALESCE)\s*\(\s*$", re.IGNORECASE)
+    FOLD_AFTER = re.compile(r"\s*,\s*''(?:::text)?\s*\)")
+    UNDONE = {
+        "COALESCE": re.compile(r"\s*(?:::\w+\s*)?IS\s+(?:NOT\s+)?NULL", re.IGNORECASE),
+        "NULLIF": re.compile(r"\s*(?:::\w+\s*)?(?:=|<>|!=)\s*''", re.IGNORECASE),
+    }
+
+    def test_every_read_treats_the_empty_string_as_unset(self, ledger):
+        with ledger["conn"].cursor() as cur:
+            cur.execute(
+                "SELECT 'function ' || p.proname, p.prosrc FROM pg_proc p"
+                " JOIN pg_namespace n ON n.oid = p.pronamespace"
+                " WHERE n.nspname = 'public'"
+            )
+            sources = cur.fetchall()
+            cur.execute(
+                "SELECT 'policy ' || tablename || '.' || policyname,"
+                "       concat_ws(' ', qual, with_check)"
+                "  FROM pg_policies WHERE schemaname = 'public'"
+            )
+            sources += cur.fetchall()
+        reads, bad = 0, []
+        for where, src in sources:
+            for m in self.ANY_READ.finditer(src):
+                at = m.start()
+                snippet = f"{where}: …{src[max(0, at - 24) : at + 72]}…"
+                if self.STRICT.match(src, at):
+                    continue  # raises when unset; these run after a guard
+                read = self.READ.match(src, at)
+                if read is None:
+                    bad.append(f"unrecognised read: {snippet}")
+                    continue
+                reads += 1
+                fold = self.FOLD_BEFORE.search(src[:at])
+                after = self.FOLD_AFTER.match(src, read.end())
+                if not (fold and after):
+                    bad.append(f"bare: {snippet}")
+                elif self.UNDONE[fold.group(1).upper()].match(src, after.end()):
+                    bad.append(f"fold undone: {snippet}")
+        # The positive control: the pattern still finds the policies' tenant
+        # reads, so an empty `bad` is not a regex that stopped matching.
+        assert reads >= 40, f"only {reads} reads found"
+        assert bad == [], bad
 
 
 class TestTheInsertGuard:
@@ -635,7 +736,7 @@ APPROVE = "UPDATE post_intents SET state = 'approved' WHERE id = %s"
 
 
 class TestAPlannedRowIsApprovedOnlyByAPerson:
-    """086: `awaiting_approval -> approved` on a PLANNED row needs a person,
+    """088: `awaiting_approval -> approved` on a PLANNED row needs a person,
     `app.actor_kind = 'user'` with an `app.actor_user_id`, whatever issues the
     UPDATE. Each refusal has its rowcount-checked positive control: the same
     statement as a person lands, and on a cadence row the rule is silent."""
@@ -674,7 +775,7 @@ class TestAPlannedRowIsApprovedOnlyByAPerson:
 class TestOriginIsFixedAtBirthAndAPlannedRowIsManual:
     """The person rule keys on `origin`, so `origin` must not move: a rule one
     UPDATE could step around would not hold. And a planned row is `manual`
-    whatever the workspace's stored approval settings say (086's CHECK)."""
+    whatever the workspace's stored approval settings say (088's CHECK)."""
 
     @pytest.mark.parametrize(
         "born, becomes", [("planned", "cadence"), ("cadence", "planned")]
@@ -807,7 +908,7 @@ class TestTheGuardsAreLoadBearing:
             (intent,),
             actor=None,
         )
-        assert not ok and "app.actor_kind" in msg, msg
+        assert not ok and _names_the_guc(msg), msg
 
         self._drop(ledger, "tg_intent_audit", "post_intents")
         intent2 = _new_intent(ledger, "scheduled")
@@ -845,7 +946,7 @@ class TestTheGuardsAreLoadBearing:
         ws = ledger["chain"]["ws"]
         sql = "UPDATE workspaces SET name='lb' WHERE id=%s"
         ok, msg, _ = _attempt(ledger, sql, (ws,), actor=None)
-        assert not ok and "app.actor_kind" in msg, msg
+        assert not ok and _names_the_guc(msg), msg
 
         self._drop(ledger, "tg_audit_workspaces", "workspaces")
         ok2, msg2, rows2 = _attempt(ledger, sql, (ws,), actor=None)
@@ -920,8 +1021,9 @@ class TestTheServicePathAgreesWithTheTrigger:
             await engine.dispose()
 
     @pytest.mark.asyncio
-    async def test_an_ACTOR_LESS_transition_is_refused_on_a_FRESH_connection_by_the_AUDIT_TRIGGER(
-        self, ledger
+    @pytest.mark.parametrize("reused", [False, True], ids=["fresh", "reused"])
+    async def test_an_ACTOR_LESS_transition_is_refused_by_the_AUDIT_TRIGGER(
+        self, ledger, reused
     ):
         """The one refusal that is not a `check_violation` (#1402).
 
@@ -929,43 +1031,9 @@ class TestTheServicePathAgreesWithTheTrigger:
         `RAISE EXCEPTION`, which asyncpg surfaces as `RaiseError` — so this is
         the test that proves `transition()` catches both driver shapes. The edge
         is legal, so the guard passes and the missing actor is the only
-        objection left; on a fresh connection the unset setting reads NULL,
-        which is what the trigger tests.
-        """
-        from sqlalchemy.ext.asyncio import create_async_engine
-
-        from src.services.target.intent_ledger import (
-            IntentTransitionRefused,
-            transition,
-        )
-        from src.services.target.unit_of_work import unit_of_work
-
-        intent = _new_intent(ledger, "scheduled")
-        engine = create_async_engine(
-            self._async_dsn(ledger), pool_size=1, max_overflow=0
-        )
-        try:
-            anonymous = unit_of_work(engine, ledger["chain"]["ws"])
-            with pytest.raises(IntentTransitionRefused, match="app.actor_kind"):
-                async with anonymous.begin() as session:
-                    await transition(session, intent, "prompt_pending")
-        finally:
-            await engine.dispose()
-
-    @pytest.mark.asyncio
-    async def test_an_ACTOR_LESS_transition_is_refused_on_a_REUSED_connection_by_CK_AUDIT_ACTOR(
-        self, ledger
-    ):
-        """A KNOWN GAP, pinned as it stands (found under #1402; the fix is #1421).
-
-        A pooled connection that has carried an actor reads the unset setting
-        as '' rather than NULL, and the audit trigger's `IS NULL` test lets ''
-        through. The state change is still refused, but only because the audit
-        row then fails `ck_audit_actor` — an accident of this table, not the
-        rule: `trg_governance_audit` has the same test and writes no audit row
-        for its machinery columns, so there nothing refuses at all. When the
-        triggers read '' as unset, this refusal will name `app.actor_kind`
-        instead — change the match then.
+        objection left. On a fresh connection the unset setting reads NULL; on
+        a pooled connection that has carried an actor it reads '', which the
+        trigger reads as unset too since `085` (#1421).
         """
         from sqlalchemy import text
         from sqlalchemy.ext.asyncio import create_async_engine
@@ -981,16 +1049,19 @@ class TestTheServicePathAgreesWithTheTrigger:
             self._async_dsn(ledger), pool_size=1, max_overflow=0
         )
         try:
-            primed = unit_of_work(engine, ledger["chain"]["ws"], actor_kind="system")
-            async with primed.begin():  # the one connection carries an actor once
-                pass
+            if reused:  # the one connection carries an actor once
+                primed = unit_of_work(
+                    engine, ledger["chain"]["ws"], actor_kind="system"
+                )
+                async with primed.begin():
+                    pass
             anonymous = unit_of_work(engine, ledger["chain"]["ws"])
-            with pytest.raises(IntentTransitionRefused, match="ck_audit_actor"):
+            with pytest.raises(IntentTransitionRefused, match="app.actor_kind"):
                 async with anonymous.begin() as session:  # pool_size=1: the same one
                     unset = await session.execute(
                         text("SELECT current_setting('app.actor_kind', true)")
                     )
-                    assert unset.scalar_one() == ""  # the premise: '', not NULL
+                    assert unset.scalar_one() == ("" if reused else None)  # the premise
                     await transition(session, intent, "prompt_pending")
         finally:
             await engine.dispose()

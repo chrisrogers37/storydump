@@ -65,13 +65,13 @@ UQ_INTENT_SLOT_SQL = (
     " (workspace_id, ig_account_id, schedule_slot_at)"
 )
 
-#: 086's cadence-only slot key, verbatim — re-added after its drop proof.
+#: 088's cadence-only slot key, verbatim — re-added after its drop proof.
 UQ_INTENT_SLOT_CADENCE_SQL = (
     "CREATE UNIQUE INDEX uq_intent_slot_cadence ON post_intents"
     " (workspace_id, ig_account_id, schedule_slot_at) WHERE origin = 'cadence'"
 )
 
-#: Key 1 is two indexes while 086's expand stands: whichever refuses a
+#: Key 1 is two indexes while 088's expand stands: whichever refuses a
 #: duplicate cadence slot, it is one of these, by name.
 SLOT_KEYS = ("uq_intent_slot", "uq_intent_slot_cadence")
 
@@ -733,7 +733,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
             _owner_exec(clock_db, UQ_INTENT_SLOT_CADENCE_SQL)
 
     #: `plan_slot`'s insert as raw SQL, and its two conflict targets: the one
-    #: 086 ships, and the predicate-less one every worker ran before it.
+    #: 088 ships, and the predicate-less one every worker ran before it.
     SLOT_INSERT = (
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
         " provider_account_ref, approval_mode, schedule_slot_at, origin)"
@@ -819,7 +819,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
 
     @pytest.mark.asyncio
     async def test_the_executor_holds_on_the_cadence_key_alone(self, clock_db):
-        """086's spelling as `plan_slot` runs it. With the unconditional key
+        """088's spelling as `plan_slot` runs it. With the unconditional key
         gone (the contract a later file makes), a duplicate execution still
         mints one intent, and a planned row at the slot's instant no longer
         absorbs the cadence mint. The predicate-less spelling raises on the

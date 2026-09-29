@@ -413,7 +413,7 @@ def test_a_workspace_name_resolves_through_the_real_principal(world, people, tmp
 def test_a_planned_story_is_approved_through_the_real_cli_by_its_person(
     world, google_configured, monkeypatch, tmp_path
 ):
-    """086 lets only a person approve a planned story. The CLI's write is a
+    """088 lets only a person approve a planned story. The CLI's write is a
     person: a person-bound operator token opens the tenant as `user` with the
     token's own user (`principal.open_tenant`), so the trigger admits it.
     Its own workspace, because `people`'s stays in manual mode for the other

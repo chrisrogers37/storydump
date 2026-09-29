@@ -1983,8 +1983,342 @@ REVOKE ALL ON FUNCTION fn_clock_tick(int, interval, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fn_clock_tick(int, interval, jsonb) TO svc_worker;
 ```
 
+### §28. The audit triggers read an empty actor as unset (085, #1421)
 
-### §29. The ledger learns 'planned' (086, #1413)
+**Why:** `trg_intent_audit` and `trg_governance_audit` (`02` §4) refuse an actor-less write by
+testing `current_setting('app.actor_kind', true) IS NULL`, which reads NULL only on a connection
+that has never set the setting. Once a transaction has run `set_config('app.actor_kind', …, true)`,
+the session keeps the setting defined, and a later transaction on the same pooled connection reads
+it as `''` (measured on PostgreSQL 15 under #1402). There, an actor-less intent state change was
+refused only because its audit row failed `ck_audit_actor`, and an actor-less write that moved only
+a governance table's machinery columns was not refused at all: those writes exit before the audit
+INSERT, so nothing reached the CHECK.
+
+**The fix is one line in each function:** `NULLIF(current_setting('app.actor_kind', true), '') IS
+NULL`, the idiom both bodies already use for `app.actor_user_id` and `app.channel`, so unset and
+empty are one case. Apart from that line and a two-line comment above it, the bodies are `02`
+§4's, byte for byte. `CREATE OR REPLACE`
+rather than §27's drop and create: six triggers depend on the two functions, and a replace keeps
+them attached, with the functions' owner and grants. `055` already refused an actor-less write on
+a fresh connection, so a writer without an actor already failed on the first transaction each
+pooled connection served; what changes is that the refusal no longer depends on the connection's
+history.
+
+```sql
+-- [§28 the audit triggers read an empty actor as unset]
+
+CREATE OR REPLACE FUNCTION trg_intent_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.state IS DISTINCT FROM OLD.state THEN
+    -- 085: '' is unset too. A pooled connection that claimed an actor in an
+    -- earlier transaction reads the setting back as '', not NULL (#1421).
+    IF NULLIF(current_setting('app.actor_kind', true), '') IS NULL THEN
+      RAISE EXCEPTION 'state change without app.actor_kind — anonymous writes are forbidden';
+    END IF;
+    INSERT INTO audit_events (workspace_id, entity_kind, entity_id, from_state, to_state,
+                              actor_kind, actor_user_id, channel, detail)
+    VALUES (NEW.workspace_id, 'post_intent', NEW.id, OLD.state, NEW.state,
+            current_setting('app.actor_kind'),
+            NULLIF(current_setting('app.actor_user_id', true), '')::uuid,
+            NULLIF(current_setting('app.channel', true), ''),
+            NULL);
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION trg_governance_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  r    RECORD;
+  kind TEXT;
+  ws   UUID;
+  ent  UUID;
+  fs   TEXT;
+  ts   TEXT;
+BEGIN
+  -- 085: '' is unset too. A pooled connection that claimed an actor in an
+  -- earlier transaction reads the setting back as '', not NULL (#1421).
+  IF NULLIF(current_setting('app.actor_kind', true), '') IS NULL THEN
+    RAISE EXCEPTION 'governance mutation on % without app.actor_kind — anonymous writes are forbidden',
+      TG_TABLE_NAME;
+  END IF;
+  -- Machinery-column early-exit (§0's exclusion applied at COLUMN grain): two governance tables
+  -- are dual-role — the clock/worker advance their scheduling columns at publish frequency.
+  -- Those advances still require an actor (the RAISE above) but write no audit row: their
+  -- authority trail is the intent ledger, and auditing them would mint from=to noise at
+  -- publish rate, retained 400 d. Any change to a governance column below still audits.
+  -- PL/pgSQL RULE THIS SHAPE DEPENDS ON (normative for every generic multi-table trigger in
+  -- this plan): a NEW./OLD. field reference is resolved when its enclosing EXPRESSION is set
+  -- up for the firing table's row type — a false left conjunct short-circuits the VALUE, never
+  -- the FIELD resolution. `TG_TABLE_NAME = 'x' AND NEW.<x-only field> …` as ONE expression
+  -- therefore errors on every OTHER table (`record "new" has no field …`, the R5 P0). Table
+  -- dispatch must be an IF STATEMENT, whose branch body is parsed only when reached for a row
+  -- type that has the fields — which is why the exits below are nested, not AND-chained.
+  IF TG_OP = 'UPDATE' THEN
+    IF TG_TABLE_NAME = 'ig_accounts' THEN
+      IF ROW(NEW.workspace_id, NEW.provider_account_ref, NEW.handle, NEW.display_name, NEW.state,
+             NEW.posts_per_day, NEW.posting_hours_start, NEW.posting_hours_end, NEW.tz)
+         IS NOT DISTINCT FROM
+         ROW(OLD.workspace_id, OLD.provider_account_ref, OLD.handle, OLD.display_name, OLD.state,
+             OLD.posts_per_day, OLD.posting_hours_start, OLD.posting_hours_end, OLD.tz) THEN
+        RETURN NULL;                             -- next_slot_at / last_posted_at advance only
+      END IF;
+    ELSIF TG_TABLE_NAME = 'oauth_credentials' THEN
+      IF ROW(NEW.workspace_id, NEW.ig_account_id, NEW.media_source_id, NEW.provider,
+             NEW.encrypted_payload, NEW.state)
+         IS NOT DISTINCT FROM
+         ROW(OLD.workspace_id, OLD.ig_account_id, OLD.media_source_id, OLD.provider,
+             OLD.encrypted_payload, OLD.state) THEN
+        RETURN NULL;                             -- next_refresh_at / expires_at advance only
+      END IF;
+    END IF;
+  END IF;
+  IF TG_OP = 'DELETE' THEN r := OLD; ELSE r := NEW; END IF;
+  kind := CASE TG_TABLE_NAME
+            WHEN 'workspaces'        THEN 'workspace'
+            WHEN 'workspace_members' THEN 'member'
+            WHEN 'oauth_credentials' THEN 'credential'
+            WHEN 'ig_accounts'       THEN 'ig_account'
+            WHEN 'channel_bindings'  THEN 'channel_binding'
+          END;
+  IF TG_TABLE_NAME = 'workspaces' THEN
+    ws := r.id;           ent := r.id;
+  ELSIF TG_TABLE_NAME = 'workspace_members' THEN
+    ws := r.workspace_id; ent := r.user_id;
+  ELSE
+    ws := r.workspace_id; ent := r.id;
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF TG_TABLE_NAME = 'workspace_members' THEN fs := OLD.role;  ts := NEW.role;
+    ELSE                                        fs := OLD.state; ts := NEW.state;
+    END IF;
+  ELSIF TG_OP = 'INSERT' THEN
+    IF TG_TABLE_NAME = 'workspace_members' THEN ts := NEW.role;  ELSE ts := NEW.state; END IF;
+  ELSE
+    IF TG_TABLE_NAME = 'workspace_members' THEN fs := OLD.role;  ELSE fs := OLD.state; END IF;
+  END IF;
+  INSERT INTO audit_events (workspace_id, entity_kind, entity_id, from_state, to_state,
+                            actor_kind, actor_user_id, channel, detail)
+  VALUES (ws, kind, ent, fs, ts,
+          current_setting('app.actor_kind'),
+          NULLIF(current_setting('app.actor_user_id', true), '')::uuid,
+          NULLIF(current_setting('app.channel', true), ''),
+          jsonb_build_object('v', 1, 'op', TG_OP));
+  RETURN NULL;
+END $$;
+```
+
+### §29. The reaper ends a `ready` job past its deadline when a sweep re-mints its kind (086, #1429)
+
+**Why:** every mint but `publish_pipeline`'s writes `jobs.deadline_at`, so that a job stuck
+`ready` is ended and its kind re-minted (§26). Nothing read it but `jobs.budget_exhausted`, which
+the worker calls only after a run has failed, and `fn_reaper_sweep` (§22) returned expired leases
+without reading a deadline. So a job nothing claimed sat `ready` for ever, holding its
+serialization key: a key another job held, or a quarantined (workspace, key) scope, which the
+claim door skips.
+
+**The fix is the sweep's last leg, for the kinds a sweep re-mints.** A `ready` job past its
+deadline ends `failed`, with `ended: deadline` merged into its payload: `jobs` has no error column,
+and the outbox records what happened to a row the same way. It ends only the clock's recurring
+singletons, its slot, refresh and reauth legs, the sender sweep's `deliver_outbox`, and the two
+sync kinds, whose source it re-arms for tomorrow, as `work_loop._rearm_source` does, because a
+sync's mint disarms it. Nothing re-mints the others (`publish_pipeline`, `send_email`,
+`offboard_workspace`, `revoke_workspace_credentials`, `retention_sweep`, `reencrypt_credentials`),
+so ending one would unblock no successor and only lose its work; they are left as they were. For
+the kinds it ends, the leg is the worker's spent-budget path without the tenant notice, which that
+path calls a courtesy, not the record.
+
+**A deferral carries its deadline** (`jobs.reschedule_job`), so a parked or paced job keeps its
+slack. The outer UPDATE repeats `state` and the deadline test, so a job that a claim or a deferral
+changed while the sweep ran is not ended under it. The leg runs last, so a backlog of expired jobs
+cannot take the budget of the legs above; the onboarding leg gains the budget line every other leg
+has. It needs no index of its own. **The grant is column-scoped**, as §27's was: `svc_maintenance`,
+the door's owner, could only read `media_sources` (§25); it gains `UPDATE` on `next_sync_at`
+alone, with a policy that admits the row. Every other leg is §22's, verbatim.
+
+```sql
+-- [§29 the reaper ends a ready job past its deadline]
+
+GRANT UPDATE (next_sync_at) ON media_sources TO svc_maintenance;
+
+CREATE POLICY p_maint_sources_rearm ON media_sources FOR UPDATE TO svc_maintenance
+  USING (true) WITH CHECK (true);
+
+CREATE OR REPLACE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval)
+RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE n int := 0; c int; rem int := GREATEST(p_lim, 0);
+BEGIN
+  PERFORM set_config('app.actor_kind', 'reaper', true);
+  UPDATE jobs SET state = 'ready', locked_by = NULL, lease_token = NULL, locked_until = NULL
+   WHERE id IN (SELECT id FROM jobs
+                 WHERE state = 'leased' AND locked_until < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE post_intents SET state = 'expired'
+   WHERE id IN (SELECT id FROM post_intents
+                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
+                 LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE post_intents i SET state = 'expired'
+   WHERE i.id IN (
+     SELECT i2.id FROM post_intents i2 JOIN workspaces w ON w.id = i2.workspace_id
+      WHERE i2.state = 'awaiting_approval'
+        AND i2.entered_state_at
+            < now() - COALESCE(w.approval_ttl_minutes * interval '1 minute', p_approval_ttl)
+      LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  DELETE FROM post_locks
+   WHERE id IN (SELECT id FROM post_locks
+                 WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE workspace_invitations SET state = 'expired'
+   WHERE id IN (SELECT id FROM workspace_invitations
+                 WHERE state = 'pending' AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  DELETE FROM onboarding_sessions
+   WHERE id IN (SELECT id FROM onboarding_sessions WHERE expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  -- 086: a `ready` job past its deadline ends `failed`, and says so (#1429),
+  -- for the kinds a sweep re-mints; a sync kind's source is re-armed, as
+  -- `work_loop._rearm_source` does on a spent budget. Last, so a backlog of
+  -- expired jobs cannot take the budget of the legs above.
+  WITH ended AS (
+    UPDATE jobs SET state = 'failed',
+                    payload = payload || jsonb_build_object('ended', 'deadline')
+     WHERE id IN (SELECT id FROM jobs
+                   WHERE state = 'ready' AND deadline_at <= now()
+                     AND kind IN ('reap_expired', 'reconcile_ambiguous',
+                                  'alert_stranded_sources', 'reap_transit_assets',
+                                  'plan_slot', 'refresh_credential', 'reauth_prompt',
+                                  'deliver_outbox', 'sync_media_source',
+                                  'first_ingest_chunk')   -- the kinds a sweep re-mints
+                   ORDER BY deadline_at LIMIT rem)
+       AND state = 'ready' AND deadline_at <= now()   -- rechecked on a changed row
+    RETURNING kind, workspace_id, payload->>'source_id' AS source_id
+  ), rearmed AS (
+    UPDATE media_sources s
+       SET next_sync_at = now() + interval '24 hours'           -- work_loop.REARM_AFTER_SECONDS
+      FROM ended e
+     WHERE e.kind IN ('sync_media_source', 'first_ingest_chunk')  -- work_loop._SYNC_KINDS
+       AND s.id::text = e.source_id   -- as text: a malformed payload must not abort the sweep
+       AND s.workspace_id = e.workspace_id
+       AND s.state = 'active' AND s.next_sync_at IS NULL
+  )
+  SELECT count(*) INTO c FROM ended;
+  n := n + c;
+  RETURN n;
+END $$;
+```
+
+### §30. The reaper ends a cancel the user asked for (087, #1235)
+
+**Why:** `cancel` and `disable_account` set `cancel_requested` and nothing else — the user never
+writes a waiting story's terminal state, and every `→ cancelled` edge out of a waiting state is
+the worker's (`02` §4). The one
+worker that honoured the flag was publish admission, for an `approved` row at its job's next run. A
+flagged row in `scheduled`, `prompt_pending` or `awaiting_approval` had no worker checkpoint at all:
+it stayed live until the approval TTL ended it as `expired`, the wrong label, and while it stayed
+live it held `uq_intent_live_subject`, refusing that item for that account.
+
+**The leg** ends a flagged row in any of the four waiting states as `cancelled` at the next sweep,
+drawing on the sweep's running remainder like every other leg, audited under the door's `reaper`
+actor. It sits **after the lease leg**, because liveness comes first (the door's order since 059), and
+**before the expiry legs**, because a flagged row they reached first would end `expired`. Its candidates are
+only flagged rows, each ended once, so a full budget delays the expiry legs and never blocks them.
+The publish job also cancels a flagged `approved` story, so the outer UPDATE repeats the waiting
+states: at READ COMMITTED a row changed under the sweep is rechecked against the UPDATE's own
+quals, not its subquery's (§29's leg does the same), and a sweep that wrote to a row the job had
+just cancelled would meet the terminal freeze and roll every leg back.
+The flag's writers strip the story's cards themselves; a card sent after the flag (the prompt sweep
+does not read it) is retired by the settled-card sweep that follows the reap (§25), the backstop
+for every terminal intent.
+
+**A row carrying a debit is not this leg's.** A floating story steps back `publishing → approved`
+with its cap debit (§22), and a cancel owes that debit back first: the terminal freeze refuses every
+write to a cancelled row, a refund included. The two paths that cancel a debited story already
+refund before the flip — its own job at admission, and the reap executor's stale-approved leg,
+which runs after this door — so the leg takes only rows with no `cap_consumed_on`. Cancelled here,
+the debit would be stranded: nothing refunds a terminal row, and the freeze would refuse a late
+refund anyway. The same guard means no provider work is owed: a transit asset is written only
+while `publishing`, which is always debited. The rest of the function is §29's, byte-for-byte:
+§22's six legs and §29's deadline leg, still last.
+
+```sql
+-- [§30 the reaper ends a cancel the user asked for]
+
+CREATE OR REPLACE FUNCTION fn_reaper_sweep(p_lim int, p_approval_ttl interval, p_approved_ttl interval)
+RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE n int := 0; c int; rem int := GREATEST(p_lim, 0);
+BEGIN
+  PERFORM set_config('app.actor_kind', 'reaper', true);
+  UPDATE jobs SET state = 'ready', locked_by = NULL, lease_token = NULL, locked_until = NULL
+   WHERE id IN (SELECT id FROM jobs
+                 WHERE state = 'leased' AND locked_until < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  -- 087: a cancel the user asked for ends `cancelled` (#1235), ahead of the
+  -- expiry legs; a debited row is left to the paths that refund it first.
+  UPDATE post_intents SET state = 'cancelled'
+   WHERE id IN (SELECT id FROM post_intents
+                 WHERE cancel_requested AND cap_consumed_on IS NULL
+                   AND state IN ('scheduled','prompt_pending','awaiting_approval','approved')
+                 LIMIT rem)
+     AND state IN ('scheduled','prompt_pending','awaiting_approval','approved');  -- rechecked on a changed row
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE post_intents SET state = 'expired'
+   WHERE id IN (SELECT id FROM post_intents
+                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
+                 LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE post_intents i SET state = 'expired'
+   WHERE i.id IN (
+     SELECT i2.id FROM post_intents i2 JOIN workspaces w ON w.id = i2.workspace_id
+      WHERE i2.state = 'awaiting_approval'
+        AND i2.entered_state_at
+            < now() - COALESCE(w.approval_ttl_minutes * interval '1 minute', p_approval_ttl)
+      LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  DELETE FROM post_locks
+   WHERE id IN (SELECT id FROM post_locks
+                 WHERE expires_at IS NOT NULL AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  UPDATE workspace_invitations SET state = 'expired'
+   WHERE id IN (SELECT id FROM workspace_invitations
+                 WHERE state = 'pending' AND expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  DELETE FROM onboarding_sessions
+   WHERE id IN (SELECT id FROM onboarding_sessions WHERE expires_at < now() LIMIT rem);
+  GET DIAGNOSTICS c = ROW_COUNT; n := n + c; rem := rem - c;
+  -- 086: a `ready` job past its deadline ends `failed`, and says so (#1429),
+  -- for the kinds a sweep re-mints; a sync kind's source is re-armed, as
+  -- `work_loop._rearm_source` does on a spent budget. Last, so a backlog of
+  -- expired jobs cannot take the budget of the legs above.
+  WITH ended AS (
+    UPDATE jobs SET state = 'failed',
+                    payload = payload || jsonb_build_object('ended', 'deadline')
+     WHERE id IN (SELECT id FROM jobs
+                   WHERE state = 'ready' AND deadline_at <= now()
+                     AND kind IN ('reap_expired', 'reconcile_ambiguous',
+                                  'alert_stranded_sources', 'reap_transit_assets',
+                                  'plan_slot', 'refresh_credential', 'reauth_prompt',
+                                  'deliver_outbox', 'sync_media_source',
+                                  'first_ingest_chunk')   -- the kinds a sweep re-mints
+                   ORDER BY deadline_at LIMIT rem)
+       AND state = 'ready' AND deadline_at <= now()   -- rechecked on a changed row
+    RETURNING kind, workspace_id, payload->>'source_id' AS source_id
+  ), rearmed AS (
+    UPDATE media_sources s
+       SET next_sync_at = now() + interval '24 hours'           -- work_loop.REARM_AFTER_SECONDS
+      FROM ended e
+     WHERE e.kind IN ('sync_media_source', 'first_ingest_chunk')  -- work_loop._SYNC_KINDS
+       AND s.id::text = e.source_id   -- as text: a malformed payload must not abort the sweep
+       AND s.workspace_id = e.workspace_id
+       AND s.state = 'active' AND s.next_sync_at IS NULL
+  )
+  SELECT count(*) INTO c FROM ended;
+  n := n + c;
+  RETURN n;
+END $$;
+```
+
+### §31. The ledger learns 'planned' (088, #1413)
 
 **Why:** the content schedule (#1413) lets a person put one chosen item before approval at a
 chosen time, on top of the cadence. Such a story is a `post_intents` row like any other, told apart
@@ -2014,7 +2348,7 @@ Every other edge is untouched, the pipeline's `publishing -> approved` wait amon
 The trigger's `WHEN` is the rule's scope, so a cadence row's update never runs the function.
 
 ```sql
--- [§29 the ledger learns 'planned']
+-- [§31 the ledger learns 'planned']
 
 ALTER TABLE post_intents ADD COLUMN origin TEXT NOT NULL DEFAULT 'cadence'
   CONSTRAINT ck_intent_origin CHECK (origin IN ('cadence','planned'));

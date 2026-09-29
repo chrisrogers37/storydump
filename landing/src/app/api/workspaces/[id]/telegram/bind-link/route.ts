@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { passThrough, requireWorkspace } from "@/lib/route-guards";
+import { passThrough, refuseCrossSite, requireWorkspace } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 import {
   LINK_TTL_SECONDS_FALLBACK,
@@ -12,7 +12,10 @@ import {
  * (`07` §13). Admin floor is the API's; a link that is not our bot's
  * `startgroup` link is a failure, because the next act is to open it.
  */
-export async function POST(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
+export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const guard = await requireWorkspace(context);
   if (guard instanceof NextResponse) return guard;
   const { token, id } = guard;

@@ -341,7 +341,7 @@ async def execute_plan_slot(
     cadence rule: a planned row (a story a person scheduled for a chosen time)
     must not absorb a slot's mint. Postgres infers any unique index the
     predicate satisfies, partial or not, so this spelling resolves against
-    `uq_intent_slot_cadence` (086) and against the unconditional
+    `uq_intent_slot_cadence` (088) and against the unconditional
     `uq_intent_slot` alike, while both exist. The predicate-less spelling
     would not survive the unconditional key's removal: against the partial
     index alone it finds no arbiter and raises on every mint.

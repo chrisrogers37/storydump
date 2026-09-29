@@ -54,6 +54,14 @@ def _insert_job(
     return job_id
 
 
+def _deadline_and_run_at(conn, job_id):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT deadline_at, run_at FROM jobs WHERE id = %s", (str(job_id),)
+        )
+        return cur.fetchone()
+
+
 def _job_row(conn, job_id):
     with conn.cursor() as cur:
         cur.execute(
@@ -159,6 +167,43 @@ class TestParkingOnTheRealMachinery:
         eta = (row["run_at"] - datetime.now(timezone.utc)).total_seconds()
         assert 800 < eta <= WorkerConfig().park_seconds + 60
         _assert_no_stranded_lease(sync_conn)
+
+    async def test_a_parked_job_carries_its_deadline_past_the_reaper(
+        self, lane_db, sync_conn
+    ):
+        """#1429: a deferral moves the job's deadline with its `run_at`, so the
+        parking contract's "never finalized dead" survives the reaper's
+        deadline leg (086). Seeded a minute past its deadline, the parked job's
+        deadline moves exactly as far as its `run_at`, and a sweep leaves it
+        `ready`."""
+        chain = seed_workspace_chain(sync_conn, "w1parkdl")
+        job_id = _insert_job(
+            sync_conn,
+            kind="sync_media_source",
+            workspace_id=chain["ws"],
+            payload='{"v": 1, "source_id": "%s", "reason": "baseline"}' % uuid.uuid4(),
+        )
+        _set(
+            sync_conn,
+            job_id,
+            "run_at = now() - interval '2 minutes',"
+            " deadline_at = now() - interval '1 minute'",
+        )
+        deadline, run_at = _deadline_and_run_at(sync_conn, job_id)
+
+        wl, claimed = await _run_once(lane_db)
+
+        assert claimed is True and wl.parked == 1
+        moved_deadline, moved_run_at = _deadline_and_run_at(sync_conn, job_id)
+        assert moved_deadline - deadline == moved_run_at - run_at
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT fn_reaper_sweep(50, '72 hours'::interval, '72 hours'::interval)"
+            )
+        sync_conn.commit()
+        assert _job_row(sync_conn, job_id)["state"] == "ready", (
+            "the reaper leaves a parked job alone"
+        )
 
 
 class TestFailureBackoffOnTheRealMachinery:
@@ -488,11 +533,16 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         async def failing(session, job):
             raise RuntimeError("down")
 
+        _set(sync_conn, job_id, "deadline_at = now() + interval '1 hour'")
+        deadline, _ = _deadline_and_run_at(sync_conn, job_id)
         wl, _ = await _run_once(
             lane_db, registry_override={"sync_media_source": failing}
         )
 
         assert wl.exhausted == 0
+        assert _deadline_and_run_at(sync_conn, job_id)[0] == deadline, (
+            "a failure keeps its deadline, as it keeps its attempt (#1429)"
+        )
         row = _job_row(sync_conn, job_id)
         assert row["state"] == "ready" and row["attempts"] == 1
         eta = (row["run_at"] - datetime.now(timezone.utc)).total_seconds()

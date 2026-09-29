@@ -695,7 +695,15 @@ async def _cancel_in(session, ctx: _Ctx) -> None:
         )
     ).fetchone()
     if cancelled is None:
-        raise ValueError(f"intent {ctx.intent_id} left 'approved' during cancel honor")
+        # The reaper's cancel leg (087) ends a flagged story that owes no
+        # refund; a sweep landing after this job's load leaves the row already
+        # `cancelled`, and the job's work is done. A debited row never gets
+        # here: its refund above meets the terminal freeze first.
+        state = await intent_ledger.current_state(session, ctx.intent_id)
+        if state != "cancelled":
+            raise ValueError(
+                f"intent {ctx.intent_id} left 'approved' during cancel honor"
+            )
     await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "cancelled")
 
 

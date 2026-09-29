@@ -49,6 +49,7 @@ const { POST } = await import("./route");
 function req(body: unknown) {
   return new Request("https://storydump.app/api/workspaces", {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }) as unknown as Parameters<typeof POST>[0];
 }
@@ -127,7 +128,12 @@ describe("POST /api/workspaces — a refusal names its exit", () => {
     ["a body that is not JSON", '{"name":'],
     ["a body of null", "null"],
   ])("renders %s apart from a refusal relayed from the port", async (_case, body) => {
-    const unreadable = await refusal({ method: "POST", body });
+    // Declared JSON, so what refuses it is the parse and not the type check.
+    const unreadable = await refusal({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
     // A port refusal whose body carries no `reason`, which `readError` reports
     // as `http_<status>`. Same status as the local refusal, so only the reason
     // can separate the two.

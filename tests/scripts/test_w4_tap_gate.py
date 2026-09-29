@@ -116,7 +116,7 @@ def _one(world, sql, params=()):
 
 def _intent(world, tag: str, *, state="awaiting_approval", origin="cadence") -> dict:
     """An intent on the chain's account, on its own media item, with a SENT
-    card in both groups (refs 1xxx in A, 2xxx in B). A planned story (086) is
+    card in both groups (refs 1xxx in A, 2xxx in B). A planned story (088) is
     born planned: its origin cannot change afterwards."""
     ((media,),) = _write(
         world,
@@ -254,7 +254,7 @@ def _card_states(world, intent_id):
 
 class TestATapFlipsOnceAndEditsEveryCard:
     def test_a_planned_story_is_approved_by_the_tapper_like_any_other(self, world):
-        """086 lets only a person approve a planned story. A tap is a person:
+        """088 lets only a person approve a planned story. A tap is a person:
         the dispatcher stamps the tapper as `user` with their linked id, so
         the trigger admits it, and the audit row says who."""
         i = _intent(world, "post-planned", origin="planned")

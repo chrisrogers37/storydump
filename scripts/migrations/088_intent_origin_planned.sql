@@ -1,4 +1,4 @@
--- Migration 086: the intent ledger learns 'planned' (content schedule, phase 2; #1413, plan PR #1414).
+-- Migration 088: the intent ledger learns 'planned' (content schedule, phase 2; #1413, plan PR #1414).
 --
 -- A planned story is a `post_intents` row a person scheduled for a chosen time, beside the
 -- cadence rows `plan_slot` mints. This file gives the ledger the shape to hold one; nothing

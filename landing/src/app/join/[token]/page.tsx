@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { getSession } from "@/lib/session";
 import { AcceptInvitation } from "@/components/workspace/accept-invitation";
 import { SignOutButton } from "@/components/auth/sign-out-button";
@@ -57,12 +56,14 @@ export default async function JoinPage({
           {session ? (
             <AcceptInvitation token={token} />
           ) : (
-            <Link
+            // An anchor, not <Link>: `start` is a route handler, which a Link
+            // prefetch would run on every view of this page.
+            <a
               href={`/join/${encodeURIComponent(token)}/start`}
               className="inline-flex w-full items-center justify-center rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
             >
               Sign in to continue
-            </Link>
+            </a>
           )}
         </div>
 

@@ -348,7 +348,7 @@ class TestMembershipListingUnderTheProductionRole:
 def test_a_planned_story_is_approved_through_the_web_route_by_its_person(
     world, google_configured, monkeypatch
 ):
-    """086 lets only a person approve a planned story. The web route is a
+    """088 lets only a person approve a planned story. The web route is a
     person: the session principal opens the tenant as `user` with the
     signed-in id (`principal.open_tenant`), so the trigger admits it, and the
     audit row names who approved."""

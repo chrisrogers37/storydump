@@ -73,7 +73,7 @@ does.
 
 `plan_slot` mints at most one intent for its slot: the insert is
 `ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at) WHERE origin = 'cadence' DO NOTHING`
-(`scheduler.py:494`), so a duplicate job mints nothing. The predicate is 086's: the slot key
+(`scheduler.py:494`), so a duplicate job mints nothing. The predicate is 088's: the slot key
 is a cadence rule, so a planned story (`origin = 'planned'`) never absorbs a slot. The spelling
 resolves against both `uq_intent_slot` and the cadence-only `uq_intent_slot_cadence` while
 both exist. Keep the predicate: once the unconditional key is dropped, a bare `ON CONFLICT`
@@ -102,6 +102,16 @@ is eligible the slot lapses and the workspace is told at most once per 24 h
   expired lease of its OWN recurring singletons to `ready` before its mint
   guard reads it (084), because the reaper is one of those singletons and
   cannot revive itself. Every other kind's expired lease is the reaper's.
+- A deadline ends a job two ways. A job that runs and fails past its budget is
+  ended by the worker (`jobs.budget_exhausted`), with the tenant notice; a
+  `ready` job past its `deadline_at` is ended `failed` by the reaper, which
+  merges `ended: deadline` into its payload and re-arms a sync kind's source,
+  but sends no notice, and only for the kinds a sweep re-mints (086, #1429:
+  the list is in the leg, and the lease gate pins every kind to one side). A
+  deferral (`reschedule_job` with the attempt restored: a park, a pacing
+  wait) moves the deadline with `run_at`, so the job keeps its slack; a
+  retryable failure keeps its deadline. A new job kind must be classified in
+  that pin.
 - Per-workspace lane caps (interactive 5, bulk 3) are the claim's, so one
   workspace cannot own a lane.
 - An executor that waits on a provider is marked `own_transactions`

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Mutation battery for the content schedule's phase 2, the ledger learning 'planned' (migration 086;
+# Mutation battery for the content schedule's phase 2, the ledger learning 'planned' (migration 088;
 # #1413, plan PR #1414): each behaviour has one named mutation that must make its test FAIL ("killed")
 # — and must PASS on the clean tree first, or the verdict is BASELINE RED; a selector that selects
 # nothing is NO TEST SELECTED, never a kill. Files are restored from the COMMITTED tree after each, so
@@ -7,8 +7,8 @@
 # DB_* fields are read from the environment, defaulting to the Docker server `AGENTS.md` › Testing
 # starts; `STORYDUMP_PY` points at another venv's python.
 #
-# The behavioural mutations edit `07` §29, not the 086 file: every gate here replays the ADVERTISED
-# stream, so §29 is the SQL they run. The one 086 mutation is caught by the prefix check that holds
+# The behavioural mutations edit `07` §31, not the 088 file: every gate here replays the ADVERTISED
+# stream, so §31 is the SQL they run. The one 088 mutation is caught by the prefix check that holds
 # the file to the stream, and the model mutation by the lane's parity with `create_all`.
 set -u
 ROOT=${STORYDUMP_ROOT:-/Users/chris/Projects/storydump}
@@ -58,25 +58,25 @@ MANIFEST=scripts/advertised_ddl_manifest.json
 L=tests/scripts/test_intent_ledger_gate.py
 C=tests/scripts/test_scheduler_clock_gate.py
 
-# A §29 mutation changes the block's sha256, and the manifest ratchet then refuses to build the
+# A §31 mutation changes the block's sha256, and the manifest ratchet then refuses to build the
 # stream ("1 unclassified, 1 orphaned"): every gate would ERROR in its fixture instead of the named
-# test deciding. So `check_doc` re-hashes §29's manifest entry after the edit — the stream builds
+# test deciding. So `check_doc` re-hashes §31's manifest entry after the edit — the stream builds
 # with the mutated SQL — and restores both files after the verdict.
 rehash() {
   $PY -c '
 import json
 from scripts.advertised_ddl import extract_blocks
 doc = "documentation/planning/2026-08-02-consolidated-design-plan/07-security-model.md"
-(block,) = [b for b in extract_blocks(doc) if b.sql.startswith("-- [§29 ")]
+(block,) = [b for b in extract_blocks(doc) if b.sql.startswith("-- [§31 ")]
 path = "scripts/advertised_ddl_manifest.json"
 manifest = json.load(open(path))
 entries = manifest if isinstance(manifest, list) else manifest["blocks"]
-(entry,) = [e for e in entries if e["label"].startswith("§29 ")]
+(entry,) = [e for e in entries if e["label"].startswith("§31 ")]
 entry["sha256"] = block.sha256
 open(path, "w").write(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
 '
 }
-check_doc() {  # name old new test-selector — a mutation of §29, re-hashed
+check_doc() {  # name old new test-selector — a mutation of §31, re-hashed
   local name=$1 old=$2 new=$3 sel=$4
   if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
   RAN=$((RAN + 1))
@@ -90,7 +90,7 @@ check_doc() {  # name old new test-selector — a mutation of §29, re-hashed
   cd "$ROOT" && git checkout -- "$DOC" "$MANIFEST"
 }
 
-# The person rule (§29's trigger): its scope is the trigger's WHEN, the body checks the actor.
+# The person rule (§31's trigger): its scope is the trigger's WHEN, the body checks the actor.
 check_doc "the person rule is gone" "        OR (OLD.origin = 'planned' AND OLD.state = 'awaiting_approval' AND NEW.state = 'approved'))" "        )" "$L -k 'anything_but_a_person_is_refused'"
 check_doc "a service identity counts as a person" "  IF COALESCE(current_setting('app.actor_kind', true), '') <> 'user'" "  IF COALESCE(current_setting('app.actor_kind', true), '') NOT IN ('user','operator')" "$L -k 'anything_but_a_person_is_refused and operator'"
 check_doc "a user actor needs no user id" "     OR NULLIF(current_setting('app.actor_user_id', true), '') IS NULL THEN" "     OR false THEN" "$L -k 'anything_but_a_person_is_refused and user-False'"
@@ -104,7 +104,7 @@ check_doc "the cadence key is unconditional" "  WHERE origin = 'cadence';" "  ;"
 check "plan_slot drops the predicate" src/services/target/scheduler.py "                \" WHERE origin = 'cadence'\"" "                \"\"" "$C -k 'holds_on_the_cadence_key_alone'"
 # The file and the model are held to the stream. Parity compares uniqueness SEMANTICS, not index
 # names, so renaming the model's index would be an equivalent mutant; these mutate what it compares.
-check "the 086 file drifts from §29" scripts/migrations/086_intent_origin_planned.sql "CREATE TRIGGER tg_intent_planned_person BEFORE UPDATE OF state, origin ON post_intents" "CREATE TRIGGER tg_intent_planned_person BEFORE UPDATE OF state ON post_intents" "tests/scripts/test_advertised_ddl.py -k 'wired_prefix_holds_against_the_real_stream'"
+check "the 088 file drifts from §31" scripts/migrations/088_intent_origin_planned.sql "CREATE TRIGGER tg_intent_planned_person BEFORE UPDATE OF state, origin ON post_intents" "CREATE TRIGGER tg_intent_planned_person BEFORE UPDATE OF state ON post_intents" "tests/scripts/test_advertised_ddl.py -k 'wired_prefix_holds_against_the_real_stream'"
 check "the model's manual CHECK drifts" src/models/target/intent_ledger.py "            \"origin = 'cadence' OR approval_mode = 'manual'\"," "            \"origin = 'cadence' OR approval_mode IN ('manual','auto')\"," "tests/scripts/test_lineage_lane.py -k 'lane_parity_holds_against_the_target_models'"
 check "the model's cadence key covers planned rows" src/models/target/intent_ledger.py "            postgresql_where=text(\"origin = 'cadence'\")," "            postgresql_where=text(\"origin = 'planned'\")," "tests/scripts/test_lineage_lane.py -k 'lane_parity_holds_against_the_target_models'"
 # Each approve path is a person only because it stamps one: a path that stopped stamping `user`

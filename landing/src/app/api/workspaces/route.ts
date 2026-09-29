@@ -3,6 +3,7 @@ import { idempotencyKeyFor } from "@/lib/commands";
 import {
   passThrough,
   readJsonBody,
+  refuseCrossSite,
   requireSessionToken,
 } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
@@ -36,6 +37,9 @@ export async function GET() {
  * with an error that points at neither statement.
  */
 export async function POST(request: NextRequest) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const token = await requireSessionToken();
   if (token instanceof NextResponse) return token;
 

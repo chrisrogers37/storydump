@@ -44,7 +44,7 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
   rows of `post_intent_transitions`; `trg_intent_guard` refuses the rest and
   `trg_intent_audit` writes every state change to `audit_events`. A story's
   `origin` is `cadence` (minted by `plan_slot` for a slot) or `planned` (a
-  person chose the time, 086): `trg_intent_planned_person` fixes `origin` at
+  person chose the time, 088): `trg_intent_planned_person` fixes `origin` at
   birth and admits `awaiting_approval → approved` on a planned row only under a
   person's actor, and `ck_intent_planned_manual` keeps a planned row `manual`.
   The slot key is cadence-only (`uq_intent_slot_cadence`); the unconditional

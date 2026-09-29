@@ -745,7 +745,7 @@ def seed_intent_chain(
     ``app.actor_kind``). ``state`` overrides the intent's column default
     (``'scheduled'``) for a suite that needs, say, ``'awaiting_approval'``;
     ``origin`` likewise (``'cadence'``) for a planned story, which must be
-    BORN planned: 086's trigger refuses changing it afterwards.
+    BORN planned: 088's trigger refuses changing it afterwards.
     Split out of :func:`seed_workspace_chain` so an API-created workspace can
     be seeded with the same spelling rather than a copy."""
     cur.execute(
