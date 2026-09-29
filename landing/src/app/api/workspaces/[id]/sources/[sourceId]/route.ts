@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isUuid } from "@/lib/session";
-import { passThrough, requireWorkspace } from "@/lib/route-guards";
+import { passThrough, refuseCrossSite, requireWorkspace } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -9,9 +9,12 @@ import { targetFetch } from "@/lib/target-api";
  * its history stay; picking the folder again revives it).
  */
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ id: string; sourceId: string }> },
 ) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const guard = await requireWorkspace(context);
   if (guard instanceof NextResponse) return guard;
   const { token, id } = guard;

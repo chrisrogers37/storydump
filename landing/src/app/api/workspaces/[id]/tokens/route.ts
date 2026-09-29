@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   passThrough,
   readJsonBody,
+  refuseCrossSite,
   requireWorkspace,
 } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
@@ -34,6 +35,9 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const guard = await requireWorkspace(context);
   if (guard instanceof NextResponse) return guard;
   const { token, id } = guard;

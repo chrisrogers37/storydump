@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
-import { passThrough, requireSessionToken } from "@/lib/route-guards";
+import { NextRequest, NextResponse } from "next/server";
+import { passThrough, refuseCrossSite, requireSessionToken } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 import {
   LINK_TTL_SECONDS_FALLBACK,
@@ -12,7 +12,10 @@ import {
  * a user, not a workspace, so there is no workspace segment and no
  * `Idempotency-Key` — every click is a fresh, independent link.
  */
-export async function POST() {
+export async function POST(request: NextRequest) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const token = await requireSessionToken();
   if (token instanceof NextResponse) return token;
 

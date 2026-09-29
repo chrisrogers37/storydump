@@ -55,6 +55,7 @@ function post(body: unknown, id = WS) {
     `https://storydump.app/api/workspaces/${id}/tokens`,
     {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: typeof body === "string" ? body : JSON.stringify(body),
     },
   ) as unknown as Parameters<typeof POST>[0];

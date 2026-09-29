@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { refuseCrossSite } from "@/lib/route-guards"
 import { getDb } from "@/lib/db"
 import { waitlistSignups } from "@/lib/schema"
 import { notifyAdmin } from "@/lib/telegram"
@@ -7,6 +8,9 @@ import { UTM_KEYS } from "@/lib/analytics"
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export async function POST(req: NextRequest) {
+  const refused = refuseCrossSite(req)
+  if (refused) return refused
+
   try {
     const body = await req.json()
     const email = body.email?.trim().toLowerCase()

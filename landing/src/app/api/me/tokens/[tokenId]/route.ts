@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isUuid } from "@/lib/session";
-import { passThrough, requireSessionToken } from "@/lib/route-guards";
+import { passThrough, refuseCrossSite, requireSessionToken } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -10,9 +10,12 @@ import { targetFetch } from "@/lib/target-api";
  * command (`sources/[sourceId]/route.ts` is the analogue).
  */
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ tokenId: string }> },
 ) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const token = await requireSessionToken();
   if (token instanceof NextResponse) return token;
   const { tokenId } = await context.params;

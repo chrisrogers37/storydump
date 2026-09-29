@@ -5,7 +5,7 @@ import {
   WORKSPACE_COOKIE_OPTIONS,
   isWorkspaceId,
 } from "@/lib/session";
-import { passThrough, requireSessionToken } from "@/lib/route-guards";
+import { passThrough, refuseCrossSite, requireSessionToken } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -22,9 +22,12 @@ import { targetFetch } from "@/lib/target-api";
  * version of this the BFF can do itself.
  */
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ token: string }> },
 ) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const sessionToken = await requireSessionToken();
   if (sessionToken instanceof NextResponse) return sessionToken;
 
