@@ -413,10 +413,11 @@ class TestTheDerivedAdoptionProbesReadBothWays:
     # NOT reached, because it never asks one there. That is the direction below,
     # and it is the one production meets first.
 
-    # 084 is here for its grant probe: a column privilege read from
-    # `pg_attribute.attacl`, joined to `pg_roles` by name, where
-    # `has_column_privilege` would raise on a database with no `svc_clock`.
-    @pytest.mark.parametrize("version", [62, 84])
+    # 084 and 086 are here for their grant probes: a column privilege read
+    # from `pg_attribute.attacl`, joined to `pg_roles` by name, where
+    # `has_column_privilege` would raise on a database with no `svc_clock`
+    # (084) or `svc_maintenance` (086).
+    @pytest.mark.parametrize("version", [62, 84, 86])
     def test_probes_read_false_without_raising_before_the_target_lineage(
         self, version, at49_db, owner_actor
     ):

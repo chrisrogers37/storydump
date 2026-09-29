@@ -39,14 +39,12 @@ the gate's phrasing and the trigger's behaviour are not identical:
   had won. `061`'s `BEFORE UPDATE OF state` trigger refuses any write that
   names `state` with its current value; an update that never names `state` (a
   checkpoint) does not fire it. The gate asserts both halves.
-* **An actor-less state change raises, from `trg_intent_audit` — on a fresh
+* **An actor-less state change raises, from `trg_intent_audit`, on every
   connection.** A pooled connection that has carried an actor reads the unset
-  `app.actor_kind` as `''`, not NULL, and the trigger's `IS NULL` test lets it
-  through. That is a known gap (#1421), not a design: here the change is still
-  refused, because the audit row fails `ck_audit_actor`, but
-  `trg_governance_audit` has the same test and writes no audit row for its
-  machinery columns, so an actor-less machinery write on a reused connection
-  is not refused at all. The gate pins both connection states.
+  `app.actor_kind` as `''`, not NULL. Under `055` the trigger's `IS NULL` test
+  let that through, and only `ck_audit_actor` refused the change; `085`
+  (#1421) reads `''` as unset, in `trg_governance_audit` too. The gate pins
+  both connection states.
 """
 
 from __future__ import annotations

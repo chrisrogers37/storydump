@@ -1,8 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createNonce, isReportOnly, noncePolicy } from "@/lib/csp";
 import { SESSION_COOKIE, WORKSPACE_COOKIE, isWorkspaceId } from "@/lib/session";
 
 /**
- * The route gate.
+ * The pages rendered per request: the session gate for the dashboard and the
+ * workspace list, then the per-request Content-Security-Policy for all of
+ * them.
+ *
+ * ── The policy ─────────────────────────────────────────────────────────────
+ *
+ * Each request gets a fresh nonce (`lib/csp.ts`). Next reads it from the
+ * request's policy header and stamps it on every script it renders; the
+ * browser gets the same policy on the response. Only these pages can carry a
+ * nonce, because only they are rendered after the request exists. Every other
+ * page is prerendered and takes its policy from `next.config.ts`.
+ *
+ * ── The gate ───────────────────────────────────────────────────────────────
  *
  * ── What it deliberately does NOT do: resolve the session ───────────────────
  *
@@ -33,6 +46,19 @@ import { SESSION_COOKIE, WORKSPACE_COOKIE, isWorkspaceId } from "@/lib/session";
  * workspace-less session from reaching a workspace-scoped fetch at all.
  */
 export function middleware(request: NextRequest) {
+  return gate(request) ?? withContentSecurityPolicy(request);
+}
+
+/** The dashboard and the workspace list; the other pages admit a visitor with no session. */
+function isGated(pathname: string): boolean {
+  return pathname === "/workspaces" || pathname === "/dashboard" || pathname.startsWith("/dashboard/");
+}
+
+/** The redirect that stops a gated request, or null to render the page. */
+function gate(request: NextRequest): NextResponse | null {
+  const { pathname } = request.nextUrl;
+  if (!isGated(pathname)) return null;
+
   const cookie = request.cookies.get(SESSION_COOKIE)?.value;
 
   if (!cookie) {
@@ -65,8 +91,6 @@ export function middleware(request: NextRequest) {
     return response;
   }
 
-  const { pathname } = request.nextUrl;
-
   if (pathname.startsWith("/dashboard")) {
     const workspace = request.cookies.get(WORKSPACE_COOKIE)?.value;
 
@@ -78,7 +102,24 @@ export function middleware(request: NextRequest) {
     }
   }
 
-  return NextResponse.next();
+  return null;
+}
+
+/** Render the page under this request's nonce policy. */
+function withContentSecurityPolicy(request: NextRequest): NextResponse {
+  const policy = noncePolicy(createNonce(), { dev: process.env.NODE_ENV === "development" });
+
+  const headers = new Headers(request.headers);
+  headers.set("content-security-policy", policy);
+  const response = NextResponse.next({ request: { headers } });
+
+  response.headers.set(
+    isReportOnly(request.nextUrl.pathname)
+      ? "content-security-policy-report-only"
+      : "content-security-policy",
+    policy,
+  );
+  return response;
 }
 
 /** Positively JWT-shaped: `header.payload.signature`, header starting `{"`. */
@@ -87,5 +128,8 @@ export function isLegacyJwt(value: string): boolean {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/workspaces"],
+  // Exactly the pages rendered per request. `next.config.ts` gives every other
+  // path the static policy; `csp-routing-contract.test.ts` holds the two to
+  // exact complements, so no page gets both policies or neither.
+  matcher: ["/dashboard/:path*", "/workspaces", "/welcome", "/join/:token", "/auth/error"],
 };

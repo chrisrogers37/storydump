@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireWorkspace } from "@/lib/route-guards";
+import { refuseCrossSite, requireWorkspace } from "@/lib/route-guards";
 import { proxyStartOfGrant } from "@/lib/start-proxy";
 import { isGoogleAuthorizationUrl } from "@/lib/drive";
 
@@ -8,7 +8,10 @@ import { isGoogleAuthorizationUrl } from "@/lib/drive";
  * (owner ruling 2026-09-05, #1165 lean (b)): one Google grant per workspace,
  * folders picked under it. The per-folder sibling this replaces is gone.
  */
-export async function POST(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
+export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const guard = await requireWorkspace(context);
   if (guard instanceof NextResponse) return guard;
   const { token, id } = guard;

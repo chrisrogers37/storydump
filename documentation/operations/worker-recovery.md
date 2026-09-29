@@ -83,6 +83,19 @@ sweep mints no second `deliver_outbox` job for that binding (`work_loop.py:1110-
 returns a lapsed lease sooner; if the wait is not acceptable, that is the owner's decision and a
 hand-written statement against `jobs`, never an agent's.
 
+**What a job nothing claims becomes.** A `ready` job can sit unclaimed: another job holds its
+key, or its (workspace, key) scope is quarantined, which the claim door skips. Once it is past its
+`deadline_at` (every mint writes one except `publish_pipeline`'s), the reaper's last leg ends it
+`failed` and merges `ended: deadline` into its payload, so `payload->>'ended'` tells a job the
+reaper ended from one whose run failed
+(`scripts/migrations/086_reaper_ends_ready_jobs_past_deadline.sql`). It does so only for the kinds a
+sweep re-mints, which come back by themselves: the clock's singletons and its slot, refresh and
+reauth jobs, the sender's `deliver_outbox`, and the sync kinds, whose source it re-arms for 24 hours
+later. An email, an offboarding, a credential revocation, a retention or re-encryption run and a
+publish are never ended this way: nothing would re-mint them. A deferral moves its job's deadline
+with its `run_at` (`jobs.reschedule_job`), so a parked or paced job keeps its slack. Nobody is
+notified: the worker's own spent-budget path sends the tenant a notice, the reaper does not.
+
 ### The clock election
 
 There is one clock per deployment. Each worker process tries

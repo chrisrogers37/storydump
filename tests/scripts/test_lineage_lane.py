@@ -387,6 +387,14 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 084 appends §27, the clock reviving its own singletons' expired
             # leases (#1329).
             "084_clock_revives_singleton_leases.sql",
+            # 085 appends §28, the audit triggers reading an empty actor as
+            # unset (#1421).
+            "085_audit_triggers_empty_actor.sql",
+            # 086 appends §29, the reaper ending a ready job past its
+            # deadline (#1429).
+            "086_reaper_ends_ready_jobs_past_deadline.sql",
+            # 087 appends §30, the reaper's cancel leg (#1235).
+            "087_reaper_cancels_flagged_waiting_intents.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

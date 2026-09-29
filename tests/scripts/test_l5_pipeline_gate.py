@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
@@ -141,11 +143,15 @@ def _new_intent(
     ref=None,
     media_kind="image",
     debited=None,
+    slot_in_s=0,
+    age_s=0,
 ):
     """An intent born directly in *state* on a fresh media item (the L.3/L.5
     template: migration-actor birth, fresh media per uq_intent_live_subject,
     debited states carry cap_consumed_on + a real bucket row so refunds have
-    something to return)."""
+    something to return). *slot_in_s* moves its slot from now and *age_s*
+    ages its `entered_state_at` — the two clocks the reaper's expiry legs
+    read."""
     ws, iga = pipe_db["ws"], pipe_db["iga"]
     ref = ref or f"acct-{uuid.uuid4()}"
     if debited is None:
@@ -161,7 +167,8 @@ def _new_intent(
     )
     media = rows[0][0]
     step = "publish_called" if state == "publishing_ambiguous" else publish_step
-    cols, vals, params = "", "", [ws, iga, media, ref, state, step, cancel_requested]
+    cols, vals = "", ""
+    params = [ws, iga, media, ref, slot_in_s, age_s, state, step, cancel_requested]
     if debited:
         # A debited birth: the recorded day and, for a story past the container
         # step, a container id; a stepped-back story (the float) carries its
@@ -189,9 +196,10 @@ def _new_intent(
     rows = _exec(
         pipe_db,
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-        " provider_account_ref, approval_mode, schedule_slot_at, state,"
-        " publish_step, cancel_requested" + cols + ")"
-        " VALUES (%s, %s, %s, %s, 'manual', now(), %s, %s, %s" + vals + ")"
+        " provider_account_ref, approval_mode, schedule_slot_at, entered_state_at,"
+        " state, publish_step, cancel_requested" + cols + ")"
+        " VALUES (%s, %s, %s, %s, 'manual', now() + make_interval(secs => %s),"
+        " now() - make_interval(secs => %s), %s, %s, %s" + vals + ")"
         " RETURNING id",
         params,
         fetch=True,
@@ -1707,9 +1715,10 @@ class TestTheJobsDoors:
         )
 
 
-def _seed_card(pipe_db, intent):
+def _seed_card(pipe_db, intent, *, tapped=True):
     """The approval card exactly as the tap leaves it: the card row already
-    `superseded` with the tap's line, the tap's own edit sent."""
+    `superseded` with the tap's line, the tap's own edit sent. Untapped, it is
+    a sent card that still has its buttons."""
     binding = _exec(
         pipe_db,
         "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
@@ -1717,6 +1726,16 @@ def _seed_card(pipe_db, intent):
         (pipe_db["ws"], f"-100{intent[:8]}"),
         fetch=True,
     )[0][0]
+    if not tapped:
+        _exec(
+            pipe_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            " VALUES (%s, %s, 'approval_prompt', %s,"
+            ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text"}\', \'sent\', \'77001\')',
+            (pipe_db["ws"], binding, intent),
+        )
+        return binding
     _exec(
         pipe_db,
         "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
@@ -2951,3 +2970,341 @@ class TestTheFloatsSafetyNets:
             "left for the next tick"
         )
         assert len(_notices(pipe_db, good, binding)) == 1
+
+
+# --- #1235: the reaper's cancel leg (087) ---------------------------------------
+
+#: The four states a cancel the user asked for waits in (055's seeded edges).
+WAITING_STATES = ("scheduled", "prompt_pending", "awaiting_approval", "approved")
+
+
+def _waiting(pipe_db, state, *, flagged, slot_in_s=3600, age_s=0):
+    """An undebited intent in *state*, its slot an hour ahead unless a test
+    moves it, so no expiry leg reaches it by accident."""
+    intent, _ = _new_intent(
+        pipe_db,
+        state=state,
+        cancel_requested=flagged,
+        slot_in_s=slot_in_s,
+        age_s=age_s,
+    )
+    return intent
+
+
+def _states(pipe_db, intents):
+    """The states of *intents*, in order, in one read."""
+    rows = dict(
+        _exec(
+            pipe_db,
+            "SELECT id::text, state FROM post_intents WHERE id = ANY(%s::uuid[])",
+            (list(intents),),
+            fetch=True,
+        )
+    )
+    return [rows[str(i)] for i in intents]
+
+
+async def _reap(pipe_db):
+    """One `reap_expired` run exactly as the worker's registry runs it — the
+    reaper door, the stale-approved leg, the settled-card sweep, at the
+    worker's own numbers — as `svc_worker` with no tenant."""
+    from sqlalchemy import text
+
+    from src.services.target.unit_of_work import apply_gucs
+    from src.services.target.work_loop import WorkerConfig, WorkerDeps, build_registry
+    from tests.scripts.conftest import as_user, ingress_engine
+
+    async with ingress_engine(as_user(pipe_db["owner"], "svc_worker")) as engine:
+        registry = build_registry(WorkerDeps(engine=engine, config=WorkerConfig()))
+        async with engine.begin() as conn:
+            who = (await conn.execute(text("SELECT current_user"))).scalar()
+            assert who == "svc_worker", who
+            await apply_gucs(conn, tenant_id="", actor_kind="system")
+            await registry["reap_expired"](conn, {"kind": "reap_expired"})
+
+
+def _sweep(pipe_db, lim):
+    """The door alone, bounded by *lim*; the rows it moved."""
+    return _exec(
+        pipe_db,
+        "SELECT fn_reaper_sweep(%s, interval '24 hours', interval '72 hours')",
+        (lim,),
+        fetch=True,
+    )[0][0]
+
+
+class TestTheReapersCancelLeg:
+    """087 (#1235): a cancel the user asked for ends `cancelled` at the
+    reaper's next sweep in every waiting state, ahead of the expiry legs —
+    never for a row carrying a debit, which only the paths that refund it may
+    cancel."""
+
+    def test_a_flagged_row_in_each_waiting_state_ends_cancelled(self, pipe_db):
+        """Audited as the reaper. The flag's writers strip a story's cards
+        themselves; a card sent after the flag (the prompt sweep does not read
+        it) loses its buttons to the settled-card sweep that follows the reap."""
+        intents = [_waiting(pipe_db, s, flagged=True) for s in WAITING_STATES]
+        bindings = [_seed_card(pipe_db, i, tapped=False) for i in intents]
+        _run(_reap(pipe_db))
+        assert _states(pipe_db, intents) == ["cancelled"] * 4
+        audited = _exec(
+            pipe_db,
+            "SELECT from_state, actor_kind FROM audit_events"
+            " WHERE entity_id = ANY(%s::uuid[]) AND to_state = 'cancelled'",
+            (intents,),
+            fetch=True,
+        )
+        assert sorted(audited) == sorted((s, "reaper") for s in WAITING_STATES)
+        for intent, binding in zip(intents, bindings):
+            assert "Cancelled" in _card_line(pipe_db, intent)
+            assert "Cancelled" in _review_edit(pipe_db, intent, binding)["outcome_text"]
+
+    def test_an_unflagged_waiting_row_is_left_alone(self, pipe_db):
+        """The leg's control: only the flag ends a story."""
+        intents = [_waiting(pipe_db, s, flagged=False) for s in WAITING_STATES]
+        _run(_reap(pipe_db))
+        assert _states(pipe_db, intents) == list(WAITING_STATES)
+
+    def test_a_flag_outranks_an_expiry_in_the_same_sweep(self, pipe_db):
+        """A flagged row past its slot or its approval TTL ends `cancelled`,
+        the label #1235 is for. Its unflagged twin still expires — the expiry
+        legs' positive control."""
+        past = {
+            flagged: [
+                _waiting(pipe_db, "scheduled", flagged=flagged, slot_in_s=-60),
+                _waiting(
+                    pipe_db, "awaiting_approval", flagged=flagged, age_s=2 * 86400
+                ),
+            ]
+            for flagged in (True, False)
+        }
+        _run(_reap(pipe_db))
+        assert _states(pipe_db, past[True]) == ["cancelled"] * 2
+        assert _states(pipe_db, past[False]) == ["expired"] * 2
+
+    def test_the_leg_draws_on_the_sweeps_one_budget(self, pipe_db):
+        """`p_lim` is the sweep's TOTAL across its legs: at p_lim = 1 a sweep
+        moves one row, and the two cancels go before the expiry. The module's
+        other work is drained before the rows are seeded."""
+        _sweep(pipe_db, 100000)
+        rows = [_waiting(pipe_db, "awaiting_approval", flagged=True) for _ in range(2)]
+        rows.append(_waiting(pipe_db, "scheduled", flagged=False, slot_in_s=-60))
+        for _ in range(10):  # a lease elsewhere lapsing mid-test may take a sweep
+            assert _sweep(pipe_db, 1) <= 1
+            if _states(pipe_db, rows)[2] == "expired":
+                break
+        assert _states(pipe_db, rows) == ["cancelled", "cancelled", "expired"]
+
+    def test_a_debited_story_is_left_for_the_path_that_refunds_it(self, pipe_db):
+        """A floating story steps back to `approved` with its cap debit (076).
+        The sweep leaves it — cancelled there, the debit would be stranded —
+        and its own job refunds it and cancels it, as
+        `test_a_cancel_while_floating_refunds_and_destroys` pins."""
+        intent, _ = _new_intent(pipe_db, cancel_requested=True, debited=True)
+        _run(_reap(pipe_db))
+        row = _intent_row(pipe_db, intent)
+        assert (row["state"], row["cap_refunded_at"]) == ("approved", None)
+        assert _bucket(pipe_db, DAY) == 1, "the debit is still owed, not lost"
+
+    def test_a_sweep_between_the_jobs_load_and_its_cancel_is_benign(
+        self, pipe_db, monkeypatch
+    ):
+        """The two cancels, interleaved: the job loaded the flagged story, the
+        reaper ended it, then the job's own cancel met a terminal row. The job
+        ends `cancelled`, as in either serial order
+        (`test_a_raced_terminal_intent_cancels_the_job_and_leaks_no_debit`,
+        `test_cancel_requested_is_honored_before_the_flip_only`) — not a crash
+        and a retry."""
+        from src.services.target import publish_pipeline
+
+        intent, ref = _new_intent(pipe_db, cancel_requested=True)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        real = publish_pipeline._cancel_in
+
+        async def the_reaper_first(session, ctx):
+            _sweep(pipe_db, 500)
+            assert _intent_row(pipe_db, intent)["state"] == "cancelled", (
+                "positive control"
+            )
+            return await real(session, ctx)
+
+        monkeypatch.setattr(publish_pipeline, "_cancel_in", the_reaper_first)
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, StubMetaAdapter(), FakeTransit())
+            )
+        )
+        assert outcome == CANCELLED
+        assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
+        audited = _exec(
+            pipe_db,
+            "SELECT actor_kind FROM audit_events WHERE entity_id = %s"
+            " AND to_state = 'cancelled'",
+            (intent,),
+            fetch=True,
+        )
+        assert audited == [("reaper",)]
+
+    def test_a_story_the_job_cancels_under_the_sweep_does_not_fail_it(self, pipe_db):
+        """The other order of the same two cancellers: the job cancels a
+        flagged `approved` story (`_cancel_in`) while the sweep waits on its
+        row. At READ COMMITTED the sweep rechecks the UPDATE's own quals, not
+        its subquery's, so the leg repeats the waiting states; without that it
+        writes to the row the job has just cancelled, the terminal freeze
+        refuses it, and every leg of the sweep rolls back. Driven
+        deterministically: the job's cancel holds its transaction open until
+        the sweep is seen waiting on the row."""
+        intent = _waiting(pipe_db, "approved", flagged=True)
+        job = psycopg2.connect(pipe_db["owner"])
+        swept: dict = {}
+        t = None
+
+        def sweep():
+            try:
+                swept["n"] = _sweep(pipe_db, 500)
+            except Exception as exc:  # noqa: BLE001 — the assertion target
+                swept["error"] = exc
+
+        try:
+            with job.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'system'")
+                cur.execute(
+                    "UPDATE post_intents SET state = 'cancelled'"
+                    " WHERE id = %s AND state = 'approved'",
+                    (intent,),
+                )
+                assert cur.rowcount == 1, "positive control: the job's cancel"
+            t = threading.Thread(target=sweep)
+            t.start()
+            blocked = 0
+            for _ in range(100):  # the sweep must be seen WAITING on the job's row
+                blocked = _exec(
+                    pipe_db,
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE %s = ANY(pg_blocking_pids(pid))",
+                    (job.get_backend_pid(),),
+                    fetch=True,
+                )[0][0]
+                if blocked:
+                    break
+                time.sleep(0.05)
+            assert blocked, "the sweep never waited on the job's row: no race was run"
+            job.commit()
+            t.join(timeout=10)
+            assert not t.is_alive() and "error" not in swept, swept
+        finally:
+            job.close()  # an open transaction rolls back here, releasing the sweep
+            if t is not None:
+                t.join(timeout=10)
+        assert _intent_row(pipe_db, intent)["state"] == "cancelled"
+
+
+class TestEveryLegRunsInTheFinalBody:
+    """087 redefines `fn_reaper_sweep` on 086's body, so one file carries every
+    leg: 076's six, 086's deadline leg (#1429) and 087's cancel leg (#1235).
+    One sweep, as the worker runs it, over a world holding one row for each
+    leg to take, and one test per leg reading its row: a body that dropped a
+    leg fails by the leg's name (`tests/mutations/content_schedule_01b.sh` removes
+    each in turn)."""
+
+    @pytest.fixture(scope="class")
+    def swept(self, pipe_db):
+        leased, ref = _new_intent(pipe_db)
+        lease = _leased_job(pipe_db, leased, ref=ref)["id"]
+        _exec(
+            pipe_db,
+            "UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = %s",
+            (lease,),
+        )
+        flagged = _waiting(pipe_db, "scheduled", flagged=True)
+        late = _waiting(pipe_db, "prompt_pending", flagged=False, slot_in_s=-60)
+        stale = _waiting(pipe_db, "awaiting_approval", flagged=False, age_s=2 * 86400)
+        lock = _exec(
+            pipe_db,
+            "INSERT INTO post_locks (workspace_id, media_item_id, kind, expires_at)"
+            " VALUES (%s, %s, 'skip', now() - interval '1 minute') RETURNING id",
+            (pipe_db["ws"], _intent_row(pipe_db, late)["media_item_id"]),
+            fetch=True,
+        )[0][0]
+        invite = _exec(
+            pipe_db,
+            "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+            " delivery_channel, expires_at) VALUES (%s, %s, 'telegram',"
+            " now() - interval '1 minute') RETURNING id",
+            (pipe_db["ws"], f"h-{uuid.uuid4()}"),
+            fetch=True,
+        )[0][0]
+        user = _exec(
+            pipe_db, "INSERT INTO users DEFAULT VALUES RETURNING id", fetch=True
+        )[0][0]
+        _exec(
+            pipe_db,
+            "INSERT INTO onboarding_sessions (user_id, expires_at)"
+            " VALUES (%s, now() - interval '1 minute')",
+            (user,),
+        )
+        # A kind a sweep re-mints, never claimed, a minute past its deadline.
+        deadline = _exec(
+            pipe_db,
+            "INSERT INTO jobs (workspace_id, kind, lane, serialization_key, run_at,"
+            " deadline_at, payload, max_attempts) VALUES (%s, 'plan_slot', 'bulk',"
+            " %s, now() - interval '2 minutes', now() - interval '1 minute',"
+            " '{\"v\": 1}', 3) RETURNING id",
+            (pipe_db["ws"], f"legs:{uuid.uuid4()}"),
+            fetch=True,
+        )[0][0]
+        _run(_reap(pipe_db))
+        return {
+            "lease": lease,
+            "flagged": flagged,
+            "late": late,
+            "stale": stale,
+            "lock": lock,
+            "invite": invite,
+            "user": user,
+            "deadline": deadline,
+        }
+
+    def test_the_lease_leg_re_readies_an_expired_lease(self, pipe_db, swept):
+        assert _job_row(pipe_db, swept["lease"])["state"] == "ready"
+
+    def test_the_cancel_leg_ends_a_flagged_waiting_story(self, pipe_db, swept):
+        assert _intent_row(pipe_db, swept["flagged"])["state"] == "cancelled"
+
+    def test_the_slot_leg_expires_a_story_past_its_slot(self, pipe_db, swept):
+        assert _intent_row(pipe_db, swept["late"])["state"] == "expired"
+
+    def test_the_approval_leg_expires_a_card_past_its_ttl(self, pipe_db, swept):
+        assert _intent_row(pipe_db, swept["stale"])["state"] == "expired"
+
+    def test_the_lock_leg_deletes_an_expired_lock(self, pipe_db, swept):
+        assert _exec(
+            pipe_db,
+            "SELECT count(*) FROM post_locks WHERE id = %s",
+            (swept["lock"],),
+            fetch=True,
+        ) == [(0,)]
+
+    def test_the_invitation_leg_expires_a_pending_invitation(self, pipe_db, swept):
+        assert _exec(
+            pipe_db,
+            "SELECT state FROM workspace_invitations WHERE id = %s",
+            (swept["invite"],),
+            fetch=True,
+        ) == [("expired",)]
+
+    def test_the_onboarding_leg_deletes_an_expired_session(self, pipe_db, swept):
+        assert _exec(
+            pipe_db,
+            "SELECT count(*) FROM onboarding_sessions WHERE user_id = %s",
+            (swept["user"],),
+            fetch=True,
+        ) == [(0,)]
+
+    def test_the_deadline_leg_ends_a_ready_job_past_its_deadline(self, pipe_db, swept):
+        assert _exec(
+            pipe_db,
+            "SELECT state, payload->>'ended' FROM jobs WHERE id = %s",
+            (swept["deadline"],),
+            fetch=True,
+        ) == [("failed", "deadline")]

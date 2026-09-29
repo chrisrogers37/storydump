@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { WORKSPACE_COOKIE, WORKSPACE_COOKIE_OPTIONS } from "@/lib/session";
-import { passThrough, requireWorkspace } from "@/lib/route-guards";
+import { passThrough, refuseCrossSite, requireWorkspace } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -16,6 +16,9 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const guard = await requireWorkspace(context);
   if (guard instanceof NextResponse) return guard;
   const { token, id } = guard;

@@ -51,6 +51,7 @@ const { DELETE } = await import("./[tokenId]/route");
 function post(body: unknown) {
   return new Request("https://storydump.app/api/me/tokens", {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: typeof body === "string" ? body : JSON.stringify(body),
   }) as unknown as Parameters<typeof POST>[0];
 }

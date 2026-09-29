@@ -4,6 +4,7 @@ import {
   WORKSPACE_COOKIE,
   getSessionToken,
 } from "@/lib/session";
+import { refuseCrossSite } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
 /**
@@ -27,6 +28,9 @@ import { targetFetch } from "@/lib/target-api";
  * resolve.
  */
 async function signOut(request: NextRequest) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
   const token = await getSessionToken();
 
   if (token) {
