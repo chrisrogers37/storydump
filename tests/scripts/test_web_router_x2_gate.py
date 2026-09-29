@@ -40,7 +40,7 @@ from tests.scripts.conftest import (
     set_test_passwords,
 )
 from tests.src.api import conftest as api_conftest
-from tests.src.api.conftest import api_client, sign_in
+from tests.src.api.conftest import api_client, publishing_workspace, sign_in
 
 #: The configured sign-in world, registered here as a fixture by assignment.
 google_configured = api_conftest.google_configured
@@ -355,26 +355,9 @@ def test_a_planned_story_is_approved_through_the_web_route_by_its_person(
 
     async def main():
         async with api_client(world["ingress"]) as (client, engine):
-            owner = await sign_in(
-                client, monkeypatch, sub="sub-planned", email="planned@example.test"
+            owner, owner_id, ws = await publishing_workspace(
+                client, monkeypatch, tag="web-planned"
             )
-            me = await client.get("/api/v1/me", headers=owner)
-            assert me.status_code == 200, me.text
-            owner_id = me.json()["user"]["id"]
-            created = await client.post(
-                "/api/v1/workspaces",
-                json={"name": "Planned", "tz": "America/New_York"},
-                headers={**owner, "Idempotency-Key": "create-planned"},
-            )
-            assert created.status_code == 201, created.text
-            ws = created.json()["workspace_id"]
-            flipped = await client.post(
-                f"/api/v1/workspaces/{ws}/commands/settings_change",
-                json={"settings": {"api_publishing_enabled": True}},
-                headers={**owner, "Idempotency-Key": "settings-planned"},
-            )
-            assert flipped.status_code == 200, flipped.text
-
             intent_id = _seed_intent(world["stream"], ws, "planned", origin="planned")
             assert fetch_one(
                 world["stream"],

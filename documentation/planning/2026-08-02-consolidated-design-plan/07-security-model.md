@@ -2011,6 +2011,7 @@ dropped by a later increment, once this one has deployed and drained on every wo
 `operator` with no user, and the worker stamps `system`; both are refused. The same trigger fixes
 `origin` at birth, because a rule keyed on a column that one `UPDATE` could rewrite would not hold.
 Every other edge is untouched, the pipeline's `publishing -> approved` wait among them.
+The trigger's `WHEN` is the rule's scope, so a cadence row's update never runs the function.
 
 ```sql
 -- [§29 the ledger learns 'planned']
@@ -2032,9 +2033,10 @@ BEGIN
     RAISE EXCEPTION 'post_intent % origin is fixed at birth (% -> %)', OLD.id, OLD.origin, NEW.origin
       USING ERRCODE = 'check_violation';
   END IF;
-  IF OLD.origin = 'planned' AND OLD.state = 'awaiting_approval' AND NEW.state = 'approved'
-     AND (COALESCE(current_setting('app.actor_kind', true), '') <> 'user'
-          OR NULLIF(current_setting('app.actor_user_id', true), '') IS NULL) THEN
+  -- The trigger's WHEN admits only that change or a planned row moving
+  -- awaiting_approval -> approved, so reaching here is the approval itself.
+  IF COALESCE(current_setting('app.actor_kind', true), '') <> 'user'
+     OR NULLIF(current_setting('app.actor_user_id', true), '') IS NULL THEN
     RAISE EXCEPTION 'post_intent % is planned: only a person approves it (actor %)',
       OLD.id, COALESCE(NULLIF(current_setting('app.actor_kind', true), ''), 'none')
       USING ERRCODE = 'check_violation';
@@ -2043,5 +2045,8 @@ BEGIN
 END $$;
 
 CREATE TRIGGER tg_intent_planned_person BEFORE UPDATE OF state, origin ON post_intents
-  FOR EACH ROW EXECUTE FUNCTION trg_intent_planned_person();
+  FOR EACH ROW
+  WHEN (NEW.origin IS DISTINCT FROM OLD.origin
+        OR (OLD.origin = 'planned' AND OLD.state = 'awaiting_approval' AND NEW.state = 'approved'))
+  EXECUTE FUNCTION trg_intent_planned_person();
 ```

@@ -732,6 +732,91 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
             _owner_exec(clock_db, UQ_INTENT_SLOT_SQL)
             _owner_exec(clock_db, UQ_INTENT_SLOT_CADENCE_SQL)
 
+    #: `plan_slot`'s insert as raw SQL, and its two conflict targets: the one
+    #: 086 ships, and the predicate-less one every worker ran before it.
+    SLOT_INSERT = (
+        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, origin)"
+        " VALUES (%s, %s, %s, %s, 'manual', %s, %s)"
+    )
+    BARE = (
+        " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
+        " DO NOTHING RETURNING id"
+    )
+    CADENCE = (
+        " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
+        " WHERE origin = 'cadence' DO NOTHING RETURNING id"
+    )
+
+    def _slot_row(self, clock_db, account, slot, origin="cadence"):
+        ref = f"r-{uuid.uuid4().hex[:8]}"
+        return (clock_db["ws"], account, _new_media(clock_db), ref, slot, origin)
+
+    def test_while_both_keys_exist_the_bare_spelling_still_mints_once(self, clock_db):
+        """The deploy window: a worker still running the predicate-less
+        spelling keeps minting, once, while both slot keys exist."""
+        account = _new_account(clock_db)
+        slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
+        try:
+            minted = [
+                _owner_exec(
+                    clock_db,
+                    self.SLOT_INSERT + self.BARE,
+                    self._slot_row(clock_db, account, slot),
+                )
+                for _ in range(2)
+            ]
+        finally:
+            _owner_exec(
+                clock_db,
+                "DELETE FROM post_intents WHERE ig_account_id = %s",
+                (account,),
+            )
+        assert minted == [1, 0], minted
+
+    def test_on_the_cadence_key_alone_the_bare_spelling_raises(self, clock_db):
+        """Why the unconditional key is dropped only after every worker runs
+        the new spelling: against the partial key alone the old one finds no
+        arbiter, so every cadence mint would raise."""
+        account = _new_account(clock_db)
+        slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
+        row = self._slot_row(clock_db, account, slot)
+        _owner_exec(clock_db, "DROP INDEX uq_intent_slot")
+        try:
+            with pytest.raises(psycopg2.Error) as exc:
+                _owner_exec(clock_db, self.SLOT_INSERT + self.BARE, row)
+            assert "no unique or exclusion constraint matching" in str(exc.value)
+        finally:
+            _owner_exec(clock_db, UQ_INTENT_SLOT_SQL)
+
+    def test_while_both_keys_exist_a_planned_row_still_holds_the_instant(
+        self, clock_db
+    ):
+        """The expand half alone does not yet let a planned row share a cadence
+        instant: the unconditional key still decides. Nothing creates a planned
+        row before the verbs (a later phase), so this is the stated interim,
+        pinned so the expand is not read as the whole fix."""
+        account = _new_account(clock_db)
+        slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
+        try:
+            planned = _owner_exec(
+                clock_db,
+                self.SLOT_INSERT,
+                self._slot_row(clock_db, account, slot, "planned"),
+            )
+            cadence = _owner_exec(
+                clock_db,
+                self.SLOT_INSERT + self.CADENCE,
+                self._slot_row(clock_db, account, slot),
+            )
+        finally:
+            _owner_exec(
+                clock_db,
+                "DELETE FROM post_intents WHERE ig_account_id = %s",
+                (account,),
+            )
+        assert (planned, cadence) == (1, 0)
+
     @pytest.mark.asyncio
     async def test_the_executor_holds_on_the_cadence_key_alone(self, clock_db):
         """086's spelling as `plan_slot` runs it. With the unconditional key
@@ -739,14 +824,11 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
         mints one intent, and a planned row at the slot's instant no longer
         absorbs the cadence mint. The predicate-less spelling raises on the
         first execution here: no arbiter is left for it to infer."""
-        from src.services.target.scheduler import execute_plan_slot
-
         account = _new_account(clock_db)
         planned_media = _new_media(clock_db)
         _new_media(clock_db)
         slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
         _owner_exec(clock_db, "DROP INDEX uq_intent_slot")
-        engine = self._engine(clock_db)
         try:
             assert (
                 _owner_exec(
@@ -765,22 +847,9 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                 )
                 == 1
             ), "positive control: the planned row lands at the slot's instant"
-            outcomes = []
-            for _ in range(2):
-                async with engine.connect() as conn:
-                    await self._tenant(conn, clock_db)
-                    outcomes.append(
-                        await execute_plan_slot(
-                            conn,
-                            workspace_id=clock_db["ws"],
-                            ig_account_id=account,
-                            slot_at=slot,
-                            provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
-                            approval_mode="manual",
-                            no_media_notice_after_seconds=24 * 3600,
-                        )
-                    )
-                    await conn.commit()
+            outcomes = [
+                await _plan_slot(clock_db, account, 0, slot_at=slot) for _ in range(2)
+            ]
             by_origin = dict(
                 _owner_exec(
                     clock_db,
@@ -792,7 +861,6 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                 )
             )
         finally:
-            await engine.dispose()
             _owner_exec(
                 clock_db,
                 "DELETE FROM post_intents WHERE ig_account_id = %s",
@@ -1150,9 +1218,10 @@ def _new_media_in(clock_db, source_id, category=None):
     )
 
 
-async def _plan_slot(clock_db, account, seed):
-    """One `plan_slot` for *account* at a slot *seed* seconds out, drawn with
-    a generator seeded by *seed*, as the worker."""
+async def _plan_slot(clock_db, account, seed, *, slot_at=None):
+    """One `plan_slot` for *account* at a slot *seed* seconds out (or at
+    *slot_at*, to run one slot twice), drawn with a generator seeded by
+    *seed*, as the worker."""
     import random
 
     from sqlalchemy import text as _t
@@ -1160,9 +1229,13 @@ async def _plan_slot(clock_db, account, seed):
 
     from src.services.target.scheduler import execute_plan_slot
 
-    slot = _owner_exec(
-        clock_db, "SELECT now() + make_interval(secs => %s)", (seed,), fetch=True
-    )[0][0]
+    slot = (
+        slot_at
+        if slot_at is not None
+        else _owner_exec(
+            clock_db, "SELECT now() + make_interval(secs => %s)", (seed,), fetch=True
+        )[0][0]
+    )
     engine = create_async_engine(async_url(clock_db["worker"]))
     try:
         async with engine.connect() as conn:

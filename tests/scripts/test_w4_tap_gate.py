@@ -130,16 +130,14 @@ def _intent(world, tag: str, *, state="awaiting_approval", origin="cadence") -> 
     # path leaves it — published by hand, the day's cap consumed.
     posted_cols = ", published_via, cap_consumed_on" if state == "posted" else ""
     posted_vals = ", 'manual', current_date" if state == "posted" else ""
-    if origin != "cadence":
-        posted_cols += ", origin"
-        posted_vals += f", '{origin}'"
     ((intent,),) = _write(
         world,
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-        f" provider_account_ref, approval_mode, schedule_slot_at, state{posted_cols})"
-        f" VALUES (%s, %s, %s, 'acct-w4-tap', 'manual', now(), %s{posted_vals})"
+        " provider_account_ref, approval_mode, schedule_slot_at, state, origin"
+        f"{posted_cols})"
+        f" VALUES (%s, %s, %s, 'acct-w4-tap', 'manual', now(), %s, %s{posted_vals})"
         " RETURNING id",
-        (world["ws"], world["iga"], media, state),
+        (world["ws"], world["iga"], media, state, origin),
         fetch=True,
     )
     cards = {}

@@ -307,7 +307,7 @@
       "ordinal": 25
     },
     {
-      "sha256": "1e8ee60c0f63384e56f87d95d122fe1dd039e37cddca861e6b4b31b3a09ea507",
+      "sha256": "81ef8deaaca7555f9fab6a72f67a9915b73fc349b33fe502e91bf2696ec5f85c",
       "class": "normative",
       "label": "§29 the ledger learns 'planned' (086, #1413) — post_intents.origin and scheduled_by_user_id, the manual-only CHECK, the cadence-only slot key beside the unconditional one (expand), and the trigger that fixes origin at birth and lets only a person approve a planned row",
       "doc": "07-security-model.md",

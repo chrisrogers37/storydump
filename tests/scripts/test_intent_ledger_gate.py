@@ -102,6 +102,23 @@ def ledger(owner_window_db, owner_actor, admin_conn):
     conn.close()
 
 
+def _new_media(ledger) -> str:
+    """A fresh media item on the chain's source (`uq_intent_live_subject`
+    admits one live intent per item and account)."""
+    c = ledger["chain"]
+    ledger["seq"] += 1
+    tag = f"l1m-{ledger['seq']}"
+    with ledger["conn"].cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+            " file_name, media_kind, provider_file_ref)"
+            " VALUES (%s, %s, %s, %s, 'image', %s) RETURNING id",
+            (c["ws"], c["src"], tag, f"{tag}.jpg", tag),
+        )
+        return cur.fetchone()[0]
+
+
 def _new_intent(ledger, state: str, *, origin: str = "cadence") -> str:
     """An intent born directly in *state*, on its own fresh media item.
 
@@ -149,17 +166,10 @@ def _new_intent(ledger, state: str, *, origin: str = "cadence") -> str:
         extra_cols += ", origin"
         extra_vals = [*extra_vals, origin]
 
+    media = _new_media(ledger)
+    tag = f"l1-{ledger['seq']}"
     with ledger["conn"].cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
-        ledger["seq"] += 1
-        tag = f"l1-{ledger['seq']}"
-        cur.execute(
-            "INSERT INTO media_items (workspace_id, source_id, content_hash,"
-            " file_name, media_kind, provider_file_ref)"
-            " VALUES (%s, %s, %s, %s, 'image', %s) RETURNING id",
-            (c["ws"], c["src"], tag, f"{tag}.jpg", tag),
-        )
-        media = cur.fetchone()[0]
         cur.execute(
             "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
             f" provider_account_ref, approval_mode, schedule_slot_at, state{extra_cols})"
@@ -624,23 +634,6 @@ class TestTheInsertGuard:
 APPROVE = "UPDATE post_intents SET state = 'approved' WHERE id = %s"
 
 
-def _new_media(ledger) -> str:
-    """A fresh media item on the chain's source (`uq_intent_live_subject`
-    admits one live intent per item and account)."""
-    c = ledger["chain"]
-    ledger["seq"] += 1
-    tag = f"l1m-{ledger['seq']}"
-    with ledger["conn"].cursor() as cur:
-        cur.execute("SET app.actor_kind = 'migration'")
-        cur.execute(
-            "INSERT INTO media_items (workspace_id, source_id, content_hash,"
-            " file_name, media_kind, provider_file_ref)"
-            " VALUES (%s, %s, %s, %s, 'image', %s) RETURNING id",
-            (c["ws"], c["src"], tag, f"{tag}.jpg", tag),
-        )
-        return cur.fetchone()[0]
-
-
 class TestAPlannedRowIsApprovedOnlyByAPerson:
     """086: `awaiting_approval -> approved` on a PLANNED row needs a person,
     `app.actor_kind = 'user'` with an `app.actor_user_id`, whatever issues the
@@ -728,85 +721,6 @@ class TestOriginIsFixedAtBirthAndAPlannedRowIsManual:
             assert ok and rows == 1, msg
         else:
             assert not ok and "ck_intent_planned_manual" in msg, msg
-
-
-class TestTheCadenceSlotKey:
-    """086 is the EXPAND half: the unconditional `uq_intent_slot` and the
-    cadence-only `uq_intent_slot_cadence` coexist, and `plan_slot` spells its
-    conflict target with `WHERE origin = 'cadence'`. Both spellings run here
-    as raw SQL, with both keys and with the cadence key alone (the contract a
-    later file makes), because a spelling that raises against the deployed
-    index set is an outage on every cadence mint."""
-
-    SLOT = "2026-10-03 14:00:00+00"
-    CADENCE = (
-        " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
-        " WHERE origin = 'cadence' DO NOTHING RETURNING id"
-    )
-    BARE = (
-        " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
-        " DO NOTHING RETURNING id"
-    )
-
-    def _mint(self, ledger, spelling: str, origin: str = "cadence"):
-        """One insert in `plan_slot`'s shape at SLOT, on a fresh item."""
-        c = ledger["chain"]
-        cols = (
-            "workspace_id, ig_account_id, media_item_id, provider_account_ref,"
-            " approval_mode, schedule_slot_at"
-        )
-        vals = "%s, %s, %s, %s, 'manual', %s"
-        params = [c["ws"], c["iga"], _new_media(ledger), f"slot-{uuid.uuid4().hex[:8]}"]
-        params.append(self.SLOT)
-        if origin != "cadence":
-            cols += ", origin"
-            vals += ", %s"
-            params.append(origin)
-        return _attempt(
-            ledger,
-            f"INSERT INTO post_intents ({cols}) VALUES ({vals})" + spelling,
-            tuple(params),
-        )
-
-    def _cadence_key_alone(self, ledger) -> None:
-        with ledger["conn"].cursor() as cur:
-            cur.execute("DROP INDEX uq_intent_slot")
-
-    @pytest.mark.parametrize("spelling", ["CADENCE", "BARE"])
-    def test_with_both_keys_either_spelling_mints_once(self, ledger, spelling):
-        first = self._mint(ledger, getattr(self, spelling))
-        second = self._mint(ledger, getattr(self, spelling))
-        assert first[0] and first[2] == 1, first
-        assert second[0] and second[2] == 0, second
-
-    def test_on_the_cadence_key_alone_the_cadence_spelling_mints_once(self, ledger):
-        self._cadence_key_alone(ledger)
-        first = self._mint(ledger, self.CADENCE)
-        second = self._mint(ledger, self.CADENCE)
-        assert first[0] and first[2] == 1, first
-        assert second[0] and second[2] == 0, second
-
-    def test_on_the_cadence_key_alone_the_bare_spelling_raises(self, ledger):
-        """Why the contract waits until every worker runs the new spelling."""
-        self._cadence_key_alone(ledger)
-        ok, msg, _ = self._mint(ledger, self.BARE)
-        assert not ok and "no unique or exclusion constraint matching" in msg, msg
-
-    def test_on_the_cadence_key_alone_a_planned_row_shares_the_instant(self, ledger):
-        self._cadence_key_alone(ledger)
-        planned = self._mint(ledger, "", origin="planned")
-        cadence = self._mint(ledger, self.CADENCE)
-        assert planned[0] and planned[2] == 1, planned
-        assert cadence[0] and cadence[2] == 1, cadence
-
-    def test_with_both_keys_a_planned_row_still_holds_the_instant(self, ledger):
-        """The expand half alone does not yet let the two share an instant:
-        the unconditional key still decides. Nothing creates a planned row
-        before the verbs (a later phase), so this is the stated interim."""
-        planned = self._mint(ledger, "", origin="planned")
-        cadence = self._mint(ledger, self.CADENCE)
-        assert planned[0] and planned[2] == 1, planned
-        assert cadence[0] and cadence[2] == 0, cadence
 
 
 class TestTheGuardsAreLoadBearing:

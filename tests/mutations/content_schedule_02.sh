@@ -57,16 +57,16 @@ DOC=documentation/planning/2026-08-02-consolidated-design-plan/07-security-model
 L=tests/scripts/test_intent_ledger_gate.py
 C=tests/scripts/test_scheduler_clock_gate.py
 
-# The person rule (§29's trigger), its scope, and what it keys on.
-check "the person rule is gone" $DOC "  IF OLD.origin = 'planned' AND OLD.state = 'awaiting_approval' AND NEW.state = 'approved'" "  IF false AND OLD.state = 'awaiting_approval' AND NEW.state = 'approved'" "$L -k 'anything_but_a_person_is_refused'"
-check "a service identity counts as a person" $DOC "     AND (COALESCE(current_setting('app.actor_kind', true), '') <> 'user'" "     AND (COALESCE(current_setting('app.actor_kind', true), '') NOT IN ('user','operator')" "$L -k 'anything_but_a_person_is_refused and operator'"
-check "a user actor needs no user id" $DOC "          OR NULLIF(current_setting('app.actor_user_id', true), '') IS NULL) THEN" "          OR false) THEN" "$L -k 'anything_but_a_person_is_refused and user-False'"
-check "the rule reaches cadence rows" $DOC "  IF OLD.origin = 'planned' AND" "  IF OLD.origin IN ('planned','cadence') AND" "$L -k 'cadence_row_is_untouched_by_the_rule'"
-check "the rule blocks the pipeline's step back" $DOC "AND OLD.state = 'awaiting_approval' AND NEW.state = 'approved'" "AND OLD.state IN ('awaiting_approval','publishing') AND NEW.state = 'approved'" "$L -k 'step_back_is_untouched'"
+# The person rule (§29's trigger): its scope is the trigger's WHEN, the body checks the actor.
+check "the person rule is gone" $DOC "        OR (OLD.origin = 'planned' AND OLD.state = 'awaiting_approval' AND NEW.state = 'approved'))" "        )" "$L -k 'anything_but_a_person_is_refused'"
+check "a service identity counts as a person" $DOC "  IF COALESCE(current_setting('app.actor_kind', true), '') <> 'user'" "  IF COALESCE(current_setting('app.actor_kind', true), '') NOT IN ('user','operator')" "$L -k 'anything_but_a_person_is_refused and operator'"
+check "a user actor needs no user id" $DOC "     OR NULLIF(current_setting('app.actor_user_id', true), '') IS NULL THEN" "     OR false THEN" "$L -k 'anything_but_a_person_is_refused and user-False'"
+check "the rule reaches cadence rows" $DOC "        OR (OLD.origin = 'planned' AND" "        OR (OLD.origin IN ('planned','cadence') AND" "$L -k 'cadence_row_is_untouched_by_the_rule'"
+check "the rule blocks the pipeline's step back" $DOC "AND OLD.state = 'awaiting_approval' AND NEW.state = 'approved'))" "AND OLD.state IN ('awaiting_approval','publishing') AND NEW.state = 'approved'))" "$L -k 'step_back_is_untouched'"
 check "origin can be rewritten" $DOC "  IF NEW.origin IS DISTINCT FROM OLD.origin THEN" "  IF false THEN" "$L -k 'origin_cannot_be_rewritten or rewrite_that_would_admit'"
 # The manual-only CHECK and the cadence-only key.
 check "a planned row may be auto" $DOC "  CHECK (origin = 'cadence' OR approval_mode = 'manual');" "  CHECK (true);" "$L -k 'born_manual'"
-check "the cadence key is unconditional" $DOC "  WHERE origin = 'cadence';" "  ;" "$L -k 'planned_row_shares_the_instant'"
+check "the cadence key is unconditional" $DOC "  WHERE origin = 'cadence';" "  ;" "$C -k 'holds_on_the_cadence_key_alone'"
 # plan_slot's spelling, run by the real executor on the cadence key alone.
 check "plan_slot drops the predicate" src/services/target/scheduler.py "                \" WHERE origin = 'cadence'\"" "                \"\"" "$C -k 'holds_on_the_cadence_key_alone'"
 # The file and the model are held to the stream.
