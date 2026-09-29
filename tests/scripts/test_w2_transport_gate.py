@@ -254,7 +254,17 @@ class TestReMintThroughTheRealSweeper:
         stop = asyncio.Event()
         runner = asyncio.create_task(run(app, stop=stop))
         try:
-            await asyncio.sleep(1.0)  # worker up; outbox empty; sweeps ticking
+            # The late row lands after the sweeper's first pass, so only a
+            # later pass can mint its job. `sweeps` counts passes as they
+            # start: a second one means the first has finished.
+            first_pass_deadline = asyncio.get_running_loop().time() + 12.0
+            while (
+                app.sweeper is None or app.sweeper.sweeps < 2
+            ) and asyncio.get_running_loop().time() < first_pass_deadline:
+                await asyncio.sleep(0.2)
+            assert app.sweeper is not None and app.sweeper.sweeps >= 2, (
+                "the sender sweeper never finished its first pass"
+            )
             with sync_conn.cursor() as cur:
                 cur.execute("SET app.actor_kind = 'migration'")
                 cur.execute(
