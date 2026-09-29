@@ -399,6 +399,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # columns, the cadence-only slot key and the person-only approval
             # trigger (#1413, phase 2).
             "088_intent_origin_planned.sql",
+            # 089 appends §32, planned stories served on time or missed out
+            # loud: the slot key's contract, the serve and miss doors and the
+            # reaper's cadence-only slot expiry (#1413, phase 3).
+            "089_planned_serve_and_misses.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

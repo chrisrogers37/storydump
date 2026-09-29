@@ -201,18 +201,12 @@ class PostIntent(TargetBase):
             "origin = 'cadence' OR approval_mode = 'manual'",
             name="ck_intent_planned_manual",
         ),
+        # The slot key is cadence's alone (088 expand, 089 contract): a planned
+        # row takes no slot, so it never absorbs a slot's mint and a cadence
+        # mint never meets it. `plan_slot`'s conflict target carries the
+        # predicate, which is how Postgres infers this partial index.
         Index(
             "uq_intent_slot",
-            "workspace_id",
-            "ig_account_id",
-            "schedule_slot_at",
-            unique=True,
-        ),
-        # 088's cadence-only slot key. Both keys exist until a later migration
-        # drops the unconditional one; `plan_slot`'s conflict target carries the
-        # predicate so it resolves against either.
-        Index(
-            "uq_intent_slot_cadence",
             "workspace_id",
             "ig_account_id",
             "schedule_slot_at",

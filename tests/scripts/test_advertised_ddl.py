@@ -296,9 +296,10 @@ class TestAgainstTheRealDocs:
         # it 39; §28's audit triggers reading an empty actor as unset (085,
         # #1421) make it 40; §29's reaper ending a ready job past its
         # deadline (086, #1429) makes it 41; §30's reaper leg for the
-        # cancels users asked for (087, #1235) makes it 42; and §31's ledger
-        # learning 'planned' (088, #1413) makes it 43.
-        assert classes.count("normative") == 43
+        # cancels users asked for (087, #1235) makes it 42; §31's ledger
+        # learning 'planned' (088, #1413) makes it 43; and §32's planned
+        # stories served on time or missed out loud (089, #1413) make it 44.
+        assert classes.count("normative") == 44
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
@@ -551,6 +552,7 @@ class TestWhatTheCommentRuleChangedInTheStream:
         "CREATE FUNCTION trg_intent_guard",
         "CREATE FUNCTION trg_intent_insert_guard",
         "CREATE FUNCTION trg_intent_planned_person",
+        "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION trg_governance_audit",
