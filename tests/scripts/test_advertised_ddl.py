@@ -486,13 +486,12 @@ class TestWhatTheCommentRuleChangedInTheStream:
       column, in a trigger or function header — which the old rule kept.
     - 18 START comparing the `--` lines inside a function body, which the old
       rule dropped although PostgreSQL stores them in `pg_proc.prosrc`. The
-      last four are `085`'s two (#1421), whose audit trigger replacements
+      last five are `085`'s two (#1421), whose audit trigger replacements
       carry a `-- 085:` line, `086`'s reaper (#1429), whose new leg
-      carries a `-- 086:` block, and `087`'s reaper (#1235), which adds a
-      `-- 087:` block for its cancel leg and carries 086's. `088`'s
-      `trg_intent_planned_person` (#1413) starts too: its body says why it
-      may assume the approval, since its trigger's WHEN admits nothing
-      else.
+      carries a `-- 086:` block, `087`'s reaper (#1235), which adds a
+      `-- 087:` block for its cancel leg and carries 086's, and `088`'s
+      `trg_intent_planned_person` (#1413), whose body says why it may
+      assume the approval: its trigger's WHEN admits nothing else.
 
     Five statements are in both: the five definitions of `fn_clock_tick`.
     Nothing else changed.

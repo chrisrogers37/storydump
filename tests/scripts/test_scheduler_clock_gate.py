@@ -59,21 +59,35 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 TICK_MAX, REFRESH_CADENCE_S = 500, 7 * 24 * 3600
 REAPER_LIM, APPROVAL_TTL_S, APPROVED_TTL_S = 500, 24 * 3600, 24 * 3600
 
-#: `uq_intent_slot`, verbatim from `055` — re-added after its drop proof.
-UQ_INTENT_SLOT_SQL = (
-    "CREATE UNIQUE INDEX uq_intent_slot ON post_intents"
-    " (workspace_id, ig_account_id, schedule_slot_at)"
-)
-
-#: 088's cadence-only slot key, verbatim — re-added after its drop proof.
-UQ_INTENT_SLOT_CADENCE_SQL = (
-    "CREATE UNIQUE INDEX uq_intent_slot_cadence ON post_intents"
-    " (workspace_id, ig_account_id, schedule_slot_at) WHERE origin = 'cadence'"
-)
-
 #: Key 1 is two indexes while 088's expand stands: whichever refuses a
 #: duplicate cadence slot, it is one of these, by name.
 SLOT_KEYS = ("uq_intent_slot", "uq_intent_slot_cadence")
+
+
+@contextlib.contextmanager
+def _indexes_dropped(clock_db, *names):
+    """Drop *names* for a proof, and restore each from its own catalog
+    definition (`pg_indexes.indexdef`) afterwards, so no test carries a copy of
+    DDL the advertised stream owns. A row the proof left behind is the
+    caller's to remove INSIDE the block: a unique index cannot be rebuilt over
+    the duplicates its absence let in."""
+    definitions = [
+        _owner_exec(
+            clock_db,
+            "SELECT indexdef FROM pg_indexes"
+            " WHERE schemaname = 'public' AND indexname = %s",
+            (name,),
+            fetch=True,
+        )[0][0]
+        for name in names
+    ]
+    for name in names:
+        _owner_exec(clock_db, f"DROP INDEX {name}")
+    try:
+        yield
+    finally:
+        for definition in definitions:
+            _owner_exec(clock_db, definition)
 
 
 @pytest.fixture(scope="module")
@@ -705,32 +719,29 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
 
         # Both halves of key 1 go: with either one left, a duplicate cadence
         # slot is still refused, and the proof would prove nothing.
-        _owner_exec(clock_db, "DROP INDEX uq_intent_slot")
-        _owner_exec(clock_db, "DROP INDEX uq_intent_slot_cadence")
-        try:
-            assert (
+        with _indexes_dropped(clock_db, *SLOT_KEYS):
+            try:
+                assert (
+                    _owner_exec(
+                        clock_db,
+                        insert,
+                        (
+                            clock_db["ws"],
+                            account,
+                            media_b,
+                            f"r-{uuid.uuid4().hex[:8]}",
+                            slot,
+                        ),
+                    )
+                    == 1
+                ), "with key 1 gone the second slot row must insert — that is what"
+                " proves the index was load-bearing"
+            finally:
                 _owner_exec(
                     clock_db,
-                    insert,
-                    (
-                        clock_db["ws"],
-                        account,
-                        media_b,
-                        f"r-{uuid.uuid4().hex[:8]}",
-                        slot,
-                    ),
+                    "DELETE FROM post_intents WHERE ig_account_id = %s",
+                    (account,),
                 )
-                == 1
-            ), "with key 1 gone the second slot row must insert — that is what"
-            " proves the index was load-bearing"
-        finally:
-            _owner_exec(
-                clock_db,
-                "DELETE FROM post_intents WHERE ig_account_id = %s",
-                (account,),
-            )
-            _owner_exec(clock_db, UQ_INTENT_SLOT_SQL)
-            _owner_exec(clock_db, UQ_INTENT_SLOT_CADENCE_SQL)
 
     #: `plan_slot`'s insert as raw SQL, and its two conflict targets: the one
     #: 088 ships, and the predicate-less one every worker ran before it.
@@ -781,13 +792,10 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
         account = _new_account(clock_db)
         slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
         row = self._slot_row(clock_db, account, slot)
-        _owner_exec(clock_db, "DROP INDEX uq_intent_slot")
-        try:
+        with _indexes_dropped(clock_db, "uq_intent_slot"):
             with pytest.raises(psycopg2.Error) as exc:
                 _owner_exec(clock_db, self.SLOT_INSERT + self.BARE, row)
-            assert "no unique or exclusion constraint matching" in str(exc.value)
-        finally:
-            _owner_exec(clock_db, UQ_INTENT_SLOT_SQL)
+        assert "no unique or exclusion constraint matching" in str(exc.value)
 
     def test_while_both_keys_exist_a_planned_row_still_holds_the_instant(
         self, clock_db
@@ -825,48 +833,38 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
         absorbs the cadence mint. The predicate-less spelling raises on the
         first execution here: no arbiter is left for it to infer."""
         account = _new_account(clock_db)
-        planned_media = _new_media(clock_db)
-        _new_media(clock_db)
+        _new_media(clock_db)  # the item plan_slot draws; the planned row brings its own
         slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
-        _owner_exec(clock_db, "DROP INDEX uq_intent_slot")
-        try:
-            assert (
+        with _indexes_dropped(clock_db, "uq_intent_slot"):
+            try:
+                assert (
+                    _owner_exec(
+                        clock_db,
+                        self.SLOT_INSERT,
+                        self._slot_row(clock_db, account, slot, "planned"),
+                    )
+                    == 1
+                ), "positive control: the planned row lands at the slot's instant"
+                outcomes = [
+                    await _plan_slot(clock_db, account, 0, slot_at=slot)
+                    for _ in range(2)
+                ]
+                by_origin = dict(
+                    _owner_exec(
+                        clock_db,
+                        "SELECT origin, count(*) FROM post_intents"
+                        " WHERE ig_account_id = %s AND schedule_slot_at = %s"
+                        " GROUP BY origin",
+                        (account, slot),
+                        fetch=True,
+                    )
+                )
+            finally:
                 _owner_exec(
                     clock_db,
-                    "INSERT INTO post_intents (workspace_id, ig_account_id,"
-                    " media_item_id, provider_account_ref, approval_mode,"
-                    " schedule_slot_at, origin)"
-                    " VALUES (%s, %s, %s, %s, 'manual', %s, 'planned')",
-                    (
-                        clock_db["ws"],
-                        account,
-                        planned_media,
-                        f"r-{uuid.uuid4().hex[:8]}",
-                        slot,
-                    ),
+                    "DELETE FROM post_intents WHERE ig_account_id = %s",
+                    (account,),
                 )
-                == 1
-            ), "positive control: the planned row lands at the slot's instant"
-            outcomes = [
-                await _plan_slot(clock_db, account, 0, slot_at=slot) for _ in range(2)
-            ]
-            by_origin = dict(
-                _owner_exec(
-                    clock_db,
-                    "SELECT origin, count(*) FROM post_intents"
-                    " WHERE ig_account_id = %s AND schedule_slot_at = %s"
-                    " GROUP BY origin",
-                    (account, slot),
-                    fetch=True,
-                )
-            )
-        finally:
-            _owner_exec(
-                clock_db,
-                "DELETE FROM post_intents WHERE ig_account_id = %s",
-                (account,),
-            )
-            _owner_exec(clock_db, UQ_INTENT_SLOT_SQL)
 
         assert outcomes[0].intent_id is not None, "the planned row absorbed the mint"
         assert outcomes[1].intent_id is None, "the duplicate minted a second intent"

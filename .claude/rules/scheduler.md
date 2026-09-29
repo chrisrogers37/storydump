@@ -83,7 +83,7 @@ The draw is weighted over the CONNECTED FOLDERS that have eligible media —
 explicit ratios; automatic folders in proportion to their files, together never
 more than the smallest explicit weight; Off (ratio 0) never
 (`category_mix.py:108`). Within the drawn folder: never-posted files first in
-the row id's shuffled order, then least-recently-posted (`scheduler.py:392`).
+the row id's shuffled order, then least-recently-posted (`scheduler.py:387`).
 Eligible means `available`, not already live for this account, and not under a
 live `post_locks` row. There is no pool behind the weighted set: when nothing
 is eligible the slot lapses and the workspace is told at most once per 24 h

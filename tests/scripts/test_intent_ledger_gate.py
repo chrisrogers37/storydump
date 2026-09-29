@@ -119,7 +119,7 @@ def _new_media(ledger) -> str:
         return cur.fetchone()[0]
 
 
-def _new_intent(ledger, state: str, *, origin: str = "cadence") -> str:
+def _new_intent(ledger, state: str, *, origin: str | None = None) -> str:
     """An intent born directly in *state*, on its own fresh media item.
 
     Two constraints shape this and both were found by running it:
@@ -143,9 +143,9 @@ def _new_intent(ledger, state: str, *, origin: str = "cadence") -> str:
     than about how the row got there. The insert guard is tested separately,
     including that this exemption still exists.
 
-    *origin* is written only when it is not the column default, so a cadence
-    row is inserted exactly as it was before 088 (`origin` is fixed at birth:
-    a planned row has to be BORN planned).
+    *origin* is written only when given (`seed_intent_chain`'s rule), so a
+    cadence row is inserted exactly as it was before 088 (`origin` is fixed at
+    birth: a planned row has to be BORN planned).
     """
     c = ledger["chain"]
     extra_cols, extra_vals = "", []
@@ -162,7 +162,7 @@ def _new_intent(ledger, state: str, *, origin: str = "cadence") -> str:
             "publish_called" if state == "publishing_ambiguous" else "none",
         ]
 
-    if origin != "cadence":
+    if origin is not None:
         extra_cols += ", origin"
         extra_vals = [*extra_vals, origin]
 

@@ -57,24 +57,25 @@ DOC=documentation/planning/2026-08-02-consolidated-design-plan/07-security-model
 MANIFEST=scripts/advertised_ddl_manifest.json
 L=tests/scripts/test_intent_ledger_gate.py
 C=tests/scripts/test_scheduler_clock_gate.py
+# An interrupted check must not leave a mutant behind, least of all a §31 edit with a manifest
+# re-hashed to agree with it: every file a check mutates is restored from the committed tree.
+trap 'cd "$ROOT" && git checkout HEAD -- "$DOC" "$MANIFEST" src/services/target/scheduler.py scripts/migrations/088_intent_origin_planned.sql src/models/target/intent_ledger.py src/services/target/telegram_dispatch.py src/api/principal.py' EXIT INT TERM
 
 # A §31 mutation changes the block's sha256, and the manifest ratchet then refuses to build the
 # stream ("1 unclassified, 1 orphaned"): every gate would ERROR in its fixture instead of the named
 # test deciding. So `check_doc` re-hashes §31's manifest entry after the edit — the stream builds
 # with the mutated SQL — and restores both files after the verdict.
 rehash() {
-  $PY -c '
-import json
+  $PY - "$DOC" "$MANIFEST" <<'PY'
+import json, sys
 from scripts.advertised_ddl import extract_blocks
-doc = "documentation/planning/2026-08-02-consolidated-design-plan/07-security-model.md"
+doc, path = sys.argv[1], sys.argv[2]
 (block,) = [b for b in extract_blocks(doc) if b.sql.startswith("-- [§31 ")]
-path = "scripts/advertised_ddl_manifest.json"
 manifest = json.load(open(path))
-entries = manifest if isinstance(manifest, list) else manifest["blocks"]
-(entry,) = [e for e in entries if e["label"].startswith("§31 ")]
+(entry,) = [e for e in manifest["blocks"] if e["label"].startswith("§31 ")]
 entry["sha256"] = block.sha256
 open(path, "w").write(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
-'
+PY
 }
 check_doc() {  # name old new test-selector — a mutation of §31, re-hashed
   local name=$1 old=$2 new=$3 sel=$4
