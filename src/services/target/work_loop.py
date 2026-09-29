@@ -89,6 +89,12 @@ class WorkerConfig:
     sender_mint_limit: int = 200
     prompt_sweep_seconds: float = 5.0  # cadence of the prompt sweep (W3)
     prompt_sweep_limit: int = 50  # W3 sweep batch (`prompts.sweep_due_prompts`)
+    # The late window (#1413, fork F9): a planned story is still served up to
+    # an hour after its time — the worker down, or a pause that ended inside
+    # the hour; past it, it is missed and its bound chats are told. Passed to
+    # both doors (`fn_prompts_due`, `fn_planned_misses`), so a new value needs
+    # no migration.
+    planned_late_seconds: int = 3600
     status_interval_seconds: float = 60.0  # cadence of the status line
     lane_max_consecutive_errors: int = 10  # claim errors before the lane dies loudly
     poller_interval_seconds: float = 2.0  # 05: outbox cadence
@@ -297,7 +303,9 @@ def build_registry(deps: WorkerDeps) -> dict:
             # the same beat, same transaction. The prompt sweep is the
             # correctness backstop for anything this misses (a crash between
             # mint and prompt, or intents minted before W3 existed).
-            await prompts.sweep_due_prompts(session, limit=1)
+            await prompts.sweep_due_prompts(
+                session, limit=1, late_seconds=cfg.planned_late_seconds
+            )
 
     async def reap_expired(session, job):
         await scheduler.execute_reap_expired(

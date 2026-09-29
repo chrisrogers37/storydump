@@ -33,15 +33,24 @@ expired them. And `prompt_pending → failed` ("no reachable surface") has no
 producer any more: an intent whose every card failed is still actionable on
 the web until a person acts or `approval_ttl` expires it. That edge stays
 seeded in `055`; nothing drives it.
+
+A PLANNED story (`origin = 'planned'`: a person chose its time, #1413) ends
+unserved only out loud (089). The due door serves it while it can be served
+and within the worker's late window, its card naming who scheduled it; the
+miss door (`fn_planned_misses`) lists the rest, and `sweep_planned_misses`
+expires each with its reason and tells the bound chats in the same
+transaction. The reaper's slot expiry takes cadence rows only, so nothing
+else can end a planned story before its time is served or missed.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Mapping, Optional, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
@@ -81,6 +90,25 @@ OUTCOME_WORDS = {
     "cancelled": "🚫 Cancelled",
     "failed": "⚠️ Failed",
     "account_disabled": "⏸ Account disabled",
+}
+
+#: A planned card rendered this long after its story's time says "served
+#: late". The sweep serves a due row within its 5-second beat and the sender
+#: claims a card within seconds, so a minute past means something held it up
+#: (the worker down, the workspace paused, a backlog), and the person who
+#: chose the time should see that it was not kept.
+SERVED_LATE_AFTER = timedelta(minutes=1)
+
+#: Why a planned story was not served, as its notice says it: the miss door's
+#: reasons in its precedence (089, `fn_planned_misses`), and `account_removed`
+#: from a destination's removal as well (`provisioning.disable_destination`).
+MISS_REASONS = {
+    "item_removed": "the item was removed from the library",
+    "item_unsupported": "Instagram cannot post the item",
+    "item_locked": "the item is locked",
+    "account_removed": "the account was removed",
+    "paused": "the workspace was paused at its time",
+    "late": "it could not be served in time",
 }
 
 
@@ -207,7 +235,25 @@ def _canonical_fraction(value: str) -> str:
     )
 
 
-def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
+def _planned_line(
+    intent: dict, *, slot: datetime, tz: str, now: Optional[datetime]
+) -> Optional[str]:
+    """The line a PLANNED card adds under its slot: who scheduled it and for
+    when, plus "served late" when the card is rendered `SERVED_LATE_AFTER`
+    past that time. None for a cadence card. *intent* carries
+    ``scheduled_by``, the display name the caller resolved; a scheduler who
+    is gone (`ON DELETE SET NULL`) leaves the line without a name."""
+    if intent.get("origin") != "planned":
+        return None
+    line = outcome_line("scheduled", by=intent.get("scheduled_by"), at=slot, tz=tz)
+    if (now or datetime.now(timezone.utc)) - slot >= SERVED_LATE_AFTER:
+        line += " · served late"
+    return line
+
+
+def render_card(
+    intent: dict, *, api_publishing_enabled: bool, now: Optional[datetime] = None
+) -> dict:
     """The approval-prompt payload in the transport contract
     (``{"v": 2, "text", "reply_markup", "media"?, "caption"?}``).
 
@@ -218,7 +264,9 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
     sends the photo or video with ``caption`` — the account and the slot, as
     the legacy card did (owner, 2026-09-08) — and ``text`` is the card when it
     cannot. The slot renders in the WORKSPACE's timezone — a solo user reads
-    his own clock, never UTC.
+    his own clock, never UTC. A planned story's card (``origin``,
+    ``scheduled_by``) also says who scheduled it, and whether it is late
+    against *now*, the render's own instant (the clock's, when omitted).
     """
     intent_id = str(intent["intent_id"])
     slot = intent.get("schedule_slot_at")
@@ -226,6 +274,9 @@ def render_card(intent: dict, *, api_publishing_enabled: bool) -> dict:
         slot = datetime.fromisoformat(_canonical_fraction(slot))
     tz = intent.get("tz") or "UTC"
     slot_line = f"Slot: {stamp(slot, tz)}"
+    planned = _planned_line(intent, slot=slot, tz=tz, now=now)
+    if planned:
+        slot_line += f"\n{planned}"
     file_name = intent.get("file_name") or "media"
     card_text = f"📸 {file_name} ({intent.get('media_kind', '?')})\n{slot_line}"
     actions = _ACTIONS_API if api_publishing_enabled else _ACTIONS_MANUAL
@@ -298,7 +349,7 @@ _CARD_SELECT = (
     "SELECT i.id, i.state, i.workspace_id, i.schedule_slot_at,"
     "       m.file_name, m.media_kind, m.mime_type,"
     "       m.source_id, m.provider_file_ref, a.handle, w.tz,"
-    "       w.api_publishing_enabled"
+    "       w.api_publishing_enabled, i.origin, i.scheduled_by_user_id"
     "  FROM post_intents i"
     "  JOIN workspaces w ON w.id = i.workspace_id"
     "  JOIN media_items m ON m.id = i.media_item_id"
@@ -317,6 +368,30 @@ def _card_for(row, *, intent_id: str) -> dict:
     )
 
 
+async def _scheduler_name(session, user_id, names: dict) -> Optional[str]:
+    """Who scheduled a planned story, as a shared chat may see them:
+    `identity.display_name_for`, the one spelling of that rule (never an
+    email). None when the user is gone. *names* caches it for one sweep."""
+    if user_id is None:
+        return None
+    key = str(user_id)
+    if key not in names:
+        from src.services.target import identity  # noqa: PLC0415 — cycle
+
+        names[key] = await identity.display_name_for(session, user_id=key)
+    return names[key]
+
+
+async def _with_scheduler(session, row: Mapping, names: dict) -> dict:
+    """*row* as a dict, with ``scheduled_by`` resolved when it is planned."""
+    row = dict(row)
+    if row.get("origin") == "planned":
+        row["scheduled_by"] = await _scheduler_name(
+            session, row.get("scheduled_by_user_id"), names
+        )
+    return row
+
+
 async def rerender_prompt(session, *, intent_id: str) -> Optional[dict]:
     """The card for *intent_id* rendered from the intent AS IT IS NOW — at
     send time (2026-09-12): the workspace's current buttons, the slot in its
@@ -333,7 +408,7 @@ async def rerender_prompt(session, *, intent_id: str) -> Optional[dict]:
     )
     if row is None or row.get("state") not in LIVE_FOR_A_CARD:
         return None
-    return _card_for(row, intent_id=intent_id)
+    return _card_for(await _with_scheduler(session, row, {}), intent_id=intent_id)
 
 
 async def push_bindings(session, workspace_id: str) -> list[str]:
@@ -444,12 +519,15 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
     return healed
 
 
-async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
+async def sweep_due_prompts(session, *, late_seconds: int, limit: int = 50) -> dict:
     """The prompt sweep — the `02` §4 matrix legs, idempotent, in the
     caller's transaction. Two legs, two counts:
 
     - ``prompted``: due `scheduled` intents (slot arrived, workspace active
-      and unpaused) gain their transition + cards via :func:`prompt_intent`.
+      and unpaused, no cancel flag) gain their transition + cards via
+      :func:`prompt_intent`. A planned one is due only while it can be served
+      and within *late_seconds* of its time (089); its card names who
+      scheduled it.
       This is also the correctness backstop for the fast path in the
       `plan_slot` adapter — an intent minted before this module existed, or
       whose prompt crashed mid-way, is picked up here.
@@ -484,16 +562,19 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
                     "       o_mime_type AS mime_type, o_source_id AS source_id,"
                     "       o_provider_file_ref AS provider_file_ref,"
                     "       o_handle AS handle, o_tz AS tz,"
-                    "       o_api_publishing_enabled AS api_publishing_enabled"
-                    "  FROM fn_prompts_due(:lim)"
+                    "       o_api_publishing_enabled AS api_publishing_enabled,"
+                    "       o_origin AS origin,"
+                    "       o_scheduled_by_user_id AS scheduled_by_user_id"
+                    "  FROM fn_prompts_due(:lim, make_interval(secs => :late))"
                 ),
-                {"lim": limit},
+                {"lim": limit, "late": float(late_seconds)},
             )
         )
         .mappings()
         .all()
     )
     bindings_by_workspace: dict[str, list[str]] = {}  # same tx, same answer
+    names: dict[str, str] = {}  # a scheduler's display name, once per sweep
     claims = unit_of_work.WorkspaceClaims(session)
     for row in sorted(
         due, key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"])
@@ -503,7 +584,9 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
         if ws not in bindings_by_workspace:
             bindings_by_workspace[ws] = await push_bindings(session, ws)
         await prompt_intent(
-            session, dict(row), [{"id": b} for b in bindings_by_workspace[ws]]
+            session,
+            await _with_scheduler(session, row, names),
+            [{"id": b} for b in bindings_by_workspace[ws]],
         )
         counts["prompted"] += 1
 
@@ -533,5 +616,146 @@ async def sweep_due_prompts(session, *, limit: int = 50) -> dict:
             counts["advanced"] += 1
         except intent_ledger.IntentTransitionRefused:
             pass  # the ledger refused; most often the fast path moved it first
+    await claims.release()
+    return counts
+
+
+def missed_notice(
+    *,
+    file_name: Optional[str],
+    handle: Optional[str],
+    slot: datetime,
+    tz: str,
+    by: Optional[str],
+    reason: str,
+) -> str:
+    """What the bound chats are told when a planned story is not served. The
+    file name is bounded as the card's caption bounds it: a Drive name has no
+    bound of its own."""
+    what = (file_name or "an item")[:200]
+    whose = f"@{handle}" if handle else "one of this workspace's accounts"
+    who = f" by {by}" if by else ""
+    return (
+        f"🗓 Not served: {what} for {whose}, scheduled for {stamp(slot, tz)}{who}:"
+        f" {MISS_REASONS[reason]}. Nothing was posted."
+    )
+
+
+async def say_not_served(
+    session, row: Mapping, *, reason: str, names: dict
+) -> Union[int, str]:
+    """Tell a workspace's bound chats that one planned story was not served,
+    in the CALLER's transaction — the one that ended it or flagged it, so the
+    notice commits with the change it announces. *row* carries the story's
+    ``id``, ``workspace_id``, ``schedule_slot_at``, ``file_name``, ``handle``,
+    ``tz`` and ``scheduled_by_user_id``.
+
+    Returns the rows written, or `outbox.UNDELIVERABLE` when the workspace has
+    no push binding: "told nobody, because there is nobody" is a verdict
+    (`scheduler._notice_no_media`'s rule), never a quiet zero. The web's Queue
+    still shows the story `expired` with its reason."""
+    workspace_id = str(row["workspace_id"])
+    surface = await push_bindings(session, workspace_id)
+    if not surface:
+        logger.warning(
+            "planned story %s was not served (%s) and its workspace has NO push"
+            " binding — nobody was told",
+            row["id"],
+            reason,
+        )
+        return outbox.UNDELIVERABLE
+    await outbox.fanout_notification(
+        session,
+        workspace_id=workspace_id,
+        bindings=surface,
+        text=missed_notice(
+            file_name=row.get("file_name"),
+            handle=row.get("handle"),
+            slot=row["schedule_slot_at"],
+            tz=str(row.get("tz") or "UTC"),
+            by=await _scheduler_name(session, row.get("scheduled_by_user_id"), names),
+            reason=reason,
+        ),
+        intent_id=str(row["id"]),
+    )
+    return len(surface)
+
+
+async def sweep_planned_misses(session, *, limit: int, late_seconds: int) -> dict:
+    """The miss leg (089), on the prompt sweep's cadence and in the CALLER's
+    transaction: every planned story the miss door lists ends `expired`, with
+    `last_error = {v: 1, class: planned_missed, message: <reason>}`, and its
+    notice is queued in the SAME savepoint, so none ends unserved without
+    saying so. Returns ``missed`` (stories ended) and ``unheard`` (those whose
+    workspace had no surface to tell).
+
+    The door is the rule (F5): what can be served, and whether the window has
+    passed, is decided in SQL, as the due door decides it, and the two are
+    each other's complement. The UPDATE is guarded on `scheduled` and on the
+    flag, so a story served, flagged or ended since the door read it is left
+    alone: a cancelled story gets no miss notice (its person already knows),
+    and only the reaper's cancel leg ever writes `cancelled`. Each row runs
+    under its workspace's tenant in its own savepoint, so one row's fault is
+    logged and the sweep goes on; the caller's scope is handed back."""
+    from src.services.target import unit_of_work
+
+    rows = (
+        (
+            await session.execute(
+                text(
+                    "SELECT o_id AS id, o_workspace_id AS workspace_id,"
+                    "       o_reason AS reason, o_schedule_slot_at AS schedule_slot_at,"
+                    "       o_file_name AS file_name, o_handle AS handle, o_tz AS tz,"
+                    "       o_scheduled_by_user_id AS scheduled_by_user_id"
+                    "  FROM fn_planned_misses(:lim, make_interval(secs => :late))"
+                ),
+                {"lim": int(limit), "late": float(late_seconds)},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    counts = {"missed": 0, "unheard": 0}
+    names: dict[str, str] = {}
+    claims = unit_of_work.WorkspaceClaims(session)
+    for row in sorted(
+        rows, key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"])
+    ):
+        await claims.claim(str(row["workspace_id"]))
+        try:
+            async with session.begin_nested():
+                ended = (
+                    await session.execute(
+                        text(
+                            "UPDATE post_intents SET state = 'expired',"
+                            " last_error = CAST(:e AS jsonb)"
+                            " WHERE id = :id AND workspace_id = :ws"
+                            "   AND state = 'scheduled' AND origin = 'planned'"
+                            "   AND NOT cancel_requested RETURNING id"
+                        ),
+                        {
+                            "id": str(row["id"]),
+                            "ws": str(row["workspace_id"]),
+                            "e": json.dumps(
+                                {
+                                    "v": 1,
+                                    "class": "planned_missed",
+                                    "message": row["reason"],
+                                }
+                            ),
+                        },
+                    )
+                ).first()
+                if ended is None:
+                    continue  # served, flagged or ended since the door read it
+                told = await say_not_served(
+                    session, row, reason=str(row["reason"]), names=names
+                )
+        except Exception:  # noqa: BLE001 — isolated, logged, the sweep goes on
+            logger.exception("planned-miss sweep: intent %s skipped", row["id"])
+            continue
+        counts["missed"] += 1
+        if told == outbox.UNDELIVERABLE:
+            counts["unheard"] += 1
     await claims.release()
     return counts

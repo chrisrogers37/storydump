@@ -89,7 +89,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
-from src.services.target import oauth_states, readers, vocabulary
+from src.services.target import oauth_states, prompts, readers, vocabulary
 from src.services.target.intent_ledger import TERMINAL_STATES
 from src.services.target._dbapi import constraint_violated
 
@@ -782,7 +782,10 @@ async def disable_destination(
     user never writes a terminal state; the pipeline honours the flag at
     admission, the Queue offers a flagged card no action, and the reaper's
     cancel leg (087) ends the waiting states); and any grant issued for
-    the row before the removal is retired, so it cannot land afterwards.
+    the row before the removal is retired, so it cannot land afterwards. A
+    planned story it flags before its time is served is told about in this
+    transaction (089, `account_removed`): flagged, it will never reach the
+    miss door, which lists no flagged row, so this is its one notice.
 
     The row stays. `oauth_credentials` and the intent history hang off it, and
     `connect_destination` adopting a `disabled` row is how the account comes
@@ -834,9 +837,21 @@ async def disable_destination(
             "UPDATE post_intents SET cancel_requested = true"
             " WHERE workspace_id = :ws AND ig_account_id = :acct"
             f"   AND NOT cancel_requested AND state NOT IN ({terminal})"
+            " RETURNING id, origin, state"
         ),
         {"acct": str(ig_account_id), "ws": str(workspace_id)},
     )
+    # The planned stories THIS removal flags before their time is served: a
+    # story flagged earlier was cancelled by its own person, who already knows.
+    unserved = [
+        str(row["id"])
+        for row in flagged.mappings().all()
+        if row["origin"] == "planned" and row["state"] == "scheduled"
+    ]
+    if unserved:
+        await _say_removed_before_served(
+            executor, workspace_id=str(workspace_id), intent_ids=unserved
+        )
     # A grant issued BEFORE the removal must not land afterwards and revive the
     # row by surprise — the statement `issue_state` uses to retire a target's
     # live states.
@@ -848,6 +863,34 @@ async def disable_destination(
         "intents_flagged": flagged.rowcount,
         "states_retired": retired,
     }
+
+
+async def _say_removed_before_served(
+    executor, *, workspace_id: str, intent_ids: list[str]
+) -> None:
+    """Queue the `account_removed` notice for each planned story a removal
+    flagged before its time was served — `prompts.say_not_served`, the notice
+    the miss leg sends, in the removal's own transaction."""
+    rows = await readers.rows(
+        executor,
+        "SELECT i.id, i.workspace_id, i.schedule_slot_at, i.scheduled_by_user_id,"
+        "       m.file_name, a.handle, w.tz"
+        "  FROM post_intents i"
+        "  JOIN workspaces w ON w.id = i.workspace_id"
+        "  LEFT JOIN media_items m ON m.id = i.media_item_id"
+        "   AND m.workspace_id = i.workspace_id"
+        "  LEFT JOIN ig_accounts a ON a.id = i.ig_account_id"
+        "   AND a.workspace_id = i.workspace_id"
+        " WHERE i.workspace_id = :ws AND i.id = ANY(CAST(:ids AS uuid[]))"
+        " ORDER BY i.schedule_slot_at",
+        ws=workspace_id,
+        ids=intent_ids,
+    )
+    names: dict[str, str] = {}
+    for row in rows:
+        await prompts.say_not_served(
+            executor, row, reason="account_removed", names=names
+        )
 
 
 async def pause_media_source(session, *, workspace_id: str, source_id: str) -> bool:

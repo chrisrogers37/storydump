@@ -554,6 +554,13 @@ class _ScriptedExecutor:
             def first(self_inner):
                 return first
 
+            def all(self_inner):
+                # A RETURNING write, or a read of rows, answers them as a list.
+                return first if isinstance(first, list) else []
+
+            def __iter__(self_inner):
+                return iter(self_inner.all())
+
         _R.rowcount = rowcount
         return _R()
 
@@ -585,6 +592,9 @@ class TestDisableDestination:
         assert revoke[1]["provider"] == "ig_login"
         assert "UPDATE post_intents SET cancel_requested = true" in flag[0]
         assert "NOT cancel_requested" in flag[0]
+        assert "RETURNING id, origin, state" in flag[0], (
+            "the rows THIS removal flags are what its notices are keyed on"
+        )
         assert "state = 'cancelled'" not in flag[0], (
             "the user never writes a terminal state"
         )
@@ -592,6 +602,39 @@ class TestDisableDestination:
         assert "UPDATE oauth_states SET consumed_at = now()" in retire[0]
         assert "consumed_at IS NULL" in retire[0]
         assert retire[1] == {"provider": "ig_login", "target": "acct"}
+
+    async def test_a_planned_story_not_yet_served_is_told_about_once(self, monkeypatch):
+        """089: a planned story the removal flags before its time is served
+        will never reach the miss door (it lists no flagged row), so the
+        removal tells the chats now, in its own transaction, with the reason
+        `account_removed`. A served planned story and a cadence story flagged
+        by the same removal get no such notice."""
+        from src.services.target import prompts
+        from src.services.target.provisioning import disable_destination
+
+        told = []
+
+        async def say(executor, row, *, reason, names):
+            told.append((row["id"], reason))
+            return 1
+
+        monkeypatch.setattr(prompts, "say_not_served", say)
+        flagged = [
+            {"id": "p-waiting", "origin": "planned", "state": "scheduled"},
+            {"id": "p-served", "origin": "planned", "state": "awaiting_approval"},
+            {"id": "c-waiting", "origin": "cadence", "state": "scheduled"},
+        ]
+        details = [{"id": "p-waiting", "workspace_id": "ws"}]
+        ex = _ScriptedExecutor(
+            (1, {"id": "acct"}), (1, None), (3, flagged), (1, details), (1, None)
+        )
+        result = await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
+        assert result["intents_flagged"] == 3
+        assert told == [("p-waiting", "account_removed")]
+        detail_sql, detail_params = ex.statements[3]
+        assert "i.id = ANY(CAST(:ids AS uuid[]))" in detail_sql
+        assert "i.workspace_id = :ws" in detail_sql
+        assert detail_params == {"ws": "ws", "ids": ["p-waiting"]}
 
     async def test_nothing_to_revoke_flag_or_retire_is_reported_not_invented(self):
         from src.services.target.provisioning import disable_destination

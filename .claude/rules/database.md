@@ -47,10 +47,14 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
   person chose the time, 088): `trg_intent_planned_person` fixes `origin` at
   birth and admits `awaiting_approval → approved` on a planned row only under a
   person's actor, and `ck_intent_planned_manual` keeps a planned row `manual`.
-  The slot key is cadence-only (`uq_intent_slot_cadence`); the unconditional
-  `uq_intent_slot` stands beside it until a later file drops it. **The trigger
-  is the authority** — `intent_ledger.py` issues the UPDATE and translates the
-  refusal; do not add a Python pre-check of the edge set.
+  The slot key `uq_intent_slot` is cadence-only (`WHERE origin = 'cadence'`,
+  089): a planned row takes no slot. A planned row that is due is served by
+  `fn_prompts_due` only while it can be served and within the worker's late
+  window, or expired with its reason by the miss leg (`fn_planned_misses`),
+  which tells the bound chats; the reaper's slot expiry takes cadence rows
+  only. **The trigger is the authority** — `intent_ledger.py` issues the
+  UPDATE and translates the refusal; do not add a Python pre-check of the edge
+  set, nor of what the doors decide.
 - **`jobs`** is the work queue (kind, lane, serialization key, lease token);
   **`channel_outbox`** is the delivery record for every message to a chat;
   **`provider_operations`** is one permit per Instagram call that has an effect
