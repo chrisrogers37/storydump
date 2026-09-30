@@ -14,11 +14,12 @@ read back as the owner. None of these executors talks to a provider, so
 nothing is excluded for needing one.
 
 The two that carry the PR's own R1 claim are pinned hardest. `mark_posted`:
-the debit is UNCONDITIONAL and lands past the cap (the story is already on
-Instagram, so refusing to record it would misstate the day), `cap_at_write`
-freezes at the day's first debit, and a REFUSED mark_posted rolls its debit
-back with the transaction rather than leaving a phantom count. `sync_now`:
-exactly one job while one is pending, and a fresh one once it is not.
+a cadence story's debit is UNCONDITIONAL and lands past the cap (the story is
+already on Instagram, so refusing to record it would misstate the day; a
+planned story takes none), `cap_at_write` freezes at the day's first debit,
+and a REFUSED mark_posted debits nothing (the debit reads the flip's own row).
+`sync_now`: exactly one job while one is pending, and a fresh one once it is
+not.
 """
 
 from __future__ import annotations
@@ -33,13 +34,14 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
-from src.services.target import commands
+from src.services.target import commands, publish_cap
 from src.services.target.commands import Command, CommandRefused
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
     _scratch,
     as_user,
     fetch_one,
+    in_tenant,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -104,7 +106,13 @@ def _media(world, ids, tag: str) -> str:
 
 
 def _intent(
-    world, ids, tag: str, *, media: str | None = None, state="awaiting_approval"
+    world,
+    ids,
+    tag: str,
+    *,
+    media: str | None = None,
+    state="awaiting_approval",
+    origin="cadence",
 ) -> dict:
     """An intent on the chain's account (so per-account counters accumulate),
     on a fresh media item unless one is given."""
@@ -113,9 +121,9 @@ def _intent(
         world["stream"],
         "INSERT INTO post_intents"
         " (workspace_id, ig_account_id, media_item_id, provider_account_ref,"
-        "  approval_mode, schedule_slot_at, state)"
-        " VALUES (%s, %s, %s, %s, 'manual', now(), %s) RETURNING id",
-        (str(ids["ws"]), str(ids["iga"]), media, f"acct-{ids['name']}", state),
+        "  approval_mode, schedule_slot_at, state, origin)"
+        " VALUES (%s, %s, %s, %s, 'manual', now(), %s, %s) RETURNING id",
+        (str(ids["ws"]), str(ids["iga"]), media, f"acct-{ids['name']}", state, origin),
     )
     return {"id": str(intent), "media": media}
 
@@ -265,8 +273,9 @@ class TestReject:
 
 
 class TestMarkPosted:
-    """The account's day is debited unconditionally, the cap is frozen at the
-    first debit, and a refusal leaves no debit behind."""
+    """A cadence story's day is debited unconditionally, the cap is frozen at
+    the first debit, a planned story takes no debit, and a refusal leaves no
+    debit behind."""
 
     @pytest.fixture(autouse=True, scope="class")
     def _cap_of_one(self, world):
@@ -350,6 +359,54 @@ class TestMarkPosted:
         before = self._count(world)
         out = run(world, "mark_posted", intent_id=scheduled["id"])
         assert out.outcome == "answered" and out.data["state"] == "scheduled"
+        assert self._count(world) == before
+
+    def test_a_planned_story_posted_by_hand_leaves_the_day_as_it_was(self, world):
+        """F8 (a) (content schedule, phase 4; #1413): a planned story sits
+        outside the cap whichever way it posts. Counted here, a Posted
+        myself would push the day's last cadence story to tomorrow, the one
+        thing the owner's call rules out. Its day is still stamped, which a
+        manual post needs (`ck_posted_complete`)."""
+        control = _intent(world, world["a"], "posted-5")
+        run(world, "mark_posted", intent_id=control["id"])
+        before = self._count(world)
+        assert before is not None, "the control: today's bucket is the one read"
+        i = _intent(world, world["a"], "posted-6", origin="planned")
+
+        out = run(world, "mark_posted", intent_id=i["id"])
+
+        assert out.data["state"] == "posted"
+        assert _one(
+            world,
+            "SELECT published_via, cap_consumed_on = (now() AT TIME ZONE 'UTC')::date"
+            "  FROM post_intents WHERE id = %s",
+            (i["id"],),
+        ) == ("manual", True)
+        assert self._count(world) == before, "the day's count is the cadence's"
+
+    def test_a_flip_that_matches_no_row_commits_no_debit(self, world):
+        """`flip_to_posted_by_hand` debits only the row it flipped, so a
+        refusal needs no rollback to stay debit-free. Called directly and
+        COMMITTED here: `run` would roll a refusal back and hide it."""
+        ids = world["a"]
+        i = _intent(world, ids, "posted-nomatch")
+        run(world, "mark_posted", intent_id=i["id"])  # now posted
+        before = self._count(world)
+
+        async def flip_again(session):
+            return await publish_cap.flip_to_posted_by_hand(
+                session,
+                intent_id=i["id"],
+                workspace_id=str(ids["ws"]),
+                ig_account_id=str(ids["iga"]),
+                tz="UTC",
+                effective_cap=3,
+            )
+
+        flipped = asyncio.run(
+            in_tenant(world["ingress"], ids["ws"], ids["user"], flip_again)
+        )
+        assert flipped is False
         assert self._count(world) == before
 
 

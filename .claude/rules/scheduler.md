@@ -134,6 +134,16 @@ is eligible the slot lapses and the workspace is told at most once per 24 h
   publish, then ONE terminal transaction (`posted`, the counters, the recent
   lock, `finalize_job`). Each permit is a `provider_operations` row committed
   BEFORE the provider call; every checkpoint re-asserts the lease.
+- **Only the cadence spends the daily cap.** A planned story
+  (`origin = 'planned'`) neither spends it nor waits on a spent day: the flip
+  stamps its `cap_consumed_on` without a debit, and the refunds return nothing
+  for it. Every write to `daily_post_counts` lives in `publish_cap.py` (the
+  flip, the manual post, the refunds), where they all ask one predicate;
+  `tests/src/services/target/test_publish_cap.py` fails on a new SQL string
+  literal under `src/` that writes the table by its bare name (it does not
+  see ORM or Core writes, a built or schema-qualified name, or a write
+  outside `src/`), because a writer that forgot the rule would drift the
+  day's count.
 - **A story does not wait inside the slot.** Any wait between attempts steps the
   intent back `publishing → approved` with its step, transit asset and debit
   intact, and writes a `float_wait` audit row (class, rung, next run). That is

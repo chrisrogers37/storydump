@@ -494,10 +494,10 @@ class TelegramDispatcher:
         before the exception reaches them, exactly as it did inline.
 
         A savepoint: a refusal the database raised mid-executor (the guard's
-        last line; `mark_posted`'s debit CTE) must not leave the admission's
-        transaction aborted — the route's COMMIT would silently become a
-        ROLLBACK and the delivery would be lost with a 200 (structural review
-        of #1271).
+        last line; `publish_cap`'s manual-post flip) must not leave the
+        admission's transaction aborted — the route's COMMIT would silently
+        become a ROLLBACK and the delivery would be lost with a 200 (structural
+        review of #1271).
         """
         begin_nested = getattr(conn, "begin_nested", None)
         # `tenant_bound`: `_tap`'s GUC statement already set this workspace as
