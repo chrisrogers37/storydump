@@ -94,14 +94,15 @@ export default function ConnectTelegram() {
               — connect Google Drive, then pick the folders to sync
             </li>
             <li>
+              <span className="font-medium text-foreground">Accounts</span> — use{" "}
+              <span className="font-medium text-foreground">Connect Instagram</span>{" "}
+              to add the account your Stories post to
+            </li>
+            <li>
               <span className="font-medium text-foreground">General</span> — set
               how many Stories per day and your posting window
             </li>
           </ol>
-          <Callout type="info" className="mt-3">
-            Connecting an Instagram account is not available from the dashboard
-            yet. If you need one connected, get in touch — see Step 5.
-          </Callout>
         </StepCard>
 
         <StepCard number={4} title="What happens next">

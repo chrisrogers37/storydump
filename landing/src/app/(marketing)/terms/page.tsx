@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
-const LAST_UPDATED = "May 13, 2026"
+const LAST_UPDATED = "September 30, 2026"
 
 export const metadata: Metadata = {
   title: "Terms of Service — Storydump",
@@ -75,8 +75,8 @@ export default function TermsOfService() {
             4. Account &amp; authentication
           </h2>
           <p className="mt-3">
-            You sign in to Storydump using the Telegram Login Widget. You are
-            responsible for the security of your Telegram account and the
+            You sign in to Storydump with your Google account. You are
+            responsible for the security of your Google account and the
             devices that have access to it. Notify us promptly at{" "}
             <a
               href={`mailto:${email}`}
@@ -172,13 +172,9 @@ export default function TermsOfService() {
             9. Beta features
           </h2>
           <p className="mt-3">
-            Some Storydump features are gated behind feature flags (for example,
-            direct Instagram API posting under{" "}
-            <code className="rounded bg-muted px-1.5 py-0.5">
-              ENABLE_INSTAGRAM_API
-            </code>
-            ). Beta features are provided for evaluation purposes, may change
-            or be removed at any time, and are not subject to any availability
+            Some Storydump features are gated behind feature flags. Beta
+            features are provided for evaluation purposes, may change or be
+            removed at any time, and are not subject to any availability
             commitments.
           </p>
         </section>

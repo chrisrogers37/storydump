@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
-const LAST_UPDATED = "May 13, 2026"
+const LAST_UPDATED = "September 30, 2026"
 
 export const metadata: Metadata = {
   title: "Privacy Policy — Storydump",
@@ -64,8 +64,10 @@ export default function PrivacyPolicy() {
           <ul className="mt-3 list-disc space-y-2 pl-6">
             <li>
               <span className="font-medium text-foreground">Account data</span>{" "}
-              — from the Telegram Login Widget when you sign in: Telegram user
-              ID, username, display name, and profile photo URL.
+              — from Google when you sign in: your Google account identifier,
+              your verified email address, and your display name. If you link a
+              Telegram account to Storydump: your Telegram user ID and your
+              Telegram username, or your first name if you have no username.
             </li>
             <li>
               <span className="font-medium text-foreground">
@@ -88,8 +90,8 @@ export default function PrivacyPolicy() {
             </li>
             <li>
               <span className="font-medium text-foreground">Operational data</span>{" "}
-              — queues, schedules, content mix preferences, caption style
-              settings, and posting history.
+              — queues, schedules, content mix preferences, and posting
+              history.
             </li>
             <li>
               <span className="font-medium text-foreground">Technical data</span>{" "}
