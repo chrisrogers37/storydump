@@ -42,7 +42,7 @@ from sqlalchemy.exc import DBAPIError
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
 from src.exceptions.base import StorydumpError
 from src.services.target import vocabulary
-from src.services.target import google_drive_oauth, offboarding, readers
+from src.services.target import google_drive_oauth, identity, offboarding, readers
 from src.services.target._dbapi import driver_error_is
 from src.services.target.unit_of_work import apply_gucs
 
@@ -384,6 +384,9 @@ async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
 #: filter validates against this so a typo is a 422, not an empty page.
 INTENT_STATES: tuple[str, ...] = vocabulary.INTENT_STATES
 
+#: `ck_intent_origin`: the list filter's other closed set.
+INTENT_ORIGINS: tuple[str, ...] = vocabulary.INTENT_ORIGINS
+
 #: `ck_media_state`.
 MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed")
 
@@ -394,6 +397,7 @@ _INTENT_COLUMNS = (
     "i.id, i.state, i.ig_account_id, i.media_item_id, i.schedule_slot_at,"
     " i.approval_mode, i.published_via, i.publish_step, i.cancel_requested,"
     " i.ig_permalink, i.entered_state_at, i.created_at,"
+    " i.origin, i.scheduled_by_user_id,"
     " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category,"
     " a.handle AS account_handle, a.display_name AS account_display_name"
 )
@@ -411,27 +415,49 @@ _MEDIA_COLUMNS = (
 )
 
 
+async def _with_schedulers(executor, rows: list[dict]) -> list[dict]:
+    """Each row's `scheduled_by`: the name a person who scheduled it goes by
+    (`identity.display_name_for`, the card's rule, never an email), None on
+    a story nobody scheduled. One read per person, not per row."""
+    names = {
+        by: await identity.display_name_for(executor, user_id=str(by))
+        for by in {row["scheduled_by_user_id"] for row in rows} - {None}
+    }
+    for row in rows:
+        row["scheduled_by"] = names.get(row["scheduled_by_user_id"])
+    return rows
+
+
 async def list_intents(
     executor,
     *,
     workspace_id: str,
     states: Sequence[str] = (),
+    origin: Optional[str] = None,
     limit: int = 50,
 ) -> list[dict]:
     """The ledger read model (X.2: "reads pending approvals from the ledger").
     *states* narrows to any of several states — a history tab is one call —
-    and must already be validated against :data:`INTENT_STATES`. Bounded
-    (`01` H5) — *limit* is applied after the caller's clamp."""
+    and must already be validated against :data:`INTENT_STATES`; *origin*
+    (one of :data:`INTENT_ORIGINS`) to the planned stories or the cadence's —
+    "what is coming" is the planned ones still `scheduled`. Bounded (`01`
+    H5) — *limit* is applied after the caller's clamp."""
     params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
     where = "i.workspace_id = :ws"
     if states:
         where += " AND i.state = ANY(CAST(:states AS text[]))"
         params["states"] = list(states)
-    return await readers.rows(
+    if origin is not None:
+        where += " AND i.origin = :origin"
+        params["origin"] = origin
+    return await _with_schedulers(
         executor,
-        f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE {where}"
-        " ORDER BY i.schedule_slot_at, i.id LIMIT :lim",
-        **params,
+        await readers.rows(
+            executor,
+            f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE {where}"
+            " ORDER BY i.schedule_slot_at, i.id LIMIT :lim",
+            **params,
+        ),
     )
 
 
@@ -553,12 +579,13 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
 
 async def get_intent(executor, *, workspace_id: str, intent_id: str) -> Optional[dict]:
     """One intent — always its CURRENT state (R6: terminal-state-first)."""
-    return await readers.row(
+    found = await readers.row(
         executor,
         f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE i.workspace_id = :ws AND i.id = :id",
         ws=str(workspace_id),
         id=str(intent_id),
     )
+    return (await _with_schedulers(executor, [found]))[0] if found else None
 
 
 async def rename(executor, *, workspace_id: str, name: str) -> str:

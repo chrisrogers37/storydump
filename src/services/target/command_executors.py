@@ -56,13 +56,18 @@ caught here: `commands.execute` maps it once, for every executor.
 
 from __future__ import annotations
 
+import re
+import uuid
+from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from src.config.defaults import DEFAULT_SKIP_TTL_DAYS
 from src.config.settings import settings
 from src.services.target import (
+    audit,
     google_drive_oauth,
     identity,
     intent_ledger,
@@ -78,6 +83,7 @@ from src.services.target import (
     vocabulary,
     workspaces,
 )
+from src.services.target._dbapi import constraint_violated
 from src.services.target.oauth_states import issue_state
 from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.intent_ledger import IntentTransitionRefused
@@ -108,6 +114,7 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
         "SELECT i.id, i.workspace_id, i.state, i.media_item_id, i.ig_account_id,"
         "       i.provider_account_ref, i.cancel_requested, i.published_via,"
         "       i.publish_step, i.ig_container_id, i.attempts_by_step,"
+        "       i.origin, i.schedule_slot_at,"
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
         "       w.dry_run_mode, w.is_paused,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
@@ -761,10 +768,287 @@ async def cancel(session, command: Command) -> CommandResult:
         text("UPDATE post_intents SET cancel_requested = true WHERE id = :id"),
         {"id": str(intent["id"])},
     )
+    # The flag is not a state change, so the intent's audit trigger writes
+    # nothing for it: the request is recorded here, naming the person.
+    await _audit_intent(
+        session,
+        intent,
+        from_state=intent["state"],
+        to_state=intent["state"],
+        detail={"event": "cancel_requested"},
+    )
     # The card loses its buttons now: a cancelling card offers no lever, and
     # the worker's terminalization is a later checkpoint (the reaper, 087).
     await _record_outcome(session, intent, command, "cancelled")
     return _result(intent, intent["state"], cancel_requested=True)
+
+
+# --- a planned story (#1413 phase 5; plan `05_schedule-verbs.md`) -------------
+
+#: A planned story's time as the person gives it: a date and a clock time,
+#: seconds optional, and NO offset — the account's zone makes it an instant.
+#: Postgres would read an offset on a `timestamp` and silently drop it.
+_LOCAL_AT = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?")
+
+#: How far ahead a story may be planned.
+PLAN_HORIZON_DAYS = 365
+
+#: F7, the lock and item rule. These lock kinds, and an item that was
+#: removed or cannot be posted, refuse a schedule outright — the four the
+#: serve door (`fn_prompts_due`) turns into a miss at the story's time. The
+#: others only warn: the person may override them, and they never cause a
+#: miss. Together they are `ck_locks_kind`.
+BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")
+WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
+
+#: The wall time :local_at in the zone :tz as an instant, NULL when the
+#: clocks skip it. Postgres reads a skipped wall time with the offset in
+#: force before the jump, and an ambiguous one with the offset after it (its
+#: second occurrence), so `e`, the reading with the offset in force a day
+#: earlier, is the other candidate. The answer is the earliest candidate
+#: that reads back as the wall time: a skipped time has none, and an
+#: ambiguous one resolves to its first occurrence. The zone is the
+#: database's reading, as the clock's (`fn_next_slot`) is.
+_INSTANT = (
+    "SELECT CASE WHEN (r.c AT TIME ZONE r.z) = r.l"
+    "            THEN LEAST(r.c, CASE WHEN (r.e AT TIME ZONE r.z) = r.l THEN r.e END)"
+    "       END AS at,"
+    "       now() AS now,"
+    "       now() + make_interval(days => CAST(:horizon AS integer)) AS horizon"
+    "  FROM (SELECT q.l, q.z, q.c,"
+    "               (q.l AT TIME ZONE 'UTC')"
+    "                 - (((q.c - interval '1 day') AT TIME ZONE q.z)"
+    "                    - ((q.c - interval '1 day') AT TIME ZONE 'UTC')) AS e"
+    "          FROM (SELECT p.l, p.z, p.l AT TIME ZONE p.z AS c"
+    "                  FROM (SELECT CAST(CAST(:local_at AS text) AS timestamp) AS l,"
+    "                               CAST(:tz AS text) AS z) p) q) r"
+)
+
+
+def _id_arg(command: Command, name: str) -> str:
+    """`_arg` for an id: a string that is not one is refused by name, not
+    left to a failed cast the database answers with a 500."""
+    value = _arg(command, name)
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        raise CommandRefused("invalid_args", f"{name} is not an id") from None
+
+
+def _local_at(command: Command) -> str:
+    """The wall time: its shape checked here, the date by the parser."""
+    value = _arg(command, "local_at")
+    if not _LOCAL_AT.fullmatch(value):
+        raise CommandRefused(
+            "invalid_args",
+            "local_at is a date and a time with no offset: YYYY-MM-DD HH:MM",
+        )
+    try:
+        return datetime.fromisoformat(value).isoformat(sep=" ")
+    except ValueError:
+        raise CommandRefused(
+            "invalid_args", f"local_at {value!r} is not a date and time"
+        ) from None
+
+
+async def _planned_instant(session, *, local_at: str, tz: str) -> datetime:
+    """When a planned story is due: *local_at* in *tz*, after now and within
+    the horizon, both as the database's clock reads them."""
+    found = await readers.row(
+        session, _INSTANT, local_at=local_at, tz=tz, horizon=PLAN_HORIZON_DAYS
+    )
+    at = found["at"] if found else None
+    if at is None:
+        raise CommandRefused(
+            "invalid_args", f"{local_at} does not happen in {tz}: the clocks skip it"
+        )
+    if at <= found["now"]:
+        raise CommandRefused("invalid_args", f"{local_at} {tz} is not in the future")
+    if at > found["horizon"]:
+        raise CommandRefused(
+            "invalid_args",
+            f"{local_at} {tz} is more than {PLAN_HORIZON_DAYS} days ahead",
+        )
+    return at
+
+
+async def _audit_intent(
+    session,
+    intent: dict[str, Any],
+    *,
+    from_state: Optional[str],
+    to_state: str,
+    detail: dict[str, Any],
+) -> None:
+    """An intent's audit row for a write its trigger cannot see — a birth, a
+    new time, a flag — under the command's actor (the unit of work's GUCs)."""
+    await audit.record(
+        session,
+        workspace_id=str(intent["workspace_id"]),
+        entity_kind="post_intent",
+        entity_id_sql=":intent",
+        from_state=from_state,
+        to_state=to_state,
+        detail={"v": 1, **detail},
+        intent=str(intent["id"]),
+    )
+
+
+async def schedule_item(session, command: Command) -> CommandResult:
+    """A planned story: this item, to this account, at this wall time in the
+    account's zone (F11). It is born `scheduled` with `origin = 'planned'`,
+    is served at its time or missed out loud (phase 3), and only a person
+    approves it (088).
+
+    The database decides what it can: the account must be live here, the
+    time must exist in its zone, and `uq_intent_live_subject` — the same
+    item waiting on the same account — is the INSERT's to refuse, with no
+    read before it. The lock and item rule (F7) is the one decision made
+    here, and `override_locks` gets past only its warnings."""
+    account_id = _id_arg(command, "ig_account_id")
+    media_id = _id_arg(command, "media_item_id")
+    local_at = _local_at(command)
+    override = command.args.get("override_locks", False)
+    if not isinstance(override, bool):
+        raise CommandRefused("invalid_args", "override_locks is true or false")
+    account = await readers.row(
+        session,
+        "SELECT a.provider_account_ref, COALESCE(a.tz, w.tz) AS eff_tz"
+        "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
+        " WHERE a.id = :acct AND a.workspace_id = :ws"
+        "   AND a.state IN ('active', 'reauth_required')",
+        acct=account_id,
+        ws=command.workspace_id,
+    )
+    if account is None:
+        raise CommandRefused("not_found", f"account {account_id}")
+    item = await readers.row(
+        session,
+        "SELECT m.state,"
+        "       ARRAY(SELECT DISTINCT l.kind FROM post_locks l"
+        "              WHERE l.workspace_id = m.workspace_id AND l.media_item_id = m.id"
+        "                AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct)"
+        "                AND (l.expires_at IS NULL OR l.expires_at > now())"
+        "              ORDER BY l.kind) AS locks"
+        "  FROM media_items m WHERE m.id = :media AND m.workspace_id = :ws",
+        acct=account_id,
+        media=media_id,
+        ws=command.workspace_id,
+    )
+    if item is None:
+        raise CommandRefused("not_found", f"item {media_id}")
+    tz = _tz(account)
+    at = await _planned_instant(session, local_at=local_at, tz=tz)
+    blockers = [] if item["state"] == "available" else [f"item_{item['state']}"]
+    blockers += [kind for kind in item["locks"] if kind in BLOCKING_LOCKS]
+    warnings = [kind for kind in item["locks"] if kind in WARNING_LOCKS]
+    if blockers or (warnings and not override):
+        in_the_way = ", ".join(blockers + warnings)
+        raise CommandRefused(
+            "locked",
+            f"item {media_id}: {in_the_way}"
+            + ("" if blockers else " — override_locks schedules it anyway"),
+            facts={
+                "blockers": blockers,
+                "warnings": warnings,
+                "overridable": not blockers,
+            },
+        )
+    try:
+        born = await readers.row(
+            session,
+            "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+            " provider_account_ref, approval_mode, schedule_slot_at, state, origin,"
+            " scheduled_by_user_id)"
+            " VALUES (:ws, :acct, :media, :ref, 'manual', :at, 'scheduled',"
+            "         'planned', :by)"
+            " RETURNING id, workspace_id",
+            ws=command.workspace_id,
+            acct=account_id,
+            media=media_id,
+            ref=account["provider_account_ref"],
+            at=at,
+            by=command.actor_user_id,
+        )
+    except DBAPIError as exc:
+        if constraint_violated(exc, "uq_intent_live_subject"):
+            raise CommandRefused(
+                "illegal_transition",
+                f"item {media_id} is already waiting to post on account {account_id}",
+            ) from exc
+        raise
+    detail: dict[str, Any] = {
+        "event": "scheduled",
+        "at": at.isoformat(),
+        "tz": tz,
+        "local_at": local_at,
+    }
+    if warnings:
+        detail["override"] = warnings
+    await _audit_intent(
+        session, born, from_state=None, to_state="scheduled", detail=detail
+    )
+    return _result(
+        born,
+        "scheduled",
+        scheduled_at=at.isoformat(),
+        tz=tz,
+        local_at=local_at,
+        overridden=warnings,
+        # Nothing is served where no chat is bound: said, not refused.
+        chat_bound=bool(await prompts.push_bindings(session, command.workspace_id)),
+    )
+
+
+async def reschedule_item(session, command: Command) -> CommandResult:
+    """A planned story's new time, in place (F4): the same row and id, so
+    nothing else about it can change here — a different item or account is
+    a cancel and a new schedule. The guarded UPDATE decides; the row read
+    under its lock only explains a refusal."""
+    intent = await _intent_row(session, command)
+    local_at = _local_at(command)
+    tz = _tz(intent)
+    at = await _planned_instant(session, local_at=local_at, tz=tz)
+    moved = await readers.row(
+        session,
+        "UPDATE post_intents SET schedule_slot_at = :at"
+        " WHERE id = :id AND workspace_id = :ws AND origin = 'planned'"
+        "   AND state = 'scheduled' AND NOT cancel_requested"
+        " RETURNING id",
+        at=at,
+        id=str(intent["id"]),
+        ws=command.workspace_id,
+    )
+    if moved is None:
+        if intent["origin"] == "planned" and intent["state"] == "scheduled":
+            # Only the flag can have stopped it.
+            _refuse_if_cancelling(intent)
+        raise CommandRefused(
+            "illegal_transition",
+            "only a planned story still waiting for its time moves"
+            f" (this one is {intent['origin']}, {intent['state']})",
+        )
+    await _audit_intent(
+        session,
+        intent,
+        from_state="scheduled",
+        to_state="scheduled",
+        detail={
+            "event": "rescheduled",
+            "from": intent["schedule_slot_at"].isoformat(),
+            "to": at.isoformat(),
+            "tz": tz,
+            "local_at": local_at,
+        },
+    )
+    return _result(
+        intent,
+        "scheduled",
+        scheduled_at=at.isoformat(),
+        previous=intent["schedule_slot_at"].isoformat(),
+        tz=tz,
+        local_at=local_at,
+    )
 
 
 async def sync_now(session, command: Command) -> CommandResult:

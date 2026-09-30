@@ -32,6 +32,8 @@ COMMANDS: tuple[str, ...] = (
     "reject",
     "mark_posted",
     "cancel",
+    "schedule_item",
+    "reschedule_item",
     "autopost_now",
     "sync_now",
     "settings_change",
@@ -69,6 +71,7 @@ REASONS: tuple[str, ...] = (
     "not_connected",
     "nothing_to_confirm",
     "may_have_posted",
+    "locked",
 )
 
 #: `post_intents.state` (055 ``ck_intent_state``), in the migration's order.
@@ -87,6 +90,11 @@ INTENT_STATES: tuple[str, ...] = (
     "failed",
     "cancelled",
 )
+
+#: `post_intents.origin` (088 ``ck_intent_origin``): a ``cadence`` story is
+#: minted by the clock for a slot, a ``planned`` one by a person who chose the
+#: item, the account and the time (`schedule_item`).
+INTENT_ORIGINS: tuple[str, ...] = ("cadence", "planned")
 
 #: `post_intents.publish_step` (055 ``ck_intent_step``).
 PUBLISH_STEPS: tuple[str, ...] = (
@@ -302,6 +310,7 @@ REASON_SENTENCES: Mapping[str, str] = {
         "the last publish answer was lost — say whether the story is on Instagram:"
         " resolve <story> retry --not-posted, or resolve <story> posted"
     ),
+    "locked": "a lock, or the item itself, keeps it from being scheduled",
     "session_required": "this needs a signed-in web session, not a token",
     "readonly_token": "this token is read-only",
     "wrong_workspace": "this token belongs to another workspace",
@@ -343,6 +352,8 @@ WRITE_SENTENCES: Mapping[tuple[str, str], str] = {
     ("reject", "executed"): "rejected",
     ("mark_posted", "executed"): "marked as posted by hand",
     ("cancel", "executed"): "cancel requested",
+    ("schedule_item", "executed"): "scheduled",
+    ("reschedule_item", "executed"): "rescheduled",
     ("resolve_review", "executed"): "resolved",
     ("resolve_review", "enqueued"): "resolved — posting again shortly",
     ("pause_workspace", "executed"): "posting paused for the workspace",
