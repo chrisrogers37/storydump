@@ -370,6 +370,7 @@ class TestCommands:
             ("not_found", 404),
             ("illegal_transition", 409),
             ("manual_mode", 409),
+            ("locked", 409),
         ],
     )
     def test_each_port_refusal_maps_to_its_status(
@@ -379,6 +380,26 @@ class TestCommands:
         resp = client.post(self.URL, json={"intent_id": INTENT}, headers=KEY)
         assert resp.status_code == status
         assert resp.json()["reason"] == reason
+
+    def test_a_refusals_facts_ride_its_body_and_cannot_overwrite_it(
+        self, client, signed_in, tenant, port
+    ):
+        """`locked` names what is in the way and whether an override gets past
+        it, beside the reason — a front end acts on them without parsing the
+        prose — and a fact never replaces the reason or the detail."""
+        port["outcome"] = CommandRefused(
+            "locked",
+            "item x: skip",
+            facts={"in_the_way": ["skip"], "overridable": True, "reason": "forged"},
+        )
+        resp = client.post(self.URL, json={"intent_id": INTENT}, headers=KEY)
+        assert resp.status_code == 409
+        assert resp.json() == {
+            "reason": "locked",
+            "detail": "command refused: locked — item x: skip",
+            "in_the_way": ["skip"],
+            "overridable": True,
+        }
 
     def test_a_member_below_the_floor_is_403(self, client, signed_in, tenant, port):
         port["outcome"] = TenantResolutionError("insufficient_role", "member < admin")

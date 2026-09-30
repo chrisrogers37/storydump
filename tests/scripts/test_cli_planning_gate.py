@@ -248,7 +248,9 @@ def test_a_lock_holds_the_cli_back_until_overridden(world, people, planning, tmp
             code, doc = await _cli(rt, *args, "--workspace", ws)
             assert code == EXIT_REFUSED, doc
             assert doc["error"]["reason"] == "locked"
-            assert "--override-locks" in doc["error"]["fix"]
+            assert doc["error"]["fix"] == (
+                "run it again with --override-locks to schedule it anyway"
+            ), "the body said the override gets past it"
             code, doc = await _cli(rt, *args, "--workspace", ws, "--override-locks")
             assert code == EXIT_OK, doc
             assert doc["data"]["result"]["overridden"] == ["skip"]

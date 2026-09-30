@@ -444,6 +444,20 @@ class TestScheduleItem:
             world, "SELECT 1 FROM post_intents WHERE media_item_id = %s", (item,)
         )
 
+    def test_an_offset_is_refused_not_dropped(self, world):
+        """Postgres reads a `timestamp` and silently drops an offset, so one
+        inside the window would schedule the wrong instant."""
+        w = _workspace(world, "offset")
+        refused = refusal(
+            world,
+            w,
+            "schedule_item",
+            ig_account_id=w["account"],
+            media_item_id=_item(world, w),
+            local_at=_local(days=3) + "+02:00",
+        )
+        assert refused.reason == "invalid_args" and "offset" in str(refused)
+
     @pytest.mark.parametrize(
         "local_at",
         [
@@ -988,6 +1002,29 @@ class TestTheQueueRead:
             cadence["scheduled_by"] is None and cadence["scheduled_by_user_id"] is None
         )
         assert _read(world, w, origin="planned", states=["awaiting_approval"]) == []
+
+    def test_the_schedulers_telegram_name_comes_first(self, world):
+        """The card's rule: the name the group already sees."""
+        w = _workspace(world, "queue-names")
+        member = _member(world, w)
+        for provider, name in (("google", "Mo on Google"), ("telegram", "Mo")):
+            _sql(
+                world,
+                "INSERT INTO user_identities (user_id, provider, external_id,"
+                " display_name) VALUES (%s, %s, %s, %s)",
+                (member, provider, f"{provider}-{uuid.uuid4().hex[:6]}", name),
+            )
+        run(
+            world,
+            w,
+            "schedule_item",
+            user=member,
+            ig_account_id=w["account"],
+            media_item_id=_item(world, w),
+            local_at=_local(),
+        )
+        (row,) = _read(world, w, origin="planned")
+        assert row["scheduled_by"] == "Mo"
 
     def test_a_scheduler_with_no_name_is_a_teammate_never_an_address(self, world):
         w = _workspace(world, "queue-nameless")
