@@ -22,7 +22,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from src.services.target import readers
+from src.services.target import audit, readers
 from src.services.target.vocabulary import FLOATING_LIMIT, FLOATING_LIMIT_MAX
 
 #: The bound inside a story's own timeline (audit rows) and per-section lists.
@@ -271,7 +271,8 @@ _TAPS = _newest(
     " a.actor_kind, a.channel, a.id AS row_id"
     " FROM audit_events a"
     " WHERE a.workspace_id = :ws AND a.entity_kind = 'post_intent'"
-    "   AND a.from_state = 'awaiting_approval' AND a.created_at >= :since",
+    "   AND a.from_state = 'awaiting_approval' AND a.created_at >= :since"
+    f"   AND {audit.moved('a')}",
     order="at, row_id",
     limit=SECTION_ROWS,
     columns="workspace_id, at, intent_id, from_state, to_state, actor_kind, channel",

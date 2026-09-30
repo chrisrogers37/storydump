@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.services.target.commands import Command, CommandRefused  # noqa: I001 — the port first: the registry cycle
-from src.services.target import command_executors, vocabulary, workspaces
+from src.services.target import command_executors, intent_ledger, vocabulary, workspaces
 from tests.src.services.target.test_provisioning import _ScriptedExecutor
 
 WS = "7a1c3d5e-0000-4000-8000-000000000001"
@@ -116,7 +116,7 @@ class TestScheduleItem:
         values = " ".join(insert[0].split())
         assert "VALUES (:ws, :acct, :media, :ref, 'manual', :at, 'scheduled'," in values
         assert "'scheduled', 'planned', :by)" in values
-        assert f"WHERE {command_executors._LIVE_SUBJECT} DO NOTHING" in insert[0]
+        assert f"WHERE {intent_ledger.NOT_TERMINAL} DO NOTHING" in insert[0]
         assert insert[1] == {
             "ws": WS,
             "acct": ACCOUNT,
@@ -152,7 +152,7 @@ class TestScheduleItem:
         }
         assert len(ex.statements) == 5, "no audit row, nothing else"
         sql, params = ex.statements[-1]
-        assert f"AND {command_executors._LIVE_SUBJECT}" in sql
+        assert f"AND {intent_ledger.NOT_TERMINAL}" in sql
         assert params == {"ws": WS, "media": ITEM, "acct": ACCOUNT}
 
     async def test_a_duplicate_that_ended_before_it_was_read_names_nothing(self):
@@ -162,16 +162,16 @@ class TestScheduleItem:
         assert (refused.value.reason, refused.value.facts) == ("illegal_transition", {})
 
     @pytest.mark.parametrize(
-        "state, locks, in_the_way, overridable",
+        "state, locks, in_the_way",
         [
-            ("removed", [], ["item_removed"], False),
-            ("unsupported", ["skip"], ["item_unsupported", "skip"], False),
-            ("available", ["hold", "recent"], ["hold", "recent"], False),
-            ("available", ["reject", "seasonal"], ["reject", "seasonal"], False),
+            ("removed", [], ["item_removed"]),
+            ("unsupported", ["skip"], ["item_unsupported", "skip"]),
+            ("available", ["hold", "recent"], ["hold", "recent"]),
+            ("available", ["reject", "seasonal"], ["reject", "seasonal"]),
         ],
     )
     async def test_what_blocks_is_refused_even_with_the_override(
-        self, state, locks, in_the_way, overridable
+        self, state, locks, in_the_way
     ):
         """F7: an item that cannot post, or a lock that would miss it at its
         time, refuses whatever the person sends; the warnings ride along, so
@@ -180,10 +180,7 @@ class TestScheduleItem:
         with pytest.raises(CommandRefused) as refused:
             await command_executors.schedule_item(ex, _schedule(override_locks=True))
         assert refused.value.reason == "locked"
-        assert refused.value.facts == {
-            "in_the_way": in_the_way,
-            "overridable": overridable,
-        }
+        assert refused.value.facts == {"in_the_way": in_the_way, "overridable": False}
         assert len(ex.statements) == 3, "nothing is written"
 
     async def test_a_warning_refuses_until_the_override_and_says_it_would_pass(self):

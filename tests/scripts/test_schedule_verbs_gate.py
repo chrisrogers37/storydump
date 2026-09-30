@@ -32,13 +32,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-import psycopg2
 import pytest
 from sqlalchemy import text
 
@@ -46,12 +46,10 @@ from src.services.target import commands  # noqa: I001 — the port first: the r
 from src.services.target import (
     command_executors,
     intent_ledger,
-    prompts,
     vocabulary,
     workspaces,
 )
 from src.services.target.commands import Command, CommandRefused
-from src.services.target.work_loop import WorkerConfig
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -62,7 +60,7 @@ from tests.scripts.conftest import (
     set_test_passwords,
 )
 from tests.scripts.test_ops_views_gate import _sql as owner_sql
-from tests.scripts.test_planned_serve_gate import _owner_cursor, _worker
+from tests.scripts.test_planned_serve_gate import _miss, _owner_cursor, _serve, _worker
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -420,12 +418,28 @@ class TestScheduleItem:
 
     def test_a_t_and_seconds_are_the_same_wall_time(self, world):
         w = _workspace(world, "shape")
-        day = (datetime.now(UTC).date() + timedelta(days=2)).isoformat()
-        out = schedule(world, w, _item(world, w), f"{day}T15:00:30")
-        assert out.data["local_at"] == f"{day} 15:00:30"
-        assert datetime.fromisoformat(
-            out.data["schedule_slot_at"]
-        ) == datetime.fromisoformat(f"{day}T15:00:30+00:00")
+        local_at = f"{_local(days=2, hour=15)}:30"
+        out = schedule(world, w, _item(world, w), local_at.replace(" ", "T"))
+        assert out.data["local_at"] == local_at
+        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == _instant(
+            local_at, "UTC"
+        )
+
+    def test_the_conflict_arbiter_is_the_live_subject_index(self, world):
+        """`schedule_item` names `uq_intent_live_subject` by its predicate. A
+        terminal state the index had and the predicate did not would fail
+        every schedule; the reverse would let the duplicate's read name
+        nothing. So the index's own definition is read back."""
+        ((indexdef,),) = _sql(
+            world,
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_intent_live_subject'",
+        )
+        columns, predicate = indexdef.split(" WHERE ", 1)
+        assert columns.endswith("(workspace_id, media_item_id, ig_account_id)")
+        assert "<> ALL" in predicate, predicate
+        assert set(re.findall(r"'(\w+)'", predicate)) == set(
+            intent_ledger.TERMINAL_STATES
+        )
 
     def test_the_audit_row_names_the_person(self, world):
         w = _workspace(world, "audit")
@@ -1033,101 +1047,94 @@ class TestWhoLastMovedIt:
         assert str(found["by_user_id"]) == w["user"], "the scheduler, not the canceller"
 
 
-def _await_lock_wait(world, xid, deadline_s=20.0):
-    """Until a session waits on the transaction *xid* (the one holding the
-    story's row), or fail: a race test whose loser never waited on that row
-    proves nothing, and a wait on any other transaction is not this one."""
+def _await_lock_wait(cur, xid, deadline_s=20.0):
+    """Until a session waits on the transaction *xid*, which holds the story's
+    row, or fail: a race test whose loser never waited on that row proves
+    nothing, and a wait on any other transaction is not this one. Read inside
+    that transaction: `pg_locks` is the lock table as it stands, not a
+    snapshot."""
     end = time.monotonic() + deadline_s
     while time.monotonic() < end:
-        ((waiting,),) = _sql(
-            world,
+        cur.execute(
             "SELECT count(*) FROM pg_locks WHERE NOT granted"
             " AND locktype = 'transactionid' AND transactionid::text = %s",
             (xid,),
         )
-        if waiting:
+        if cur.fetchone()[0]:
             return
         time.sleep(0.05)
     pytest.fail("the sweep never waited on the row")
 
 
-def _sweep_while_moved(world, intent, sweep):
-    """The race a reschedule can win: a transaction holds the story's row, as
-    `reschedule_item` does under `_intent_row`'s lock, and moves its time; the
-    sweep reads its door (an unlocked read, so it still sees the old time) and
-    then waits on the row; the move commits, and the sweep goes on."""
-    conn = psycopg2.connect(world["owner"])
-    try:
-        conn.autocommit = False
-        with conn.cursor() as cur:
-            cur.execute("SET app.actor_kind = 'migration'")
-            cur.execute(
-                "SELECT 1 FROM post_intents WHERE id = %s FOR UPDATE", (intent,)
-            )
-            cur.execute(
-                "UPDATE post_intents SET schedule_slot_at = now() + interval '1 day'"
-                " WHERE id = %s",
-                (intent,),
-            )
-            cur.execute("SELECT pg_current_xact_id()::xid::text")
-            ((xid,),) = cur.fetchall()
-        done = {}
-        thread = threading.Thread(target=lambda: done.update(out=_worker(world, sweep)))
+def _sweep_while_changed(world, intent, sweep, change):
+    """The race a write can win against a sweep: a transaction holds the
+    story's row, as `reschedule_item` and `cancel` do under `_intent_row`'s
+    lock, and changes it (*change*, a SET list); the sweep (`_serve` or
+    `_miss`) reads its door, an unlocked read that still sees the row as it
+    was, then waits on the row; the change commits and the sweep goes on. A
+    sweep that raised fails the test."""
+    done = {}
+
+    def go():
+        try:
+            done["out"] = sweep(world)
+        except Exception as exc:  # reported in the test's own thread, below
+            done["error"] = exc
+
+    thread = threading.Thread(target=go)
+    with _owner_cursor(world) as cur:
+        cur.execute(f"UPDATE post_intents SET {change} WHERE id = %s", (intent,))
+        cur.execute("SELECT pg_current_xact_id()::xid::text")
+        ((xid,),) = cur.fetchall()
         thread.start()
-        _await_lock_wait(world, xid)
-        conn.commit()
-        thread.join(timeout=60)
-        assert not thread.is_alive(), "the sweep never finished"
-        return done["out"]
-    finally:
-        conn.close()
+        _await_lock_wait(cur, xid)
+    thread.join(timeout=60)
+    assert not thread.is_alive(), "the sweep never finished"
+    assert "error" not in done, done.get("error")
+    return done["out"]
 
 
-class TestAMoveAtTheDueInstant:
-    """A story moved while a sweep that read it as due waits on its row is
-    served or missed at the time it holds, never at the time the sweep read."""
+class TestAWriteAtTheDueInstant:
+    """A story changed while a sweep that read it as due waits on its row is
+    served or missed as it now is, never as the sweep read it."""
 
-    def test_the_serve_sweep_leaves_a_story_moved_under_it(self, world):
-        w = _workspace(world, "race-serve")
+    def _due(self, world, name, ago):
+        w = _workspace(world, name)
         intent = _planned(world, w)
         _sql(
             world,
-            "UPDATE post_intents SET schedule_slot_at = now() - interval '10 seconds'"
+            "UPDATE post_intents SET schedule_slot_at = now() - CAST(%s AS interval)"
             " WHERE id = %s",
-            (intent,),
+            (ago, intent),
         )
-        cfg = WorkerConfig()
-        _sweep_while_moved(
-            world,
-            intent,
-            lambda session: prompts.sweep_due_prompts(
-                session,
-                late_seconds=cfg.planned_late_seconds,
-                limit=cfg.prompt_sweep_limit,
-            ),
+        return intent
+
+    def test_the_serve_sweep_leaves_a_story_moved_under_it(self, world):
+        intent = self._due(world, "race-serve", "10 seconds")
+        _sweep_while_changed(
+            world, intent, _serve, "schedule_slot_at = now() + interval '1 day'"
         )
         row = _row(world, intent)
         assert row["state"] == "scheduled", "served at the time it no longer holds"
         assert datetime.fromisoformat(row["schedule_slot_at"]) > datetime.now(UTC)
 
+    def test_the_serve_sweep_leaves_a_story_flagged_under_it(self, world):
+        intent = self._due(world, "race-flag", "10 seconds")
+        _sweep_while_changed(world, intent, _serve, "cancel_requested = true")
+        assert _row(world, intent)["state"] == "scheduled", "served while cancelling"
+
+    def test_the_serve_sweep_skips_a_story_another_sweep_served(self, world):
+        """The worker's sweep and `plan_slot`'s fast path can read one due row.
+        The second reads it served and goes on; its transition would be
+        refused as a same-state write (061) and take the whole beat with it."""
+        intent = self._due(world, "race-twice", "10 seconds")
+        _sweep_while_changed(world, intent, _serve, "state = 'prompt_pending'")
+        assert _row(world, intent)["state"] in ("prompt_pending", "awaiting_approval")
+
     def test_the_miss_sweep_leaves_a_story_moved_under_it(self, world):
-        w = _workspace(world, "race-miss")
-        intent = _planned(world, w)
-        _sql(
-            world,
-            "UPDATE post_intents SET schedule_slot_at = now() - interval '2 hours'"
-            " WHERE id = %s",
-            (intent,),
-        )
-        cfg = WorkerConfig()
-        _sweep_while_moved(
-            world,
-            intent,
-            lambda session: prompts.sweep_planned_misses(
-                session,
-                late_seconds=cfg.planned_late_seconds,
-                limit=cfg.prompt_sweep_limit,
-            ),
+        intent = self._due(world, "race-miss", "2 hours")
+        _sweep_while_changed(
+            world, intent, _miss, "schedule_slot_at = now() + interval '1 day'"
         )
         row = _row(world, intent)
         assert row["state"] == "scheduled", "missed at the time it no longer holds"

@@ -32,6 +32,16 @@ ACTOR_FROM_GUCS = (
     " NULLIF(current_setting('app.channel', true), '')"
 )
 
+
+def moved(alias: str) -> str:
+    """The rows of the `audit_events` alias *alias* that record a change of
+    state. A direct row whose from and to states are equal, or both NULL,
+    records something else about its entity — a cancel request, a new time,
+    a CLI admission, a cap deferral, a float wait — so it never answers who
+    moved it, or what a tap did."""
+    return f"{alias}.from_state IS DISTINCT FROM {alias}.to_state"
+
+
 #: A worker session that sets no `app.channel` (`work_loop.poller_session_factory`),
 #: naming the channel itself so the row still says where the write came from —
 #: a NULL there would lose the only thing the row says about who ran the drain.

@@ -361,7 +361,7 @@ def _planned_due(row: Mapping[str, Any]) -> Any:
     at, tz = row.get("schedule_slot_at"), row.get("tz")
     try:
         local = datetime.fromisoformat(str(at)).astimezone(ZoneInfo(str(tz)))
-    except (ValueError, TypeError, ZoneInfoNotFoundError):
+    except (ValueError, OSError, ZoneInfoNotFoundError):
         return at
     return f"{local.strftime('%Y-%m-%d %H:%M')} {tz}"
 
@@ -812,15 +812,19 @@ def _render_doctor(console: Console, data: Any) -> None:
 
 def _render_planned(console: Console, data: Any) -> None:
     """The planned stories per workspace — and, where a page came back full,
-    that it is the first page, never a list that reads as complete."""
+    that there may be more, never a list that reads as complete."""
     _view("planned", _table_of(PLANNED_COLUMNS))(console, data)
-    workspaces = data.get("workspaces") if isinstance(data, dict) else None
-    for entry in workspaces if isinstance(workspaces, list) else []:
-        limit = entry.get("limit") if isinstance(entry, dict) else None
+    for entry in _dicts(data.get("workspaces") if isinstance(data, dict) else None):
+        limit = entry.get("limit")
         if isinstance(limit, int) and len(_dicts(entry.get("rows"))) >= limit:
+            wider = (
+                f"pass --limit up to {LIST_LIMIT_MAX}"
+                if limit < LIST_LIMIT_MAX
+                else "narrow it with --state"
+            )
             console.print(
-                f"workspace {_text(entry.get('workspace_id'), '?')}: the first"
-                f" {limit} shown — pass --limit up to {LIST_LIMIT_MAX} for more"
+                f"workspace {_text(entry.get('workspace_id'), '?')}: {limit} shown,"
+                f" a full page — there may be more; {wider}"
             )
 
 

@@ -330,23 +330,26 @@ def render_card(
     return payload
 
 
-async def _due_as_read(session, row: dict) -> bool:
-    """Whether a planned story still holds the time the door read. Its time
-    moves in place until it is served (`reschedule_item`), and the door read
-    takes no lock, so the row is locked here and its time compared: a
-    reschedule that got the row first moved it off the instant the sweep is
-    serving, and a sweep that gets it first serves it and the reschedule is
-    refused. The miss leg makes the same check in its UPDATE."""
-    slot = (
-        await session.execute(
-            text(
-                "SELECT schedule_slot_at FROM post_intents"
-                " WHERE id = :id AND workspace_id = :ws FOR UPDATE"
-            ),
-            {"id": str(row["id"]), "ws": str(row["workspace_id"])},
-        )
-    ).scalar()
-    return slot == row["schedule_slot_at"]
+async def _still_due(session, row: dict) -> bool:
+    """Whether a story is still as the door read it: in its state, not
+    flagged for a cancel, at its time. The door read takes no lock, so the
+    row is locked here and read again before it is served: a reschedule, a
+    cancel or another sweep that got the row first changed it, and it waits
+    for the next reading; one that comes after waits on this lock. The miss
+    leg makes the same check in its UPDATE."""
+    found = await readers.row(
+        session,
+        "SELECT state, cancel_requested, schedule_slot_at FROM post_intents"
+        " WHERE id = :id AND workspace_id = :ws FOR UPDATE",
+        id=str(row["id"]),
+        ws=str(row["workspace_id"]),
+    )
+    return (
+        found is not None
+        and found["state"] == row["state"]
+        and not found["cancel_requested"]
+        and found["schedule_slot_at"] == row["schedule_slot_at"]
+    )
 
 
 async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
@@ -620,8 +623,8 @@ async def sweep_due_prompts(session, *, late_seconds: int, limit: int) -> dict:
     ):
         ws = str(row["workspace_id"])
         await claims.claim(ws)
-        if row["origin"] == "planned" and not await _due_as_read(session, row):
-            continue  # moved since the door read it: not due yet
+        if not await _still_due(session, row):
+            continue  # changed since the door read it: its next reading decides
         if ws not in bindings_by_workspace:
             bindings_by_workspace[ws] = await push_bindings(session, ws)
         await prompt_intent(

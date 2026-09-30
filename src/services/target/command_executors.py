@@ -799,11 +799,6 @@ _LIVE_ACCOUNT = (
 )
 
 
-#: `uq_intent_live_subject`'s predicate: one story per item and account
-#: while it is live. The INSERT names it as its conflict arbiter, so the
-#: database refuses the duplicate with no read before it.
-_LIVE_SUBJECT = "state NOT IN (" + ", ".join(f"'{s}'" for s in TERMINAL_STATES) + ")"
-
 #: The wall time :local_at in the zone :tz as an instant, NULL when the
 #: clocks skip it. Two readings are candidates: Postgres's own (a skipped
 #: time takes the offset before the jump, an ambiguous one the offset after
@@ -975,8 +970,10 @@ async def schedule_item(session, command: Command) -> CommandResult:
         " scheduled_by_user_id)"
         " VALUES (:ws, :acct, :media, :ref, 'manual', :at, 'scheduled',"
         "         'planned', :by)"
-        f" ON CONFLICT (workspace_id, media_item_id, ig_account_id) WHERE {_LIVE_SUBJECT}"
-        " DO NOTHING RETURNING id, workspace_id",
+        # `uq_intent_live_subject` is the arbiter, named by its predicate: the
+        # database refuses the duplicate, with no read before it
+        " ON CONFLICT (workspace_id, media_item_id, ig_account_id)"
+        f" WHERE {intent_ledger.NOT_TERMINAL} DO NOTHING RETURNING id, workspace_id",
         ws=command.workspace_id,
         acct=account_id,
         media=media_id,
@@ -991,7 +988,7 @@ async def schedule_item(session, command: Command) -> CommandResult:
             session,
             "SELECT id, state, origin FROM post_intents"
             " WHERE workspace_id = :ws AND media_item_id = :media"
-            f"   AND ig_account_id = :acct AND {_LIVE_SUBJECT}",
+            f"   AND ig_account_id = :acct AND {intent_ledger.NOT_TERMINAL}",
             ws=command.workspace_id,
             media=media_id,
             acct=account_id,

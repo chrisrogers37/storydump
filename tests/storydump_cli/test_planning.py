@@ -161,8 +161,9 @@ def test_a_handle_with_no_live_account_is_not_found_and_nothing_is_sent(tmp_path
 
 
 def test_a_handle_on_an_api_older_than_the_cli_is_left_to_the_port(tmp_path):
-    """An account view that carries no `state` cannot say which row is live;
-    its one row is sent, and the port judges whether it is."""
+    """An account view that carries no `state` comes from an API older than
+    this CLI and cannot say which row is live: its one row is sent, so the
+    answer is the API's own, never a false "no live account"."""
     api, result = schedule(
         tmp_path, account=HANDLE, routes=accounts({"id": ACCOUNT, "handle": HANDLE})
     )
@@ -406,10 +407,10 @@ def test_planned_is_the_queue_read_filtered_to_planned_stories(tmp_path):
         assert cell in result.output
     # due in the zone its time was chosen in, the time the person typed
     assert "2026-10-12 18:30 America/New_York" in result.output
-    assert "the first" not in result.output, "a short page is the whole list"
+    assert "a full page" not in result.output, "a short page is the whole list"
 
 
-@pytest.mark.parametrize("tz", [None, "Not/AZone"])
+@pytest.mark.parametrize("tz", [None, "Not/AZone", "America"])
 def test_planned_shows_the_time_as_given_where_it_cannot_name_the_zone(tmp_path, tz):
     api = write_api(queue(WS, [{**ROW, "tz": tz}]))
     result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
@@ -421,9 +422,20 @@ def test_a_full_page_says_it_is_the_first(tmp_path):
     api = write_api(queue(WS, [ROW], limit=1))
     result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
     assert result.exit_code == EXIT_OK, result.output
-    assert f"workspace {WS}: the first 1 shown — pass --limit up to 200" in (
+    assert (
+        f"workspace {WS}: 1 shown, a full page — there may be more;"
+        " pass --limit up to 200"
+    ) in result.output
+
+
+def test_a_full_page_at_the_most_one_read_returns_says_to_narrow_it(tmp_path):
+    api = write_api(queue(WS, [ROW] * 200, limit=200))
+    result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
+    assert result.exit_code == EXIT_OK, result.output
+    assert "200 shown, a full page — there may be more; narrow it with --state" in (
         result.output
     )
+    assert "--limit up to" not in result.output
 
 
 def test_planned_says_a_cancel_still_landing(tmp_path):

@@ -276,6 +276,16 @@ def _seed_world(dsn: str, ws: str, tag: str) -> dict:
             open_story = seed_intent_chain(
                 cur, ws, f"{tag}-open", state="awaiting_approval"
             )
+            # a row that moved nothing — a cancel request records the story's
+            # own state on both sides — is never a tap
+            cur.execute(
+                "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
+                " from_state, to_state, actor_kind, channel, detail)"
+                " VALUES (%s, 'post_intent', %s, 'awaiting_approval',"
+                " 'awaiting_approval', 'system', 'system',"
+                " jsonb_build_object('v', 1, 'event', 'cancel_requested'))",
+                (ws, str(open_story["intent"])),
+            )
         conn.commit()
         return {
             "iga": iga,

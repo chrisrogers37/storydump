@@ -544,7 +544,8 @@ def _account_id(client: Client, ws: str, key: str) -> str:
     if account_id is not None:
         return account_id
     rows = unwrap(client.ops_account(ws, key), ws)["rows"]
-    # a row with no `state` is an API older than this CLI: the port judges
+    # A row with no `state` comes from an API older than this CLI: sent as it
+    # is, the API's own refusal is the answer, never a false "no live account".
     live = [
         row
         for row in rows
