@@ -498,12 +498,16 @@ class TestTheLaneReplaysAcrossTheBoundary:
         evidence of the files below it standing (089 re-creates
         `fn_prompts_due`, which 082's probes count, and renames the slot key
         088's probe reads). Only the files this run APPLIED are asked: a gated
-        file is owed, not applied."""
+        file is owed, not applied. The move itself is not asked either: its
+        probe says `public` holds nothing, which is true only at the move — the
+        target lineage builds into `public` from the next file on (and the move
+        predates the rule that a probe never asserts an absence)."""
         report = run_lane(bootstrapped_db)
+        move = schema_move_migration(MIGRATIONS_DIR)
         probed = [
             (migration, probe)
             for migration in report.applied
-            if migration.version > LEGACY_LINEAGE_MAX
+            if migration.version > move.version
             for probe in migration.postconditions
         ]
         newest = max(migration.version for migration in report.applied)
