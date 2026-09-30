@@ -768,6 +768,7 @@ class TestTheMissNotice:
         leg's alias list to every column: a column added for the notice cannot
         reach the removal and not the miss."""
         import inspect
+        import re
 
         from scripts.migration_runner import MIGRATIONS_DIR
 
@@ -778,9 +779,15 @@ class TestTheMissNotice:
         assert " ".join(columns.split()) in body
         assert " ".join(f"FROM{joins}".split()) in body
         leg = inspect.getsource(prompts.sweep_planned_misses)
-        for column in columns.split("SELECT", 1)[1].split(","):
-            name = column.strip().split(".")[-1]
+        names = [
+            c.strip().split(".")[-1] for c in columns.split("SELECT", 1)[1].split(",")
+        ]
+        for name in names:
             assert f"o_{name} AS {name}" in leg, f"the miss leg does not read {name}"
+        read = {alias for _, alias in re.findall(r"o_(\w+) AS (\w+)", leg)}
+        assert read - {"reason"} == set(names), (
+            "the miss leg reads a column the removal's notice row does not carry"
+        )
 
 
 def _miss_row(intent, ws, reason="late"):

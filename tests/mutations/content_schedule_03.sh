@@ -117,6 +117,10 @@ check_doc "an expired lock blocks the serve" "                                 A
 check_doc "a paused workspace's story is served" "     AND w.state = 'active' AND NOT w.is_paused
      AND (i.origin = 'cadence'" "     AND w.state = 'active'
      AND (i.origin = 'cadence'" "$G -k 'waits_out_the_pause'"
+check_doc "a suspended workspace's story is served" "     AND w.state = 'active' AND NOT w.is_paused
+     AND (i.origin = 'cadence'" "     AND NOT w.is_paused
+     AND (i.origin = 'cadence'" "$G -k 'every_combination'"
+check_doc "the window's edge is served" "          OR (i.schedule_slot_at > now() - p_late" "          OR (i.schedule_slot_at >= now() - p_late" "$G -k 'window_edge'"
 # The miss door (§32's fn_planned_misses): the flag, each reason, their precedence, the window.
 check_doc "a cancelled story is missed out loud" "             AND i.schedule_slot_at <= now() AND NOT i.cancel_requested) d" "             AND i.schedule_slot_at <= now()) d" "$G -k 'cancelled_planned_story'"
 check_doc "a removed item is not a miss" "                   WHEN m.id IS NULL OR m.state = 'removed' THEN 'item_removed'" "                   WHEN m.id IS NULL THEN 'item_removed'" "$G -k 'media-removed'"
@@ -142,6 +146,9 @@ check_doc "the account outranks the lock" "                   WHEN EXISTS (SELEC
                      THEN 'item_locked'" "$G -k 'reasons_come_in_their_precedence'"
 check_doc "a paused workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN false THEN 'paused'" "$G -k 'paused_through_the_window'"
 check_doc "a story inside its window is missed during a pause" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN false THEN NULL" "$G -k 'waits_out_the_pause'"
+check_doc "the miss door counts an expired lock" "                                   AND (l.expires_at IS NULL OR l.expires_at > now()))" "                                   AND true)" "$G -k 'every_combination'"
+check_doc "a suspended workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN w.is_paused THEN 'paused'" "$G -k 'every_combination'"
+check_doc "the window's edge is not missed" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN i.schedule_slot_at >= now() - p_late THEN NULL" "$G -k 'window_edge'"
 check_doc "a NULL window misses everything" "LANGUAGE sql STABLE STRICT SECURITY DEFINER" "LANGUAGE sql STABLE SECURITY DEFINER" "$G -k 'null_window_lists_no_miss'"
 # The reaper's slot expiry (§32's fn_reaper_sweep) and the slot key's contract.
 check_doc "the reaper expires a planned story in silence" "                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
@@ -169,8 +176,8 @@ check "the removal tells nobody" src/services/target/provisioning.py "    if uns
         await prompts.say_removed_before_served(" "$G -k 'RemovingADestination'"
 check "the removal tells about served stories too" src/services/target/provisioning.py '        if row["origin"] == "planned" and row["state"] == "scheduled"' '        if row["origin"] == "planned"' "$G -k 'RemovingADestination'"
 check "the late window is not the owner's hour" src/services/target/work_loop.py "    planned_late_seconds: int = 3600" "    planned_late_seconds: int = 900" "tests/src/test_worker.py -k 'late_window_is_the_hour'"
-# The removal's notice row is the miss door's, by a pin (a door cannot call the Python).
-check "the removal's notice row drifts from the door" src/services/target/prompts.py '    "  LEFT JOIN media_items m ON m.id = i.media_item_id"' '    "  JOIN media_items m ON m.id = i.media_item_id"' "tests/src/services/target/test_prompts.py -k 'notice_select'"
+# The removal's notice reads the row the miss door's notice is written from.
+check "the removal's notice forgets the account" src/services/target/prompts.py '    "       m.file_name, a.handle, w.tz"' '    "       m.file_name, NULL AS handle, w.tz"' "$G -k 'RemovingADestination'"
 # The file and the model are held to the stream. Parity compares uniqueness SEMANTICS, not index
 # names, so renaming the model's index would be an equivalent mutant; these mutate what it compares.
 check "the 089 file drifts from §32" scripts/migrations/089_planned_serve_and_misses.sql "LANGUAGE sql STABLE STRICT SECURITY DEFINER" "LANGUAGE sql STABLE SECURITY DEFINER" "tests/scripts/test_advertised_ddl.py -k 'wired_prefix_holds_against_the_real_stream'"

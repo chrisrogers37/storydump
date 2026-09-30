@@ -486,6 +486,37 @@ class TestTheLaneReplaysAcrossTheBoundary:
             " declare at this point"
         )
 
+    def test_every_target_files_evidence_still_reads_true_at_the_head(
+        self, bootstrapped_db
+    ):
+        """A file's `runner:postcondition` lines run once, when that file
+        applies, and nothing asks them again after later files have moved the
+        schema. `runner adopt` at the head reads them all, though, and refuses a
+        false probe below a true one. So once the whole corpus has applied,
+        every probe of every target file must still read true: a later file
+        that re-creates a door, renames a key or rewrites a body must leave the
+        evidence of the files below it standing (089 re-creates
+        `fn_prompts_due`, which 082's probes count, and renames the slot key
+        088's probe reads). Only the files this run APPLIED are asked: a gated
+        file is owed, not applied."""
+        report = run_lane(bootstrapped_db)
+        probed = [
+            (migration, probe)
+            for migration in report.applied
+            if migration.version > LEGACY_LINEAGE_MAX
+            for probe in migration.postconditions
+        ]
+        newest = max(migration.version for migration in report.applied)
+        assert any(m.version == newest for m, _ in probed), (
+            "the positive control: the newest file's own probes are among those read"
+        )
+        stale = [
+            (migration.label, probe[:120])
+            for migration, probe in probed
+            if fetch_one(bootstrapped_db, probe)[0] is not True
+        ]
+        assert not stale, stale
+
     def test_legacy_holds_the_inventory_the_lineage_literal_names(
         self, bootstrapped_db
     ):

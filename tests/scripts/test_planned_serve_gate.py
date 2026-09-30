@@ -29,6 +29,7 @@ import contextlib
 import itertools
 import re
 import uuid
+from datetime import timedelta
 
 import psycopg2
 import pytest
@@ -96,7 +97,7 @@ def _checked(world, constraint):
     return tuple(sorted(re.findall(r"'([a-z_]+)'", definition)))
 
 
-def _workspace(world, name, *, bound=True, paused=False):
+def _workspace(world, name, *, bound=True, paused=False, state="active"):
     """A workspace, its owner (who has a Telegram display name, the name a
     shared chat sees), and one active push binding unless *bound* is False."""
     with _owner_cursor(world) as cur:
@@ -108,9 +109,9 @@ def _workspace(world, name, *, bound=True, paused=False):
             (user, f"tg-{uuid.uuid4()}", f"Dana {name}"),
         )
         cur.execute(
-            "INSERT INTO workspaces (name, tz, is_paused)"
-            " VALUES (%s, 'America/New_York', %s) RETURNING id",
-            (name, paused),
+            "INSERT INTO workspaces (name, tz, is_paused, state)"
+            " VALUES (%s, 'America/New_York', %s, %s) RETURNING id",
+            (name, paused, state),
         )
         ws = cur.fetchone()[0]
         cur.execute(
@@ -252,21 +253,22 @@ def _worker(world, fn, *, tenant=None):
     return asyncio.run(go())
 
 
-def _serve(world, *, late=LATE):
+def _serve(world, *, late=LATE, limit=500):
     return _worker(
-        world, lambda s: prompts.sweep_due_prompts(s, limit=500, late_seconds=late)
+        world, lambda s: prompts.sweep_due_prompts(s, limit=limit, late_seconds=late)
     )
 
 
-def _miss(world, *, late=LATE):
+def _miss(world, *, late=LATE, limit=500):
     return _worker(
-        world, lambda s: prompts.sweep_planned_misses(s, limit=500, late_seconds=late)
+        world,
+        lambda s: prompts.sweep_planned_misses(s, limit=limit, late_seconds=late),
     )
 
 
-def _pass(world, *, late=LATE):
+def _pass(world, *, late=LATE, limit=500):
     """One beat of the prompt sweeper: the serve leg, then the miss leg."""
-    return _serve(world, late=late), _miss(world, late=late)
+    return _serve(world, late=late, limit=limit), _miss(world, late=late, limit=limit)
 
 
 def _reap(world):
@@ -400,10 +402,22 @@ class TestNeverServedWhileFlagged:
     ):
         """G2: the flag outranks everything. Not served, not a miss (its person
         already knows), and the reaper's cancel leg ends it `cancelled` — even
-        long past its window."""
+        long past its window. The miss door is read directly: the miss leg's
+        own guard skips a flagged row, so it would hide a door that listed one."""
         w = _workspace(world, "p3-cancelled")
         on_time = _story(world, w, flagged=True)
         past_window = _story(world, w, flagged=True, slot_in_s=-2 * LATE)
+        control = _story(world, w, slot_in_s=-2 * LATE)
+        listed = {
+            r[0]
+            for r in _as_worker(
+                world,
+                "SELECT o_id::text FROM fn_planned_misses(500, make_interval(secs => %s))",
+                (LATE,),
+            )
+        }
+        assert control["intent"] in listed, "the positive control: unflagged, it is"
+        assert past_window["intent"] not in listed, "a flagged row is not the door's"
         _pass(world)
         for story in (on_time, past_window):
             assert _row(world, story["intent"])["state"] == "scheduled"
@@ -420,7 +434,11 @@ class TestNeverServedWhileFlagged:
         now is left for the cancel leg, not carded."""
         w = _workspace(world, "p3-cancel-cadence")
         story = _story(world, w, origin="cadence", flagged=True)
+        control = _story(world, w, origin="cadence")
         _serve(world)
+        assert _row(world, control["intent"])["state"] == "awaiting_approval", (
+            "the positive control: unflagged, the same story is served"
+        )
         assert _row(world, story["intent"])["state"] == "scheduled"
         assert _outbox(world, story["intent"], "approval_prompt") == []
 
@@ -547,13 +565,14 @@ class TestTheDoorsPartitionTheDuePlannedRows:
     """The serve door and the miss door are each other's complement: after
     one beat, every due, unflagged planned story is served, missed with the
     reason its facts give, or — only if it can be served, is inside its window
-    and its workspace is paused — still waiting. Nothing is left unaccounted,
-    and nothing is both. Every media state, account state and lock kind the
-    schema allows is in the grid, read from its CHECKs."""
+    and its workspace is not taking posts — still waiting. Nothing is left
+    unaccounted, and nothing is both. Every media state, account state, lock
+    kind and workspace state the schema allows is in the grid (read from its
+    CHECKs), and every blocking lock also appears expired."""
 
-    #: Each value's part in the rule, in the doors' precedence: a value these
-    #: maps do not name fails the grid, so a new state or kind is classified
-    #: here, and in both doors, the day the schema allows it.
+    #: Each value's part in the rule, in the doors' precedence. The grid first
+    #: asserts these name exactly the values the schema allows, so a new state
+    #: or kind fails here, to be classified here and in both doors.
     ITEM = {
         "available": None,
         "removed": "item_removed",
@@ -570,53 +589,66 @@ class TestTheDoorsPartitionTheDuePlannedRows:
         "skip": None,
         "recent": None,
     }
+    #: Whether a workspace in this state takes posts, when it is not paused.
+    WORKSPACE = {"active": True, "suspended": False, "offboarding": False}
     PAUSED = (False, True)
     SLOTS = (-60, -LATE - 60)
 
     @classmethod
-    def _expected(cls, media, account, lock, paused, slot_in_s):
-        kind = lock[0] if lock else None
-        for known, value in (
-            (cls.ITEM, media),
-            (cls.ACCOUNT, account),
-            (cls.LOCK, kind),
-        ):
-            if value is not None and value not in known:
-                pytest.fail(f"{value!r} is new: classify it here and in both doors")
+    def _expected(cls, media, account, lock, workspace, slot_in_s):
+        kind, expires_in_s = lock or (None, None)
+        state, paused = workspace
         if cls.ITEM[media]:
             return cls.ITEM[media]
-        if kind and cls.LOCK[kind]:
+        if kind and cls.LOCK[kind] and (expires_in_s is None or expires_in_s > 0):
             return cls.LOCK[kind]
         if cls.ACCOUNT[account]:
             return cls.ACCOUNT[account]
+        taking_posts = cls.WORKSPACE[state] and not paused
         if slot_in_s > -LATE:
-            return "waiting" if paused else "served"
-        return "paused" if paused else "late"
+            return "served" if taking_posts else "waiting"
+        return "late" if taking_posts else "paused"
 
     def test_every_combination_lands_in_exactly_its_bucket(self, world):
-        media_states = _checked(world, "ck_media_state")
-        account_states = _checked(world, "ck_ig_accounts_state")
-        locks = (None, *((kind, None) for kind in _checked(world, "ck_locks_kind")))
+        for constraint, known in (
+            ("ck_media_state", self.ITEM),
+            ("ck_ig_accounts_state", self.ACCOUNT),
+            ("ck_locks_kind", self.LOCK),
+            ("ck_workspaces_state", self.WORKSPACE),
+        ):
+            allowed = _checked(world, constraint)
+            assert set(allowed) == set(known), (
+                f"{constraint} allows {allowed}: classify each here and in both doors"
+            )
+        locks = (
+            None,
+            *((kind, None) for kind in self.LOCK),
+            *((kind, -60) for kind, blocks in self.LOCK.items() if blocks),
+        )
         spaces = {
-            paused: _workspace(world, f"p3-grid-{int(paused)}", paused=paused)
+            (state, paused): _workspace(
+                world, f"p3-grid-{state}-{int(paused)}", state=state, paused=paused
+            )
+            for state in self.WORKSPACE
             for paused in self.PAUSED
+            if state == "active" or not paused  # a pause changes nothing more
         }
         cells = []
         with _owner_cursor(world) as cur:  # one connection seeds the whole grid
-            for media, account, lock, paused, slot in itertools.product(
-                media_states, account_states, locks, self.PAUSED, self.SLOTS
+            for media, account, lock, (space, w), slot in itertools.product(
+                self.ITEM, self.ACCOUNT, locks, spaces.items(), self.SLOTS
             ):
                 story = _seed_story(
                     cur,
-                    spaces[paused],
+                    w,
                     media_state=media,
                     account_state=account,
                     lock=lock,
                     slot_in_s=slot,
                 )
-                expected = self._expected(media, account, lock, paused, slot)
+                expected = self._expected(media, account, lock, space, slot)
                 cells.append((story["intent"], expected))
-        _pass(world)
+        _pass(world, limit=2 * len(cells))
         seen = {
             intent: rest
             for intent, *rest in _exec(
@@ -690,6 +722,30 @@ class TestTheLateWindowIsTheCallersNumber:
         assert (late["intent"], "late") in named, (
             "the positive control: named, the window lists the late story"
         )
+
+    def test_the_window_edge_belongs_to_the_miss_door(self, world):
+        """Both doors spell the window `schedule_slot_at > now() - p_late`, so a
+        story exactly at the edge is late in both: missed, not served, never
+        neither. One statement is one `now()`: the window is made to end at
+        the story's own time, and one second later as the control."""
+        w = _workspace(world, "p3-edge")
+        story = _story(world, w, slot_in_s=-600)
+        ((slot,),) = _exec(
+            world,
+            "SELECT schedule_slot_at FROM post_intents WHERE id = %s",
+            (story["intent"],),
+            fetch=True,
+        )
+        doors = (
+            "SELECT (SELECT count(*) FROM fn_prompts_due(500,"
+            "          now() - %(slot)s + %(extra)s) WHERE o_id = %(id)s),"
+            "       (SELECT array_agg(o_reason) FROM fn_planned_misses(500,"
+            "          now() - %(slot)s + %(extra)s) WHERE o_id = %(id)s)"
+        )
+        edge = {"slot": slot, "extra": timedelta(0), "id": story["intent"]}
+        inside = {**edge, "extra": timedelta(seconds=1)}
+        assert _as_worker(world, doors, edge) == [(0, ["late"])]
+        assert _as_worker(world, doors, inside) == [(1, None)]
 
     def test_the_window_is_the_callers(self, world):
         """The same story is served under a wide window and missed under a
