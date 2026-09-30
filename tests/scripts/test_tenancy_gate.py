@@ -530,6 +530,23 @@ class TestDroppingAnIndexIsInert:
         assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
 
 
+class TestRenamingAnIndexIsInert:
+    """087 (#1413) is the first migration to rename an index: the slot key's
+    contract gives the cadence-only key the dropped key's name. An index is
+    none of the four facts, so ALTER INDEX is allowlisted beside CREATE and
+    DROP INDEX, and this is the control that proves the entry is reachable."""
+
+    def test_alter_index_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                "CREATE UNIQUE INDEX uq_t_new ON t (workspace_id) WHERE id IS NOT NULL",
+                "ALTER INDEX uq_t_new RENAME TO uq_t",
+            ]
+        )
+        assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
+
+
 class TestConstraintEditsAreBoundedTheSameWay:
     """#1061: `065` is the first migration to edit a CHECK constraint, and the
     derivation had no branch for it — a loud refusal, correctly.

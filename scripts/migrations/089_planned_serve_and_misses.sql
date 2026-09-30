@@ -44,14 +44,14 @@
 -- 062's CREATE bracket.
 --
 -- Adoption evidence (#997): the partial key under its old name, the two doors by owner and arity,
--- their EXECUTE rows as a floor, the reaper leg's text, and the bracket closed — catalog state this
--- file creates. Each probe reads false, without raising, on a database without these objects.
+-- their EXECUTE rows as a floor, and the reaper leg's text — catalog state this file creates. Each
+-- probe reads false, without raising, on a database without these objects. The closed CREATE
+-- bracket is not probed: an absence reads true on a database this file has never touched.
 --
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'post_intents' AND indexname = 'uq_intent_slot' AND indexdef LIKE '%WHERE (origin = ''cadence''::text)')
 -- runner:postcondition SELECT count(*) = 2 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner WHERE n.nspname = 'public' AND p.proname IN ('fn_prompts_due', 'fn_planned_misses') AND p.pronargs = 2 AND r.rolname = 'svc_maintenance' AND p.prosecdef
 -- runner:postcondition SELECT count(*) >= 2 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, aclexplode(p.proacl) a JOIN pg_roles g ON g.oid = a.grantee WHERE n.nspname = 'public' AND p.proname IN ('fn_prompts_due', 'fn_planned_misses') AND p.pronargs = 2 AND a.privilege_type = 'EXECUTE' AND g.rolname = 'svc_worker'
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'fn_reaper_sweep' AND position('AND origin = ''cadence''' IN p.prosrc) > 0)
--- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a JOIN pg_roles r ON r.oid = a.grantee WHERE n.nspname = 'public' AND r.rolname = 'svc_maintenance' AND a.privilege_type = 'CREATE')
 
 DROP INDEX uq_intent_slot;
 
