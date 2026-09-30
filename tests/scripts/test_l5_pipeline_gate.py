@@ -758,6 +758,31 @@ class TestTheHappyPath:
         assert _intent_row(pipe_db, intent)["state"] == "posted"
         assert len(transit.destroy_calls) == 1, "the destroy was attempted"
 
+    def test_the_posted_line_reaches_the_card_on_every_binding(self, pipe_db):
+        """The card is restated on EVERY active Telegram binding that shows
+        it, one edit each. The two cards share a message id, so an edit
+        keyed on the message alone would reach only one chat."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        bindings = [
+            _seed_card(pipe_db, intent),
+            _seed_card(pipe_db, intent, chat=f"-200{intent[:8]}"),
+        ]
+        deps = _deps(pipe_db, StubMetaAdapter())
+        assert _run(run_publish_pipeline(job, **deps)) == POSTED
+        edits = _exec(
+            pipe_db,
+            "SELECT binding_id, payload->>'supersedes_ref', payload->>'outcome_text'"
+            " FROM channel_outbox WHERE intent_id = %s AND kind = 'prompt_supersede'"
+            "   AND state = 'pending'",
+            (intent,),
+            fetch=True,
+        )
+        posted = sorted(
+            (b, msg) for b, msg, line in edits if line.startswith("✅ Posted")
+        )
+        assert posted == sorted((b, "77001") for b in bindings), edits
+
 
 class TestTheFetchRung:
     """The fetch and the upload are provider calls too (#1276 review): a file
@@ -1729,15 +1754,17 @@ class TestTheJobsDoors:
         )
 
 
-def _seed_card(pipe_db, intent, *, tapped=True):
+def _seed_card(pipe_db, intent, *, chat=None, tapped=True):
     """The approval card exactly as the tap leaves it: the card row already
     `superseded` with the tap's line, the tap's own edit sent. Untapped, it is
-    a sent card that still has its buttons."""
+    a sent card that still has its buttons. A second *chat* puts the same card
+    on a further binding, under the same message id: Telegram numbers messages
+    per chat, so two chats can share one."""
     binding = _exec(
         pipe_db,
         "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
         " VALUES (%s, 'telegram_group', %s) RETURNING id",
-        (pipe_db["ws"], f"-100{intent[:8]}"),
+        (pipe_db["ws"], chat or f"-100{intent[:8]}"),
         fetch=True,
     )[0][0]
     if not tapped:

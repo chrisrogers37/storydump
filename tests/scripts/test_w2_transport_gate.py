@@ -226,6 +226,19 @@ class TestReMintThroughTheRealSweeper:
         from src.worker import run
 
         chain, binding = _seed_binding_with_pending(sync_conn, "w2remint", rows=0)
+        # The row this test watches is the one it writes after startup, which
+        # belongs to no intent, so nothing can supersede it: a `superseded`
+        # read here was always the chain's own card. That intent is due as
+        # soon as it is seeded, so the live worker prompts it onto this
+        # binding, and the reaper can expire it even after the prompt (#1454).
+        # Its slot moves a day out, so the late row is the binding's only card.
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE post_intents SET schedule_slot_at = now() + interval '1 day'"
+                " WHERE id = %s",
+                (chain["intent"],),
+            )
+        sync_conn.commit()
         transport = _FakeTransport()
         cfg = WorkerConfig(
             lease_seconds=10.0,
@@ -241,15 +254,26 @@ class TestReMintThroughTheRealSweeper:
         stop = asyncio.Event()
         runner = asyncio.create_task(run(app, stop=stop))
         try:
-            await asyncio.sleep(1.0)  # worker up; outbox empty; sweeps ticking
+            # The late row lands after the sweeper's first pass, so only a
+            # later pass can mint its job. `sweeps` counts passes as they
+            # start: a second one means the first has finished.
+            first_pass_deadline = asyncio.get_running_loop().time() + 12.0
+            while (
+                app.sweeper is None or app.sweeper.sweeps < 2
+            ) and asyncio.get_running_loop().time() < first_pass_deadline:
+                await asyncio.sleep(0.2)
+            assert app.sweeper is not None and app.sweeper.sweeps >= 2, (
+                "the sender sweeper never finished its first pass"
+            )
             with sync_conn.cursor() as cur:
                 cur.execute("SET app.actor_kind = 'migration'")
                 cur.execute(
                     "INSERT INTO channel_outbox (workspace_id, binding_id, kind,"
                     " payload) VALUES (%s, %s, 'approval_prompt',"
-                    " jsonb_build_object('v', 1, 'text', 'late card'))",
+                    " jsonb_build_object('v', 1, 'text', 'late card')) RETURNING id",
                     (chain["ws"], binding),
                 )
+                late = cur.fetchone()[0]
             sync_conn.commit()
 
             deadline = asyncio.get_running_loop().time() + 12.0
@@ -278,9 +302,10 @@ class TestReMintThroughTheRealSweeper:
         assert app.sweeper.mints >= 1, "the sender job must come from the SWEEPER"
         with sync_conn.cursor() as cur:
             cur.execute(
-                "SELECT state FROM channel_outbox WHERE binding_id = %s", (binding,)
+                "SELECT id, state FROM channel_outbox WHERE binding_id = %s",
+                (binding,),
             )
-            assert cur.fetchone()[0] == "sent"
+            assert cur.fetchall() == [(late, "sent")]
             cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
             assert cur.fetchone()[0] == 0
 

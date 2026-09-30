@@ -220,6 +220,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Business names are removed from the docs and tests (#1470).** Two Instagram handles and a workspace name are replaced by neutral placeholders (`exampleshop`, `example.brand`, `Example Co`) in the archived investigations and plans, the Meta App Review runbook, six test files and two earlier entries in this file, each spelled the same way everywhere it appears so the tests keep matching. Nothing at runtime read them: none was under `src/`, `storydump_cli/`, `landing/`, `scripts/` (migrations included) or a config or env file.
 
+### Tests
+
+- **The pipeline gate proves a posted card is restated on every binding that shows it (#1432).** `test_the_posted_line_reaches_the_card_on_every_binding` puts the card on two chats under one message id, as Telegram allows, and requires one `✅ Posted` edit per binding. It is the only test that fails when `binding_id` leaves the restate's `DISTINCT ON` key: the unit test in `test_outbox_restate.py` checks the statement's shape and passes without it. `_seed_card` takes an optional `chat` for the second binding.
+
+- **The W2 re-mint gate checks the card it wrote, and only that card (#1433).** The chain's own intent was due as soon as it was seeded, so the live worker prompted it onto the test's binding. The reaper could then expire it even after that prompt, a runtime defect now tracked in #1454, and its card was superseded. The final read took whichever card came first, which is how it read `superseded`: the row the test wrote belongs to no intent and cannot be superseded. The intent's slot now moves a day out, and the test requires the binding's rows to be exactly its own card, sent. That card is written only after the sender sweeper's first pass, where a fixed one-second sleep used to stand, so only a periodic re-mint can deliver it.
+
+- **The Drive adapter's policy-less fetch test needs no network (#1434).** It answers the default policy's host lookup through the floor's `resolver=` seam instead of real DNS, and checks the media request was pinned to the stubbed address.
+
+- **The egress-floor tests that listen on `127.0.0.2` skip, saying why, where that address cannot be bound (#1435).** macOS configures only `127.0.0.1` on the loopback until the address is aliased, and the skip message gives the command. On Linux, and so in CI, they run as before.
+
 ### Added
 
 - **The Meta usage pre-check can be switched on in production.** `02` §8's advisory pre-check — one usage read per publish attempt, cached five minutes per real account, deferring a publish the account's quota would refuse — shipped behind a default-off flag that nothing composed, so the flag had nothing to flip. The worker now reads `TARGET_USAGE_PRECHECK_ENABLED` (`1`/`true`/`yes`/`on`) and hands one shared `UsagePrecheck` to the publish pipeline; absent or off, the seam stays empty and no usage read is ever made, as before. A dry run never reads usage (nothing reaches Instagram in a rehearsal, and Meta's cap must not hold one), and an answer that carries no quota total is not read as "at cap" — it proceeds, uncached, with a warning. Arming it is said in the deploy log. Off by default; the S.5 canary decides.
