@@ -21,6 +21,7 @@ any verb for one envelope `{"v": 1, "kind", "data", "error"}` — a workspace re
 | What is the job queue doing? | `storydump jobs [--since 3h]` | one per kind × lane × state with the oldest runnable and failed samples |
 | What is still owed or lost on the chats? | `storydump outbox [--since 3h]` | pending, sending, ambiguous and failed rows by binding |
 | What did the burst do? | `storydump burst [--since 3h]` | one timeline: taps, permits, float waits, siblings posting past a waiter, review cards, and the window's outcome counts |
+| What is coming — the stories a person planned? | `storydump planned [--state scheduled,awaiting_approval] [--newest-first] [--limit N]` | one per planned story, soonest first (`--newest-first` for a history such as `--state expired`): when it is due in the zone its time was chosen in, its account and item, who planned it, a cancel still landing; a full page says it is the first |
 | What is the database's posture? | `storydump posture` | the migration ledger, the connected role and whether it bypasses RLS, the tables under RLS, the SECURITY DEFINER census |
 
 `--since` takes `45m`, `3h`, `2d`, an ISO-8601 timestamp (`2026-09-15T14:50:00Z`; a naive one
@@ -60,6 +61,8 @@ refusal is an answer: the reason in the CLI's words, the fixing verb, exit 2.
 | resolve a story parked for review | `storydump resolve <story> retry|posted|cancel [--not-posted] --workspace <ws>` |
 | pause or resume the workspace's posting | `storydump pause --workspace <ws>` / `storydump resume --workspace <ws>` |
 | queue a sync of a connected folder | `storydump sync <source_id> --workspace <ws>` |
+| plan a story: an item, on an account, at a time in the account's zone | `storydump schedule <item> --account <handle\|id> --at 'YYYY-MM-DD HH:MM' [--override-locks] --workspace <ws>` |
+| move a planned story that still waits for its time | `storydump reschedule <story> --at 'YYYY-MM-DD HH:MM' --workspace <ws>` |
 | the deployment: the API's health, the latest deploys, the bot's webhook, this laptop | `storydump health` · `storydump deploys [--watch]` · `storydump webhook status` · `storydump doctor` |
 
 ## What the verbs never read

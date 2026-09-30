@@ -235,8 +235,8 @@ client, never a database connection
    `storydump burst --since 2026-09-15T14:50:00Z` (taps, permits, float
    waits, siblings, review cards, outcomes) · `storydump posture` (the
    migration ledger, the role, RLS, the doors) · `storydump planned [--state
-   scheduled,awaiting_approval]` (the planned stories, soonest first: when each
-   is due, its account and item, and who planned it). The guide:
+   scheduled,awaiting_approval] [--newest-first]` (the planned stories, soonest
+   first: when each is due, its account and item, and who planned it). The guide:
    `documentation/operations/reading-the-ledger.md`.
 5. Write through the command port — the same door a tap or a web click uses,
    so admission, tenancy and audit apply unchanged. `--workspace <id or name>`
