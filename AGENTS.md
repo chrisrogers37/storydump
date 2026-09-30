@@ -49,9 +49,11 @@ the ledger — `post_intents`, `jobs`, `channel_outbox` and every other table
 
 It names what posts, destroys, or re-points the bot. It is not a complete
 read-only/read-write taxonomy: the other write verbs (`skip`, `reject`,
-`posted`, `pause`, `resume`, `sync`) change the ledger through the command port
-too — a skip or a reject is a terminal state for that story — and every one of
-them is a posting-related action under the STOP rule above. The read verbs,
+`posted`, `pause`, `resume`, `sync`, `schedule`, `reschedule`) change the
+ledger through the command port too — a skip or a reject is a terminal state
+for that story, and a scheduled story asks the workspace's chats to approve it
+at its time — and every one of them is a posting-related action under the STOP
+rule above. The read verbs,
 `health`, `deploys` and `doctor` read only, and `webhook status` changes nothing
 (its door check is an empty POST the API refuses by design). When a verb is
 not on this list, check what it does before running it rather than inferring
@@ -130,7 +132,7 @@ second authority is how the two drift.
 
 State changes go through one closed vocabulary
 (`src/services/target/commands.py::VOCABULARY`, re-exported from
-`vocabulary.py::COMMANDS` — 26 commands on 2026-09-18). The web adapter exposes
+`vocabulary.py::COMMANDS` — 28 commands on 2026-09-30). The web adapter exposes
 them as a single route — `POST /api/v1/workspaces/{ws}/commands/{command}`
 (`src/api/routes/v1.py`) — whose path segment is validated against that
 vocabulary, so the route table cannot drift from it. `create_workspace` is the
@@ -232,7 +234,9 @@ client, never a database connection
    outcomes) · `storydump jobs --since 3h` · `storydump outbox --since 3h` ·
    `storydump burst --since 2026-09-15T14:50:00Z` (taps, permits, float
    waits, siblings, review cards, outcomes) · `storydump posture` (the
-   migration ledger, the role, RLS, the doors). The guide:
+   migration ledger, the role, RLS, the doors) · `storydump planned [--state
+   scheduled,awaiting_approval]` (the planned stories, soonest first: when each
+   is due, its account and item, and who planned it). The guide:
    `documentation/operations/reading-the-ledger.md`.
 5. Write through the command port — the same door a tap or a web click uses,
    so admission, tenancy and audit apply unchanged. `--workspace <id or name>`
@@ -242,10 +246,15 @@ client, never a database connection
    execution; a resolution's key carries the review episode, so a later review
    of the same story is new; `pause`, `resume` and `sync` mint a fresh key per
    invocation (their effects are idempotent — a retry is harmless, a later
-   action always executes):
+   action always executes), and so do `schedule` and `reschedule` (planning an
+   item again after a cancel, or moving a story back to a time it had, is a new
+   act; a duplicate schedule is the database's to refuse):
    `storydump approve|skip|reject|posted|cancel <story>` ·
    `storydump resolve <story> retry|posted|cancel [--not-posted]` ·
-   `storydump pause` / `storydump resume` · `storydump sync <source_id>`. A
+   `storydump pause` / `storydump resume` · `storydump sync <source_id>` ·
+   `storydump schedule <item> --account <handle|id> --at 'YYYY-MM-DD HH:MM'
+   [--override-locks]` (the time is the account's own zone, else the
+   workspace's) · `storydump reschedule <story> --at 'YYYY-MM-DD HH:MM'`. A
    refusal is an answer, not a failure: the reason's sentence, the fixing
    verb, exit 2. The Telegram adapter's words never appear in a terminal.
 6. The environment: `storydump health` (the API's three health surfaces,
