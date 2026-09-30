@@ -330,6 +330,25 @@ def render_card(
     return payload
 
 
+async def _due_as_read(session, row: dict) -> bool:
+    """Whether a planned story still holds the time the door read. Its time
+    moves in place until it is served (`reschedule_item`), and the door read
+    takes no lock, so the row is locked here and its time compared: a
+    reschedule that got the row first moved it off the instant the sweep is
+    serving, and a sweep that gets it first serves it and the reschedule is
+    refused. The miss leg makes the same check in its UPDATE."""
+    slot = (
+        await session.execute(
+            text(
+                "SELECT schedule_slot_at FROM post_intents"
+                " WHERE id = :id AND workspace_id = :ws FOR UPDATE"
+            ),
+            {"id": str(row["id"]), "ws": str(row["workspace_id"])},
+        )
+    ).scalar()
+    return slot == row["schedule_slot_at"]
+
+
 async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
     """`scheduled → prompt_pending` + one card per active push binding, in
     the CALLER's transaction — and the transition happens whether or not a
@@ -601,6 +620,8 @@ async def sweep_due_prompts(session, *, late_seconds: int, limit: int) -> dict:
     ):
         ws = str(row["workspace_id"])
         await claims.claim(ws)
+        if row["origin"] == "planned" and not await _due_as_read(session, row):
+            continue  # moved since the door read it: not due yet
         if ws not in bindings_by_workspace:
             bindings_by_workspace[ws] = await push_bindings(session, ws)
         await prompt_intent(
@@ -793,11 +814,13 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
                             " last_error = CAST(:e AS jsonb)"
                             " WHERE id = :id AND workspace_id = :ws"
                             "   AND state = 'scheduled' AND origin = 'planned'"
-                            "   AND NOT cancel_requested RETURNING id"
+                            "   AND NOT cancel_requested"
+                            "   AND schedule_slot_at = :slot RETURNING id"
                         ),
                         {
                             "id": str(row["id"]),
                             "ws": ws,
+                            "slot": row["schedule_slot_at"],
                             "e": json.dumps(
                                 {
                                     "v": 1,
@@ -809,7 +832,7 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
                     )
                 ).first()
                 if ended is None:
-                    continue  # served, flagged or ended since the door read it
+                    continue  # served, flagged, moved or ended since the door read it
                 if ws not in surfaces:
                     surfaces[ws] = await push_bindings(session, ws)
                 told = await say_not_served(

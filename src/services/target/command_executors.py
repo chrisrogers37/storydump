@@ -62,7 +62,6 @@ from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
 
 from src.config.defaults import DEFAULT_SKIP_TTL_DAYS
 from src.config.settings import settings
@@ -83,7 +82,6 @@ from src.services.target import (
     vocabulary,
     workspaces,
 )
-from src.services.target._dbapi import constraint_violated
 from src.services.target.oauth_states import issue_state
 from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.intent_ledger import IntentTransitionRefused
@@ -107,8 +105,9 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
     read `FOR UPDATE` (F2 (a), phase 1 of the 2026-09-09 tap plan): the lock
     is what makes the read the DECISION — two taps racing on one card queue
     here, and the second reads the first's committed state and answers with
-    it. Workspace-bound in the WHERE, not only by RLS."""
-    intent_id = _arg(command, "intent_id")
+    it. Workspace-bound in the WHERE, not only by RLS. A string that is not
+    an id is refused by name (`_id_arg`), never left to the driver."""
+    intent_id = _id_arg(command, "intent_id")
     row = await readers.row(
         session,
         "SELECT i.id, i.workspace_id, i.state, i.media_item_id, i.ig_account_id,"
@@ -765,8 +764,11 @@ async def cancel(session, command: Command) -> CommandResult:
             "illegal_transition", f"intent is already {intent['state']!r}"
         )
     await session.execute(
-        text("UPDATE post_intents SET cancel_requested = true WHERE id = :id"),
-        {"id": str(intent["id"])},
+        text(
+            "UPDATE post_intents SET cancel_requested = true"
+            " WHERE id = :id AND workspace_id = :ws"
+        ),
+        {"id": str(intent["id"]), "ws": command.workspace_id},
     )
     # The flag is not a state change, so the intent's audit trigger writes
     # nothing for it: the request is recorded here, naming the person.
@@ -788,7 +790,7 @@ async def cancel(session, command: Command) -> CommandResult:
 #: A planned story's time as the person gives it: a date and a clock time,
 #: seconds optional, and NO offset — the account's zone makes it an instant.
 #: Postgres would read an offset on a `timestamp` and silently drop it.
-_LOCAL_AT = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?")
+_LOCAL_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?")
 
 #: The account read's predicate, one spelling with the serve and miss doors'
 #: (pinned against their bodies by the gate).
@@ -797,13 +799,21 @@ _LIVE_ACCOUNT = (
 )
 
 
+#: `uq_intent_live_subject`'s predicate: one story per item and account
+#: while it is live. The INSERT names it as its conflict arbiter, so the
+#: database refuses the duplicate with no read before it.
+_LIVE_SUBJECT = "state NOT IN (" + ", ".join(f"'{s}'" for s in TERMINAL_STATES) + ")"
+
 #: The wall time :local_at in the zone :tz as an instant, NULL when the
 #: clocks skip it. Two readings are candidates: Postgres's own (a skipped
 #: time takes the offset before the jump, an ambiguous one the offset after
 #: it — its SECOND occurrence), and the reading with a day earlier's offset.
 #: The answer is the earliest candidate that reads back as the wall time: a
 #: skipped time has none, an ambiguous one is its first occurrence. The zone
-#: is the database's reading, as the clock's (`fn_next_slot`) is.
+#: is the database's reading; unlike the clock, which reads a zone through
+#: `fn_safe_tz`, a stored zone the tzdata has since withdrawn fails the
+#: request here (an error, not a refusal) rather than being read as UTC — a
+#: planned time is never guessed.
 _INSTANT = (
     "SELECT min(v.at) FILTER (WHERE v.at AT TIME ZONE p.z = p.l) AS at,"
     "       now() AS now,"
@@ -958,29 +968,47 @@ async def schedule_item(session, command: Command) -> CommandResult:
             + ("" if blockers else " — override_locks schedules it anyway"),
             facts={"in_the_way": in_the_way, "overridable": not blockers},
         )
-    try:
-        born = await readers.row(
+    born = await readers.row(
+        session,
+        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, state, origin,"
+        " scheduled_by_user_id)"
+        " VALUES (:ws, :acct, :media, :ref, 'manual', :at, 'scheduled',"
+        "         'planned', :by)"
+        f" ON CONFLICT (workspace_id, media_item_id, ig_account_id) WHERE {_LIVE_SUBJECT}"
+        " DO NOTHING RETURNING id, workspace_id",
+        ws=command.workspace_id,
+        acct=account_id,
+        media=media_id,
+        ref=account["provider_account_ref"],
+        at=at,
+        by=command.actor_user_id,
+    )
+    if born is None:
+        # The same item already waits on this account; the database said so,
+        # and the story in the way is named so a person can find it.
+        existing = await readers.row(
             session,
-            "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-            " provider_account_ref, approval_mode, schedule_slot_at, state, origin,"
-            " scheduled_by_user_id)"
-            " VALUES (:ws, :acct, :media, :ref, 'manual', :at, 'scheduled',"
-            "         'planned', :by)"
-            " RETURNING id, workspace_id",
+            "SELECT id, state, origin FROM post_intents"
+            " WHERE workspace_id = :ws AND media_item_id = :media"
+            f"   AND ig_account_id = :acct AND {_LIVE_SUBJECT}",
             ws=command.workspace_id,
-            acct=account_id,
             media=media_id,
-            ref=account["provider_account_ref"],
-            at=at,
-            by=command.actor_user_id,
+            acct=account_id,
         )
-    except DBAPIError as exc:
-        if constraint_violated(exc, "uq_intent_live_subject"):
-            raise CommandRefused(
-                "illegal_transition",
-                f"item {media_id} is already waiting to post on account {account_id}",
-            ) from exc
-        raise
+        raise CommandRefused(
+            "illegal_transition",
+            f"item {media_id} is already waiting to post on account {account_id}",
+            facts={
+                "existing": {
+                    "intent_id": str(existing["id"]),
+                    "state": existing["state"],
+                    "origin": existing["origin"],
+                }
+            }
+            if existing
+            else {},
+        )
     detail: dict[str, Any] = {
         "event": "scheduled",
         "at": at.isoformat(),
@@ -1010,11 +1038,7 @@ async def reschedule_item(session, command: Command) -> CommandResult:
     nothing else about it can change here — a different item or account is
     a cancel and a new schedule. The row is read under its lock, so that
     read decides, as it does for every lever on a story."""
-    _id_arg(command, "intent_id")  # a malformed id is the caller's, not a 500
     intent = await _intent_row(session, command)
-    local_at = _local_at(command)
-    tz = _tz(intent)
-    at = await _planned_instant(session, local_at=local_at, tz=tz)
     if intent["origin"] != "planned" or intent["state"] != "scheduled":
         raise CommandRefused(
             "illegal_transition",
@@ -1022,6 +1046,9 @@ async def reschedule_item(session, command: Command) -> CommandResult:
             f" (this one is {intent['origin']}, {intent['state']})",
         )
     _refuse_if_cancelling(intent)
+    local_at = _local_at(command)
+    tz = _tz(intent)
+    at = await _planned_instant(session, local_at=local_at, tz=tz)
     await session.execute(
         text(
             "UPDATE post_intents SET schedule_slot_at = :at"

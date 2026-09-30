@@ -180,9 +180,13 @@ async def transition(session, intent_id: str, to_state: str) -> None:
 async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
     """What a card in any state past `awaiting_approval` says about itself:
     the state, who last moved it and when — the newest `audit_events` row for
-    the intent (`ix_audit_entity`, bound on `workspace_id`), or the row's own
-    `entered_state_at` when no audit row exists (a clock or reaper move records
-    `actor_user_id` NULL). Phase 1 of the 2026-09-09 tap plan, step 6."""
+    the intent that MOVED it (`ix_audit_entity`, bound on `workspace_id`), or
+    the row's own `entered_state_at` when no audit row exists (a clock or
+    reaper move records `actor_user_id` NULL). A row that records something
+    else about the story — a cancel request, a new time, a CLI admission, a
+    cap deferral or a publish wait, whose from and to states are equal or
+    both NULL — moved nothing, so it never names who did. Phase 1 of the 2026-09-09 tap plan,
+    step 6."""
     row = (
         (
             await session.execute(
@@ -194,6 +198,7 @@ async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
                     "    SELECT actor_user_id, created_at FROM audit_events e"
                     "     WHERE e.workspace_id = i.workspace_id"
                     "       AND e.entity_kind = 'post_intent' AND e.entity_id = i.id"
+                    "       AND e.from_state IS DISTINCT FROM e.to_state"
                     "     ORDER BY e.id DESC LIMIT 1) a ON true"
                     " WHERE i.id = :i AND i.workspace_id = :ws"
                 ),
