@@ -3200,12 +3200,13 @@ class TestTheReapersCancelLeg:
 
 
 class TestEveryLegRunsInTheFinalBody:
-    """087 redefines `fn_reaper_sweep` on 086's body, so one file carries every
-    leg: 076's six, 086's deadline leg (#1429) and 087's cancel leg (#1235).
-    One sweep, as the worker runs it, over a world holding one row for each
-    leg to take, and one test per leg reading its row: a body that dropped a
-    leg fails by the leg's name (`tests/mutations/content_schedule_01b.sh` removes
-    each in turn)."""
+    """The stream's last definition of `fn_reaper_sweep` carries every leg: 089
+    redefines it on 087's body (#1413), so one file holds 076's six, 086's
+    deadline leg (#1429), 087's cancel leg (#1235) and 089's cadence-only slot
+    expiry. One sweep, as the worker runs it, over a world holding one row for
+    each leg to take, and one test per leg reading its row: a body that dropped
+    a leg fails by the leg's name (`tests/mutations/content_schedule_01b.sh`
+    removes each in turn from the final body)."""
 
     @pytest.fixture(scope="class")
     def swept(self, pipe_db):
