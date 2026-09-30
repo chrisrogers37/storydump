@@ -21,8 +21,9 @@ adapter reads the current state back and shows it, and nothing was acted on.
 Every intent edge's side effects are the `02` §4 matrix rows, verbatim:
 
 - `awaiting_approval → posted` (`mark_posted`, the manual-mode path): same
-  transaction sets `published_via='manual'`, debits the cap
-  (`cap_consumed_on`), `times_posted`++, the account-scoped recent lock,
+  transaction sets `published_via='manual'`, stamps the day (`cap_consumed_on`)
+  and, for a cadence story, debits it (`publish_cap.flip_to_posted_by_hand`),
+  `times_posted`++, the account-scoped recent lock,
   `ig_accounts.last_posted_at`. Mirrors `publish_pipeline._confirm`'s
   post-publish effects deliberately — one shape, two entry points.
 - `awaiting_approval → rejected`: terminal; upserts a workspace-scoped
@@ -527,47 +528,24 @@ async def reject(session, command: Command) -> CommandResult:
 
 async def mark_posted(session, command: Command) -> CommandResult:
     """The manual-mode path (`06` §3): the human posted by hand and taps
-    Posted. The debit is unconditional — the story is already on Instagram,
-    so refusing to record it at the cap would misstate the day, which is the
-    over-posting direction R1 exists to avoid; `cap_at_write` freezes at the
-    day's first debit exactly as the API path's does."""
+    Posted. The flip and the day's debit are the cap ledger's one statement
+    (`publish_cap.flip_to_posted_by_hand`)."""
     intent = await _intent_row(session, command)
     _refuse_if_cancelling(intent)
     settled = await _settle(session, intent, command)
     if settled is not None:
         return settled
-    row = (
-        await session.execute(
-            text(
-                "WITH debit AS ("
-                "  INSERT INTO daily_post_counts AS d"
-                "    (workspace_id, ig_account_id, local_date, count, cap_at_write)"
-                "  VALUES (:ws, :acct,"
-                "          (now() AT TIME ZONE fn_safe_tz(:tz))::date, 1, :cap)"
-                "  ON CONFLICT (workspace_id, ig_account_id, local_date)"
-                "    DO UPDATE SET count = d.count + 1"
-                "  RETURNING local_date"
-                "), flip AS ("
-                "  UPDATE post_intents"
-                "     SET state = 'posted', published_via = 'manual',"
-                "         cap_consumed_on = (SELECT local_date FROM debit)"
-                "   WHERE id = :intent AND state = 'awaiting_approval'"
-                "  RETURNING id"
-                ") SELECT (SELECT count(*) FROM flip) AS flipped"
-            ),
-            {
-                "ws": command.workspace_id,
-                "acct": str(intent["ig_account_id"]),
-                "tz": _tz(intent),
-                "cap": int(intent["eff_ppd"]),
-                "intent": str(intent["id"]),
-            },
-        )
-    ).one()
-    if int(row.flipped) != 1:
+    posted = await publish_cap.flip_to_posted_by_hand(
+        session,
+        intent_id=str(intent["id"]),
+        workspace_id=command.workspace_id,
+        ig_account_id=str(intent["ig_account_id"]),
+        tz=_tz(intent),
+        effective_cap=int(intent["eff_ppd"]),
+    )
+    if not posted:
         # Not awaiting approval any more: render the current state, act on
-        # nothing (R6). The debit above rolls back with the caller's
-        # transaction, because the adapter maps this refusal to a rollback.
+        # nothing (R6). The flip matched no row, so nothing was debited.
         state = await intent_ledger.current_state(session, str(intent["id"]))
         raise CommandRefused(
             "illegal_transition", f"intent is {state!r}, not awaiting_approval"

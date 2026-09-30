@@ -1,5 +1,5 @@
-"""L.5 — the §4 cap ledger: the atomic flip, the refund, and the two resolve
-edges (#862, `02` §4).
+"""L.5 — the §4 cap ledger: the atomic flip, the manual post, the refund, and
+the two resolve edges (#862, `02` §4).
 
 The cap-ledger core, separate from the pipeline body because it is what the
 product depends on: **zero over-cap** — posting more than Meta allows gets the
@@ -38,6 +38,26 @@ mid-day cap change must not make a later refund arithmetic-inconsistent
 (`04` §L.2, `02` §6). The refund always targets the RECORDED debit day
 (`cap_consumed_on`), so a tz change or midnight crossing between debit and
 refund cannot touch the wrong bucket.
+
+## Only the cadence spends the cap
+
+The cap is the cadence's own (`daily_post_counts`, "OUR product cadence cap —
+never Meta's", `055`). A story a person planned for a time of their choosing
+(`origin = 'planned'`, 088) sits outside it (content schedule F8 (a)): it
+neither spends the day nor waits on a spent one, so the day's cadence is what
+it would have been without it. One predicate says which stories spend the cap,
+:data:`_SPENDS_CAP_SQL`, and every write to a bucket asks it: the flip's debit,
+the manual post's (:func:`flip_to_posted_by_hand`) and the one decrement both
+refund legs share (:data:`_RETURN_DEBIT`). Those writes live in this module,
+because a debit and a refund keyed on different answers would drift the day's
+count. `tests/src/services/target/test_publish_cap.py` fails on a new SQL string
+literal under `src/` that writes the table by its bare name; it does not see ORM
+or Core writes, a built or schema-qualified name, or a write outside `src/`. A
+story outside the cap still carries its day in `cap_consumed_on`, stamped
+without a debit, since `publishing` and a manual `posted` require the column
+(`ck_publishing_debited`, `ck_posted_complete`): the column says the story was
+admitted on that day, not that a bucket was touched. Key 4, the cancel honour
+and Meta's own limit hold it like any other story.
 """
 
 from __future__ import annotations
@@ -55,6 +75,20 @@ from src.services.target._dbapi import driver_candidates
 #: already publishing/ambiguous in some workspace"; matched by name so an
 #: unrelated unique violation is never swallowed as a defer.
 _PUBLISH_EXCLUSIVE = "uq_publish_exclusive"
+
+#: Which stories spend the account's daily cap (module docstring). Unaliased:
+#: splice it only where `post_intents` is the one table in scope.
+_SPENDS_CAP_SQL = "origin = 'cadence'"
+
+#: The one decrement both refund legs share (module docstring): the recorded
+#: day's bucket, and none for a story that never took one.
+_RETURN_DEBIT = (
+    "UPDATE daily_post_counts SET count = count - 1"
+    " WHERE (workspace_id, ig_account_id, local_date) ="
+    "       (:ws, :acct, (SELECT cap_consumed_on FROM post_intents"
+    "                      WHERE id = :intent AND " + _SPENDS_CAP_SQL + "))"
+    "   AND count > 0"
+)
 
 
 class FlipOutcome(enum.Enum):
@@ -113,6 +147,10 @@ async def flip_to_publishing(
     keeps `ck_publishing_debited` true on re-entry. The flip's own WHERE
     refuses a `cancel_requested` row, closing the window between the
     pipeline's read and its flip.
+
+    A story outside the cap (:data:`_SPENDS_CAP_SQL`) takes *local_date*
+    without a debit and answers `(0,1,1)`; with no debit guarding it, the
+    flip's own WHERE is all that refuses its cancel.
     """
     try:
         # In a SAVEPOINT: key 4's refusal (`uq_publish_exclusive`, a sibling
@@ -127,13 +165,16 @@ async def flip_to_publishing(
                 await session.execute(
                     text(
                         "WITH me AS ("
-                        "  SELECT cap_consumed_on, cancel_requested FROM post_intents"
+                        "  SELECT cap_consumed_on, cancel_requested,"
+                        "         " + _SPENDS_CAP_SQL + " AS spends_cap"
+                        "    FROM post_intents"
                         "   WHERE id = :intent AND state = 'approved'"
                         "), debit AS ("
                         "  INSERT INTO daily_post_counts AS d"
                         "    (workspace_id, ig_account_id, local_date, count, cap_at_write)"
                         "  SELECT :ws, :acct, :local_date, 1, :cap FROM me"
                         "   WHERE me.cap_consumed_on IS NULL AND NOT me.cancel_requested"
+                        "     AND me.spends_cap"
                         "  ON CONFLICT (workspace_id, ig_account_id, local_date)"
                         "    DO UPDATE SET count = d.count + 1 WHERE d.count < d.cap_at_write"
                         "  RETURNING local_date"
@@ -141,11 +182,12 @@ async def flip_to_publishing(
                         "  UPDATE post_intents p"
                         "     SET state = 'publishing',"
                         "         cap_consumed_on = COALESCE(p.cap_consumed_on,"
-                        "                                    (SELECT local_date FROM debit))"
+                        "                                    CAST(:local_date AS date))"
                         "   WHERE p.id = :intent AND p.state = 'approved'"
                         "     AND NOT p.cancel_requested"
                         "     AND (p.cap_consumed_on IS NOT NULL"
-                        "          OR EXISTS (SELECT 1 FROM debit))"
+                        "          OR EXISTS (SELECT 1 FROM debit)"
+                        "          OR NOT (SELECT spends_cap FROM me))"
                         "  RETURNING id"
                         ") SELECT (SELECT count(*) FROM debit) AS debited,"
                         "         (SELECT count(*) FROM flip)  AS flipped,"
@@ -171,7 +213,8 @@ async def flip_to_publishing(
     debited, flipped = int(row.debited), int(row.flipped)
     was_approved = int(row.was_approved)
     if flipped == 1 and debited in (0, 1):
-        # (1,1): a fresh debit; (0,1): re-entry on the debit the story carries.
+        # (1,1): a fresh debit; (0,1): re-entry on the debit the story
+        # carries, or a story outside the cap on its stamped day.
         return FlipOutcome.PROCEED
     if flipped == 0 and debited == 0:
         if was_approved == 0:
@@ -189,6 +232,54 @@ async def flip_to_publishing(
     )
 
 
+async def flip_to_posted_by_hand(
+    session,
+    *,
+    intent_id: str,
+    workspace_id: str,
+    ig_account_id: str,
+    tz: str,
+    effective_cap: int,
+) -> bool:
+    """`awaiting_approval → posted` by hand (`06` §3, the manual path's Posted
+    tap) and the day's debit, in ONE statement. The debit reads the flip's
+    row, so it lands only on a flipped story and in the bucket of the day the
+    story is stamped with. For a story that spends the cap it is
+    unconditional: the story is already on Instagram, so refusing to record it
+    would misstate the day, the over-posting direction R1 exists to avoid, and
+    `cap_at_write` freezes at the day's first debit as the flip's does. Either
+    way the row carries its account-local day (`ck_posted_complete`). Returns
+    False when the row was not awaiting approval."""
+    row = (
+        await session.execute(
+            text(
+                "WITH flip AS ("
+                "  UPDATE post_intents"
+                "     SET state = 'posted', published_via = 'manual',"
+                "         cap_consumed_on = (now() AT TIME ZONE fn_safe_tz(:tz))::date"
+                "   WHERE id = :intent AND state = 'awaiting_approval'"
+                "  RETURNING cap_consumed_on, " + _SPENDS_CAP_SQL + " AS spends_cap"
+                "), debit AS ("
+                "  INSERT INTO daily_post_counts AS d"
+                "    (workspace_id, ig_account_id, local_date, count, cap_at_write)"
+                "  SELECT :ws, :acct, flip.cap_consumed_on, 1, :cap FROM flip"
+                "   WHERE flip.spends_cap"
+                "  ON CONFLICT (workspace_id, ig_account_id, local_date)"
+                "    DO UPDATE SET count = d.count + 1"
+                ") SELECT (SELECT count(*) FROM flip) AS flipped"
+            ),
+            {
+                "ws": workspace_id,
+                "acct": ig_account_id,
+                "tz": tz,
+                "cap": effective_cap,
+                "intent": intent_id,
+            },
+        )
+    ).one()
+    return int(row.flipped) == 1
+
+
 async def refund_cap(
     session, *, intent_id: str, workspace_id: str, ig_account_id: str
 ) -> None:
@@ -200,13 +291,7 @@ async def refund_cap(
     refund the wrong bucket; `AND count > 0` keeps `ck_dpc_nonneg`.
     """
     await session.execute(
-        text(
-            "UPDATE daily_post_counts SET count = count - 1"
-            " WHERE (workspace_id, ig_account_id, local_date) ="
-            "       (:ws, :acct, (SELECT cap_consumed_on FROM post_intents"
-            "                      WHERE id = :intent))"
-            "   AND count > 0"
-        ),
+        text(_RETURN_DEBIT),
         {"ws": workspace_id, "acct": ig_account_id, "intent": intent_id},
     )
     await session.execute(
@@ -235,13 +320,7 @@ async def resolve_retry(
     import json
 
     await session.execute(
-        text(
-            "UPDATE daily_post_counts SET count = count - 1"
-            " WHERE (workspace_id, ig_account_id, local_date) ="
-            "       (:ws, :acct, (SELECT cap_consumed_on FROM post_intents"
-            "                      WHERE id = :intent))"
-            "   AND count > 0"
-        ),
+        text(_RETURN_DEBIT),
         {"ws": workspace_id, "acct": ig_account_id, "intent": intent_id},
     )
     flipped = (
