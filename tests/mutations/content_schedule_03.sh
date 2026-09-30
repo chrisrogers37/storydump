@@ -63,8 +63,9 @@ MANIFEST=scripts/advertised_ddl_manifest.json
 G=tests/scripts/test_planned_serve_gate.py
 C=tests/scripts/test_scheduler_clock_gate.py
 # An interrupted check must not leave a mutant behind, least of all a §32 edit with a manifest
-# re-hashed to agree with it: every file a check mutates is restored from the committed tree.
-trap 'cd "$ROOT" && git checkout HEAD -- "$DOC" "$MANIFEST" src/services/target/prompts.py src/worker.py src/services/target/provisioning.py src/services/target/work_loop.py scripts/migrations/089_planned_serve_and_misses.sql src/models/target/intent_ledger.py' EXIT INT TERM
+# re-hashed to agree with it: every file a check mutates is restored from the committed tree. Not
+# under DRY=1, which mutates nothing: there the restore would only discard uncommitted work.
+[ -n "${DRY:-}" ] || trap 'cd "$ROOT" && git checkout HEAD -- "$DOC" "$MANIFEST" src/services/target/prompts.py src/worker.py src/services/target/provisioning.py src/services/target/work_loop.py scripts/migrations/089_planned_serve_and_misses.sql src/models/target/intent_ledger.py' EXIT INT TERM
 
 # A §32 mutation changes the block's sha256, and the manifest ratchet then refuses to build the
 # stream ("1 unclassified, 1 orphaned"): every gate would ERROR in its fixture instead of the named
@@ -124,6 +125,7 @@ check_doc "a hold lock is not a miss" "                                   AND l.
 check_doc "a removed account is not a miss" "                   WHEN a.state IS NULL OR a.state NOT IN ('active', 'reauth_required')" "                   WHEN a.state IS NULL" "$G -k 'account-disabled'"
 check_doc "the account outranks the lock" "                   WHEN EXISTS (SELECT 1 FROM post_locks l
                                  WHERE l.workspace_id = i.workspace_id
+                                   AND l.ig_account_id IS NULL
                                    AND l.media_item_id = i.media_item_id
                                    AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')
                                    AND (l.expires_at IS NULL OR l.expires_at > now()))
@@ -133,6 +135,7 @@ check_doc "the account outranks the lock" "                   WHEN EXISTS (SELEC
                      THEN 'account_removed'
                    WHEN EXISTS (SELECT 1 FROM post_locks l
                                  WHERE l.workspace_id = i.workspace_id
+                                   AND l.ig_account_id IS NULL
                                    AND l.media_item_id = i.media_item_id
                                    AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')
                                    AND (l.expires_at IS NULL OR l.expires_at > now()))
@@ -150,22 +153,24 @@ check_doc "the unconditional slot key survives" "DROP INDEX uq_intent_slot;
 
 ALTER INDEX uq_intent_slot_cadence RENAME TO uq_intent_slot;
 
-CREATE OR REPLACE FUNCTION fn_reaper_sweep" "CREATE OR REPLACE FUNCTION fn_reaper_sweep" "$C -k 'may_share_a_cadence_instant'"
+CREATE OR REPLACE FUNCTION fn_reaper_sweep" "CREATE OR REPLACE FUNCTION fn_reaper_sweep" "$C -k 'holds_on_the_cadence_key_alone'"
 # The worker's legs, in Python.
-check "the miss notice reaches nobody" src/services/target/prompts.py "    surface = await push_bindings(session, workspace_id)" "    surface = []" "$G -k 'media-removed'"
+check "the miss notice reaches nobody" src/services/target/prompts.py "                    surfaces[ws] = await push_bindings(session, ws)" "                    surfaces[ws] = []" "$G -k 'media-removed'"
 check "a miss nobody heard is counted heard" src/services/target/prompts.py '            counts["unheard"] += 1' '            pass' "$G -k 'nobody_can_hear'"
 check "the card forgets its scheduler" src/services/target/prompts.py "    if planned:
         slot_line += f\"\\n{planned}\"" "    if False:
         slot_line += f\"\\n{planned}\"" "$G -k 'names_who_scheduled_it'"
-check "every planned card says served late" src/services/target/prompts.py "    if (now or datetime.now(timezone.utc)) - slot >= SERVED_LATE_AFTER:" "    if True:" "$G -k 'names_who_scheduled_it'"
-check "no planned card ever says served late" src/services/target/prompts.py "    if (now or datetime.now(timezone.utc)) - slot >= SERVED_LATE_AFTER:" "    if False:" "$G -k 'waits_out_the_pause'"
-check "the send-time card forgets its scheduler" src/services/target/prompts.py "    return _card_for(await _with_scheduler(session, row, {}), intent_id=intent_id)" "    return _card_for(row, intent_id=intent_id)" "$G -k 'rendered_again_at_send_time'"
-check "the sweeper skips the miss leg" src/worker.py "                        misses = await prompts_mod.sweep_planned_misses(" "                        misses = {\"missed\": 0, \"unheard\": 0} or prompts_mod.sweep_planned_misses(" "tests/src/test_worker.py -k 'PromptSweeperConsumesTheSweep'"
+check "every planned card says served late" src/services/target/prompts.py "    if (now or utcnow()) - slot >= SERVED_LATE_AFTER:" "    if True:" "$G -k 'names_who_scheduled_it'"
+check "no planned card ever says served late" src/services/target/prompts.py "    if (now or utcnow()) - slot >= SERVED_LATE_AFTER:" "    if False:" "$G -k 'waits_out_the_pause'"
+check "the send-time card forgets its scheduler" src/services/target/prompts.py "    return _card_for(await _with_scheduler(session, row), intent_id=intent_id)" "    return _card_for(row, intent_id=intent_id)" "$G -k 'rendered_again_at_send_time'"
+check "the sweeper skips the miss leg" src/worker.py "                    misses = await prompts_mod.sweep_planned_misses(" "                    misses = {\"missed\": 0, \"unheard\": 0} or prompts_mod.sweep_planned_misses(" "tests/src/test_worker.py -k 'PromptSweeperConsumesTheSweep'"
 check "the removal tells nobody" src/services/target/provisioning.py "    if unserved:
-        await _say_removed_before_served(" "    if False:
-        await _say_removed_before_served(" "$G -k 'RemovingADestination'"
+        await prompts.say_removed_before_served(" "    if False:
+        await prompts.say_removed_before_served(" "$G -k 'RemovingADestination'"
 check "the removal tells about served stories too" src/services/target/provisioning.py '        if row["origin"] == "planned" and row["state"] == "scheduled"' '        if row["origin"] == "planned"' "$G -k 'RemovingADestination'"
 check "the late window is not the owner's hour" src/services/target/work_loop.py "    planned_late_seconds: int = 3600" "    planned_late_seconds: int = 900" "tests/src/test_worker.py -k 'late_window_is_the_hour'"
+# The removal's notice row is the miss door's, by a pin (a door cannot call the Python).
+check "the removal's notice row drifts from the door" src/services/target/prompts.py '    "  LEFT JOIN media_items m ON m.id = i.media_item_id"' '    "  JOIN media_items m ON m.id = i.media_item_id"' "tests/src/services/target/test_prompts.py -k 'notice_select'"
 # The file and the model are held to the stream. Parity compares uniqueness SEMANTICS, not index
 # names, so renaming the model's index would be an equivalent mutant; these mutate what it compares.
 check "the 089 file drifts from §32" scripts/migrations/089_planned_serve_and_misses.sql "LANGUAGE sql STABLE STRICT SECURITY DEFINER" "LANGUAGE sql STABLE SECURITY DEFINER" "tests/scripts/test_advertised_ddl.py -k 'wired_prefix_holds_against_the_real_stream'"

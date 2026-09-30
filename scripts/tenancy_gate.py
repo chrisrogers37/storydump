@@ -110,11 +110,6 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     # `expected_tenancy` and none of them is an index — so DROP INDEX is inert
     # here exactly as CREATE INDEX above already is.
     "DROP INDEX ",
-    # 089 (#1413) renames a partial unique index to the name of the key it
-    # replaces. Every ALTER INDEX form acts on an index alone, and an index is
-    # none of the four facts, so the kind is inert here exactly as CREATE and
-    # DROP INDEX above are.
-    "ALTER INDEX ",
     # 076 (the float, plan 03) replaces a door's body in place. A function
     # definition touches no table, policy or RLS bit — inert on the four facts
     # exactly as CREATE FUNCTION above; the `OR REPLACE` form is a new prefix,
@@ -409,6 +404,21 @@ def expected_tenancy(statements) -> dict:
             re.match(r"ALTER TABLE (?:public\.)?\w+ DROP CONSTRAINT \w+", stmt)
             or re.match(r"ALTER TABLE (?:public\.)?\w+ ADD CONSTRAINT \w+ CHECK", stmt)
         ):
+            continue
+
+        # ALTER INDEX is HANDLED, not allowlisted, because one spelling of it
+        # moves a table: for backward compatibility PostgreSQL also runs
+        # `ALTER INDEX … RENAME TO` on a TABLE and renames it (measured on 15:
+        # the relation renamed is relkind 'r'; every other ALTER INDEX form
+        # refuses a non-index). A table's name is the key every fact here is
+        # recorded under, so a rename through the index form is the reducing
+        # case `ALTER TABLE … RENAME TO` is. An ALTER INDEX naming no table
+        # this prefix created acts on an index, which is none of the four
+        # facts; one naming such a table falls through to the refusal below.
+        # 089 (#1413) is the first member: it renames a partial unique index
+        # to the name of the key it replaces.
+        m = re.match(r"ALTER INDEX (?:IF EXISTS )?(?:public\.)?(\w+) ", stmt)
+        if m and m.group(1) not in sig:
             continue
 
         # ALLOWLIST, not a denylist, and the direction is the whole point.

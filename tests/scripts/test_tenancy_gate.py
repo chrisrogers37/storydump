@@ -533,8 +533,10 @@ class TestDroppingAnIndexIsInert:
 class TestRenamingAnIndexIsInert:
     """089 (#1413) is the first migration to rename an index: the slot key's
     contract gives the cadence-only key the dropped key's name. An index is
-    none of the four facts, so ALTER INDEX is allowlisted beside CREATE and
-    DROP INDEX, and this is the control that proves the entry is reachable."""
+    none of the four facts, so an ALTER INDEX on one is inert. PostgreSQL also
+    renames a TABLE through `ALTER INDEX … RENAME TO`, and a table's name is
+    the key its facts are recorded under, so that spelling is refused like
+    `ALTER TABLE … RENAME TO`."""
 
     def test_alter_index_moves_no_fact(self):
         sig = expected_tenancy(
@@ -545,6 +547,15 @@ class TestRenamingAnIndexIsInert:
             ]
         )
         assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
+
+    def test_a_table_renamed_through_alter_index_is_refused(self):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(
+                [
+                    "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                    "ALTER INDEX t RENAME TO t_renamed",
+                ]
+            )
 
 
 class TestConstraintEditsAreBoundedTheSameWay:

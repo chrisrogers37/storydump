@@ -539,8 +539,8 @@ class TestTheDueDoorReadsTheCardSelect:
 
 
 class _SweepResult:
-    def __init__(self, rows):
-        self.rows = rows
+    def __init__(self, rows, first=None):
+        self.rows, self.first_row = rows, first
 
     def mappings(self):
         return self
@@ -548,16 +548,25 @@ class _SweepResult:
     def all(self):
         return self.rows
 
+    def first(self):
+        return self.first_row
+
+    def __iter__(self):
+        return iter(self.rows)
+
     def one(self):
         return ("", "system")  # the caller's scope, read by the first claim
 
 
 class _SweepSession:
-    """The prompt sweep's session double: the two doors answer, every
-    statement is recorded, a savepoint is offered and its rollback counted."""
+    """The prompt sweeper's session double: the three doors answer, the miss
+    leg's guarded UPDATE returns its id unless the intent is in *raced*,
+    every statement is recorded, a savepoint is offered and its rollback
+    counted."""
 
-    def __init__(self, *, due=(), pending=()):
-        self.due, self.pending = list(due), list(pending)
+    def __init__(self, *, due=(), pending=(), misses=(), raced=()):
+        self.due, self.pending, self.misses = list(due), list(pending), list(misses)
+        self.raced = set(raced)
         self.statements = []
         self.savepoints = self.rolled_back = 0
 
@@ -582,6 +591,10 @@ class _SweepSession:
             return _SweepResult(self.due)
         if "fn_prompts_pending" in sql:
             return _SweepResult(self.pending)
+        if "fn_planned_misses" in sql:
+            return _SweepResult(self.misses)
+        if sql.startswith("UPDATE post_intents") and params["id"] not in self.raced:
+            return _SweepResult([], first=(params["id"],))
         return _SweepResult([])
 
 
@@ -707,22 +720,23 @@ class TestThePlannedCard:
         )
 
 
-class TestTheMissNotice:
-    def _notice(self, **over):
-        kw = dict(
-            file_name="drop.jpg",
-            handle="brand",
-            slot=SLOT,
-            tz="America/New_York",
-            by="Dana",
-            reason="late",
-        )
-        kw.update(over)
-        return prompts.missed_notice(**kw)
+def _notice(**over):
+    kw = dict(
+        file_name="drop.jpg",
+        handle="brand",
+        slot=SLOT,
+        tz="America/New_York",
+        by="Dana",
+        reason="late",
+    )
+    kw.update(over)
+    return prompts.missed_notice(**kw)
 
+
+class TestTheMissNotice:
     @pytest.mark.parametrize("reason", sorted(prompts.MISS_REASONS))
     def test_each_reason_says_what_happened_and_that_nothing_was_posted(self, reason):
-        assert self._notice(reason=reason) == (
+        assert _notice(reason=reason) == (
             "🗓 Not served: drop.jpg for @brand, scheduled for 2026-10-01 14:00"
             f" America/New_York by Dana: {prompts.MISS_REASONS[reason]}."
             " Nothing was posted."
@@ -737,62 +751,36 @@ class TestTheMissNotice:
 
         ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
         body = ddl.split("CREATE FUNCTION fn_planned_misses(", 1)[1].split("$$;", 1)[0]
-        returned = set(re.findall(r"THEN '([a-z_]+)'", body)) | set(
-            re.findall(r"ELSE '([a-z_]+)'", body)
-        )
+        returned = set(re.findall(r"(?:THEN|ELSE) '([a-z_]+)'", body))
         assert returned == set(prompts.MISS_REASONS), returned
 
     def test_no_handle_no_name_and_a_long_file_name_still_make_a_notice(self):
-        said = self._notice(file_name="x" * 5000, handle=None, by=None)
-        assert said.startswith("🗓 Not served: " + "x" * 200 + " for one of")
+        said = _notice(file_name="x" * 5000, handle=None, by=None)
+        bound = "x" * prompts.FILE_NAME_BOUND
+        assert said.startswith(f"🗓 Not served: {bound} for one of this workspace's")
         assert "by " not in said and len(said) < 400
 
+    def test_the_miss_door_carries_the_notice_select_verbatim(self):
+        """`_NOTICE_SELECT` is the one spelling of the row a notice is written
+        from: the removal reads it directly, and `fn_planned_misses` spells the
+        same columns and joins (a door cannot call the Python). So its select
+        list and its joins are pinned to the door's body verbatim, and the miss
+        leg's alias list to every column: a column added for the notice cannot
+        reach the removal and not the miss."""
+        import inspect
 
-class _MissSession:
-    """The miss leg's session double: the door answers with *rows*; each
-    guarded UPDATE answers with a returned id unless its intent is in
-    *raced*; every statement is recorded, and savepoints are counted."""
+        from scripts.migration_runner import MIGRATIONS_DIR
 
-    def __init__(self, rows, raced=()):
-        self.rows, self.raced = list(rows), set(raced)
-        self.statements = []
-        self.savepoints = 0
-
-    def begin_nested(self):
-        from contextlib import asynccontextmanager
-
-        @asynccontextmanager
-        async def _sp():
-            self.savepoints += 1
-            yield self
-
-        return _sp()
-
-    async def execute(self, statement, params=None):
-        sql = str(statement)
-        self.statements.append((sql, params))
-        rows, first = [], None
-        if "fn_planned_misses" in sql:
-            rows = self.rows
-        elif sql.startswith("UPDATE post_intents") and params["id"] not in self.raced:
-            first = (params["id"],)
-        elif "current_setting('app.tenant_id'" in sql:
-            first = ("", "system")
-
-        class _R:
-            def mappings(self_inner):
-                return self_inner
-
-            def all(self_inner):
-                return rows
-
-            def first(self_inner):
-                return first
-
-            def one(self_inner):
-                return ("", "system")
-
-        return _R()
+        ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
+        body = ddl.split("CREATE FUNCTION fn_planned_misses(", 1)[1].split("$$;", 1)[0]
+        body = " ".join(body.split())
+        columns, joins = prompts._NOTICE_SELECT.split("FROM", 1)
+        assert " ".join(columns.split()) in body
+        assert " ".join(f"FROM{joins}".split()) in body
+        leg = inspect.getsource(prompts.sweep_planned_misses)
+        for column in columns.split("SELECT", 1)[1].split(","):
+            name = column.strip().split(".")[-1]
+            assert f"o_{name} AS {name}" in leg, f"the miss leg does not read {name}"
 
 
 def _miss_row(intent, ws, reason="late"):
@@ -812,33 +800,50 @@ class TestTheMissLeg:
     async def test_each_miss_is_ended_with_its_reason_and_told_in_its_savepoint(
         self, monkeypatch
     ):
-        from src.services.target import outbox
+        from src.services.target import identity, outbox
 
-        told = []
+        told, looked_up, named = [], [], []
 
-        async def say(session, row, *, reason, names):
-            told.append((row["id"], reason, session.savepoints))
-            return 1 if row["workspace_id"] == "ws-1" else outbox.UNDELIVERABLE
+        async def say(session, row, *, reason, surface, by):
+            told.append((row["id"], reason, session.savepoints, surface, by))
+            return 1 if surface else outbox.UNDELIVERABLE
+
+        async def bindings(session, workspace_id):
+            looked_up.append(workspace_id)
+            return ["b-1"] if workspace_id == "ws-1" else []
+
+        async def display_name_for(session, *, user_id):
+            named.append(user_id)
+            return "Dana"
 
         monkeypatch.setattr(prompts, "say_not_served", say)
-        session = _MissSession(
-            [
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(identity, "display_name_for", display_name_for)
+        session = _SweepSession(
+            misses=[
                 _miss_row("i-1", "ws-1", "item_locked"),
                 _miss_row("i-2", "ws-2", "paused"),
                 _miss_row("i-3", "ws-1", "late"),
+                _miss_row("i-4", "ws-1", "late"),
             ],
             raced={"i-3"},
         )
         counts = await prompts.sweep_planned_misses(session, limit=7, late_seconds=900)
-        assert counts == {"missed": 2, "unheard": 1}
-        assert told == [("i-1", "item_locked", 1), ("i-2", "paused", 3)], (
+        assert counts == {"missed": 3, "unheard": 1}
+        assert told == [
+            ("i-1", "item_locked", 1, ["b-1"], "Dana"),
+            ("i-4", "late", 3, ["b-1"], "Dana"),
+            ("i-2", "paused", 4, [], "Dana"),
+        ], (
             "told inside the savepoint that ended it; a row served or flagged"
             " since the door read it (i-3) is neither ended nor told"
         )
+        assert looked_up == ["ws-1", "ws-2"], "one surface lookup per workspace"
+        assert named == ["u-1"], "one name lookup per scheduler per sweep"
         door = next(p for s, p in session.statements if "fn_planned_misses" in s)
         assert door == {"lim": 7, "late": 900.0}
         updates = [(s, p) for s, p in session.statements if s.startswith("UPDATE")]
-        assert [p["id"] for _, p in updates] == ["i-1", "i-3", "i-2"]
+        assert [p["id"] for _, p in updates] == ["i-1", "i-3", "i-4", "i-2"]
         sql, params = updates[0]
         for guard in (
             "state = 'expired'",
@@ -864,18 +869,29 @@ class TestTheMissLeg:
     ):
         import logging
 
-        async def say(session, row, *, reason, names):
+        async def say(session, row, *, reason, surface, by):
             if row["id"] == "i-1":
                 raise RuntimeError("a zone, a lost binding")
             return 1
 
+        async def bindings(session, workspace_id):
+            return ["b-1"]
+
+        async def no_name(session, user_id, names=None):
+            return None
+
         monkeypatch.setattr(prompts, "say_not_served", say)
-        session = _MissSession([_miss_row("i-1", "ws-1"), _miss_row("i-2", "ws-1")])
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(prompts, "_scheduler_name", no_name)
+        session = _SweepSession(
+            misses=[_miss_row("i-1", "ws-1"), _miss_row("i-2", "ws-1")]
+        )
         with caplog.at_level(logging.ERROR):
             counts = await prompts.sweep_planned_misses(
                 session, limit=5, late_seconds=900
             )
         assert counts == {"missed": 1, "unheard": 0}
+        assert session.rolled_back == 1, "the faulty row's savepoint is undone"
         assert "planned-miss sweep: intent i-1 skipped" in caplog.text
 
 
@@ -883,10 +899,7 @@ class TestSayNotServed:
     async def test_it_writes_one_notice_per_binding_with_the_scheduler_named(
         self, monkeypatch
     ):
-        from src.services.target import identity, outbox
-
-        async def bindings(session, workspace_id):
-            return ["b-1", "b-2"]
+        from src.services.target import outbox
 
         written = []
 
@@ -894,48 +907,77 @@ class TestSayNotServed:
             written.append((workspace_id, list(bindings), text, intent_id))
             return len(bindings)
 
-        names = []
-
-        async def display_name_for(session, *, user_id):
-            names.append(user_id)
-            return "Dana"
-
-        monkeypatch.setattr(prompts, "push_bindings", bindings)
         monkeypatch.setattr(outbox, "fanout_notification", fanout)
-        monkeypatch.setattr(identity, "display_name_for", display_name_for)
-        cache: dict = {}
-        row = _miss_row("i-1", "ws-1")
-        assert await prompts.say_not_served(None, row, reason="late", names=cache) == 2
-        assert await prompts.say_not_served(None, row, reason="late", names=cache) == 2
-        assert names == ["u-1"], "one name lookup per scheduler per sweep"
-        ((ws, bound, said, intent), _) = written
-        assert (ws, bound, intent) == ("ws-1", ["b-1", "b-2"], "i-1")
-        assert said == prompts.missed_notice(
-            file_name="drop.jpg",
-            handle="brand",
-            slot=SLOT,
-            tz="America/New_York",
-            by="Dana",
+        got = await prompts.say_not_served(
+            None,
+            _miss_row("i-1", "ws-1"),
             reason="late",
+            surface=["b-1", "b-2"],
+            by="Dana",
         )
+        assert got == 2
+        assert written == [("ws-1", ["b-1", "b-2"], _notice(), "i-1")]
 
     async def test_no_binding_is_the_undeliverable_verdict_not_a_zero(
         self, monkeypatch
     ):
         from src.services.target import outbox
 
-        async def bindings(session, workspace_id):
-            return []
-
         async def fanout(*a, **k):  # pragma: no cover - must not run
             raise AssertionError("nothing to write to")
 
-        monkeypatch.setattr(prompts, "push_bindings", bindings)
         monkeypatch.setattr(outbox, "fanout_notification", fanout)
         got = await prompts.say_not_served(
-            None, _miss_row("i-1", "ws-1"), reason="late", names={}
+            None, _miss_row("i-1", "ws-1"), reason="late", surface=[], by=None
         )
         assert got == outbox.UNDELIVERABLE
+
+
+class TestSayRemovedBeforeServed:
+    async def test_it_reads_the_notice_rows_and_tells_each_once(self, monkeypatch):
+        """The removal's notice: the flagged stories read with `_NOTICE_SELECT`,
+        its one workspace's surface looked up once, each story told once with
+        the reason `account_removed` and its scheduler named."""
+        from src.services.target import identity
+
+        rows = [_miss_row("i-1", "ws-1"), _miss_row("i-2", "ws-1")]
+        session = _SweepSession()
+
+        async def execute(statement, params=None):
+            session.statements.append((str(statement), params))
+            return _SweepResult(rows)
+
+        session.execute = execute
+        told, looked_up, named = [], [], []
+
+        async def say(s, row, *, reason, surface, by):
+            told.append((row["id"], reason, surface, by))
+            return len(surface)
+
+        async def bindings(s, workspace_id):
+            looked_up.append(workspace_id)
+            return ["b-1"]
+
+        async def display_name_for(s, *, user_id):
+            named.append(user_id)
+            return "Dana"
+
+        monkeypatch.setattr(prompts, "say_not_served", say)
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(identity, "display_name_for", display_name_for)
+        await prompts.say_removed_before_served(
+            session, workspace_id="ws-1", intent_ids=["i-1", "i-2"]
+        )
+        ((sql, params),) = session.statements
+        assert sql.startswith(prompts._NOTICE_SELECT)
+        assert "i.workspace_id = :ws" in sql
+        assert "i.id = ANY(CAST(:ids AS uuid[]))" in sql
+        assert params == {"ws": "ws-1", "ids": ["i-1", "i-2"]}
+        assert told == [
+            ("i-1", "account_removed", ["b-1"], "Dana"),
+            ("i-2", "account_removed", ["b-1"], "Dana"),
+        ]
+        assert (looked_up, named) == (["ws-1"], ["u-1"])
 
 
 class TestTheServeLegNamesTheScheduler:

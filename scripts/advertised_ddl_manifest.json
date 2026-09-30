@@ -335,7 +335,7 @@
       "ordinal": 29
     },
     {
-      "sha256": "83068b3202a7c6de7360c7b6000adaca25404e90188cb2afecc2f8f2cb334c67",
+      "sha256": "6a790e2a66f5ccaec0d5da794341c25bc6e7a67fb2f2dab83d647dde62c1b7d0",
       "class": "normative",
       "label": "§32 planned stories are served on time or missed out loud (089, #1413) — the unconditional slot key dropped and the cadence-only key renamed to it (contract), fn_prompts_due re-created serving planned rows only while servable and in their late window and skipping every cancel-flagged row, fn_reaper_sweep replace whose slot expiry takes cadence rows only, and fn_planned_misses listing the planned rows that will not be served with their reason",
       "doc": "07-security-model.md",

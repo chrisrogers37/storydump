@@ -19,7 +19,9 @@
 -- cancel leg, 087, ends it `cancelled`), and serves a planned row only while it can be served —
 -- its media `available`, its account `active` or `reauth_required`, no live `reject`,
 -- `unsupported`, `hold` or `seasonal` lock on it (a `skip` or `recent` lock never blocks one; the
--- four blocking kinds are workspace-wide by `ck_locks_recent_scope`, so no account scope is read) —
+-- four blocking kinds are workspace-wide by `ck_locks_recent_scope`, and both doors' lock reads say
+-- `ig_account_id IS NULL`, which is what lets them use the workspace-scope index `uq_lock_ws_scope`
+-- instead of scanning every live lock) —
 -- and only within `p_late` of its time. It returns each row's origin and scheduler, which the card
 -- names. Its row type changes, so it is dropped and created again. `p_late` DEFAULTS TO NULL, and a
 -- NULL window serves no planned row: that is also what keeps the draining worker's one-argument
@@ -161,6 +163,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
               AND a.state IN ('active', 'reauth_required')
               AND NOT EXISTS (SELECT 1 FROM post_locks l
                                WHERE l.workspace_id = i.workspace_id
+                                 AND l.ig_account_id IS NULL
                                  AND l.media_item_id = i.media_item_id
                                  AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')
                                  AND (l.expires_at IS NULL OR l.expires_at > now()))))
@@ -188,6 +191,7 @@ LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, public
                    WHEN m.state = 'unsupported' THEN 'item_unsupported'
                    WHEN EXISTS (SELECT 1 FROM post_locks l
                                  WHERE l.workspace_id = i.workspace_id
+                                   AND l.ig_account_id IS NULL
                                    AND l.media_item_id = i.media_item_id
                                    AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')
                                    AND (l.expires_at IS NULL OR l.expires_at > now()))

@@ -2532,6 +2532,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
               AND a.state IN ('active', 'reauth_required')
               AND NOT EXISTS (SELECT 1 FROM post_locks l
                                WHERE l.workspace_id = i.workspace_id
+                                 AND l.ig_account_id IS NULL
                                  AND l.media_item_id = i.media_item_id
                                  AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')
                                  AND (l.expires_at IS NULL OR l.expires_at > now()))))
@@ -2559,6 +2560,7 @@ LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, public
                    WHEN m.state = 'unsupported' THEN 'item_unsupported'
                    WHEN EXISTS (SELECT 1 FROM post_locks l
                                  WHERE l.workspace_id = i.workspace_id
+                                   AND l.ig_account_id IS NULL
                                    AND l.media_item_id = i.media_item_id
                                    AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')
                                    AND (l.expires_at IS NULL OR l.expires_at > now()))

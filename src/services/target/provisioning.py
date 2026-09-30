@@ -849,7 +849,7 @@ async def disable_destination(
         if row["origin"] == "planned" and row["state"] == "scheduled"
     ]
     if unserved:
-        await _say_removed_before_served(
+        await prompts.say_removed_before_served(
             executor, workspace_id=str(workspace_id), intent_ids=unserved
         )
     # A grant issued BEFORE the removal must not land afterwards and revive the
@@ -863,34 +863,6 @@ async def disable_destination(
         "intents_flagged": flagged.rowcount,
         "states_retired": retired,
     }
-
-
-async def _say_removed_before_served(
-    executor, *, workspace_id: str, intent_ids: list[str]
-) -> None:
-    """Queue the `account_removed` notice for each planned story a removal
-    flagged before its time was served — `prompts.say_not_served`, the notice
-    the miss leg sends, in the removal's own transaction."""
-    rows = await readers.rows(
-        executor,
-        "SELECT i.id, i.workspace_id, i.schedule_slot_at, i.scheduled_by_user_id,"
-        "       m.file_name, a.handle, w.tz"
-        "  FROM post_intents i"
-        "  JOIN workspaces w ON w.id = i.workspace_id"
-        "  LEFT JOIN media_items m ON m.id = i.media_item_id"
-        "   AND m.workspace_id = i.workspace_id"
-        "  LEFT JOIN ig_accounts a ON a.id = i.ig_account_id"
-        "   AND a.workspace_id = i.workspace_id"
-        " WHERE i.workspace_id = :ws AND i.id = ANY(CAST(:ids AS uuid[]))"
-        " ORDER BY i.schedule_slot_at",
-        ws=workspace_id,
-        ids=intent_ids,
-    )
-    names: dict[str, str] = {}
-    for row in rows:
-        await prompts.say_not_served(
-            executor, row, reason="account_removed", names=names
-        )
 
 
 async def pause_media_source(session, *, workspace_id: str, source_id: str) -> bool:

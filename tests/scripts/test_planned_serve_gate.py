@@ -25,14 +25,14 @@ asserts on its own rows, since the sweeps are estate-wide by design.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
-import json
+import re
 import uuid
 
 import psycopg2
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.services.target import prompts, provisioning, unit_of_work
 from src.services.target.work_loop import WorkerConfig
@@ -41,8 +41,10 @@ from tests.scripts.conftest import (
     as_user,
     in_tenant,
     ingress_engine,
+    reap_as_worker,
     replay_advertised_stream,
     set_test_passwords,
+    txn,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -63,62 +65,73 @@ def world(admin_conn, owner_actor):
         gen.close()
 
 
-def _exec(world, sql, params=None, fetch=False):
+@contextlib.contextmanager
+def _owner_cursor(world):
+    """The owner's cursor under the `migration` actor (the audit triggers
+    refuse a state change with no actor), committed when the block ends."""
     conn = psycopg2.connect(world["owner"])
-    conn.autocommit = True
     try:
-        with conn.cursor() as cur:
+        with conn, conn.cursor() as cur:
             cur.execute("SET app.actor_kind = 'migration'")
-            cur.execute(sql, params)
-            if fetch:
-                return cur.fetchall()
-            return cur.rowcount
+            yield cur
     finally:
         conn.close()
 
 
-def _workspace(world, name, *, bound=True, paused=False, tz="America/New_York"):
+def _exec(world, sql, params=None, fetch=False):
+    with _owner_cursor(world) as cur:
+        cur.execute(sql, params)
+        return cur.fetchall() if fetch else cur.rowcount
+
+
+def _checked(world, constraint):
+    """The values a `col IN (...)` CHECK admits, read from the replayed
+    schema, so a test covers a value the day the schema allows it."""
+    ((definition,),) = _exec(
+        world,
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = %s",
+        (constraint,),
+        fetch=True,
+    )
+    return tuple(sorted(re.findall(r"'([a-z_]+)'", definition)))
+
+
+def _workspace(world, name, *, bound=True, paused=False):
     """A workspace, its owner (who has a Telegram display name, the name a
     shared chat sees), and one active push binding unless *bound* is False."""
-    conn = psycopg2.connect(world["owner"])
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SET app.actor_kind = 'migration'")
-            cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
-            user = cur.fetchone()[0]
+    with _owner_cursor(world) as cur:
+        cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
+        user = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO user_identities (user_id, provider, external_id,"
+            " display_name) VALUES (%s, 'telegram', %s, %s)",
+            (user, f"tg-{uuid.uuid4()}", f"Dana {name}"),
+        )
+        cur.execute(
+            "INSERT INTO workspaces (name, tz, is_paused)"
+            " VALUES (%s, 'America/New_York', %s) RETURNING id",
+            (name, paused),
+        )
+        ws = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO workspace_members (workspace_id, user_id, role)"
+            " VALUES (%s, %s, 'owner')",
+            (ws, user),
+        )
+        cur.execute(
+            "INSERT INTO media_sources (workspace_id, provider, config)"
+            " VALUES (%s, 'gdrive', '{\"v\": 1}') RETURNING id",
+            (ws,),
+        )
+        src = cur.fetchone()[0]
+        binding = None
+        if bound:
+            binding = str(uuid.uuid4())
             cur.execute(
-                "INSERT INTO user_identities (user_id, provider, external_id,"
-                " display_name) VALUES (%s, 'telegram', %s, %s)",
-                (user, f"tg-{uuid.uuid4()}", f"Dana {name}"),
+                "INSERT INTO channel_bindings (id, workspace_id, channel,"
+                " external_ref) VALUES (%s, %s, 'telegram_group', %s)",
+                (binding, ws, f"-100{uuid.uuid4().int % 10**9}"),
             )
-            cur.execute(
-                "INSERT INTO workspaces (name, tz, is_paused) VALUES (%s, %s, %s)"
-                " RETURNING id",
-                (name, tz, paused),
-            )
-            ws = cur.fetchone()[0]
-            cur.execute(
-                "INSERT INTO workspace_members (workspace_id, user_id, role)"
-                " VALUES (%s, %s, 'owner')",
-                (ws, user),
-            )
-            cur.execute(
-                "INSERT INTO media_sources (workspace_id, provider, config)"
-                " VALUES (%s, 'gdrive', '{\"v\": 1}') RETURNING id",
-                (ws,),
-            )
-            src = cur.fetchone()[0]
-            binding = None
-            if bound:
-                binding = str(uuid.uuid4())
-                cur.execute(
-                    "INSERT INTO channel_bindings (id, workspace_id, channel,"
-                    " external_ref) VALUES (%s, %s, 'telegram_group', %s)",
-                    (binding, ws, f"-100{uuid.uuid4().int % 10**9}"),
-                )
-        conn.commit()
-    finally:
-        conn.close()
     return {
         "ws": str(ws),
         "user": str(user),
@@ -128,8 +141,8 @@ def _workspace(world, name, *, bound=True, paused=False, tz="America/New_York"):
     }
 
 
-def _story(
-    world,
+def _seed_story(
+    cur,
     w,
     *,
     origin="planned",
@@ -144,77 +157,63 @@ def _story(
 ):
     """One story on its own item and, unless *on* names another story whose
     account it shares, its own account, so no key or lock of another test's
-    story can reach it. *lock* is ``(kind, scope, expires_in_s)``: scope
-    ``'workspace'`` or ``'account'`` (only a `recent` lock may be the
-    account's: ``ck_locks_recent_scope``); an ``expires_in_s``
-    of None is a permanent lock."""
+    story can reach it. *lock* is ``(kind, expires_in_s)``, None seconds for a
+    permanent lock; `ck_locks_recent_scope` places it, a `recent` lock on the
+    account and every other kind on the workspace."""
     tag = uuid.uuid4().hex[:10]
     acct_tag = on["acct_tag"] if on else tag
-    conn = psycopg2.connect(world["owner"])
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SET app.actor_kind = 'migration'")
-            if on:
-                acct = on["acct"]
-            else:
-                cur.execute(
-                    "INSERT INTO ig_accounts (workspace_id, provider_account_ref,"
-                    " handle) VALUES (%s, %s, %s) RETURNING id",
-                    (w["ws"], f"acct-{tag}", f"h_{tag}"),
-                )
-                acct = cur.fetchone()[0]
-            cur.execute(
-                "INSERT INTO media_items (workspace_id, source_id, content_hash,"
-                " file_name, media_kind, provider_file_ref)"
-                " VALUES (%s, %s, %s, %s, 'image', %s) RETURNING id",
-                (w["ws"], w["src"], f"hash-{tag}", f"drop-{tag}.jpg", f"ref-{tag}"),
-            )
-            media = cur.fetchone()[0]
-            cur.execute(
-                "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-                " provider_account_ref, approval_mode, schedule_slot_at, state,"
-                " origin, scheduled_by_user_id, cancel_requested)"
-                " VALUES (%s, %s, %s, %s, 'manual',"
-                "         now() + make_interval(secs => %s), %s, %s, %s, %s)"
-                " RETURNING id",
-                (
-                    w["ws"],
-                    acct,
-                    media,
-                    f"acct-{acct_tag}",
-                    slot_in_s,
-                    state,
-                    origin,
-                    w["user"] if (scheduled_by and origin == "planned") else None,
-                    flagged,
-                ),
-            )
-            intent = cur.fetchone()[0]
-            if media_state != "available":
-                cur.execute(
-                    "UPDATE media_items SET state = %s WHERE id = %s",
-                    (media_state, media),
-                )
-            if account_state != "active":
-                cur.execute(
-                    "UPDATE ig_accounts SET state = %s WHERE id = %s",
-                    (account_state, acct),
-                )
-            if lock is not None:
-                kind, scope, expires_in_s = lock
-                # `ck_locks_recent_scope`: a `recent` lock is the account's,
-                # every other kind the workspace's.
-                scoped = {"workspace": None, "account": acct}[scope]
-                cur.execute(
-                    "INSERT INTO post_locks (workspace_id, media_item_id,"
-                    " ig_account_id, kind, expires_at)"
-                    " VALUES (%s, %s, %s, %s, CASE WHEN %s::int IS NULL THEN NULL"
-                    "         ELSE now() + make_interval(secs => %s::int) END)",
-                    (w["ws"], media, scoped, kind, expires_in_s, expires_in_s),
-                )
-        conn.commit()
-    finally:
-        conn.close()
+    if on:
+        acct = on["acct"]
+    else:
+        cur.execute(
+            "INSERT INTO ig_accounts (workspace_id, provider_account_ref,"
+            " handle) VALUES (%s, %s, %s) RETURNING id",
+            (w["ws"], f"acct-{tag}", f"h_{tag}"),
+        )
+        acct = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+        " file_name, media_kind, provider_file_ref)"
+        " VALUES (%s, %s, %s, %s, 'image', %s) RETURNING id",
+        (w["ws"], w["src"], f"hash-{tag}", f"drop-{tag}.jpg", f"ref-{tag}"),
+    )
+    media = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, state,"
+        " origin, scheduled_by_user_id, cancel_requested)"
+        " VALUES (%s, %s, %s, %s, 'manual',"
+        "         now() + make_interval(secs => %s), %s, %s, %s, %s)"
+        " RETURNING id",
+        (
+            w["ws"],
+            acct,
+            media,
+            f"acct-{acct_tag}",
+            slot_in_s,
+            state,
+            origin,
+            w["user"] if (scheduled_by and origin == "planned") else None,
+            flagged,
+        ),
+    )
+    intent = cur.fetchone()[0]
+    if media_state != "available":
+        cur.execute(
+            "UPDATE media_items SET state = %s WHERE id = %s", (media_state, media)
+        )
+    if account_state != "active":
+        cur.execute(
+            "UPDATE ig_accounts SET state = %s WHERE id = %s", (account_state, acct)
+        )
+    if lock is not None:
+        kind, expires_in_s = lock
+        cur.execute(
+            "INSERT INTO post_locks (workspace_id, media_item_id,"
+            " ig_account_id, kind, expires_at)"
+            " VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s::int))",
+            (w["ws"], media, acct if kind == "recent" else None, kind, expires_in_s),
+        )
     return {
         "intent": str(intent),
         "acct": str(acct),
@@ -224,44 +223,45 @@ def _story(
     }
 
 
+def _story(world, w, **kw):
+    with _owner_cursor(world) as cur:
+        return _seed_story(cur, w, **kw)
+
+
 def _as_worker(world, sql, params=None):
     """One read straight through a door, connected as `svc_worker`."""
-    conn = psycopg2.connect(as_user(world["owner"], "svc_worker"))
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT current_user")
-            assert cur.fetchone()[0] == "svc_worker"
-            cur.execute(sql, params)
-            return cur.fetchall()
-    finally:
-        conn.close()
+    dsn = as_user(world["owner"], "svc_worker")
+    with txn(dsn, expect_user="svc_worker") as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
 
 
-def _worker_sweep(world, leg, *, late=LATE):
-    """One leg of the prompt sweeper exactly as `worker.PromptSweeper` runs it:
-    its own transaction, `svc_worker`, no tenant, the system actor."""
+def _worker(world, fn, *, tenant=None):
+    """Run ``fn(session)`` in one transaction opened as the worker opens each
+    leg of its prompt sweeper (`unit_of_work.make_session_for`: the system
+    actor, no tenant unless *tenant* names one), connected as `svc_worker`."""
 
     async def go():
         async with ingress_engine(as_user(world["owner"], "svc_worker")) as engine:
-            maker = async_sessionmaker(engine, expire_on_commit=False)
-            async with maker() as session:
-                async with session.begin():
-                    who = (await session.execute(text("SELECT current_user"))).scalar()
-                    assert who == "svc_worker", who
-                    await unit_of_work.apply_gucs(
-                        session, tenant_id="", actor_kind="system"
-                    )
-                    return await leg(session, limit=500, late_seconds=late)
+            sessions = unit_of_work.make_session_for(engine)
+            async with sessions({"workspace_id": tenant}) as session:
+                who = (await session.execute(text("SELECT current_user"))).scalar()
+                assert who == "svc_worker", who
+                return await fn(session)
 
     return asyncio.run(go())
 
 
 def _serve(world, *, late=LATE):
-    return _worker_sweep(world, prompts.sweep_due_prompts, late=late)
+    return _worker(
+        world, lambda s: prompts.sweep_due_prompts(s, limit=500, late_seconds=late)
+    )
 
 
 def _miss(world, *, late=LATE):
-    return _worker_sweep(world, prompts.sweep_planned_misses, late=late)
+    return _worker(
+        world, lambda s: prompts.sweep_planned_misses(s, limit=500, late_seconds=late)
+    )
 
 
 def _pass(world, *, late=LATE):
@@ -270,43 +270,27 @@ def _pass(world, *, late=LATE):
 
 
 def _reap(world):
-    """One `reap_expired` run as the worker's registry runs it, as `svc_worker`."""
-    from src.services.target.work_loop import WorkerDeps, build_registry
-
-    async def go():
-        async with ingress_engine(as_user(world["owner"], "svc_worker")) as engine:
-            registry = build_registry(WorkerDeps(engine=engine, config=WorkerConfig()))
-            async with engine.begin() as conn:
-                await unit_of_work.apply_gucs(conn, tenant_id="", actor_kind="system")
-                await registry["reap_expired"](conn, {"kind": "reap_expired"})
-
-    asyncio.run(go())
+    asyncio.run(reap_as_worker(world["owner"]))
 
 
 def _row(world, intent):
-    (state, last_error, flagged) = _exec(
+    ((state, last_error, flagged),) = _exec(
         world,
         "SELECT state, last_error, cancel_requested FROM post_intents WHERE id = %s",
         (intent,),
         fetch=True,
-    )[0]
-    if isinstance(last_error, str):
-        last_error = json.loads(last_error)
+    )
     return {"state": state, "last_error": last_error, "flagged": flagged}
 
 
 def _outbox(world, intent, kind):
-    rows = _exec(
+    return _exec(
         world,
         "SELECT binding_id::text, payload FROM channel_outbox"
         " WHERE intent_id = %s AND kind = %s ORDER BY created_at",
         (intent, kind),
         fetch=True,
     )
-    return [
-        (binding, payload if isinstance(payload, dict) else json.loads(payload))
-        for binding, payload in rows
-    ]
 
 
 def _audited(world, intent):
@@ -319,9 +303,21 @@ def _audited(world, intent):
     )
 
 
+def _told(world, w, story, reason):
+    """*story*'s notice is queued once, on the workspace's binding, in the
+    words `prompts.missed_notice` gives *reason*."""
+    notices = _outbox(world, story["intent"], "notification")
+    assert [b for b, _ in notices] == [w["binding"]], notices
+    said = notices[0][1]["text"]
+    assert said.startswith("🗓 Not served: "), said
+    assert f"drop-{story['tag']}.jpg for @h_{story['acct_tag']}" in said, said
+    assert f"by {w['name']}: {prompts.MISS_REASONS[reason]}." in said, said
+    assert said.endswith("Nothing was posted."), said
+
+
 def _missed(world, w, story, reason):
     """*story* ended `expired` with *reason*, audited as the system's, and its
-    notice is queued once on the workspace's binding."""
+    chats were told."""
     row = _row(world, story["intent"])
     assert row["state"] == "expired", row
     assert row["last_error"] == {
@@ -330,13 +326,7 @@ def _missed(world, w, story, reason):
         "message": reason,
     }, row
     assert ("scheduled", "expired", "system") in _audited(world, story["intent"])
-    notices = _outbox(world, story["intent"], "notification")
-    assert [b for b, _ in notices] == [w["binding"]], notices
-    said = notices[0][1]["text"]
-    assert said.startswith("🗓 Not served: "), said
-    assert f"drop-{story['tag']}.jpg for @h_{story['acct_tag']}" in said, said
-    assert f"by {w['name']}: {prompts.MISS_REASONS[reason]}." in said, said
-    assert said.endswith("Nothing was posted."), said
+    _told(world, w, story, reason)
 
 
 class TestServedOnTime:
@@ -366,18 +356,11 @@ class TestServedOnTime:
         w = _workspace(world, "p3-rerender")
         story = _story(world, w)
         _serve(world)
-
-        async def go():
-            async with ingress_engine(as_user(world["owner"], "svc_worker")) as e:
-                async with e.begin() as conn:
-                    await unit_of_work.apply_gucs(
-                        conn, tenant_id=w["ws"], actor_kind="system"
-                    )
-                    return await prompts.rerender_prompt(
-                        conn, intent_id=story["intent"]
-                    )
-
-        card = asyncio.run(go())
+        card = _worker(
+            world,
+            lambda s: prompts.rerender_prompt(s, intent_id=story["intent"]),
+            tenant=w["ws"],
+        )
         assert f"🗓 Scheduled by {w['name']} · " in card["text"], card["text"]
 
     def test_a_scheduler_who_is_gone_leaves_the_line_without_a_name(self, world):
@@ -390,16 +373,13 @@ class TestServedOnTime:
     @pytest.mark.parametrize(
         "variant",
         [
-            {"account_state": "reauth_required"},
-            {"lock": ("skip", "workspace", None)},
-            {"lock": ("recent", "account", 3600)},
-            {"lock": ("reject", "workspace", -60)},
-        ],
-        ids=[
-            "an-account-awaiting-reconnection",
-            "a-skip-lock",
-            "a-recent-lock",
-            "an-expired-reject-lock",
+            pytest.param(
+                {"account_state": "reauth_required"},
+                id="an-account-awaiting-reconnection",
+            ),
+            pytest.param({"lock": ("skip", None)}, id="a-skip-lock"),
+            pytest.param({"lock": ("recent", 3600)}, id="a-recent-lock"),
+            pytest.param({"lock": ("reject", -60)}, id="an-expired-reject-lock"),
         ],
     )
     def test_what_only_warns_never_blocks_the_serve(self, world, variant):
@@ -449,25 +429,28 @@ class TestEachMissSaysWhy:
     @pytest.mark.parametrize(
         "reason, variant",
         [
-            ("item_removed", {"media_state": "removed"}),
-            ("item_unsupported", {"media_state": "unsupported"}),
+            pytest.param(
+                "item_removed", {"media_state": "removed"}, id="media-removed"
+            ),
+            pytest.param(
+                "item_unsupported",
+                {"media_state": "unsupported"},
+                id="media-unsupported",
+            ),
             *[
-                ("item_locked", {"lock": (kind, "workspace", None)})
+                pytest.param("item_locked", {"lock": (kind, None)}, id=f"{kind}-lock")
                 for kind in BLOCKING_LOCKS
             ],
-            ("item_locked", {"lock": ("reject", "workspace", 3600)}),
-            ("account_removed", {"account_state": "disabled"}),
-            ("account_removed", {"account_state": "moved"}),
-            ("late", {"slot_in_s": -LATE - 60}),
-        ],
-        ids=[
-            "media-removed",
-            "media-unsupported",
-            *[f"{kind}-lock" for kind in BLOCKING_LOCKS],
-            "a-live-timed-reject-lock",
-            "account-disabled",
-            "account-moved",
-            "past-the-window",
+            pytest.param(
+                "item_locked", {"lock": ("reject", 3600)}, id="a-live-timed-reject-lock"
+            ),
+            pytest.param(
+                "account_removed", {"account_state": "disabled"}, id="account-disabled"
+            ),
+            pytest.param(
+                "account_removed", {"account_state": "moved"}, id="account-moved"
+            ),
+            pytest.param("late", {"slot_in_s": -LATE - 60}, id="past-the-window"),
         ],
     )
     def test_each_reason_ends_the_story_expired_and_tells_the_chats(
@@ -499,7 +482,7 @@ class TestEachMissSaysWhy:
             slot_in_s=-LATE - 60,
             media_state="removed",
             account_state="moved",
-            lock=("reject", "workspace", None),
+            lock=("reject", None),
         )
         _pass(world)
         _missed(world, w, story, "item_removed")
@@ -508,7 +491,7 @@ class TestEachMissSaysWhy:
             w,
             slot_in_s=-LATE - 60,
             account_state="moved",
-            lock=("hold", "workspace", None),
+            lock=("hold", None),
         )
         _pass(world)
         _missed(world, w, locked, "item_locked")
@@ -566,65 +549,101 @@ class TestTheDoorsPartitionTheDuePlannedRows:
     one beat, every due, unflagged planned story is served, missed with the
     reason its facts give, or — only if it can be served, is inside its window
     and its workspace is paused — still waiting. Nothing is left unaccounted,
-    and nothing is both."""
+    and nothing is both. Every media state, account state and lock kind the
+    schema allows is in the grid, read from its CHECKs."""
 
-    MEDIA = ("available", "unsupported", "removed")
-    ACCOUNTS = ("active", "reauth_required", "disabled", "moved")
-    LOCKS = (None, ("reject", "workspace", None), ("skip", "workspace", None))
+    #: Each value's part in the rule, in the doors' precedence: a value these
+    #: maps do not name fails the grid, so a new state or kind is classified
+    #: here, and in both doors, the day the schema allows it.
+    ITEM = {
+        "available": None,
+        "removed": "item_removed",
+        "unsupported": "item_unsupported",
+    }
+    ACCOUNT = {
+        "active": None,
+        "reauth_required": None,
+        "disabled": "account_removed",
+        "moved": "account_removed",
+    }
+    LOCK = {
+        **dict.fromkeys(BLOCKING_LOCKS, "item_locked"),
+        "skip": None,
+        "recent": None,
+    }
     PAUSED = (False, True)
     SLOTS = (-60, -LATE - 60)
 
-    @staticmethod
-    def _expected(media, account, lock, paused, slot_in_s):
-        if media == "removed":
-            return "item_removed"
-        if media == "unsupported":
-            return "item_unsupported"
-        if lock is not None and lock[0] in BLOCKING_LOCKS:
-            return "item_locked"
-        if account not in ("active", "reauth_required"):
-            return "account_removed"
+    @classmethod
+    def _expected(cls, media, account, lock, paused, slot_in_s):
+        kind = lock[0] if lock else None
+        for known, value in (
+            (cls.ITEM, media),
+            (cls.ACCOUNT, account),
+            (cls.LOCK, kind),
+        ):
+            if value is not None and value not in known:
+                pytest.fail(f"{value!r} is new: classify it here and in both doors")
+        if cls.ITEM[media]:
+            return cls.ITEM[media]
+        if kind and cls.LOCK[kind]:
+            return cls.LOCK[kind]
+        if cls.ACCOUNT[account]:
+            return cls.ACCOUNT[account]
         if slot_in_s > -LATE:
             return "waiting" if paused else "served"
         return "paused" if paused else "late"
 
     def test_every_combination_lands_in_exactly_its_bucket(self, world):
+        media_states = _checked(world, "ck_media_state")
+        account_states = _checked(world, "ck_ig_accounts_state")
+        locks = (None, *((kind, None) for kind in _checked(world, "ck_locks_kind")))
         spaces = {
             paused: _workspace(world, f"p3-grid-{int(paused)}", paused=paused)
             for paused in self.PAUSED
         }
         cells = []
-        for media, account, lock, paused, slot in itertools.product(
-            self.MEDIA, self.ACCOUNTS, self.LOCKS, self.PAUSED, self.SLOTS
-        ):
-            story = _story(
-                world,
-                spaces[paused],
-                media_state=media,
-                account_state=account,
-                lock=lock,
-                slot_in_s=slot,
-            )
-            cells.append((story, self._expected(media, account, lock, paused, slot)))
-        _pass(world)
-        wrong = []
-        for story, expected in cells:
-            row = _row(world, story["intent"])
-            notices = _outbox(world, story["intent"], "notification")
-            cards = _outbox(world, story["intent"], "approval_prompt")
-            if expected == "served":
-                got = row["state"] == "awaiting_approval" and cards and not notices
-            elif expected == "waiting":
-                got = row["state"] == "scheduled" and not cards and not notices
-            else:
-                got = (
-                    row["state"] == "expired"
-                    and row["last_error"]["message"] == expected
-                    and len(notices) == 1
-                    and not cards
+        with _owner_cursor(world) as cur:  # one connection seeds the whole grid
+            for media, account, lock, paused, slot in itertools.product(
+                media_states, account_states, locks, self.PAUSED, self.SLOTS
+            ):
+                story = _seed_story(
+                    cur,
+                    spaces[paused],
+                    media_state=media,
+                    account_state=account,
+                    lock=lock,
+                    slot_in_s=slot,
                 )
+                expected = self._expected(media, account, lock, paused, slot)
+                cells.append((story["intent"], expected))
+        _pass(world)
+        seen = {
+            intent: rest
+            for intent, *rest in _exec(
+                world,
+                "SELECT i.id::text, i.state, i.last_error->>'message',"
+                "       count(o.id) FILTER (WHERE o.kind = 'approval_prompt'),"
+                "       count(o.id) FILTER (WHERE o.kind = 'notification')"
+                "  FROM post_intents i"
+                "  LEFT JOIN channel_outbox o ON o.intent_id = i.id"
+                " WHERE i.id = ANY(%s::uuid[]) GROUP BY i.id",
+                ([intent for intent, _ in cells],),
+                fetch=True,
+            )
+        }
+        assert len(seen) == len(cells), "every cell is read back"
+        wrong = []
+        for intent, expected in cells:
+            state, reason, cards, notices = seen[intent]
+            if expected == "served":
+                got = state == "awaiting_approval" and cards and not notices
+            elif expected == "waiting":
+                got = state == "scheduled" and not cards and not notices
+            else:
+                got = (state, reason, cards, notices) == ("expired", expected, 0, 1)
             if not got:
-                wrong.append((expected, row, len(cards), len(notices)))
+                wrong.append((expected, state, reason, cards, notices))
         assert not wrong, wrong
 
 
@@ -737,11 +756,7 @@ class TestRemovingADestinationTellsItsPlannedStories:
             )
         )
         assert effects["intents_flagged"] == 3
-        (notice,) = _outbox(world, acct_story["intent"], "notification")
-        assert notice[0] == w["binding"]
-        said = notice[1]["text"]
-        assert said.startswith("🗓 Not served: "), said
-        assert f"by {w['name']}: {prompts.MISS_REASONS['account_removed']}." in said
+        _told(world, w, acct_story, "account_removed")
         for other in (served, cadence, cancelled_before):
             assert _outbox(world, other["intent"], "notification") == []
         assert _row(world, acct_story["intent"])["flagged"] is True

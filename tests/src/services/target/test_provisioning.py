@@ -614,27 +614,19 @@ class TestDisableDestination:
 
         told = []
 
-        async def say(executor, row, *, reason, names):
-            told.append((row["id"], reason))
-            return 1
+        async def say(executor, *, workspace_id, intent_ids):
+            told.append((workspace_id, intent_ids))
 
-        monkeypatch.setattr(prompts, "say_not_served", say)
+        monkeypatch.setattr(prompts, "say_removed_before_served", say)
         flagged = [
             {"id": "p-waiting", "origin": "planned", "state": "scheduled"},
             {"id": "p-served", "origin": "planned", "state": "awaiting_approval"},
             {"id": "c-waiting", "origin": "cadence", "state": "scheduled"},
         ]
-        details = [{"id": "p-waiting", "workspace_id": "ws"}]
-        ex = _ScriptedExecutor(
-            (1, {"id": "acct"}), (1, None), (3, flagged), (1, details), (1, None)
-        )
+        ex = _ScriptedExecutor((1, {"id": "acct"}), (1, None), (3, flagged), (1, None))
         result = await disable_destination(ex, workspace_id="ws", ig_account_id="acct")
         assert result["intents_flagged"] == 3
-        assert told == [("p-waiting", "account_removed")]
-        detail_sql, detail_params = ex.statements[3]
-        assert "i.id = ANY(CAST(:ids AS uuid[]))" in detail_sql
-        assert "i.workspace_id = :ws" in detail_sql
-        assert detail_params == {"ws": "ws", "ids": ["p-waiting"]}
+        assert told == [("ws", ["p-waiting"])]
 
     async def test_nothing_to_revoke_flag_or_retire_is_reported_not_invented(self):
         from src.services.target.provisioning import disable_destination

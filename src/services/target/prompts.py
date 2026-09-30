@@ -49,14 +49,15 @@ import json
 import logging
 import re
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Mapping, Optional, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
 
-from src.services.target import bindings, intent_ledger, outbox
+from src.services.target import bindings, intent_ledger, outbox, readers
 from src.services.target.callback_tokens import ACTIONS, token as _token
+from src.utils.datetime_utils import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,19 @@ MISS_REASONS = {
     "paused": "the workspace was paused at its time",
     "late": "it could not be served in time",
 }
+
+
+#: A Drive file name has no bound of its own; a Telegram caption stops at 1024
+#: characters. The card's caption and the "not served" notice both name a file
+#: within this.
+FILE_NAME_BOUND = 200
+
+
+def account_label(handle: Optional[str]) -> str:
+    """How a notice names a destination: its handle, or a phrase when the
+    handle is unknown (it is nullable), never a blank. A multi-account
+    workspace cannot act on "a slot" (`06` §3)."""
+    return f"@{handle}" if handle else "one of this workspace's accounts"
 
 
 #: Zones already warned about — one line per zone, not one per card.
@@ -246,7 +260,7 @@ def _planned_line(
     if intent.get("origin") != "planned":
         return None
     line = outcome_line("scheduled", by=intent.get("scheduled_by"), at=slot, tz=tz)
-    if (now or datetime.now(timezone.utc)) - slot >= SERVED_LATE_AFTER:
+    if (now or utcnow()) - slot >= SERVED_LATE_AFTER:
         line += " · served late"
     return line
 
@@ -303,7 +317,7 @@ def render_card(
         handle = intent.get("handle")
         # Bounded: Telegram captions stop at 1024 characters, and a Drive
         # file name has no bound of its own.
-        who = f"@{handle}" if handle else file_name[:200]
+        who = f"@{handle}" if handle else file_name[:FILE_NAME_BOUND]
         payload["media"] = {
             "workspace_id": str(intent["workspace_id"]),
             "source_id": str(intent["source_id"]),
@@ -368,21 +382,27 @@ def _card_for(row, *, intent_id: str) -> dict:
     )
 
 
-async def _scheduler_name(session, user_id, names: dict) -> Optional[str]:
+async def _scheduler_name(
+    session, user_id, names: Optional[dict] = None
+) -> Optional[str]:
     """Who scheduled a planned story, as a shared chat may see them:
     `identity.display_name_for`, the one spelling of that rule (never an
-    email). None when the user is gone. *names* caches it for one sweep."""
+    email). None when the user is gone. A sweep passes *names* to look each
+    scheduler up once."""
     if user_id is None:
         return None
     key = str(user_id)
-    if key not in names:
-        from src.services.target import identity  # noqa: PLC0415 — cycle
+    if names is not None and key in names:
+        return names[key]
+    from src.services.target import identity  # noqa: PLC0415 — cycle
 
-        names[key] = await identity.display_name_for(session, user_id=key)
-    return names[key]
+    name = await identity.display_name_for(session, user_id=key)
+    if names is not None:
+        names[key] = name
+    return name
 
 
-async def _with_scheduler(session, row: Mapping, names: dict) -> dict:
+async def _with_scheduler(session, row: Mapping, names: Optional[dict] = None) -> dict:
     """*row* as a dict, with ``scheduled_by`` resolved when it is planned."""
     row = dict(row)
     if row.get("origin") == "planned":
@@ -408,7 +428,7 @@ async def rerender_prompt(session, *, intent_id: str) -> Optional[dict]:
     )
     if row is None or row.get("state") not in LIVE_FOR_A_CARD:
         return None
-    return _card_for(await _with_scheduler(session, row, {}), intent_id=intent_id)
+    return _card_for(await _with_scheduler(session, row), intent_id=intent_id)
 
 
 async def push_bindings(session, workspace_id: str) -> list[str]:
@@ -629,11 +649,9 @@ def missed_notice(
     by: Optional[str],
     reason: str,
 ) -> str:
-    """What the bound chats are told when a planned story is not served. The
-    file name is bounded as the card's caption bounds it: a Drive name has no
-    bound of its own."""
-    what = (file_name or "an item")[:200]
-    whose = f"@{handle}" if handle else "one of this workspace's accounts"
+    """What the bound chats are told when a planned story is not served."""
+    what = (file_name or "an item")[:FILE_NAME_BOUND]
+    whose = account_label(handle)
     who = f" by {by}" if by else ""
     return (
         f"🗓 Not served: {what} for {whose}, scheduled for {stamp(slot, tz)}{who}:"
@@ -642,20 +660,18 @@ def missed_notice(
 
 
 async def say_not_served(
-    session, row: Mapping, *, reason: str, names: dict
+    session, row: Mapping, *, reason: str, surface: list[str], by: Optional[str]
 ) -> Union[int, str]:
     """Tell a workspace's bound chats that one planned story was not served,
     in the CALLER's transaction — the one that ended it or flagged it, so the
-    notice commits with the change it announces. *row* carries the story's
-    ``id``, ``workspace_id``, ``schedule_slot_at``, ``file_name``, ``handle``,
-    ``tz`` and ``scheduled_by_user_id``.
+    notice commits with the change it announces. *row* is a `_NOTICE_SELECT`
+    row, *surface* the workspace's push bindings (`push_bindings`, resolved
+    once per workspace by the caller) and *by* the scheduler's display name.
 
     Returns the rows written, or `outbox.UNDELIVERABLE` when the workspace has
     no push binding: "told nobody, because there is nobody" is a verdict
     (`scheduler._notice_no_media`'s rule), never a quiet zero. The web's Queue
     still shows the story `expired` with its reason."""
-    workspace_id = str(row["workspace_id"])
-    surface = await push_bindings(session, workspace_id)
     if not surface:
         logger.warning(
             "planned story %s was not served (%s) and its workspace has NO push"
@@ -664,24 +680,67 @@ async def say_not_served(
             reason,
         )
         return outbox.UNDELIVERABLE
-    await outbox.fanout_notification(
+    return await outbox.fanout_notification(
         session,
-        workspace_id=workspace_id,
+        workspace_id=str(row["workspace_id"]),
         bindings=surface,
         text=missed_notice(
             file_name=row.get("file_name"),
             handle=row.get("handle"),
             slot=row["schedule_slot_at"],
             tz=str(row.get("tz") or "UTC"),
-            by=await _scheduler_name(session, row.get("scheduled_by_user_id"), names),
+            by=by,
             reason=reason,
         ),
         intent_id=str(row["id"]),
     )
-    return len(surface)
 
 
-async def sweep_planned_misses(session, *, limit: int, late_seconds: int) -> dict:
+#: The row a "not served" notice is written from, and the one spelling of it
+#: in Python. The removal's notice reads it directly; `fn_planned_misses`
+#: (089) spells the same columns and joins, a door being unable to call the
+#: Python, and the pin in `test_prompts.py` holds the two together, as it
+#: holds `_CARD_SELECT` to `fn_prompts_due`.
+_NOTICE_SELECT = (
+    "SELECT i.id, i.workspace_id, i.schedule_slot_at, i.scheduled_by_user_id,"
+    "       m.file_name, a.handle, w.tz"
+    "  FROM post_intents i"
+    "  JOIN workspaces w ON w.id = i.workspace_id"
+    "  LEFT JOIN media_items m ON m.id = i.media_item_id"
+    "   AND m.workspace_id = i.workspace_id"
+    "  LEFT JOIN ig_accounts a ON a.id = i.ig_account_id"
+    "   AND a.workspace_id = i.workspace_id"
+)
+
+
+async def say_removed_before_served(
+    session, *, workspace_id: str, intent_ids: list[str]
+) -> None:
+    """Queue the `account_removed` notice for each planned story a
+    destination's removal flagged before its time was served
+    (`provisioning.disable_destination`), in the removal's own transaction.
+    Flagged, such a story never reaches the miss door, which lists no flagged
+    row, so this is its one notice — the same words the miss leg sends."""
+    rows = await readers.rows(
+        session,
+        _NOTICE_SELECT + " WHERE i.workspace_id = :ws"
+        " AND i.id = ANY(CAST(:ids AS uuid[])) ORDER BY i.schedule_slot_at",
+        ws=workspace_id,
+        ids=intent_ids,
+    )
+    surface = await push_bindings(session, workspace_id)
+    names: dict[str, str] = {}
+    for row in rows:
+        await say_not_served(
+            session,
+            row,
+            reason="account_removed",
+            surface=surface,
+            by=await _scheduler_name(session, row.get("scheduled_by_user_id"), names),
+        )
+
+
+async def sweep_planned_misses(session, *, late_seconds: int, limit: int = 50) -> dict:
     """The miss leg (089), on the prompt sweep's cadence and in the CALLER's
     transaction: every planned story the miss door lists ends `expired`, with
     `last_error = {v: 1, class: planned_missed, message: <reason>}`, and its
@@ -709,19 +768,21 @@ async def sweep_planned_misses(session, *, limit: int, late_seconds: int) -> dic
                     "       o_scheduled_by_user_id AS scheduled_by_user_id"
                     "  FROM fn_planned_misses(:lim, make_interval(secs => :late))"
                 ),
-                {"lim": int(limit), "late": float(late_seconds)},
+                {"lim": limit, "late": float(late_seconds)},
             )
         )
         .mappings()
         .all()
     )
     counts = {"missed": 0, "unheard": 0}
-    names: dict[str, str] = {}
+    surfaces: dict[str, list[str]] = {}  # same tx, same answer
+    names: dict[str, str] = {}  # a scheduler's display name, once per sweep
     claims = unit_of_work.WorkspaceClaims(session)
     for row in sorted(
         rows, key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"])
     ):
-        await claims.claim(str(row["workspace_id"]))
+        ws = str(row["workspace_id"])
+        await claims.claim(ws)
         try:
             async with session.begin_nested():
                 ended = (
@@ -735,7 +796,7 @@ async def sweep_planned_misses(session, *, limit: int, late_seconds: int) -> dic
                         ),
                         {
                             "id": str(row["id"]),
-                            "ws": str(row["workspace_id"]),
+                            "ws": ws,
                             "e": json.dumps(
                                 {
                                     "v": 1,
@@ -748,8 +809,16 @@ async def sweep_planned_misses(session, *, limit: int, late_seconds: int) -> dic
                 ).first()
                 if ended is None:
                     continue  # served, flagged or ended since the door read it
+                if ws not in surfaces:
+                    surfaces[ws] = await push_bindings(session, ws)
                 told = await say_not_served(
-                    session, row, reason=str(row["reason"]), names=names
+                    session,
+                    row,
+                    reason=str(row["reason"]),
+                    surface=surfaces[ws],
+                    by=await _scheduler_name(
+                        session, row.get("scheduled_by_user_id"), names
+                    ),
                 )
         except Exception:  # noqa: BLE001 — isolated, logged, the sweep goes on
             logger.exception("planned-miss sweep: intent %s skipped", row["id"])

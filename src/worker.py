@@ -561,36 +561,31 @@ class PromptSweeper:
         self.unheard = 0
 
     async def run(self, stop: asyncio.Event) -> None:
-        maker = async_sessionmaker(self._app.engine, expire_on_commit=False)
+        # Each leg is one transaction with no tenant and the system actor —
+        # the shape `make_session_for` gives a system job — so the doors and
+        # the per-workspace claims inside the sweep scope what it touches.
+        sessions = unit_of_work.make_session_for(self._app.engine)
         cfg = self._app.config
         while not stop.is_set():
             self.sweeps += 1
             try:
-                async with maker() as session:
-                    async with session.begin():
-                        await unit_of_work.apply_gucs(
-                            session, tenant_id="", actor_kind="system"
-                        )
-                        counts = await prompts_mod.sweep_due_prompts(
-                            session,
-                            limit=cfg.prompt_sweep_limit,
-                            late_seconds=cfg.planned_late_seconds,
-                        )
+                async with sessions({}) as session:
+                    counts = await prompts_mod.sweep_due_prompts(
+                        session,
+                        limit=cfg.prompt_sweep_limit,
+                        late_seconds=cfg.planned_late_seconds,
+                    )
                 self.prompted += counts["prompted"]
                 self.advanced += counts["advanced"]
             except Exception:  # noqa: BLE001 — outlive a blip, loudly
                 logger.exception("prompt sweep failed; retrying on cadence")
             try:
-                async with maker() as session:
-                    async with session.begin():
-                        await unit_of_work.apply_gucs(
-                            session, tenant_id="", actor_kind="system"
-                        )
-                        misses = await prompts_mod.sweep_planned_misses(
-                            session,
-                            limit=cfg.prompt_sweep_limit,
-                            late_seconds=cfg.planned_late_seconds,
-                        )
+                async with sessions({}) as session:
+                    misses = await prompts_mod.sweep_planned_misses(
+                        session,
+                        limit=cfg.prompt_sweep_limit,
+                        late_seconds=cfg.planned_late_seconds,
+                    )
                 self.missed += misses["missed"]
                 self.unheard += misses["unheard"]
             except Exception:  # noqa: BLE001 — outlive a blip, loudly

@@ -753,8 +753,8 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
         assert definition.startswith("CREATE UNIQUE INDEX uq_intent_slot ON ")
         assert definition.endswith("WHERE (origin = 'cadence'::text)"), definition
 
-    #: `plan_slot`'s insert as raw SQL, and its two conflict targets: the one
-    #: it runs since 088, and the predicate-less one every worker ran before.
+    #: `plan_slot`'s insert as raw SQL, and the predicate-less conflict target
+    #: every worker ran before 088 (the real spelling runs through `plan_slot`).
     SLOT_INSERT = (
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
         " provider_account_ref, approval_mode, schedule_slot_at, origin)"
@@ -763,10 +763,6 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
     BARE = (
         " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
         " DO NOTHING RETURNING id"
-    )
-    CADENCE = (
-        " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
-        " WHERE origin = 'cadence' DO NOTHING RETURNING id"
     )
 
     def _slot_row(self, clock_db, account, slot, origin="cadence"):
@@ -783,34 +779,6 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
         with pytest.raises(psycopg2.Error) as exc:
             _owner_exec(clock_db, self.SLOT_INSERT + self.BARE, row)
         assert "no unique or exclusion constraint matching" in str(exc.value)
-
-    def test_a_planned_row_may_share_a_cadence_instant(self, clock_db):
-        """The interim 088 pinned is over: with the unconditional key gone, a
-        planned row at a slot's instant no longer holds it against the cadence
-        mint, and the cadence mint still lands once."""
-        account = _new_account(clock_db)
-        slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
-        try:
-            planned = _owner_exec(
-                clock_db,
-                self.SLOT_INSERT,
-                self._slot_row(clock_db, account, slot, "planned"),
-            )
-            cadence = [
-                _owner_exec(
-                    clock_db,
-                    self.SLOT_INSERT + self.CADENCE,
-                    self._slot_row(clock_db, account, slot),
-                )
-                for _ in range(2)
-            ]
-        finally:
-            _owner_exec(
-                clock_db,
-                "DELETE FROM post_intents WHERE ig_account_id = %s",
-                (account,),
-            )
-        assert (planned, cadence) == (1, [1, 0])
 
     @pytest.mark.asyncio
     async def test_the_executor_holds_on_the_cadence_key_alone(self, clock_db):

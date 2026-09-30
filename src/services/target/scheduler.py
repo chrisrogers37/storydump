@@ -270,10 +270,8 @@ async def _notice_no_media(
         )
         return outbox.UNDELIVERABLE
 
-    # Name the account: a multi-account workspace cannot act on "a slot", and
-    # `06` §3 already requires the queue card to name its account for the same
-    # reason. `handle` is nullable, so the fallback is a phrase, not a blank.
-    label = f"@{claimed[0]}" if claimed[0] else "one of this workspace's accounts"
+    # Name the account, as every notice names one (`prompts.account_label`).
+    label = prompts.account_label(claimed[0])
     await outbox.fanout_notification(
         session,
         workspace_id=workspace_id,
