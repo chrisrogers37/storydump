@@ -355,21 +355,31 @@ FLOATING_COLUMNS: Sequence[Column] = (
 
 
 def _planned_due(row: Mapping[str, Any]) -> Any:
-    """When a planned story is due, in the zone its time was chosen in (the
-    row's `tz`) — the time a person typed — or as the API gave it where the
-    zone is one the IANA database does not name."""
+    """When a planned story is due, in its account's zone, else the
+    workspace's (the row's `tz`), as that zone is now; or as the API gave it
+    where the zone is one the IANA database does not name, or the time names
+    no instant."""
     at, tz = row.get("schedule_slot_at"), row.get("tz")
     try:
-        local = datetime.fromisoformat(str(at)).astimezone(ZoneInfo(str(tz)))
+        instant = datetime.fromisoformat(str(at))
+        if instant.tzinfo is None:
+            return at
+        local = instant.astimezone(ZoneInfo(str(tz)))
     except (ValueError, OSError, ZoneInfoNotFoundError):
         return at
-    return f"{local.strftime('%Y-%m-%d %H:%M')} {tz}"
+    clock = "%H:%M:%S" if local.second else "%H:%M"
+    return f"{local.strftime('%Y-%m-%d ' + clock)} {tz}"
 
 
 def _planned_state(row: Mapping[str, Any]) -> Any:
-    """The state, and a cancel that is still landing."""
+    """The state, a cancel that is still landing, and why a story missed at
+    its time was missed."""
     state = row.get("state")
-    return f"{state} (cancelling)" if row.get("cancel_requested") else state
+    if row.get("cancel_requested"):
+        return f"{state} (cancelling)"
+    if row.get("miss_reason"):
+        return f"{state} ({row['miss_reason']})"
+    return state
 
 
 PLANNED_COLUMNS: Sequence[Column] = (
@@ -597,6 +607,7 @@ def _render_account_rows(console: Console, rows: list[dict[str, Any]]) -> None:
             else "nothing yet"
         )
         console.print(f"  {_handle(row.get('handle'))}  {_text(row.get('id'), '?')}")
+        console.print(f"    state     {_cell(row.get('state'))}")
         console.print(f"    cap/day   {_cell(row.get('posts_per_day'))}")
         console.print(f"    today     {used}")
         console.print(f"    tz        {_cell(row.get('tz'))}")
@@ -820,7 +831,7 @@ def _render_planned(console: Console, data: Any) -> None:
             wider = (
                 f"pass --limit up to {LIST_LIMIT_MAX}"
                 if limit < LIST_LIMIT_MAX
-                else "narrow it with --state"
+                else f"{limit} is the most one read returns"
             )
             console.print(
                 f"workspace {_text(entry.get('workspace_id'), '?')}: {limit} shown,"

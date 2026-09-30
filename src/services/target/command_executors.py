@@ -983,10 +983,11 @@ async def schedule_item(session, command: Command) -> CommandResult:
     )
     if born is None:
         # The same item already waits on this account; the database said so,
-        # and the story in the way is named so a person can find it.
+        # and the story in the way is named so a person can find it — with its
+        # cancel flag, since a story cancelled a moment ago still waits.
         existing = await readers.row(
             session,
-            "SELECT id, state, origin FROM post_intents"
+            "SELECT id, state, origin, cancel_requested FROM post_intents"
             " WHERE workspace_id = :ws AND media_item_id = :media"
             f"   AND ig_account_id = :acct AND {intent_ledger.NOT_TERMINAL}",
             ws=command.workspace_id,
@@ -1001,6 +1002,7 @@ async def schedule_item(session, command: Command) -> CommandResult:
                     "intent_id": str(existing["id"]),
                     "state": existing["state"],
                     "origin": existing["origin"],
+                    "cancel_requested": existing["cancel_requested"],
                 }
             }
             if existing

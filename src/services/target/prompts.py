@@ -619,12 +619,15 @@ async def sweep_due_prompts(session, *, late_seconds: int, limit: int) -> dict:
     names: dict[str, str] = {}  # a scheduler's display name, once per sweep
     claims = unit_of_work.WorkspaceClaims(session)
     for row in sorted(
-        due, key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"])
+        due,
+        key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"], str(r["id"])),
     ):
         ws = str(row["workspace_id"])
         await claims.claim(ws)
         if not await _still_due(session, row):
-            continue  # changed since the door read it: its next reading decides
+            # its next reading decides: moved, flagged or served since the door read
+            logger.info("prompt sweep: intent %s changed under the sweep", row["id"])
+            continue
         if ws not in bindings_by_workspace:
             bindings_by_workspace[ws] = await push_bindings(session, ws)
         await prompt_intent(
@@ -804,7 +807,8 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
     names: dict[str, str] = {}  # a scheduler's display name, once per sweep
     claims = unit_of_work.WorkspaceClaims(session)
     for row in sorted(
-        rows, key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"])
+        rows,
+        key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"], str(r["id"])),
     ):
         ws = str(row["workspace_id"])
         await claims.claim(ws)

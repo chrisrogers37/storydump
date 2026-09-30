@@ -142,13 +142,26 @@ class TestScheduleItem:
             _item(),
             _instant(),
             (0, None),  # the INSERT did nothing: the live-subject key holds
-            (1, {"id": STORY, "state": "approved", "origin": "cadence"}),
+            (
+                1,
+                {
+                    "id": STORY,
+                    "state": "approved",
+                    "origin": "cadence",
+                    "cancel_requested": True,
+                },
+            ),
         )
         with pytest.raises(CommandRefused) as refused:
             await command_executors.schedule_item(ex, _schedule())
         assert refused.value.reason == "illegal_transition"
         assert refused.value.facts == {
-            "existing": {"intent_id": STORY, "state": "approved", "origin": "cadence"}
+            "existing": {
+                "intent_id": STORY,
+                "state": "approved",
+                "origin": "cadence",
+                "cancel_requested": True,
+            }
         }
         assert len(ex.statements) == 5, "no audit row, nothing else"
         sql, params = ex.statements[-1]

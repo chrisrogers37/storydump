@@ -9,7 +9,7 @@ hatch for a question these do not answer; the probes the verbs were built from a
 
 Sign in once (`storydump login`, a token minted under Settings › API tokens). Add `--json` to
 any verb for one envelope `{"v": 1, "kind", "data", "error"}` — a workspace read's `data` is
-`{"workspaces": [{"workspace_id", "rows"}]}`, `posture`'s is the view's own object; add
+`{"workspaces": [{"workspace_id", "rows"}]}` (`planned`'s also carries the page size it asked for, `limit`), `posture`'s is the view's own object; add
 `--workspace <id or exact name>` to read one workspace (`posture` takes neither).
 
 | Question | Verb | Rows |
@@ -21,7 +21,7 @@ any verb for one envelope `{"v": 1, "kind", "data", "error"}` — a workspace re
 | What is the job queue doing? | `storydump jobs [--since 3h]` | one per kind × lane × state with the oldest runnable and failed samples |
 | What is still owed or lost on the chats? | `storydump outbox [--since 3h]` | pending, sending, ambiguous and failed rows by binding |
 | What did the burst do? | `storydump burst [--since 3h]` | one timeline: taps, permits, float waits, siblings posting past a waiter, review cards, and the window's outcome counts |
-| What is coming — the stories a person planned? | `storydump planned [--state scheduled,awaiting_approval] [--newest-first] [--limit N]` | one per planned story, soonest first (`--newest-first` for a history such as `--state expired`): when it is due in the zone its time was chosen in, its account and item, who planned it, a cancel still landing; a full page says it is the first |
+| What is coming — the stories a person planned? | `storydump planned [--state scheduled,awaiting_approval] [--newest-first] [--limit N]` | one per planned story, soonest first (`--newest-first` for a history such as `--state expired`): when it is due in its account's zone (else the workspace's), as that zone is now, its account and item, who planned it, a cancel still landing; a full page says it is the first |
 | What is the database's posture? | `storydump posture` | the migration ledger, the connected role and whether it bypasses RLS, the tables under RLS, the SECURITY DEFINER census |
 
 `--since` takes `45m`, `3h`, `2d`, an ISO-8601 timestamp (`2026-09-15T14:50:00Z`; a naive one
@@ -29,7 +29,8 @@ is read as UTC) or a bare date (its midnight UTC); a window is at most thirty da
 starts in the future. Every list is bounded: `floating` by its limit (500 at most); `jobs`,
 `outbox` and `burst` by the window — except what is still owed (`jobs` in `ready`/`leased`, `outbox` rows pending,
 sending or ambiguous), which is listed at any age because a stuck row is the one to see; a
-story's own lists and `cards` stop at 500 rows, `account` at 20.
+story's own lists and `cards` stop at 500 rows, `account` at 20, `planned` at its limit (50,
+or 200 at most).
 
 ## Watching
 
@@ -49,16 +50,17 @@ click uses, so admission, tenancy and audit apply unchanged — and to ONE works
 (`--workspace <id or name>` is required). A story verb's idempotency key is deterministic
 (`<command>:<story>`, the web's), so running it twice replays ("already done", exit 0) and
 `--idempotency-key <k>` is the deliberate second execution; `resolve`'s key carries the review
-episode, so a later review of the same story is new; `pause`, `resume` and `sync` mint a fresh
-key per invocation, because their effects are idempotent and a later action must execute. A
+episode, so a later review of the same story is new; `schedule`, `reschedule`, `pause`, `resume`
+and `sync` mint a fresh key per invocation, because a later action must execute (a second
+`schedule` of an item that already waits is the database's to refuse). A
 refusal is an answer: the reason in the CLI's words, the fixing verb, exit 2.
 
 | To … | Verb |
 |---|---|
-| skip, reject, or record a hand-posted story awaiting approval | `storydump skip|reject|posted <story> --workspace <ws>` |
+| skip, reject, or record a hand-posted story awaiting approval | `storydump skip\|reject\|posted <story> --workspace <ws>` |
 | approve a story for the Instagram API (`manual_mode` when API posting is off) | `storydump approve <story> --workspace <ws>` |
 | cancel a story (a waiting one is refunded; one mid-flight stops at its next step) | `storydump cancel <story> --workspace <ws>` |
-| resolve a story parked for review | `storydump resolve <story> retry|posted|cancel [--not-posted] --workspace <ws>` |
+| resolve a story parked for review | `storydump resolve <story> retry\|posted\|cancel [--not-posted] --workspace <ws>` |
 | pause or resume the workspace's posting | `storydump pause --workspace <ws>` / `storydump resume --workspace <ws>` |
 | queue a sync of a connected folder | `storydump sync <source_id> --workspace <ws>` |
 | plan a story: an item, on an account, at a time in the account's zone | `storydump schedule <item> --account <handle\|id> --at 'YYYY-MM-DD HH:MM' [--override-locks] --workspace <ws>` |

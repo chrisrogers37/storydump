@@ -13,6 +13,7 @@ PR body, never ridden.
 """
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -869,9 +870,11 @@ class TestTheMissLeg:
             "state = 'scheduled'",
             "origin = 'planned'",
             "NOT cancel_requested",
+            "schedule_slot_at = :slot",
         ):
             assert guard in sql, guard
         assert params["ws"] == "ws-1"
+        assert params["slot"] == SLOT, "the time the door read"
         assert json.loads(params["e"]) == {
             "v": 1,
             "class": "planned_missed",
@@ -885,8 +888,6 @@ class TestTheMissLeg:
     async def test_one_rows_fault_is_logged_and_the_sweep_goes_on(
         self, monkeypatch, caplog
     ):
-        import logging
-
         async def say(session, row, *, reason, surface, by):
             if row["id"] == "i-1":
                 raise RuntimeError("a zone, a lost binding")
@@ -1087,11 +1088,15 @@ class TestTheServeLegServesAStoryAsTheDoorReadIt:
         ids=["moved", "flagged", "served_by_another_sweep"],
     )
     async def test_a_story_changed_since_the_door_read_it_waits_for_its_next(
-        self, monkeypatch, origin, since
+        self, monkeypatch, caplog, origin, since
     ):
         seen = _serving(monkeypatch)
+        caplog.set_level(logging.INFO, logger=prompts.logger.name)
         session = _SweepSession(
             due=[_due_story(origin)], changed={f"i-{origin}": since}
         )
         counts = await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
         assert seen == {"served": [], "cards": []} and counts["prompted"] == 0
+        assert f"intent i-{origin} changed under the sweep" in caplog.text, (
+            "never silent"
+        )

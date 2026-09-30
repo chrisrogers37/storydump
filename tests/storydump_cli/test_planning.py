@@ -268,11 +268,38 @@ def test_an_item_already_waiting_names_the_story_in_the_way(tmp_path):
     )
     assert result.exit_code == EXIT_REFUSED
     assert error["detail"] == (
-        f"that item already waits on that account: story {STORY} (awaiting_approval)"
+        f"that item already waits on that account: story {STORY}"
+        " (cadence, awaiting_approval)"
+    )
+    # a re-run after an answer that never arrived meets the person's own story
+    assert error["fix"] == (
+        f"storydump story {STORY} shows it: if you just ran this, it is the story"
+        " you planned; otherwise cancel it to plan the item again"
+    )
+
+
+def test_an_item_whose_story_is_being_cancelled_says_to_wait_for_it(tmp_path):
+    result, error = refused(
+        tmp_path,
+        {
+            "reason": "illegal_transition",
+            "detail": "command refused: …",
+            "facts": {
+                "existing": {
+                    "intent_id": STORY,
+                    "state": "scheduled",
+                    "origin": "planned",
+                    "cancel_requested": True,
+                }
+            },
+        },
+    )
+    assert result.exit_code == EXIT_REFUSED
+    assert error["detail"] == (
+        f"that item's story on that account, {STORY}, is still being cancelled"
     )
     assert error["fix"] == (
-        f"storydump story {STORY} shows it; cancel it, or let it post,"
-        " to plan the item again"
+        f"run it again once the cancel has landed (storydump story {STORY} shows it)"
     )
 
 
@@ -282,7 +309,10 @@ def test_an_item_already_waiting_with_no_story_named_says_where_to_look(tmp_path
     )
     assert result.exit_code == EXIT_REFUSED
     assert "already waiting to post" in error["detail"]
-    assert error["fix"] == "storydump account <handle> lists that account's stories"
+    assert error["fix"] == (
+        "run it again, since the story in the way may have just ended; if it is"
+        " refused again, storydump account <handle> shows that account's stories"
+    )
 
 
 @pytest.mark.parametrize("verb", ["schedule", "reschedule"])
@@ -410,12 +440,38 @@ def test_planned_is_the_queue_read_filtered_to_planned_stories(tmp_path):
     assert "a full page" not in result.output, "a short page is the whole list"
 
 
-@pytest.mark.parametrize("tz", [None, "Not/AZone", "America"])
+@pytest.mark.parametrize("tz", [None, "Not/AZone"])
 def test_planned_shows_the_time_as_given_where_it_cannot_name_the_zone(tmp_path, tz):
     api = write_api(queue(WS, [{**ROW, "tz": tz}]))
     result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
     assert result.exit_code == EXIT_OK, result.output
     assert "2026-10-12T22:30:00+00:00" in result.output
+
+
+def test_planned_shows_the_time_as_given_where_the_zone_cannot_be_read(
+    tmp_path, monkeypatch
+):
+    """With the `tzdata` package installed, a key that is a directory there
+    raises an OSError rather than ZoneInfoNotFoundError; the list shows the
+    time as given all the same."""
+    from storydump_cli import output
+
+    def unreadable(key):
+        raise IsADirectoryError(key)
+
+    monkeypatch.setattr(output, "ZoneInfo", unreadable)
+    api = write_api(queue(WS, [ROW]))
+    result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
+    assert result.exit_code == EXIT_OK, result.output
+    assert "2026-10-12T22:30:00+00:00" in result.output
+
+
+def test_planned_shows_a_time_that_names_no_instant_as_given(tmp_path):
+    api = write_api(queue(WS, [{**ROW, "schedule_slot_at": "2026-10-12T22:30:00"}]))
+    result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
+    assert result.exit_code == EXIT_OK, result.output
+    assert "2026-10-12T22:30:00" in result.output
+    assert "America/New_York" not in result.output
 
 
 def test_a_full_page_says_it_is_the_first(tmp_path):
@@ -428,14 +484,37 @@ def test_a_full_page_says_it_is_the_first(tmp_path):
     ) in result.output
 
 
-def test_a_full_page_at_the_most_one_read_returns_says_to_narrow_it(tmp_path):
+def test_a_full_page_at_the_most_one_read_returns_offers_no_wider_read(tmp_path):
     api = write_api(queue(WS, [ROW] * 200, limit=200))
     result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
     assert result.exit_code == EXIT_OK, result.output
-    assert "200 shown, a full page — there may be more; narrow it with --state" in (
-        result.output
-    )
+    assert (
+        "200 shown, a full page — there may be more; 200 is the most one read returns"
+    ) in result.output
     assert "--limit up to" not in result.output
+
+
+def test_a_story_missed_at_its_time_says_why(tmp_path):
+    missed = {**ROW, "state": "expired", "miss_reason": "late"}
+    api = write_api(queue(WS, [missed]))
+    result = run(
+        write_runtime(tmp_path, api),
+        "planned",
+        "--workspace",
+        WS,
+        "--state",
+        "expired",
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    assert "expired (late)" in result.output
+
+
+def test_a_due_time_with_seconds_shows_them(tmp_path):
+    api = write_api(
+        queue(WS, [{**ROW, "schedule_slot_at": "2026-10-12T22:30:05+00:00"}])
+    )
+    result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
+    assert "2026-10-12 18:30:05 America/New_York" in result.output
 
 
 def test_planned_says_a_cancel_still_landing(tmp_path):

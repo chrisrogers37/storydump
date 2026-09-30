@@ -585,6 +585,7 @@ class TestScheduleItem:
                 "intent_id": first.data["intent_id"],
                 "state": "scheduled",
                 "origin": "planned",
+                "cancel_requested": False,
             }
         }
         assert _row(world, first.data["intent_id"])["state"] == "scheduled"
@@ -609,7 +610,30 @@ class TestScheduleItem:
             "intent_id": cadence,
             "state": "scheduled",
             "origin": "cadence",
+            "cancel_requested": False,
         }
+
+    def test_the_story_in_the_way_is_the_live_one_never_an_ended_one(self, world):
+        w = _workspace(world, "ended-then-live")
+        item = _item(world, w)
+        ended = schedule(world, w, item, _local(days=1)).data["intent_id"]
+        run(world, w, "cancel", intent_id=ended)
+        asyncio.run(reap_as_worker(world["owner"]))
+        assert _row(world, ended)["state"] == "cancelled"
+        live = schedule(world, w, item, _local(days=2)).data["intent_id"]
+        refused = schedule_refused(world, w, item, _local(days=3))
+        assert refused.facts["existing"]["intent_id"] == live
+
+    def test_a_story_being_cancelled_still_holds_its_item_and_says_so(self, world):
+        """A cancel is a flag the reaper honours later: until it does, the
+        story still holds its item, and the refusal says it is on its way out."""
+        w = _workspace(world, "recancel")
+        item = _item(world, w)
+        first = schedule(world, w, item, _local(days=1)).data["intent_id"]
+        run(world, w, "cancel", intent_id=first)
+        refused = schedule_refused(world, w, item, _local(days=2))
+        assert refused.facts["existing"]["intent_id"] == first
+        assert refused.facts["existing"]["cancel_requested"] is True
 
     def test_no_bound_chat_is_said_not_refused(self, world):
         w = _workspace(world, "unbound", bound=False)
@@ -881,6 +905,13 @@ class TestCancel:
         listed = _worker(world, due)
         assert uuid.UUID(control) in listed
         assert uuid.UUID(intent) not in listed
+        # the control goes back to the future: no due row left for later sweeps
+        _sql(
+            world,
+            "UPDATE post_intents SET schedule_slot_at = now() + interval '2 days'"
+            " WHERE id = %s",
+            (control,),
+        )
         asyncio.run(reap_as_worker(world["owner"]))
         assert _row(world, intent)["state"] == "cancelled"
         # and the item is free for that account again
@@ -1047,14 +1078,16 @@ class TestWhoLastMovedIt:
         assert str(found["by_user_id"]) == w["user"], "the scheduler, not the canceller"
 
 
-def _await_lock_wait(cur, xid, deadline_s=20.0):
+def _await_lock_wait(cur, xid, thread, done, deadline_s=20.0):
     """Until a session waits on the transaction *xid*, which holds the story's
     row, or fail: a race test whose loser never waited on that row proves
     nothing, and a wait on any other transaction is not this one. Read inside
     that transaction: `pg_locks` is the lock table as it stands, not a
-    snapshot."""
+    snapshot. A sweep that ended first never waited: say how it ended."""
     end = time.monotonic() + deadline_s
     while time.monotonic() < end:
+        if not thread.is_alive():
+            pytest.fail(f"the sweep ended without waiting on the row: {done}")
         cur.execute(
             "SELECT count(*) FROM pg_locks WHERE NOT granted"
             " AND locktype = 'transactionid' AND transactionid::text = %s",
@@ -1066,13 +1099,13 @@ def _await_lock_wait(cur, xid, deadline_s=20.0):
     pytest.fail("the sweep never waited on the row")
 
 
-def _sweep_while_changed(world, intent, sweep, change):
+def _sweep_while_changed(world, intent, sweep, *changes):
     """The race a write can win against a sweep: a transaction holds the
     story's row, as `reschedule_item` and `cancel` do under `_intent_row`'s
-    lock, and changes it (*change*, a SET list); the sweep (`_serve` or
-    `_miss`) reads its door, an unlocked read that still sees the row as it
-    was, then waits on the row; the change commits and the sweep goes on. A
-    sweep that raised fails the test."""
+    lock, and changes it (*changes*, SET lists applied in order); the sweep
+    (`_serve` or `_miss`) reads its door, an unlocked read that still sees
+    the row as it was, then waits on the row; the change commits and the
+    sweep goes on. A sweep that raised fails the test."""
     done = {}
 
     def go():
@@ -1083,20 +1116,26 @@ def _sweep_while_changed(world, intent, sweep, change):
 
     thread = threading.Thread(target=go)
     with _owner_cursor(world) as cur:
-        cur.execute(f"UPDATE post_intents SET {change} WHERE id = %s", (intent,))
+        for change in changes:
+            cur.execute(f"UPDATE post_intents SET {change} WHERE id = %s", (intent,))
         cur.execute("SELECT pg_current_xact_id()::xid::text")
         ((xid,),) = cur.fetchall()
         thread.start()
-        _await_lock_wait(cur, xid)
+        _await_lock_wait(cur, xid, thread, done)
     thread.join(timeout=60)
     assert not thread.is_alive(), "the sweep never finished"
     assert "error" not in done, done.get("error")
     return done["out"]
 
 
+SERVED = ("prompt_pending", "awaiting_approval")
+
+
 class TestAWriteAtTheDueInstant:
     """A story changed while a sweep that read it as due waits on its row is
-    served or missed as it now is, never as the sweep read it."""
+    served or missed as it now is, never as the sweep read it. Each test's
+    control, due the same way and left alone, is served or missed by the
+    same sweep: a sweep that skipped everything would pass them otherwise."""
 
     def _due(self, world, name, ago):
         w = _workspace(world, name)
@@ -1111,31 +1150,48 @@ class TestAWriteAtTheDueInstant:
 
     def test_the_serve_sweep_leaves_a_story_moved_under_it(self, world):
         intent = self._due(world, "race-serve", "10 seconds")
+        control = self._due(world, "race-serve-control", "10 seconds")
         _sweep_while_changed(
             world, intent, _serve, "schedule_slot_at = now() + interval '1 day'"
         )
         row = _row(world, intent)
         assert row["state"] == "scheduled", "served at the time it no longer holds"
         assert datetime.fromisoformat(row["schedule_slot_at"]) > datetime.now(UTC)
+        assert _row(world, control)["state"] in SERVED
 
     def test_the_serve_sweep_leaves_a_story_flagged_under_it(self, world):
         intent = self._due(world, "race-flag", "10 seconds")
+        control = self._due(world, "race-flag-control", "10 seconds")
         _sweep_while_changed(world, intent, _serve, "cancel_requested = true")
         assert _row(world, intent)["state"] == "scheduled", "served while cancelling"
+        assert _row(world, control)["state"] in SERVED
 
-    def test_the_serve_sweep_skips_a_story_another_sweep_served(self, world):
+    @pytest.mark.parametrize("winner_ended", SERVED)
+    def test_the_serve_sweep_skips_a_story_another_sweep_served(
+        self, world, winner_ended
+    ):
         """The worker's sweep and `plan_slot`'s fast path can read one due row.
         The second reads it served and goes on; its transition would be
-        refused as a same-state write (061) and take the whole beat with it."""
-        intent = self._due(world, "race-twice", "10 seconds")
-        _sweep_while_changed(world, intent, _serve, "state = 'prompt_pending'")
-        assert _row(world, intent)["state"] in ("prompt_pending", "awaiting_approval")
+        refused (a same-state write, 061, or an edge the guard does not
+        allow) and would take the whole beat with it."""
+        intent = self._due(world, f"race-twice-{winner_ended}", "10 seconds")
+        control = self._due(world, f"race-twice-{winner_ended}-ctl", "10 seconds")
+        served = ["state = 'prompt_pending'"]
+        if winner_ended == "awaiting_approval":
+            served.append("state = 'awaiting_approval'")
+        _sweep_while_changed(world, intent, _serve, *served)
+        # served once, by the winner (the same sweep's pending leg may then
+        # advance a `prompt_pending` row): no error above is the loser's skip
+        assert _row(world, intent)["state"] in SERVED
+        assert _row(world, control)["state"] in SERVED
 
     def test_the_miss_sweep_leaves_a_story_moved_under_it(self, world):
         intent = self._due(world, "race-miss", "2 hours")
+        control = self._due(world, "race-miss-control", "2 hours")
         _sweep_while_changed(
             world, intent, _miss, "schedule_slot_at = now() + interval '1 day'"
         )
         row = _row(world, intent)
         assert row["state"] == "scheduled", "missed at the time it no longer holds"
         assert row["last_error"] is None
+        assert _row(world, control)["state"] == "expired"

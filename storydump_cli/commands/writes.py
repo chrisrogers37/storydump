@@ -514,15 +514,23 @@ def _schedule_refused(exc: ApiError) -> Optional[tuple[str, str]]:
         existing = exc.facts.get("existing")
         if isinstance(existing, dict) and existing.get("intent_id"):
             story = existing["intent_id"]
+            if existing.get("cancel_requested"):
+                return (
+                    f"that item's story on that account, {story}, is still being"
+                    " cancelled",
+                    f"run it again once the cancel has landed (storydump story"
+                    f" {story} shows it)",
+                )
             return (
                 f"that item already waits on that account: story {story}"
-                f" ({existing.get('state')})",
-                f"storydump story {story} shows it; cancel it, or let it post,"
-                " to plan the item again",
+                f" ({existing.get('origin')}, {existing.get('state')})",
+                f"storydump story {story} shows it: if you just ran this, it is"
+                " the story you planned; otherwise cancel it to plan the item again",
             )
         return (
             "that item is already waiting to post on that account",
-            "storydump account <handle> lists that account's stories",
+            "run it again, since the story in the way may have just ended; if it is"
+            " refused again, storydump account <handle> shows that account's stories",
         )
     return _time_refused(exc)
 

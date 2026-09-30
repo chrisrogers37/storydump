@@ -97,6 +97,9 @@ check "the duplicate is a 500" $EX '        " ON CONFLICT (workspace_id, media_i
 check "the duplicate names no story" $EX '            if existing
             else {},' '            if False
             else {},' "$S -k 'same_item_waiting or cadence_story_waiting'"
+check "the story in the way may be one that ended (gate)" $EX '            f"   AND ig_account_id = :acct AND {intent_ledger.NOT_TERMINAL}",' '            "   AND ig_account_id = :acct",' "$S -k 'live_one_never_an_ended_one'"
+check "a story being cancelled is not said" $EX '                    "cancel_requested": existing["cancel_requested"],' '' "$S -k 'being_cancelled_still_holds'"
+check "a story being cancelled is not said (unit)" $EX '                    "cancel_requested": existing["cancel_requested"],' '' "$PE -k 'duplicate_is_the_databases'"
 check "the story in the way may be one that ended" $EX '            f"   AND ig_account_id = :acct AND {intent_ledger.NOT_TERMINAL}",' '            "   AND ig_account_id = :acct",' "$PE -k 'duplicate_is_the_databases'"
 check "the scheduler is not recorded" $EX "        \"         'planned', :by)\"" "        \"         'planned', NULL)\"" "$S -k 'born_planned_by_the_person'"
 check "a planned story is born cadence" $EX "        \"         'planned', :by)\"" "        \"         'cadence', :by)\"" "$S -k 'born_planned_by_the_person'"
@@ -149,6 +152,14 @@ check "the serve re-read ignores the cancel flag" $PR '        and not found["ca
 check "the serve re-read ignores the cancel flag (unit)" $PR '        and not found["cancel_requested"]' '        and True' "$TP -k 'changed_since_the_door_read_it and flagged'"
 check "the serve re-read ignores the state" $PR '        and found["state"] == row["state"]' '        and True' "$S -k 'another_sweep_served'"
 check "the serve re-read ignores the state (unit)" $PR '        and found["state"] == row["state"]' '        and True' "$TP -k 'changed_since_the_door_read_it and served_by_another_sweep'"
+check "the serve sweep serves nothing" $PR '    return (
+        found is not None' '    return False and (
+        found is not None' "$S -k 'serve_sweep'"
+check "the serve sweep serves nothing (unit)" $PR '    return (
+        found is not None' '    return False and (
+        found is not None' "$TP -k 'as_the_door_read_it_is_served'"
+check "a story left to its next reading goes unsaid" $PR '            logger.info("prompt sweep: intent %s changed under the sweep", row["id"])' '            pass' "$TP -k 'changed_since_the_door_read_it and moved'"
+check "the miss sweep misses a moved story (unit)" $PR '                            "   AND schedule_slot_at = :slot RETURNING id"' '                            "   RETURNING id"' "$TP -k 'each_miss_is_ended'"
 check "the miss sweep misses a moved story" $PR '                            "   AND schedule_slot_at = :slot RETURNING id"' '                            "   RETURNING id"' "$S -k 'miss_sweep_leaves'"
 check "a cancel request is who last moved it" src/services/target/intent_ledger.py "                    f\"       AND {audit.moved('e')}\"" '                    ""' "$S -k 'who_only_asked_for_a_cancel'"
 check "a cancel request is a tap" src/services/target/ops_views.py "    f\"   AND {audit.moved('a')}\"," '    "",' "$OV -k 'only_this_workspaces_rows'"
@@ -199,7 +210,14 @@ check "planned reads a history oldest first" storydump_cli/client.py '        if
 check "the due time is UTC" storydump_cli/output.py '    ("due", _planned_due),' '    ("due", "schedule_slot_at"),' "$CU -k 'queue_read_filtered'"
 check "a full page reads as the whole list" storydump_cli/output.py '        if isinstance(limit, int) and len(_dicts(entry.get("rows"))) >= limit:' '        if False:' "$CU -k 'full_page'"
 check "a full page at the most one read returns says to raise it" storydump_cli/output.py '                if limit < LIST_LIMIT_MAX' '                if True' "$CU -k 'most_one_read_returns'"
-check "a zone that is a directory breaks the list" storydump_cli/output.py '    except (ValueError, OSError, ZoneInfoNotFoundError):' '    except (ValueError, ZoneInfoNotFoundError):' "$CU -k 'cannot_name_the_zone'"
+check "a zone that cannot be read breaks the list" storydump_cli/output.py '    except (ValueError, OSError, ZoneInfoNotFoundError):' '    except (ValueError, ZoneInfoNotFoundError):' "$CU -k 'zone_cannot_be_read'"
+check "a missed story does not say why" storydump_cli/output.py '    if row.get("miss_reason"):' '    if False:' "$CU -k 'missed_at_its_time_says_why'"
+check "seconds are dropped" storydump_cli/output.py '    clock = "%H:%M:%S" if local.second else "%H:%M"' '    clock = "%H:%M"' "$CU -k 'seconds_shows_them'"
+check "a time with no zone is read in the terminal's own" storydump_cli/output.py '        if instant.tzinfo is None:
+            return at' '        if False:
+            return at' "$CU -k 'names_no_instant'"
+check "an account's state is not shown" storydump_cli/output.py "        console.print(f\"    state     {_cell(row.get('state'))}\")" '        pass' "tests/storydump_cli/test_reads.py -k 'account_by_handle_json_and_human'"
+check "a story being cancelled reads as one that waits" storydump_cli/commands/writes.py '            if existing.get("cancel_requested"):' '            if False:' "$CU -k 'being_cancelled_says_to_wait'"
 check "the page size is dropped" storydump_cli/commands/reads.py '    if isinstance(data.get("limit"), int):' '    if False:' "$CU -k 'full_page or bounds_the_page'"
 
 # The vocabulary: every fact a refusal carries keeps its words (the CLI's tests are parametrized over
