@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.services.target import prompts, unit_of_work
+from src.services.target.work_loop import WorkerConfig
 from tests.scripts.conftest import async_url, seed_workspace_chain
 
 pytestmark = [pytest.mark.integration]
@@ -64,7 +65,9 @@ async def _sweep(engine, tenant_id=""):
             await unit_of_work.apply_gucs(
                 session, tenant_id=str(tenant_id), actor_kind="system"
             )
-            return await prompts.sweep_due_prompts(session, limit=50)
+            return await prompts.sweep_due_prompts(
+                session, limit=50, late_seconds=WorkerConfig().planned_late_seconds
+            )
 
 
 class TestDueScheduledGainsItsCard:

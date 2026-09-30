@@ -500,7 +500,9 @@ def status_line(
         line += (
             f" prompts[sweeps={prompt_sweeper.sweeps}"
             f" prompted={prompt_sweeper.prompted}"
-            f" advanced={prompt_sweeper.advanced}]"
+            f" advanced={prompt_sweeper.advanced}"
+            f" missed={prompt_sweeper.missed}"
+            f" unheard={prompt_sweeper.unheard}]"
         )
     if backpressure is not None:
         line += " " + _backpressure.render(backpressure)
@@ -542,34 +544,53 @@ class PromptSweeper:
     """The W3 prompt sweep on its own cadence: due intents gain their cards
     and advance to `awaiting_approval` in the same pass — the web queue is a
     surface every workspace has (#1033), so delivery is not what gates the
-    edge. Counters ride the status line — the same absence-is-failure
-    control the sender sweeper carries. Runs regardless of channel state: cards enqueued while
-    the transport is parked simply wait as `pending` rows."""
+    edge. Then the miss leg (089): planned stories that will not be served
+    end `expired` and their bound chats are told. The two legs run in two
+    transactions, so a fault in one never holds the other back. Counters ride
+    the status line — the same absence-is-failure control the sender sweeper
+    carries; `unheard` counts misses nobody could be told of. Runs regardless
+    of channel state: cards enqueued while the transport is parked simply wait
+    as `pending` rows."""
 
     def __init__(self, app: "WorkerApp"):
         self._app = app
         self.sweeps = 0
         self.prompted = 0
         self.advanced = 0
+        self.missed = 0
+        self.unheard = 0
 
     async def run(self, stop: asyncio.Event) -> None:
-        maker = async_sessionmaker(self._app.engine, expire_on_commit=False)
+        # Each leg is one transaction with no tenant and the system actor —
+        # the shape `make_session_for` gives a system job — so the doors and
+        # the per-workspace claims inside the sweep scope what it touches.
+        sessions = unit_of_work.make_session_for(self._app.engine)
+        cfg = self._app.config
         while not stop.is_set():
             self.sweeps += 1
             try:
-                async with maker() as session:
-                    async with session.begin():
-                        await unit_of_work.apply_gucs(
-                            session, tenant_id="", actor_kind="system"
-                        )
-                        counts = await prompts_mod.sweep_due_prompts(
-                            session, limit=self._app.config.prompt_sweep_limit
-                        )
+                async with sessions({}) as session:
+                    counts = await prompts_mod.sweep_due_prompts(
+                        session,
+                        limit=cfg.prompt_sweep_limit,
+                        late_seconds=cfg.planned_late_seconds,
+                    )
                 self.prompted += counts["prompted"]
                 self.advanced += counts["advanced"]
             except Exception:  # noqa: BLE001 — outlive a blip, loudly
                 logger.exception("prompt sweep failed; retrying on cadence")
-            await jobs.wait_or_stop(stop, self._app.config.prompt_sweep_seconds)
+            try:
+                async with sessions({}) as session:
+                    misses = await prompts_mod.sweep_planned_misses(
+                        session,
+                        limit=cfg.prompt_sweep_limit,
+                        late_seconds=cfg.planned_late_seconds,
+                    )
+                self.missed += misses["missed"]
+                self.unheard += misses["unheard"]
+            except Exception:  # noqa: BLE001 — outlive a blip, loudly
+                logger.exception("planned-miss sweep failed; retrying on cadence")
+            await jobs.wait_or_stop(stop, cfg.prompt_sweep_seconds)
 
 
 async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:

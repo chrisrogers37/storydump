@@ -410,6 +410,21 @@ def expected_tenancy(statements) -> dict:
         ):
             continue
 
+        # ALTER INDEX is HANDLED, not allowlisted, because one spelling of it
+        # moves a table: for backward compatibility PostgreSQL also runs
+        # `ALTER INDEX … RENAME TO` on a TABLE and renames it (measured on 15:
+        # the relation renamed is relkind 'r'; every other ALTER INDEX form
+        # refuses a non-index). A table's name is the key every fact here is
+        # recorded under, so a rename through the index form is the reducing
+        # case `ALTER TABLE … RENAME TO` is. An ALTER INDEX naming no table
+        # this prefix created acts on an index, which is none of the four
+        # facts; one naming such a table falls through to the refusal below.
+        # 089 (#1413) is the first member: it renames a partial unique index
+        # to the name of the key it replaces.
+        m = re.match(r"ALTER INDEX (?:IF EXISTS )?(?:public\.)?(\w+) ", stmt)
+        if m and m.group(1).lower() not in {name.lower() for name in sig}:
+            continue  # an unquoted name folds to lower case, as the server folds it
+
         # ALLOWLIST, not a denylist, and the direction is the whole point.
         #
         # What must never happen is a statement that REDUCES tenancy state

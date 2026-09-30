@@ -56,6 +56,7 @@ from src.services.target.usage_precheck import UsagePrecheck
 from tests.scripts.conftest import (
     _scratch,
     async_url,
+    reap_as_worker,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -3045,25 +3046,6 @@ def _states(pipe_db, intents):
     return [rows[str(i)] for i in intents]
 
 
-async def _reap(pipe_db):
-    """One `reap_expired` run exactly as the worker's registry runs it — the
-    reaper door, the stale-approved leg, the settled-card sweep, at the
-    worker's own numbers — as `svc_worker` with no tenant."""
-    from sqlalchemy import text
-
-    from src.services.target.unit_of_work import apply_gucs
-    from src.services.target.work_loop import WorkerConfig, WorkerDeps, build_registry
-    from tests.scripts.conftest import as_user, ingress_engine
-
-    async with ingress_engine(as_user(pipe_db["owner"], "svc_worker")) as engine:
-        registry = build_registry(WorkerDeps(engine=engine, config=WorkerConfig()))
-        async with engine.begin() as conn:
-            who = (await conn.execute(text("SELECT current_user"))).scalar()
-            assert who == "svc_worker", who
-            await apply_gucs(conn, tenant_id="", actor_kind="system")
-            await registry["reap_expired"](conn, {"kind": "reap_expired"})
-
-
 def _sweep(pipe_db, lim):
     """The door alone, bounded by *lim*; the rows it moved."""
     return _exec(
@@ -3086,7 +3068,7 @@ class TestTheReapersCancelLeg:
         it) loses its buttons to the settled-card sweep that follows the reap."""
         intents = [_waiting(pipe_db, s, flagged=True) for s in WAITING_STATES]
         bindings = [_seed_card(pipe_db, i, tapped=False) for i in intents]
-        _run(_reap(pipe_db))
+        _run(reap_as_worker(pipe_db["owner"]))
         assert _states(pipe_db, intents) == ["cancelled"] * 4
         audited = _exec(
             pipe_db,
@@ -3103,7 +3085,7 @@ class TestTheReapersCancelLeg:
     def test_an_unflagged_waiting_row_is_left_alone(self, pipe_db):
         """The leg's control: only the flag ends a story."""
         intents = [_waiting(pipe_db, s, flagged=False) for s in WAITING_STATES]
-        _run(_reap(pipe_db))
+        _run(reap_as_worker(pipe_db["owner"]))
         assert _states(pipe_db, intents) == list(WAITING_STATES)
 
     def test_a_flag_outranks_an_expiry_in_the_same_sweep(self, pipe_db):
@@ -3119,7 +3101,7 @@ class TestTheReapersCancelLeg:
             ]
             for flagged in (True, False)
         }
-        _run(_reap(pipe_db))
+        _run(reap_as_worker(pipe_db["owner"]))
         assert _states(pipe_db, past[True]) == ["cancelled"] * 2
         assert _states(pipe_db, past[False]) == ["expired"] * 2
 
@@ -3142,7 +3124,7 @@ class TestTheReapersCancelLeg:
         and its own job refunds it and cancels it, as
         `test_a_cancel_while_floating_refunds_and_destroys` pins."""
         intent, _ = _new_intent(pipe_db, cancel_requested=True, debited=True)
-        _run(_reap(pipe_db))
+        _run(reap_as_worker(pipe_db["owner"]))
         row = _intent_row(pipe_db, intent)
         assert (row["state"], row["cap_refunded_at"]) == ("approved", None)
         assert _bucket(pipe_db, DAY) == 1, "the debit is still owed, not lost"
@@ -3241,12 +3223,13 @@ class TestTheReapersCancelLeg:
 
 
 class TestEveryLegRunsInTheFinalBody:
-    """087 redefines `fn_reaper_sweep` on 086's body, so one file carries every
-    leg: 076's six, 086's deadline leg (#1429) and 087's cancel leg (#1235).
-    One sweep, as the worker runs it, over a world holding one row for each
-    leg to take, and one test per leg reading its row: a body that dropped a
-    leg fails by the leg's name (`tests/mutations/content_schedule_01b.sh` removes
-    each in turn)."""
+    """The stream's last definition of `fn_reaper_sweep` carries every leg: 089
+    redefines it on 087's body (#1413), so one file holds 076's six, 086's
+    deadline leg (#1429), 087's cancel leg (#1235) and 089's cadence-only slot
+    expiry. One sweep, as the worker runs it, over a world holding one row for
+    each leg to take, and one test per leg reading its row: a body that dropped
+    a leg fails by the leg's name (`tests/mutations/content_schedule_01b.sh`
+    removes each in turn from the final body)."""
 
     @pytest.fixture(scope="class")
     def swept(self, pipe_db):
@@ -3294,7 +3277,7 @@ class TestEveryLegRunsInTheFinalBody:
             (pipe_db["ws"], f"legs:{uuid.uuid4()}"),
             fetch=True,
         )[0][0]
-        _run(_reap(pipe_db))
+        _run(reap_as_worker(pipe_db["owner"]))
         return {
             "lease": lease,
             "flagged": flagged,

@@ -296,9 +296,10 @@ class TestAgainstTheRealDocs:
         # it 39; §28's audit triggers reading an empty actor as unset (085,
         # #1421) make it 40; §29's reaper ending a ready job past its
         # deadline (086, #1429) makes it 41; §30's reaper leg for the
-        # cancels users asked for (087, #1235) makes it 42; and §31's ledger
-        # learning 'planned' (088, #1413) makes it 43.
-        assert classes.count("normative") == 43
+        # cancels users asked for (087, #1235) makes it 42; §31's ledger
+        # learning 'planned' (088, #1413) makes it 43; and §32's planned
+        # stories served on time or missed out loud (089, #1413) make it 44.
+        assert classes.count("normative") == 44
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
@@ -479,19 +480,21 @@ class TestWhatTheCommentRuleChangedInTheStream:
     """#1406 changed what the prefix gate compares, and this pins the change.
 
     Normalization now drops every comment outside a literal and keeps every
-    literal whole. Against the rule it replaced, 44 of the stream's 448
+    literal whole. Against the rule it replaced, 45 of the stream's 464
     statements normalize differently, and in two directions:
 
     - 31 STOP comparing a comment that sits outside every literal — after a
       column, in a trigger or function header — which the old rule kept.
-    - 18 START comparing the `--` lines inside a function body, which the old
+    - 19 START comparing the `--` lines inside a function body, which the old
       rule dropped although PostgreSQL stores them in `pg_proc.prosrc`. The
-      last five are `085`'s two (#1421), whose audit trigger replacements
+      last six are `085`'s two (#1421), whose audit trigger replacements
       carry a `-- 085:` line, `086`'s reaper (#1429), whose new leg
       carries a `-- 086:` block, `087`'s reaper (#1235), which adds a
-      `-- 087:` block for its cancel leg and carries 086's, and `088`'s
+      `-- 087:` block for its cancel leg and carries 086's, `088`'s
       `trg_intent_planned_person` (#1413), whose body says why it may
-      assume the approval: its trigger's WHEN admits nothing else.
+      assume the approval (its trigger's WHEN admits nothing else), and
+      `089`'s reaper (#1413), which carries both blocks and adds a
+      `-- 089:` block for its cadence-only slot expiry.
 
     Five statements are in both: the five definitions of `fn_clock_tick`.
     Nothing else changed.
@@ -551,6 +554,7 @@ class TestWhatTheCommentRuleChangedInTheStream:
         "CREATE FUNCTION trg_intent_guard",
         "CREATE FUNCTION trg_intent_insert_guard",
         "CREATE FUNCTION trg_intent_planned_person",
+        "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION trg_governance_audit",

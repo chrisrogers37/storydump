@@ -270,10 +270,8 @@ async def _notice_no_media(
         )
         return outbox.UNDELIVERABLE
 
-    # Name the account: a multi-account workspace cannot act on "a slot", and
-    # `06` §3 already requires the queue card to name its account for the same
-    # reason. `handle` is nullable, so the fallback is a phrase, not a blank.
-    label = f"@{claimed[0]}" if claimed[0] else "one of this workspace's accounts"
+    # Name the account, as every notice names one (`prompts.account_label`).
+    label = prompts.account_label(claimed[0])
     await outbox.fanout_notification(
         session,
         workspace_id=workspace_id,
@@ -339,12 +337,12 @@ async def execute_plan_slot(
 
     The target carries ``WHERE origin = 'cadence'`` because the slot key is a
     cadence rule: a planned row (a story a person scheduled for a chosen time)
-    must not absorb a slot's mint. Postgres infers any unique index the
-    predicate satisfies, partial or not, so this spelling resolves against
-    `uq_intent_slot_cadence` (088) and against the unconditional
-    `uq_intent_slot` alike, while both exist. The predicate-less spelling
-    would not survive the unconditional key's removal: against the partial
-    index alone it finds no arbiter and raises on every mint.
+    takes no slot, so it must never absorb a slot's mint, and a slot's mint
+    must never meet it. `uq_intent_slot` is that partial index (088 added it
+    beside the unconditional key, 089 dropped the unconditional one and gave
+    the partial one its name). Postgres infers a partial unique index only
+    from a conflict target whose predicate implies the index's: the
+    predicate-less spelling finds no arbiter and raises on every mint.
 
     Selection (`06` §3), keyed on the CONNECTED FOLDER since 2026-09-08: the
     connected folders that have eligible media are drawn by

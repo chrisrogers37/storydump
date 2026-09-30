@@ -128,6 +128,30 @@ def test_heartbeat_and_lease_numbers_agree():
     assert app.heartbeat_interval_seconds < cfg.lease_seconds / 2
 
 
+def test_the_late_window_is_the_hour_the_owner_ruled():
+    """#1413's fork F9, option (b): a planned story is still served up to 60
+    minutes after its time, and missed out loud past it. The owner ruled the
+    number, so a change to it is a product decision this test makes visible."""
+    cfg = WorkerConfig()
+    assert cfg.planned_late_seconds == 60 * 60
+    assert cfg.planned_late_seconds > cfg.prompt_sweep_seconds, (
+        "a window shorter than one sweep beat would miss a story the worker"
+        " was up to serve"
+    )
+
+
+def test_a_card_is_late_only_past_what_the_worker_s_own_beats_explain():
+    """`prompts.SERVED_LATE_AFTER` is justified by the prompt sweep's beat and
+    the sender's: a card served on the next beat and sent on the sender's must
+    not read "served late", or every planned card would."""
+    from src.services.target import prompts
+
+    cfg = WorkerConfig()
+    assert prompts.SERVED_LATE_AFTER.total_seconds() > (
+        cfg.prompt_sweep_seconds + cfg.sender_sweep_seconds
+    )
+
+
 class TestEngineUrlFromEnv:
     """TARGET_DATABASE_URL is the branch-soak/deploy door: a plain postgres URL
     in, an asyncpg-dialect URL out, with the libpq-only params asyncpg refuses
@@ -445,57 +469,129 @@ class TestPromptSweeperConsumesTheSweep:
     only symptom is a "prompt sweep failed" line on every cadence. So the
     assertion that carries this test is the log staying silent."""
 
-    async def test_one_sweep_moves_exactly_the_counts_the_sweep_returned(
-        self, monkeypatch, caplog
-    ):
-        import asyncio
-        import logging
+    @pytest.fixture
+    def sweeper(self, monkeypatch):
+        """A PromptSweeper over no database: each leg's transaction is the one
+        `make_session_for` opens, stood in for by a no-op, and every one it
+        opens is recorded."""
+        from contextlib import asynccontextmanager
 
         from src import worker
 
-        class _Session:
-            async def __aenter__(self):
-                return self
+        opened = []
 
-            async def __aexit__(self, *exc):
-                return False
+        def make_session_for(engine):
+            @asynccontextmanager
+            async def session_for(job):
+                opened.append(job)
+                yield object()
 
-            def begin(self):
-                return self
+            return session_for
 
-        monkeypatch.setattr(
-            worker, "async_sessionmaker", lambda engine, **kw: lambda: _Session()
-        )
-
-        async def fake_gucs(session, **kw):
-            pass
-
-        monkeypatch.setattr(worker.unit_of_work, "apply_gucs", fake_gucs)
-
-        stop = asyncio.Event()
-
-        async def fake_sweep(session, *, limit):
-            stop.set()  # one iteration, then the loop sees the stop
-            return {"prompted": 2, "advanced": 1}  # the whole vocabulary since #1033
-
-        monkeypatch.setattr(worker.prompts_mod, "sweep_due_prompts", fake_sweep)
+        monkeypatch.setattr(worker.unit_of_work, "make_session_for", make_session_for)
 
         class _Config:
             prompt_sweep_seconds = 0.01
             # The door reads its batch from the config too (#1325, TD-A15);
             # a stub missing it spins the loop's `except Exception` forever.
             prompt_sweep_limit = 50
+            planned_late_seconds = 3600
 
         class _App:
             engine = object()
             config = _Config()
 
-        sweeper = worker.PromptSweeper(_App())
-        with caplog.at_level(logging.ERROR, logger="target.worker"):
-            await sweeper.run(stop)
+        return worker, worker.PromptSweeper(_App()), opened
 
-        assert (sweeper.sweeps, sweeper.prompted, sweeper.advanced) == (1, 2, 1)
-        assert "prompt sweep failed" not in caplog.text
+    async def test_one_sweep_moves_exactly_the_counts_the_sweep_returned(
+        self, sweeper, monkeypatch, caplog
+    ):
+        import asyncio
+        import logging
+
+        worker, prompt_sweeper, opened = sweeper
+        stop = asyncio.Event()
+        asked = []
+
+        async def fake_sweep(session, *, limit, late_seconds):
+            asked.append(("serve", limit, late_seconds))
+            stop.set()  # one iteration: both legs run, then the loop sees the stop
+            return {"prompted": 2, "advanced": 1}  # the whole vocabulary since #1033
+
+        async def fake_misses(session, *, limit, late_seconds):
+            asked.append(("miss", limit, late_seconds))
+            return {"missed": 3, "unheard": 1}  # the miss leg's vocabulary (089)
+
+        monkeypatch.setattr(worker.prompts_mod, "sweep_due_prompts", fake_sweep)
+        monkeypatch.setattr(worker.prompts_mod, "sweep_planned_misses", fake_misses)
+        with caplog.at_level(logging.ERROR, logger="target.worker"):
+            await prompt_sweeper.run(stop)
+
+        p = prompt_sweeper
+        assert (p.sweeps, p.prompted, p.advanced) == (1, 2, 1)
+        assert (p.missed, p.unheard) == (3, 1)
+        assert asked == [("serve", 50, 3600), ("miss", 50, 3600)], (
+            "both legs, serve first, at the config's batch and late window"
+        )
+        assert opened == [{}, {}], "a transaction per leg, neither with a tenant"
+        assert "sweep failed" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "broken, logged, counts",
+        [
+            ("serve", "prompt sweep failed", (0, 1)),
+            ("miss", "planned-miss sweep failed", (1, 0)),
+        ],
+    )
+    async def test_a_failing_leg_never_holds_the_other_back(
+        self, sweeper, monkeypatch, caplog, broken, logged, counts
+    ):
+        """The serve leg and the miss leg run in two transactions: a fault in
+        either is logged and the other still runs, in both directions."""
+        import asyncio
+        import logging
+
+        worker, prompt_sweeper, _ = sweeper
+        stop = asyncio.Event()
+        ran = []
+
+        async def fake_sweep(session, *, limit, late_seconds):
+            ran.append("serve")
+            stop.set()
+            if broken == "serve":
+                raise RuntimeError("serve leg down")
+            return {"prompted": 1, "advanced": 1}
+
+        async def fake_misses(session, *, limit, late_seconds):
+            ran.append("miss")
+            if broken == "miss":
+                raise RuntimeError("miss leg down")
+            return {"missed": 1, "unheard": 0}
+
+        monkeypatch.setattr(worker.prompts_mod, "sweep_due_prompts", fake_sweep)
+        monkeypatch.setattr(worker.prompts_mod, "sweep_planned_misses", fake_misses)
+        with caplog.at_level(logging.ERROR, logger="target.worker"):
+            await prompt_sweeper.run(stop)
+
+        assert ran == ["serve", "miss"], ran
+        assert logged in caplog.text
+        assert (prompt_sweeper.prompted, prompt_sweeper.missed) == counts
+
+    def test_the_status_line_carries_the_miss_counters(self):
+        from src.worker import status_line
+
+        class _L:
+            lane = "bulk"
+            processed = parked = failures = fenced = exhausted = 0
+
+        class _H:
+            beats, short_beats, consecutive_failures = 0, 0, 0
+
+        class _P:
+            sweeps, prompted, advanced, missed, unheard = 9, 4, 4, 2, 1
+
+        line = status_line(loops=[_L], clock=None, heartbeat=_H, prompt_sweeper=_P)
+        assert "prompts[sweeps=9 prompted=4 advanced=4 missed=2 unheard=1]" in line
 
 
 class TestThePublishLegIsWired:

@@ -296,6 +296,24 @@ def sweep_as_worker(dsn: str) -> int:
     return asyncio.run(go())
 
 
+async def reap_as_worker(owner_dsn: str) -> None:
+    """One `reap_expired` run exactly as the worker's registry runs it — the
+    reaper door, the stale-approved leg, the settled-card sweep, at the
+    worker's own numbers — connected as `svc_worker`, with no tenant and the
+    `system` actor. ONE spelling for every gate that reaps (its subject check
+    included)."""
+    from src.services.target.unit_of_work import apply_gucs
+    from src.services.target.work_loop import WorkerConfig, WorkerDeps, build_registry
+
+    async with ingress_engine(as_user(owner_dsn, "svc_worker")) as engine:
+        registry = build_registry(WorkerDeps(engine=engine, config=WorkerConfig()))
+        async with engine.begin() as conn:
+            who = (await conn.execute(text("SELECT current_user"))).scalar()
+            assert who == "svc_worker", who
+            await apply_gucs(conn, tenant_id="", actor_kind="system")
+            await registry["reap_expired"](conn, {"kind": "reap_expired"})
+
+
 def async_url(dsn: str) -> str:
     """The asyncpg URL for *dsn* — the APPLICATION's rewrite, not a second one.
 

@@ -50,7 +50,7 @@ LANE="tests/scripts/test_lineage_lane.py -k one_run_applies_the_whole_corpus"
 
 # The reads through the doors: each read emptied blinds BOTH logins — the owner control kills, the worker's assertion with it.
 check "the sender sweep stops minting (the owner control is what kills)" src/services/target/work_loop.py 'text("SELECT fn_sender_sweep(:prefix, :attempts, :deadline, :age, :lim)"),' 'text("SELECT (SELECT count(*) FROM channel_bindings b WHERE b.state = :prefix)"),' "$GATE -k sender_sweep_mints"
-check "the prompt sweep reads no due story (the owner control is what kills)" src/services/target/prompts.py '"  FROM fn_prompts_due(:lim)"' '"  FROM fn_prompts_due(:lim) WHERE false"' "$GATE -k prompt_sweep_prompts"
+check "the prompt sweep reads no due story (the owner control is what kills)" src/services/target/prompts.py '"  FROM fn_prompts_due(:lim, make_interval(secs => :late))"' '"  FROM fn_prompts_due(:lim, make_interval(secs => :late)) WHERE false"' "$GATE -k prompt_sweep_prompts"
 check "the settled-card sweep selects no card (the owner control is what kills)" src/services/target/prompts.py '"  FROM fn_settled_cards(CAST(:terminal AS text[]), :lim)"' '"  FROM fn_settled_cards(CAST(:terminal AS text[]), :lim) WHERE false"' "$GATE -k settled_card_sweep"
 check "the stranded alert selects nothing (the owner control is what kills)" src/services/target/media_sync.py '"  FROM fn_stranded_sources(:age, :lim)"' '"  FROM fn_stranded_sources(:age, :lim) WHERE false"' "$GATE -k stranded_alert_finds"
 # The writes under the workspace's tenant: each claim forgotten is a write the policy refuses (or a read that sees nothing).

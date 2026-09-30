@@ -511,8 +511,8 @@ class TestPlanSlotAdapterMapsThePayload:
 
         swept = []
 
-        async def fake_sweep(session, *, limit):
-            swept.append(limit)
+        async def fake_sweep(session, *, limit, late_seconds):
+            swept.append((limit, late_seconds))
             return {"prompted": 0, "advanced": 0}
 
         monkeypatch.setattr(work_loop.prompts, "sweep_due_prompts", fake_sweep)
@@ -551,7 +551,10 @@ class TestPlanSlotAdapterMapsThePayload:
         assert bound["slot"] == "2026-08-21T10:00:00+00:00", (
             "the raw payload string must ride to Postgres unmodified"
         )
-        assert swept == [1], "a minted intent triggers the same-beat prompt fast path"
+        assert swept == [(1, WorkerConfig().planned_late_seconds)], (
+            "a minted intent triggers the same-beat prompt fast path, at the"
+            " worker's own late window"
+        )
 
     async def test_a_slot_minted_for_an_account_since_removed_is_a_no_op(
         self, monkeypatch

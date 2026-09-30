@@ -189,6 +189,14 @@ def world(admin_conn, owner_actor):
         gen.close()
 
 
+async def _prompt_sweep(c):
+    """The prompt sweep at the worker's own numbers (`WorkerConfig`)."""
+    cfg = work_loop.WorkerConfig()
+    return await prompts.sweep_due_prompts(
+        c, limit=cfg.prompt_sweep_limit, late_seconds=cfg.planned_late_seconds
+    )
+
+
 async def _system_session(dsn: str, fn, check=None):
     """A sweep the way the worker runs it: a session with the EMPTY tenant and
     the `system` actor — then rolled back, so the next login sees the same
@@ -297,9 +305,9 @@ def test_the_prompt_sweep_prompts_the_due_stories_and_advances_the_pending_one_a
         await _claim(c, world["third"])
         assert await _state(c, world["third_intent"]) == "awaiting_approval"
 
-    owner = _run(_system_session(world["owner"], prompts.sweep_due_prompts, prompted))
+    owner = _run(_system_session(world["owner"], _prompt_sweep, prompted))
     assert (owner["prompted"], owner["advanced"]) == (2, 3)
-    got = _run(_system_session(world["worker"], prompts.sweep_due_prompts, prompted))
+    got = _run(_system_session(world["worker"], _prompt_sweep, prompted))
     assert (got["prompted"], got["advanced"]) == (2, 3)
 
 
@@ -320,7 +328,11 @@ def test_the_prompt_sweep_hands_the_callers_scope_back_so_plan_slot_can_finalize
             async with engine.connect() as c:
                 tx = await c.begin()
                 await _claim(c, world["ws"])
-                counts = await prompts.sweep_due_prompts(c, limit=1)
+                counts = await prompts.sweep_due_prompts(
+                    c,
+                    limit=1,
+                    late_seconds=work_loop.WorkerConfig().planned_late_seconds,
+                )
                 tenant = (
                     await c.execute(
                         text("SELECT current_setting('app.tenant_id', true)")

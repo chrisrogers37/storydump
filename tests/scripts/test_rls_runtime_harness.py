@@ -448,6 +448,12 @@ DOORS = {
         "svc_worker",
         "SELECT * FROM fn_stranded_sources(0, 10)",
     ),
+    # 089 (`07` §32, #1413): the planned stories that will not be served —
+    # the prompt sweeper's miss leg reads them and ends each under its tenant.
+    "fn_planned_misses": (
+        "svc_worker",
+        "SELECT * FROM fn_planned_misses(50, interval '1 hour')",
+    ),
 }
 
 

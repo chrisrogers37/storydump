@@ -421,8 +421,10 @@ class TestTheDerivedAdoptionProbesReadBothWays:
     # such function exists. 088 is here because every one of its probes names
     # `post_intents`, which a database predating the target lineage does not
     # have: they read the catalogs by name rather than cast to `regclass`,
-    # which would raise.
-    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88])
+    # which would raise. 089 is here for the same reason: its key probe
+    # names `post_intents`, and its door and grant probes name roles a
+    # database before the lineage lacks.
+    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89])
     def test_probes_read_false_without_raising_before_the_target_lineage(
         self, version, at49_db, owner_actor
     ):

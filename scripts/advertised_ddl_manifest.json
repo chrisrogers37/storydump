@@ -333,6 +333,13 @@
       "label": "§31 the ledger learns 'planned' (088, #1413) — post_intents.origin and scheduled_by_user_id, the manual-only CHECK, the cadence-only slot key beside the unconditional one (expand), and the trigger that fixes origin at birth and lets only a person approve a planned row",
       "doc": "07-security-model.md",
       "ordinal": 29
+    },
+    {
+      "sha256": "6a790e2a66f5ccaec0d5da794341c25bc6e7a67fb2f2dab83d647dde62c1b7d0",
+      "class": "normative",
+      "label": "§32 planned stories are served on time or missed out loud (089, #1413) — the unconditional slot key dropped and the cadence-only key renamed to it (contract), fn_prompts_due re-created serving planned rows only while servable and in their late window and skipping every cancel-flagged row, fn_reaper_sweep replace whose slot expiry takes cadence rows only, and fn_planned_misses listing the planned rows that will not be served with their reason",
+      "doc": "07-security-model.md",
+      "ordinal": 30
     }
   ],
   "policy_expansion": {

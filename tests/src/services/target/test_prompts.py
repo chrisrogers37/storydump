@@ -521,13 +521,14 @@ class TestTheDueDoorReadsTheCardSelect:
         sweep's alias list to every column: a column added for `render_card`
         cannot reach the resend and not the sweep (#1349 re-verify). An
         applied file is immutable: a column change means a fix-forward door,
-        and this pin moves to the new file with it."""
+        and this pin moves to the new file with it — 089 re-created the door
+        with the origin and the scheduler, so it reads 089."""
         import inspect
 
         from scripts.migration_runner import MIGRATIONS_DIR
         from src.services.target import prompts
 
-        ddl = (MIGRATIONS_DIR / "082_worker_doors.sql").read_text()
+        ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
         body = ddl.split("CREATE FUNCTION fn_prompts_due(", 1)[1].split("$$;", 1)[0]
         assert " ".join(prompts._CARD_SELECT.split()) in " ".join(body.split())
         select_list = prompts._CARD_SELECT.split("SELECT", 1)[1].split("FROM", 1)[0]
@@ -538,8 +539,8 @@ class TestTheDueDoorReadsTheCardSelect:
 
 
 class _SweepResult:
-    def __init__(self, rows):
-        self.rows = rows
+    def __init__(self, rows, first=None):
+        self.rows, self.first_row = rows, first
 
     def mappings(self):
         return self
@@ -547,16 +548,25 @@ class _SweepResult:
     def all(self):
         return self.rows
 
+    def first(self):
+        return self.first_row
+
+    def __iter__(self):
+        return iter(self.rows)
+
     def one(self):
         return ("", "system")  # the caller's scope, read by the first claim
 
 
 class _SweepSession:
-    """The prompt sweep's session double: the two doors answer, every
-    statement is recorded, a savepoint is offered and its rollback counted."""
+    """The prompt sweeper's session double: the three doors answer, the miss
+    leg's guarded UPDATE returns its id unless the intent is in *raced*,
+    every statement is recorded, a savepoint is offered and its rollback
+    counted."""
 
-    def __init__(self, *, due=(), pending=()):
-        self.due, self.pending = list(due), list(pending)
+    def __init__(self, *, due=(), pending=(), misses=(), raced=()):
+        self.due, self.pending, self.misses = list(due), list(pending), list(misses)
+        self.raced = set(raced)
         self.statements = []
         self.savepoints = self.rolled_back = 0
 
@@ -581,6 +591,10 @@ class _SweepSession:
             return _SweepResult(self.due)
         if "fn_prompts_pending" in sql:
             return _SweepResult(self.pending)
+        if "fn_planned_misses" in sql:
+            return _SweepResult(self.misses)
+        if sql.startswith("UPDATE post_intents") and params["id"] not in self.raced:
+            return _SweepResult([], first=(params["id"],))
         return _SweepResult([])
 
 
@@ -608,7 +622,7 @@ class TestTheAdvancePhaseSurvivesARefusal:
                 raise intent_ledger.IntentTransitionRefused("raced by the fast path")
 
         monkeypatch.setattr(prompts.intent_ledger, "transition", transition)
-        counts = await prompts.sweep_due_prompts(session, limit=5)
+        counts = await prompts.sweep_due_prompts(session, limit=5, late_seconds=3600)
         assert counts == {"prompted": 0, "advanced": 1}
         assert calls == ["i-1", "i-2"], "the sweep goes on after a refusal"
         assert (session.savepoints, session.rolled_back) == (2, 1), (
@@ -633,4 +647,387 @@ class TestTheAdvancePhaseSurvivesARefusal:
 
         monkeypatch.setattr(prompts.intent_ledger, "transition", transition)
         with pytest.raises(intent_ledger.IntentNotVisible):
-            await prompts.sweep_due_prompts(session, limit=5)
+            await prompts.sweep_due_prompts(session, limit=5, late_seconds=3600)
+
+
+SLOT = datetime(2026, 10, 1, 18, 0, tzinfo=timezone.utc)  # 14:00 in New York
+
+
+class TestThePlannedCard:
+    """A planned story's card says who scheduled it and for when (089), and
+    says "served late" when it is rendered a minute or more past that time —
+    at the serve, or again at send time, whichever renders it."""
+
+    def _planned(self, **over):
+        base = dict(
+            schedule_slot_at=SLOT,
+            origin="planned",
+            scheduled_by="Dana",
+            source_id="src",
+            provider_file_ref="ref",
+            workspace_id="ws",
+            handle="brand",
+        )
+        base.update(over)
+        return _card_input(**base)
+
+    def test_it_names_the_scheduler_and_the_time_in_text_and_caption(self):
+        from datetime import timedelta
+
+        card = prompts.render_card(
+            self._planned(),
+            api_publishing_enabled=True,
+            now=SLOT + timedelta(seconds=5),
+        )
+        line = "🗓 Scheduled by Dana · 2026-10-01 14:00 America/New_York"
+        assert card["text"].endswith(line), card["text"]
+        assert card["caption"].endswith(line), card["caption"]
+
+    def test_a_minute_past_its_time_the_card_says_served_late(self):
+        from datetime import timedelta
+
+        on_time = prompts.render_card(
+            self._planned(),
+            api_publishing_enabled=True,
+            now=SLOT + prompts.SERVED_LATE_AFTER - timedelta(seconds=1),
+        )
+        late = prompts.render_card(
+            self._planned(),
+            api_publishing_enabled=True,
+            now=SLOT + prompts.SERVED_LATE_AFTER,
+        )
+        assert "served late" not in on_time["text"]
+        assert late["text"].endswith(" · served late"), late["text"]
+        assert late["caption"].endswith(" · served late"), late["caption"]
+
+    def test_a_scheduler_who_is_gone_leaves_the_line_without_a_name(self):
+        card = prompts.render_card(
+            self._planned(scheduled_by=None), api_publishing_enabled=True, now=SLOT
+        )
+        assert card["text"].endswith("🗓 Scheduled · 2026-10-01 14:00 America/New_York")
+
+    def test_a_cadence_card_is_unchanged(self):
+        from datetime import timedelta
+
+        cadence = prompts.render_card(
+            _card_input(schedule_slot_at=SLOT, origin="cadence", scheduled_by="Dana"),
+            api_publishing_enabled=True,
+            now=SLOT + timedelta(hours=5),
+        )
+        assert (
+            cadence["text"]
+            == "📸 sunset.jpg (image)\nSlot: 2026-10-01 14:00 America/New_York"
+        )
+
+
+def _notice(**over):
+    kw = dict(
+        file_name="drop.jpg",
+        handle="brand",
+        slot=SLOT,
+        tz="America/New_York",
+        by="Dana",
+        reason="late",
+    )
+    kw.update(over)
+    return prompts.missed_notice(**kw)
+
+
+class TestTheMissNotice:
+    @pytest.mark.parametrize("reason", sorted(prompts.MISS_REASONS))
+    def test_each_reason_says_what_happened_and_that_nothing_was_posted(self, reason):
+        assert _notice(reason=reason) == (
+            "🗓 Not served: drop.jpg for @brand, scheduled for 2026-10-01 14:00"
+            f" America/New_York by Dana: {prompts.MISS_REASONS[reason]}."
+            " Nothing was posted."
+        )
+
+    def test_the_door_and_the_notice_share_one_vocabulary(self):
+        """Every reason the miss door can return has words, and nothing else
+        does: `account_removed` comes from the door and from a removal."""
+        import re
+
+        from scripts.migration_runner import MIGRATIONS_DIR
+
+        ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
+        body = ddl.split("CREATE FUNCTION fn_planned_misses(", 1)[1].split("$$;", 1)[0]
+        returned = set(re.findall(r"(?:THEN|ELSE) '([a-z_]+)'", body))
+        assert returned == set(prompts.MISS_REASONS), returned
+
+    def test_no_handle_no_name_and_a_long_file_name_still_make_a_notice(self):
+        said = _notice(file_name="x" * 5000, handle=None, by=None)
+        bound = "x" * prompts.FILE_NAME_BOUND
+        assert said.startswith(f"🗓 Not served: {bound} for one of this workspace's")
+        assert "by " not in said and len(said) < 400
+
+    def test_the_miss_door_carries_the_notice_select_verbatim(self):
+        """`_NOTICE_SELECT` is the one spelling of the row a notice is written
+        from: the removal reads it directly, and `fn_planned_misses` spells the
+        same columns and joins (a door cannot call the Python). So its select
+        list and its joins are pinned to the door's body verbatim, and the miss
+        leg's alias list to every column: a column added for the notice cannot
+        reach the removal and not the miss."""
+        import inspect
+        import re
+
+        from scripts.migration_runner import MIGRATIONS_DIR
+
+        ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
+        body = ddl.split("CREATE FUNCTION fn_planned_misses(", 1)[1].split("$$;", 1)[0]
+        body = " ".join(body.split())
+        columns, joins = prompts._NOTICE_SELECT.split("FROM", 1)
+        assert " ".join(columns.split()) in body
+        assert " ".join(f"FROM{joins}".split()) in body
+        leg = inspect.getsource(prompts.sweep_planned_misses)
+        names = [
+            c.strip().split(".")[-1] for c in columns.split("SELECT", 1)[1].split(",")
+        ]
+        for name in names:
+            assert f"o_{name} AS {name}" in leg, f"the miss leg does not read {name}"
+        read = {alias for _, alias in re.findall(r"o_(\w+) AS (\w+)", leg)}
+        assert read - {"reason"} == set(names), (
+            "the miss leg reads a column the removal's notice row does not carry"
+        )
+
+
+def _miss_row(intent, ws, reason="late"):
+    return {
+        "id": intent,
+        "workspace_id": ws,
+        "reason": reason,
+        "schedule_slot_at": SLOT,
+        "file_name": "drop.jpg",
+        "handle": "brand",
+        "tz": "America/New_York",
+        "scheduled_by_user_id": "u-1",
+    }
+
+
+class TestTheMissLeg:
+    async def test_each_miss_is_ended_with_its_reason_and_told_in_its_savepoint(
+        self, monkeypatch
+    ):
+        from src.services.target import identity, outbox
+
+        told, looked_up, named = [], [], []
+
+        async def say(session, row, *, reason, surface, by):
+            told.append((row["id"], reason, session.savepoints, surface, by))
+            return 1 if surface else outbox.UNDELIVERABLE
+
+        async def bindings(session, workspace_id):
+            looked_up.append(workspace_id)
+            return ["b-1"] if workspace_id == "ws-1" else []
+
+        async def display_name_for(session, *, user_id):
+            named.append(user_id)
+            return "Dana"
+
+        monkeypatch.setattr(prompts, "say_not_served", say)
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(identity, "display_name_for", display_name_for)
+        session = _SweepSession(
+            misses=[
+                _miss_row("i-1", "ws-1", "item_locked"),
+                _miss_row("i-2", "ws-2", "paused"),
+                _miss_row("i-3", "ws-1", "late"),
+                _miss_row("i-4", "ws-1", "late"),
+            ],
+            raced={"i-3"},
+        )
+        counts = await prompts.sweep_planned_misses(session, limit=7, late_seconds=900)
+        assert counts == {"missed": 3, "unheard": 1}
+        assert told == [
+            ("i-1", "item_locked", 1, ["b-1"], "Dana"),
+            ("i-4", "late", 3, ["b-1"], "Dana"),
+            ("i-2", "paused", 4, [], "Dana"),
+        ], (
+            "told inside the savepoint that ended it; a row served or flagged"
+            " since the door read it (i-3) is neither ended nor told"
+        )
+        assert looked_up == ["ws-1", "ws-2"], "one surface lookup per workspace"
+        assert named == ["u-1"], "one name lookup per scheduler per sweep"
+        door = next(p for s, p in session.statements if "fn_planned_misses" in s)
+        assert door == {"lim": 7, "late": 900.0}
+        updates = [(s, p) for s, p in session.statements if s.startswith("UPDATE")]
+        assert [p["id"] for _, p in updates] == ["i-1", "i-3", "i-4", "i-2"]
+        sql, params = updates[0]
+        for guard in (
+            "state = 'expired'",
+            "WHERE id = :id AND workspace_id = :ws",
+            "state = 'scheduled'",
+            "origin = 'planned'",
+            "NOT cancel_requested",
+        ):
+            assert guard in sql, guard
+        assert params["ws"] == "ws-1"
+        assert json.loads(params["e"]) == {
+            "v": 1,
+            "class": "planned_missed",
+            "message": "item_locked",
+        }
+        last_sql, last_params = session.statements[-1]
+        assert (
+            "set_config('app.tenant_id'" in last_sql and "" in last_params.values()
+        ), "the caller's scope is handed back"
+
+    async def test_one_rows_fault_is_logged_and_the_sweep_goes_on(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        async def say(session, row, *, reason, surface, by):
+            if row["id"] == "i-1":
+                raise RuntimeError("a zone, a lost binding")
+            return 1
+
+        async def bindings(session, workspace_id):
+            return ["b-1"]
+
+        async def no_name(session, user_id, names=None):
+            return None
+
+        monkeypatch.setattr(prompts, "say_not_served", say)
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(prompts, "_scheduler_name", no_name)
+        session = _SweepSession(
+            misses=[_miss_row("i-1", "ws-1"), _miss_row("i-2", "ws-1")]
+        )
+        with caplog.at_level(logging.ERROR):
+            counts = await prompts.sweep_planned_misses(
+                session, limit=5, late_seconds=900
+            )
+        assert counts == {"missed": 1, "unheard": 0}
+        assert session.rolled_back == 1, "the faulty row's savepoint is undone"
+        assert "planned-miss sweep: intent i-1 skipped" in caplog.text
+
+
+class TestSayNotServed:
+    async def test_it_writes_one_notice_per_binding_with_the_scheduler_named(
+        self, monkeypatch
+    ):
+        from src.services.target import outbox
+
+        written = []
+
+        async def fanout(session, *, workspace_id, bindings, text, intent_id=None):
+            written.append((workspace_id, list(bindings), text, intent_id))
+            return len(bindings)
+
+        monkeypatch.setattr(outbox, "fanout_notification", fanout)
+        got = await prompts.say_not_served(
+            None,
+            _miss_row("i-1", "ws-1"),
+            reason="late",
+            surface=["b-1", "b-2"],
+            by="Dana",
+        )
+        assert got == 2
+        assert written == [("ws-1", ["b-1", "b-2"], _notice(), "i-1")]
+
+    async def test_no_binding_is_the_undeliverable_verdict_not_a_zero(
+        self, monkeypatch
+    ):
+        from src.services.target import outbox
+
+        async def fanout(*a, **k):  # pragma: no cover - must not run
+            raise AssertionError("nothing to write to")
+
+        monkeypatch.setattr(outbox, "fanout_notification", fanout)
+        got = await prompts.say_not_served(
+            None, _miss_row("i-1", "ws-1"), reason="late", surface=[], by=None
+        )
+        assert got == outbox.UNDELIVERABLE
+
+
+class TestSayRemovedBeforeServed:
+    async def test_it_reads_the_notice_rows_and_tells_each_once(self, monkeypatch):
+        """The removal's notice: the flagged stories read with `_NOTICE_SELECT`,
+        its one workspace's surface looked up once, each story told once with
+        the reason `account_removed` and its scheduler named."""
+        from src.services.target import identity
+
+        rows = [_miss_row("i-1", "ws-1"), _miss_row("i-2", "ws-1")]
+        session = _SweepSession()
+
+        async def execute(statement, params=None):
+            session.statements.append((str(statement), params))
+            return _SweepResult(rows)
+
+        session.execute = execute
+        told, looked_up, named = [], [], []
+
+        async def say(s, row, *, reason, surface, by):
+            told.append((row["id"], reason, surface, by))
+            return len(surface)
+
+        async def bindings(s, workspace_id):
+            looked_up.append(workspace_id)
+            return ["b-1"]
+
+        async def display_name_for(s, *, user_id):
+            named.append(user_id)
+            return "Dana"
+
+        monkeypatch.setattr(prompts, "say_not_served", say)
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(identity, "display_name_for", display_name_for)
+        await prompts.say_removed_before_served(
+            session, workspace_id="ws-1", intent_ids=["i-1", "i-2"]
+        )
+        ((sql, params),) = session.statements
+        assert sql.startswith(prompts._NOTICE_SELECT)
+        assert "i.workspace_id = :ws" in sql
+        assert "i.id = ANY(CAST(:ids AS uuid[]))" in sql
+        assert params == {"ws": "ws-1", "ids": ["i-1", "i-2"]}
+        assert told == [
+            ("i-1", "account_removed", ["b-1"], "Dana"),
+            ("i-2", "account_removed", ["b-1"], "Dana"),
+        ]
+        assert (looked_up, named) == (["ws-1"], ["u-1"])
+
+
+class TestTheServeLegNamesTheScheduler:
+    async def test_the_window_rides_to_the_door_and_the_card_names_who_scheduled_it(
+        self, monkeypatch
+    ):
+        from src.services.target import identity, intent_ledger, outbox
+
+        planned = {
+            "id": "i-p",
+            "state": "scheduled",
+            "workspace_id": "ws-1",
+            "schedule_slot_at": SLOT,
+            "file_name": "drop.jpg",
+            "media_kind": "image",
+            "tz": "America/New_York",
+            "api_publishing_enabled": True,
+            "origin": "planned",
+            "scheduled_by_user_id": "u-1",
+        }
+        session = _SweepSession(due=[planned])
+
+        async def transition(s, intent_id, to_state):
+            pass
+
+        async def bindings(s, ws):
+            return ["b-1"]
+
+        cards = []
+
+        async def enqueue(s, **kw):
+            cards.append(kw["payload"])
+
+        async def display_name_for(s, *, user_id):
+            assert user_id == "u-1"
+            return "Dana"
+
+        monkeypatch.setattr(intent_ledger, "transition", transition)
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(outbox, "enqueue", enqueue)
+        monkeypatch.setattr(identity, "display_name_for", display_name_for)
+        await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        door = next(p for s, p in session.statements if "fn_prompts_due" in s)
+        assert door == {"lim": 5, "late": 900.0}
+        (card,) = cards
+        assert "🗓 Scheduled by Dana · 2026-10-01 14:00 America/New_York" in card["text"]

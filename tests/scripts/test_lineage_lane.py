@@ -399,6 +399,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # columns, the cadence-only slot key and the person-only approval
             # trigger (#1413, phase 2).
             "088_intent_origin_planned.sql",
+            # 089 appends §32, planned stories served on time or missed out
+            # loud: the slot key's contract, the serve and miss doors and the
+            # reaper's cadence-only slot expiry (#1413, phase 3).
+            "089_planned_serve_and_misses.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
@@ -481,6 +485,41 @@ class TestTheLaneReplaysAcrossTheBoundary:
             " a target file installed something the advertised stream does not"
             " declare at this point"
         )
+
+    def test_every_target_files_evidence_still_reads_true_at_the_head(
+        self, bootstrapped_db
+    ):
+        """A file's `runner:postcondition` lines run once, when that file
+        applies, and nothing asks them again after later files have moved the
+        schema. `runner adopt` at the head reads them all, though, and refuses a
+        false probe below a true one. So once the whole corpus has applied,
+        every probe of every target file must still read true: a later file
+        that re-creates a door, renames a key or rewrites a body must leave the
+        evidence of the files below it standing (089 re-creates
+        `fn_prompts_due`, which 082's probes count, and renames the slot key
+        088's probe reads). Only the files this run APPLIED are asked: a gated
+        file is owed, not applied. The move itself is not asked either: its
+        probe says `public` holds nothing, which is true only at the move — the
+        target lineage builds into `public` from the next file on (and the move
+        predates the rule that a probe never asserts an absence)."""
+        report = run_lane(bootstrapped_db)
+        move = schema_move_migration(MIGRATIONS_DIR)
+        probed = [
+            (migration, probe)
+            for migration in report.applied
+            if migration.version > move.version
+            for probe in migration.postconditions
+        ]
+        newest = max(migration.version for migration in report.applied)
+        assert any(m.version == newest for m, _ in probed), (
+            "the positive control: the newest file's own probes are among those read"
+        )
+        stale = [
+            (migration.label, probe[:120])
+            for migration, probe in probed
+            if fetch_one(bootstrapped_db, probe)[0] is not True
+        ]
+        assert not stale, stale
 
     def test_legacy_holds_the_inventory_the_lineage_literal_names(
         self, bootstrapped_db
