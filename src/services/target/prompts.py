@@ -57,7 +57,7 @@ from sqlalchemy import text
 
 from src.services.target import bindings, intent_ledger, outbox, readers
 from src.services.target.callback_tokens import ACTIONS, token as _token
-from src.utils.datetime_utils import utcnow
+from src.utils.datetime_utils import ensure_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ MISS_REASONS = {
     "item_unsupported": "Instagram cannot post the item",
     "item_locked": "the item is locked",
     "account_removed": "the account was removed",
-    "paused": "the workspace was paused at its time",
+    "paused": "the workspace was not taking posts until it was too late",
     "late": "it could not be served in time",
 }
 
@@ -285,7 +285,7 @@ def render_card(
     intent_id = str(intent["intent_id"])
     slot = intent.get("schedule_slot_at")
     if isinstance(slot, str):
-        slot = datetime.fromisoformat(_canonical_fraction(slot))
+        slot = ensure_utc(datetime.fromisoformat(_canonical_fraction(slot)))
     tz = intent.get("tz") or "UTC"
     slot_line = f"Slot: {stamp(slot, tz)}"
     planned = _planned_line(intent, slot=slot, tz=tz, now=now)
@@ -539,7 +539,7 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
     return healed
 
 
-async def sweep_due_prompts(session, *, late_seconds: int, limit: int = 50) -> dict:
+async def sweep_due_prompts(session, *, late_seconds: int, limit: int) -> dict:
     """The prompt sweep — the `02` §4 matrix legs, idempotent, in the
     caller's transaction. Two legs, two counts:
 
@@ -670,8 +670,9 @@ async def say_not_served(
 
     Returns the rows written, or `outbox.UNDELIVERABLE` when the workspace has
     no push binding: "told nobody, because there is nobody" is a verdict
-    (`scheduler._notice_no_media`'s rule), never a quiet zero. The web's Queue
-    still shows the story `expired` with its reason."""
+    (`scheduler._notice_no_media`'s rule), never a quiet zero. The story still
+    ends `expired`, and its reason stays on the row (`last_error`) for the
+    operator's views."""
     if not surface:
         logger.warning(
             "planned story %s was not served (%s) and its workspace has NO push"
@@ -740,7 +741,7 @@ async def say_removed_before_served(
         )
 
 
-async def sweep_planned_misses(session, *, late_seconds: int, limit: int = 50) -> dict:
+async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dict:
     """The miss leg (089), on the prompt sweep's cadence and in the CALLER's
     transaction: every planned story the miss door lists ends `expired`, with
     `last_error = {v: 1, class: planned_missed, message: <reason>}`, and its

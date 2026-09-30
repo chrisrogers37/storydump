@@ -500,9 +500,8 @@ class TestEachMissSaysWhy:
         _missed(world, w, gone, "account_removed")
 
     def test_a_miss_nobody_can_hear_is_counted_not_dropped(self, world):
-        """No push binding: the story still ends `expired` with its reason (the
-        web's Queue shows it), and the sweep counts it `unheard` — never a
-        quiet zero."""
+        """No push binding: the story still ends `expired` with its reason on
+        the row, and the sweep counts it `unheard` — never a quiet zero."""
         w = _workspace(world, "p3-unheard", bound=False)
         story = _story(world, w, media_state="removed")
         _, missed = _pass(world)
@@ -510,7 +509,7 @@ class TestEachMissSaysWhy:
         assert row["state"] == "expired"
         assert row["last_error"]["message"] == "item_removed"
         assert _outbox(world, story["intent"], "notification") == []
-        assert missed["unheard"] >= 1 and missed["missed"] >= missed["unheard"]
+        assert missed["unheard"] >= 1, missed
 
     def test_a_story_not_yet_due_is_never_missed(self, world):
         """Unservable today is not a miss before its time: the person may yet

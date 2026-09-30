@@ -140,6 +140,18 @@ def test_the_late_window_is_the_hour_the_owner_ruled():
     )
 
 
+def test_a_card_is_late_only_past_what_the_worker_s_own_beats_explain():
+    """`prompts.SERVED_LATE_AFTER` is justified by the prompt sweep's beat and
+    the sender's: a card served on the next beat and sent on the sender's must
+    not read "served late", or every planned card would."""
+    from src.services.target import prompts
+
+    cfg = WorkerConfig()
+    assert prompts.SERVED_LATE_AFTER.total_seconds() > (
+        cfg.prompt_sweep_seconds + cfg.sender_sweep_seconds
+    )
+
+
 class TestEngineUrlFromEnv:
     """TARGET_DATABASE_URL is the branch-soak/deploy door: a plain postgres URL
     in, an asyncpg-dialect URL out, with the libpq-only params asyncpg refuses

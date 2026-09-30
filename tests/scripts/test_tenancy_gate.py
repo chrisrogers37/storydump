@@ -548,14 +548,26 @@ class TestRenamingAnIndexIsInert:
         )
         assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
 
-    def test_a_table_renamed_through_alter_index_is_refused(self):
+    @pytest.mark.parametrize("target", ["t", "T"])
+    def test_a_table_renamed_through_alter_index_is_refused(self, target):
+        """An unquoted name folds to lower case on the server, so `T` renames
+        the table `t` just as `t` does."""
         with pytest.raises(AssertionError, match="does not classify"):
             expected_tenancy(
                 [
                     "CREATE TABLE t ( id uuid, workspace_id uuid )",
-                    "ALTER INDEX t RENAME TO t_renamed",
+                    f"ALTER INDEX {target} RENAME TO t_renamed",
                 ]
             )
+
+    def test_moving_every_index_to_a_tablespace_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                "ALTER INDEX ALL IN TABLESPACE pg_default SET TABLESPACE pg_default",
+            ]
+        )
+        assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
 
 
 class TestConstraintEditsAreBoundedTheSameWay:

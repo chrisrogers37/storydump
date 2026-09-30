@@ -418,8 +418,8 @@ def expected_tenancy(statements) -> dict:
         # 089 (#1413) is the first member: it renames a partial unique index
         # to the name of the key it replaces.
         m = re.match(r"ALTER INDEX (?:IF EXISTS )?(?:public\.)?(\w+) ", stmt)
-        if m and m.group(1) not in sig:
-            continue
+        if m and m.group(1).lower() not in {name.lower() for name in sig}:
+            continue  # an unquoted name folds to lower case, as the server folds it
 
         # ALLOWLIST, not a denylist, and the direction is the whole point.
         #

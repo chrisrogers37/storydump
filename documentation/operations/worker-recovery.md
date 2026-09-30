@@ -154,15 +154,16 @@ In the logs:
 ```bash
 railway logs --service worker | grep -E "FATAL|DIED|worker up|worker stopped|database role" | tail -20
 railway logs --service worker | grep -E "status:" | tail -5
-railway logs --service worker | grep -E "clock tick failed|lease heartbeat failed|claim failed|parked kind" | tail -20
+railway logs --service worker | grep -E "clock tick failed|lease heartbeat failed|claim failed|parked kind|prompt sweep failed|planned-miss sweep failed" | tail -20
 ```
 
 The `status:` line is the instrument for a worker that is alive: per lane
 `tasks processed parked failures exhausted fenced waits`, then
 `clock[elected ticks inserts errs]`, `heartbeat[beats short errs]`,
 `transport[bot auth_failures media_fetch_failures]`, `sweeper[sweeps mints]`,
-`prompts[sweeps prompted advanced]` and the queue's depth and age per lane
-(`src/worker.py:414-481`). Counters that stop moving between two lines are the stuck worker;
+`prompts[sweeps prompted advanced missed unheard]` (`missed` counts planned stories the miss leg
+ended, `unheard` those whose workspace had no chat to tell) and the queue's depth and age per lane
+(`src/worker.py:440-509`). Counters that stop moving between two lines are the stuck worker;
 `elected=False` with `ticks=0` long after a deploy means another session still holds the clock.
 
 ## Before restarting: find the cause
