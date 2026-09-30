@@ -48,7 +48,7 @@ from src.services.target.vocabulary import (
 from storydump_cli.client import ApiError, Client, Unreachable
 from storydump_cli.commands import as_uuid, begin, global_options, uuid_argument
 from storydump_cli.commands.auth import signed_in_client
-from storydump_cli.commands.reads import WORKSPACES_FIX, _unwrap, workspace_targets
+from storydump_cli.commands.reads import WORKSPACES_FIX, unwrap, workspace_targets
 from storydump_cli.output import Failure, emit
 
 SOURCES_FIX = (
@@ -98,14 +98,16 @@ def deterministic_key(
 
 
 def fresh_key(command: str, *, workspace_id: str, identity: str) -> str:
-    """The workspace verbs are keyed per ATTEMPT, as the web's submission id
-    is: a fresh identity per invocation, because an invocation IS an attempt
-    and a re-run is a new one by design — their effects are idempotent (pause
-    and resume set a flag; a sync coalesces with a pending one), so a retry
-    is harmless and a later action always executes. (A day or a minute bucket
-    answered "already done" to a second pause after a resume.) The next
-    entity-less verb follows the same rule; the identities both doors derive
-    are pinned in `tests/fixtures/idempotency_keys.json`."""
+    """The workspace verbs, and the two that plan a story, are keyed per
+    ATTEMPT, as the web's submission id is: a fresh identity per invocation,
+    because an invocation IS an attempt and a re-run is a new one by design —
+    pause and resume set a flag and a sync coalesces with a pending one, so a
+    retry is harmless and a later action always executes; a second schedule
+    of the same item is the database's to refuse, and planning it again after
+    a cancel, or moving a story back to a time it had, is a new act. (A day
+    or a minute bucket answered "already done" to a second pause after a
+    resume.) The next entity-less verb follows the same rule; the identities
+    both doors derive are pinned in `tests/fixtures/idempotency_keys.json`."""
     return f"{command}:{workspace_id}:{identity}"
 
 
@@ -250,7 +252,8 @@ def _key_option(command):
         metavar="KEY",
         help=(
             "Send under a key of your own. A story verb's key is deterministic"
-            " (a re-run replays); pause, resume and sync mint a fresh one."
+            " (a re-run replays); schedule, reschedule, pause, resume and sync"
+            " mint a fresh one per run."
         ),
     )(command)
 
@@ -508,10 +511,18 @@ def _schedule_refused(exc: ApiError) -> Optional[tuple[str, str]]:
             "storydump account <handle> shows an account; an item's id is on the web",
         )
     if exc.reason == "illegal_transition":
+        existing = exc.facts.get("existing")
+        if isinstance(existing, dict) and existing.get("intent_id"):
+            story = existing["intent_id"]
+            return (
+                f"that item already waits on that account: story {story}"
+                f" ({existing.get('state')})",
+                f"storydump story {story} shows it; cancel it, or let it post,"
+                " to plan the item again",
+            )
         return (
             "that item is already waiting to post on that account",
-            "storydump planned --workspace <id> lists what is coming; cancel that"
-            " story first to plan the item again",
+            "storydump account <handle> lists that account's stories",
         )
     return _time_refused(exc)
 
@@ -532,11 +543,13 @@ def _account_id(client: Client, ws: str, key: str) -> str:
     account_id = as_uuid(key)
     if account_id is not None:
         return account_id
-    rows = _unwrap(client.ops_account(ws, key), ws)["rows"]
+    rows = unwrap(client.ops_account(ws, key), ws)["rows"]
+    # a row with no `state` is an API older than this CLI: the port judges
     live = [
         row
         for row in rows
-        if isinstance(row, dict) and row.get("state") in LIVE_ACCOUNT_STATES
+        if isinstance(row, dict)
+        and ("state" not in row or row["state"] in LIVE_ACCOUNT_STATES)
     ]
     if not live:
         raise Failure(
@@ -599,6 +612,10 @@ def schedule(
     Example:
       storydump schedule 3c6e0b8a-9d7f-4a1e-b2c3-4d5e6f7a8b9c --account storydump.studio --at "2026-10-12 18:30" --workspace <id>
     """
+    if not account.strip():
+        raise click.BadParameter(
+            "an account is a handle or an id", param_hint="--account"
+        )
     args: dict[str, Any] = {"media_item_id": item, "local_at": local_at}
     if override_locks:
         args["override_locks"] = True

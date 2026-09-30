@@ -22,13 +22,19 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import datetime
 from typing import Any, Callable, Mapping, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from rich.console import Console
 from rich.padding import Padding
 from rich.table import Table
 
-from src.services.target.vocabulary import WARNING_SENTENCES, write_sentence
+from src.services.target.vocabulary import (
+    LIST_LIMIT_MAX,
+    WARNING_SENTENCES,
+    write_sentence,
+)
 
 #: The three secret shapes the spec names (§6, redaction at the client).
 TOKEN_PATTERN = re.compile(r"sdt_[A-Za-z0-9_-]{8,}")
@@ -348,6 +354,18 @@ FLOATING_COLUMNS: Sequence[Column] = (
 )
 
 
+def _planned_due(row: Mapping[str, Any]) -> Any:
+    """When a planned story is due, in the zone its time was chosen in (the
+    row's `tz`) — the time a person typed — or as the API gave it where the
+    zone is one the IANA database does not name."""
+    at, tz = row.get("schedule_slot_at"), row.get("tz")
+    try:
+        local = datetime.fromisoformat(str(at)).astimezone(ZoneInfo(str(tz)))
+    except (ValueError, TypeError, ZoneInfoNotFoundError):
+        return at
+    return f"{local.strftime('%Y-%m-%d %H:%M')} {tz}"
+
+
 def _planned_state(row: Mapping[str, Any]) -> Any:
     """The state, and a cancel that is still landing."""
     state = row.get("state")
@@ -356,7 +374,7 @@ def _planned_state(row: Mapping[str, Any]) -> Any:
 
 PLANNED_COLUMNS: Sequence[Column] = (
     ("id", "id"),
-    ("due", "schedule_slot_at"),
+    ("due", _planned_due),
     ("account", "account_handle"),
     ("item", "file_name"),
     ("state", _planned_state),
@@ -792,6 +810,20 @@ def _render_doctor(console: Console, data: Any) -> None:
     console.print("doctor: ok" if doctor.get("ok") else "doctor: something is wrong")
 
 
+def _render_planned(console: Console, data: Any) -> None:
+    """The planned stories per workspace — and, where a page came back full,
+    that it is the first page, never a list that reads as complete."""
+    _view("planned", _table_of(PLANNED_COLUMNS))(console, data)
+    workspaces = data.get("workspaces") if isinstance(data, dict) else None
+    for entry in workspaces if isinstance(workspaces, list) else []:
+        limit = entry.get("limit") if isinstance(entry, dict) else None
+        if isinstance(limit, int) and len(_dicts(entry.get("rows"))) >= limit:
+            console.print(
+                f"workspace {_text(entry.get('workspace_id'), '?')}: the first"
+                f" {limit} shown — pass --limit up to {LIST_LIMIT_MAX} for more"
+            )
+
+
 RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
     "approve": _render_write,
     "skip": _render_write,
@@ -819,6 +851,6 @@ RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
     "jobs": _view("jobs", _render_jobs_rows),
     "outbox": _view("outbox", _table_of(OUTBOX_COLUMNS)),
     "burst": _view("burst", _render_burst_rows),
-    "planned": _view("planned", _table_of(PLANNED_COLUMNS)),
+    "planned": _render_planned,
     "posture": _render_posture,
 }

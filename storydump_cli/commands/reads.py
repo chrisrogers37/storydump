@@ -103,17 +103,21 @@ def workspace_targets(client: Client, workspace: Optional[str]) -> list[str]:
     )
 
 
-def _unwrap(answer: Any, workspace_id: str) -> dict[str, Any]:
+def unwrap(answer: Any, workspace_id: str) -> dict[str, Any]:
     """The rows of one workspace out of the API's envelope."""
     data = answer.get("data") if isinstance(answer, dict) else None
     rows = data.get("rows") if isinstance(data, dict) else None
     if not isinstance(rows, list):
         raise Unreachable(200, None, "the answer was not the view's envelope")
     ws = data.get("workspace_id")
-    return {
+    entry: dict[str, Any] = {
         "workspace_id": ws if isinstance(ws, str) and ws else workspace_id,
         "rows": rows,
     }
+    if isinstance(data.get("limit"), int):
+        # a bounded list says how far it went, so a full page reads as one
+        entry["limit"] = data["limit"]
+    return entry
 
 
 def _run_view(
@@ -136,7 +140,7 @@ def _run_view(
     targets = workspace_targets(client, workspace)
 
     def read() -> Reading:
-        return [_unwrap(call(client, target), target) for target in targets]
+        return [unwrap(call(client, target), target) for target in targets]
 
     if watch_mode:
         return watch(
@@ -459,9 +463,8 @@ def _intent_states(
 
 def _as_view(answer: Any) -> dict[str, Any]:
     """The Queue read's answer in the views' envelope, so it renders as one."""
-    return {
-        "data": {"rows": answer.get("intents") if isinstance(answer, dict) else None}
-    }
+    answer = answer if isinstance(answer, dict) else {}
+    return {"data": {"rows": answer.get("intents"), "limit": answer.get("limit")}}
 
 
 @click.command()
@@ -493,12 +496,18 @@ def _as_view(answer: Any) -> dict[str, Any]:
         f" at most {LIST_LIMIT_MAX})."
     ),
 )
+@click.option(
+    "--newest-first",
+    is_flag=True,
+    help="Latest first, for a history: the most recent misses, not the oldest.",
+)
 @click.pass_context
 def planned(
     ctx: click.Context,
     workspace: Optional[str],
     states: tuple[str, ...],
     limit: Optional[int],
+    newest_first: bool,
 ) -> Optional[int]:
     """The planned stories, soonest first: when each is due, its account and
     item, and who planned it. By default what is still to come.
@@ -507,12 +516,19 @@ def planned(
     Examples:
       storydump planned --workspace "Chris's studio"
       storydump planned --state scheduled,awaiting_approval
+      storydump planned --state expired --newest-first
     """
     return _run_view(
         ctx,
         "planned",
         lambda client, ws: _as_view(
-            client.intents(ws, origin="planned", states=states, limit=limit)
+            client.intents(
+                ws,
+                origin="planned",
+                states=states,
+                limit=limit,
+                newest_first=newest_first,
+            )
         ),
         workspace=workspace,
         watch_mode=False,

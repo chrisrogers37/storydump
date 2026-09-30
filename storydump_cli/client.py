@@ -184,9 +184,11 @@ class Client:
         origin: Optional[str] = None,
         states: Sequence[str] = (),
         limit: Optional[int] = None,
+        newest_first: bool = False,
     ) -> dict[str, Any]:
         """The workspace's stories — the web's Queue read, which a token may
-        make: ``origin`` narrows to the planned stories or the cadence's."""
+        make: ``origin`` narrows to the planned stories or the cadence's, and
+        ``newest_first`` reads a history latest first."""
         params: dict[str, Any] = {}
         if origin is not None:
             params["origin"] = origin
@@ -194,6 +196,8 @@ class Client:
             params["state"] = ",".join(states)
         if limit is not None:
             params["limit"] = limit
+        if newest_first:
+            params["order"] = "desc"
         return self._request(
             "GET", f"/workspaces/{_segment(workspace_id)}/intents", params=params
         )
