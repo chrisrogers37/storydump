@@ -13,7 +13,7 @@ PR body, never ridden.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -539,8 +539,11 @@ class TestTheDueDoorReadsTheCardSelect:
 
 
 class _SweepResult:
-    def __init__(self, rows, first=None):
-        self.rows, self.first_row = rows, first
+    def __init__(self, rows, first=None, scalar=None):
+        self.rows, self.first_row, self.scalar_value = rows, first, scalar
+
+    def scalar(self):
+        return self.scalar_value
 
     def mappings(self):
         return self
@@ -559,10 +562,11 @@ class _SweepResult:
 
 
 class _SweepSession:
-    """The prompt sweeper's session double: the three doors answer, the miss
-    leg's guarded UPDATE returns its id unless the intent is in *raced*,
-    every statement is recorded, a savepoint is offered and its rollback
-    counted."""
+    """The prompt sweeper's session double: the three doors answer; the miss
+    leg's guarded UPDATE returns its id, and the serve leg's locked re-read
+    the time the door read, unless the intent is in *raced* (it moved, or
+    ended, since the door read it); every statement is recorded, a savepoint
+    is offered and its rollback counted."""
 
     def __init__(self, *, due=(), pending=(), misses=(), raced=()):
         self.due, self.pending, self.misses = list(due), list(pending), list(misses)
@@ -595,6 +599,15 @@ class _SweepSession:
             return _SweepResult(self.misses)
         if sql.startswith("UPDATE post_intents") and params["id"] not in self.raced:
             return _SweepResult([], first=(params["id"],))
+        if sql.startswith("SELECT schedule_slot_at FROM post_intents"):
+            (read,) = [r for r in self.due if str(r["id"]) == params["id"]]
+            moved = read["schedule_slot_at"] + timedelta(days=1)
+            return _SweepResult(
+                [],
+                scalar=moved
+                if params["id"] in self.raced
+                else read["schedule_slot_at"],
+            )
         return _SweepResult([])
 
 
@@ -1031,3 +1044,67 @@ class TestTheServeLegNamesTheScheduler:
         assert door == {"lim": 5, "late": 900.0}
         (card,) = cards
         assert "🗓 Scheduled by Dana · 2026-10-01 14:00 America/New_York" in card["text"]
+
+
+class TestTheServeLegServesTheTimeItRead:
+    """The door read takes no lock, and a planned story's time moves in place
+    until it is served, so the serve leg locks the row and compares its time
+    before serving it. The race itself, two transactions and a lock, is the
+    gate's (`test_schedule_verbs_gate.py::TestAMoveAtTheDueInstant`)."""
+
+    def _world(self, monkeypatch):
+        from src.services.target import intent_ledger, outbox
+
+        served = []
+
+        async def transition(s, intent_id, to_state):
+            served.append(intent_id)
+
+        async def bindings(s, ws):
+            return ["b-1"]
+
+        async def enqueue(s, **kw):
+            pass
+
+        monkeypatch.setattr(intent_ledger, "transition", transition)
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(outbox, "enqueue", enqueue)
+        return served
+
+    def _story(self, origin):
+        return {
+            "id": f"i-{origin}",
+            "state": "scheduled",
+            "workspace_id": "ws-1",
+            "schedule_slot_at": SLOT,
+            "file_name": "drop.jpg",
+            "media_kind": "image",
+            "tz": "UTC",
+            "api_publishing_enabled": True,
+            "origin": origin,
+            "scheduled_by_user_id": None,
+        }
+
+    async def test_a_story_moved_since_the_door_read_it_waits_for_its_new_time(
+        self, monkeypatch
+    ):
+        served = self._world(monkeypatch)
+        session = _SweepSession(due=[self._story("planned")], raced={"i-planned"})
+        counts = await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        assert served == [] and counts["prompted"] == 0
+        (recheck,) = [(s, p) for s, p in session.statements if "FOR UPDATE" in s]
+        assert recheck[1] == {"id": "i-planned", "ws": "ws-1"}
+
+    async def test_a_story_still_at_its_time_is_served(self, monkeypatch):
+        served = self._world(monkeypatch)
+        session = _SweepSession(due=[self._story("planned")])
+        counts = await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        assert served == ["i-planned"] and counts["prompted"] == 1
+
+    async def test_a_cadence_story_is_not_read_again(self, monkeypatch):
+        """Its time never moves (`reschedule_item` takes planned stories only)."""
+        served = self._world(monkeypatch)
+        session = _SweepSession(due=[self._story("cadence")])
+        await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        assert served == ["i-cadence"]
+        assert not [s for s, _ in session.statements if "FOR UPDATE" in s]

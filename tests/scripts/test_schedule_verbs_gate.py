@@ -32,16 +32,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import psycopg2
 import pytest
 from sqlalchemy import text
 
 from src.services.target import commands  # noqa: I001 — the port first: the registry cycle
-from src.services.target import command_executors, vocabulary, workspaces
+from src.services.target import (
+    command_executors,
+    intent_ledger,
+    prompts,
+    vocabulary,
+    workspaces,
+)
 from src.services.target.commands import Command, CommandRefused
+from src.services.target.work_loop import WorkerConfig
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -341,12 +351,16 @@ class TestTheWallTimeIsTheDatabasesReading:
         )
 
     def test_a_zone_only_postgres_knows_converts_as_the_clock_does(self, world):
-        """`fn_safe_tz` admits a POSIX zone the IANA database does not name;
-        the conversion is Postgres's own reading of it."""
-        ((expected,),) = _sql(
+        """`fn_safe_tz`, the CHECK on every stored zone, admits a POSIX zone
+        the IANA database does not name, and the clock (`fn_next_slot`) reads
+        a wall time in it as `AT TIME ZONE fn_safe_tz(tz)`: the planned
+        reading is that one."""
+        ((admitted, expected),) = _sql(
             world,
-            "SELECT CAST('2030-07-01 12:00' AS timestamp) AT TIME ZONE 'UTC+5'",
+            "SELECT fn_safe_tz('UTC+5'),"
+            " CAST('2030-07-01 12:00' AS timestamp) AT TIME ZONE fn_safe_tz('UTC+5')",
         )
+        assert admitted == "UTC+5"
         assert _reading(world, "2030-07-01 12:00:00", "UTC+5") == expected
 
 
@@ -403,6 +417,15 @@ class TestScheduleItem:
             (w["account"],),
         )
         assert row["provider_account_ref"] == ref
+
+    def test_a_t_and_seconds_are_the_same_wall_time(self, world):
+        w = _workspace(world, "shape")
+        day = (datetime.now(UTC).date() + timedelta(days=2)).isoformat()
+        out = schedule(world, w, _item(world, w), f"{day}T15:00:30")
+        assert out.data["local_at"] == f"{day} 15:00:30"
+        assert datetime.fromisoformat(
+            out.data["schedule_slot_at"]
+        ) == datetime.fromisoformat(f"{day}T15:00:30+00:00")
 
     def test_the_audit_row_names_the_person(self, world):
         w = _workspace(world, "audit")
@@ -542,6 +565,14 @@ class TestScheduleItem:
         first = schedule(world, w, item, _local(days=1))
         refused = schedule_refused(world, w, item, _local(days=2))
         assert refused.reason == "illegal_transition"
+        # the story in the way, named, so a person can find it
+        assert refused.facts == {
+            "existing": {
+                "intent_id": first.data["intent_id"],
+                "state": "scheduled",
+                "origin": "planned",
+            }
+        }
         assert _row(world, first.data["intent_id"])["state"] == "scheduled"
         ((count,),) = _sql(
             world, "SELECT count(*) FROM post_intents WHERE media_item_id = %s", (item,)
@@ -557,8 +588,14 @@ class TestScheduleItem:
     def test_a_cadence_story_waiting_with_the_item_refuses_it_too(self, world):
         w = _workspace(world, "cadence")
         item = _item(world, w)
-        _cadence(world, w, item=item, hours=1)
-        assert schedule_refused(world, w, item, _local()).reason == "illegal_transition"
+        cadence = _cadence(world, w, item=item, hours=1)
+        refused = schedule_refused(world, w, item, _local())
+        assert refused.reason == "illegal_transition"
+        assert refused.facts["existing"] == {
+            "intent_id": cadence,
+            "state": "scheduled",
+            "origin": "cadence",
+        }
 
     def test_no_bound_chat_is_said_not_refused(self, world):
         w = _workspace(world, "unbound", bound=False)
@@ -718,6 +755,23 @@ class TestRescheduleItem:
             world, w, "reschedule_item", intent_id=intent, local_at=_local(days=3)
         )
         assert refused.reason == "illegal_transition" and "cadence" in str(refused)
+        # the story is judged before the time: a bad time does not hide it
+        refused = refusal(
+            world, w, "reschedule_item", intent_id=intent, local_at="soon"
+        )
+        assert refused.reason == "illegal_transition"
+
+    def test_an_id_in_any_spelling_uuid_reads_is_that_id(self, world):
+        w = _workspace(world, "move-braced")
+        intent = _planned(world, w)
+        out = run(
+            world,
+            w,
+            "reschedule_item",
+            intent_id="{" + intent.upper() + "}",
+            local_at=_local(days=3),
+        )
+        assert out.data["intent_id"] == intent
 
     def test_a_story_being_cancelled_says_so(self, world):
         w = _workspace(world, "flagged")
@@ -802,7 +856,17 @@ class TestCancel:
                 .all()
             )
 
-        assert uuid.UUID(intent) not in _worker(world, due)
+        # the door is not empty: an unflagged story due beside it IS served
+        control = _planned(world, w, days=2)
+        _sql(
+            world,
+            "UPDATE post_intents SET schedule_slot_at = now() - interval '1 minute'"
+            " WHERE id = %s",
+            (control,),
+        )
+        listed = _worker(world, due)
+        assert uuid.UUID(control) in listed
+        assert uuid.UUID(intent) not in listed
         asyncio.run(reap_as_worker(world["owner"]))
         assert _row(world, intent)["state"] == "cancelled"
         # and the item is free for that account again
@@ -886,12 +950,13 @@ class TestTheQueueRead:
     def test_a_scheduler_with_no_name_is_a_teammate_never_an_address(self, world):
         w = _workspace(world, "queue-nameless")
         member = _member(world, w)
-        _sql(
-            world,
-            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
-            " VALUES (%s, 'google', %s, NULL)",
-            (member, f"someone-{uuid.uuid4().hex[:6]}@example.com"),
-        )
+        for provider, name in (("google", None), ("telegram", "")):
+            _sql(
+                world,
+                "INSERT INTO user_identities (user_id, provider, external_id,"
+                " display_name) VALUES (%s, %s, %s, %s)",
+                (member, provider, f"someone-{uuid.uuid4().hex[:6]}@example.com", name),
+            )
         schedule(world, w, _item(world, w), _local(), user=member)
         (row,) = _read(world, w, origin="planned")
         assert row["scheduled_by"] == "a teammate"
@@ -932,3 +997,138 @@ class TestTheQueueRead:
             ids[2],
             ids[1],
         ]
+
+    def test_one_instant_orders_by_id_in_the_reads_direction(self, world):
+        """Stories planned for one instant keep one order from page to page:
+        the id breaks the tie, running the way the read runs."""
+        w = _workspace(world, "queue-tie")
+        at = _local(days=2)
+        ids = sorted(
+            schedule(world, w, _item(world, w), at).data["intent_id"] for _ in range(3)
+        )
+        assert [str(r["id"]) for r in _read(world, w, origin="planned")] == ids
+        newest = _read(world, w, origin="planned", newest_first=True)
+        assert [str(r["id"]) for r in newest] == ids[::-1]
+
+
+class TestWhoLastMovedIt:
+    def test_is_never_who_only_asked_for_a_cancel(self, world):
+        """A card that answers a late tap names who last MOVED the story; a
+        cancel request moves nothing (the reaper ends the story), so it must
+        not name the person who asked."""
+        w = _workspace(world, "settle")
+        intent = _planned(world, w)
+        member = _member(world, w)
+        run(world, w, "cancel", user=member, intent_id=intent)
+        found = asyncio.run(
+            in_tenant(
+                world["ingress"],
+                w["ws"],
+                w["user"],
+                lambda session: intent_ledger.settlement(
+                    session, workspace_id=w["ws"], intent_id=intent
+                ),
+            )
+        )
+        assert str(found["by_user_id"]) == w["user"], "the scheduler, not the canceller"
+
+
+def _await_lock_wait(world, xid, deadline_s=20.0):
+    """Until a session waits on the transaction *xid* (the one holding the
+    story's row), or fail: a race test whose loser never waited on that row
+    proves nothing, and a wait on any other transaction is not this one."""
+    end = time.monotonic() + deadline_s
+    while time.monotonic() < end:
+        ((waiting,),) = _sql(
+            world,
+            "SELECT count(*) FROM pg_locks WHERE NOT granted"
+            " AND locktype = 'transactionid' AND transactionid::text = %s",
+            (xid,),
+        )
+        if waiting:
+            return
+        time.sleep(0.05)
+    pytest.fail("the sweep never waited on the row")
+
+
+def _sweep_while_moved(world, intent, sweep):
+    """The race a reschedule can win: a transaction holds the story's row, as
+    `reschedule_item` does under `_intent_row`'s lock, and moves its time; the
+    sweep reads its door (an unlocked read, so it still sees the old time) and
+    then waits on the row; the move commits, and the sweep goes on."""
+    conn = psycopg2.connect(world["owner"])
+    try:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "SELECT 1 FROM post_intents WHERE id = %s FOR UPDATE", (intent,)
+            )
+            cur.execute(
+                "UPDATE post_intents SET schedule_slot_at = now() + interval '1 day'"
+                " WHERE id = %s",
+                (intent,),
+            )
+            cur.execute("SELECT pg_current_xact_id()::xid::text")
+            ((xid,),) = cur.fetchall()
+        done = {}
+        thread = threading.Thread(target=lambda: done.update(out=_worker(world, sweep)))
+        thread.start()
+        _await_lock_wait(world, xid)
+        conn.commit()
+        thread.join(timeout=60)
+        assert not thread.is_alive(), "the sweep never finished"
+        return done["out"]
+    finally:
+        conn.close()
+
+
+class TestAMoveAtTheDueInstant:
+    """A story moved while a sweep that read it as due waits on its row is
+    served or missed at the time it holds, never at the time the sweep read."""
+
+    def test_the_serve_sweep_leaves_a_story_moved_under_it(self, world):
+        w = _workspace(world, "race-serve")
+        intent = _planned(world, w)
+        _sql(
+            world,
+            "UPDATE post_intents SET schedule_slot_at = now() - interval '10 seconds'"
+            " WHERE id = %s",
+            (intent,),
+        )
+        cfg = WorkerConfig()
+        _sweep_while_moved(
+            world,
+            intent,
+            lambda session: prompts.sweep_due_prompts(
+                session,
+                late_seconds=cfg.planned_late_seconds,
+                limit=cfg.prompt_sweep_limit,
+            ),
+        )
+        row = _row(world, intent)
+        assert row["state"] == "scheduled", "served at the time it no longer holds"
+        assert datetime.fromisoformat(row["schedule_slot_at"]) > datetime.now(UTC)
+
+    def test_the_miss_sweep_leaves_a_story_moved_under_it(self, world):
+        w = _workspace(world, "race-miss")
+        intent = _planned(world, w)
+        _sql(
+            world,
+            "UPDATE post_intents SET schedule_slot_at = now() - interval '2 hours'"
+            " WHERE id = %s",
+            (intent,),
+        )
+        cfg = WorkerConfig()
+        _sweep_while_moved(
+            world,
+            intent,
+            lambda session: prompts.sweep_planned_misses(
+                session,
+                late_seconds=cfg.planned_late_seconds,
+                limit=cfg.prompt_sweep_limit,
+            ),
+        )
+        row = _row(world, intent)
+        assert row["state"] == "scheduled", "missed at the time it no longer holds"
+        assert row["last_error"] is None

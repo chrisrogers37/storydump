@@ -609,6 +609,25 @@ def test_the_routes_admit_tokens_by_their_scope_and_refuse_strangers(
             )
             assert svc_posture.status_code == 200
 
+            # the Queue read, the CLI's `planned`, admits tokens the same way
+            queue = f"/api/v1/workspaces/{a['ws']}/intents"
+            assert (await client.get(queue)).status_code == 401
+            mine = await client.get(queue, headers=_bearer(a["readonly"]))
+            assert mine.status_code == 200, mine.text
+            assert a["floating"] in {r["id"] for r in mine.json()["intents"]}
+            not_mine = await client.get(queue, headers=_bearer(b["token"]))
+            assert not_mine.status_code == 404, "not a member reads as not found"
+            own = await client.get(
+                f"/api/v1/workspaces/{b['ws']}/intents", headers=_bearer(b["service"])
+            )
+            assert own.status_code == 200, own.text
+            assert b["floating"] in {r["id"] for r in own.json()["intents"]}
+            elsewhere = await client.get(queue, headers=_bearer(b["service"]))
+            assert (elsewhere.status_code, elsewhere.json()["reason"]) == (
+                403,
+                "wrong_workspace",
+            )
+
             bad_since = await _view(
                 client, a["ws"], "jobs", _bearer(a["token"]), "?since=yesterday"
             )
@@ -656,6 +675,13 @@ def test_the_predicates_confine_rows_even_without_row_level_security(
                     assert row["workspace_id"] == a["ws"], (view, row)
                     dumped = json.dumps(row)
                     assert not any(f in dumped for f in _foreign(b)), (view, row)
+            queue = await client.get(
+                f"/api/v1/workspaces/{a['ws']}/intents", headers=token
+            )
+            assert queue.status_code == 200, queue.text
+            intents = queue.json()["intents"]
+            assert a["floating"] in {r["id"] for r in intents}
+            assert not any(f in json.dumps(intents) for f in _foreign(b))
             crossed = await _view(client, a["ws"], f"story/{b['floating']}", token)
             assert crossed.json()["data"]["rows"] == []
             crossed = await _view(client, a["ws"], f"cards/{b['floating']}", token)

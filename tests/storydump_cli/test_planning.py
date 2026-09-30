@@ -160,6 +160,23 @@ def test_a_handle_with_no_live_account_is_not_found_and_nothing_is_sent(tmp_path
     assert posts(api) == []
 
 
+def test_a_handle_on_an_api_older_than_the_cli_is_left_to_the_port(tmp_path):
+    """An account view that carries no `state` cannot say which row is live;
+    its one row is sent, and the port judges whether it is."""
+    api, result = schedule(
+        tmp_path, account=HANDLE, routes=accounts({"id": ACCOUNT, "handle": HANDLE})
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    assert body_of(posts(api)[0])["ig_account_id"] == ACCOUNT
+
+
+def test_a_blank_account_is_a_usage_error_and_nothing_is_sent(tmp_path):
+    api, result = schedule(tmp_path, account="  ")
+    assert result.exit_code == EXIT_USAGE
+    assert "--account" in result.output
+    assert posts(api) == [] and api.paths("GET") == []
+
+
 def test_a_handle_naming_two_live_accounts_needs_the_id(tmp_path):
     api, result = schedule(
         tmp_path,
@@ -215,19 +232,6 @@ def test_a_blocked_item_says_the_override_does_not_help(tmp_path):
     assert "does not get past" in error["fix"]
 
 
-def test_every_kind_in_the_way_has_the_clis_words():
-    """The port names these and the CLI says them: the item's two unpostable
-    states, then every lock kind (`ck_locks_kind`, split by F7)."""
-    from src.services.target.vocabulary import BLOCKING_LOCKS, WARNING_LOCKS
-
-    assert set(IN_THE_WAY) == {
-        "item_removed",
-        "item_unsupported",
-        *BLOCKING_LOCKS,
-        *WARNING_LOCKS,
-    }
-
-
 @pytest.mark.parametrize("missing", sorted(MISSING_SENTENCES))
 def test_a_not_found_names_what_is_missing(tmp_path, missing):
     result, error = refused(
@@ -244,12 +248,40 @@ def test_a_not_found_names_what_is_missing(tmp_path, missing):
     assert error["detail"] == MISSING_SENTENCES[missing]
 
 
-def test_an_item_already_waiting_says_so(tmp_path):
+def test_an_item_already_waiting_names_the_story_in_the_way(tmp_path):
+    """Whatever its origin or state, the story holding the item is the one to
+    look at: the refusal names it, so the fix is that story's own view."""
+    result, error = refused(
+        tmp_path,
+        {
+            "reason": "illegal_transition",
+            "detail": "command refused: …",
+            "facts": {
+                "existing": {
+                    "intent_id": STORY,
+                    "state": "awaiting_approval",
+                    "origin": "cadence",
+                }
+            },
+        },
+    )
+    assert result.exit_code == EXIT_REFUSED
+    assert error["detail"] == (
+        f"that item already waits on that account: story {STORY} (awaiting_approval)"
+    )
+    assert error["fix"] == (
+        f"storydump story {STORY} shows it; cancel it, or let it post,"
+        " to plan the item again"
+    )
+
+
+def test_an_item_already_waiting_with_no_story_named_says_where_to_look(tmp_path):
     result, error = refused(
         tmp_path, {"reason": "illegal_transition", "detail": "command refused: …"}
     )
     assert result.exit_code == EXIT_REFUSED
     assert "already waiting to post" in error["detail"]
+    assert error["fix"] == "storydump account <handle> lists that account's stories"
 
 
 @pytest.mark.parametrize("verb", ["schedule", "reschedule"])
@@ -350,14 +382,16 @@ ROW = {
     "file_name": "sunset.jpg",
     "scheduled_by": "Chris",
     "origin": "planned",
+    "tz": "America/New_York",
 }
 
 
-def queue(ws: str, rows: list) -> dict:
+def queue(ws: str, rows: list, limit: int = 50) -> dict:
+    """The Queue read's answer, echoing the page size as the API does."""
     return {
         ("GET", f"/api/v1/workspaces/{ws}/intents"): (
             200,
-            {"intents": rows, "limit": 50},
+            {"intents": rows, "limit": limit},
         )
     }
 
@@ -368,8 +402,28 @@ def test_planned_is_the_queue_read_filtered_to_planned_stories(tmp_path):
     assert result.exit_code == EXIT_OK, result.output
     (request,) = [r for r in api.calls if r.url.path.endswith("/intents")]
     assert dict(request.url.params) == {"origin": "planned", "state": "scheduled"}
-    for cell in ("sunset.jpg", HANDLE, "Chris", "2026-10-12T22:30:00"):
+    for cell in ("sunset.jpg", HANDLE, "Chris"):
         assert cell in result.output
+    # due in the zone its time was chosen in, the time the person typed
+    assert "2026-10-12 18:30 America/New_York" in result.output
+    assert "the first" not in result.output, "a short page is the whole list"
+
+
+@pytest.mark.parametrize("tz", [None, "Not/AZone"])
+def test_planned_shows_the_time_as_given_where_it_cannot_name_the_zone(tmp_path, tz):
+    api = write_api(queue(WS, [{**ROW, "tz": tz}]))
+    result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
+    assert result.exit_code == EXIT_OK, result.output
+    assert "2026-10-12T22:30:00+00:00" in result.output
+
+
+def test_a_full_page_says_it_is_the_first(tmp_path):
+    api = write_api(queue(WS, [ROW], limit=1))
+    result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
+    assert result.exit_code == EXIT_OK, result.output
+    assert f"workspace {WS}: the first 1 shown — pass --limit up to 200" in (
+        result.output
+    )
 
 
 def test_planned_says_a_cancel_still_landing(tmp_path):
@@ -379,7 +433,7 @@ def test_planned_says_a_cancel_still_landing(tmp_path):
 
 
 def test_planned_widens_by_state_and_bounds_the_page(tmp_path):
-    api = write_api(queue(WS, []))
+    api = write_api(queue(WS, [], limit=20))
     result = run(
         write_runtime(tmp_path, api),
         "planned",
@@ -400,7 +454,29 @@ def test_planned_widens_by_state_and_bounds_the_page(tmp_path):
     }
     document = one_envelope(result)
     assert document["kind"] == "planned"
-    assert document["data"] == {"workspaces": [{"workspace_id": WS, "rows": []}]}
+    assert document["data"] == {
+        "workspaces": [{"workspace_id": WS, "rows": [], "limit": 20}]
+    }
+
+
+def test_planned_reads_a_history_newest_first_when_asked(tmp_path):
+    api = write_api(queue(WS, []))
+    result = run(
+        write_runtime(tmp_path, api),
+        "planned",
+        "--workspace",
+        WS,
+        "--state",
+        "expired",
+        "--newest-first",
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    (request,) = [r for r in api.calls if r.url.path.endswith("/intents")]
+    assert dict(request.url.params) == {
+        "origin": "planned",
+        "state": "expired",
+        "order": "desc",
+    }
 
 
 @pytest.mark.parametrize("states", ["someday", "scheduled,someday", ","])

@@ -83,6 +83,28 @@ class TestTheClosedSets:
         )
         assert blocking | warning == kinds and not blocking & warning
 
+    def test_every_fact_a_planned_story_is_refused_with_has_the_clis_words(self):
+        """The CLI says each fact `schedule_item` and `reschedule_item` send, and
+        its tests are parametrized over these tables, so a key dropped here
+        would drop its own case there. What is in the way: the item's media
+        states other than `available` (spelled `item_<state>`), then every lock
+        kind."""
+        from src.services.target import workspaces
+
+        assert set(vocabulary.IN_THE_WAY) == {
+            *(f"item_{s}" for s in workspaces.MEDIA_STATES if s != "available"),
+            *vocabulary.BLOCKING_LOCKS,
+            *vocabulary.WARNING_LOCKS,
+        }
+        assert set(vocabulary.AT_RULE_SENTENCES) == {
+            "shape",
+            "not_a_date",
+            "skipped",
+            "past",
+            "horizon",
+        }
+        assert set(vocabulary.MISSING_SENTENCES) == {"account", "item"}
+
     def test_the_provider_names_are_the_migrations_check_lists(self):
         """`"ig_login"` and `"gdrive"` had a hand copy in seven modules and
         four inline SQL literals; one copy's import-cycle excuse was false

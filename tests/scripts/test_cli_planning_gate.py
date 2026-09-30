@@ -1,10 +1,10 @@
 """Planning a story through the REAL CLI against the real app as the
 production role (#1413 phase 5): the plan's verification, end to end.
 
-A person's operator token schedules an item for a few minutes ahead, naming
-the account by its handle; `storydump planned` lists it; at its time the
-worker's prompt sweeper serves it and it waits in `awaiting_approval`, as any
-story does. The same token moves it and cancels it, each write an audit row
+A person's operator token schedules an item for a time tomorrow, naming the
+account by its handle; `storydump planned` lists it; the worker's prompt
+sweeper leaves it alone until its time and then serves it, and it waits in
+`awaiting_approval`, as any story does. The same token moves it and cancels it, each write an audit row
 naming the person over the `cli` channel. A readonly token and a service
 identity read what is coming and cannot plan.
 
@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo
 import psycopg2
 import pytest
 
+from sqlalchemy import text
+
 from src.services.target import prompts, unit_of_work
 from src.services.target.vocabulary import (
     EXIT_NOT_AUTHORIZED,
@@ -28,6 +30,7 @@ from src.services.target.vocabulary import (
     EXIT_REFUSED,
     NO_PUSH_BINDING,
 )
+from src.services.target.work_loop import WorkerConfig
 from tests.scripts import test_cli_writes_gate as cli_gate
 from tests.scripts.conftest import as_user, ingress_engine
 from tests.scripts.test_cli_writes_gate import LoopBridge, _cli, _runtime, _state
@@ -48,7 +51,7 @@ ZONE = "America/New_York"
 
 @pytest.fixture(scope="module")
 def planning(world, people):
-    """One account with a handle and three items in `people`'s workspace."""
+    """One account with a handle and four items in `people`'s workspace."""
     conn = psycopg2.connect(world["stream"])
     try:
         with conn, conn.cursor() as cur:
@@ -66,7 +69,7 @@ def planning(world, people):
             )
             (account,) = cur.fetchone()
             items = []
-            for n in range(3):
+            for n in range(4):
                 cur.execute(
                     "INSERT INTO media_items (workspace_id, source_id, content_hash,"
                     " file_name, media_kind, provider_file_ref)"
@@ -85,11 +88,12 @@ def planning(world, people):
     return {"account": str(account), "items": items}
 
 
-def _in_minutes(minutes: int) -> str:
-    """A wall time *minutes* ahead in the workspace's zone, as typed."""
-    return (datetime.now(ZoneInfo(ZONE)) + timedelta(minutes=minutes)).strftime(
-        "%Y-%m-%d %H:%M"
-    )
+def _tomorrow_at(hour: int) -> str:
+    """A wall time tomorrow in the workspace's zone, as typed: a whole hour in
+    the afternoon, clear of any clock change and always hours ahead (minutes
+    added to an aware time can land in a skipped hour)."""
+    day = datetime.now(ZoneInfo(ZONE)).date() + timedelta(days=1)
+    return f"{day.isoformat()} {hour:02d}:00"
 
 
 def _audit(dsn, intent_id, event):
@@ -102,14 +106,20 @@ def _audit(dsn, intent_id, event):
 
 
 def _serve(world):
-    """One pass of the worker's prompt sweeper, as the worker runs it."""
+    """One pass of the worker's prompt sweeper, as the worker runs it: as
+    `svc_worker`, with the worker's own late window and page."""
+    cfg = WorkerConfig()
 
     async def go():
         async with ingress_engine(as_user(world["stream"], "svc_worker")) as engine:
             sessions = unit_of_work.make_session_for(engine)
             async with sessions({}) as session:
+                who = (await session.execute(text("SELECT current_user"))).scalar()
+                assert who == "svc_worker", who
                 return await prompts.sweep_due_prompts(
-                    session, late_seconds=3600, limit=100
+                    session,
+                    late_seconds=cfg.planned_late_seconds,
+                    limit=cfg.prompt_sweep_limit,
                 )
 
     return asyncio.run(go())
@@ -119,7 +129,7 @@ def test_the_cli_plans_a_story_lists_it_and_at_its_time_it_asks(
     world, people, planning, tmp_path
 ):
     ws, item = people["ws"], planning["items"][0]
-    local_at = _in_minutes(5)
+    local_at = _tomorrow_at(12)
 
     async def plan():
         async with api_client(world["ingress"]) as (client, engine):
@@ -164,6 +174,16 @@ def test_the_cli_plans_a_story_lists_it_and_at_its_time_it_asks(
     assert entry["tz"] == ZONE and entry["account_handle"] == HANDLE
     assert entry["scheduled_by"] and "@" not in entry["scheduled_by"]
 
+    ((slot,),) = _sql(
+        world["stream"],
+        "SELECT to_char(schedule_slot_at AT TIME ZONE %s, 'YYYY-MM-DD HH24:MI')"
+        " FROM post_intents WHERE id = %s",
+        (ZONE, story),
+    )
+    assert slot == local_at, "the time typed, in the account's zone"
+    _serve(world)
+    assert _state(world["stream"], story) == "scheduled", "not served before its time"
+
     # its time comes (the slot moved into the past stands in for the wait)
     _sql(
         world["stream"],
@@ -190,13 +210,13 @@ def test_the_cli_moves_and_cancels_a_planned_story(world, people, planning, tmp_
                 "--account",
                 planning["account"],
                 "--at",
-                _in_minutes(60),
+                _tomorrow_at(13),
                 "--workspace",
                 ws,
             )
             assert code == EXIT_OK, doc
             story = doc["data"]["result"]["intent_id"]
-            later = _in_minutes(180)
+            later = _tomorrow_at(15)
             code, doc = await _cli(
                 rt, "reschedule", story, "--at", later, "--workspace", ws
             )
@@ -244,7 +264,7 @@ def test_a_lock_holds_the_cli_back_until_overridden(world, people, planning, tmp
         async with api_client(world["ingress"]) as (client, engine):
             bridge = LoopBridge(client._transport, asyncio.get_running_loop())
             rt = _runtime(people["operator"], bridge, tmp_path)
-            args = ("schedule", item, "--account", HANDLE, "--at", _in_minutes(90))
+            args = ("schedule", item, "--account", HANDLE, "--at", _tomorrow_at(14))
             code, doc = await _cli(rt, *args, "--workspace", ws)
             assert code == EXIT_REFUSED, doc
             assert doc["error"]["reason"] == "locked"
@@ -262,6 +282,26 @@ def test_a_readonly_token_and_a_service_identity_read_but_cannot_plan(
     world, people, planning, tmp_path
 ):
     ws = people["ws"]
+
+    async def plan():
+        async with api_client(world["ingress"]) as (client, engine):
+            bridge = LoopBridge(client._transport, asyncio.get_running_loop())
+            rt = _runtime(people["operator"], bridge, tmp_path)
+            code, doc = await _cli(
+                rt,
+                "schedule",
+                planning["items"][3],
+                "--account",
+                HANDLE,
+                "--at",
+                _tomorrow_at(17),
+                "--workspace",
+                ws,
+            )
+            assert code == EXIT_OK, doc
+            return doc["data"]["result"]["intent_id"]
+
+    story = _run(plan())
     ((before,),) = _sql(world["stream"], "SELECT count(*) FROM post_intents")
 
     async def main():
@@ -276,7 +316,7 @@ def test_a_readonly_token_and_a_service_identity_read_but_cannot_plan(
                     "--account",
                     planning["account"],
                     "--at",
-                    _in_minutes(30),
+                    _tomorrow_at(16),
                     "--workspace",
                     ws,
                 )
@@ -284,6 +324,8 @@ def test_a_readonly_token_and_a_service_identity_read_but_cannot_plan(
                 assert doc["error"]["reason"] == "readonly_token"
                 code, doc = await _cli(rt, "planned", "--workspace", ws)
                 assert code == EXIT_OK, doc
+                rows = [r for w in doc["data"]["workspaces"] for r in w["rows"]]
+                assert story in {r["id"] for r in rows}, "an empty page is no read"
 
     _run(main())
     assert _sql(world["stream"], "SELECT count(*) FROM post_intents") == [(before,)]
