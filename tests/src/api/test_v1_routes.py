@@ -141,7 +141,13 @@ class TestWorkspaceReads:
         seen = {}
 
         async def list_intents(
-            session, *, workspace_id, states=(), origin=None, limit=50
+            session,
+            *,
+            workspace_id,
+            states=(),
+            origin=None,
+            newest_first=False,
+            limit=50,
         ):
             seen.update(states=list(states), limit=limit)
             return []
@@ -172,22 +178,33 @@ class TestWorkspaceReads:
         seen = {}
 
         async def list_intents(
-            session, *, workspace_id, states=(), origin=None, limit=50
+            session,
+            *,
+            workspace_id,
+            states=(),
+            origin=None,
+            newest_first=False,
+            limit=50,
         ):
-            seen.update(states=list(states), origin=origin)
+            seen.update(states=list(states), origin=origin, newest_first=newest_first)
             return []
 
         monkeypatch.setattr(workspaces, "list_intents", list_intents)
-        resp = client.get(f"/api/v1/workspaces/{WS}/intents?origin=someday")
-        assert resp.status_code == 422 and "someday" in resp.json()["detail"]
+        for bad, word in (("origin=someday", "someday"), ("order=up", "up")):
+            resp = client.get(f"/api/v1/workspaces/{WS}/intents?{bad}")
+            assert resp.status_code == 422 and word in resp.json()["detail"]
         assert seen == {}
         resp = client.get(
             f"/api/v1/workspaces/{WS}/intents?origin=planned&state=scheduled"
         )
         assert resp.status_code == 200
-        assert seen == {"states": ["scheduled"], "origin": "planned"}
-        client.get(f"/api/v1/workspaces/{WS}/intents")
-        assert seen["origin"] is None
+        assert seen == {
+            "states": ["scheduled"],
+            "origin": "planned",
+            "newest_first": False,
+        }
+        client.get(f"/api/v1/workspaces/{WS}/intents?state=expired&order=desc")
+        assert seen["origin"] is None and seen["newest_first"] is True
 
     def test_media_reads_pass_the_gate_and_validate_the_state(
         self, client, signed_in, tenant, monkeypatch

@@ -456,19 +456,28 @@ async def list_intents(
     principal: Principal = Depends(current_principal),
     state: Optional[str] = Query(None),
     origin: Optional[str] = Query(None),
+    order: str = Query("asc"),
     limit: int = Query(LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
 ):
     """The ledger read model — X.2's "reads pending approvals from the ledger"
     is ``?state=awaiting_approval``; a history tab is
     ``?state=posted,skipped,rejected`` (one call, several states); what is
-    coming is ``?origin=planned&state=scheduled``. A token reads it too (the
+    coming is ``?origin=planned&state=scheduled``, and the latest misses
+    ``?origin=planned&state=expired&order=desc``. A token reads it too (the
     CLI's ``planned``), as it reads the ops views."""
     states = _states(state)
     if origin is not None and origin not in workspaces.INTENT_ORIGINS:
         raise HTTPException(status_code=422, detail=f"unknown origin: {origin!r}")
+    if order not in ("asc", "desc"):
+        raise HTTPException(status_code=422, detail=f"order is asc or desc: {order!r}")
     async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await workspaces.list_intents(
-            session, workspace_id=str(ws), states=states, origin=origin, limit=limit
+            session,
+            workspace_id=str(ws),
+            states=states,
+            origin=origin,
+            newest_first=order == "desc",
+            limit=limit,
         )
     return {"intents": rows, "limit": limit}
 

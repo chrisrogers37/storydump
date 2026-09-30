@@ -28,7 +28,7 @@ from rich.console import Console
 from rich.padding import Padding
 from rich.table import Table
 
-from src.services.target.vocabulary import write_sentence
+from src.services.target.vocabulary import WARNING_SENTENCES, write_sentence
 
 #: The three secret shapes the spec names (§6, redaction at the client).
 TOKEN_PATTERN = re.compile(r"sdt_[A-Za-z0-9_-]{8,}")
@@ -257,6 +257,7 @@ EMPTY: Mapping[str, str] = {
     "jobs": "no jobs",
     "outbox": "outbox empty",
     "burst": "nothing in the window",
+    "planned": "nothing planned",
 }
 
 STORY_FIELDS: Sequence[Column] = (
@@ -344,6 +345,22 @@ FLOATING_COLUMNS: Sequence[Column] = (
     ("run at", "job_run_at"),
     ("wait", _wait_of),
     ("waited at", "last_wait_at"),
+)
+
+
+def _planned_state(row: Mapping[str, Any]) -> Any:
+    """The state, and a cancel that is still landing."""
+    state = row.get("state")
+    return f"{state} (cancelling)" if row.get("cancel_requested") else state
+
+
+PLANNED_COLUMNS: Sequence[Column] = (
+    ("id", "id"),
+    ("due", "schedule_slot_at"),
+    ("account", "account_handle"),
+    ("item", "file_name"),
+    ("state", _planned_state),
+    ("planned by", "scheduled_by"),
 )
 RECENT_COLUMNS: Sequence[Column] = (
     ("id", "id"),
@@ -616,14 +633,24 @@ def _render_write(console: Console, data: Any) -> None:
     result = write.get("result") if isinstance(write.get("result"), dict) else {}
     outcome = str(write.get("outcome"))
     line = write_sentence(str(write.get("command")), outcome)
-    if args.get("intent_id"):
-        line += f" — story {args['intent_id']}"
+    story = args.get("intent_id") or result.get("intent_id")
+    if story:
+        line += f" — story {story}"
     elif args.get("source_id"):
         line += f" — source {args['source_id']}"
     state = result.get("state") or result.get("to_state")
     if isinstance(state, str) and outcome != "replayed":
         line += f" (now {state})"
+    if result.get("local_at") and result.get("tz"):
+        # a planned story: when it is due, as the account's zone reads it
+        line += f", due {result['local_at']} {result['tz']}"
     console.print(line)
+    overridden = result.get("overridden")
+    if isinstance(overridden, list) and overridden:
+        console.print(f"  scheduled over: {', '.join(str(k) for k in overridden)}")
+    warnings = result.get("warnings")
+    for code in warnings if isinstance(warnings, list) else []:
+        console.print(f"  {WARNING_SENTENCES.get(str(code), str(code))}")
 
 
 def _tap_outcomes(payload: Any) -> str:
@@ -775,6 +802,8 @@ RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
     "pause": _render_write,
     "resume": _render_write,
     "sync": _render_write,
+    "schedule": _render_write,
+    "reschedule": _render_write,
     "health": _render_health,
     "deploys": _render_deploys,
     "webhook": _render_webhook,
@@ -790,5 +819,6 @@ RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
     "jobs": _view("jobs", _render_jobs_rows),
     "outbox": _view("outbox", _table_of(OUTBOX_COLUMNS)),
     "burst": _view("burst", _render_burst_rows),
+    "planned": _view("planned", _table_of(PLANNED_COLUMNS)),
     "posture": _render_posture,
 }

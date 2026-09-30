@@ -220,19 +220,30 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
     return None if row is None else str(row[0])
 
 
-async def display_name_for(executor, *, user_id: str) -> str:
-    """The name a shared chat may see for *user_id*: the Telegram identity's
+def display_name_sql(user_id: str) -> str:
+    """The name a shared chat may see for the person *user_id* (a column or a
+    bind, never user input) as one SQL expression: the Telegram identity's
     display name first (the group already sees it), else another identity's,
-    never an email — an address in a group chat is a disclosure (phase 1 of the
-    2026-09-09 tap plan, F3)."""
-    rows = await readers.rows(
+    else "a teammate" — never an email, since an address in a group chat is a
+    disclosure (phase 1 of the 2026-09-09 tap plan, F3). A read that names
+    many people joins this instead of asking once per person."""
+    return (
+        "COALESCE((SELECT ui.display_name FROM user_identities ui"
+        f" WHERE ui.user_id = {user_id}"
+        "   AND ui.display_name IS NOT NULL AND ui.display_name <> ''"
+        " ORDER BY (ui.provider = 'telegram') DESC, ui.created_at LIMIT 1),"
+        " 'a teammate')"
+    )
+
+
+async def display_name_for(executor, *, user_id: str) -> str:
+    """:func:`display_name_sql` for one person."""
+    found = await readers.row(
         executor,
-        "SELECT provider, display_name FROM user_identities"
-        " WHERE user_id = :u AND display_name IS NOT NULL AND display_name <> ''"
-        " ORDER BY (provider = 'telegram') DESC, created_at",
+        f"SELECT {display_name_sql('CAST(:u AS uuid)')} AS name",
         u=str(user_id),
     )
-    return str(rows[0]["display_name"]) if rows else "a teammate"
+    return str(found["name"])
 
 
 async def get_user(executor, *, user_id: str) -> Optional[dict]:

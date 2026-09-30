@@ -398,6 +398,14 @@ _INTENT_COLUMNS = (
     " i.approval_mode, i.published_via, i.publish_step, i.cancel_requested,"
     " i.ig_permalink, i.entered_state_at, i.created_at,"
     " i.origin, i.scheduled_by_user_id,"
+    " CASE WHEN i.scheduled_by_user_id IS NOT NULL"
+    f"      THEN {identity.display_name_sql('i.scheduled_by_user_id')}"
+    " END AS scheduled_by,"
+    # the zone the story's times read in: the account's, else the workspace's
+    # (the one `schedule_item` resolved its wall time in)
+    " COALESCE(a.tz, w.tz) AS tz,"
+    f" CASE WHEN i.last_error->>'class' = '{vocabulary.PLANNED_MISSED}'"
+    "      THEN i.last_error->>'message' END AS miss_reason,"
     " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category,"
     " a.handle AS account_handle, a.display_name AS account_display_name"
 )
@@ -406,6 +414,7 @@ _INTENT_FROM = (
     "  FROM post_intents i"
     "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
     "  JOIN ig_accounts a ON a.workspace_id = i.workspace_id AND a.id = i.ig_account_id"
+    "  JOIN workspaces w ON w.id = i.workspace_id"
 )
 
 _MEDIA_COLUMNS = (
@@ -415,33 +424,22 @@ _MEDIA_COLUMNS = (
 )
 
 
-async def _with_schedulers(executor, rows: list[dict]) -> list[dict]:
-    """Each row's `scheduled_by`: the name a person who scheduled it goes by
-    (`identity.display_name_for`, the card's rule, never an email), None on
-    a story nobody scheduled. One read per person, not per row."""
-    names = {
-        by: await identity.display_name_for(executor, user_id=str(by))
-        for by in {row["scheduled_by_user_id"] for row in rows} - {None}
-    }
-    for row in rows:
-        row["scheduled_by"] = names.get(row["scheduled_by_user_id"])
-    return rows
-
-
 async def list_intents(
     executor,
     *,
     workspace_id: str,
     states: Sequence[str] = (),
     origin: Optional[str] = None,
+    newest_first: bool = False,
     limit: int = 50,
 ) -> list[dict]:
     """The ledger read model (X.2: "reads pending approvals from the ledger").
     *states* narrows to any of several states — a history tab is one call —
     and must already be validated against :data:`INTENT_STATES`; *origin*
     (one of :data:`INTENT_ORIGINS`) to the planned stories or the cadence's —
-    "what is coming" is the planned ones still `scheduled`. Bounded (`01`
-    H5) — *limit* is applied after the caller's clamp."""
+    "what is coming" is the planned ones still `scheduled`. Soonest first, or
+    *newest_first* for a history (the latest misses, not the oldest). Bounded
+    (`01` H5) — *limit* is applied after the caller's clamp."""
     params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
     where = "i.workspace_id = :ws"
     if states:
@@ -450,14 +448,12 @@ async def list_intents(
     if origin is not None:
         where += " AND i.origin = :origin"
         params["origin"] = origin
-    return await _with_schedulers(
+    order = "DESC" if newest_first else "ASC"
+    return await readers.rows(
         executor,
-        await readers.rows(
-            executor,
-            f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE {where}"
-            " ORDER BY i.schedule_slot_at, i.id LIMIT :lim",
-            **params,
-        ),
+        f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE {where}"
+        f" ORDER BY i.schedule_slot_at {order}, i.id {order} LIMIT :lim",
+        **params,
     )
 
 
@@ -579,13 +575,12 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
 
 async def get_intent(executor, *, workspace_id: str, intent_id: str) -> Optional[dict]:
     """One intent — always its CURRENT state (R6: terminal-state-first)."""
-    found = await readers.row(
+    return await readers.row(
         executor,
         f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE i.workspace_id = :ws AND i.id = :id",
         ws=str(workspace_id),
         id=str(intent_id),
     )
-    return (await _with_schedulers(executor, [found]))[0] if found else None
 
 
 async def rename(executor, *, workspace_id: str, name: str) -> str:

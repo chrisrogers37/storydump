@@ -34,6 +34,11 @@ class TestTheClosedSets:
         "values, migration, constraint",
         [
             (
+                vocabulary.INTENT_ORIGINS,
+                "088_intent_origin_planned.sql",
+                "ck_intent_origin",
+            ),
+            (
                 vocabulary.INTENT_STATES,
                 "055_intent_ledger_tables.sql",
                 "ck_intent_state",
@@ -64,6 +69,19 @@ class TestTheClosedSets:
         self, values, migration, constraint
     ):
         assert values == _check_values(migration, constraint)
+
+    def test_the_lock_rule_splits_every_lock_kind_once(self):
+        """F7 (#1413): a lock kind either blocks a planned story or warns of
+        it, never both and never neither — a new kind in `ck_locks_kind` is a
+        failing test until someone decides which."""
+        kinds = set(
+            _check_values("054_accounts_sources_media_tables.sql", "ck_locks_kind")
+        )
+        blocking, warning = (
+            set(vocabulary.BLOCKING_LOCKS),
+            set(vocabulary.WARNING_LOCKS),
+        )
+        assert blocking | warning == kinds and not blocking & warning
 
     def test_the_provider_names_are_the_migrations_check_lists(self):
         """`"ig_login"` and `"gdrive"` had a hand copy in seven modules and

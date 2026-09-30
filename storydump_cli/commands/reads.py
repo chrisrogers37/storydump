@@ -29,6 +29,7 @@ import click
 from src.services.target.vocabulary import (
     DEFAULT_WINDOW,
     EXIT_NOT_FOUND,
+    INTENT_STATES,
     envelope,
     window_start,
 )
@@ -442,4 +443,75 @@ def posture(ctx: click.Context) -> None:
     emit(envelope("posture", data), json_mode=runtime.json_mode)
 
 
-COMMANDS = (story, cards, floating, account, jobs, outbox, burst, posture)
+def _intent_states(
+    ctx: click.Context, param: click.Parameter, value: str
+) -> tuple[str, ...]:
+    """``--state a,b`` → the closed set's members, or a usage error naming it."""
+    wanted = tuple(s.strip() for s in value.split(",") if s.strip())
+    if not wanted or any(s not in INTENT_STATES for s in wanted):
+        raise click.BadParameter(
+            f"each state is one of {', '.join(INTENT_STATES)}", ctx=ctx, param=param
+        )
+    return wanted
+
+
+def _as_view(answer: Any, workspace_id: str) -> dict[str, Any]:
+    """The Queue read's answer in the views' envelope, so it renders as one."""
+    rows = answer.get("intents") if isinstance(answer, dict) else None
+    return {"data": {"workspace_id": workspace_id, "rows": rows}}
+
+
+@click.command()
+@global_options
+@click.option(
+    "--workspace",
+    metavar="ID|NAME",
+    help="One workspace, by id or exact name (default: every workspace this token can read).",
+)
+@click.option(
+    "--state",
+    "states",
+    default="scheduled",
+    show_default=True,
+    metavar="STATE[,STATE]",
+    callback=_intent_states,
+    help=(
+        "The states to list: `scheduled` is still to come; a served story waits"
+        " in `awaiting_approval`."
+    ),
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(1, 200),
+    default=None,
+    metavar="N",
+    help="At most N stories per workspace (default 50, at most 200).",
+)
+@click.pass_context
+def planned(
+    ctx: click.Context,
+    workspace: Optional[str],
+    states: tuple[str, ...],
+    limit: Optional[int],
+) -> Optional[int]:
+    """The planned stories, soonest first: when each is due, its account and
+    item, and who planned it. By default what is still to come.
+
+    \b
+    Examples:
+      storydump planned --workspace "Chris's studio"
+      storydump planned --state scheduled,awaiting_approval
+    """
+    return _run_view(
+        ctx,
+        "planned",
+        lambda client, ws: _as_view(
+            client.intents(ws, origin="planned", states=states, limit=limit), ws
+        ),
+        workspace=workspace,
+        watch_mode=False,
+        every=None,
+    )
+
+
+COMMANDS = (story, cards, floating, account, jobs, outbox, burst, posture, planned)

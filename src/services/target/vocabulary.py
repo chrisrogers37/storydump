@@ -96,6 +96,20 @@ INTENT_STATES: tuple[str, ...] = (
 #: item, the account and the time (`schedule_item`).
 INTENT_ORIGINS: tuple[str, ...] = ("cadence", "planned")
 
+#: `post_intents.last_error.class` on a planned story that ended unserved
+#: at its time (`prompts.sweep_planned_misses`); its `message` is the reason.
+PLANNED_MISSED = "planned_missed"
+
+#: What a scheduled story's answer may warn of, without refusing it.
+NO_PUSH_BINDING = "no_push_binding"
+
+#: `post_locks.kind` (054 ``ck_locks_kind``), split by the lock and item
+#: rule (#1413, F7). A blocking kind refuses a planned story, and at its
+#: time the serve door turns it into a miss; a warning kind refuses a
+#: schedule only until the person overrides it, and never causes a miss.
+BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")
+WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
+
 #: `post_intents.publish_step` (055 ``ck_intent_step``).
 PUBLISH_STEPS: tuple[str, ...] = (
     "none",
@@ -338,6 +352,25 @@ OUTCOME_SENTENCES: Mapping[str, str] = {
     # a command on a story past awaiting_approval answers with the story's
     # state (F2 (a) of the tap plan) — nothing changed
     "answered": "nothing changed — the story had already answered",
+}
+
+#: What stands in the way of scheduling an item, in the CLI's words: the
+#: blockers and warnings a `locked` refusal names — the item's own state,
+#: then the lock kinds.
+IN_THE_WAY: Mapping[str, str] = {
+    "item_removed": "it was removed from its folder",
+    "item_unsupported": "it cannot be posted as a story",
+    "reject": "it was rejected",
+    "unsupported": "it is marked as one that cannot be posted",
+    "hold": "it is on hold",
+    "seasonal": "it is out of season",
+    "skip": "it was skipped recently",
+    "recent": "it was posted on this account recently",
+}
+
+#: A write's warnings, in the CLI's words (the answer carries the codes).
+WARNING_SENTENCES: Mapping[str, str] = {
+    NO_PUSH_BINDING: "no chat is bound to this workspace: nothing is asked until one is",
 }
 
 #: Words that belong to the Telegram adapter and never to a terminal.

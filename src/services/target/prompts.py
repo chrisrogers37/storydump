@@ -55,7 +55,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
 
-from src.services.target import bindings, intent_ledger, outbox, readers
+from src.services.target import bindings, intent_ledger, outbox, readers, vocabulary
 from src.services.target.callback_tokens import ACTIONS, token as _token
 from src.utils.datetime_utils import ensure_utc, utcnow
 
@@ -801,7 +801,7 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
                             "e": json.dumps(
                                 {
                                     "v": 1,
-                                    "class": "planned_missed",
+                                    "class": vocabulary.PLANNED_MISSED,
                                     "message": row["reason"],
                                 }
                             ),

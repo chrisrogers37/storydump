@@ -793,13 +793,6 @@ _LOCAL_AT = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?")
 #: How far ahead a story may be planned.
 PLAN_HORIZON_DAYS = 365
 
-#: F7, the lock and item rule. These lock kinds, and an item that was
-#: removed or cannot be posted, refuse a schedule outright — the four the
-#: serve door (`fn_prompts_due`) turns into a miss at the story's time. The
-#: others only warn: the person may override them, and they never cause a
-#: miss. Together they are `ck_locks_kind`.
-BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")
-WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
 
 #: The wall time :local_at in the zone :tz as an instant, NULL when the
 #: clocks skip it. Postgres reads a skipped wall time with the offset in
@@ -904,7 +897,9 @@ async def schedule_item(session, command: Command) -> CommandResult:
     time must exist in its zone, and `uq_intent_live_subject` — the same
     item waiting on the same account — is the INSERT's to refuse, with no
     read before it. The lock and item rule (F7) is the one decision made
-    here, and `override_locks` gets past only its warnings."""
+    here (`vocabulary.BLOCKING_LOCKS`: an item that cannot post, or a lock
+    that would miss it at its time), and `override_locks` gets past only its
+    warnings."""
     account_id = _id_arg(command, "ig_account_id")
     media_id = _id_arg(command, "media_item_id")
     local_at = _local_at(command)
@@ -940,19 +935,14 @@ async def schedule_item(session, command: Command) -> CommandResult:
     tz = _tz(account)
     at = await _planned_instant(session, local_at=local_at, tz=tz)
     blockers = [] if item["state"] == "available" else [f"item_{item['state']}"]
-    blockers += [kind for kind in item["locks"] if kind in BLOCKING_LOCKS]
-    warnings = [kind for kind in item["locks"] if kind in WARNING_LOCKS]
+    blockers += [k for k in item["locks"] if k in vocabulary.BLOCKING_LOCKS]
+    warnings = [k for k in item["locks"] if k in vocabulary.WARNING_LOCKS]
     if blockers or (warnings and not override):
-        in_the_way = ", ".join(blockers + warnings)
         raise CommandRefused(
             "locked",
-            f"item {media_id}: {in_the_way}"
+            f"item {media_id}: {', '.join(blockers + warnings)}"
             + ("" if blockers else " — override_locks schedules it anyway"),
-            facts={
-                "blockers": blockers,
-                "warnings": warnings,
-                "overridable": not blockers,
-            },
+            facts={"in_the_way": blockers + warnings, "overridable": not blockers},
         )
     try:
         born = await readers.row(
@@ -988,15 +978,16 @@ async def schedule_item(session, command: Command) -> CommandResult:
     await _audit_intent(
         session, born, from_state=None, to_state="scheduled", detail=detail
     )
+    bound = await prompts.push_bindings(session, command.workspace_id)
     return _result(
         born,
         "scheduled",
-        scheduled_at=at.isoformat(),
+        schedule_slot_at=at.isoformat(),
         tz=tz,
         local_at=local_at,
         overridden=warnings,
         # Nothing is served where no chat is bound: said, not refused.
-        chat_bound=bool(await prompts.push_bindings(session, command.workspace_id)),
+        warnings=[] if bound else [vocabulary.NO_PUSH_BINDING],
     )
 
 
@@ -1044,8 +1035,8 @@ async def reschedule_item(session, command: Command) -> CommandResult:
     return _result(
         intent,
         "scheduled",
-        scheduled_at=at.isoformat(),
-        previous=intent["schedule_slot_at"].isoformat(),
+        schedule_slot_at=at.isoformat(),
+        previous_slot_at=intent["schedule_slot_at"].isoformat(),
         tz=tz,
         local_at=local_at,
     )

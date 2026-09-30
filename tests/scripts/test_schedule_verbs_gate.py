@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -37,7 +38,7 @@ import pytest
 from sqlalchemy import text
 
 from src.services.target import commands  # noqa: I001 — the port first: the registry cycle
-from src.services.target import command_executors, unit_of_work, workspaces
+from src.services.target import command_executors, unit_of_work, vocabulary, workspaces
 from src.services.target.commands import Command, CommandRefused
 from tests.scripts.conftest import (
     _scratch,
@@ -371,8 +372,10 @@ class TestScheduleItem:
         data = out.data
         assert data["state"] == "scheduled" and data["tz"] == "UTC"
         assert data["local_at"] == f"{local_at}:00"
-        assert datetime.fromisoformat(data["scheduled_at"]) == _instant(local_at, "UTC")
-        assert data["chat_bound"] is True and data["overridden"] == []
+        assert datetime.fromisoformat(data["schedule_slot_at"]) == _instant(
+            local_at, "UTC"
+        )
+        assert data["warnings"] == [] and data["overridden"] == []
         row = _row(world, data["intent_id"])
         assert row["origin"] == "planned" and row["state"] == "scheduled"
         assert row["approval_mode"] == "manual"
@@ -397,7 +400,7 @@ class TestScheduleItem:
         assert detail == {
             "v": 1,
             "event": "scheduled",
-            "at": out.data["scheduled_at"],
+            "at": out.data["schedule_slot_at"],
             "tz": "UTC",
             "local_at": f"{local_at}:00",
         }
@@ -407,14 +410,14 @@ class TestScheduleItem:
         local_at = _local(days=5, hour=9, tz="America/New_York")
         out = schedule(world, w, _item(world, w), local_at)
         assert out.data["tz"] == "America/New_York"
-        assert datetime.fromisoformat(out.data["scheduled_at"]) == _instant(
+        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == _instant(
             local_at, "America/New_York"
         )
         tokyo = _account(world, w, tz="Asia/Tokyo")
         local_at = _local(days=5, hour=9, tz="Asia/Tokyo")
         out = schedule(world, w, _item(world, w), local_at, account=tokyo)
         assert out.data["tz"] == "Asia/Tokyo"
-        assert datetime.fromisoformat(out.data["scheduled_at"]) == _instant(
+        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == _instant(
             local_at, "Asia/Tokyo"
         )
 
@@ -422,7 +425,7 @@ class TestScheduleItem:
         tz, local_at, expected = _next_ambiguous_or_skipped("ambiguous")
         w = _workspace(world, "ambiguous", tz=tz)
         out = schedule(world, w, _item(world, w), local_at)
-        assert datetime.fromisoformat(out.data["scheduled_at"]) == expected
+        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == expected
 
     def test_a_skipped_wall_time_is_refused(self, world):
         tz, local_at, _ = _next_ambiguous_or_skipped("skipped")
@@ -610,7 +613,7 @@ class TestScheduleItem:
     def test_no_bound_chat_is_said_not_refused(self, world):
         w = _workspace(world, "unbound", bound=False)
         out = schedule(world, w, _item(world, w), _local())
-        assert out.outcome == "executed" and out.data["chat_bound"] is False
+        assert out.outcome == "executed" and out.data["warnings"] == ["no_push_binding"]
 
 
 class TestTheLockAndItemRule:
@@ -632,12 +635,11 @@ class TestTheLockAndItemRule:
             )
             assert refused.reason == "locked"
             assert refused.facts == {
-                "blockers": [f"item_{state}"],
-                "warnings": [],
+                "in_the_way": [f"item_{state}"],
                 "overridable": False,
             }
 
-    @pytest.mark.parametrize("kind", command_executors.BLOCKING_LOCKS)
+    @pytest.mark.parametrize("kind", vocabulary.BLOCKING_LOCKS)
     def test_a_blocking_lock_blocks_even_with_the_override(self, world, kind):
         w = _workspace(world, f"lock-{kind}")
         item = _item(world, w)
@@ -653,13 +655,9 @@ class TestTheLockAndItemRule:
                 override_locks=override,
             )
             assert refused.reason == "locked"
-            assert refused.facts == {
-                "blockers": [kind],
-                "warnings": [],
-                "overridable": False,
-            }
+            assert refused.facts == {"in_the_way": [kind], "overridable": False}
 
-    @pytest.mark.parametrize("kind", command_executors.WARNING_LOCKS)
+    @pytest.mark.parametrize("kind", vocabulary.WARNING_LOCKS)
     def test_a_warning_lock_holds_until_overridden_and_the_override_is_audited(
         self, world, kind
     ):
@@ -675,11 +673,7 @@ class TestTheLockAndItemRule:
             local_at=_local(),
         )
         assert refused.reason == "locked"
-        assert refused.facts == {
-            "blockers": [],
-            "warnings": [kind],
-            "overridable": True,
-        }
+        assert refused.facts == {"in_the_way": [kind], "overridable": True}
         out = schedule(world, w, item, _local(), override_locks=True)
         assert out.outcome == "executed" and out.data["overridden"] == [kind]
         ((_, by, _, _, _, detail),) = _audit(world, out.data["intent_id"], "scheduled")
@@ -699,11 +693,8 @@ class TestTheLockAndItemRule:
             local_at=_local(),
             override_locks=True,
         )
-        assert refused.facts == {
-            "blockers": ["reject"],
-            "warnings": ["skip"],
-            "overridable": False,
-        }
+        # the blocker first, then what an override would have got past
+        assert refused.facts == {"in_the_way": ["reject", "skip"], "overridable": False}
 
     def test_another_accounts_recent_lock_and_an_expired_lock_do_not_count(self, world):
         w = _workspace(world, "scope")
@@ -727,18 +718,12 @@ class TestTheLockAndItemRule:
             " WHERE conname = 'ck_locks_kind'",
         )
         kinds = {k for k in definition.split("'")[1::2]}
-        assert kinds == set(command_executors.BLOCKING_LOCKS) | set(
-            command_executors.WARNING_LOCKS
-        )
+        assert kinds == set(vocabulary.BLOCKING_LOCKS) | set(vocabulary.WARNING_LOCKS)
         for door in ("fn_prompts_due", "fn_planned_misses"):
             ((body,),) = _sql(
                 world, "SELECT prosrc FROM pg_proc WHERE proname = %s", (door,)
             )
-            listed = (
-                "("
-                + ", ".join(f"'{k}'" for k in command_executors.BLOCKING_LOCKS)
-                + ")"
-            )
+            listed = "(" + ", ".join(f"'{k}'" for k in vocabulary.BLOCKING_LOCKS) + ")"
             assert f"l.kind IN {listed}" in body, door
 
 
@@ -758,7 +743,7 @@ class TestRescheduleItem:
             local_at=local_at,
         )
         assert out.outcome == "executed" and out.data["intent_id"] == intent
-        assert datetime.fromisoformat(out.data["scheduled_at"]) == _instant(
+        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == _instant(
             local_at, "UTC"
         )
         row = _row(world, intent)
@@ -777,7 +762,7 @@ class TestRescheduleItem:
             "scheduled",
         )
         assert datetime.fromisoformat(detail["from"]) == datetime.fromisoformat(before)
-        assert detail["to"] == out.data["scheduled_at"]
+        assert detail["to"] == out.data["schedule_slot_at"]
         assert detail["tz"] == "UTC" and detail["local_at"] == f"{local_at}:00"
 
     def test_a_served_story_no_longer_moves(self, world):
@@ -955,35 +940,46 @@ class TestFloors:
         assert err.value.reason == "not_a_member"
 
 
+def _read(world, w, **kw):
+    """The Queue read of *w*, as the web's route runs it."""
+
+    async def go():
+        async with ingress_engine(world["ingress"]) as engine:
+            uow = unit_of_work.unit_of_work(
+                engine,
+                w["ws"],
+                actor_kind="user",
+                actor_user_id=w["user"],
+                channel="web",
+            )
+            async with uow.begin() as session:
+                return await workspaces.list_intents(
+                    session, workspace_id=w["ws"], **kw
+                )
+
+    return asyncio.run(go())
+
+
+def _cadence(world, w, *, hours=24, state="scheduled", last_error=None) -> str:
+    ((intent,),) = _sql(
+        world,
+        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, state, last_error)"
+        " VALUES (%s, %s, %s, 'r', 'manual', now() + make_interval(hours => %s),"
+        "         %s, %s) RETURNING id",
+        (w["ws"], w["account"], _item(world, w), hours, state, last_error),
+    )
+    return str(intent)
+
+
 class TestTheQueueRead:
     def test_the_origin_filter_and_the_schedulers_name(self, world):
         w = _workspace(world, "queue")
         planned = schedule(world, w, _item(world, w), _local(days=2)).data["intent_id"]
-        _sql(
-            world,
-            "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-            " provider_account_ref, approval_mode, schedule_slot_at, state)"
-            " VALUES (%s, %s, %s, 'r', 'manual', now() + interval '1 day', 'scheduled')",
-            (w["ws"], w["account"], _item(world, w)),
-        )
-
-        async def read(**kw):
-            async with ingress_engine(world["ingress"]) as engine:
-                uow = unit_of_work.unit_of_work(
-                    engine,
-                    w["ws"],
-                    actor_kind="user",
-                    actor_user_id=w["user"],
-                    channel="web",
-                )
-                async with uow.begin() as session:
-                    return await workspaces.list_intents(
-                        session, workspace_id=w["ws"], **kw
-                    )
-
-        everything = asyncio.run(read())
+        _cadence(world, w)
+        everything = _read(world, w)
         assert {r["origin"] for r in everything} == {"cadence", "planned"}
-        rows = asyncio.run(read(origin="planned"))
+        rows = _read(world, w, origin="planned")
         assert [str(r["id"]) for r in rows] == [planned]
         assert str(rows[0]["scheduled_by_user_id"]) == w["user"]
         assert rows[0]["scheduled_by"] == w["name"]
@@ -991,4 +987,62 @@ class TestTheQueueRead:
         assert (
             cadence["scheduled_by"] is None and cadence["scheduled_by_user_id"] is None
         )
-        assert asyncio.run(read(origin="planned", states=["awaiting_approval"])) == []
+        assert _read(world, w, origin="planned", states=["awaiting_approval"]) == []
+
+    def test_a_scheduler_with_no_name_is_a_teammate_never_an_address(self, world):
+        w = _workspace(world, "queue-nameless")
+        member = _member(world, w)
+        _sql(
+            world,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'google', %s, NULL)",
+            (member, f"someone-{uuid.uuid4().hex[:6]}@example.com"),
+        )
+        run(
+            world,
+            w,
+            "schedule_item",
+            user=member,
+            ig_account_id=w["account"],
+            media_item_id=_item(world, w),
+            local_at=_local(),
+        )
+        (row,) = _read(world, w, origin="planned")
+        assert row["scheduled_by"] == "a teammate"
+
+    def test_each_row_carries_the_zone_its_times_read_in(self, world):
+        w = _workspace(world, "queue-zones", tz="Europe/Lisbon")
+        schedule(world, w, _item(world, w), _local(days=1))
+        tokyo = _account(world, w, tz="Asia/Tokyo")
+        schedule(world, w, _item(world, w), _local(days=2), account=tokyo)
+        by_account = {str(r["ig_account_id"]): r["tz"] for r in _read(world, w)}
+        assert by_account == {w["account"]: "Europe/Lisbon", tokyo: "Asia/Tokyo"}
+
+    def test_a_missed_planned_story_says_why_and_nothing_else_does(self, world):
+        w = _workspace(world, "queue-misses")
+        _cadence(world, w, hours=-3, state="expired")
+        failed = json.dumps(
+            {"v": 1, "class": "provider", "message": "a secret-free error"}
+        )
+        _cadence(world, w, hours=-2, state="failed", last_error=failed)
+        missed = _planned(world, w)
+        _sql(
+            world,
+            "UPDATE post_intents SET state = 'expired', last_error = %s WHERE id = %s",
+            (
+                json.dumps({"v": 1, "class": "planned_missed", "message": "late"}),
+                missed,
+            ),
+        )
+        reasons = {str(r["id"]): r["miss_reason"] for r in _read(world, w)}
+        assert reasons.pop(missed) == "late"
+        assert set(reasons.values()) == {None}
+
+    def test_newest_first_is_the_latest_not_the_oldest(self, world):
+        w = _workspace(world, "queue-order")
+        ids = [_cadence(world, w, hours=h) for h in (1, 2, 3)]
+        assert [str(r["id"]) for r in _read(world, w, limit=2)] == ids[:2]
+        assert [str(r["id"]) for r in _read(world, w, newest_first=True, limit=2)] == [
+            ids[2],
+            ids[1],
+        ]
