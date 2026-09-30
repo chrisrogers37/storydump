@@ -110,7 +110,7 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     # `expected_tenancy` and none of them is an index — so DROP INDEX is inert
     # here exactly as CREATE INDEX above already is.
     "DROP INDEX ",
-    # 087 (#1413) renames a partial unique index to the name of the key it
+    # 089 (#1413) renames a partial unique index to the name of the key it
     # replaces. Every ALTER INDEX form acts on an index alone, and an index is
     # none of the four facts, so the kind is inert here exactly as CREATE and
     # DROP INDEX above are.

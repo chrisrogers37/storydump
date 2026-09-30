@@ -480,19 +480,21 @@ class TestWhatTheCommentRuleChangedInTheStream:
     """#1406 changed what the prefix gate compares, and this pins the change.
 
     Normalization now drops every comment outside a literal and keeps every
-    literal whole. Against the rule it replaced, 44 of the stream's 448
+    literal whole. Against the rule it replaced, 45 of the stream's 464
     statements normalize differently, and in two directions:
 
     - 31 STOP comparing a comment that sits outside every literal — after a
       column, in a trigger or function header — which the old rule kept.
-    - 18 START comparing the `--` lines inside a function body, which the old
+    - 19 START comparing the `--` lines inside a function body, which the old
       rule dropped although PostgreSQL stores them in `pg_proc.prosrc`. The
-      last five are `085`'s two (#1421), whose audit trigger replacements
+      last six are `085`'s two (#1421), whose audit trigger replacements
       carry a `-- 085:` line, `086`'s reaper (#1429), whose new leg
       carries a `-- 086:` block, `087`'s reaper (#1235), which adds a
-      `-- 087:` block for its cancel leg and carries 086's, and `088`'s
+      `-- 087:` block for its cancel leg and carries 086's, `088`'s
       `trg_intent_planned_person` (#1413), whose body says why it may
-      assume the approval: its trigger's WHEN admits nothing else.
+      assume the approval (its trigger's WHEN admits nothing else), and
+      `089`'s reaper (#1413), which carries both blocks and adds a
+      `-- 089:` block for its cadence-only slot expiry.
 
     Five statements are in both: the five definitions of `fn_clock_tick`.
     Nothing else changed.

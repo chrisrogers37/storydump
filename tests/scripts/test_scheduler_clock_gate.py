@@ -59,6 +59,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 TICK_MAX, REFRESH_CADENCE_S = 500, 7 * 24 * 3600
 REAPER_LIM, APPROVAL_TTL_S, APPROVED_TTL_S = 500, 24 * 3600, 24 * 3600
 
+
 @contextlib.contextmanager
 def _indexes_dropped(clock_db, *names):
     """Drop *names* for a proof, and restore each from its own catalog

@@ -531,7 +531,7 @@ class TestDroppingAnIndexIsInert:
 
 
 class TestRenamingAnIndexIsInert:
-    """087 (#1413) is the first migration to rename an index: the slot key's
+    """089 (#1413) is the first migration to rename an index: the slot key's
     contract gives the cadence-only key the dropped key's name. An index is
     none of the four facts, so ALTER INDEX is allowlisted beside CREATE and
     DROP INDEX, and this is the control that proves the entry is reachable."""
