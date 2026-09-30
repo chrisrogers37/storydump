@@ -7,15 +7,15 @@ on. ``TargetBase`` carries the models for the schema the F.2 migration files
 create into the ``public`` that 051 leaves behind — for schema parity, not for
 an ORM: the target tier's SQL is written by hand under the unit of work.
 
-**Why two bases rather than one base plus a list of target tables.** The lane
-parity check compares ``create_all`` output against the replayed schema, and it
-needs to know which tables belong to which lineage. A single base forces that
-question to be answered by a declared target-table list — a second enumeration,
-maintained by hand, correct on the day it is written and silently wrong at some
-later point nobody can predict. ``create_all`` on a base whose only members
-*are* the target models derives the same answer from the models themselves:
-there is no list, so there is nothing to drift. The check that requires no
-invented input beats the check that requires a correct one.
+**Why a base of its own rather than a list of target tables.** The lane parity
+check compares ``create_all`` output against the replayed ``public`` schema, so
+it needs to know which tables the models describe. A declared table list would
+answer that with a second enumeration, maintained by hand, correct on the day
+it is written and silently wrong at some later point nobody can predict.
+``create_all`` on a base whose only members *are* the target models derives the
+same answer from the models themselves: there is no list, so there is nothing
+to drift. The check that requires no invented input beats the check that
+requires a correct one.
 
 **Lane parity is LOAD-BEARING from F.2.2 on.** It was vacuous while both sides
 were empty and said so; migration 053 landed 02 §1's seven tables and this
@@ -33,9 +33,6 @@ the "red and known" cost #806 Fork 1 declined when it declined option D.
 is imported here rather than only where it is used. Nothing below is
 decoration: drop an import and its table silently leaves ``create_all``'s
 output, which reads as a parity failure against the migration that installed it.
-
-At M.3 the application is flipped over to this base — a visible switch, not a
-rewrite.
 """
 
 from src.models.target.accounts_sources_media import (

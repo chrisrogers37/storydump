@@ -28,12 +28,13 @@ cd ~/Projects
 git clone https://github.com/chrisrogers37/storydump.git
 cd storydump
 
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Create the virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install dependencies, the package and the `storydump` CLI (the `cli` extra;
-# `make install` does the same, and the Makefile's targets assume ./venv/)
+# `make install` does the same with the `pip` on your PATH; the Makefile's
+# test targets look for `.venv/` first, then `venv/`)
 pip install -r requirements.txt
 pip install -e '.[cli]'
 make install-dev          # + ruff, bandit, pip-audit — what CI's lint and security jobs run; the aliases below need ruff
@@ -93,13 +94,13 @@ Add these to `~/.zshrc` (or `~/.bashrc`) on your Mac:
 
 ```bash
 # Storydump shortcuts
-alias sl='cd ~/Projects/storydump && source venv/bin/activate'
+alias sl='cd ~/Projects/storydump && source .venv/bin/activate'
 
 # Quick checks
-alias sl-test='cd ~/Projects/storydump && source venv/bin/activate && pytest'
-alias sl-lint='cd ~/Projects/storydump && source venv/bin/activate && ruff check .'
-alias sl-format='cd ~/Projects/storydump && source venv/bin/activate && ruff format .'
-alias sl-precommit='cd ~/Projects/storydump && source venv/bin/activate && ruff check . && ruff format --check . && pytest'
+alias sl-test='cd ~/Projects/storydump && source .venv/bin/activate && pytest'
+alias sl-lint='cd ~/Projects/storydump && source .venv/bin/activate && ruff check .'
+alias sl-format='cd ~/Projects/storydump && source .venv/bin/activate && ruff format .'
+alias sl-precommit='cd ~/Projects/storydump && source .venv/bin/activate && ruff check . && ruff format --check . && pytest'
 
 # Database shortcuts (local PostgreSQL)
 alias sl-db-reset='cd ~/Projects/storydump && make reset-db'
@@ -179,8 +180,9 @@ railway redeploy --service storydump --yes
 Never `railway up`: it uploads and deploys the laptop's working tree —
 uncommitted edits included — bypassing `main`, the PR flow and CI. And
 `redeploy` re-runs whatever Railway holds as the latest deployment, which after
-a `railway down` can be an old build (`../operations/legacy-window-close.md`,
-step 8): when in doubt, push to `main` and confirm the commit with
+a `railway down` can be an old build
+([`worker-recovery.md`](../operations/worker-recovery.md#after-a-railway-down-never-railway-redeploy)):
+when in doubt, push to `main` and confirm the commit with
 `storydump deploys`.
 
 ---
@@ -263,7 +265,7 @@ sl-restart          - restart worker service
 - [ ] **Mac: Install dependencies**
   ```bash
   cd ~/Projects/storydump
-  python3 -m venv venv && source venv/bin/activate
+  python3 -m venv .venv && source .venv/bin/activate
   pip install -r requirements.txt && pip install -e '.[cli]' && make install-dev
   ```
 

@@ -11,7 +11,7 @@ below so a reader can tell a decision from a drift.
 ## Where the target intentionally diverges from the proven flow
 
 1. **State lives in `oauth_states`, not in a signed self-describing token.** The
-   legacy `_create_state_token` mints a token the callback re-parses. The target
+   legacy `_create_state_token` minted a token the callback re-parsed. The target
    stores a row and consumes it with a one-shot CAS, because replay protection
    has to be a fact about storage: a stateless token cannot be single-use.
 
@@ -24,16 +24,16 @@ below so a reader can tell a decision from a drift.
    `src/utils/encryption.py` under `ENCRYPTION_KEYS`, so this reuses it — the
    plan's own note is that renaming the env var would be churn for zero gain.
 
-4. **Refresh drops the host branch, and this is the interesting one.**
-   `token_refresh.py` carries a hard-won lesson: `graph.instagram.com` accepts
-   `grant_type=ig_refresh_token` + the token alone, while the FB host needs
-   `fb_exchange_token` plus client id/secret — and sending IG-flavoured params
-   to the FB host produced Meta error 101, "Missing client_id parameter". The
-   target keeps the lesson and drops the branch, because under FC-7 no
-   FB-vintage credential can exist here: `ck_credentials_provider` ships with
-   **no** `fb_login_legacy` value, so the FB host is unreachable by
-   construction rather than by convention. The branch is not forgotten; it is
-   structurally impossible.
+4. **Refresh drops the host branch, and this is the interesting one.** The
+   legacy `token_refresh.py` (deleted in #1316) carried a hard-won lesson:
+   `graph.instagram.com` accepts `grant_type=ig_refresh_token` + the token
+   alone, while the FB host needs `fb_exchange_token` plus client id/secret —
+   and sending IG-flavoured params to the FB host produced Meta error 101,
+   "Missing client_id parameter". The target keeps the lesson and drops the
+   branch, because under FC-7 no FB-vintage credential can exist here:
+   `ck_credentials_provider` ships with **no** `fb_login_legacy` value, so the
+   FB host is unreachable by construction rather than by convention. The
+   branch is not forgotten; it is structurally impossible.
 
 5. **Reconnect is "last issued wins", enforced in the ISSUE transaction.**
    `07` §2 records that the pass-2 "last consumed wins" claim was false —
@@ -62,7 +62,6 @@ from typing import Optional
 import httpx
 from sqlalchemy import text
 
-from src.config.constants import IG_LOGIN_API_BASE, IG_LOGIN_GRAPH_BASE
 from src.exceptions.base import RefusalError, StorydumpError
 from src.services.target import egress, vocabulary
 from src.services.target.oauth_states import OAuthStateRefused, ring
@@ -78,12 +77,18 @@ FIRST_REFRESH_INTERVAL = "7 days"
 #: background turns on the app's *use case*, not on this list.
 REQUIRED_SCOPES = ("instagram_business_basic", "instagram_business_content_publish")
 
-AUTHORIZE_URL = f"{IG_LOGIN_API_BASE}/oauth/authorize"
-TOKEN_URL = f"{IG_LOGIN_API_BASE}/oauth/access_token"
-LONG_LIVED_URL = f"{IG_LOGIN_GRAPH_BASE}/access_token"
-REFRESH_URL = f"{IG_LOGIN_GRAPH_BASE}/refresh_access_token"
+#: The Instagram Login hosts: unversioned, and separate from the Meta Graph
+#: API. `GRAPH_BASE` is also the host an Instagram-Login token publishes on,
+#: so `instagram_graph` reads it from here — one spelling of the host.
+API_BASE = "https://api.instagram.com"
+GRAPH_BASE = "https://graph.instagram.com"
+
+AUTHORIZE_URL = f"{API_BASE}/oauth/authorize"
+TOKEN_URL = f"{API_BASE}/oauth/access_token"
+LONG_LIVED_URL = f"{GRAPH_BASE}/access_token"
+REFRESH_URL = f"{GRAPH_BASE}/refresh_access_token"
 #: Who the long-lived token belongs to — the real Meta id and the handle.
-PROFILE_URL = f"{IG_LOGIN_GRAPH_BASE}/me"
+PROFILE_URL = f"{GRAPH_BASE}/me"
 
 PROVIDER = vocabulary.PROVIDER_IG_LOGIN
 

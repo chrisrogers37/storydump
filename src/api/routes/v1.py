@@ -709,10 +709,8 @@ async def get_category_mix(
     """The workspace's posting mix, keyed on the CONNECTED FOLDER (owner
     ruling 2026-09-08): every connected folder with its label, media count,
     current ratio (null = automatic, 0 = Off) and the share of posts it gets —
-    what the Settings card renders. The v1 keys (`mix` by name, `categories`)
-    ride along for one release so the card deployed before this phase keeps
-    working while the API and the web deploy apart. Member floor: it explains
-    what will post."""
+    what the Settings card renders, under `rows` (`_mix_response`). Member
+    floor: it explains what will post."""
     async with principal_mod.member_session(request, str(ws), principal) as session:
         rows = await category_mix.mix_view(session, workspace_id=str(ws))
     return _mix_response(rows)

@@ -89,7 +89,7 @@ export DATABASE_URL="postgresql://owner:PASSWORD@ep-xxx.region.neon.tech/storydu
 # Step 0 (the seven svc_* roles, then the DDL door migration 050 calls), the
 # by-hand base, and the one table production made by hand — migration 078
 # snapshots it by name, so a database built from the tree must hold it.
-# This is `make init-db`'s own sequence (Makefile:105-113).
+# This is `make init-db`'s own sequence (the Makefile's `init-db` target).
 psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 \
   -f scripts/window/step0_bootstrap.sql -f scripts/window/step0_legacy_ddl_door.sql \
   -f scripts/setup_database.sql -f tests/scripts/fixtures/legacy_by_hand.sql
@@ -101,8 +101,9 @@ python -m scripts.migration_runner apply
 `apply` ends by listing `owed (manual) 079 …` and `owed (manual) 080 …`. Those
 two files drop the `legacy` schema and stand the migration window down; they
 are gated (`-- runner:manual`), so a deploy owes them and does not apply them.
-The operator's sequence for them is
-[`legacy-window-close.md`](../operations/legacy-window-close.md).
+Production applied both in the owner's window of 2026-09-19 (its record:
+[`legacy-window-close.md`](../archive/2026-09-16-legacy-tear-out/legacy-window-close.md));
+what a fresh database does about them is the legacy lineage's retirement (#1468).
 
 An existing database needs none of the four files: every deploy of either
 service applies what is pending.

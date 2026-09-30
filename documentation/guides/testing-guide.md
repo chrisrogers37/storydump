@@ -5,10 +5,15 @@ patterns the tests follow. What is covered and how coverage is measured is
 [`TEST_COVERAGE.md`](TEST_COVERAGE.md) (3,709 tests in 158 files on
 2026-09-20; that page has the command that re-counts them).
 
-The suite tests the target tier only. The legacy tier's tests — the
-repositories, the polling bot's handlers, the old CLI, `tests/integration/` —
-were deleted with it in the tear-out (#1216, September 2026), and the fixtures
-they used (`test_db`, a schema built from the ORM models) went with them.
+The suite tests the target tier. The legacy tier's tests — the repositories,
+the polling bot's handlers, the old CLI, `tests/integration/` — were deleted
+with it in the tear-out (#1216, September 2026), and the fixtures they used
+(`test_db`, a schema built from the ORM models) went with them. The legacy
+lineage's files (migrations 001–050) are still replayed, because a fresh
+database is still built from them (`make init-db`): the lineage lane and the
+database gates build their schema the same way. Three suites that pin the
+lineage's own behaviour, rather than a fresh database's, remain; #1460 tracks
+deleting them.
 
 ## Quick Start
 
@@ -28,7 +33,8 @@ pytest --no-cov
 pytest --lf
 ```
 
-The `make` targets wrap the same commands and assume the virtualenv is `./venv/`:
+The `make` targets wrap the same commands with the virtualenv's `pytest`: `.venv/`,
+or `venv/` when `.venv/` holds no `pytest` (`make VENV=<dir>` overrides both):
 
 | Target | Runs |
 |---|---|

@@ -26,7 +26,7 @@ in that history or the production branch **restored in place** to one.
 
 | Concern | The plan's number (`05` §DR) | Measured |
 |---|---|---|
-| History retention (the PITR window) | ≥ 7 days, "verified at 0.2's gate" | **24 hours** — the project's `history_retention_seconds` is 86400 (read 2026-09-18; the tear-out's `RUN_LOG.md`, and `legacy-window-close.md`). Raising it in Neon or amending the plan is the owner's open decision |
+| History retention (the PITR window) | ≥ 7 days, "verified at 0.2's gate" | **24 hours** — the project's `history_retention_seconds` is 86400 (read 2026-09-18; the tear-out's `RUN_LOG.md`, and its [`legacy-window-close.md`](../archive/2026-09-16-legacy-tear-out/legacy-window-close.md)). Raising it in Neon or amending the plan is the owner's open decision |
 | RPO | Neon's continuous WAL, "~minutes", no additional mechanism | not measured here |
 | RTO target | 1 h — restore, repoint, smoke suite | not measured here |
 | Restore drill | quarterly: PITR branch → runner parity → smoke suite | none of that shape is recorded in the tree (`04`: M.2, which was to be the first, was not run). What is recorded on branches of production: the 078 rehearsal at production's head (2026-09-18) and the 079/080 rehearsal on a fresh PITR branch (2026-09-19), both in the tear-out's `RUN_LOG.md`; the window itself ran behind a marker branch (`pre-3g-20260919-2134`), which is the plan's drill shape without the smoke suite |
@@ -34,23 +34,80 @@ in that history or the production branch **restored in place** to one.
 
 So: a restore to an **arbitrary** moment reaches back 24 hours and no further. A **marker branch**
 is the way past that bound — by Neon's documented branch model a child branch pins its parent's
-branch point and is a durable copy (documented, not measured here; `legacy-window-close.md` says
-the same and asks for it to be measured once).
+branch point and is a durable copy (documented, not measured here — measure it once by restoring
+from a rehearsal branch older than a day).
 
 ### Before a risky change: take a marker
 
-The commands are the ones `legacy-window-close.md` prints, against the same project
-(`npx --yes neonctl@latest me` must show the account that owns it):
+Against the production project (`npx --yes neonctl@latest me` must show the account that owns it).
+`branches create` prints the new branch's connection string — the same role password as
+production's — so its output goes through the redaction, always:
 
 ```bash
 P=ancient-grass-50759240; O=org-ancient-bush-46337162; PROD=br-square-frog-ai37r0qg
 MARKER=pre-change-$(date -u +%Y%m%d-%H%M)
-npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name $MARKER
+npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name $MARKER \
+  2>&1 | sed -E 's#postgres(ql)?://[^ ]+#postgres://<redacted>#g'
 ```
 
 Retire it once the change is verified: `npx --yes neonctl@latest branches delete "${MARKER:?}" --project-id $P --org-id $O`.
 Never pass an empty branch name to `neonctl connection-string` — it resolves to the project's
-default branch, which is production (`legacy-window-close.md`, the rehearsal's guard).
+default branch, which is production ([the rehearsal's guard](#rehearsing-a-change-on-a-branch)).
+
+### Rehearsing a change on a branch
+
+A change that is hard to take back — a migration that drops or moves data, a gated file — runs
+first on a branch taken at production's head, with wall-clock recorded. A branch is a copy, so
+nothing here touches production — with ONE way to get that wrong, closed below: `neonctl
+connection-string` with an EMPTY branch name resolves to production. So the branch name is
+demanded (`${NAME:?}`) wherever it is used, and the host guard fails closed. The guard's first arm
+is production's compute endpoint, which the script demands as well (`PROD_EP`): read it off the
+`production` branch in the Neon console when you run, never from a page, because a stale arm lets
+production's endpoint through as a branch's. `P`, `O` and `PROD` are the marker block's three ids.
+
+Save the block as `rehearse.sh`, write steps 4 and 5 for the change at hand, and run it with all
+four ids in its environment — `P=… O=… PROD=… PROD_EP=… bash -eu rehearse.sh` — top to bottom: an
+id left unset ends the script before any call, under `-e` a failed substitution ends it too, and
+the connection string never enters an interactive shell.
+
+```bash
+: "${P:?the project id}" "${O:?the organization id}" "${PROD:?the production branch id}"
+: "${PROD_EP:?the endpoint id of the production branch, from the Neon console}"
+NAME=claude/rehearsal-$(date -u +%Y%m%d-%H%M)
+
+# 1. the branch, at production's head. neonctl PRINTS the new branch's connection string on create —
+#    the same role password as production's — so the output goes through the redaction, always
+npx --yes neonctl@latest branches create --project-id $P --org-id $O --parent $PROD --name "${NAME:?}" \
+  2>&1 | sed -E 's#postgres(ql)?://[^ ]+#postgres://<redacted>#g'
+
+# 2. the branch's OWNER connection string, into a variable — never echoed, never pasted.
+#    an unset name fails the substitution (`${NAME:?}`) — under `bash -eu` that ends the script;
+#    in a bare shell it leaves URL empty, which the guard below refuses.
+URL=$(npx --yes neonctl@latest connection-string "${NAME:?set NAME first — an empty name is production}" \
+      --project-id $P --org-id $O --role-name neondb_owner --database-name neondb)
+# the host guard, FAIL-CLOSED: anything but a Neon branch endpoint unsets URL and ends the script
+case "$(printf %s "$URL" | sed -E 's#^[^@]*@##; s#[:/?].*##')" in
+  "$PROD_EP"*|"") echo "REFUSED: production's endpoint, or none"; unset URL; exit 1 ;;
+  ep-*.neon.tech) echo "branch endpoint ok" ;;
+  *) echo "REFUSED: not a Neon endpoint"; unset URL; exit 1 ;;
+esac
+
+# 3. the branch's ledger, before
+DATABASE_URL="$URL" python -m scripts.migration_runner status | tail -4
+
+# 4. the change, timed (`time …`), exactly as production will run it — against "$URL" and nothing else
+
+# 5. its checks, run as printed, answers compared with what production must show — and a positive
+#    control where the change closes a door: what must still work, run once, still works
+
+# 6. retire the branch
+npx --yes neonctl@latest branches delete "${NAME:?}" --project-id $P --org-id $O
+```
+
+Record the wall-clocks and the checks' answers in the PR. Any red: retire the branch, fix forward in
+the tree, rehearse again on a fresh branch. Never re-run in place. The shape was first run for the
+owner's window of 2026-09-19 (079 and 080; the record is
+[`legacy-window-close.md`](../archive/2026-09-16-legacy-tear-out/legacy-window-close.md)).
 
 ### Restoring production in place
 
@@ -89,7 +146,7 @@ owner's act; an agent does not run it.
    of these is the owner's decision, not an agent's.
 6. **Restart the worker** — NOT with `railway redeploy` after a `down`: on 2026-09-19 it re-ran an
    OLD deployment (a commit of 2026-09-03) and the worker came back on stale code
-   (`legacy-window-close.md`, step 8). Push an empty commit to `main`, which deploys both services
+   ([`worker-recovery.md`](worker-recovery.md#after-a-railway-down-never-railway-redeploy)). Push an empty commit to `main`, which deploys both services
    through the normal path and runs the predeploy (which applies whatever the restore owes):
    `git commit --allow-empty -m "redeploy: the worker after the restore" && git push origin main`,
    then `storydump deploys --watch --timeout 900` (the API lands after CI) and `storydump health`;
@@ -104,8 +161,8 @@ read `TARGET_DATABASE_URL` (`railway.toml`; `src/services/target/vocabulary.py:3
 
 ### Reading a branch without touching production
 
-A branch is a copy; reading one is how a restore point is checked before it is used. Use the
-rehearsal block of `legacy-window-close.md` as the template — the demanded branch name and the
+A branch is a copy; reading one is how a restore point is checked before it is used. Use
+[the rehearsal](#rehearsing-a-change-on-a-branch) as the template — the demanded branch name and the
 host guard that refuses production's endpoint are the parts not to drop — then
 `python -m scripts.migration_runner status` and `parity --against <dsn>` answer whether the branch
 is the schema the tree expects.
@@ -179,7 +236,7 @@ row count to its source in the same transaction.
 
 - **Rows only.** `CREATE TABLE … AS` copies rows — not indexes, constraints, defaults or sequence
   values. The `legacy` schema itself, with its 77 indexes, was dropped by 079 in the owner's window
-  on 2026-09-19 (`legacy-window-close.md`); what that drop took and no snapshot holds is exactly
+  on 2026-09-19 ([`legacy-window-close.md`](../archive/2026-09-16-legacy-tear-out/legacy-window-close.md)); what that drop took and no snapshot holds is exactly
   that list.
 - **For reading, not for running.** The code that read those tables was deleted in the tear-out's
   phase 01. A snapshot answers a question about the past; nothing can be restored *into service*
@@ -205,7 +262,7 @@ SELECT count(*) FROM archive.posting_history_pre_cutover_20260917;
 SQL
 ```
 
-Never drop `archive` or a snapshot by hand (`legacy-window-close.md`, *What NOT to do*).
+Never drop `archive` or a snapshot by hand ([`legacy-window-close.md`](../archive/2026-09-16-legacy-tear-out/legacy-window-close.md), *What NOT to do*).
 
 ---
 

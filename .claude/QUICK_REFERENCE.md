@@ -8,7 +8,8 @@
 - `storydump cancel <story>` / `storydump resolve <story> cancel`
 - `storydump tokens revoke <id>`
 - `storydump webhook register` / `storydump webhook deregister` (the production bot's webhook)
-- `python -m src.main`
+- `python -m src.main` (starts the posting worker: the clock, the job lanes and the sweepers — it posts to Instagram)
+- `python -m src.worker` (starts the posting worker: the clock, the job lanes and the sweepers — it posts to Instagram)
 - `python -m scripts.migration_runner apply --manual <version>` (applies a `-- runner:manual` file by name — 079 and 080, the legacy drop and the stand-down, were applied by the owner on 2026-09-19; any future manual file is the owner's the same way)
 
 The canonical list, with what each command does, is the safety block in

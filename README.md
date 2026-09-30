@@ -43,9 +43,9 @@ production.
 git clone <your-repo-url>
 cd storydump
 
-# Create virtual environment (the Makefile's targets assume ./venv/)
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Create the virtual environment (.venv/, where the Makefile's test targets look first)
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt

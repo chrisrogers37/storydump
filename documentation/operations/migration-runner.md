@@ -30,7 +30,8 @@ replay still stamps it and the runner never reads it
 (`scripts/migration_runner.py:758`). In production that table rode into
 `legacy` with the rest at the 051 move, is snapshotted as
 `archive.schema_version_pre_cutover_20260917` (078), and was dropped with
-`legacy` by 079 in the owner's window on 2026-09-19 (`legacy-window-close.md`).
+`legacy` by 079 in the owner's window on 2026-09-19
+([`legacy-window-close.md`](../archive/2026-09-16-legacy-tear-out/legacy-window-close.md)).
 
 Checksums are SHA256 of the file bytes. An applied file that no longer
 matches its recorded checksum is a hard failure everywhere: fix forward with
@@ -63,7 +64,11 @@ with the new checksum).
   lock, the integrity check, one transaction with its postconditions and its
   ledger row. `--manual` refuses a version without the directive, a version
   not in the tree, and a version already recorded (a gated file runs once).
-  The operator's sequence is `documentation/operations/legacy-window-close.md`.
+  The operator's sequence for 079 and 080 is recorded in
+  `documentation/archive/2026-09-16-legacy-tear-out/legacy-window-close.md`; a later gated
+  file is rehearsed on a branch first (`backup-restore.md`, *Rehearsing a change on a
+  branch*) and applied from a checkout at the deployed commit (`worker-recovery.md`,
+  *The checkout and the link*).
   `storydump doctor` reads the directive as well: a gated file the ledger lacks is
   reported as owed to the owner's window, not as a deployment behind the repository.
 - A NEAR MISS — a comment opener followed straight by `runner` and a known word

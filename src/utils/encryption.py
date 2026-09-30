@@ -1,8 +1,8 @@
 """Token encryption utility for secure database storage.
 
-Supports key rotation via MultiFernet. Set ENCRYPTION_KEYS (comma-separated,
-newest first) to enable rotation. Falls back to single ENCRYPTION_KEY for
-backward compatibility.
+The key ring comes from ENCRYPTION_KEY, a single Fernet key, or from
+ENCRYPTION_KEYS (comma-separated, newest first), which takes precedence and
+is how a key is rotated (MultiFernet).
 """
 
 import binascii
@@ -22,8 +22,8 @@ class TokenEncryption:
     (first) key; decrypts by trying all keys in order.
 
     Key configuration (checked in order):
-        1. ENCRYPTION_KEYS — comma-separated Fernet keys, newest first
-        2. ENCRYPTION_KEY  — single key (backward compat, wrapped as MultiFernet)
+        1. ENCRYPTION_KEYS — comma-separated Fernet keys, newest first (rotation)
+        2. ENCRYPTION_KEY  — a single key, wrapped as MultiFernet
 
     Rotation workflow:
         1. Generate new key: TokenEncryption.generate_key()

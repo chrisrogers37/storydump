@@ -26,7 +26,8 @@ does not have. Nothing else here is shared, and nothing else needs guarding.
 ### NEVER run these
 
 ```bash
-python -m src.main                   # Starts the posting scheduler + Telegram bot
+python -m src.main                   # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
+python -m src.worker                 # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
 python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 079 dropped the legacy schema in the owner's window (2026-09-19); a fresh database still owes both
 storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
 storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload

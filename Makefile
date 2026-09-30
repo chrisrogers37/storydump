@@ -151,7 +151,7 @@ run: ## Run the worker (python -m src.main) — it posts to Instagram; see the s
 	@echo "$(GREEN)Starting the worker...$(NC)"
 	python -m src.main
 
-dev: ## Run the worker against .env (no gate on production's health)
+dev: ## Run the worker (python -m src.main) once .env exists — it posts to Instagram; see the safety rules
 	@echo "$(GREEN)Starting the worker in development mode...$(NC)"
 	@if [ ! -f .env ]; then \
 		echo "$(RED)✗ .env file not found. Copy .env.example to .env and configure it.$(NC)"; \

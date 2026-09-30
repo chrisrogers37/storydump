@@ -15,8 +15,11 @@ so **merged is applied**. The ledger is `runner.schema_migrations`.
 
 - Name the file `scripts/migrations/NNN_description.sql` with the next number.
   No `BEGIN`/`COMMIT`: the runner wraps the file and its ledger row in one
-  transaction. Files 001–050 are the legacy lineage, kept because the lineage
-  lane replays them; do not edit them or add below 051.
+  transaction. Files 001–050 are the legacy lineage; do not edit them or add
+  below 051. They stay because production's ledger records them, and a recorded
+  version with no file in the tree makes every runner door refuse
+  (`ledger_discrepancies`, `scripts/migration_runner.py`); a fresh database is
+  also still built by replaying them.
 - **An applied file is immutable** — the ledger stores its SHA-256 and a changed
   file fails every later apply. Fix forward with a new number (063 replacing
   062's `fn_clock_tick` is the precedent).

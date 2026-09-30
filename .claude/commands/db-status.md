@@ -54,10 +54,11 @@ grep -l "^-- runner:manual" scripts/migrations/*.sql
 ```
 
 A file the second command lists carries `-- runner:manual`: the deploy owes it
-and does not apply it; the owner applies it in a window. Both such files today,
-079 and 080, are `applied` — the window ran on 2026-09-19
-(`documentation/operations/legacy-window-close.md`) — so the ledger's highest
-version should read 080. A manual file that lands later and is absent from the
+and does not apply it; the owner applies it in a window. 079 and 080 are such
+files, and both are `applied` — the window ran on 2026-09-19
+(`documentation/archive/2026-09-16-legacy-tear-out/legacy-window-close.md`) — so
+the ledger's highest version should be the tree's highest file (the first
+command). A manual file that lands later and is absent from the
 ledger is expected, not drift: `storydump doctor` reads the same directive
 (`storydump_cli/commands/env.py`, `_gated_in`), keeps its ledger line `ok` and
 names it as "owed to the owner's window". Any OTHER file in the tree

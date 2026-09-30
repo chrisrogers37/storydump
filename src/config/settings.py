@@ -226,8 +226,8 @@ class Settings(BaseSettings):
     # and `oauth_credentials`.
     # Meta's signed callbacks verify against INSTAGRAM_APP_SECRET, then this.
     FACEBOOK_APP_SECRET: Optional[str] = None
-    INSTAGRAM_APP_ID: Optional[str] = None  # Instagram Login OAuth (preferred)
-    INSTAGRAM_APP_SECRET: Optional[str] = None  # Instagram Login OAuth (preferred)
+    INSTAGRAM_APP_ID: Optional[str] = None  # Instagram Login OAuth
+    INSTAGRAM_APP_SECRET: Optional[str] = None  # Instagram Login OAuth
     OAUTH_REDIRECT_BASE_URL: Optional[str] = None  # e.g., "https://api.storydump.app"
 
     # The web front end (#1028). The target API hosts sign-in and the session

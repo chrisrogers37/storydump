@@ -146,7 +146,8 @@ of `/health/scheduling` is what reads them, and `storydump health` is how to see
 own in its boot line. And `storydump doctor`'s ledger check reports a gated file (`runner:manual`)
 as "owed to the owner's window" on its `ok` line rather than as missing
 (`storydump_cli/commands/env.py`, `_gated_in`; `migration-runner.md`) — none is owed today: 079
-and 080 were applied in the owner's window on 2026-09-19 (`legacy-window-close.md`). Only an
+and 080 were applied in the owner's window on 2026-09-19
+([`legacy-window-close.md`](../archive/2026-09-16-legacy-tear-out/legacy-window-close.md)). Only an
 ORDINARY file the ledger lacks is "not applied".
 
 In the logs:
@@ -203,7 +204,9 @@ storydump deploys --watch --timeout 900
 
 `railway redeploy` acts on the **linked** environment and takes no `--environment`; another
 session's `railway login` silently drops the link, so check it first
-(`legacy-window-close.md`, step 0).
+([*The checkout and the link*](#the-checkout-and-the-link), below). If the worker's latest row
+reads `REMOVED` — a `railway down` — do not redeploy it this way: a redeploy after a `down` can
+bring back an old build ([*After a `railway down`*](#after-a-railway-down-never-railway-redeploy)).
 
 ### 3. Confirm a fresh boot
 
@@ -238,6 +241,46 @@ lease waiting for the reaper (above), not a second fault.
   missing.
 - **It does not apply a gated migration.** The predeploy runs `migration_runner apply`, which owes
   a `runner:manual` file and applies nothing of it (`migration-runner.md`).
+
+## Production acts from a checkout
+
+Two rules hold for any production act run from a laptop: a `railway run` against production, a
+`railway down`, a redeploy. Both were learned in the owner's window of 2026-09-19; its record is
+[`legacy-window-close.md`](../archive/2026-09-16-legacy-tear-out/legacy-window-close.md) (steps 0
+and 8).
+
+### The checkout and the link
+
+`railway run` executes the LOCAL checkout with the service's environment: the code that runs is
+the text on disk, not the deployed commit. A migration applied that way records the checksum of
+the file on disk, so a checkout that is not the deployed commit fails every later deploy's
+integrity check on both services. And `railway redeploy` acts on the LINKED environment (it takes
+no `--environment`); another session's `railway login` silently drops the link. Check both before
+the act, and the link again before any redeploy:
+
+```bash
+git status --porcelain                  # empty
+git rev-parse --short HEAD              # the commit `storydump deploys` shows for both services
+shasum -a 256 scripts/migrations/<the file>.sql   # when the act applies a migration: paste into the PR
+railway whoami && railway status        # the storydump project, environment production
+railway environment production          # re-link if it is not
+```
+
+### After a `railway down`, never `railway redeploy`
+
+`railway redeploy` re-runs whatever Railway holds as the service's latest deployment, and after a
+`railway down` that need not be the deployed commit: in the window of 2026-09-19 it re-ran an OLD
+deployment, a commit of 2026-09-03, and the worker came back on stale code. The way back is a push
+to `main` — an empty commit — which deploys both services through the normal path and runs the
+predeploy. The alternative is the dashboard's Redeploy on the worker's last `SUCCESS` deployment
+*at the deployed commit*, chosen by hand. Either way, read the commit `storydump deploys` shows for
+the worker: it must be `main`'s head.
+
+```bash
+git commit --allow-empty -m "redeploy: the worker after a down" && git push origin main
+storydump deploys --watch --timeout 900     # both services SUCCESS at main's head (the API after CI)
+storydump health                            # every surface ok; the worker's last success age falls
+```
 
 ## Related
 

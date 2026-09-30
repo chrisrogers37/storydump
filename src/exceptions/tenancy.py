@@ -17,11 +17,7 @@ class TenantResolutionError(RefusalError):
     ``reason`` is the closed vocabulary in :data:`REASONS`, so callers route
     without parsing prose: unknown_binding | revoked_binding | invalid_session |
     expired_session | revoked_session | disabled_user | not_a_member |
-    insufficient_role | unknown_channel | unprovisioned_channel (legacy-era:
-    the deployment's global notification channel has no settings row — an
-    operator condition, deliberately distinct from unknown_binding so no edge
-    tells an operator to run /start — no raiser in src as of 2026-09-20
-    (#1325 audit, TD-C9)) | invalid_token | expired_token |
+    insufficient_role | unknown_channel | invalid_token | expired_token |
     revoked_token (a bearer API token that did not resolve — the token
     resolver's three answers, mapped like their session twins: 401, and the
     response never says which).
@@ -46,7 +42,6 @@ class TenantResolutionError(RefusalError):
         "not_a_member",
         "insufficient_role",
         "unknown_channel",
-        "unprovisioned_channel",
     ) + tuple(r for r in vocabulary.TOKEN_RESOLUTION_REASONS if r != "disabled_user")
 
     def __init__(self, reason: str, detail: str = ""):

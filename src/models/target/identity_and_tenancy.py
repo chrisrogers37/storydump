@@ -25,9 +25,9 @@ owns `updated_at` on every write path, including the ones that never go through
 the ORM, and a Python-side duplicate would be a second answer to a question
 that has one.
 
-**Names are unprefixed on purpose.** At the M.3 cutover the application is
-flipped to this base, and a `Target` prefix would make that a rename of every
-call site rather than a change of import. (The legacy `User` in
+**Names are unprefixed on purpose.** These are the application's models, named
+for what they are (`User`, `Workspace`); a `Target` prefix would name the tier
+at every call site, and there is only one tier. (The legacy `User` in
 ``src.models.user`` coexisted with this one on a separate ``MetaData`` until
 the tear-out deleted it, phase 01; #1216.)
 """
