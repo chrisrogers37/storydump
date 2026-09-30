@@ -9,7 +9,9 @@
 # venv's python.
 #
 # Phase 5 has no DDL, so every mutation here is Python: the executors, the vocabulary's F7 split,
-# the Queue read, the name rule, the API's refusal body and token gate, and the CLI. A lock set's
+# the Queue read, the name rule, the API's refusal body and token gate, the CLI, the prompt sweeps'
+# re-check of a planned story's time, and a card's settlement read. A rule that is a statement's
+# shape (a predicate, a bound parameter) is judged by the executors' unit tests, which assert it. A lock set's
 # mutation is judged by a test that names its kinds, never by one parametrized over the mutated set
 # (that test's case would vanish with the mutant). The account read's own `workspace_id` predicate
 # is not mutated: the gates run as `svc_ingress`, whose policies hide another tenant's row anyway, so
@@ -68,10 +70,13 @@ WS=src/services/target/workspaces.py
 S=tests/scripts/test_schedule_verbs_gate.py
 CG=tests/scripts/test_cli_planning_gate.py
 CU=tests/storydump_cli/test_planning.py
+PE=tests/src/services/target/test_planning_executors.py
+OV=tests/scripts/test_ops_views_gate.py
+VT=tests/src/services/target/test_vocabulary.py
 # An interrupted check must not leave a mutant behind: every file a check mutates is restored from
 # the committed tree. Not under DRY=1, which mutates nothing: there the restore would only discard
 # uncommitted work.
-[ -n "${DRY:-}" ] || trap 'cd "$ROOT" && git checkout HEAD -- "$EX" "$VOC" "$WS" src/services/target/commands.py src/services/target/identity.py src/api/app.py src/api/principal.py src/api/routes/v1.py storydump_cli/commands/writes.py storydump_cli/commands/reads.py' EXIT INT TERM
+[ -n "${DRY:-}" ] || trap 'cd "$ROOT" && git checkout HEAD -- "$EX" "$VOC" "$WS" src/services/target/commands.py src/services/target/identity.py src/api/app.py src/api/principal.py src/api/routes/v1.py src/services/target/prompts.py src/services/target/intent_ledger.py storydump_cli/commands/writes.py storydump_cli/commands/reads.py storydump_cli/output.py storydump_cli/client.py' EXIT INT TERM
 
 # schedule_item: the account, the item, the lock and item rule (F7), the database's duplicate.
 check "a removed destination is found" $VOC 'LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required")' 'LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required", "disabled", "moved")' "$S -k 'only_a_live_account'"
@@ -86,9 +91,14 @@ check "an expired lock counts" $EX '"                AND (l.expires_at IS NULL O
 check "another account's recent post counts" $EX '"                AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct)"' '"                AND (l.ig_account_id IS NULL OR l.ig_account_id <> :acct OR l.ig_account_id = :acct)"' "$S -k 'expired_lock_do_not_count'"
 check "the override is not audited" $EX '        detail["override"] = warnings' '        pass' "$S -k 'warning_lock_holds'"
 check "the refusal says an override helps a blocker" $EX '"overridable": not blockers' '"overridable": True' "$S -k 'blocking_lock_blocks_even'"
-check "the duplicate is a 500" $EX '        if constraint_violated(exc, "uq_intent_live_subject"):' '        if constraint_violated(exc, "uq_intent_slot"):' "$S -k 'same_item_waiting'"
-check "the scheduler is not recorded" $EX "            \"         'planned', :by)\"" "            \"         'planned', NULL)\"" "$S -k 'born_planned_by_the_person'"
-check "a planned story is born cadence" $EX "            \"         'planned', :by)\"" "            \"         'cadence', :by)\"" "$S -k 'born_planned_by_the_person'"
+check "the duplicate is a 500" $EX '        f" ON CONFLICT (workspace_id, media_item_id, ig_account_id) WHERE {_LIVE_SUBJECT}"
+        " DO NOTHING RETURNING id, workspace_id",' '        " RETURNING id, workspace_id",' "$S -k 'same_item_waiting'"
+check "the duplicate names no story" $EX '            if existing
+            else {},' '            if False
+            else {},' "$S -k 'same_item_waiting or cadence_story_waiting'"
+check "the story in the way may be one that ended" $EX '            f"   AND ig_account_id = :acct AND {_LIVE_SUBJECT}",' '            "   AND ig_account_id = :acct",' "$PE -k 'duplicate_is_the_databases'"
+check "the scheduler is not recorded" $EX "        \"         'planned', :by)\"" "        \"         'planned', NULL)\"" "$S -k 'born_planned_by_the_person'"
+check "a planned story is born cadence" $EX "        \"         'planned', :by)\"" "        \"         'cadence', :by)\"" "$S -k 'born_planned_by_the_person'"
 check "no bound chat goes unsaid" $EX '        warnings=[] if bound else [vocabulary.NO_PUSH_BINDING],' '        warnings=[],' "$S -k 'no_bound_chat'"
 check "a member cannot schedule" src/services/target/commands.py '    "schedule_item": "member",' '    "schedule_item": "admin",' "$S -k 'member_schedules'"
 
@@ -98,30 +108,45 @@ check "an ambiguous time is its second occurrence" $EX '    "SELECT min(v.at) FI
 check "a skipped time does not say so" $EX '            facts={"at_rule": "skipped"},' '            facts={},' "$S -k 'skipped_wall_time'"
 check "the past is accepted" $EX '    if at <= found["now"]:' '    if False and at <= found["now"]:' "$S -k 'past_and_now'"
 check "the horizon is open" $EX '    if at > found["horizon"]:' '    if False and at > found["horizon"]:' "$S -k 'past_and_now'"
-check "an offset is dropped, not refused" $EX '_LOCAL_AT = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?")' '_LOCAL_AT = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?.*")' "$S -k 'offset_is_refused'"
+check "an offset is dropped, not refused" $EX '_LOCAL_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?")' '_LOCAL_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?.*")' "$S -k 'offset_is_refused'"
+check "another script's digits are the shape" $EX '_LOCAL_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?")' '_LOCAL_AT = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?")' "$PE -k 'anything_else_names_the_rule'"
 
-# reschedule_item: the guarded UPDATE decides; the move is audited. cancel: audited on every story.
+# reschedule_item: the row read under its lock decides; the move is audited. cancel: audited on every
+# story. The sweeps serve or miss a planned story only at the time they read.
 check "a served story moves" $EX '    if intent["origin"] != "planned" or intent["state"] != "scheduled":' '    if intent["origin"] != "planned":' "$S -k 'served_story_no_longer_moves'"
 check "a cadence story moves" $EX '    if intent["origin"] != "planned" or intent["state"] != "scheduled":' '    if intent["state"] != "scheduled":' "$S -k 'cadence_story_does_not_move'"
 check "a story being cancelled moves" $EX '    _refuse_if_cancelling(intent)
-    await session.execute(
-        text(
-            "UPDATE post_intents SET schedule_slot_at = :at"' '    await session.execute(
-        text(
-            "UPDATE post_intents SET schedule_slot_at = :at"' "$S -k 'being_cancelled'"
-check "a malformed story id is a 500" $EX '    _id_arg(command, "intent_id")  # a malformed id is the caller'"'"'s, not a 500' '    pass' "$S -k 'malformed_or_foreign_story_id'"
+    local_at = _local_at(command)' '    local_at = _local_at(command)' "$S -k 'being_cancelled'"
+check "the time is judged before the story" $EX '    intent = await _intent_row(session, command)
+    if intent["origin"] != "planned" or intent["state"] != "scheduled":' '    intent = await _intent_row(session, command)
+    _local_at(command)
+    if intent["origin"] != "planned" or intent["state"] != "scheduled":' "$S $PE -k 'cadence_story_does_not_move or judged_before_its_new_time'"
+check "a malformed story id is a 500" $EX '    intent_id = _id_arg(command, "intent_id")' '    intent_id = _arg(command, "intent_id")' "$S -k 'malformed_or_foreign_story_id or any_spelling'"
 check "the move is not audited" $EX '            "event": "rescheduled",' '            "event": "moved",' "$S -k 'moves_in_place'"
+check "cancel's flag names no tenant" $EX '            "UPDATE post_intents SET cancel_requested = true"
+            " WHERE id = :id AND workspace_id = :ws"' '            "UPDATE post_intents SET cancel_requested = true"
+            " WHERE id = :id"' "$PE -k 'flag_is_bound_to_the_tenant'"
 check "cancel is not audited" $EX "    # nothing for it: the request is recorded here, naming the person.
     await _audit_intent(" "    # nothing for it: the request is recorded here, naming the person.
     if False:
       await _audit_intent(" "$S -k 'every_cancel_leaves'"
+
+# The sweeps serve or miss a planned story only at the time they read; a card's "who last moved it"
+# skips the rows that moved nothing.
+PR=src/services/target/prompts.py
+check "the serve sweep serves a moved story" $PR '        if row["origin"] == "planned" and not await _due_as_read(session, row):' '        if False:' "$S -k 'serve_sweep_leaves'"
+check "the serve re-check reads the row unlocked" $PR '                " WHERE id = :id AND workspace_id = :ws FOR UPDATE"' '                " WHERE id = :id AND workspace_id = :ws"' "$S -k 'serve_sweep_leaves'"
+check "the miss sweep misses a moved story" $PR '                            "   AND schedule_slot_at = :slot RETURNING id"' '                            "   RETURNING id"' "$S -k 'miss_sweep_leaves'"
+check "a cancel request is who last moved it" src/services/target/intent_ledger.py '                    "       AND e.from_state IS DISTINCT FROM e.to_state"' '                    ""' "$S -k 'who_only_asked_for_a_cancel'"
 
 # The Queue read: the origin filter, the zone, the miss reason, the order, the scheduler's name.
 check "the origin filter is ignored" $WS '        where += " AND i.origin = :origin"' '        where += ""' "$S -k 'origin_filter'"
 check "the zone is always the workspace's" $WS '" COALESCE(a.tz, w.tz) AS tz,"' '" w.tz AS tz,"' "$S -k 'zone_its_times'"
 check "every error reads as a miss reason" $WS "f\" CASE WHEN i.last_error->>'class' = '{vocabulary.PLANNED_MISSED}'\"" "f\" CASE WHEN i.last_error IS NOT NULL\"" "$S -k 'missed_planned_story_says_why'"
 check "newest first is ignored" $WS '    order = "DESC" if newest_first else "ASC"' '    order = "ASC"' "$S -k 'newest_first'"
+check "the tie-break runs one way only" $WS '        f" ORDER BY i.schedule_slot_at {order}, i.id {order} LIMIT :lim",' '        f" ORDER BY i.schedule_slot_at {order}, i.id ASC LIMIT :lim",' "$S $PE -k 'one_instant_orders or origin_the_states_and_the_order'"
 check "a cadence story names a scheduler" $WS '" CASE WHEN i.scheduled_by_user_id IS NOT NULL"' '" CASE WHEN true"' "$S -k 'origin_filter_and_the_schedulers_name'"
+check "an empty name is a name" src/services/target/identity.py "\"   AND ui.display_name IS NOT NULL AND ui.display_name <> ''\"" "\"   AND ui.display_name IS NOT NULL\"" "$S -k 'no_name_is_a_teammate'"
 check "the Telegram name is not preferred" src/services/target/identity.py "\" ORDER BY (ui.provider = 'telegram') DESC, ui.created_at LIMIT 1),\"" "\" ORDER BY (ui.provider = 'telegram') ASC, ui.created_at LIMIT 1),\"" "$S -k 'telegram_name_comes_first'"
 
 # The API: the refusal body's facts, a token's read of the Queue.
@@ -135,9 +160,15 @@ check "a service identity reads another workspace" src/api/principal.py '       
 check "a token cannot read the Queue" src/api/routes/v1.py '    principal: Principal = Depends(current_principal),
     state: Optional[str] = Query(None),' '    principal: Principal = Depends(require_session),
     state: Optional[str] = Query(None),' "$CG -k 'read_but_cannot_plan'"
+check "a token cannot read the Queue (the route gate)" src/api/routes/v1.py '    principal: Principal = Depends(current_principal),
+    state: Optional[str] = Query(None),' '    principal: Principal = Depends(require_session),
+    state: Optional[str] = Query(None),' "$OV -k 'admit_tokens'"
 
 # The CLI: the handle, the keys, the refusal's words, the read's filter.
-check "a handle takes a removed account" storydump_cli/commands/writes.py '        if isinstance(row, dict) and row.get("state") in LIVE_ACCOUNT_STATES' '        if isinstance(row, dict)' "$CU -k 'one_live_account'"
+check "a handle takes a removed account" storydump_cli/commands/writes.py '        and ("state" not in row or row["state"] in LIVE_ACCOUNT_STATES)' '        and True' "$CU -k 'one_live_account'"
+check "a handle on an older API finds no account" storydump_cli/commands/writes.py '        and ("state" not in row or row["state"] in LIVE_ACCOUNT_STATES)' '        and row.get("state") in LIVE_ACCOUNT_STATES' "$CU -k 'older_than_the_cli'"
+check "a blank account is looked up" storydump_cli/commands/writes.py '    if not account.strip():' '    if False:' "$CU -k 'blank_account'"
+check "the story in the way is not named" storydump_cli/commands/writes.py '        if isinstance(existing, dict) and existing.get("intent_id"):' '        if False:' "$CU -k 'names_the_story_in_the_way'"
 check "a handle naming two live accounts takes the first" storydump_cli/commands/writes.py '    if len(live) > 1:' '    if False:' "$CU -k 'two_live_accounts'"
 check "a not_found names nothing" storydump_cli/commands/writes.py '    if exc.reason == "not_found" and exc.facts.get("missing") in MISSING_SENTENCES:' '    if False:' "$CU -k 'names_what_is_missing'"
 check "a refused write exits with the verb's own code" storydump_cli/commands/writes.py '                code=exit_code_for(exc.status, exc.reason),' '                code=EXIT_USAGE,' "$CU -k 'held_back'"
@@ -145,6 +176,17 @@ check "a schedule replays its first answer" storydump_cli/commands/writes.py '  
 check "a reschedule replays its first answer" storydump_cli/commands/writes.py '        key_for=_fresh_key("reschedule"),' '        key_for=_story_key("reschedule_item", story),' "$CU -k 'reschedule_sends'"
 check "a held-back item offers no override" storydump_cli/commands/writes.py '        if exc.facts.get("overridable") is True:' '        if False:' "$CU -k 'held_back'"
 check "a refused time says only that it was refused" storydump_cli/commands/writes.py '    if exc.reason == "invalid_args" and rule in AT_RULE_SENTENCES:' '    if False:' "$CU -k 'which_rule'"
-check "planned lists cadence stories too" storydump_cli/commands/reads.py 'client.intents(ws, origin="planned", states=states, limit=limit)' 'client.intents(ws, origin=None, states=states, limit=limit)' "$CU -k 'queue_read_filtered'"
+check "planned lists cadence stories too" storydump_cli/commands/reads.py '                origin="planned",' '                origin=None,' "$CU -k 'queue_read_filtered'"
+check "planned reads a history oldest first" storydump_cli/client.py '        if newest_first:
+            params["order"] = "desc"' '        if False:
+            params["order"] = "desc"' "$CU -k 'newest_first_when_asked'"
+check "the due time is UTC" storydump_cli/output.py '    ("due", _planned_due),' '    ("due", "schedule_slot_at"),' "$CU -k 'queue_read_filtered'"
+check "a full page reads as the whole list" storydump_cli/output.py '        if isinstance(limit, int) and len(_dicts(entry.get("rows"))) >= limit:' '        if False:' "$CU -k 'full_page'"
+check "the page size is dropped" storydump_cli/commands/reads.py '    if isinstance(data.get("limit"), int):' '    if False:' "$CU -k 'full_page or bounds_the_page'"
+
+# The vocabulary: every fact a refusal carries keeps its words (the CLI's tests are parametrized over
+# these tables, so their own cases would vanish with the key).
+check "a time rule loses its words" $VOC "    \"skipped\": \"that time does not happen in the account's zone: the clocks skip it\"," "" "$VT -k 'planned_story_is_refused_with'"
+check "an item state loses its words" $VOC '    "item_removed": "it was removed from the library",' '' "$VT -k 'planned_story_is_refused_with'"
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"
