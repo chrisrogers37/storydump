@@ -146,8 +146,8 @@ export function WaitlistForm({
       className={cn(
         "flex w-full gap-2",
         variant === "hero"
-          ? "max-w-md mx-auto flex-col sm:flex-row"
-          : "max-w-sm mx-auto flex-col sm:flex-row",
+          ? "max-w-md mx-auto flex-col sm:flex-row sm:flex-wrap"
+          : "max-w-sm mx-auto flex-col sm:flex-row sm:flex-wrap",
         className
       )}
     >
@@ -171,7 +171,11 @@ export function WaitlistForm({
         {status === "submitting" ? "Submitting..." : "Get Early Access"}
       </Button>
       {status === "error" && (
-        <p className="text-sm text-destructive" role="alert" aria-live="assertive">
+        <p
+          className="basis-full text-sm text-destructive"
+          role="alert"
+          aria-live="assertive"
+        >
           {message}
         </p>
       )}
