@@ -140,7 +140,9 @@ class TestWorkspaceReads:
     ):
         seen = {}
 
-        async def list_intents(session, *, workspace_id, states=(), limit=50):
+        async def list_intents(
+            session, *, workspace_id, states=(), origin=None, limit=50
+        ):
             seen.update(states=list(states), limit=limit)
             return []
 
@@ -161,6 +163,31 @@ class TestWorkspaceReads:
         assert resp.status_code == 200
         assert seen == {"states": ["posted", "skipped", "rejected"], "limit": 50}
         assert resp.json() == {"intents": [], "limit": 50}
+
+    def test_the_origin_is_a_closed_list_and_reaches_the_read(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        """What is coming is the Queue read filtered to planned stories: no
+        endpoint of its own (#1413 phase 5)."""
+        seen = {}
+
+        async def list_intents(
+            session, *, workspace_id, states=(), origin=None, limit=50
+        ):
+            seen.update(states=list(states), origin=origin)
+            return []
+
+        monkeypatch.setattr(workspaces, "list_intents", list_intents)
+        resp = client.get(f"/api/v1/workspaces/{WS}/intents?origin=someday")
+        assert resp.status_code == 422 and "someday" in resp.json()["detail"]
+        assert seen == {}
+        resp = client.get(
+            f"/api/v1/workspaces/{WS}/intents?origin=planned&state=scheduled"
+        )
+        assert resp.status_code == 200
+        assert seen == {"states": ["scheduled"], "origin": "planned"}
+        client.get(f"/api/v1/workspaces/{WS}/intents")
+        assert seen["origin"] is None
 
     def test_media_reads_pass_the_gate_and_validate_the_state(
         self, client, signed_in, tenant, monkeypatch
