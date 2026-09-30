@@ -143,6 +143,7 @@ def _new_intent(
     ref=None,
     media_kind="image",
     debited=None,
+    origin="cadence",
     slot_in_s=0,
     age_s=0,
 ):
@@ -151,11 +152,13 @@ def _new_intent(
     debited states carry cap_consumed_on + a real bucket row so refunds have
     something to return). *slot_in_s* moves its slot from now and *age_s*
     ages its `entered_state_at` — the two clocks the reaper's expiry legs
-    read."""
+    read. A planned story (*origin*) is born approved or earlier here: born
+    later it would need its day without its debit."""
     ws, iga = pipe_db["ws"], pipe_db["iga"]
     ref = ref or f"acct-{uuid.uuid4()}"
     if debited is None:
         debited = state in ("publishing", "publishing_ambiguous", "review_required")
+    assert origin == "cadence" or not debited, "a planned story debits nothing"
     rows = _exec(
         pipe_db,
         "INSERT INTO media_items (workspace_id, source_id, content_hash,"
@@ -168,7 +171,18 @@ def _new_intent(
     media = rows[0][0]
     step = "publish_called" if state == "publishing_ambiguous" else publish_step
     cols, vals = "", ""
-    params = [ws, iga, media, ref, slot_in_s, age_s, state, step, cancel_requested]
+    params = [
+        ws,
+        iga,
+        media,
+        ref,
+        slot_in_s,
+        age_s,
+        state,
+        step,
+        cancel_requested,
+        origin,
+    ]
     if debited:
         # A debited birth: the recorded day and, for a story past the container
         # step, a container id; a stepped-back story (the float) carries its
@@ -197,9 +211,9 @@ def _new_intent(
         pipe_db,
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
         " provider_account_ref, approval_mode, schedule_slot_at, entered_state_at,"
-        " state, publish_step, cancel_requested" + cols + ")"
+        " state, publish_step, cancel_requested, origin" + cols + ")"
         " VALUES (%s, %s, %s, %s, 'manual', now() + make_interval(secs => %s),"
-        " now() - make_interval(secs => %s), %s, %s, %s" + vals + ")"
+        " now() - make_interval(secs => %s), %s, %s, %s, %s" + vals + ")"
         " RETURNING id",
         params,
         fetch=True,
@@ -3335,3 +3349,131 @@ class TestEveryLegRunsInTheFinalBody:
             (swept["deadline"],),
             fetch=True,
         ) == [("failed", "deadline")]
+
+
+class TestAPlannedStoryOutsideTheCap:
+    """F8 (a) through the real ladder (content schedule, phase 4; #1413): a
+    planned story neither spends the account's daily cap nor waits on it, so
+    a spent day posts it at once and the day's cadence is what it would have
+    been without it. Meta's own limit still holds it."""
+
+    def _day_at(self, pipe_db, count):
+        _exec(
+            pipe_db,
+            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
+            " local_date, count, cap_at_write) VALUES (%s, %s, %s, %s, 3)",
+            (pipe_db["ws"], pipe_db["iga"], _today_utc(), count),
+        )
+
+    def _slot_in(self, pipe_db, delta):
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc) + delta, pipe_db["iga"]),
+        )
+
+    def _cap_deferrals(self, pipe_db, intent):
+        return [
+            r[0]
+            for r in _exec(
+                pipe_db,
+                "SELECT detail->>'reason' FROM audit_events WHERE entity_id = %s"
+                " AND detail->>'event' = 'cap_deferred'",
+                (intent,),
+                fetch=True,
+            )
+        ]
+
+    def _post(
+        self, pipe_db, meta=None, *, origin="cadence", card=False, dry_run=False, **deps
+    ):
+        """An approved story and one real run of the pipeline for it: the
+        story's id and the run's outcome."""
+        intent, ref = _new_intent(pipe_db, origin=origin)
+        if card:
+            _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, dry_run=dry_run)
+        meta = meta or StubMetaAdapter()
+        return intent, _run(run_publish_pipeline(job, **_deps(pipe_db, meta, **deps)))
+
+    def test_on_a_spent_day_it_posts_at_once(self, pipe_db):
+        self._slot_in(pipe_db, timedelta(hours=2))
+        self._day_at(pipe_db, 3)
+
+        intent, outcome = self._post(pipe_db, origin="planned", card=True)
+
+        assert outcome == POSTED, "no deferral: the spent day is the cadence's"
+        assert _bucket(pipe_db, _today_utc()) == 3, "and the post spent nothing"
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "posted" and row["cap_consumed_on"] == _today_utc()
+        assert self._cap_deferrals(pipe_db, intent) == []
+        assert "tomorrow" not in _card_line(pipe_db, intent)
+
+    def test_the_cadence_that_day_is_what_it_would_have_been(self, pipe_db):
+        """The owner's reason for (a). Two of three cadence posts are spent;
+        the planned post takes none of the third, so the next cadence story
+        posts, and the one after it waits for tomorrow as it always would."""
+        self._slot_in(pipe_db, timedelta(hours=2))
+        self._day_at(pipe_db, 2)
+
+        assert self._post(pipe_db, origin="planned")[1] == POSTED
+        assert _bucket(pipe_db, _today_utc()) == 2
+        assert self._post(pipe_db)[1] == POSTED
+        assert _bucket(pipe_db, _today_utc()) == 3
+
+        fourth, outcome = self._post(pipe_db)
+        assert outcome == DEFERRED_CAP
+        assert _intent_row(pipe_db, fourth)["state"] == "approved"
+        assert self._cap_deferrals(pipe_db, fourth) == ["cap"]
+
+    def test_a_dry_run_of_it_on_a_spent_day_leaves_the_count_unchanged(self, pipe_db):
+        """The plan's own rehearsal (phase 4's checklist asks for it on a Neon
+        branch): record the day's count, approve a planned story in dry run,
+        read the same count afterwards."""
+        from src.services.target.publish_pipeline import POSTED_DRY_RUN
+
+        self._slot_in(pipe_db, timedelta(hours=2))
+        self._day_at(pipe_db, 3)
+        meta = StubMetaAdapter()
+
+        intent, outcome = self._post(pipe_db, meta, origin="planned", dry_run=True)
+
+        assert outcome == POSTED_DRY_RUN
+        assert _bucket(pipe_db, _today_utc()) == 3
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "posted" and row["cap_consumed_on"] == _today_utc()
+        assert meta.create_calls == [] and meta.publish_calls == []
+
+    def test_a_failure_after_its_flip_leaves_the_count_unchanged(self, pipe_db):
+        """The refund that rides a terminal failure returns nothing for a
+        story that took nothing: the cadence's two debits stand."""
+        self._day_at(pipe_db, 2)
+        meta = StubMetaAdapter(publish_outcomes=["terminal"])
+
+        intent, outcome = self._post(pipe_db, meta, origin="planned")
+
+        assert outcome == FAILED
+        assert _bucket(pipe_db, _today_utc()) == 2
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "failed" and row["cap_refunded_at"] is not None
+
+    def test_meta_still_holds_it(self, pipe_db):
+        """The advisory pre-check is Meta's own limit, not ours: it defers a
+        planned story like any other, before the flip and any work."""
+        self._slot_in(pipe_db, timedelta(minutes=30))
+        meta = StubMetaAdapter(quota_usage=100, quota_total=100)
+        transit = FakeTransit()
+
+        intent, outcome = self._post(
+            pipe_db,
+            meta,
+            origin="planned",
+            transit=transit,
+            precheck=UsagePrecheck(ttl_seconds=300),
+        )
+
+        assert outcome == DEFERRED_META_CAP
+        assert _intent_row(pipe_db, intent)["state"] == "approved"
+        assert _bucket(pipe_db, _today_utc()) is None
+        assert transit.upload_calls == [] and meta.create_calls == []
+        assert self._cap_deferrals(pipe_db, intent) == ["meta_advisory"]

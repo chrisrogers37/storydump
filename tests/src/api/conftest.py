@@ -215,3 +215,30 @@ async def sign_in(
     assert done.status_code == 302, done.text
     assert done.headers["location"] == f"{FRONT}/welcome", done.headers["location"]
     return {"Authorization": f"Bearer {cookie_value(done, COOKIE)}"}
+
+
+async def publishing_workspace(
+    client: httpx.AsyncClient, monkeypatch, *, tag: str
+) -> tuple[dict, str, str]:
+    """A signed-in owner with a workspace of their own that publishes through
+    the API (so `approve` is not refused as `manual_mode`), all through the
+    real routes. Returns ``(headers, owner_id, workspace_id)``."""
+    owner = await sign_in(
+        client, monkeypatch, sub=f"sub-{tag}", email=f"{tag}@example.test"
+    )
+    me = await client.get("/api/v1/me", headers=owner)
+    assert me.status_code == 200, me.text
+    created = await client.post(
+        "/api/v1/workspaces",
+        json={"name": tag, "tz": "America/New_York"},
+        headers={**owner, "Idempotency-Key": f"create-{tag}"},
+    )
+    assert created.status_code == 201, created.text
+    ws = created.json()["workspace_id"]
+    flipped = await client.post(
+        f"/api/v1/workspaces/{ws}/commands/settings_change",
+        json={"settings": {"api_publishing_enabled": True}},
+        headers={**owner, "Idempotency-Key": f"settings-{tag}"},
+    )
+    assert flipped.status_code == 200, flipped.text
+    return owner, me.json()["user"]["id"], ws

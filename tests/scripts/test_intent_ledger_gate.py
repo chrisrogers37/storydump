@@ -102,7 +102,24 @@ def ledger(owner_window_db, owner_actor, admin_conn):
     conn.close()
 
 
-def _new_intent(ledger, state: str) -> str:
+def _new_media(ledger) -> str:
+    """A fresh media item on the chain's source (`uq_intent_live_subject`
+    admits one live intent per item and account)."""
+    c = ledger["chain"]
+    ledger["seq"] += 1
+    tag = f"l1m-{ledger['seq']}"
+    with ledger["conn"].cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+            " file_name, media_kind, provider_file_ref)"
+            " VALUES (%s, %s, %s, %s, 'image', %s) RETURNING id",
+            (c["ws"], c["src"], tag, f"{tag}.jpg", tag),
+        )
+        return cur.fetchone()[0]
+
+
+def _new_intent(ledger, state: str, *, origin: str | None = None) -> str:
     """An intent born directly in *state*, on its own fresh media item.
 
     Two constraints shape this and both were found by running it:
@@ -125,6 +142,10 @@ def _new_intent(ledger, state: str) -> str:
     is still testable, and these assertions are about the update rule rather
     than about how the row got there. The insert guard is tested separately,
     including that this exemption still exists.
+
+    *origin* is written only when given (`seed_intent_chain`'s rule), so a
+    cadence row is inserted exactly as it was before 088 (`origin` is fixed at
+    birth: a planned row has to be BORN planned).
     """
     c = ledger["chain"]
     extra_cols, extra_vals = "", []
@@ -141,17 +162,14 @@ def _new_intent(ledger, state: str) -> str:
             "publish_called" if state == "publishing_ambiguous" else "none",
         ]
 
+    if origin is not None:
+        extra_cols += ", origin"
+        extra_vals = [*extra_vals, origin]
+
+    media = _new_media(ledger)
+    tag = f"l1-{ledger['seq']}"
     with ledger["conn"].cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
-        ledger["seq"] += 1
-        tag = f"l1-{ledger['seq']}"
-        cur.execute(
-            "INSERT INTO media_items (workspace_id, source_id, content_hash,"
-            " file_name, media_kind, provider_file_ref)"
-            " VALUES (%s, %s, %s, %s, 'image', %s) RETURNING id",
-            (c["ws"], c["src"], tag, f"{tag}.jpg", tag),
-        )
-        media = cur.fetchone()[0]
         cur.execute(
             "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
             f" provider_account_ref, approval_mode, schedule_slot_at, state{extra_cols})"
@@ -182,7 +200,7 @@ COMPLETION = {
 }
 
 
-def _attempt(ledger, sql, params, *, actor="system", reused=False):
+def _attempt(ledger, sql, params, *, actor="system", user_id=None, reused=False):
     """Run *sql* on a fresh connection. Returns (ok, message, rowcount).
 
     *reused* first commits a transaction that claims an actor, which is the
@@ -196,6 +214,8 @@ def _attempt(ledger, sql, params, *, actor="system", reused=False):
                 cur.execute("BEGIN; SET LOCAL app.actor_kind = 'system'; COMMIT")
             if actor is not None:
                 cur.execute("SET app.actor_kind = %s", (actor,))
+            if user_id is not None:
+                cur.execute("SET app.actor_user_id = %s", (str(user_id),))
             cur.execute(sql, params)
             return True, "", cur.rowcount
     except Exception as exc:  # noqa: BLE001 — the message is the assertion
@@ -711,6 +731,99 @@ class TestTheInsertGuard:
         assert ok and rows == 1, msg
 
 
+#: The approval edge the person rule is about, as raw SQL.
+APPROVE = "UPDATE post_intents SET state = 'approved' WHERE id = %s"
+
+
+class TestAPlannedRowIsApprovedOnlyByAPerson:
+    """088: `awaiting_approval -> approved` on a PLANNED row needs a person,
+    `app.actor_kind = 'user'` with an `app.actor_user_id`, whatever issues the
+    UPDATE. Each refusal has its rowcount-checked positive control: the same
+    statement as a person lands, and on a cadence row the rule is silent."""
+
+    @pytest.mark.parametrize(
+        "actor, with_user",
+        [("system", False), ("system", True), ("operator", True), ("user", False)],
+    )
+    def test_anything_but_a_person_is_refused(self, ledger, actor, with_user):
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        user = ledger["chain"]["user"] if with_user else None
+        ok, msg, _ = _attempt(ledger, APPROVE, (intent,), actor=actor, user_id=user)
+        assert not ok and "only a person approves it" in msg, msg
+
+    def test_a_person_approves_it(self, ledger):
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        ok, msg, rows = _attempt(
+            ledger, APPROVE, (intent,), actor="user", user_id=ledger["chain"]["user"]
+        )
+        assert ok and rows == 1, msg
+
+    def test_a_cadence_row_is_untouched_by_the_rule(self, ledger):
+        intent = _new_intent(ledger, "awaiting_approval")
+        ok, msg, rows = _attempt(ledger, APPROVE, (intent,), actor="system")
+        assert ok and rows == 1, msg
+
+    def test_the_pipelines_step_back_is_untouched_on_a_planned_row(self, ledger):
+        """`publishing -> approved` is the float's step back (076), issued by
+        the worker as `system`: the rule is about approval, not about every
+        edge that lands in `approved`."""
+        intent = _new_intent(ledger, "publishing", origin="planned")
+        ok, msg, rows = _attempt(ledger, APPROVE, (intent,), actor="system")
+        assert ok and rows == 1, msg
+
+
+class TestOriginIsFixedAtBirthAndAPlannedRowIsManual:
+    """The person rule keys on `origin`, so `origin` must not move: a rule one
+    UPDATE could step around would not hold. And a planned row is `manual`
+    whatever the workspace's stored approval settings say (088's CHECK)."""
+
+    @pytest.mark.parametrize(
+        "born, becomes", [("planned", "cadence"), ("cadence", "planned")]
+    )
+    def test_origin_cannot_be_rewritten(self, ledger, born, becomes):
+        intent = _new_intent(ledger, "awaiting_approval", origin=born)
+        ok, msg, _ = _attempt(
+            ledger,
+            "UPDATE post_intents SET origin = %s WHERE id = %s",
+            (becomes, intent),
+        )
+        assert not ok and "fixed at birth" in msg, msg
+
+    def test_a_rewrite_that_would_admit_a_system_approval_is_refused(self, ledger):
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        ok, msg, _ = _attempt(
+            ledger,
+            "UPDATE post_intents SET origin = 'cadence', state = 'approved' WHERE id = %s",
+            (intent,),
+        )
+        assert not ok and "fixed at birth" in msg, msg
+
+    def test_a_write_that_leaves_origin_alone_is_untouched(self, ledger):
+        """Positive control for the two refusals above."""
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        ok, msg, rows = _attempt(
+            ledger,
+            "UPDATE post_intents SET last_error = CAST(%s AS jsonb) WHERE id = %s",
+            ('{"v": 1, "class": "probe", "message": "m"}', intent),
+        )
+        assert ok and rows == 1, msg
+
+    @pytest.mark.parametrize("mode, lands", [("auto", False), ("manual", True)])
+    def test_a_planned_row_is_born_manual(self, ledger, mode, lands):
+        c = ledger["chain"]
+        ok, msg, rows = _attempt(
+            ledger,
+            "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+            " provider_account_ref, approval_mode, schedule_slot_at, origin)"
+            " VALUES (%s, %s, %s, %s, %s, now(), 'planned')",
+            (c["ws"], c["iga"], _new_media(ledger), f"born-{mode}", mode),
+        )
+        if lands:
+            assert ok and rows == 1, msg
+        else:
+            assert not ok and "ck_intent_planned_manual" in msg, msg
+
+
 class TestTheGuardsAreLoadBearing:
     """Each refusal above is caused by the trigger it names — proven by
     removing the trigger and watching the refusal disappear.
@@ -838,6 +951,19 @@ class TestTheGuardsAreLoadBearing:
         self._drop(ledger, "tg_audit_workspaces", "workspaces")
         ok2, msg2, rows2 = _attempt(ledger, sql, (ws,), actor=None)
         assert ok2 and rows2 == 1, f"still refused without tg_audit_workspaces: {msg2}"
+
+    def test_the_person_trigger_is_what_refuses_a_system_approval_of_a_planned_row(
+        self, ledger
+    ):
+        intent = _new_intent(ledger, "awaiting_approval", origin="planned")
+        ok, msg, _ = _attempt(ledger, APPROVE, (intent,), actor="system")
+        assert not ok and "only a person approves it" in msg, msg
+
+        self._drop(ledger, "tg_intent_planned_person", "post_intents")
+        ok2, msg2, rows2 = _attempt(ledger, APPROVE, (intent,), actor="system")
+        assert ok2 and rows2 == 1, (
+            f"still refused without tg_intent_planned_person: {msg2}"
+        )
 
 
 class TestTheServicePathAgreesWithTheTrigger:

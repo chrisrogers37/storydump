@@ -37,6 +37,12 @@ STRANGER_TG_ID = "9009"
 CHAT_A = "-1001"
 CHAT_B = "-1002"
 
+# The account's own day: where the ledger stamps `cap_consumed_on` and debits
+# `daily_post_counts` (the world's workspace keeps the schema's default, UTC).
+# Not the session's `current_date`, which is another date for part of every
+# day on a server outside UTC.
+ACCOUNT_DAY = "(now() AT TIME ZONE 'UTC')::date"
+
 
 @pytest.fixture(scope="module")
 def world(admin_conn, owner_actor):
@@ -114,9 +120,10 @@ def _one(world, sql, params=()):
     return fetch_one(world["stream"], sql, params)
 
 
-def _intent(world, tag: str, *, state="awaiting_approval") -> dict:
+def _intent(world, tag: str, *, state="awaiting_approval", origin="cadence") -> dict:
     """An intent on the chain's account, on its own media item, with a SENT
-    card in both groups (refs 1xxx in A, 2xxx in B)."""
+    card in both groups (refs 1xxx in A, 2xxx in B). A planned story (088) is
+    born planned: its origin cannot change afterwards."""
     ((media,),) = _write(
         world,
         "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name,"
@@ -128,14 +135,15 @@ def _intent(world, tag: str, *, state="awaiting_approval") -> dict:
     # A `posted` row must be complete (`ck_posted_complete`): as the manual
     # path leaves it — published by hand, the day's cap consumed.
     posted_cols = ", published_via, cap_consumed_on" if state == "posted" else ""
-    posted_vals = ", 'manual', current_date" if state == "posted" else ""
+    posted_vals = f", 'manual', {ACCOUNT_DAY}" if state == "posted" else ""
     ((intent,),) = _write(
         world,
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-        f" provider_account_ref, approval_mode, schedule_slot_at, state{posted_cols})"
-        f" VALUES (%s, %s, %s, 'acct-w4-tap', 'manual', now(), %s{posted_vals})"
+        " provider_account_ref, approval_mode, schedule_slot_at, state, origin"
+        f"{posted_cols})"
+        f" VALUES (%s, %s, %s, 'acct-w4-tap', 'manual', now(), %s, %s{posted_vals})"
         " RETURNING id",
-        (world["ws"], world["iga"], media, state),
+        (world["ws"], world["iga"], media, state, origin),
         fetch=True,
     )
     cards = {}
@@ -251,6 +259,20 @@ def _card_states(world, intent_id):
 
 
 class TestATapFlipsOnceAndEditsEveryCard:
+    def test_a_planned_story_is_approved_by_the_tapper_like_any_other(self, world):
+        """088 lets only a person approve a planned story. A tap is a person:
+        the dispatcher stamps the tapper as `user` with their linked id, so
+        the trigger admits it, and the audit row says who."""
+        i = _intent(world, "post-planned", origin="planned")
+        assert _one(
+            world, "SELECT origin FROM post_intents WHERE id = %s", (i["id"],)
+        ) == ("planned",), "positive control: the story really is planned"
+        r = tap(world, "post", i["id"])
+        assert r.outcome == "executed" and r.handled is True
+        assert _state(world, i["id"]) == "approved"
+        (row,) = _audit(world, i["id"])
+        assert row == ("approved", "user", world["user"], "telegram")
+
     def test_post_approves_as_the_tapper_enqueues_the_publish_and_supersedes_both_groups(
         self, world
     ):
@@ -881,7 +903,7 @@ def _parked(world, tag: str, *, publish_step="publish_called", op="ambiguous") -
     i = _intent(world, tag, state="review_required")
     _write(
         world,
-        "UPDATE post_intents SET cap_consumed_on = current_date, publish_step = %s,"
+        f"UPDATE post_intents SET cap_consumed_on = {ACCOUNT_DAY}, publish_step = %s,"
         " ig_container_id = 'c-1' WHERE id = %s",
         (publish_step, i["id"]),
     )
@@ -897,7 +919,7 @@ def _parked(world, tag: str, *, publish_step="publish_called", op="ambiguous") -
     _write(
         world,
         "INSERT INTO daily_post_counts (workspace_id, ig_account_id, local_date, count, cap_at_write)"
-        " VALUES (%s, %s, current_date, 1, 3)"
+        f" VALUES (%s, %s, {ACCOUNT_DAY}, 1, 3)"
         " ON CONFLICT (workspace_id, ig_account_id, local_date) DO UPDATE SET count = 1",
         (world["ws"], world["iga"]),
     )
@@ -928,7 +950,7 @@ def _day_count(world):
     row = _one(
         world,
         "SELECT count FROM daily_post_counts WHERE workspace_id = %s AND ig_account_id = %s"
-        " AND local_date = current_date",
+        f" AND local_date = {ACCOUNT_DAY}",
         (world["ws"], world["iga"]),
     )
     return row[0] if row else 0
@@ -1063,3 +1085,29 @@ class TestTheReviewCardIsTheTenantsToResolve:
         assert r.outcome == "answered" and "Approved" in r.answer_text
         assert _intent_cols(world, i["id"])[0] == "approved"
         assert len(_audit(world, i["id"])) == 1, "the second tap wrote nothing"
+
+
+class TestPostedMyselfThroughTheTap:
+    """Manual mode's own tap, as `svc_ingress` through the real dispatcher."""
+
+    def test_a_cadence_story_debits_once_and_a_repeat_tap_debits_nothing(self, world):
+        before = _day_count(world)
+        i = _intent(world, "posted-tap-c")
+        assert tap(world, "posted", i["id"]).outcome == "executed"
+        assert _state(world, i["id"]) == "posted"
+        assert _day_count(world) == before + 1
+
+        assert tap(world, "posted", i["id"]).outcome == "answered"
+        assert _day_count(world) == before + 1
+
+    def test_a_planned_story_debits_nothing_and_stamps_its_day(self, world):
+        before = _day_count(world)
+        i = _intent(world, "posted-tap-p", origin="planned")
+        assert tap(world, "posted", i["id"]).outcome == "executed"
+        assert _one(
+            world,
+            f"SELECT state, published_via, cap_consumed_on = {ACCOUNT_DAY}"
+            "  FROM post_intents WHERE id = %s",
+            (i["id"],),
+        ) == ("posted", "manual", True)
+        assert _day_count(world) == before

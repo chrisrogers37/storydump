@@ -59,11 +59,35 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 TICK_MAX, REFRESH_CADENCE_S = 500, 7 * 24 * 3600
 REAPER_LIM, APPROVAL_TTL_S, APPROVED_TTL_S = 500, 24 * 3600, 24 * 3600
 
-#: `uq_intent_slot`, verbatim from `055` — re-added after its drop proof.
-UQ_INTENT_SLOT_SQL = (
-    "CREATE UNIQUE INDEX uq_intent_slot ON post_intents"
-    " (workspace_id, ig_account_id, schedule_slot_at)"
-)
+#: Key 1 is two indexes while 088's expand stands: whichever refuses a
+#: duplicate cadence slot, it is one of these, by name.
+SLOT_KEYS = ("uq_intent_slot", "uq_intent_slot_cadence")
+
+
+@contextlib.contextmanager
+def _indexes_dropped(clock_db, *names):
+    """Drop *names* for a proof, and restore each from its own catalog
+    definition (`pg_indexes.indexdef`) afterwards, so no test carries a copy of
+    DDL the advertised stream owns. A row the proof left behind is the
+    caller's to remove INSIDE the block: a unique index cannot be rebuilt over
+    the duplicates its absence let in."""
+    definitions = [
+        _owner_exec(
+            clock_db,
+            "SELECT indexdef FROM pg_indexes"
+            " WHERE schemaname = 'public' AND indexname = %s",
+            (name,),
+            fetch=True,
+        )[0][0]
+        for name in names
+    ]
+    for name in names:
+        _owner_exec(clock_db, f"DROP INDEX {name}")
+    try:
+        yield
+    finally:
+        for definition in definitions:
+            _owner_exec(clock_db, definition)
 
 
 @pytest.fixture(scope="module")
@@ -687,36 +711,164 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                             slot,
                         ),
                     )
-                assert exc.value.diag.constraint_name == "uq_intent_slot", (
+                assert exc.value.diag.constraint_name in SLOT_KEYS, (
                     exc.value.diag.constraint_name
                 )
         finally:
             conn.close()
 
-        _owner_exec(clock_db, "DROP INDEX uq_intent_slot")
-        try:
-            assert (
+        # Both halves of key 1 go: with either one left, a duplicate cadence
+        # slot is still refused, and the proof would prove nothing.
+        with _indexes_dropped(clock_db, *SLOT_KEYS):
+            try:
+                assert (
+                    _owner_exec(
+                        clock_db,
+                        insert,
+                        (
+                            clock_db["ws"],
+                            account,
+                            media_b,
+                            f"r-{uuid.uuid4().hex[:8]}",
+                            slot,
+                        ),
+                    )
+                    == 1
+                ), "with key 1 gone the second slot row must insert — that is what"
+                " proves the index was load-bearing"
+            finally:
                 _owner_exec(
                     clock_db,
-                    insert,
-                    (
-                        clock_db["ws"],
-                        account,
-                        media_b,
-                        f"r-{uuid.uuid4().hex[:8]}",
-                        slot,
-                    ),
+                    "DELETE FROM post_intents WHERE ig_account_id = %s",
+                    (account,),
                 )
-                == 1
-            ), "with key 1 gone the second slot row must insert — that is what"
-            " proves the index was load-bearing"
+
+    #: `plan_slot`'s insert as raw SQL, and its two conflict targets: the one
+    #: 088 ships, and the predicate-less one every worker ran before it.
+    SLOT_INSERT = (
+        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, origin)"
+        " VALUES (%s, %s, %s, %s, 'manual', %s, %s)"
+    )
+    BARE = (
+        " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
+        " DO NOTHING RETURNING id"
+    )
+    CADENCE = (
+        " ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at)"
+        " WHERE origin = 'cadence' DO NOTHING RETURNING id"
+    )
+
+    def _slot_row(self, clock_db, account, slot, origin="cadence"):
+        ref = f"r-{uuid.uuid4().hex[:8]}"
+        return (clock_db["ws"], account, _new_media(clock_db), ref, slot, origin)
+
+    def test_while_both_keys_exist_the_bare_spelling_still_mints_once(self, clock_db):
+        """The deploy window: a worker still running the predicate-less
+        spelling keeps minting, once, while both slot keys exist."""
+        account = _new_account(clock_db)
+        slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
+        try:
+            minted = [
+                _owner_exec(
+                    clock_db,
+                    self.SLOT_INSERT + self.BARE,
+                    self._slot_row(clock_db, account, slot),
+                )
+                for _ in range(2)
+            ]
         finally:
             _owner_exec(
                 clock_db,
                 "DELETE FROM post_intents WHERE ig_account_id = %s",
                 (account,),
             )
-            _owner_exec(clock_db, UQ_INTENT_SLOT_SQL)
+        assert minted == [1, 0], minted
+
+    def test_on_the_cadence_key_alone_the_bare_spelling_raises(self, clock_db):
+        """Why the unconditional key is dropped only after every worker runs
+        the new spelling: against the partial key alone the old one finds no
+        arbiter, so every cadence mint would raise."""
+        account = _new_account(clock_db)
+        slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
+        row = self._slot_row(clock_db, account, slot)
+        with _indexes_dropped(clock_db, "uq_intent_slot"):
+            with pytest.raises(psycopg2.Error) as exc:
+                _owner_exec(clock_db, self.SLOT_INSERT + self.BARE, row)
+        assert "no unique or exclusion constraint matching" in str(exc.value)
+
+    def test_while_both_keys_exist_a_planned_row_still_holds_the_instant(
+        self, clock_db
+    ):
+        """The expand half alone does not yet let a planned row share a cadence
+        instant: the unconditional key still decides. Nothing creates a planned
+        row before the verbs (a later phase), so this is the stated interim,
+        pinned so the expand is not read as the whole fix."""
+        account = _new_account(clock_db)
+        slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
+        try:
+            planned = _owner_exec(
+                clock_db,
+                self.SLOT_INSERT,
+                self._slot_row(clock_db, account, slot, "planned"),
+            )
+            cadence = _owner_exec(
+                clock_db,
+                self.SLOT_INSERT + self.CADENCE,
+                self._slot_row(clock_db, account, slot),
+            )
+        finally:
+            _owner_exec(
+                clock_db,
+                "DELETE FROM post_intents WHERE ig_account_id = %s",
+                (account,),
+            )
+        assert (planned, cadence) == (1, 0)
+
+    @pytest.mark.asyncio
+    async def test_the_executor_holds_on_the_cadence_key_alone(self, clock_db):
+        """088's spelling as `plan_slot` runs it. With the unconditional key
+        gone (the contract a later file makes), a duplicate execution still
+        mints one intent, and a planned row at the slot's instant no longer
+        absorbs the cadence mint. The predicate-less spelling raises on the
+        first execution here: no arbiter is left for it to infer."""
+        account = _new_account(clock_db)
+        _new_media(clock_db)  # the item plan_slot draws; the planned row brings its own
+        slot = _owner_exec(clock_db, "SELECT now()", fetch=True)[0][0]
+        with _indexes_dropped(clock_db, "uq_intent_slot"):
+            try:
+                assert (
+                    _owner_exec(
+                        clock_db,
+                        self.SLOT_INSERT,
+                        self._slot_row(clock_db, account, slot, "planned"),
+                    )
+                    == 1
+                ), "positive control: the planned row lands at the slot's instant"
+                outcomes = [
+                    await _plan_slot(clock_db, account, 0, slot_at=slot)
+                    for _ in range(2)
+                ]
+                by_origin = dict(
+                    _owner_exec(
+                        clock_db,
+                        "SELECT origin, count(*) FROM post_intents"
+                        " WHERE ig_account_id = %s AND schedule_slot_at = %s"
+                        " GROUP BY origin",
+                        (account, slot),
+                        fetch=True,
+                    )
+                )
+            finally:
+                _owner_exec(
+                    clock_db,
+                    "DELETE FROM post_intents WHERE ig_account_id = %s",
+                    (account,),
+                )
+
+        assert outcomes[0].intent_id is not None, "the planned row absorbed the mint"
+        assert outcomes[1].intent_id is None, "the duplicate minted a second intent"
+        assert by_origin == {"cadence": 1, "planned": 1}, by_origin
 
 
 class TestEveryLegMintsWithADeadline:
@@ -1064,9 +1216,10 @@ def _new_media_in(clock_db, source_id, category=None):
     )
 
 
-async def _plan_slot(clock_db, account, seed):
-    """One `plan_slot` for *account* at a slot *seed* seconds out, drawn with
-    a generator seeded by *seed*, as the worker."""
+async def _plan_slot(clock_db, account, seed, *, slot_at=None):
+    """One `plan_slot` for *account* at a slot *seed* seconds out (or at
+    *slot_at*, to run one slot twice), drawn with a generator seeded by
+    *seed*, as the worker."""
     import random
 
     from sqlalchemy import text as _t
@@ -1074,9 +1227,13 @@ async def _plan_slot(clock_db, account, seed):
 
     from src.services.target.scheduler import execute_plan_slot
 
-    slot = _owner_exec(
-        clock_db, "SELECT now() + make_interval(secs => %s)", (seed,), fetch=True
-    )[0][0]
+    slot = (
+        slot_at
+        if slot_at is not None
+        else _owner_exec(
+            clock_db, "SELECT now() + make_interval(secs => %s)", (seed,), fetch=True
+        )[0][0]
+    )
     engine = create_async_engine(async_url(clock_db["worker"]))
     try:
         async with engine.connect() as conn:

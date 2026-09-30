@@ -72,14 +72,18 @@ does.
 ## Folder selection (`scheduler.execute_plan_slot` + `category_mix.weights`)
 
 `plan_slot` mints at most one intent for its slot: the insert is
-`ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at) DO NOTHING`
-(`scheduler.py:492`), so a duplicate job mints nothing.
+`ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at) WHERE origin = 'cadence' DO NOTHING`
+(`scheduler.py:494`), so a duplicate job mints nothing. The predicate is 088's: the slot key
+is a cadence rule, so a planned story (`origin = 'planned'`) never absorbs a slot. The spelling
+resolves against both `uq_intent_slot` and the cadence-only `uq_intent_slot_cadence` while
+both exist. Keep the predicate: once the unconditional key is dropped, a bare `ON CONFLICT`
+finds no arbiter and every cadence mint raises.
 
 The draw is weighted over the CONNECTED FOLDERS that have eligible media —
 explicit ratios; automatic folders in proportion to their files, together never
 more than the smallest explicit weight; Off (ratio 0) never
 (`category_mix.py:108`). Within the drawn folder: never-posted files first in
-the row id's shuffled order, then least-recently-posted (`scheduler.py:392`).
+the row id's shuffled order, then least-recently-posted (`scheduler.py:387`).
 Eligible means `available`, not already live for this account, and not under a
 live `post_locks` row. There is no pool behind the weighted set: when nothing
 is eligible the slot lapses and the workspace is told at most once per 24 h
@@ -131,6 +135,16 @@ is eligible the slot lapses and the workspace is told at most once per 24 h
   publish, then ONE terminal transaction (`posted`, the counters, the recent
   lock, `finalize_job`). Each permit is a `provider_operations` row committed
   BEFORE the provider call; every checkpoint re-asserts the lease.
+- **Only the cadence spends the daily cap.** A planned story
+  (`origin = 'planned'`) neither spends it nor waits on a spent day: the flip
+  stamps its `cap_consumed_on` without a debit, and the refunds return nothing
+  for it. Every write to `daily_post_counts` lives in `publish_cap.py` (the
+  flip, the manual post, the refunds), where they all ask one predicate;
+  `tests/src/services/target/test_publish_cap.py` fails on a new SQL string
+  literal under `src/` that writes the table by its bare name (it does not
+  see ORM or Core writes, a built or schema-qualified name, or a write
+  outside `src/`), because a writer that forgot the rule would drift the
+  day's count.
 - **A story does not wait inside the slot.** Any wait between attempts steps the
   intent back `publishing → approved` with its step, transit asset and debit
   intact, and writes a `float_wait` audit row (class, rung, next run). That is

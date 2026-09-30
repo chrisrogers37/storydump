@@ -94,13 +94,18 @@ def _exec(cap_db, sql, params=None, fetch=False):
         conn.close()
 
 
-def _new_intent(cap_db, *, state="approved", account_ref=None, publish_step="none"):
+def _new_intent(
+    cap_db, *, state="approved", account_ref=None, publish_step="none", origin="cadence"
+):
     """An approved (or other-state) intent on a fresh media item.
 
     Mirrors the L.3 template: born directly in *state* under the migration
     actor (the insert guard's exemption); a fresh media item per intent
     (uq_intent_live_subject); the debited states carry cap_consumed_on +
-    ig_container_id so ck_publishing_debited/ck_posted_complete hold.
+    ig_container_id so ck_publishing_debited/ck_posted_complete hold. No
+    bucket row is written for them: a planned story (*origin*) born in one
+    of those states is therefore exactly what the flip leaves one, its day
+    stamped and nothing debited.
     """
     ws, iga = cap_db["ws"], cap_db["iga"]
     ref = account_ref or f"acct-{uuid.uuid4()}"
@@ -122,10 +127,10 @@ def _new_intent(cap_db, *, state="approved", account_ref=None, publish_step="non
         cap_db,
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
         " provider_account_ref, approval_mode, schedule_slot_at, state,"
-        " publish_step" + extra_cols + ")"
-        " VALUES (%s, %s, %s, %s, 'manual', now(), %s, %s" + extra_vals + ")"
+        " publish_step, origin" + extra_cols + ")"
+        " VALUES (%s, %s, %s, %s, 'manual', now(), %s, %s, %s" + extra_vals + ")"
         " RETURNING id",
-        (ws, iga, media, ref, state, step),
+        (ws, iga, media, ref, state, step, origin),
         fetch=True,
     )
     return str(rows[0][0])
@@ -168,6 +173,16 @@ def _clear_bucket(cap_db, *, day=DAY):
     )
 
 
+def _seed_bucket(cap_db, count):
+    """DAY's bucket as `count` debits left it."""
+    _exec(
+        cap_db,
+        "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
+        " local_date, count, cap_at_write) VALUES (%s, %s, %s, %s, %s)",
+        (cap_db["ws"], cap_db["iga"], DAY, count, CAP),
+    )
+
+
 async def _flip(engine, cap_db, intent_id, *, cap=CAP):
     async with engine.connect() as conn:
         async with conn.begin():
@@ -181,6 +196,37 @@ async def _flip(engine, cap_db, intent_id, *, cap=CAP):
                 effective_cap=cap,
             )
         return outcome
+
+
+async def _refund_and_fail(engine, cap_db, intent_id):
+    """A terminal failure as the pipeline takes it: the refund, then the flip
+    to `failed` (the terminal freeze refuses the other order)."""
+    async with engine.connect() as conn:
+        async with conn.begin():
+            await conn.execute(text("SET LOCAL app.actor_kind = 'system'"))
+            await publish_cap.refund_cap(
+                conn,
+                intent_id=intent_id,
+                workspace_id=cap_db["ws"],
+                ig_account_id=cap_db["iga"],
+            )
+            await conn.execute(
+                text("UPDATE post_intents SET state = 'failed' WHERE id = :i"),
+                {"i": intent_id},
+            )
+
+
+async def _resolve_retry(engine, cap_db, intent_id):
+    async with engine.connect() as conn:
+        async with conn.begin():
+            await conn.execute(text("SET LOCAL app.actor_kind = 'operator'"))
+            return await publish_cap.resolve_retry(
+                conn,
+                intent_id=intent_id,
+                workspace_id=cap_db["ws"],
+                ig_account_id=cap_db["iga"],
+                attempts_by_step={"v": 1, "retries": 1},
+            )
 
 
 #: ONE persistent loop for the whole module. asyncpg connections are bound to
@@ -412,27 +458,10 @@ class TestPass5ResolveEffects:
         _clear_bucket(cap_db)
         # A review_required intent that carries a debit on DAY.
         intent = _new_intent(cap_db, state="review_required")
-        _exec(
-            cap_db,
-            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
-            " local_date, count, cap_at_write) VALUES (%s, %s, %s, 1, %s)",
-            (cap_db["ws"], cap_db["iga"], DAY, CAP),
-        )
+        _seed_bucket(cap_db, 1)
         assert _bucket_count(cap_db) == 1  # positive control
 
-        async def retry():
-            async with cap_db["engine"].connect() as conn:
-                async with conn.begin():
-                    await conn.execute(text("SET LOCAL app.actor_kind = 'operator'"))
-                    return await publish_cap.resolve_retry(
-                        conn,
-                        intent_id=intent,
-                        workspace_id=cap_db["ws"],
-                        ig_account_id=cap_db["iga"],
-                        attempts_by_step={"v": 1, "generation": 2},
-                    )
-
-        assert _run(retry()) is True
+        assert _run(_resolve_retry(cap_db["engine"], cap_db, intent)) is True
         assert _bucket_count(cap_db) == 0, "retry refunds the recorded day"
         row = _intent(cap_db, intent)
         assert row["state"] == "approved" and row["cap_consumed_on"] is None
@@ -445,12 +474,7 @@ class TestPass5ResolveEffects:
     def test_resolve_cancel_retains_the_debit(self, cap_db):
         _clear_bucket(cap_db)
         intent = _new_intent(cap_db, state="review_required")
-        _exec(
-            cap_db,
-            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
-            " local_date, count, cap_at_write) VALUES (%s, %s, %s, 1, %s)",
-            (cap_db["ws"], cap_db["iga"], DAY, CAP),
-        )
+        _seed_bucket(cap_db, 1)
 
         async def cancel():
             async with cap_db["engine"].connect() as conn:
@@ -468,29 +492,9 @@ class TestPass5ResolveEffects:
     def test_refund_returns_the_recorded_day(self, cap_db):
         _clear_bucket(cap_db)
         intent = _new_intent(cap_db, state="publishing")
-        _exec(
-            cap_db,
-            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
-            " local_date, count, cap_at_write) VALUES (%s, %s, %s, 1, %s)",
-            (cap_db["ws"], cap_db["iga"], DAY, CAP),
-        )
+        _seed_bucket(cap_db, 1)
 
-        async def fail_with_refund():
-            async with cap_db["engine"].connect() as conn:
-                async with conn.begin():
-                    await conn.execute(text("SET LOCAL app.actor_kind = 'system'"))
-                    await publish_cap.refund_cap(
-                        conn,
-                        intent_id=intent,
-                        workspace_id=cap_db["ws"],
-                        ig_account_id=cap_db["iga"],
-                    )
-                    await conn.execute(
-                        text("UPDATE post_intents SET state = 'failed' WHERE id = :i"),
-                        {"i": intent},
-                    )
-
-        _run(fail_with_refund())
+        _run(_refund_and_fail(cap_db["engine"], cap_db, intent))
         assert _bucket_count(cap_db) == 0, "the refund returned the recorded day"
         assert _intent(cap_db, intent)["cap_refunded_at"] is not None
 
@@ -568,3 +572,103 @@ class TestReEntry:
         assert _run(_flip(cap_db["engine"], cap_db, waiting)) is FlipOutcome.BUSY
         assert _bucket_count(cap_db) == 1
         assert _intent(cap_db, waiting)["state"] == "approved"
+
+
+class TestAPlannedStorySitsOutsideTheCap:
+    """F8 (a), the owner's call (content schedule, phase 4; #1413): a planned
+    story neither spends the account's daily cap nor waits on it, so a spent
+    day never pushes it and it never pushes a cadence story to tomorrow. Key 4
+    and the cancel honour hold it exactly as they hold a cadence story."""
+
+    def test_on_a_spent_day_it_flips_at_once_and_debits_nothing(self, cap_db):
+        _clear_bucket(cap_db)
+        _seed_bucket(cap_db, CAP)
+        cadence = _new_intent(cap_db)
+        assert _run(_flip(cap_db["engine"], cap_db, cadence)) is FlipOutcome.DEFERRED, (
+            "the control: this day refuses a cadence story"
+        )
+
+        planned = _new_intent(cap_db, origin="planned")
+        outcome = _run(_flip(cap_db["engine"], cap_db, planned))
+
+        assert outcome is FlipOutcome.PROCEED, (
+            "a spent day never pushes a planned story"
+        )
+        assert _bucket_count(cap_db) == CAP, "and the planned story spent nothing"
+        row = _intent(cap_db, planned)
+        assert row["state"] == "publishing"
+        assert str(row["cap_consumed_on"]) == str(DAY), (
+            "its day is stamped (ck_publishing_debited) without a debit"
+        )
+
+    def test_the_cadence_still_spends_its_whole_cap_after_one(self, cap_db):
+        """The owner's reason for (a): the cadence is unchanged that day."""
+        _clear_bucket(cap_db)
+        planned = _new_intent(cap_db, origin="planned")
+        assert _run(_flip(cap_db["engine"], cap_db, planned)) is FlipOutcome.PROCEED
+        assert _bucket_count(cap_db) is None, "no bucket row is written for it"
+
+        outcomes = [
+            _run(_flip(cap_db["engine"], cap_db, _new_intent(cap_db)))
+            for _ in range(CAP + 1)
+        ]
+
+        assert outcomes == [FlipOutcome.PROCEED] * CAP + [FlipOutcome.DEFERRED]
+        assert _bucket_count(cap_db) == CAP
+
+    def test_it_still_waits_on_key4(self, cap_db):
+        """Publish exclusivity is the real account's, not the cap's."""
+        _clear_bucket(cap_db)
+        ref = f"acct-{uuid.uuid4()}"
+        _new_intent(cap_db, state="publishing", account_ref=ref)  # a sibling mid-call
+        planned = _new_intent(cap_db, origin="planned", account_ref=ref)
+
+        assert _run(_flip(cap_db["engine"], cap_db, planned)) is FlipOutcome.BUSY
+        assert _intent(cap_db, planned)["state"] == "approved"
+        assert _bucket_count(cap_db) is None
+
+    def test_a_cancel_still_wins_over_its_flip(self, cap_db):
+        """No debit guards a planned story's flip, so the flip's own WHERE is
+        the only thing between a cancel and a post."""
+        _clear_bucket(cap_db)
+        planned = _new_intent(cap_db, origin="planned")
+        _exec(
+            cap_db,
+            "UPDATE post_intents SET cancel_requested = true WHERE id = %s",
+            (planned,),
+        )
+
+        assert _run(_flip(cap_db["engine"], cap_db, planned)) is FlipOutcome.CANCELLED
+        row = _intent(cap_db, planned)
+        assert row["state"] == "approved" and row["cap_consumed_on"] is None
+
+    def test_a_refund_of_it_leaves_the_cadence_debits_alone(self, cap_db):
+        """It took nothing, so a decrement here would hand a cadence story's
+        slot back."""
+        _clear_bucket(cap_db)
+        _seed_bucket(cap_db, 1)
+        planned = _new_intent(cap_db, state="publishing", origin="planned")
+
+        _run(_refund_and_fail(cap_db["engine"], cap_db, planned))
+
+        assert _bucket_count(cap_db) == 1, "the cadence story's debit stands"
+        row = _intent(cap_db, planned)
+        assert row["state"] == "failed" and row["cap_refunded_at"] is not None, (
+            "the row reads as a cadence story's refund does"
+        )
+
+    def test_a_retry_of_it_returns_nothing_and_its_next_flip_takes_nothing(
+        self, cap_db
+    ):
+        _clear_bucket(cap_db)
+        _seed_bucket(cap_db, 1)
+        planned = _new_intent(cap_db, state="review_required", origin="planned")
+
+        assert _run(_resolve_retry(cap_db["engine"], cap_db, planned)) is True
+        assert _bucket_count(cap_db) == 1, "the retry returned nothing"
+        row = _intent(cap_db, planned)
+        assert row["state"] == "approved" and row["cap_consumed_on"] is None
+
+        assert _run(_flip(cap_db["engine"], cap_db, planned)) is FlipOutcome.PROCEED
+        assert _bucket_count(cap_db) == 1, "and its next flip took nothing"
+        assert str(_intent(cap_db, planned)["cap_consumed_on"]) == str(DAY)
