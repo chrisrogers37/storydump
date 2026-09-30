@@ -176,7 +176,7 @@ async def floating(
 
 
 _ACCOUNT = (
-    "SELECT a.workspace_id, a.id, a.handle,"
+    "SELECT a.workspace_id, a.id, a.handle, a.state,"
     " COALESCE(a.posts_per_day, w.posts_per_day) AS posts_per_day,"
     " COALESCE(a.tz, w.tz) AS tz, a.next_slot_at,"
     " (SELECT jsonb_build_object('local_date', d.local_date, 'count', d.count,"

@@ -8,9 +8,11 @@ is the database's to refuse. ``planned`` is the web's Queue read filtered to
 planned stories — no endpoint of its own.
 
 What is pinned: the route, the key and the body; an account named by handle
-resolves through the account view before anything is sent; each refusal in
-the verb's own words (a lock names what is in the way and whether
-``--override-locks`` gets past it; a time names the rule it broke); the
+resolves through the account view to the one LIVE account it names before
+anything is sent; each refusal in the verb's own words, chosen from the
+refusal's facts, never its prose (a lock names what is in the way and whether
+``--override-locks`` gets past it; a time names the rule it broke; a
+``not_found`` names what is missing) under the vocabulary's exit code; the
 answer's due time and its warnings; the read's filter and its closed states.
 """
 
@@ -19,16 +21,19 @@ from __future__ import annotations
 import pytest
 
 from src.services.target.vocabulary import (
+    AT_RULE_SENTENCES,
     EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_REFUSED,
     EXIT_USAGE,
     IN_THE_WAY,
+    MISSING_SENTENCES,
     NO_PUSH_BINDING,
     WARNING_SENTENCES,
 )
 from storydump_cli.commands import writes
 from tests.storydump_cli.test_main import one_envelope, run
+from tests.storydump_cli.test_reads import path, view
 from tests.storydump_cli.test_writes import (
     TWO,
     UUID,
@@ -43,8 +48,10 @@ from tests.storydump_cli.test_writes import (
 
 ITEM = "3c6e0b8a-9d7f-4a1e-b2c3-4d5e6f7a8b9c"
 ACCOUNT = "7b7b7b7b-7b7b-4b7b-8b7b-7b7b7b7b7b7b"
+OTHER_ACCOUNT = "8c8c8c8c-8c8c-4c8c-8c8c-8c8c8c8c8c8c"
 STORY = "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
 AT = "2026-10-12 18:30"
+HANDLE = "storydump.studio"
 
 SCHEDULED = {
     "outcome": "executed",
@@ -58,18 +65,9 @@ SCHEDULED = {
 }
 
 
-def account_view(ws: str, key: str, rows: list) -> dict:
-    return {
-        ("GET", f"/api/v1/ops/workspaces/{ws}/account/{key}"): (
-            200,
-            {
-                "v": 1,
-                "kind": "account",
-                "data": {"workspace_id": ws, "rows": rows},
-                "error": None,
-            },
-        )
-    }
+def accounts(*rows) -> dict:
+    """The account view's answer for HANDLE in WS."""
+    return {("GET", path("account", WS, HANDLE)): view("account", WS, list(rows))}
 
 
 def schedule(tmp_path, answer=(200, SCHEDULED), *extra, account=ACCOUNT, routes=None):
@@ -132,28 +130,49 @@ def test_schedule_sends_the_item_the_account_and_the_wall_time_under_a_fresh_key
     ) in result.output
 
 
-def test_a_handle_resolves_through_the_account_view_first(tmp_path):
+def test_a_handle_resolves_to_its_one_live_account(tmp_path):
+    """A removed or moved destination keeps its handle, so a handle can name
+    several rows; the live one is the account."""
     api, result = schedule(
         tmp_path,
-        account="storydump.studio",
-        routes=account_view(WS, "storydump.studio", [{"id": ACCOUNT, "handle": "x"}]),
+        account=HANDLE,
+        routes=accounts(
+            {"id": OTHER_ACCOUNT, "handle": HANDLE, "state": "disabled"},
+            {"id": ACCOUNT, "handle": HANDLE, "state": "reauth_required"},
+        ),
     )
     assert result.exit_code == EXIT_OK, result.output
     (request,) = posts(api)
     assert body_of(request)["ig_account_id"] == ACCOUNT
 
 
-def test_an_unknown_handle_is_not_found_and_nothing_is_sent(tmp_path):
+def test_a_handle_with_no_live_account_is_not_found_and_nothing_is_sent(tmp_path):
     api, result = schedule(
         tmp_path,
         (200, SCHEDULED),
         "--json",
-        account="nobody",
-        routes=account_view(WS, "nobody", []),
+        account=HANDLE,
+        routes=accounts({"id": ACCOUNT, "handle": HANDLE, "state": "moved"}),
     )
     assert result.exit_code == EXIT_NOT_FOUND
     error = one_envelope(result)["error"]
-    assert error["reason"] == "not_found" and "nobody" in error["detail"]
+    assert error["reason"] == "not_found" and HANDLE in error["detail"]
+    assert posts(api) == []
+
+
+def test_a_handle_naming_two_live_accounts_needs_the_id(tmp_path):
+    api, result = schedule(
+        tmp_path,
+        (200, SCHEDULED),
+        "--json",
+        account=HANDLE,
+        routes=accounts(
+            {"id": ACCOUNT, "handle": HANDLE, "state": "active"},
+            {"id": OTHER_ACCOUNT, "handle": HANDLE, "state": "active"},
+        ),
+    )
+    assert result.exit_code == EXIT_USAGE
+    assert "2 live accounts" in one_envelope(result)["error"]["detail"]
     assert posts(api) == []
 
 
@@ -171,14 +190,13 @@ def test_a_held_back_item_names_the_lock_and_the_override(tmp_path):
         {
             "reason": "locked",
             "detail": "command refused: locked — …",
-            "in_the_way": ["skip"],
-            "overridable": True,
+            "facts": {"in_the_way": ["skip"], "overridable": True},
         },
     )
     assert result.exit_code == EXIT_REFUSED
     assert error["reason"] == "locked"
-    assert IN_THE_WAY["skip"] in error["detail"]
-    assert "--override-locks" in error["fix"] and "anyway" in error["fix"]
+    assert error["detail"] == f"this item is held back: {IN_THE_WAY['skip']}"
+    assert error["fix"] == "run it again with --override-locks to schedule it anyway"
 
 
 def test_a_blocked_item_says_the_override_does_not_help(tmp_path):
@@ -187,13 +205,13 @@ def test_a_blocked_item_says_the_override_does_not_help(tmp_path):
         {
             "reason": "locked",
             "detail": "command refused: locked — …",
-            "in_the_way": ["reject", "skip"],
-            "overridable": False,
+            "facts": {"in_the_way": ["reject", "skip"], "overridable": False},
         },
     )
     assert result.exit_code == EXIT_REFUSED
-    assert IN_THE_WAY["reject"] in error["detail"]
-    assert IN_THE_WAY["skip"] in error["detail"]
+    assert error["detail"] == (
+        f"this item cannot be scheduled: {IN_THE_WAY['reject']}; {IN_THE_WAY['skip']}"
+    )
     assert "does not get past" in error["fix"]
 
 
@@ -210,36 +228,55 @@ def test_every_kind_in_the_way_has_the_clis_words():
     }
 
 
-@pytest.mark.parametrize(
-    "reason,status,code,words",
-    [
-        ("not_found", 404, EXIT_NOT_FOUND, "no such item"),
-        ("illegal_transition", 409, EXIT_REFUSED, "already waiting to post"),
-    ],
-)
-def test_the_other_refusals_speak_of_items_and_accounts(
-    tmp_path, reason, status, code, words
-):
+@pytest.mark.parametrize("missing", sorted(MISSING_SENTENCES))
+def test_a_not_found_names_what_is_missing(tmp_path, missing):
     result, error = refused(
-        tmp_path, {"reason": reason, "detail": "command refused: …"}, status
+        tmp_path,
+        {
+            "reason": "not_found",
+            "detail": "command refused: …",
+            "facts": {"missing": missing},
+        },
+        404,
     )
-    assert result.exit_code == code
-    assert error["reason"] == reason and words in error["detail"]
+    assert result.exit_code == EXIT_NOT_FOUND
+    assert error["reason"] == "not_found"
+    assert error["detail"] == MISSING_SENTENCES[missing]
+
+
+def test_an_item_already_waiting_says_so(tmp_path):
+    result, error = refused(
+        tmp_path, {"reason": "illegal_transition", "detail": "command refused: …"}
+    )
+    assert result.exit_code == EXIT_REFUSED
+    assert "already waiting to post" in error["detail"]
 
 
 @pytest.mark.parametrize("verb", ["schedule", "reschedule"])
-def test_a_refused_time_says_which_rule_it_broke(tmp_path, verb):
-    """The port's words name the rule — a skipped wall time, the past, the
-    horizon — and the CLI's shared sentence would say only "refused"."""
-    detail = (
-        "command refused: invalid_args — 2027-03-14 02:30:00 does not happen in"
-        " America/New_York: the clocks skip it"
-    )
+@pytest.mark.parametrize("rule", sorted(AT_RULE_SENTENCES))
+def test_a_refused_time_says_which_rule_it_broke(tmp_path, verb, rule):
+    """The rule comes from the refusal's facts, never its prose; the shared
+    sentence would say only that the arguments were refused."""
     result, error = refused(
-        tmp_path, {"reason": "invalid_args", "detail": detail}, 400, verb=verb
+        tmp_path,
+        {
+            "reason": "invalid_args",
+            "detail": "command refused: …",
+            "facts": {"at_rule": rule},
+        },
+        400,
+        verb=verb,
     )
     assert result.exit_code == EXIT_REFUSED
-    assert error["detail"] == detail and error["fix"] == writes.AT_FIX
+    assert error["detail"] == AT_RULE_SENTENCES[rule] and error["fix"] == writes.AT_FIX
+
+
+def test_a_refusal_with_no_rule_keeps_the_shared_words(tmp_path):
+    result, error = refused(
+        tmp_path, {"reason": "invalid_args", "detail": "command refused: …"}, 400
+    )
+    assert result.exit_code == EXIT_REFUSED
+    assert error["fix"] != writes.AT_FIX
 
 
 def test_the_answer_says_what_it_overrode_and_what_it_warns_of(tmp_path):
@@ -254,10 +291,6 @@ def test_the_answer_says_what_it_overrode_and_what_it_warns_of(tmp_path):
     assert result.exit_code == EXIT_OK, result.output
     assert "scheduled over: skip" in result.output
     assert WARNING_SENTENCES[NO_PUSH_BINDING] in result.output
-
-
-def test_every_warning_the_port_gives_has_the_clis_words():
-    assert set(WARNING_SENTENCES) == {NO_PUSH_BINDING}
 
 
 def test_each_run_is_a_new_attempt(tmp_path):
@@ -306,11 +339,6 @@ def test_a_story_that_can_no_longer_move_says_so(tmp_path):
     assert "still waiting for its time" in error["detail"]
 
 
-def test_the_verbs_map_to_the_ports_commands():
-    assert writes.COMMAND_OF["schedule"] == "schedule_item"
-    assert writes.COMMAND_OF["reschedule"] == "reschedule_item"
-
-
 # --- planned ----------------------------------------------------------------------
 
 ROW = {
@@ -318,7 +346,7 @@ ROW = {
     "state": "scheduled",
     "cancel_requested": False,
     "schedule_slot_at": "2026-10-12T22:30:00+00:00",
-    "account_handle": "storydump.studio",
+    "account_handle": HANDLE,
     "file_name": "sunset.jpg",
     "scheduled_by": "Chris",
     "origin": "planned",
@@ -340,7 +368,7 @@ def test_planned_is_the_queue_read_filtered_to_planned_stories(tmp_path):
     assert result.exit_code == EXIT_OK, result.output
     (request,) = [r for r in api.calls if r.url.path.endswith("/intents")]
     assert dict(request.url.params) == {"origin": "planned", "state": "scheduled"}
-    for cell in ("sunset.jpg", "storydump.studio", "Chris", "2026-10-12T22:30:00"):
+    for cell in ("sunset.jpg", HANDLE, "Chris", "2026-10-12T22:30:00"):
         assert cell in result.output
 
 

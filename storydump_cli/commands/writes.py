@@ -32,19 +32,23 @@ from typing import Any, Callable, Mapping, Optional
 import click
 
 from src.services.target.vocabulary import (
+    AT_RULE_SENTENCES,
     EXIT_NOT_FOUND,
-    EXIT_REFUSED,
     EXIT_USAGE,
     IDEMPOTENCY_KEY_MAX,
     IN_THE_WAY,
+    LIVE_ACCOUNT_STATES,
+    MISSING_SENTENCES,
     NOT_POSTED,
+    PLAN_HORIZON_DAYS,
     RESOLUTIONS,
     envelope,
+    exit_code_for,
 )
 from storydump_cli.client import ApiError, Client, Unreachable
 from storydump_cli.commands import as_uuid, begin, global_options, uuid_argument
 from storydump_cli.commands.auth import signed_in_client
-from storydump_cli.commands.reads import WORKSPACES_FIX, workspace_targets
+from storydump_cli.commands.reads import WORKSPACES_FIX, _unwrap, workspace_targets
 from storydump_cli.output import Failure, emit
 
 SOURCES_FIX = (
@@ -173,9 +177,10 @@ def _episode_of(client: Client, ws: str, intent_id: str) -> str:
     return str(intent.get("entered_state_at") or "")
 
 
-#: A verb's own words for a refusal whose shared sentence would be wrong
-#: for it; None leaves the refusal to the shared sentence.
-Refused = Callable[[ApiError], Optional[Failure]]
+#: A verb's own words for a refusal whose shared sentence would be wrong for
+#: it — ``(detail, fix)`` — or None, which leaves it to the shared sentence.
+#: The exit code stays the vocabulary's (`exit_code_for`), whichever words.
+Refused = Callable[[ApiError], Optional[tuple[str, str]]]
 #: Arguments only the workspace can resolve (a handle to an id).
 Resolve = Callable[[Client, str], dict[str, Any]]
 
@@ -203,9 +208,15 @@ def _write(
     try:
         answer = client.command(ws, command, args, idempotency_key=key)
     except ApiError as exc:
-        failure = refused(exc) if refused is not None else None
-        if failure is not None:
-            raise failure from None
+        words = refused(exc) if refused is not None else None
+        if words is not None:
+            detail, fix = words
+            raise Failure(
+                code=exit_code_for(exc.status, exc.reason),
+                reason=exc.reason or "refused",
+                detail=detail,
+                fix=fix,
+            ) from None
         raise
     outcome = answer.get("outcome") if isinstance(answer, dict) else None
     if not isinstance(outcome, str) or not outcome:
@@ -448,16 +459,11 @@ def sync(
     )
 
 
-def _sync_refused(exc: ApiError) -> Optional[Failure]:
+def _sync_refused(exc: ApiError) -> Optional[tuple[str, str]]:
     # the port's `not_found` names a media source here; the shared sentence
     # would say "story"
     if exc.reason == "not_found":
-        return Failure(
-            code=EXIT_NOT_FOUND,
-            reason="not_found",
-            detail="no such media source in this workspace",
-            fix=SOURCES_FIX,
-        )
+        return "no such media source in this workspace", SOURCES_FIX
     return None
 
 
@@ -469,93 +475,84 @@ AT_HELP = (
 )
 AT_FIX = (
     "give --at as 'YYYY-MM-DD HH:MM' in the account's zone, after now and"
-    " within 365 days"
+    f" within {PLAN_HORIZON_DAYS} days"
 )
-PLANNED_FIX = "storydump planned --workspace <id> lists what is coming"
 
 
-def _in_the_way(kinds: Any) -> str:
-    return "; ".join(
-        IN_THE_WAY.get(str(kind), str(kind))
-        for kind in (kinds if isinstance(kinds, list) else [])
-    )
-
-
-def _time_refused(exc: ApiError) -> Optional[Failure]:
-    """A time the port refused: its own words say which rule (a skipped
-    wall time, the past, the horizon, the shape)."""
-    if exc.reason == "invalid_args":
-        return Failure(
-            code=EXIT_REFUSED, reason="invalid_args", detail=exc.detail, fix=AT_FIX
-        )
+def _time_refused(exc: ApiError) -> Optional[tuple[str, str]]:
+    """A time the port refused, by the rule it broke (its `at_rule`)."""
+    rule = exc.facts.get("at_rule")
+    if exc.reason == "invalid_args" and rule in AT_RULE_SENTENCES:
+        return AT_RULE_SENTENCES[rule], AT_FIX
     return None
 
 
-def _schedule_refused(exc: ApiError) -> Optional[Failure]:
+def _schedule_refused(exc: ApiError) -> Optional[tuple[str, str]]:
     if exc.reason == "locked":
-        in_the_way = _in_the_way(exc.facts.get("in_the_way"))
-        if exc.facts.get("overridable") is True:
-            return Failure(
-                code=EXIT_REFUSED,
-                reason="locked",
-                detail=f"this item is held back: {in_the_way}",
-                fix="run it again with --override-locks to schedule it anyway",
-            )
-        return Failure(
-            code=EXIT_REFUSED,
-            reason="locked",
-            detail=f"this item cannot be scheduled: {in_the_way}",
-            fix="pick another item — --override-locks does not get past this",
+        in_the_way = "; ".join(
+            IN_THE_WAY.get(str(kind), str(kind))
+            for kind in exc.facts.get("in_the_way") or []
         )
-    if exc.reason == "not_found":
-        return Failure(
+        if exc.facts.get("overridable") is True:
+            return (
+                f"this item is held back: {in_the_way}",
+                "run it again with --override-locks to schedule it anyway",
+            )
+        return (
+            f"this item cannot be scheduled: {in_the_way}",
+            "pick another item — --override-locks does not get past this",
+        )
+    if exc.reason == "not_found" and exc.facts.get("missing") in MISSING_SENTENCES:
+        return (
+            MISSING_SENTENCES[exc.facts["missing"]],
+            "storydump account <handle> shows an account; an item's id is on the web",
+        )
+    if exc.reason == "illegal_transition":
+        return (
+            "that item is already waiting to post on that account",
+            "storydump planned --workspace <id> lists what is coming; cancel that"
+            " story first to plan the item again",
+        )
+    return _time_refused(exc)
+
+
+def _reschedule_refused(exc: ApiError) -> Optional[tuple[str, str]]:
+    if exc.reason == "illegal_transition":
+        return (
+            "only a planned story still waiting for its time can move",
+            "storydump story <story> shows where the story is",
+        )
+    return _time_refused(exc)
+
+
+def _account_id(client: Client, ws: str, key: str) -> str:
+    """The account by id as given, or by handle through the account view —
+    the one LIVE account the handle names. A handle is not unique (a removed
+    or moved destination keeps it), so two live matches need the id."""
+    account_id = as_uuid(key)
+    if account_id is not None:
+        return account_id
+    rows = _unwrap(client.ops_account(ws, key), ws)["rows"]
+    live = [
+        row
+        for row in rows
+        if isinstance(row, dict) and row.get("state") in LIVE_ACCOUNT_STATES
+    ]
+    if not live:
+        raise Failure(
             code=EXIT_NOT_FOUND,
             reason="not_found",
-            detail="no such item, or no live account by that id, in this workspace",
-            fix="storydump account <handle> shows an account; an item's id is on the web",
+            detail=f"no live account {key!r} in this workspace",
+            fix="storydump account <handle> finds one; its id works too",
         )
-    if exc.reason == "illegal_transition":
-        return Failure(
-            code=EXIT_REFUSED,
-            reason="illegal_transition",
-            detail="that item is already waiting to post on that account",
-            fix=f"{PLANNED_FIX}; cancel that story first to plan the item again",
+    if len(live) > 1:
+        raise Failure(
+            code=EXIT_USAGE,
+            reason="usage",
+            detail=f"{key!r} names {len(live)} live accounts — pass the account id",
+            fix="storydump account <handle> lists them with their ids",
         )
-    return _time_refused(exc)
-
-
-def _reschedule_refused(exc: ApiError) -> Optional[Failure]:
-    if exc.reason == "illegal_transition":
-        return Failure(
-            code=EXIT_REFUSED,
-            reason="illegal_transition",
-            detail="only a planned story still waiting for its time can move",
-            fix="storydump story <story> shows where the story is",
-        )
-    return _time_refused(exc)
-
-
-def _account_arg(key: str) -> Resolve:
-    """The account by id as given, or by handle through the account view."""
-
-    def resolve(client: Client, ws: str) -> dict[str, Any]:
-        account_id = as_uuid(key)
-        if account_id is None:
-            document = client.ops_account(ws, key)
-            data = document.get("data") if isinstance(document, dict) else None
-            rows = data.get("rows") if isinstance(data, dict) else None
-            found = rows[0] if isinstance(rows, list) and rows else None
-            if not isinstance(found, dict) or not found.get("id"):
-                raise Failure(
-                    code=EXIT_NOT_FOUND,
-                    reason="not_found",
-                    detail=f"no account {key!r} in this workspace",
-                    fix="storydump account <handle> finds one; its id works too",
-                )
-            account_id = str(found["id"])
-        return {"ig_account_id": account_id}
-
-    return resolve
+    return str(live[0]["id"])
 
 
 @click.command()
@@ -612,7 +609,7 @@ def schedule(
         idempotency_key=idempotency_key,
         args=args,
         key_for=_fresh_key("schedule"),
-        resolve=_account_arg(account),
+        resolve=lambda client, ws: {"ig_account_id": _account_id(client, ws, account)},
         refused=_schedule_refused,
     )
 

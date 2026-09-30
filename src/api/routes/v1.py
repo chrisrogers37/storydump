@@ -124,8 +124,8 @@ IDEMPOTENCY_HEADER = vocabulary.IDEMPOTENCY_HEADER
 IDEMPOTENCY_KEY_MAX = vocabulary.IDEMPOTENCY_KEY_MAX
 #: `01` H5: every list is bounded. The clamp is a Query constraint, so an
 #: out-of-range value is a 422 rather than silently narrowed.
-LIST_LIMIT_DEFAULT = 50
-LIST_LIMIT_MAX = 200
+LIST_LIMIT_DEFAULT = vocabulary.LIST_LIMIT_DEFAULT
+LIST_LIMIT_MAX = vocabulary.LIST_LIMIT_MAX
 
 
 # --- seams ---------------------------------------------------------------

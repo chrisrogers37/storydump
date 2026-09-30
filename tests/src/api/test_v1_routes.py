@@ -380,13 +380,14 @@ class TestCommands:
         resp = client.post(self.URL, json={"intent_id": INTENT}, headers=KEY)
         assert resp.status_code == status
         assert resp.json()["reason"] == reason
+        assert "facts" not in resp.json(), "a refusal with no facts carries no key"
 
-    def test_a_refusals_facts_ride_its_body_and_cannot_overwrite_it(
+    def test_a_refusals_facts_ride_its_body_under_their_own_key(
         self, client, signed_in, tenant, port
     ):
         """`locked` names what is in the way and whether an override gets past
         it, beside the reason — a front end acts on them without parsing the
-        prose — and a fact never replaces the reason or the detail."""
+        prose — under one key, so no fact can stand in for `reason`."""
         port["outcome"] = CommandRefused(
             "locked",
             "item x: skip",
@@ -397,8 +398,7 @@ class TestCommands:
         assert resp.json() == {
             "reason": "locked",
             "detail": "command refused: locked — item x: skip",
-            "in_the_way": ["skip"],
-            "overridable": True,
+            "facts": {"in_the_way": ["skip"], "overridable": True, "reason": "forged"},
         }
 
     def test_a_member_below_the_floor_is_403(self, client, signed_in, tenant, port):

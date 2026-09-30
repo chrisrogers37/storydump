@@ -790,31 +790,28 @@ async def cancel(session, command: Command) -> CommandResult:
 #: Postgres would read an offset on a `timestamp` and silently drop it.
 _LOCAL_AT = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?")
 
-#: How far ahead a story may be planned.
-PLAN_HORIZON_DAYS = 365
+#: The account read's predicate, one spelling with the serve and miss doors'
+#: (pinned against their bodies by the gate).
+_LIVE_ACCOUNT = (
+    "a.state IN (" + ", ".join(f"'{s}'" for s in vocabulary.LIVE_ACCOUNT_STATES) + ")"
+)
 
 
 #: The wall time :local_at in the zone :tz as an instant, NULL when the
-#: clocks skip it. Postgres reads a skipped wall time with the offset in
-#: force before the jump, and an ambiguous one with the offset after it (its
-#: second occurrence), so `e`, the reading with the offset in force a day
-#: earlier, is the other candidate. The answer is the earliest candidate
-#: that reads back as the wall time: a skipped time has none, and an
-#: ambiguous one resolves to its first occurrence. The zone is the
-#: database's reading, as the clock's (`fn_next_slot`) is.
+#: clocks skip it. Two readings are candidates: Postgres's own (a skipped
+#: time takes the offset before the jump, an ambiguous one the offset after
+#: it — its SECOND occurrence), and the reading with a day earlier's offset.
+#: The answer is the earliest candidate that reads back as the wall time: a
+#: skipped time has none, an ambiguous one is its first occurrence. The zone
+#: is the database's reading, as the clock's (`fn_next_slot`) is.
 _INSTANT = (
-    "SELECT CASE WHEN (r.c AT TIME ZONE r.z) = r.l"
-    "            THEN LEAST(r.c, CASE WHEN (r.e AT TIME ZONE r.z) = r.l THEN r.e END)"
-    "       END AS at,"
+    "SELECT min(v.at) FILTER (WHERE v.at AT TIME ZONE p.z = p.l) AS at,"
     "       now() AS now,"
     "       now() + make_interval(days => CAST(:horizon AS integer)) AS horizon"
-    "  FROM (SELECT q.l, q.z, q.c,"
-    "               (q.l AT TIME ZONE 'UTC')"
-    "                 - (((q.c - interval '1 day') AT TIME ZONE q.z)"
-    "                    - ((q.c - interval '1 day') AT TIME ZONE 'UTC')) AS e"
-    "          FROM (SELECT p.l, p.z, p.l AT TIME ZONE p.z AS c"
-    "                  FROM (SELECT CAST(CAST(:local_at AS text) AS timestamp) AS l,"
-    "                               CAST(:tz AS text) AS z) p) q) r"
+    "  FROM (SELECT CAST(CAST(:local_at AS text) AS timestamp) AS l,"
+    "               CAST(:tz AS text) AS z) p"
+    " CROSS JOIN LATERAL (VALUES (p.l AT TIME ZONE p.z),"
+    "        ((p.l - interval '1 day') AT TIME ZONE p.z + interval '24 hours')) v(at)"
 )
 
 
@@ -835,12 +832,15 @@ def _local_at(command: Command) -> str:
         raise CommandRefused(
             "invalid_args",
             "local_at is a date and a time with no offset: YYYY-MM-DD HH:MM",
+            facts={"at_rule": "shape"},
         )
     try:
         return datetime.fromisoformat(value).isoformat(sep=" ")
     except ValueError:
         raise CommandRefused(
-            "invalid_args", f"local_at {value!r} is not a date and time"
+            "invalid_args",
+            f"local_at {value!r} is not a date and time",
+            facts={"at_rule": "not_a_date"},
         ) from None
 
 
@@ -848,19 +848,30 @@ async def _planned_instant(session, *, local_at: str, tz: str) -> datetime:
     """When a planned story is due: *local_at* in *tz*, after now and within
     the horizon, both as the database's clock reads them."""
     found = await readers.row(
-        session, _INSTANT, local_at=local_at, tz=tz, horizon=PLAN_HORIZON_DAYS
+        session,
+        _INSTANT,
+        local_at=local_at,
+        tz=tz,
+        horizon=vocabulary.PLAN_HORIZON_DAYS,
     )
-    at = found["at"] if found else None
+    at = found["at"]
     if at is None:
         raise CommandRefused(
-            "invalid_args", f"{local_at} does not happen in {tz}: the clocks skip it"
+            "invalid_args",
+            f"{local_at} does not happen in {tz}: the clocks skip it",
+            facts={"at_rule": "skipped"},
         )
     if at <= found["now"]:
-        raise CommandRefused("invalid_args", f"{local_at} {tz} is not in the future")
+        raise CommandRefused(
+            "invalid_args",
+            f"{local_at} {tz} is not in the future",
+            facts={"at_rule": "past"},
+        )
     if at > found["horizon"]:
         raise CommandRefused(
             "invalid_args",
-            f"{local_at} {tz} is more than {PLAN_HORIZON_DAYS} days ahead",
+            f"{local_at} {tz} is more than {vocabulary.PLAN_HORIZON_DAYS} days ahead",
+            facts={"at_rule": "horizon"},
         )
     return at
 
@@ -911,12 +922,14 @@ async def schedule_item(session, command: Command) -> CommandResult:
         "SELECT a.provider_account_ref, COALESCE(a.tz, w.tz) AS eff_tz"
         "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
         " WHERE a.id = :acct AND a.workspace_id = :ws"
-        "   AND a.state IN ('active', 'reauth_required')",
+        f"   AND {_LIVE_ACCOUNT}",
         acct=account_id,
         ws=command.workspace_id,
     )
     if account is None:
-        raise CommandRefused("not_found", f"account {account_id}")
+        raise CommandRefused(
+            "not_found", f"account {account_id}", facts={"missing": "account"}
+        )
     item = await readers.row(
         session,
         "SELECT m.state,"
@@ -931,18 +944,19 @@ async def schedule_item(session, command: Command) -> CommandResult:
         ws=command.workspace_id,
     )
     if item is None:
-        raise CommandRefused("not_found", f"item {media_id}")
+        raise CommandRefused("not_found", f"item {media_id}", facts={"missing": "item"})
     tz = _tz(account)
     at = await _planned_instant(session, local_at=local_at, tz=tz)
     blockers = [] if item["state"] == "available" else [f"item_{item['state']}"]
     blockers += [k for k in item["locks"] if k in vocabulary.BLOCKING_LOCKS]
     warnings = [k for k in item["locks"] if k in vocabulary.WARNING_LOCKS]
     if blockers or (warnings and not override):
+        in_the_way = blockers + warnings
         raise CommandRefused(
             "locked",
-            f"item {media_id}: {', '.join(blockers + warnings)}"
+            f"item {media_id}: {', '.join(in_the_way)}"
             + ("" if blockers else " — override_locks schedules it anyway"),
-            facts={"in_the_way": blockers + warnings, "overridable": not blockers},
+            facts={"in_the_way": in_the_way, "overridable": not blockers},
         )
     try:
         born = await readers.row(
@@ -994,31 +1008,27 @@ async def schedule_item(session, command: Command) -> CommandResult:
 async def reschedule_item(session, command: Command) -> CommandResult:
     """A planned story's new time, in place (F4): the same row and id, so
     nothing else about it can change here — a different item or account is
-    a cancel and a new schedule. The guarded UPDATE decides; the row read
-    under its lock only explains a refusal."""
+    a cancel and a new schedule. The row is read under its lock, so that
+    read decides, as it does for every lever on a story."""
+    _id_arg(command, "intent_id")  # a malformed id is the caller's, not a 500
     intent = await _intent_row(session, command)
     local_at = _local_at(command)
     tz = _tz(intent)
     at = await _planned_instant(session, local_at=local_at, tz=tz)
-    moved = await readers.row(
-        session,
-        "UPDATE post_intents SET schedule_slot_at = :at"
-        " WHERE id = :id AND workspace_id = :ws AND origin = 'planned'"
-        "   AND state = 'scheduled' AND NOT cancel_requested"
-        " RETURNING id",
-        at=at,
-        id=str(intent["id"]),
-        ws=command.workspace_id,
-    )
-    if moved is None:
-        if intent["origin"] == "planned" and intent["state"] == "scheduled":
-            # Only the flag can have stopped it.
-            _refuse_if_cancelling(intent)
+    if intent["origin"] != "planned" or intent["state"] != "scheduled":
         raise CommandRefused(
             "illegal_transition",
             "only a planned story still waiting for its time moves"
             f" (this one is {intent['origin']}, {intent['state']})",
         )
+    _refuse_if_cancelling(intent)
+    await session.execute(
+        text(
+            "UPDATE post_intents SET schedule_slot_at = :at"
+            " WHERE id = :id AND workspace_id = :ws"
+        ),
+        {"at": at, "id": str(intent["id"]), "ws": command.workspace_id},
+    )
     await _audit_intent(
         session,
         intent,

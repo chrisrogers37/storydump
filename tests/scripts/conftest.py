@@ -1324,8 +1324,9 @@ async def ingress_engine(dsn):
         await engine.dispose()
 
 
-async def in_tenant(dsn, ws, user, fn):
-    """Run *fn(session)* in one committed unit of work as `svc_ingress`.
+async def in_tenant(dsn, ws, user, fn, *, channel="web"):
+    """Run *fn(session)* in one committed unit of work as `svc_ingress`, the
+    person *user* acting over *channel* (`web`, or `cli` for a token's write).
 
     The role is ASSERTED rather than assumed: a driver that quietly connected
     as the owner would bypass RLS, and every isolation claim built on it would
@@ -1335,7 +1336,7 @@ async def in_tenant(dsn, ws, user, fn):
     """
     async with ingress_engine(dsn) as engine:
         uow = unit_of_work(
-            engine, str(ws), actor_kind="user", actor_user_id=str(user), channel="web"
+            engine, str(ws), actor_kind="user", actor_user_id=str(user), channel=channel
         )
         async with uow.begin() as session:
             who = (await session.execute(text("SELECT current_user"))).scalar()

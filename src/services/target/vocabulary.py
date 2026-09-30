@@ -96,6 +96,14 @@ INTENT_STATES: tuple[str, ...] = (
 #: item, the account and the time (`schedule_item`).
 INTENT_ORIGINS: tuple[str, ...] = ("cadence", "planned")
 
+#: The `ig_accounts.state`s a story is served on (054 ``ck_iga_state`` less
+#: `disabled` and `moved`): a planned story is scheduled only on one of
+#: these, and served only while its account is still in one.
+LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required")
+
+#: How far ahead a story may be planned.
+PLAN_HORIZON_DAYS = 365
+
 #: `post_intents.last_error.class` on a planned story that ended unserved
 #: at its time (`prompts.sweep_planned_misses`); its `message` is the reason.
 PLANNED_MISSED = "planned_missed"
@@ -358,14 +366,31 @@ OUTCOME_SENTENCES: Mapping[str, str] = {
 #: blockers and warnings a `locked` refusal names — the item's own state,
 #: then the lock kinds.
 IN_THE_WAY: Mapping[str, str] = {
-    "item_removed": "it was removed from its folder",
-    "item_unsupported": "it cannot be posted as a story",
+    "item_removed": "it was removed from the library",
+    "item_unsupported": "Instagram cannot post it",
     "reject": "it was rejected",
     "unsupported": "it is marked as one that cannot be posted",
     "hold": "it is on hold",
     "seasonal": "it is out of season",
     "skip": "it was skipped recently",
     "recent": "it was posted on this account recently",
+}
+
+#: Why a planned story's time was refused (`invalid_args` with an `at_rule`
+#: fact), in the CLI's words.
+AT_RULE_SENTENCES: Mapping[str, str] = {
+    "shape": "give the time as YYYY-MM-DD HH:MM, with no offset",
+    "not_a_date": "that is not a real date and time",
+    "skipped": "that time does not happen in the account's zone: the clocks skip it",
+    "past": "that time is not in the future",
+    "horizon": f"that time is more than {PLAN_HORIZON_DAYS} days ahead",
+}
+
+#: What a `not_found` from `schedule_item` could not find (its `missing`
+#: fact), in the CLI's words.
+MISSING_SENTENCES: Mapping[str, str] = {
+    "account": "no live account by that id in this workspace",
+    "item": "no such item in this workspace",
 }
 
 #: A write's warnings, in the CLI's words (the answer carries the codes).
@@ -504,6 +529,10 @@ DEFAULT_WINDOW = "3h"
 #: the CLI's `--limit`); every other list is windowed by `since`.
 FLOATING_LIMIT = 100
 FLOATING_LIMIT_MAX = 500
+#: The Queue read's default page and its ceiling (`01` H5: every list is
+#: bounded) — the API's clamp and the CLI's `planned --limit`.
+LIST_LIMIT_DEFAULT = 50
+LIST_LIMIT_MAX = 200
 #: Two clocks judge one window — the CLI computes a span's start, the API
 #: measures it against its own now — so a start this close to a bound is
 #: clamped to the bound rather than refused (a `30d` from a client one second

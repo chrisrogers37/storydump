@@ -17,8 +17,12 @@ What each class pins, and why it is here rather than in a unit test:
   INSERT's to raise; nothing reads first.
 - **F7, the lock and item rule.** Four lock kinds and an item that cannot be
   posted refuse outright; `skip` and `recent` refuse until overridden, and the
-  override is audited.
+  override is audited. The kinds, and the account states a story is served
+  on, are one spelling with the serve and miss doors (pinned against them).
 - **Every write names the person** in `audit_events`.
+- **Each refusal says why in facts**, so a front end never parses its prose:
+  what is in the way (`locked`), what is missing (`not_found`), which time
+  rule broke (`invalid_args`).
 
 Every workspace here is its own, so a zone or a lock set by one test cannot
 reach another's answer.
@@ -27,27 +31,28 @@ reach another's answer.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-import psycopg2
 import pytest
 from sqlalchemy import text
 
 from src.services.target import commands  # noqa: I001 — the port first: the registry cycle
-from src.services.target import command_executors, unit_of_work, vocabulary, workspaces
+from src.services.target import command_executors, vocabulary, workspaces
 from src.services.target.commands import Command, CommandRefused
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    in_tenant,
     ingress_engine,
     reap_as_worker,
     replay_advertised_stream,
     set_test_passwords,
 )
+from tests.scripts.test_ops_views_gate import _sql as owner_sql
+from tests.scripts.test_planned_serve_gate import _owner_cursor, _worker
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -61,11 +66,7 @@ def world(admin_conn, owner_actor):
     try:
         owner = replay_advertised_stream(db, owner_actor, admin_conn)
         set_test_passwords(admin_conn)
-        yield {
-            "owner": owner,
-            "ingress": as_user(owner, "svc_ingress"),
-            "worker": as_user(owner, "svc_worker"),
-        }
+        yield {"owner": owner, "ingress": as_user(owner, "svc_ingress")}
     finally:
         gen.close()
 
@@ -73,21 +74,8 @@ def world(admin_conn, owner_actor):
 # --- seeding, as the migration actor ------------------------------------------
 
 
-@contextlib.contextmanager
-def _owner_cursor(world):
-    conn = psycopg2.connect(world["owner"])
-    try:
-        with conn, conn.cursor() as cur:
-            cur.execute("SET app.actor_kind = 'migration'")
-            yield cur
-    finally:
-        conn.close()
-
-
-def _sql(world, sql, params=None):
-    with _owner_cursor(world) as cur:
-        cur.execute(sql, params)
-        return cur.fetchall() if cur.description else None
+def _sql(world, sql, params=()):
+    return owner_sql(world["owner"], sql, params)
 
 
 def _workspace(world, name, *, tz="UTC", bound=True):
@@ -159,6 +147,21 @@ def _account(world, w, *, state="active", tz=None) -> str:
     return str(account)
 
 
+def _cadence(
+    world, w, *, item=None, hours=24, state="scheduled", last_error=None
+) -> str:
+    """A cadence story on *item* (a fresh one unless given), *hours* ahead."""
+    ((intent,),) = _sql(
+        world,
+        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, state, last_error)"
+        " VALUES (%s, %s, %s, 'r', 'manual', now() + make_interval(hours => %s),"
+        "         %s, %s) RETURNING id",
+        (w["ws"], w["account"], item or _item(world, w), hours, state, last_error),
+    )
+    return str(intent)
+
+
 def _lock(world, w, item, kind, *, account=None, expires_in=None):
     """A lock on *item*: workspace-wide unless *account* names one (only a
     `recent` lock may, `ck_locks_recent_scope`); permanent unless it
@@ -188,9 +191,7 @@ def _member(world, w, role="member") -> str:
 
 def _row(world, intent_id):
     ((row,),) = _sql(
-        world,
-        "SELECT to_jsonb(i) FROM post_intents i WHERE i.id = %s",
-        (intent_id,),
+        world, "SELECT to_jsonb(i) FROM post_intents i WHERE i.id = %s", (intent_id,)
     )
     return row
 
@@ -209,29 +210,26 @@ def _audit(world, intent_id, event):
 # --- the port, as the production role ------------------------------------------
 
 
-async def _execute(dsn, ws, user, kind, args):
-    async with ingress_engine(dsn) as engine:
-        uow = unit_of_work.unit_of_work(
-            engine, ws, actor_kind="user", actor_user_id=user, channel="cli"
-        )
-        async with uow.begin() as session:
-            who = (await session.execute(text("SELECT current_user"))).scalar()
-            assert who == "svc_ingress", who
-            return await commands.execute(
+def run(world, w, kind, *, user=None, **args):
+    """*kind* through the real registry, as a person over the CLI's channel."""
+    user = user or w["user"]
+    return asyncio.run(
+        in_tenant(
+            world["ingress"],
+            w["ws"],
+            user,
+            lambda session: commands.execute(
                 session,
                 Command(
                     kind=kind,
-                    workspace_id=ws,
+                    workspace_id=w["ws"],
                     actor_user_id=user,
                     channel="cli",
                     args=args,
                 ),
-            )
-
-
-def run(world, w, kind, *, user=None, **args):
-    return asyncio.run(
-        _execute(world["ingress"], w["ws"], user or w["user"], kind, args)
+            ),
+            channel="cli",
+        )
     )
 
 
@@ -253,21 +251,35 @@ def _instant(local_at, tz) -> datetime:
     return datetime.fromisoformat(local_at).replace(tzinfo=ZoneInfo(tz)).astimezone(UTC)
 
 
-def schedule(world, w, item, local_at, **extra):
-    return run(
-        world,
-        w,
-        "schedule_item",
-        ig_account_id=extra.pop("account", w["account"]),
-        media_item_id=item,
-        local_at=local_at,
+def _schedule_args(w, item, local_at, extra):
+    return {
+        "ig_account_id": extra.pop("account", w["account"]),
+        "media_item_id": item,
+        "local_at": local_at,
         **extra,
+    }
+
+
+def schedule(world, w, item, local_at, *, user=None, **extra):
+    return run(
+        world, w, "schedule_item", user=user, **_schedule_args(w, item, local_at, extra)
+    )
+
+
+def schedule_refused(world, w, item, local_at, **extra) -> CommandRefused:
+    return refusal(
+        world, w, "schedule_item", **_schedule_args(w, item, local_at, extra)
     )
 
 
 def _planned(world, w, days=2) -> str:
     """A planned story on a fresh item, *days* ahead: its id."""
     return schedule(world, w, _item(world, w), _local(days=days)).data["intent_id"]
+
+
+def _door(world, name) -> str:
+    ((body,),) = _sql(world, "SELECT prosrc FROM pg_proc WHERE proname = %s", (name,))
+    return body
 
 
 # --- the wall time --------------------------------------------------------------
@@ -281,7 +293,11 @@ def _reading(world, local_at, tz):
                     (
                         await conn.execute(
                             text(command_executors._INSTANT),
-                            {"local_at": local_at, "tz": tz, "horizon": 365},
+                            {
+                                "local_at": local_at,
+                                "tz": tz,
+                                "horizon": vocabulary.PLAN_HORIZON_DAYS,
+                            },
                         )
                     )
                     .mappings()
@@ -381,11 +397,11 @@ class TestScheduleItem:
         assert row["approval_mode"] == "manual"
         assert row["scheduled_by_user_id"] == w["user"]
         assert row["media_item_id"] == item and row["ig_account_id"] == w["account"]
-        (ref,) = _sql(
+        ((ref,),) = _sql(
             world,
             "SELECT provider_account_ref FROM ig_accounts WHERE id = %s",
             (w["account"],),
-        )[0]
+        )
         assert row["provider_account_ref"] == ref
 
     def test_the_audit_row_names_the_person(self, world):
@@ -431,15 +447,9 @@ class TestScheduleItem:
         tz, local_at, _ = _next_ambiguous_or_skipped("skipped")
         w = _workspace(world, "skipped", tz=tz)
         item = _item(world, w)
-        refused = refusal(
-            world,
-            w,
-            "schedule_item",
-            ig_account_id=w["account"],
-            media_item_id=item,
-            local_at=local_at,
-        )
-        assert refused.reason == "invalid_args" and "skip" in str(refused)
+        refused = schedule_refused(world, w, item, local_at)
+        assert refused.reason == "invalid_args"
+        assert refused.facts == {"at_rule": "skipped"}
         assert not _sql(
             world, "SELECT 1 FROM post_intents WHERE media_item_id = %s", (item,)
         )
@@ -448,41 +458,27 @@ class TestScheduleItem:
         """Postgres reads a `timestamp` and silently drops an offset, so one
         inside the window would schedule the wrong instant."""
         w = _workspace(world, "offset")
-        refused = refusal(
-            world,
-            w,
-            "schedule_item",
-            ig_account_id=w["account"],
-            media_item_id=_item(world, w),
-            local_at=_local(days=3) + "+02:00",
-        )
-        assert refused.reason == "invalid_args" and "offset" in str(refused)
+        refused = schedule_refused(world, w, _item(world, w), _local(days=3) + "+02:00")
+        assert refused.reason == "invalid_args"
+        assert refused.facts == {"at_rule": "shape"}
 
     @pytest.mark.parametrize(
-        "local_at",
+        "local_at, rule",
         [
-            "tomorrow at noon",
-            "2031-01-01",  # a date is not a time
-            "2031-01-01T12:00+02:00",  # an offset Postgres would silently drop
-            "2031-01-01 12:00Z",
-            "2031-13-01 12:00",  # the shape, not a date
-            "2031-02-30 12:00",
-            "",
+            ("tomorrow at noon", "shape"),
+            ("2031-01-01", "shape"),  # a date is not a time
+            ("2031-01-01T12:00+02:00", "shape"),  # an offset Postgres would drop
+            ("2031-01-01 12:00Z", "shape"),
+            ("2031-13-01 12:00", "not_a_date"),  # the shape, not a date
+            ("2031-02-30 12:00", "not_a_date"),
+            ("", None),  # no time at all: the arguments are refused by name
         ],
     )
-    def test_a_malformed_time_is_refused(self, world, local_at):
+    def test_a_malformed_time_is_refused(self, world, local_at, rule):
         w = _workspace(world, "malformed")
-        assert (
-            refusal(
-                world,
-                w,
-                "schedule_item",
-                ig_account_id=w["account"],
-                media_item_id=_item(world, w),
-                local_at=local_at,
-            ).reason
-            == "invalid_args"
-        )
+        refused = schedule_refused(world, w, _item(world, w), local_at)
+        assert refused.reason == "invalid_args"
+        assert refused.facts == ({"at_rule": rule} if rule else {})
 
     def test_the_past_and_now_are_refused_and_the_horizon_holds(self, world):
         w = _workspace(world, "window")
@@ -490,27 +486,15 @@ class TestScheduleItem:
             _local(days=-1),
             datetime.now(UTC).strftime("%Y-%m-%d %H:%M"),  # this minute: gone
         ):
-            refused = refusal(
-                world,
-                w,
-                "schedule_item",
-                ig_account_id=w["account"],
-                media_item_id=_item(world, w),
-                local_at=local_at,
-            )
-            assert refused.reason == "invalid_args" and "future" in str(refused)
-        refused = refusal(
-            world,
-            w,
-            "schedule_item",
-            ig_account_id=w["account"],
-            media_item_id=_item(world, w),
-            local_at=_local(days=366),
-        )
-        assert refused.reason == "invalid_args" and "365 days" in str(refused)
-        assert (
-            schedule(world, w, _item(world, w), _local(days=364)).outcome == "executed"
-        )
+            refused = schedule_refused(world, w, _item(world, w), local_at)
+            assert refused.reason == "invalid_args"
+            assert refused.facts == {"at_rule": "past"}
+        horizon = vocabulary.PLAN_HORIZON_DAYS
+        refused = schedule_refused(world, w, _item(world, w), _local(days=horizon + 1))
+        assert refused.reason == "invalid_args"
+        assert refused.facts == {"at_rule": "horizon"}
+        out = schedule(world, w, _item(world, w), _local(days=horizon - 1))
+        assert out.outcome == "executed"
 
     def test_ids_must_be_ids(self, world):
         w = _workspace(world, "ids")
@@ -523,18 +507,10 @@ class TestScheduleItem:
                 refusal(world, w, "schedule_item", local_at=_local(), **args).reason
                 == "invalid_args"
             )
-        assert (
-            refusal(
-                world,
-                w,
-                "schedule_item",
-                ig_account_id=w["account"],
-                media_item_id=_item(world, w),
-                local_at=_local(),
-                override_locks="yes",
-            ).reason
-            == "invalid_args"
+        refused = schedule_refused(
+            world, w, _item(world, w), _local(), override_locks="yes"
         )
+        assert refused.reason == "invalid_args"
 
     def test_only_a_live_account_of_this_workspace_is_found(self, world):
         w = _workspace(world, "accounts")
@@ -546,17 +522,9 @@ class TestScheduleItem:
             other["account"],  # another workspace's
             str(uuid.uuid4()),
         ):
-            assert (
-                refusal(
-                    world,
-                    w,
-                    "schedule_item",
-                    ig_account_id=account,
-                    media_item_id=item,
-                    local_at=_local(),
-                ).reason
-                == "not_found"
-            )
+            refused = schedule_refused(world, w, item, _local(), account=account)
+            assert refused.reason == "not_found"
+            assert refused.facts == {"missing": "account"}
         waiting = _account(world, w, state="reauth_required")
         assert schedule(world, w, item, _local(), account=waiting).outcome == "executed"
 
@@ -564,35 +532,20 @@ class TestScheduleItem:
         w = _workspace(world, "items")
         other = _workspace(world, "items-other")
         for item in (_item(world, other), str(uuid.uuid4())):
-            assert (
-                refusal(
-                    world,
-                    w,
-                    "schedule_item",
-                    ig_account_id=w["account"],
-                    media_item_id=item,
-                    local_at=_local(),
-                ).reason
-                == "not_found"
-            )
+            refused = schedule_refused(world, w, item, _local())
+            assert refused.reason == "not_found"
+            assert refused.facts == {"missing": "item"}
 
     def test_the_same_item_waiting_on_the_account_is_the_databases_refusal(self, world):
         w = _workspace(world, "twice")
         item = _item(world, w)
         first = schedule(world, w, item, _local(days=1))
-        refused = refusal(
-            world,
-            w,
-            "schedule_item",
-            ig_account_id=w["account"],
-            media_item_id=item,
-            local_at=_local(days=2),
-        )
+        refused = schedule_refused(world, w, item, _local(days=2))
         assert refused.reason == "illegal_transition"
-        assert _row(world, first.data["intent_id"])["schedule_slot_at"] is not None
-        (count,) = _sql(
+        assert _row(world, first.data["intent_id"])["state"] == "scheduled"
+        ((count,),) = _sql(
             world, "SELECT count(*) FROM post_intents WHERE media_item_id = %s", (item,)
-        )[0]
+        )
         assert count == 1
         # the same item on ANOTHER account is another story
         second = _account(world, w)
@@ -604,30 +557,14 @@ class TestScheduleItem:
     def test_a_cadence_story_waiting_with_the_item_refuses_it_too(self, world):
         w = _workspace(world, "cadence")
         item = _item(world, w)
-        _sql(
-            world,
-            "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-            " provider_account_ref, approval_mode, schedule_slot_at, state)"
-            " VALUES (%s, %s, %s, 'r', 'manual', now() + interval '1 hour',"
-            "         'scheduled')",
-            (w["ws"], w["account"], item),
-        )
-        assert (
-            refusal(
-                world,
-                w,
-                "schedule_item",
-                ig_account_id=w["account"],
-                media_item_id=item,
-                local_at=_local(),
-            ).reason
-            == "illegal_transition"
-        )
+        _cadence(world, w, item=item, hours=1)
+        assert schedule_refused(world, w, item, _local()).reason == "illegal_transition"
 
     def test_no_bound_chat_is_said_not_refused(self, world):
         w = _workspace(world, "unbound", bound=False)
         out = schedule(world, w, _item(world, w), _local())
-        assert out.outcome == "executed" and out.data["warnings"] == ["no_push_binding"]
+        assert out.outcome == "executed"
+        assert out.data["warnings"] == [vocabulary.NO_PUSH_BINDING]
 
 
 class TestTheLockAndItemRule:
@@ -638,14 +575,8 @@ class TestTheLockAndItemRule:
         w = _workspace(world, f"item-{state}")
         item = _item(world, w, state=state)
         for override in (False, True):
-            refused = refusal(
-                world,
-                w,
-                "schedule_item",
-                ig_account_id=w["account"],
-                media_item_id=item,
-                local_at=_local(),
-                override_locks=override,
+            refused = schedule_refused(
+                world, w, item, _local(), override_locks=override
             )
             assert refused.reason == "locked"
             assert refused.facts == {
@@ -659,14 +590,8 @@ class TestTheLockAndItemRule:
         item = _item(world, w)
         _lock(world, w, item, kind)
         for override in (False, True):
-            refused = refusal(
-                world,
-                w,
-                "schedule_item",
-                ig_account_id=w["account"],
-                media_item_id=item,
-                local_at=_local(),
-                override_locks=override,
+            refused = schedule_refused(
+                world, w, item, _local(), override_locks=override
             )
             assert refused.reason == "locked"
             assert refused.facts == {"in_the_way": [kind], "overridable": False}
@@ -678,14 +603,7 @@ class TestTheLockAndItemRule:
         w = _workspace(world, f"warn-{kind}")
         item = _item(world, w)
         _lock(world, w, item, kind, account=w["account"] if kind == "recent" else None)
-        refused = refusal(
-            world,
-            w,
-            "schedule_item",
-            ig_account_id=w["account"],
-            media_item_id=item,
-            local_at=_local(),
-        )
+        refused = schedule_refused(world, w, item, _local())
         assert refused.reason == "locked"
         assert refused.facts == {"in_the_way": [kind], "overridable": True}
         out = schedule(world, w, item, _local(), override_locks=True)
@@ -698,15 +616,7 @@ class TestTheLockAndItemRule:
         item = _item(world, w)
         _lock(world, w, item, "skip")
         _lock(world, w, item, "reject")
-        refused = refusal(
-            world,
-            w,
-            "schedule_item",
-            ig_account_id=w["account"],
-            media_item_id=item,
-            local_at=_local(),
-            override_locks=True,
-        )
+        refused = schedule_refused(world, w, item, _local(), override_locks=True)
         # the blocker first, then what an override would have got past
         assert refused.facts == {"in_the_way": ["reject", "skip"], "overridable": False}
 
@@ -723,22 +633,25 @@ class TestTheLockAndItemRule:
         _lock(world, w, _item(world, w), "reject")
         assert schedule(world, w, _item(world, w), _local()).outcome == "executed"
 
-    def test_the_two_sets_are_the_lock_kinds_and_the_serve_doors_blockers(self, world):
-        """A new lock kind must be filed as a blocker or a warning, and the
-        blockers are the kinds that turn a due planned story into a miss."""
+    def test_the_rule_is_one_spelling_with_the_serve_and_miss_doors(self, world):
+        """A new lock kind must be filed as a blocker or a warning; the
+        blockers, the postable item and the live account states are the ones
+        that decide, at the story's time, whether it is served or missed."""
         ((definition,),) = _sql(
             world,
             "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
             " WHERE conname = 'ck_locks_kind'",
         )
-        kinds = {k for k in definition.split("'")[1::2]}
+        kinds = set(definition.split("'")[1::2])
         assert kinds == set(vocabulary.BLOCKING_LOCKS) | set(vocabulary.WARNING_LOCKS)
+        blockers = "(" + ", ".join(f"'{k}'" for k in vocabulary.BLOCKING_LOCKS) + ")"
         for door in ("fn_prompts_due", "fn_planned_misses"):
-            ((body,),) = _sql(
-                world, "SELECT prosrc FROM pg_proc WHERE proname = %s", (door,)
-            )
-            listed = "(" + ", ".join(f"'{k}'" for k in vocabulary.BLOCKING_LOCKS) + ")"
-            assert f"l.kind IN {listed}" in body, door
+            assert f"l.kind IN {blockers}" in _door(world, door), door
+        # the serve door's allowlist is the schedule's; the miss door writes
+        # the same rule as its complement, one reason per CASE branch
+        serve = _door(world, "fn_prompts_due")
+        assert command_executors._LIVE_ACCOUNT in serve
+        assert "m.state = 'available'" in serve
 
 
 class TestRescheduleItem:
@@ -760,6 +673,9 @@ class TestRescheduleItem:
         assert datetime.fromisoformat(out.data["schedule_slot_at"]) == _instant(
             local_at, "UTC"
         )
+        assert datetime.fromisoformat(
+            out.data["previous_slot_at"]
+        ) == datetime.fromisoformat(before)
         row = _row(world, intent)
         assert row["state"] == "scheduled"
         assert datetime.fromisoformat(row["schedule_slot_at"]) == _instant(
@@ -788,27 +704,18 @@ class TestRescheduleItem:
             (intent,),
         )
         before = _row(world, intent)["schedule_slot_at"]
-        assert (
-            refusal(
-                world, w, "reschedule_item", intent_id=intent, local_at=_local(days=3)
-            ).reason
-            == "illegal_transition"
+        refused = refusal(
+            world, w, "reschedule_item", intent_id=intent, local_at=_local(days=3)
         )
+        assert refused.reason == "illegal_transition"
         assert _row(world, intent)["schedule_slot_at"] == before
         assert not _audit(world, intent, "rescheduled")
 
     def test_a_cadence_story_does_not_move(self, world):
         w = _workspace(world, "cadence-move")
-        ((intent,),) = _sql(
-            world,
-            "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-            " provider_account_ref, approval_mode, schedule_slot_at, state)"
-            " VALUES (%s, %s, %s, 'r', 'manual', now() + interval '1 day',"
-            "         'scheduled') RETURNING id",
-            (w["ws"], w["account"], _item(world, w)),
-        )
+        intent = _cadence(world, w)
         refused = refusal(
-            world, w, "reschedule_item", intent_id=str(intent), local_at=_local(days=3)
+            world, w, "reschedule_item", intent_id=intent, local_at=_local(days=3)
         )
         assert refused.reason == "illegal_transition" and "cadence" in str(refused)
 
@@ -816,53 +723,51 @@ class TestRescheduleItem:
         w = _workspace(world, "flagged")
         intent = _planned(world, w)
         run(world, w, "cancel", intent_id=intent)
-        assert (
-            refusal(
-                world, w, "reschedule_item", intent_id=intent, local_at=_local(days=3)
-            ).reason
-            == "cancelling"
+        refused = refusal(
+            world, w, "reschedule_item", intent_id=intent, local_at=_local(days=3)
         )
+        assert refused.reason == "cancelling"
 
     def test_the_time_rules_are_schedules(self, world):
         w = _workspace(world, "move-rules")
         intent = _planned(world, w)
-        for local_at in (_local(days=-1), _local(days=366), "2031-01-01T12:00+02:00"):
-            assert (
-                refusal(
-                    world, w, "reschedule_item", intent_id=intent, local_at=local_at
-                ).reason
-                == "invalid_args"
+        horizon = vocabulary.PLAN_HORIZON_DAYS
+        for local_at, rule in (
+            (_local(days=-1), "past"),
+            (_local(days=horizon + 1), "horizon"),
+            ("2031-01-01T12:00+02:00", "shape"),
+        ):
+            refused = refusal(
+                world, w, "reschedule_item", intent_id=intent, local_at=local_at
             )
+            assert refused.reason == "invalid_args"
+            assert refused.facts == {"at_rule": rule}
 
-    def test_another_workspaces_story_is_not_found(self, world):
+    def test_a_malformed_or_foreign_story_id(self, world):
         w = _workspace(world, "move-mine")
         other = _workspace(world, "move-theirs")
         theirs = _planned(world, other)
         before = _row(world, theirs)["schedule_slot_at"]
-        assert (
-            refusal(
-                world, w, "reschedule_item", intent_id=theirs, local_at=_local(days=3)
-            ).reason
-            == "not_found"
+        refused = refusal(
+            world, w, "reschedule_item", intent_id=theirs, local_at=_local(days=3)
         )
+        assert refused.reason == "not_found"
         assert _row(world, theirs)["schedule_slot_at"] == before
+        # a string that is not an id is refused by name, not by a failed cast
+        refused = refusal(
+            world, w, "reschedule_item", intent_id="not-an-id", local_at=_local(days=3)
+        )
+        assert refused.reason == "invalid_args"
 
 
 class TestCancel:
     def test_every_cancel_leaves_an_audit_row_naming_the_person(self, world):
         """Cadence as much as planned: the flag was never audited (G8)."""
         w = _workspace(world, "cancel-audit")
-        ((cadence,),) = _sql(
-            world,
-            "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-            " provider_account_ref, approval_mode, schedule_slot_at, state)"
-            " VALUES (%s, %s, %s, 'r', 'manual', now(), 'awaiting_approval')"
-            " RETURNING id",
-            (w["ws"], w["account"], _item(world, w)),
-        )
+        cadence = _cadence(world, w, hours=0, state="awaiting_approval")
         member = _member(world, w)
         for intent, state in (
-            (str(cadence), "awaiting_approval"),
+            (cadence, "awaiting_approval"),
             (_planned(world, w), "scheduled"),
         ):
             out = run(world, w, "cancel", user=member, intent_id=intent)
@@ -897,19 +802,13 @@ class TestCancel:
                 .all()
             )
 
-        async def serve_door():
-            async with ingress_engine(world["worker"]) as engine:
-                sessions = unit_of_work.make_session_for(engine)
-                async with sessions({}) as session:
-                    return await due(session)
-
-        assert uuid.UUID(intent) not in asyncio.run(serve_door())
+        assert uuid.UUID(intent) not in _worker(world, due)
         asyncio.run(reap_as_worker(world["owner"]))
         assert _row(world, intent)["state"] == "cancelled"
         # and the item is free for that account again
-        (item,) = _sql(
+        ((item,),) = _sql(
             world, "SELECT media_item_id FROM post_intents WHERE id = %s", (intent,)
-        )[0]
+        )
         assert schedule(world, w, str(item), _local(days=3)).outcome == "executed"
 
 
@@ -917,15 +816,7 @@ class TestFloors:
     def test_a_member_schedules_and_moves(self, world):
         w = _workspace(world, "floors")
         member = _member(world, w)
-        out = run(
-            world,
-            w,
-            "schedule_item",
-            user=member,
-            ig_account_id=w["account"],
-            media_item_id=_item(world, w),
-            local_at=_local(),
-        )
+        out = schedule(world, w, _item(world, w), _local(), user=member)
         assert _row(world, out.data["intent_id"])["scheduled_by_user_id"] == member
         run(
             world,
@@ -942,48 +833,22 @@ class TestFloors:
         w = _workspace(world, "floors-stranger")
         stranger = _workspace(world, "floors-elsewhere")["user"]
         with pytest.raises(TenantResolutionError) as err:
-            run(
-                world,
-                w,
-                "schedule_item",
-                user=stranger,
-                ig_account_id=w["account"],
-                media_item_id=_item(world, w),
-                local_at=_local(),
-            )
+            schedule(world, w, _item(world, w), _local(), user=stranger)
         assert err.value.reason == "not_a_member"
 
 
 def _read(world, w, **kw):
     """The Queue read of *w*, as the web's route runs it."""
-
-    async def go():
-        async with ingress_engine(world["ingress"]) as engine:
-            uow = unit_of_work.unit_of_work(
-                engine,
-                w["ws"],
-                actor_kind="user",
-                actor_user_id=w["user"],
-                channel="web",
-            )
-            async with uow.begin() as session:
-                return await workspaces.list_intents(
-                    session, workspace_id=w["ws"], **kw
-                )
-
-    return asyncio.run(go())
-
-
-def _cadence(world, w, *, hours=24, state="scheduled", last_error=None) -> str:
-    ((intent,),) = _sql(
-        world,
-        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-        " provider_account_ref, approval_mode, schedule_slot_at, state, last_error)"
-        " VALUES (%s, %s, %s, 'r', 'manual', now() + make_interval(hours => %s),"
-        "         %s, %s) RETURNING id",
-        (w["ws"], w["account"], _item(world, w), hours, state, last_error),
+    return asyncio.run(
+        in_tenant(
+            world["ingress"],
+            w["ws"],
+            w["user"],
+            lambda session: workspaces.list_intents(
+                session, workspace_id=w["ws"], **kw
+            ),
+        )
     )
-    return str(intent)
 
 
 class TestTheQueueRead:
@@ -1014,15 +879,7 @@ class TestTheQueueRead:
                 " display_name) VALUES (%s, %s, %s, %s)",
                 (member, provider, f"{provider}-{uuid.uuid4().hex[:6]}", name),
             )
-        run(
-            world,
-            w,
-            "schedule_item",
-            user=member,
-            ig_account_id=w["account"],
-            media_item_id=_item(world, w),
-            local_at=_local(),
-        )
+        schedule(world, w, _item(world, w), _local(), user=member)
         (row,) = _read(world, w, origin="planned")
         assert row["scheduled_by"] == "Mo"
 
@@ -1035,15 +892,7 @@ class TestTheQueueRead:
             " VALUES (%s, 'google', %s, NULL)",
             (member, f"someone-{uuid.uuid4().hex[:6]}@example.com"),
         )
-        run(
-            world,
-            w,
-            "schedule_item",
-            user=member,
-            ig_account_id=w["account"],
-            media_item_id=_item(world, w),
-            local_at=_local(),
-        )
+        schedule(world, w, _item(world, w), _local(), user=member)
         (row,) = _read(world, w, origin="planned")
         assert row["scheduled_by"] == "a teammate"
 
@@ -1058,16 +907,16 @@ class TestTheQueueRead:
     def test_a_missed_planned_story_says_why_and_nothing_else_does(self, world):
         w = _workspace(world, "queue-misses")
         _cadence(world, w, hours=-3, state="expired")
-        failed = json.dumps(
-            {"v": 1, "class": "provider", "message": "a secret-free error"}
-        )
+        failed = json.dumps({"v": 1, "class": "provider", "message": "an error"})
         _cadence(world, w, hours=-2, state="failed", last_error=failed)
         missed = _planned(world, w)
         _sql(
             world,
             "UPDATE post_intents SET state = 'expired', last_error = %s WHERE id = %s",
             (
-                json.dumps({"v": 1, "class": "planned_missed", "message": "late"}),
+                json.dumps(
+                    {"v": 1, "class": vocabulary.PLANNED_MISSED, "message": "late"}
+                ),
                 missed,
             ),
         )

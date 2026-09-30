@@ -196,7 +196,8 @@ class CommandRefused(StorydumpError):
 
     *facts* are what a front end needs to act on the refusal without parsing
     its prose — `locked` names what is in the way and whether an override
-    would get past it. They ride the refusal's body beside ``reason``."""
+    would get past it. They ride the refusal's body under ``facts``, beside
+    ``reason``."""
 
     def __init__(
         self,

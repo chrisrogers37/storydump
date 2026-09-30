@@ -30,6 +30,8 @@ from src.services.target.vocabulary import (
     DEFAULT_WINDOW,
     EXIT_NOT_FOUND,
     INTENT_STATES,
+    LIST_LIMIT_DEFAULT,
+    LIST_LIMIT_MAX,
     envelope,
     window_start,
 )
@@ -455,10 +457,11 @@ def _intent_states(
     return wanted
 
 
-def _as_view(answer: Any, workspace_id: str) -> dict[str, Any]:
+def _as_view(answer: Any) -> dict[str, Any]:
     """The Queue read's answer in the views' envelope, so it renders as one."""
-    rows = answer.get("intents") if isinstance(answer, dict) else None
-    return {"data": {"workspace_id": workspace_id, "rows": rows}}
+    return {
+        "data": {"rows": answer.get("intents") if isinstance(answer, dict) else None}
+    }
 
 
 @click.command()
@@ -482,10 +485,13 @@ def _as_view(answer: Any, workspace_id: str) -> dict[str, Any]:
 )
 @click.option(
     "--limit",
-    type=click.IntRange(1, 200),
+    type=click.IntRange(1, LIST_LIMIT_MAX),
     default=None,
     metavar="N",
-    help="At most N stories per workspace (default 50, at most 200).",
+    help=(
+        f"At most N stories per workspace (default {LIST_LIMIT_DEFAULT},"
+        f" at most {LIST_LIMIT_MAX})."
+    ),
 )
 @click.pass_context
 def planned(
@@ -506,7 +512,7 @@ def planned(
         ctx,
         "planned",
         lambda client, ws: _as_view(
-            client.intents(ws, origin="planned", states=states, limit=limit), ws
+            client.intents(ws, origin="planned", states=states, limit=limit)
         ),
         workspace=workspace,
         watch_mode=False,

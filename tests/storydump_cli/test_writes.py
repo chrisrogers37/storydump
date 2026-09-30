@@ -247,7 +247,7 @@ def test_sync_of_an_unknown_source_says_source_not_story(tmp_path):
     api = write_api(
         {
             route(WS, "sync_now"): (
-                409,
+                404,  # the port's `not_found` is a 404 (`app._COMMAND_STATUS`)
                 {"reason": "not_found", "detail": "media source x"},
             )
         }

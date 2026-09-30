@@ -152,12 +152,10 @@ class Client:
             reason = None
         if status >= 500:
             raise Unreachable(status, reason, detail)
-        facts = (
-            {k: v for k, v in body.items() if k not in ("detail", "reason")}
-            if isinstance(body, dict)
-            else {}
+        facts = body.get("facts") if isinstance(body, dict) else None
+        raise ApiError(
+            status, reason, detail, facts if isinstance(facts, dict) else None
         )
-        raise ApiError(status, reason, detail, facts)
 
     def principal(self) -> dict[str, Any]:
         return self._request("GET", "/me/principal")
