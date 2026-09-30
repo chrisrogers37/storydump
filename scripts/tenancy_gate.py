@@ -342,8 +342,12 @@ def expected_tenancy(statements) -> dict:
         # naming a table this prefix has not created is understood perfectly
         # well — it simply has nothing to attach to, and inventing a phantom
         # entry for it would diverge from the catalog.
+        # Bounded at the far end like ADD COLUMN and the constraint edits below
+        # (#1412): the match anchors only the start, so `ENABLE ROW LEVEL
+        # SECURITY, DROP COLUMN workspace_id` read as an enable. A top-level
+        # comma is a second action and falls through to the refusal.
         m = re.match(r"ALTER TABLE (?:public\.)?(\w+) ENABLE ROW LEVEL SECURITY", stmt)
-        if m:
+        if m and not _top_level_comma(stmt):
             if m.group(1) in sig:
                 sig[m.group(1)]["rls_enabled"] = True
             continue

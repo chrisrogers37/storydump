@@ -640,6 +640,41 @@ class TestConstraintEditsAreBoundedTheSameWay:
         assert with_edit == without
 
 
+class TestTheRlsEnableIsBoundedTheSameWay:
+    """#1412: the ENABLE ROW LEVEL SECURITY branch matched its prefix only, so
+    a second action after a top-level comma rode its `continue` — the tenant
+    key dropped behind an RLS enable. It is bounded by the same
+    `_top_level_comma` the ADD COLUMN and constraint branches use; the
+    admitted forms are the control that proves the branch still sets the bit.
+    """
+
+    BASE = "CREATE TABLE t ( id uuid, workspace_id uuid )"
+
+    ADMITTED = {
+        "enable": "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+        "enable_schema_qualified": "ALTER TABLE public.t ENABLE ROW LEVEL SECURITY",
+    }
+    REFUSED = {
+        # The issue's statement, verbatim.
+        "compound_drop_column": (
+            "ALTER TABLE t ENABLE ROW LEVEL SECURITY, DROP COLUMN workspace_id"
+        ),
+        # A second action that moves a fact the derivation never records.
+        "compound_force_rls": (
+            "ALTER TABLE t ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY"
+        ),
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADMITTED))
+    def test_a_single_enable_is_admitted_and_sets_the_bit(self, name):
+        assert expected_tenancy([self.BASE, self.ADMITTED[name]])["t"]["rls_enabled"]
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_a_second_action_after_the_enable_is_refused(self, name):
+        with pytest.raises(AssertionError):
+            expected_tenancy([self.BASE, self.REFUSED[name]])
+
+
 class TestTheCompoundGuardIsBoundedByQuoting:
     """Parenthesis depth is itself a scope claim, and quoting bounds it: a
     paren or comma inside a string literal or a quoted identifier is text, not
