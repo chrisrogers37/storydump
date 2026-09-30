@@ -19,11 +19,10 @@ _ISO_TIMESTAMP = re.compile(
 def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
     """Return ``dt`` as a timezone-aware datetime, assuming UTC if naive.
 
-    Several DB columns (notably ``api_tokens.expires_at`` and
-    ``chat_settings.last_post_sent_at``) are declared as naive ``DateTime``
-    but written with the convention "values are UTC". Comparing those to
-    ``datetime.now(timezone.utc)`` raises ``TypeError``; this helper
-    consolidates the coercion.
+    A provider timestamp can arrive without an offset under the convention
+    "values are UTC" — the asset ``created_at`` the transit sweep reads is
+    one. Comparing a naive value to ``datetime.now(timezone.utc)`` raises
+    ``TypeError``; this helper consolidates the coercion.
 
     Returns ``None`` unchanged. Already-aware datetimes pass through
     untouched (no unnecessary allocation) — including non-UTC offsets, which

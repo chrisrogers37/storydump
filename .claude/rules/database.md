@@ -12,9 +12,10 @@ in `src/models/target/`. The legacy tier was retired in the tear-out (#1216,
 September 2026); its data survives only as the sixteen
 `archive.<table>_pre_cutover_20260917` snapshots (078); the `legacy` schema
 itself was dropped by 079 in the owner's window on 2026-09-19 and 080 stood the
-window down (`documentation/operations/legacy-window-close.md`) — production's
-schemas are `archive`, `public` and `runner`. Nothing under `src/` reads
-either.
+window down (the window's record:
+`documentation/archive/2026-09-16-legacy-tear-out/legacy-window-close.md`) —
+production's schemas are `archive`, `public` and `runner`. Nothing under
+`src/` reads either.
 
 ## The tables
 

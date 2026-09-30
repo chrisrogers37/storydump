@@ -17,7 +17,8 @@ Telegram on behalf of paying tenants.
 ### NEVER run these
 
 ```bash
-python -m src.main                   # Starts the posting scheduler + Telegram bot
+python -m src.main                   # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
+python -m src.worker                 # Starts the posting worker: the clock, the job lanes and the sweepers (it posts to Instagram)
 python -m scripts.migration_runner apply --manual <version>   # Applies a gated (runner:manual) file by hand: 079 dropped the legacy schema in the owner's window (2026-09-19); a fresh database still owes both
 storydump approve <story>            # Posts a story to Instagram — the user's decision, never an agent's
 storydump cancel <story>             # Cancels a story: refunds its debit, destroys its upload
@@ -82,8 +83,9 @@ the tier it replaced. The legacy tier was retired in the tear-out (#1216,
 September 2026); its data survives as the `archive.*_pre_cutover_20260917`
 snapshots (migration 078), and the `legacy` schema itself was dropped by the
 gated 079 in the owner's window on 2026-09-19
-(`documentation/operations/legacy-window-close.md`); production's ledger
-stands at 080, and only a fresh local database still owes 079 and 080.
+(`documentation/archive/2026-09-16-legacy-tear-out/legacy-window-close.md`);
+production has applied 079 and 080, and only a fresh local database still
+owes them (`storydump posture` shows the ledger's head).
 
 Each layer is isolated. Do not violate the boundaries:
 
@@ -163,12 +165,13 @@ Two consequences worth knowing before reasoning about reach:
 ## Setup
 
 ```bash
-python3 -m venv venv && source venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install -e '.[cli]'
 ```
 
-The repo's `Makefile` targets assume `./venv/`. (`.venv/` is also gitignored, so
-a local one will not be committed, but the Makefile will not find it.)
+The `Makefile`'s test targets run the virtualenv's `pytest` from `.venv/`, or
+from `venv/` when `.venv/` holds none (`make VENV=<dir>` overrides both).
+Both directories are gitignored.
 
 Then the database: `make create-db init-db` builds the schema on a fresh
 PostgreSQL the way the lineage lane proves it — step 0 (the service roles and
@@ -368,7 +371,7 @@ the card, the web Queue and Settings, and the `storydump` write verbs.
 ## Pre-commit and CI
 
 ```bash
-source venv/bin/activate && ruff check . && ruff format --check . && pytest
+source .venv/bin/activate && ruff check . && ruff format --check . && pytest
 ```
 
 CI (`.github/workflows/ci.yml`) runs six jobs on every push and PR: Lint (ruff

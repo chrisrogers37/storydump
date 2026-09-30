@@ -12,10 +12,11 @@ What it mounts, and why each lives where it does:
 - ``/api/v1`` — reads as resources, writes as the `01` vocabulary, see
   `routes/v1.py`.
 - ``/webhooks/telegram`` — the W4 ingress route: the `/start` door (#1183)
-  and the group join path (#1242). Chat-inbound COMMANDS remain #854 and are
-  not dispatched
-  (`TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` + `app.state.ingress`) rather than
-  writing a new one.
+  and the group join path (#1242). A delivery is admitted only when it
+  carries the secret `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` holds (unset, every
+  delivery is refused), and is dispatched through `app.state.ingress`, which
+  the factory wires whenever an engine exists.
+  Chat-inbound COMMANDS remain #854 and are not dispatched.
 - ``/health`` — Railway's probe (`railway.toml`), which now also says whether
   a target engine is configured, so a service that would 503 every data route
   is visible from the probe instead of only from the first request; with

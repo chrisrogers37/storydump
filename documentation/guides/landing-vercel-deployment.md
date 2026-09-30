@@ -36,6 +36,7 @@ the runner's side.
 - **Dashboard API calls fail**: `TARGET_API_URL` / `BACKEND_URL` is missing or wrong, or the Railway API service is down. On Vercel it must be the API's public origin (`https://api.storydump.app` in production); the example file's `http://localhost:8000` is the laptop value.
 - **A waitlist signup saves but no Telegram notification arrives**: `TELEGRAM_BOT_TOKEN` or `ADMIN_TELEGRAM_CHAT_ID` is missing — the notifier logs "Telegram notification skipped" and returns (`landing/src/lib/telegram.ts:5-10`) — or the bot is not a member of that chat.
 - **The site's Telegram links are missing**: `NEXT_PUBLIC_TELEGRAM_BOT_NAME` is unset (a client variable: set it, then rebuild).
+  A rebuild is a dashboard **Redeploy** with **Use project's Ignore Build Step** unchecked (see **Ignored Build Step** below).
 
 ## Vercel Project Settings
 
@@ -43,6 +44,7 @@ the runner's side.
 - **Framework Preset**: Next.js
 - **Build Command**: `npm run build` (= `next build`), pinned with the install command and the framework in `landing/vercel.json`
 - **Node.js Version**: 22.x (`landing/package.json` `engines`, mirrored by CI's `node-version: '22'`)
+- **Ignored Build Step**: `ignoreCommand` in `landing/vercel.json` (`landing/scripts/vercel-ignore-build.sh`), which overrides the dashboard setting. A push that leaves `landing/` unchanged since the branch's last successful deployment is cancelled before the install and the build (Vercel reports "Canceled by Ignored Build Step"; the GitHub `Vercel` status still reads success). A dashboard **Redeploy** runs the step too: to rebuild the same code, for example after changing a variable, uncheck **Use project's Ignore Build Step** in the Redeploy dialog.
 
 Vercel builds every pull request as a preview deployment, which is why CI runs no `next build`
 of its own; [`operations/fetching-preview-deployments.md`](../operations/fetching-preview-deployments.md)

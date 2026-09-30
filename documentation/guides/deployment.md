@@ -56,7 +56,7 @@ TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN=<python -c "import secrets; print(secrets.t
 ### Initialize Schema
 
 A fresh database is built by four files applied by hand and then the migration runner — the same
-sequence `make init-db` runs locally (`Makefile:105-113`). The sequence, why each file is needed
+sequence `make init-db` runs locally (the `Makefile`'s `init-db` target). The sequence, why each file is needed
 (without step 0 the runner stops at 050; without the hand-made table, at 078) and what `apply`
 prints for the two gated files (`owed (manual) 079 …`, `owed (manual) 080 …`) are written down
 ONCE, in [`cloud-deployment.md` › Build the schema on a fresh database](cloud-deployment.md#build-the-schema-on-a-fresh-database).

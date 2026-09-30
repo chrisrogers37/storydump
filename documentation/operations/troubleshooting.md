@@ -29,7 +29,8 @@ nothing here reads them.
 the ledger. A GATED file (`runner:manual`) would be reported on the `ok` line as
 "owed to the owner's window", never as missing (`storydump_cli/commands/env.py`,
 `_gated_in`); none is gated today — 079 and 080 were applied in the owner's
-window on 2026-09-19 (`legacy-window-close.md`). An ordinary file the ledger
+window on 2026-09-19
+([`legacy-window-close.md`](../archive/2026-09-16-legacy-tear-out/legacy-window-close.md)). An ordinary file the ledger
 lacks is "not applied — deploy main", and that one is real
 (`migration-runner.md`).
 
@@ -230,5 +231,5 @@ storydump deploys --watch --timeout 900
 ```
 
 `railway redeploy` acts on the linked environment and takes no `--environment`
-(`legacy-window-close.md`, step 0). Restarting the production worker resumes
+(`worker-recovery.md`, *The checkout and the link*). Restarting the production worker resumes
 whatever the ledger owes, so it is a production action: an agent asks first.

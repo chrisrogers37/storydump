@@ -324,7 +324,7 @@ def drop_test_database():
 
 #: Arms the DESTRUCTIVE half of the stray reaper. Report-only by default, and
 #: that default is a rollout guarantee rather than timidity — see
-#: `reap_stray_databases`. Mirrors `dedup-media`'s dry-run-by-default shape.
+#: `reap_stray_databases`.
 REAP_ARMED_ENV = "REAP_ORPHAN_TEST_DATABASES"
 
 

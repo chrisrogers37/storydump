@@ -138,7 +138,8 @@ names every one something reads.
 - `storydump cancel <story>` / `storydump resolve <story> cancel` (destructive)
 - `storydump tokens revoke <id>`
 - `storydump webhook register` / `storydump webhook deregister` (the production bot's webhook)
-- `python -m src.main` (starts the bot)
+- `python -m src.main` (starts the posting worker: the clock, the job lanes and the sweepers — it posts to Instagram)
+- `python -m src.worker` (starts the posting worker: the clock, the job lanes and the sweepers — it posts to Instagram)
 - `python -m scripts.migration_runner apply --manual <version>` (applies a `-- runner:manual` file by name — 079 and 080, the legacy drop and the stand-down, were applied by the owner on 2026-09-19; any future manual file is the owner's the same way)
 
 The canonical list is the safety block in `CLAUDE.md`; this copy is pinned to
@@ -166,11 +167,12 @@ a reject is final for that story. Ask before suggesting any of them.
   are real; the message is not delivered.
 - Some vocabulary commands have no executor yet and answer 501
   (`commands.UNBUILT`); two job kinds have none (`work_loop.UNBUILT_KINDS`).
-- The `legacy` schema is gone: the owner ran the window on 2026-09-19
-  (`documentation/operations/legacy-window-close.md` — 079 dropped it, 080
-  stood the window down; both `applied` in the ledger). Its data survives only
-  as the sixteen `archive.*_pre_cutover_20260917` snapshots, which no code
-  reads. An agent never applies a `-- runner:manual` file.
+- The `legacy` schema is gone: the owner ran the window on 2026-09-19 (its
+  record: `documentation/archive/2026-09-16-legacy-tear-out/legacy-window-close.md`
+  — 079 dropped it, 080 stood the window down; both `applied` in the ledger).
+  Its data survives only as the sixteen `archive.*_pre_cutover_20260917`
+  snapshots, which no code reads. An agent never applies a `-- runner:manual`
+  file.
 
 ---
 

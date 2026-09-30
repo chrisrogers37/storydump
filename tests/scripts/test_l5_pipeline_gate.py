@@ -3460,3 +3460,85 @@ class TestAPlannedStoryOutsideTheCap:
         assert _bucket(pipe_db, _today_utc()) is None
         assert transit.upload_calls == [] and meta.create_calls == []
         assert self._cap_deferrals(pipe_db, intent) == ["meta_advisory"]
+
+
+def _expired_lease(pipe_db):
+    intent, ref = _new_intent(pipe_db)
+    job = _leased_job(pipe_db, intent, ref=ref)["id"]
+    _exec(
+        pipe_db,
+        "UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = %s",
+        (job,),
+    )
+    return job
+
+
+def _job_past_its_deadline(pipe_db):
+    return _exec(
+        pipe_db,
+        "INSERT INTO jobs (workspace_id, kind, lane, serialization_key, run_at,"
+        " deadline_at, payload, max_attempts) VALUES (%s, 'plan_slot', 'bulk',"
+        " %s, now() - interval '2 minutes', now() - interval '1 minute',"
+        " '{\"v\": 1}', 3) RETURNING id",
+        (pipe_db["ws"], f"order:{uuid.uuid4()}"),
+        fetch=True,
+    )[0][0]
+
+
+def _expired_onboarding_session(pipe_db):
+    user = _exec(pipe_db, "INSERT INTO users DEFAULT VALUES RETURNING id", fetch=True)[
+        0
+    ][0]
+    _exec(
+        pipe_db,
+        "INSERT INTO onboarding_sessions (user_id, expires_at)"
+        " VALUES (%s, now() - interval '1 minute')",
+        (user,),
+    )
+    return user
+
+
+def _sessions_left(pipe_db, user):
+    return _exec(
+        pipe_db,
+        "SELECT count(*) FROM onboarding_sessions WHERE user_id = %s",
+        (user,),
+        fetch=True,
+    )[0][0]
+
+
+class TestTheSweepsLegOrder:
+    """The order the legs run in decides who gets a short budget. The lease leg
+    goes first (liveness comes first, 059) and 086's deadline leg last, so a
+    backlog of expired jobs cannot take the budget of the legs above; a test
+    per adjacency that a large budget cannot tell apart."""
+
+    def test_the_lease_leg_is_served_before_the_cancel_leg(self, pipe_db):
+        _sweep(pipe_db, 100000)  # the module's other work drained
+        lease = _expired_lease(pipe_db)
+        flagged = _waiting(pipe_db, "scheduled", flagged=True)
+
+        assert _sweep(pipe_db, 1) == 1
+        assert _job_row(pipe_db, lease)["state"] == "ready", "the lease was recovered"
+        assert _states(pipe_db, [flagged]) == ["scheduled"], "the cancel waits its turn"
+
+    def test_the_deadline_leg_takes_only_what_the_legs_above_leave(self, pipe_db):
+        _sweep(pipe_db, 100000)
+        session = _expired_onboarding_session(pipe_db)
+        late = _job_past_its_deadline(pipe_db)
+
+        assert _sweep(pipe_db, 1) == 1
+        assert _sessions_left(pipe_db, session) == 0, "the onboarding leg took the one"
+        assert _job_row(pipe_db, late)["state"] == "ready", "the backlog waits"
+
+        assert _sweep(pipe_db, 1) == 1, "and is served once the legs above are empty"
+        assert _job_row(pipe_db, late)["state"] == "failed"
+
+    def test_the_sweep_counts_the_cancels_it_ends(self, pipe_db):
+        """`execute_reap_expired` hands the stale-approved leg `limit - n`, so a
+        leg that under-counted would let the executor exceed its budget."""
+        _sweep(pipe_db, 100000)
+        flagged = [_waiting(pipe_db, "scheduled", flagged=True) for _ in range(3)]
+
+        assert _sweep(pipe_db, 500) == 3
+        assert _states(pipe_db, flagged) == ["cancelled"] * 3

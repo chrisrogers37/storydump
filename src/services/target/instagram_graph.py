@@ -57,6 +57,7 @@ from src.services.target.egress import (
     ResponseTooLarge,
 )
 from src.services.target.ig_credentials import IgCredentialDead
+from src.services.target.ig_login_oauth import GRAPH_BASE
 from src.services.target.meta_adapter import (
     OAUTH_ERROR_CODE,
     MetaError,
@@ -74,7 +75,6 @@ logger = logging.getLogger(__name__)
 #: not expire). The token is scrubbed by `_redact` on every field.
 LEDGER_TEXT_MAX = 500
 _SIGNATURE = re.compile(r"s--[A-Za-z0-9_-]+--")
-GRAPH_BASE = "https://graph.instagram.com"
 DEFAULT_GRAPH_VERSION = "v21.0"
 
 #: The effects: one attempt, so a transport fault is a lost response and never

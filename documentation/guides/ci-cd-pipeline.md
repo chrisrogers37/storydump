@@ -158,7 +158,7 @@ All production secrets are configured in the Railway dashboard:
 
 ```bash
 # Run checks locally before pushing
-source venv/bin/activate
+source .venv/bin/activate
 ruff check .
 ruff format --check .
 pytest

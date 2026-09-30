@@ -170,6 +170,35 @@ def test_the_never_run_list_is_not_empty_and_covers_the_worker_and_the_cli():
     )
 
 
+_MAIN_GUARD = re.compile(r"""^if __name__ == ["']__main__["']:""", re.M)
+
+
+def test_every_src_entry_point_is_on_the_never_run_list():
+    """A module under `src/` with a `__main__` entry is a process `python -m`
+    starts, and the two that exist both start the posting worker (`src.main`
+    only dispatches to `src.worker`). The set is derived from the tree, so a
+    new entry point fails here until someone decides whether it is dangerous —
+    `src.worker` was missing from the list while `src.main` was on it."""
+    block = _never_run_block(_doc("AGENTS.md"))
+    entry_points = sorted(
+        ".".join(path.relative_to(ROOT).with_suffix("").parts)
+        for path in (ROOT / "src").rglob("*.py")
+        if _MAIN_GUARD.search(path.read_text())
+    )
+    # positive control: the scan finds the two entry points the Procfile and
+    # `src/main.py` name, so an empty scan cannot pass
+    assert {"src.main", "src.worker"} <= set(entry_points), entry_points
+    missing = [
+        module
+        for module in entry_points
+        if not any(line.split() == ["python", "-m", module] for line in block)
+    ]
+    assert not missing, (
+        f"{missing} can be started with `python -m` but are not in the NEVER-run"
+        " list — add each, with what it starts, to CLAUDE.md and AGENTS.md"
+    )
+
+
 def test_a_never_run_entry_under_a_group_names_the_subcommand():
     registry = _registry()
     for line in _never_run_block(_doc("AGENTS.md")):

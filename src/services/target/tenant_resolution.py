@@ -6,15 +6,10 @@ inland speaks ``tenant_id == workspaces.id``. Chat ids die at this boundary:
 no signature past this module accepts one (the F.6 ratchet rule's semantic
 half, installed at birth rather than retrofitted).
 
-Relation to the F.1 chokepoint, stated because the two surfaces must agree
-rather than drift (#842 dispatch): they are SEPARATE BY DESIGN and never call
-each other. F.1's ``tenant_scope`` guards the LEGACY repository layer — its
-tenant key is ``chat_settings_id``, its lifetime ends at M.3. This module
-mints TARGET tenant identity — ``workspaces.id`` — consumed by the L.0 unit
-of work, which sets the ``app.tenant_id`` GUC that F.2's policies enforce.
-What they share is the contract, not the code: absent or unresolvable
-context is a typed refusal, never a widened default, and both refusal types
-descend from ``StorydumpError``.
+This module mints tenant identity — ``workspaces.id`` — consumed by the L.0
+unit of work, which sets the ``app.tenant_id`` GUC that F.2's policies
+enforce. Absent or unresolvable context is a typed refusal
+(:class:`TenantResolutionError`), never a widened default.
 
 Privilege reality, measured in the tests rather than assumed (`02` §7):
 

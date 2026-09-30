@@ -172,12 +172,12 @@ storydump deploys --watch --timeout 900       # both services SUCCESS
 
 `railway redeploy` acts on the **linked** environment and takes no
 `--environment`; another session's `railway login` silently drops the link, so
-check it first (`legacy-window-close.md`, step 0). It re-runs whatever Railway
+check it first (`worker-recovery.md`, *The checkout and the link*). It re-runs whatever Railway
 holds as the service's latest deployment — after a `railway down` that was an
 OLD build (2026-09-19: a commit of 2026-09-03 came back `SUCCESS`), so after a
 `down` push an empty commit to `main` instead, and after any redeploy read the
 commit `storydump deploys` shows and require `main`'s head
-(`legacy-window-close.md`, step 8). Every deploy of either
+(`worker-recovery.md`, *After a `railway down`*). Every deploy of either
 service runs the predeploy, `python -m scripts.migration_runner apply`
 (`railway.toml`). Restarting the production worker resumes whatever the ledger
 owes — approved stories publish — so it is a production action and an agent

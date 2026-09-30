@@ -33,7 +33,7 @@ documentation/
 **[2026-08-02-consolidated-design-plan/](planning/2026-08-02-consolidated-design-plan/README.md)** - RATIFIED, IN EXECUTION
 - The single plan for the multi-tenant refactor: fixed constraints FC-0..FC-9, target architecture, executable domain model, decision record D1–D41, the increment sequence (Phases 0 → F → L → M → X → S), operational numbers, product lifecycles, security model
 - Read `README.md` → `00` → `04`; the README's *Live status* carries the position (2026-09-19: the legacy tier is retired) and the per-increment scoreboard with one tracker per increment
-- Position: Phases 0, F and L built · the M.3 window applied by hand; 3f ran as migration 078; 3g and the stand-down ran as the gated 079 and 080 in the owner's window on 2026-09-19 ([operations/legacy-window-close.md](operations/legacy-window-close.md)) · X.3 in progress (#1172) · S partly built
+- Position: Phases 0, F and L built · the M.3 window applied by hand; 3f ran as migration 078; 3g and the stand-down ran as the gated 079 and 080 in the owner's window on 2026-09-19 ([its record](archive/2026-09-16-legacy-tear-out/legacy-window-close.md)) · X.3 in progress (#1172) · S partly built
 
 ### Increment specs (live; each carries a status banner)
 - **[2026-09-20-device-native-inbound-spec.md](planning/2026-09-20-device-native-inbound-spec.md)** — device-native inbound: a Telegram drop relayed into the team's Drive, entering the posting mix at a reserved 20% — SPEC (kindle, 2026-09-20; the two junctions weighed and ratified in [2026-09-20-device-native-inbound-decision.md](planning/2026-09-20-device-native-inbound-decision.md)); plan: [2026-09-20-device-native-inbound/](planning/2026-09-20-device-native-inbound/00_EPIC.md), ratified 2026-09-20; ironclad cycle 1 folded 2026-09-25; F10–F12 ruled 2026-09-28 (the album deferred); cycle 2 pending (#1430)
@@ -47,7 +47,7 @@ Moved on 2026-09-20 (this audit), the five window-era increment specs — each w
 - **[2026-08-11-f1-ownership-inventory/](archive/2026-08-11-f1-ownership-inventory/README.md)** — F.1 ownership inventory and fail-closed interface spec — COMPLETED as legacy, then SUPERSEDED by `unit_of_work.py` / `tenant_resolution.py`; BUILT (#846) as the legacy repository layer's fail-closed interface, and RETIRED with that layer in the tear-out (phase 01, #1316); the target's equivalent is the unit of work, unconstructible without a tenant (`src/services/target/unit_of_work.py`)
 - **[2026-08-14-f2-increment-split/](archive/2026-08-14-f2-increment-split/README.md)** — F.2 migration split — COMPLETED (migrations 052–060)
 - **[2026-08-17-m1-transform-spec/](archive/2026-08-17-m1-transform-spec/README.md)** — M.1 legacy → target transform — ABANDONED by owner ruling 2026-09-02 (legacy data not migrated; spec retained as the record)
-- **[2026-08-17-m2-rehearsal-spec/](archive/2026-08-17-m2-rehearsal-spec/README.md)** — M.2 window rehearsal — EXECUTED DIFFERENTLY THAN WRITTEN (its banner, 2026-09-19): 3a–3d by hand on 2026-08-24/26, 3f/3g/step 8 as migrations 078–080, rehearsed on a PITR branch first; the window's runbook is [operations/legacy-window-close.md](operations/legacy-window-close.md)
+- **[2026-08-17-m2-rehearsal-spec/](archive/2026-08-17-m2-rehearsal-spec/README.md)** — M.2 window rehearsal — EXECUTED DIFFERENTLY THAN WRITTEN (its banner, 2026-09-19): 3a–3d by hand on 2026-08-24/26, 3f/3g/step 8 as migrations 078–080, rehearsed on a PITR branch first; the window's runbook is archived beside the tear-out's run log: [legacy-window-close.md](archive/2026-09-16-legacy-tear-out/legacy-window-close.md)
 - **[2026-08-17-m3-parity-bar-mapping/](archive/2026-08-17-m3-parity-bar-mapping/README.md)** — M.3 Telegram parity bar — SUPERSEDED (its forks ruled 2026-08-21; every bar item served on a target surface; chat-inbound commands #854 remain owed)
 
 Moved there on 2026-09-18 (the tear-out's phase 05), because each describes the legacy tier:
@@ -144,21 +144,17 @@ a guide walking a reader through it contradicted a fixed constraint.
 **[operations/worker-recovery.md](operations/worker-recovery.md)**
 - What the worker is (job leases and their heartbeat, the clock election, its own `/health`), how a dead or stuck one is recognised from outside, and how it is brought back on Railway
 - Restarting the production worker is a production action: approved stories publish, so an agent asks first
+- Production acts from a checkout: the checkout-and-link check, and never `railway redeploy` after a `railway down`
 
 ### Backup & Restore
 **[operations/backup-restore.md](operations/backup-restore.md)**
-- What holds state and what backs it up: the database on Neon (point-in-time restore, a marker before a risky change, restoring in place), media (the tenant's own Drive), configuration and secrets
+- What holds state and what backs it up: the database on Neon (point-in-time restore, a marker before a risky change, rehearsing a change on a branch, restoring in place), media (the tenant's own Drive), configuration and secrets
 - The legacy tier's backup: the `archive.*_pre_cutover_20260917` snapshots and their lifetime
 - Disaster recovery for the whole deployment
 
 ### Migration Runner
 **[operations/migration-runner.md](operations/migration-runner.md)**
 - `scripts/migration_runner.py`: `apply`, `adopt`, `status`, `repair`, `parity`; the ledger (`runner.schema_migrations`); the file markers, `-- runner:manual` included; the production rollout (every deploy's predeploy runs `apply`)
-
-### Closing the Legacy Window (the owner's runbook)
-**[operations/legacy-window-close.md](operations/legacy-window-close.md)**
-- The last two M.3 steps, shipped as gated migrations the deploy owes and never runs: 079 drops the `legacy` schema behind an in-file precondition, 080 stands the window down
-- Irreversible, and the owner's to run: `apply --manual` is on the never-run list for agents; run by the owner on 2026-09-19 (the tear-out's RUN_LOG records it) — kept as the record, and for a fresh database, where both files are still owed
 
 ### Telegram Webhook
 **[operations/telegram-webhook.md](operations/telegram-webhook.md)**
@@ -256,7 +252,7 @@ The design is the consolidated plan's `01-target-architecture.md` (the interacti
 1. Read **[../AGENTS.md](../AGENTS.md)** (the layer boundaries, testing, pre-commit and CI) and the safety rules, repeated in root **[CLAUDE.md](../CLAUDE.md)**
 2. Review **[testing-guide.md](guides/testing-guide.md)** (test requirements — every feature needs tests)
 3. Check the consolidated plan's `04-execution-sequence.md` for the increment your change belongs to
-4. Run pre-commit: `source venv/bin/activate && ruff check . && ruff format --check . && pytest` (the two `ruff` commands are CI's Lint job over the whole tree; `pytest` is its Test job, run against a PostgreSQL service)
+4. Run pre-commit: `source .venv/bin/activate && ruff check . && ruff format --check . && pytest` (the two `ruff` commands are CI's Lint job over the whole tree; `pytest` is its Test job, run against a PostgreSQL service)
 
 ---
 

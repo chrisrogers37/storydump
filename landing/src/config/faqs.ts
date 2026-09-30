@@ -2,12 +2,12 @@ export const faqs = [
   {
     question: "What is Storydump?",
     answer:
-      "Storydump is an Instagram Story scheduling tool that automatically rotates your content library. Connect your Google Drive, set a posting schedule, and approve each story via Telegram before it goes live.",
+      "Storydump is an Instagram Story scheduling tool that automatically rotates your content library. Connect your Google Drive, set a posting schedule, and approve each story in the dashboard or in Telegram before it goes live.",
   },
   {
-    question: "Why Telegram instead of a web dashboard?",
+    question: "Do I need Telegram?",
     answer:
-      "Telegram gives you instant mobile notifications with image previews and one-tap actions. No need to open a separate app or website — approvals happen right in your chat. A web dashboard is planned for later.",
+      "No. You sign in with Google and do everything from the web dashboard, including deciding on each story in the Queue. If you also link the Storydump Telegram bot, each story arrives in your chat as a card with one-tap actions.",
   },
   {
     question: "Do I need to give you my Instagram password?",
@@ -17,12 +17,12 @@ export const faqs = [
   {
     question: "What content types are supported?",
     answer:
-      "Instagram Stories support JPG, PNG, and GIF images. Storydump validates and optimizes each image to meet Instagram's specifications (9:16 aspect ratio, max 100MB) before posting.",
+      "Images and videos from the Google Drive folders you connect. Before a story posts, Storydump frames it to Instagram's 9:16 story format without cropping. An image can be up to 8 MB and a video up to 40 MB.",
   },
   {
     question: "Can I manage multiple Instagram accounts?",
     answer:
-      "Yes. You can connect multiple Instagram accounts and switch between them directly from Telegram. Each account maintains its own posting schedule and content rotation.",
+      "Yes. Add each one in the dashboard under Settings › Accounts with Connect Instagram. Each account maintains its own posting schedule and content rotation.",
   },
   {
     question: "What happens if I skip or reject a story?",

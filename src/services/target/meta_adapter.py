@@ -118,8 +118,8 @@ class MetaTerminalError(MetaError):
 def classify_error(code: int) -> type:
     """The closed routing table, code-only. Unknown → retryable (module
     docstring). A subcode-discriminated rule gets the parameter when one
-    exists (M.3) — until then a subcode arg would imply routing that
-    does not happen."""
+    exists — until then a subcode arg would imply routing that does not
+    happen."""
     if code == CAP_ERROR_CODE:
         return MetaCapDeferral
     if code in TERMINAL_CODES:
@@ -128,7 +128,8 @@ def classify_error(code: int) -> type:
 
 
 class StubMetaAdapter:
-    """The sandbox Meta target until M.3, and the gate's counting instrument.
+    """The sandbox Meta target the gate and the unit tests inject, and the
+    gate's counting instrument.
 
     Every method records its call (the L.3 lesson: a stub that counts, so
     at-most-once is COUNTED, not argued). Outcome scripts arm failure shapes

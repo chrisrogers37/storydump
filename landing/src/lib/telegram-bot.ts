@@ -2,10 +2,10 @@
  * The product's Telegram bot handle, and the only place the site should get it.
  *
  * The handle is deployment configuration, not a constant: `NEXT_PUBLIC_TELEGRAM_BOT_NAME`
- * is what the Telegram Login Widget is initialised with, so it is already the value that
- * decides which bot authenticates users. Anything else on the site that names the bot has
- * to agree with it or the site disagrees with itself — which it did: two hardcoded links
- * pointed at a handle that belongs to someone else entirely.
+ * names the product's bot, the one the site sends people to — the waitlist form links to it,
+ * and the account-link flow (`telegram-link.ts`) refuses a link to any other. Anything on
+ * the site that names the bot has to agree with it or the site disagrees with itself —
+ * which it did: two hardcoded links pointed at a handle that belongs to someone else entirely.
  *
  * `botUrl` returns `null` rather than a best-effort URL when the variable is unset. A
  * missing link is a nuisance; a link to a handle we do not control is the defect this

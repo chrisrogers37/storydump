@@ -75,8 +75,9 @@ railway redeploy --service storydump --yes
 Never `railway up`: it uploads and deploys the laptop's working tree --
 uncommitted edits included -- bypassing GitHub and CI. And `redeploy` re-runs
 whatever Railway holds as the service's latest deployment, which after a
-`railway down` can be an old build (`operations/legacy-window-close.md`
-step 8); when in doubt, push to `main` and confirm the commit with
+`railway down` can be an old build
+([`worker-recovery.md`](../operations/worker-recovery.md#after-a-railway-down-never-railway-redeploy));
+when in doubt, push to `main` and confirm the commit with
 `storydump deploys`.
 
 ---
