@@ -33,8 +33,9 @@ from storydump_cli.storage import MemoryBackend
 from tests.scripts.conftest import seed_intent_chain
 from tests.scripts import test_ops_views_gate as ops_gate
 from tests.scripts.test_ops_views_gate import _run, _sql
+from tests.scripts.test_web_router_x2_gate import _seed_intent
 from tests.src.api import conftest as api_conftest
-from tests.src.api.conftest import api_client, sign_in
+from tests.src.api.conftest import api_client, publishing_workspace, sign_in
 
 pytestmark = [
     pytest.mark.integration,
@@ -53,6 +54,7 @@ pytestmark = [
 #: The ops gate's world — the replayed stream, the ingress login, the bypass
 #: login — re-registered here as this module's fixture.
 world = ops_gate.world
+google_configured = api_conftest.google_configured
 
 
 class LoopBridge(httpx.BaseTransport):
@@ -404,5 +406,47 @@ def test_a_workspace_name_resolves_through_the_real_principal(world, people, tmp
             # a stranger's workspace id is the API's 404 — not a member
             code, doc = await _cli(rt, "pause", "--workspace", str(uuid.uuid4()))
             assert code == EXIT_NOT_AUTHORIZED, doc
+
+    _run(main())
+
+
+def test_a_planned_story_is_approved_through_the_real_cli_by_its_person(
+    world, google_configured, monkeypatch, tmp_path
+):
+    """088 lets only a person approve a planned story. The CLI's write is a
+    person: a person-bound operator token opens the tenant as `user` with the
+    token's own user (`principal.open_tenant`), so the trigger admits it.
+    Its own workspace, because `people`'s stays in manual mode for the other
+    tests of this module."""
+
+    async def main():
+        async with api_client(world["ingress"]) as (client, engine):
+            owner, owner_id, ws = await publishing_workspace(
+                client, monkeypatch, tag="cli-planned"
+            )
+            minted = await client.post(
+                "/api/v1/me/tokens",
+                json={"name": "agent-planned", "role": "operator"},
+                headers=owner,
+            )
+            assert minted.status_code == 201, minted.text
+            story = _seed_intent(world["stream"], ws, "cli-planned", origin="planned")
+            assert _sql(
+                world["stream"],
+                "SELECT origin FROM post_intents WHERE id = %s",
+                (story,),
+            ) == [("planned",)], "positive control: the story really is planned"
+
+            bridge = LoopBridge(client._transport, asyncio.get_running_loop())
+            rt = _runtime(minted.json()["secret"], bridge, tmp_path)
+            code, doc = await _cli(rt, "approve", story, "--workspace", ws)
+            assert code == EXIT_OK, doc
+            assert _state(world["stream"], story) == "approved"
+            assert _sql(
+                world["stream"],
+                "SELECT actor_kind, actor_user_id::text, channel FROM audit_events"
+                " WHERE entity_id = %s AND to_state = 'approved'",
+                (story,),
+            ) == [("user", owner_id, "cli")]
 
     _run(main())

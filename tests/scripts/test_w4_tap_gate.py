@@ -114,9 +114,10 @@ def _one(world, sql, params=()):
     return fetch_one(world["stream"], sql, params)
 
 
-def _intent(world, tag: str, *, state="awaiting_approval") -> dict:
+def _intent(world, tag: str, *, state="awaiting_approval", origin="cadence") -> dict:
     """An intent on the chain's account, on its own media item, with a SENT
-    card in both groups (refs 1xxx in A, 2xxx in B)."""
+    card in both groups (refs 1xxx in A, 2xxx in B). A planned story (088) is
+    born planned: its origin cannot change afterwards."""
     ((media,),) = _write(
         world,
         "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name,"
@@ -132,10 +133,11 @@ def _intent(world, tag: str, *, state="awaiting_approval") -> dict:
     ((intent,),) = _write(
         world,
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-        f" provider_account_ref, approval_mode, schedule_slot_at, state{posted_cols})"
-        f" VALUES (%s, %s, %s, 'acct-w4-tap', 'manual', now(), %s{posted_vals})"
+        " provider_account_ref, approval_mode, schedule_slot_at, state, origin"
+        f"{posted_cols})"
+        f" VALUES (%s, %s, %s, 'acct-w4-tap', 'manual', now(), %s, %s{posted_vals})"
         " RETURNING id",
-        (world["ws"], world["iga"], media, state),
+        (world["ws"], world["iga"], media, state, origin),
         fetch=True,
     )
     cards = {}
@@ -251,6 +253,20 @@ def _card_states(world, intent_id):
 
 
 class TestATapFlipsOnceAndEditsEveryCard:
+    def test_a_planned_story_is_approved_by_the_tapper_like_any_other(self, world):
+        """088 lets only a person approve a planned story. A tap is a person:
+        the dispatcher stamps the tapper as `user` with their linked id, so
+        the trigger admits it, and the audit row says who."""
+        i = _intent(world, "post-planned", origin="planned")
+        assert _one(
+            world, "SELECT origin FROM post_intents WHERE id = %s", (i["id"],)
+        ) == ("planned",), "positive control: the story really is planned"
+        r = tap(world, "post", i["id"])
+        assert r.outcome == "executed" and r.handled is True
+        assert _state(world, i["id"]) == "approved"
+        (row,) = _audit(world, i["id"])
+        assert row == ("approved", "user", world["user"], "telegram")
+
     def test_post_approves_as_the_tapper_enqueues_the_publish_and_supersedes_both_groups(
         self, world
     ):

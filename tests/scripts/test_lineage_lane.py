@@ -395,6 +395,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             "086_reaper_ends_ready_jobs_past_deadline.sql",
             # 087 appends §30, the reaper's cancel leg (#1235).
             "087_reaper_cancels_flagged_waiting_intents.sql",
+            # 088 appends §31, the ledger learning 'planned': the origin
+            # columns, the cadence-only slot key and the person-only approval
+            # trigger (#1413, phase 2).
+            "088_intent_origin_planned.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

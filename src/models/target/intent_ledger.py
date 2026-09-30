@@ -131,6 +131,12 @@ class PostIntent(TargetBase):
     legacy_queue_item_id = Column(UUID(as_uuid=True), nullable=True)
     entered_state_at = Column(TZ, nullable=False, server_default=text("now()"))
     created_at, updated_at = timestamps()
+    # 088: a planned story (one a person scheduled for a chosen time) beside the
+    # cadence ones. `origin` is fixed at birth and a planned row is approved
+    # only by a person — both `trg_intent_planned_person`, which the parity
+    # gate does not compare, so the migration is where that rule is read.
+    origin = Column(Text, nullable=False, server_default=text("'cadence'"))
+    scheduled_by_user_id = fk("users.id", "SET NULL", nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -190,12 +196,28 @@ class PostIntent(TargetBase):
             "cap_refunded_at IS NULL OR cap_consumed_on IS NOT NULL",
             name="ck_refund_after_debit",
         ),
+        CheckConstraint("origin IN ('cadence','planned')", name="ck_intent_origin"),
+        CheckConstraint(
+            "origin = 'cadence' OR approval_mode = 'manual'",
+            name="ck_intent_planned_manual",
+        ),
         Index(
             "uq_intent_slot",
             "workspace_id",
             "ig_account_id",
             "schedule_slot_at",
             unique=True,
+        ),
+        # 088's cadence-only slot key. Both keys exist until a later migration
+        # drops the unconditional one; `plan_slot`'s conflict target carries the
+        # predicate so it resolves against either.
+        Index(
+            "uq_intent_slot_cadence",
+            "workspace_id",
+            "ig_account_id",
+            "schedule_slot_at",
+            unique=True,
+            postgresql_where=text("origin = 'cadence'"),
         ),
         Index(
             "uq_intent_live_subject",

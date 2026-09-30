@@ -416,8 +416,13 @@ class TestTheDerivedAdoptionProbesReadBothWays:
     # 084 and 086 are here for their grant probes: a column privilege read
     # from `pg_attribute.attacl`, joined to `pg_roles` by name, where
     # `has_column_privilege` would raise on a database with no `svc_clock`
-    # (084) or `svc_maintenance` (086).
-    @pytest.mark.parametrize("version", [62, 84, 86])
+    # (084) or `svc_maintenance` (086). 087's two probes read
+    # `fn_reaper_sweep`'s text from `pg_proc`: false, not an error, where no
+    # such function exists. 088 is here because every one of its probes names
+    # `post_intents`, which a database predating the target lineage does not
+    # have: they read the catalogs by name rather than cast to `regclass`,
+    # which would raise.
+    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88])
     def test_probes_read_false_without_raising_before_the_target_lineage(
         self, version, at49_db, owner_actor
     ):

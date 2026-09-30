@@ -326,6 +326,13 @@
       "label": "§30 the reaper ends a cancel the user asked for (087, #1235) — fn_reaper_sweep replace adding the cancel leg for flagged, undebited waiting intents after the lease leg and ahead of the expiry legs, 086's deadline leg still last",
       "doc": "07-security-model.md",
       "ordinal": 28
+    },
+    {
+      "sha256": "e1b76c99b87522c2aef37de011b409f8697a6e5cb0bbe3cd3bdacc9ae701414f",
+      "class": "normative",
+      "label": "§31 the ledger learns 'planned' (088, #1413) — post_intents.origin and scheduled_by_user_id, the manual-only CHECK, the cadence-only slot key beside the unconditional one (expand), and the trigger that fixes origin at birth and lets only a person approve a planned row",
+      "doc": "07-security-model.md",
+      "ordinal": 29
     }
   ],
   "policy_expansion": {

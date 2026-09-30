@@ -42,7 +42,13 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
   (`vocabulary.INTENT_STATES`, `PUBLISH_STEPS`, pinned to 055's CHECKs by
   `tests/src/services/target/test_vocabulary.py:63`); the legal edges are the
   rows of `post_intent_transitions`; `trg_intent_guard` refuses the rest and
-  `trg_intent_audit` writes every state change to `audit_events`. **The trigger
+  `trg_intent_audit` writes every state change to `audit_events`. A story's
+  `origin` is `cadence` (minted by `plan_slot` for a slot) or `planned` (a
+  person chose the time, 088): `trg_intent_planned_person` fixes `origin` at
+  birth and admits `awaiting_approval → approved` on a planned row only under a
+  person's actor, and `ck_intent_planned_manual` keeps a planned row `manual`.
+  The slot key is cadence-only (`uq_intent_slot_cadence`); the unconditional
+  `uq_intent_slot` stands beside it until a later file drops it. **The trigger
   is the authority** — `intent_ledger.py` issues the UPDATE and translates the
   refusal; do not add a Python pre-check of the edge set.
 - **`jobs`** is the work queue (kind, lane, serialization key, lease token);

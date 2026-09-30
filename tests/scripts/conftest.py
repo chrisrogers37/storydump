@@ -732,13 +732,20 @@ def seed_intent(dsn: str, workspace_id, name: str, *, state: str | None = None) 
 
 
 def seed_intent_chain(
-    cur, workspace_id, name: str, *, state: str | None = None
+    cur,
+    workspace_id,
+    name: str,
+    *,
+    state: str | None = None,
+    origin: str | None = None,
 ) -> dict:
     """The satellite chain one post_intent needs — media source, account, media
     item, the intent — into an EXISTING workspace, on the caller's cursor and
     inside the caller's transaction (the caller commits, and has set
     ``app.actor_kind``). ``state`` overrides the intent's column default
-    (``'scheduled'``) for a suite that needs, say, ``'awaiting_approval'``.
+    (``'scheduled'``) for a suite that needs, say, ``'awaiting_approval'``;
+    ``origin`` likewise (``'cadence'``) for a planned story, which must be
+    BORN planned: 088's trigger refuses changing it afterwards.
     Split out of :func:`seed_workspace_chain` so an API-created workspace can
     be seeded with the same spelling rather than a copy."""
     cur.execute(
@@ -768,6 +775,10 @@ def seed_intent_chain(
         columns += ", state"
         values += ", %s"
         params += (state,)
+    if origin is not None:
+        columns += ", origin"
+        values += ", %s"
+        params += (origin,)
     cur.execute(
         f"INSERT INTO post_intents ({columns}) VALUES ({values}) RETURNING id", params
     )
