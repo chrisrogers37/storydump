@@ -34,19 +34,22 @@
 -- DEPLOY ORDER: the predeploy applies this file before the code that writes the columns starts, and a
 -- worker still draining never names them. Additive: rolling the code back leaves them NULL.
 --
--- Adoption evidence + post-apply verification: one probe per structural thing this file creates.
+-- Adoption evidence + post-apply verification: one probe per structural thing this file creates,
+-- each reading the catalogs by name, so on a database that predates the target tables it reads
+-- false rather than raising (a `regclass` cast would raise).
 -- runner:postcondition SELECT count(*) = 3 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'channel_outbox' AND column_name IN ('last_failure_class', 'last_error_code', 'last_failed_at')
--- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_outbox_failure_class' AND conrelid = 'public.channel_outbox'::regclass)
+-- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE c.conname = 'ck_outbox_failure_class' AND n.nspname = 'public' AND t.relname = 'channel_outbox')
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'ix_outbox_last_failed')
 -- runner:postcondition SELECT count(*) = 2 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner WHERE n.nspname = 'public' AND p.proname IN ('fn_health_outbox_failures', 'fn_health_outbox_sent') AND r.rolname = 'svc_maintenance' AND p.prosecdef
 -- runner:postcondition SELECT count(*) >= 4 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, aclexplode(p.proacl) a JOIN pg_roles g ON g.oid = a.grantee WHERE n.nspname = 'public' AND p.proname IN ('fn_health_outbox_failures', 'fn_health_outbox_sent') AND a.privilege_type = 'EXECUTE' AND g.rolname IN ('svc_ingress', 'svc_worker')
 
-ALTER TABLE channel_outbox
-  ADD COLUMN last_failure_class TEXT NULL
-    CONSTRAINT ck_outbox_failure_class
-    CHECK (last_failure_class IN ('rate_limited','destination_gone','refused','credential_dead','ambiguous')),
-  ADD COLUMN last_error_code INTEGER NULL,
-  ADD COLUMN last_failed_at TIMESTAMPTZ NULL;
+ALTER TABLE channel_outbox ADD COLUMN last_failure_class TEXT NULL
+  CONSTRAINT ck_outbox_failure_class
+  CHECK (last_failure_class IN ('rate_limited','destination_gone','refused','credential_dead','ambiguous'));
+
+ALTER TABLE channel_outbox ADD COLUMN last_error_code INTEGER NULL;
+
+ALTER TABLE channel_outbox ADD COLUMN last_failed_at TIMESTAMPTZ NULL;
 
 CREATE INDEX ix_outbox_last_failed ON channel_outbox (last_failed_at) WHERE last_failed_at IS NOT NULL;
 

@@ -403,6 +403,8 @@ class TestTheBoundaryIsDerivedAndLoud:
             # loud: the slot key's contract, the serve and miss doors and the
             # reaper's cadence-only slot expiry (#1413, phase 3).
             "089_planned_serve_and_misses.sql",
+            # 090 appends §33, the outbox's failure record: three columns,
+            # their index and the two doors behind /health/delivery (#1482).
             "090_outbox_failure_record.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"

@@ -2623,12 +2623,13 @@ hour with no failures and no traffic cannot read as an hour that delivered.
 ```sql
 -- [§33 the outbox records why a delivery failed]
 
-ALTER TABLE channel_outbox
-  ADD COLUMN last_failure_class TEXT NULL
-    CONSTRAINT ck_outbox_failure_class
-    CHECK (last_failure_class IN ('rate_limited','destination_gone','refused','credential_dead','ambiguous')),
-  ADD COLUMN last_error_code INTEGER NULL,
-  ADD COLUMN last_failed_at TIMESTAMPTZ NULL;
+ALTER TABLE channel_outbox ADD COLUMN last_failure_class TEXT NULL
+  CONSTRAINT ck_outbox_failure_class
+  CHECK (last_failure_class IN ('rate_limited','destination_gone','refused','credential_dead','ambiguous'));
+
+ALTER TABLE channel_outbox ADD COLUMN last_error_code INTEGER NULL;
+
+ALTER TABLE channel_outbox ADD COLUMN last_failed_at TIMESTAMPTZ NULL;
 
 CREATE INDEX ix_outbox_last_failed ON channel_outbox (last_failed_at) WHERE last_failed_at IS NOT NULL;
 

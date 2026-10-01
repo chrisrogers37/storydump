@@ -342,7 +342,7 @@
       "ordinal": 30
     },
     {
-      "sha256": "3ec706f1d96d2f92de37a38a587cfaf70ec715a5dcd5ee848db0c47739ca9e93",
+      "sha256": "dccc67c5670e3b0c96041737a328e1dd56d5e9534a464e0e201aea6b3a3c7fa8",
       "class": "normative",
       "label": "§33 the outbox records why a delivery failed (090, #1482) — channel_outbox gains last_failure_class (checked against the five classes), last_error_code and last_failed_at with a partial index on the time, and two svc_maintenance doors: fn_health_outbox_failures counting the window's failures by class and code with their alerting subset, and fn_health_outbox_sent counting the window's sends",
       "doc": "07-security-model.md",
