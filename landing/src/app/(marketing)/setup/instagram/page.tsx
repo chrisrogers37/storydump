@@ -1,20 +1,19 @@
 import type { Metadata } from "next"
+import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { ArrowLeft, ArrowRight } from "lucide-react"
 import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
 import { Screenshot } from "@/components/setup/screenshot"
-import { ogMeta } from "@/lib/og"
 
 const description =
   "How to switch your Instagram account to Business or Creator for API access and automated Story posting."
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: "Instagram Business Account Setup",
   description,
-  alternates: { canonical: "/setup/instagram" },
-  ...ogMeta("Instagram Business Account Setup", description),
-}
+  path: "/setup/instagram",
+})
 
 export default function InstagramSetup() {
   return (

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useSyncExternalStore } from "react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -29,18 +29,33 @@ function getUtmParams(): Record<string, string> {
   return utm
 }
 
-function getInitialStatus(): FormStatus {
-  if (typeof window !== "undefined" && localStorage.getItem(STORAGE_KEY)) {
-    return "duplicate"
+/**
+ * Whether this browser has signed up before. Read through
+ * useSyncExternalStore rather than a useState initialiser: the server cannot
+ * see localStorage and renders the form, so a client that rendered the
+ * "already on the list" state on its first pass would not match the server
+ * HTML (React error #418). The server snapshot is `false`, hydration matches,
+ * and the stored value takes over straight after.
+ */
+function readRegistered(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEY) !== null
+  } catch {
+    return false
   }
-  return "idle"
 }
 
-function getInitialMessage(): string {
-  if (typeof window !== "undefined" && localStorage.getItem(STORAGE_KEY)) {
-    return "You're already on the list!"
+function subscribeToStorage(onChange: () => void): () => void {
+  window.addEventListener("storage", onChange)
+  return () => window.removeEventListener("storage", onChange)
+}
+
+function markRegistered() {
+  try {
+    localStorage.setItem(STORAGE_KEY, "true")
+  } catch {
+    // Storage blocked (private mode, a policy): the form still worked.
   }
-  return ""
 }
 
 export function WaitlistForm({
@@ -48,8 +63,19 @@ export function WaitlistForm({
   className,
 }: WaitlistFormProps) {
   const [email, setEmail] = useState("")
-  const [status, setStatus] = useState<FormStatus>(getInitialStatus)
-  const [message, setMessage] = useState(getInitialMessage)
+  const [submitted, setStatus] = useState<FormStatus>("idle")
+  const [message, setMessage] = useState("")
+  const registered = useSyncExternalStore(
+    subscribeToStorage,
+    readRegistered,
+    () => false
+  )
+  // A browser that signed up before shows "already on the list" until this
+  // visit submits something of its own.
+  const status: FormStatus =
+    submitted === "idle" && registered ? "duplicate" : submitted
+  const shownMessage =
+    submitted === "idle" && registered ? "You're already on the list!" : message
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -82,7 +108,7 @@ export function WaitlistForm({
           setMessage(data.message)
           trackEvent("Waitlist Signup", { variant, ...utm })
         }
-        localStorage.setItem(STORAGE_KEY, "true")
+        markRegistered()
       } else {
         setStatus("error")
         setMessage(data.message || "Something went wrong. Please try again.")
@@ -104,7 +130,7 @@ export function WaitlistForm({
         aria-live="polite"
       >
         <div className="space-y-3">
-          <p className="text-lg font-medium">{message}</p>
+          <p className="text-lg font-medium">{shownMessage}</p>
           {status === "success" && (
             <>
               <p className="text-sm text-muted-foreground">
@@ -176,7 +202,7 @@ export function WaitlistForm({
           role="alert"
           aria-live="assertive"
         >
-          {message}
+          {shownMessage}
         </p>
       )}
     </form>

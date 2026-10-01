@@ -1,14 +1,15 @@
 import type { Metadata } from "next"
+import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { ArrowRight } from "lucide-react"
 import { Checklist } from "@/components/setup/checklist"
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: "Getting Started",
   description:
     "Connect your Instagram Business account, Google Drive, and Telegram to start automating your Stories.",
-  alternates: { canonical: "/setup" },
-}
+  path: "/setup",
+})
 
 const prerequisites = [
   { label: "Instagram Business or Creator account" },

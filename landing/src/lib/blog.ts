@@ -2,7 +2,10 @@ export interface BlogPost {
   slug: string
   title: string
   description: string
+  /** First published, YYYY-MM-DD. */
   date: string
+  /** Set when the content changes after publication, YYYY-MM-DD. */
+  updated?: string
   readTime: string
   keywords: string[]
 }

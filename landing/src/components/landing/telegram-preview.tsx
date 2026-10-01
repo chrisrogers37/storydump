@@ -15,15 +15,15 @@ export function TelegramPreview() {
             </p>
             <ul className="mt-6 space-y-3 text-sm text-muted-foreground">
               <li className="flex items-start gap-2">
-                <span className="mt-0.5 block h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" />
+                <span className="mt-0.5 block h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" aria-hidden="true" />
                 Preview each story before it goes live
               </li>
               <li className="flex items-start gap-2">
-                <span className="mt-0.5 block h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" />
+                <span className="mt-0.5 block h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" aria-hidden="true" />
                 Approve, skip, or reject with one tap
               </li>
               <li className="flex items-start gap-2">
-                <span className="mt-0.5 block h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" />
+                <span className="mt-0.5 block h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" aria-hidden="true" />
                 Auto-post or manual workflow — your choice
               </li>
             </ul>

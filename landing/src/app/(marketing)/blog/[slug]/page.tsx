@@ -3,7 +3,9 @@ import { notFound } from "next/navigation"
 import Link from "next/link"
 import { ArrowLeft } from "lucide-react"
 import { posts, getPost } from "@/lib/blog"
-import { ogMeta } from "@/lib/og"
+import { pageMetadata } from "@/lib/seo"
+import { blogPosting, breadcrumbList } from "@/lib/json-ld"
+import { JsonLd } from "@/components/seo/json-ld"
 import { AutomateInstagramStories } from "./_articles/automate-instagram-stories"
 import { GoogleDriveInstagramIntegration } from "./_articles/google-drive-instagram-integration"
 import { TelegramInstagramApproval } from "./_articles/telegram-instagram-approval-workflow"
@@ -29,13 +31,14 @@ export async function generateMetadata({
   const post = getPost(slug)
   if (!post) return {}
 
-  return {
+  return pageMetadata({
     title: post.title,
     description: post.description,
-    keywords: post.keywords,
-    alternates: { canonical: `/blog/${slug}` },
-    ...ogMeta(post.title, post.description),
-  }
+    path: `/blog/${slug}`,
+    type: "article",
+    publishedTime: post.date,
+    modifiedTime: post.updated ?? post.date,
+  })
 }
 
 export default async function BlogPost({ params }: { params: Params }) {
@@ -48,6 +51,14 @@ export default async function BlogPost({ params }: { params: Params }) {
 
   return (
     <article className="mx-auto max-w-3xl px-4 py-16">
+      <JsonLd data={blogPosting(post)} />
+      <JsonLd
+        data={breadcrumbList([
+          { name: "Home", path: "/" },
+          { name: "Blog", path: "/blog" },
+          { name: post.title, path: `/blog/${post.slug}` },
+        ])}
+      />
       <Link
         href="/blog"
         className="mb-8 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"

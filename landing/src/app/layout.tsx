@@ -22,12 +22,8 @@ export const metadata: Metadata = {
     default: siteConfig.name + " — Keep Your Stories Alive",
   },
   description: siteConfig.description,
-  keywords: siteConfig.keywords,
-  authors: [{ name: "Chris Rogers", url: siteConfig.contact.portfolio }],
+  authors: [{ name: siteConfig.author.name, url: siteConfig.contact.portfolio }],
   metadataBase: new URL(siteConfig.url),
-  alternates: {
-    canonical: "/",
-  },
   verification: {
     google: "JqcV49p6TP9UbtzZgflEngO3ijSsHRx8jtPV4qqxAj0",
   },

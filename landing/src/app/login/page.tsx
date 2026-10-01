@@ -2,9 +2,11 @@ import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
 import { siteConfig } from "@/config/site";
+import { noindexMetadata } from "@/lib/seo";
 
 export const metadata = {
-  title: `Sign in — ${siteConfig.name}`,
+  title: "Sign in",
+  ...noindexMetadata,
 };
 
 /**

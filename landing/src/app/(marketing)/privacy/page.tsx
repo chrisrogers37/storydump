@@ -1,14 +1,15 @@
 import type { Metadata } from "next"
+import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
 const LAST_UPDATED = "September 30, 2026"
 
-export const metadata: Metadata = {
-  title: "Privacy Policy — Storydump",
+export const metadata: Metadata = pageMetadata({
+  title: "Privacy Policy",
   description: "How Storydump collects, uses, and protects your data.",
-  alternates: { canonical: "/privacy" },
-}
+  path: "/privacy",
+})
 
 export default function PrivacyPolicy() {
   const email = siteConfig.contact.email

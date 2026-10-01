@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { siteConfig } from "@/config/site";
 import { resolveContent, resolveFlow } from "./content";
+import { noindexMetadata } from "@/lib/seo";
 
 /**
  * The three sign-in failure states, which are not interchangeable.
@@ -31,7 +32,7 @@ export async function generateMetadata({
       : resolved === "instagram"
         ? "Instagram connection problem"
         : "Sign-in problem";
-  return { title: `${what} — ${siteConfig.name}` };
+  return { title: what, ...noindexMetadata };
 }
 
 export default async function AuthErrorPage({
