@@ -906,6 +906,9 @@ class TestWeightedCategorySelection:
                     def first(self_inner):
                         return rows_[0] if rows_ else None
 
+                    def __iter__(self_inner):
+                        return iter(rows_)
+
                 class _R:
                     def mappings(self_inner):
                         return _M()
@@ -926,6 +929,7 @@ class TestWeightedCategorySelection:
     async def _plan(self, session, rng):
         import random
 
+        from src.services.target import content_runway
         from src.services.target.scheduler import execute_plan_slot
 
         return await execute_plan_slot(
@@ -936,6 +940,8 @@ class TestWeightedCategorySelection:
             provider_account_ref="ref",
             approval_mode="manual",
             no_media_notice_after_seconds=86400,
+            low_runway_days=content_runway.LOW_RUNWAY_DAYS,
+            rearm_runway_days=content_runway.REARM_RUNWAY_DAYS,
             rng=random.Random(rng),
         )
 

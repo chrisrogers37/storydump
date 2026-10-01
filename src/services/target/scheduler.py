@@ -81,10 +81,10 @@ from sqlalchemy import text
 
 from src.services.target import (
     category_mix,
+    content_runway,
     intent_ledger,
     outbox,
     prompts,
-    workspaces,
 )
 
 
@@ -193,7 +193,9 @@ class SlotOutcome:
 
     The two are independent and the executor needs both: `intent_id` is None
     for a duplicate slot AND for an empty library, while `notice` is set only
-    when the empty library could not be reported to anyone. Collapsing them
+    when a notice the slot owed — the empty library, or a runway that has just
+    dropped below its warning level (#1478) — could not be reported to anyone.
+    The second rides beside a minted intent. Collapsing them
     back into a single `Optional[str]` is what would hide an undeliverable
     notice behind an ordinary "nothing minted".
     """
@@ -299,6 +301,8 @@ async def execute_plan_slot(
     provider_account_ref: str,
     approval_mode: str,
     no_media_notice_after_seconds: int,
+    low_runway_days: int,
+    rearm_runway_days: int,
     rng: Optional[random.Random] = None,
 ) -> "SlotOutcome":
     """The `plan_slot` executor: mint the intent for one slot, or nothing.
@@ -322,6 +326,12 @@ async def execute_plan_slot(
     **required, not defaulted**: a dedup window that can be silently omitted is
     how a once-a-day notice becomes either a flood or a silence, and there is
     exactly one production caller to pass it.
+
+    *low_runway_days* and *rearm_runway_days* are the runway notice's two levels
+    (#1478, `content_runway.after_mint`): a mint that leaves the account with
+    fewer days of eligible content than the first tells the workspace once,
+    and the next drop is told only after the account has climbed back to the
+    second. Required for the same reason as the dedup window.
 
     **Idempotent by key 1, not by checking first.** The insert carries
     ``ON CONFLICT … DO NOTHING`` against `uq_intent_slot`, so a duplicate
@@ -360,79 +370,20 @@ async def execute_plan_slot(
     least-recently-posted file goes first so a small folder rotates
     (review of #1251)."""
     draw = rng if rng is not None else random.SystemRandom()
-    # `06` §3's rule in full: available, not already live for this account,
-    # minus the workspace-wide locks (skip/reject/hold/seasonal/unsupported)
-    # and minus THIS account's own `recent` locks — a live lock is one with no
-    # expiry or an expiry still ahead. Ordered least-recently-posted first, so
-    # a small category rotates through its files instead of repeating the
-    # oldest one (review of #1251).
-    eligible = (
-        " WHERE m.workspace_id = :ws AND m.state = 'available'"
-        "   AND NOT EXISTS (SELECT 1 FROM post_intents p"
-        "                   WHERE p.workspace_id = m.workspace_id"
-        "                     AND p.media_item_id = m.id"
-        "                     AND p.ig_account_id = :acct"
-        "                     AND p.state <> ALL(CAST(:terminal AS text[])))"
-        "   AND NOT EXISTS (SELECT 1 FROM post_locks l"
-        "                   WHERE l.workspace_id = m.workspace_id"
-        "                     AND l.media_item_id = m.id"
-        "                     AND (l.expires_at IS NULL OR l.expires_at > now())"
-        "                     AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct))"
-    )
     # Never-posted first, in the folder's shuffled order: `m.id` is a random
     # UUID, a stable per-file shuffle key — index time put a batch exported
-    # together in a row (2026-09-12: four look-alike cards in a morning).
+    # together in a row (2026-09-12: four look-alike cards in a morning). Once
+    # everything has posted, least-recently-posted first, so a small folder
+    # rotates through its files instead of repeating the oldest one (review of
+    # #1251).
     order = " ORDER BY m.last_posted_at NULLS FIRST, m.id LIMIT 1"
-    # The connected folders and their current weights (owner ruling
-    # 2026-09-08: the mix is keyed on the source; a name is a label). A row
-    # without a source_id — set before 071 — is not joined and shapes nothing.
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT s.id AS source_id, x.ratio"
-                    "  FROM media_sources s"
-                    "  LEFT JOIN category_post_case_mix x"
-                    "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
-                    "   AND x.effective_to IS NULL"
-                    " WHERE s.workspace_id = :ws AND s.state <> 'error'"
-                    "   AND " + workspaces.CONNECTED_SQL
-                ),
-                {"ws": workspace_id},
-            )
-        )
-        .mappings()
-        .all()
+    # `06` §3's rule and the connected folders' weights, read as the runway
+    # reads them (#1478): the files this draws from and the count the Overview
+    # shows are one pool, so they cannot disagree.
+    drawn = await category_mix.pool(
+        session, workspace_id=workspace_id, ig_account_id=ig_account_id
     )
-    counts = (
-        (
-            await session.execute(
-                text(
-                    "SELECT m.source_id, count(*) AS n FROM media_items m"
-                    + eligible
-                    + " GROUP BY m.source_id"
-                ),
-                {
-                    "ws": workspace_id,
-                    "acct": ig_account_id,
-                    "terminal": list(intent_ledger.TERMINAL_STATES),
-                },
-            )
-        )
-        .mappings()
-        .all()
-    )
-    have = {str(row["source_id"]): int(row["n"]) for row in counts}
-    shaped = [
-        {
-            "source_id": str(row["source_id"]),
-            "ratio": None if row["ratio"] is None else float(row["ratio"]),
-            "n": have.get(str(row["source_id"]), 0),
-        }
-        for row in rows
-    ]
-    share = category_mix.weights(shaped)
-    weighted = [(sid, w) for sid, w in share.items() if w > 0]
+    weighted = drawn.drawable
     # No pool behind the weighted set: every connected folder that may post
     # is in `weighted` once it has eligible media, so anything left would
     # belong to a removed folder or an Off one — the two things that must
@@ -460,7 +411,7 @@ async def execute_plan_slot(
             await session.execute(
                 text(
                     "SELECT m.id FROM media_items m"
-                    + eligible
+                    + category_mix.ELIGIBLE_SQL
                     + "   AND m.source_id = CAST(:source_id AS uuid)"
                     + order
                 ),
@@ -503,7 +454,23 @@ async def execute_plan_slot(
             },
         )
     ).first()
-    return SlotOutcome(intent_id=None if row is None else str(row[0]))
+    if row is None:
+        return SlotOutcome()
+    # The minted file has just left the pool (it is live for this account now)
+    # and nothing else in this transaction moved it: one fewer than was drawn
+    # from is exactly what is left (#1478).
+    said = await content_runway.after_mint(
+        session,
+        workspace_id=workspace_id,
+        ig_account_id=ig_account_id,
+        eligible=drawn.eligible - 1,
+        below_days=low_runway_days,
+        rearm_days=rearm_runway_days,
+    )
+    return SlotOutcome(
+        intent_id=str(row[0]),
+        notice=said if said == outbox.UNDELIVERABLE else None,
+    )
 
 
 async def execute_reap_expired(

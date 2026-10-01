@@ -60,6 +60,7 @@ from src.services.target import (
     category_mix,
     channel_bind,
     commands,
+    content_runway,
     drive_credentials,
     google_drive_adapter,
     google_drive_oauth,
@@ -74,6 +75,7 @@ from src.services.target import (
 )
 from src.services.target.commands import Command, CommandResult
 from src.services.target.oauth_states import STATE_TTL_SECONDS, issue_state
+from src.services.target.work_loop import WorkerConfig
 from src.exceptions.tenancy import TokenRefused
 from sqlalchemy import text
 
@@ -516,6 +518,22 @@ async def get_stats(
     aggregate question, so these are counted where the rows are."""
     async with principal_mod.member_session(request, str(ws), principal) as session:
         return await workspaces.stats(session, workspace_id=str(ws))
+
+
+@router.get("/workspaces/{ws}/runway")
+async def get_runway(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
+):
+    """Days of content left per account (#1478): the eligible files over the
+    posts per day they are spent at, counted by the planner's own rule. An
+    account is marked low at the worker's own level, so the card marks the
+    accounts the notice is about."""
+    async with principal_mod.member_session(request, str(ws), principal) as session:
+        return await content_runway.runway(
+            session,
+            workspace_id=str(ws),
+            below_days=WorkerConfig().low_runway_days,
+        )
 
 
 @router.get("/workspaces/{ws}/intents/{intent_id}")

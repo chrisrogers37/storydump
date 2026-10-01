@@ -287,8 +287,8 @@ async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
         "   AND c.provider = :provider"
         # A `disabled` destination is a REMOVED one (owner decision 2026-09-04):
         # it leaves this list, and connecting the account again brings it back.
-        " WHERE a.workspace_id = :ws AND a.state <> 'disabled'"
-        " ORDER BY a.created_at, a.id",
+        f" WHERE a.workspace_id = :ws AND {LISTED_ACCOUNT_SQL}"
+        f" {LISTED_ACCOUNT_ORDER_SQL}",
         ws=str(workspace_id),
         provider=IG_LOGIN_PROVIDER,
     )
@@ -333,6 +333,16 @@ CONNECTED_FLAG_SQL = "COALESCE((s.config->>'removed')::boolean, false)"
 #: The predicate for a CONNECTED folder: not removed. State is not part of it
 #: — a folder whose grant died is paused, still connected, still weighted.
 CONNECTED_SQL = "NOT " + CONNECTED_FLAG_SQL
+
+#: The predicate for a LISTED destination, over `ig_accounts` aliased `a`: a
+#: `disabled` destination is a removed one, so it leaves the list, and
+#: connecting the account again brings it back. The Accounts tab
+#: (:func:`list_accounts`) and the Overview's runway (`content_runway.runway`)
+#: both list with it and :data:`LISTED_ACCOUNT_ORDER_SQL`, so the two show the
+#: same accounts in the same order.
+LISTED_ACCOUNT_SQL = "a.state <> 'disabled'"
+#: The order the destinations are listed in: oldest first, the id breaking ties.
+LISTED_ACCOUNT_ORDER_SQL = "ORDER BY a.created_at, a.id"
 
 
 async def list_sources(executor, *, workspace_id: str) -> list[dict]:

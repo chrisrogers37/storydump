@@ -39,7 +39,13 @@ function* walk(node: ReactNode): Generator<ReactElement> {
 const ok = (data: unknown) => ({ ok: true, data });
 const DOWN = { ok: false, status: 503, error: "http_503" };
 
-type Read = "stats" | "intents" | "accounts" | "sources" | "category-mix";
+type Read =
+  | "stats"
+  | "intents"
+  | "accounts"
+  | "sources"
+  | "category-mix"
+  | "runway";
 
 const STATS = {
   intents_by_state: { review_required: 2, scheduled: 3 },
@@ -74,6 +80,7 @@ function answer(overrides: Partial<Record<Read, unknown>> = {}) {
       ],
     }),
     sources: ok({ sources: [] }),
+    runway: ok({ below_days: 7, accounts: [] }),
     ...overrides,
   };
   workspaceFetch.mockImplementation(async (path: string) => {

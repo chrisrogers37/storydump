@@ -1,9 +1,10 @@
 """Two advisory-lock hash widths, held apart on purpose (#1370, TD-B19).
 
-`identity.py` hashes with `hashtext` (32-bit); `provisioning.py` and
-`category_mix.py` with `hashtextextended` (64-bit). That is not two spellings
-of one thing — it was ruled in #1370 after measuring, and this file is the
-ratchet that makes changing either a decision rather than a tidy-up.
+`identity.py` hashes with `hashtext` (32-bit); `provisioning.py`,
+`category_mix.py` and `content_runway.py` with `hashtextextended` (64-bit).
+That is not two spellings of one thing — it was ruled in #1370 after
+measuring, and this file is the ratchet that makes changing either a decision
+rather than a tidy-up.
 
 THE THREE FACTS THE RULING RESTS ON
 -----------------------------------
@@ -19,11 +20,11 @@ THE THREE FACTS THE RULING RESTS ON
    folder keys are dense "at estate scale"; subjects are not.
 
 3. **The namespaces are disjoint**, which is what makes two widths safe at all.
-   `identity:` is hashed only at 32 bits; `case_mix:`, `sources:` and
-   `media_source:` only at 64. No key string is hashed both ways, so no two
-   callers can take "the same" lock through different functions and fail to
-   exclude each other. THIS is the property that would break if someone
-   half-unified them, and it is the one asserted below.
+   `identity:` is hashed only at 32 bits; `case_mix:`, `sources:`,
+   `media_source:` and `runway:` only at 64. No key string is hashed both
+   ways, so no two callers can take "the same" lock through different
+   functions and fail to exclude each other. THIS is the property that would
+   break if someone half-unified them, and it is the one asserted below.
 
 WHY UNIFYING IS A DEPLOY PLAN, NOT A PATCH
 ------------------------------------------
@@ -49,6 +50,8 @@ EXPECTED_WIDTH = {
     "case_mix:": "hashtextextended",
     "sources:": "hashtextextended",
     "media_source:": "hashtextextended",
+    # Per account: keyed on a tenant's rows, as the three above are.
+    "runway:": "hashtextextended",
 }
 
 #: `(module, hash function, key expression)` for every hashed advisory lock.

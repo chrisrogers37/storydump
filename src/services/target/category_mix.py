@@ -10,6 +10,11 @@ execute_plan_slot` draws a folder by these weights before it picks a file —
 through :func:`weights`, the ONE function that also feeds the card's
 "Posts about" column, so the two can never disagree.
 
+The draw's read lives here with its arithmetic: :func:`pool` is the folders a
+draw can land on and the files eligible in each (:data:`ELIGIBLE_SQL`, `06`
+§3's rule), and the Overview's days of content left (`content_runway`) counts
+the same read, so the figure and the draw cannot disagree either.
+
 D23: the table keeps its row shape (one row per source per effective period;
 `effective_to IS NULL` is the current row, `uq_case_mix_current_by_source`
 makes two current rows for a source impossible) and **sum-to-one is
@@ -28,12 +33,13 @@ folder name at save time — never a key. A row written before 071 carries no
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from sqlalchemy import text
 
 from src.exceptions.base import RefusalError
-from src.services.target import readers
+from src.services.target import intent_ledger, readers
 from src.services.target.workspaces import CONNECTED_SQL
 
 #: Sum-to-one tolerance: four decimal places per row, so a three-way split
@@ -143,6 +149,105 @@ def weights(rows: list[dict]) -> dict[str, float]:
     for sid, ratio, _ in explicit:
         out[sid] = (1 - pool) * ratio / total_ratio
     return out
+
+
+#: `06` §3's rule in full, spliced after ``FROM media_items m``: available, not
+#: already live for this account, minus the workspace-wide locks
+#: (skip/reject/hold/seasonal/unsupported) and minus THIS account's own
+#: `recent` locks — a live lock is one with no expiry or an expiry still ahead.
+#: The planner picks with it and the runway counts with it.
+ELIGIBLE_SQL = (
+    " WHERE m.workspace_id = :ws AND m.state = 'available'"
+    "   AND NOT EXISTS (SELECT 1 FROM post_intents p"
+    "                   WHERE p.workspace_id = m.workspace_id"
+    "                     AND p.media_item_id = m.id"
+    "                     AND p.ig_account_id = :acct"
+    "                     AND p.state <> ALL(CAST(:terminal AS text[])))"
+    "   AND NOT EXISTS (SELECT 1 FROM post_locks l"
+    "                   WHERE l.workspace_id = m.workspace_id"
+    "                     AND l.media_item_id = m.id"
+    "                     AND (l.expires_at IS NULL OR l.expires_at > now())"
+    "                     AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct))"
+)
+
+
+@dataclass(frozen=True)
+class Pool:
+    """What one account can post from right now, folder by folder."""
+
+    #: :func:`weights` over the connected folders, in the order read.
+    weights: dict[str, float]
+    #: Eligible files per connected folder.
+    counts: dict[str, int]
+
+    @property
+    def drawable(self) -> list[tuple[str, float]]:
+        """The folders the draw can land on, with their weights: Off folders,
+        and folders with nothing eligible, weigh 0 and are not among them."""
+        return [(sid, weight) for sid, weight in self.weights.items() if weight > 0]
+
+    @property
+    def eligible(self) -> int:
+        """Every file the planner could pick for this account now."""
+        return sum(self.counts.get(sid, 0) for sid, _ in self.drawable)
+
+
+async def pool_folders(executor, *, workspace_id: str) -> list[dict]:
+    """The folders a draw can land on, with their current ratios — `source_id`,
+    `ratio`. A folder in `error` or removed is not among them; the mix is keyed
+    on the source (a name is a label), so a mix row without a source_id (set
+    before 071) is not joined and shapes nothing. The same for every account
+    of the workspace, so a read over several accounts passes it to
+    :func:`pool` once."""
+    return await readers.rows(
+        executor,
+        "SELECT s.id AS source_id, x.ratio"
+        "  FROM media_sources s"
+        "  LEFT JOIN category_post_case_mix x"
+        "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
+        "   AND x.effective_to IS NULL"
+        " WHERE s.workspace_id = :ws AND s.state <> 'error'"
+        "   AND " + CONNECTED_SQL,
+        ws=workspace_id,
+    )
+
+
+async def pool(
+    executor,
+    *,
+    workspace_id: str,
+    ig_account_id: str,
+    folders: Optional[list[dict]] = None,
+) -> Pool:
+    """The planner's pool for one account: the folders a draw can land on
+    (:func:`pool_folders`, read here unless *folders* hands that read in),
+    then the eligible files in each, weighed by :func:`weights`.
+    `scheduler.execute_plan_slot` draws from it and `content_runway` counts
+    it, so the files drawn from and the days left cannot disagree."""
+    if folders is None:
+        folders = await pool_folders(executor, workspace_id=workspace_id)
+    counts = await readers.rows(
+        executor,
+        "SELECT m.source_id, count(*) AS n FROM media_items m"
+        + ELIGIBLE_SQL
+        + " GROUP BY m.source_id",
+        ws=workspace_id,
+        acct=ig_account_id,
+        terminal=list(intent_ledger.TERMINAL_STATES),
+    )
+    have = {str(row["source_id"]): int(row["n"]) for row in counts}
+    shaped = [
+        {
+            "source_id": str(row["source_id"]),
+            "ratio": None if row["ratio"] is None else float(row["ratio"]),
+            "n": have.get(str(row["source_id"]), 0),
+        }
+        for row in folders
+    ]
+    return Pool(
+        weights=weights(shaped),
+        counts={row["source_id"]: row["n"] for row in shaped},
+    )
 
 
 async def _connected(executor, *, workspace_id: str):
