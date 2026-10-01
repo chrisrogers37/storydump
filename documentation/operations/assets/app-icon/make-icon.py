@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Storydump's app icon: the PNGs Meta App Review and the Google OAuth consent
-screen ask for, drawn from the site's own colour tokens. Needs Pillow.
+screen ask for, drawn from the site's own colour tokens. Needs Pillow: the
+committed files are what 12.2 and 12.3 write byte for byte, and 9.4 draws the
+edges differently.
 
     python3 documentation/operations/assets/app-icon/make-icon.py [out-dir]
 
@@ -9,8 +11,9 @@ writes, next to this file unless an out-dir is given:
 - storydump-icon-1024.png: Meta's app icon (1024x1024).
 - storydump-icon-120.png: Google's consent-screen logo (120x120).
 
-Both platforms reject transparency, so the image is RGB with no alpha channel.
-Neither gets corners drawn in: each platform rounds its own.
+Both runbooks ask for no transparency (neither provider's docs say either
+way), so the image is RGB with no alpha channel. No corners are drawn in, so
+each platform is free to round or crop it.
 
 The mark is three Story frames in a receding deck, a 9:16 stack, which is what
 the product schedules. It has no text and no font, so it renders the same on
