@@ -97,6 +97,45 @@ class TestTheDrainDoesNotSwallowAnIntentItCannotSee:
             await offboarding.drain(_DrainSession(["i-1"]), "ws-1", limit=5)
 
 
+class TestTheDrainBound:
+    """#1441: a run makes at most 64 cancels, and a refusal does not count
+    (its savepoint rolls back and holds no subtransaction id)."""
+
+    @pytest.fixture(autouse=True)
+    def _transition(self, monkeypatch):
+        refuse = set()
+
+        async def transition(session, intent_id, to_state):
+            if intent_id in refuse:
+                raise intent_ledger.IntentTransitionRefused("illegal edge")
+
+        monkeypatch.setattr(offboarding.intent_ledger, "transition", transition)
+        return refuse
+
+    async def test_exactly_64_leaves_nothing_more(self):
+        ids = [f"i-{n}" for n in range(64)]
+        out = await offboarding.drain(_DrainSession(ids), "ws-1", limit=500)
+        assert (out["cancelled"], out["more"]) == (64, False)
+
+    async def test_the_65th_is_left_for_the_next_run(self):
+        ids = [f"i-{n}" for n in range(65)]
+        out = await offboarding.drain(_DrainSession(ids), "ws-1", limit=500)
+        assert (out["cancelled"], out["more"]) == (64, True)
+
+    async def test_refusals_do_not_count(self, _transition):
+        refused = [f"r-{n}" for n in range(10)]
+        _transition.update(refused)
+        ids = refused + [f"i-{n}" for n in range(64)]
+        out = await offboarding.drain(_DrainSession(ids), "ws-1", limit=500)
+        assert (out["cancelled"], out["refused"], out["more"]) == (64, 10, False)
+        assert [r["intent_id"] for r in out["refusals"]] == refused
+
+    async def test_a_read_that_fills_its_limit_says_more(self):
+        ids = [f"i-{n}" for n in range(5)]
+        out = await offboarding.drain(_DrainSession(ids), "ws-1", limit=5)
+        assert (out["cancelled"], out["more"]) == (5, True)
+
+
 class TestTheWorkspaceReadCarriesTheDeadline:
     async def test_an_offboarding_workspace_reports_when_it_can_last_be_restored(self):
         row = await workspaces.get_workspace(

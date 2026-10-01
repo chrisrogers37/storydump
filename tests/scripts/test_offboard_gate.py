@@ -23,6 +23,7 @@ The transit seam is faked (it is a provider); the database is not.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 
 import psycopg2
@@ -141,6 +142,45 @@ def _credential(off_db, ws):
         (ws["ws"], b"x"),
     )
     return str(cid)
+
+
+def _first_id():
+    """An intent id that sorts before any random one: the drain walks `ORDER BY id`."""
+    return "00000000" + uuid.uuid4().hex[8:]
+
+
+@contextlib.contextmanager
+def _without_edge(off_db, from_state, to_state):
+    """The guard refuses this edge inside the block, deterministically, and has it
+    back after: the database is the module's, so no test may leave it changed."""
+    edge = (from_state, to_state)
+    _migrate(
+        off_db["owner_stream"],
+        "DELETE FROM post_intent_transitions WHERE from_state = %s AND to_state = %s",
+        edge,
+    )
+    try:
+        yield
+    finally:
+        _migrate(
+            off_db["owner_stream"],
+            "INSERT INTO post_intent_transitions (from_state, to_state)"
+            " VALUES (%s, %s)",
+            edge,
+        )
+
+
+def _refusals(off_db, ws, intent_id=None):
+    """How many `offboard_cancel_refused` records the workspace holds."""
+    sql = (
+        "SELECT count(*) FROM audit_events WHERE workspace_id = %s"
+        "   AND detail->>'event' = 'offboard_cancel_refused'"
+    )
+    params = (ws["ws"],)
+    if intent_id is not None:
+        sql += " AND detail->>'intent_id' = %s"
+        params += (intent_id,)
+    return _one(off_db, sql, params)[0]
 
 
 # --- the command: `06` §1's entry edge ---------------------------------------
@@ -293,7 +333,14 @@ class _Transit:
         return True
 
 
-def _deps(off_db, *, transit, grace, drain_timeout):
+def _deps(
+    off_db,
+    *,
+    transit,
+    grace,
+    drain_timeout,
+    drain_limit=WorkerConfig.offboard_drain_limit,
+):
     engine = create_async_engine(asyncpg_url(off_db["worker"]), poolclass=NullPool)
     return WorkerDeps(
         engine=engine,
@@ -302,11 +349,20 @@ def _deps(off_db, *, transit, grace, drain_timeout):
             offboard_grace_seconds=grace,
             offboard_drain_timeout_seconds=drain_timeout,
             offboard_drain_recheck_seconds=30,
+            offboard_drain_limit=drain_limit,
         ),
     )
 
 
-def run_job(off_db, ws, *, transit=None, grace=0, drain_timeout=15 * 60):
+def run_job(
+    off_db,
+    ws,
+    *,
+    transit=None,
+    grace=0,
+    drain_timeout=15 * 60,
+    drain_limit=WorkerConfig.offboard_drain_limit,
+):
     """One `offboard_workspace` run, as `svc_worker`, in the shape the work
     loop supplies: the loop's session, a claimed job row."""
     job = _one(
@@ -319,7 +375,13 @@ def run_job(off_db, ws, *, transit=None, grace=0, drain_timeout=15 * 60):
     assert job is not None, "no ready offboard job to run"
 
     async def _go():
-        deps = _deps(off_db, transit=transit, grace=grace, drain_timeout=drain_timeout)
+        deps = _deps(
+            off_db,
+            transit=transit,
+            grace=grace,
+            drain_timeout=drain_timeout,
+            drain_limit=drain_limit,
+        )
         try:
             uow = unit_of_work(deps.engine, ws["ws"], actor_kind="system")
             async with uow.begin() as session:
@@ -551,24 +613,11 @@ class TestTheWorkflow:
         refused intent sorts FIRST (the drain walks `ORDER BY id`), so every
         other cancel runs after the refusal.
         """
-        refused = _intent(
-            off_db, ws, state="approved", intent_id="00000000" + uuid.uuid4().hex[8:]
-        )
+        refused = _intent(off_db, ws, state="approved", intent_id=_first_id())
         cancelled = _intent(off_db, ws)  # awaiting_approval: its edge stays
         offboard(off_db, ws, confirm=True)
-        _migrate(
-            off_db["owner_stream"],
-            "DELETE FROM post_intent_transitions"
-            " WHERE from_state = 'approved' AND to_state = 'cancelled'",
-        )
-        try:
+        with _without_edge(off_db, "approved", "cancelled"):
             out = run_job(off_db, ws, grace=3600)
-        finally:  # the database is the module's: put the edge back
-            _migrate(
-                off_db["owner_stream"],
-                "INSERT INTO post_intent_transitions (from_state, to_state)"
-                " VALUES ('approved', 'cancelled')",
-            )
 
         # Two cancels (the chain's own `scheduled` intent and `cancelled`) and
         # one refusal, which must not also count as a cancel.
@@ -577,6 +626,144 @@ class TestTheWorkflow:
         state = "SELECT state FROM post_intents WHERE id = %s"
         assert _one(off_db, state, (refused,))[0] == "approved"
         assert _one(off_db, state, (cancelled,))[0] == "cancelled"
+        # #1441: the refusal leaves a durable record, not only a log line.
+        assert _refusals(off_db, ws, refused) == 1
+
+    def test_a_refusals_record_survives_a_run_that_then_raises(self, off_db, ws):
+        """The record is committed in its own transaction, so it outlives the
+        run's rollback — here the drain timing out on a still-publishing intent,
+        which raises after the refusal was recorded."""
+        refused = _intent(off_db, ws, state="approved", intent_id=_first_id())
+        _intent(off_db, ws, state="publishing_ambiguous")
+        offboard(off_db, ws, confirm=True)
+        with _without_edge(off_db, "approved", "cancelled"):
+            with pytest.raises(DrainTimedOut):
+                run_job(off_db, ws, grace=0, drain_timeout=0)
+        assert _refusals(off_db, ws, refused) == 1
+
+
+class TestTheDrainIsBoundedBySubtransactions:
+    """#1441: each cancel rides its own savepoint, and a backend caches 64
+    subtransaction ids. A run that wrote in more would mark every other
+    backend's snapshot suboverflowed until it ended."""
+
+    def test_a_run_cancels_at_most_64_and_the_rest_drain_at_once(self, off_db, ws):
+        credential = _credential(off_db, ws)
+        for _ in range(70):  # plus the chain's own `scheduled` intent: 71 live
+            _intent(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        out = run_job(off_db, ws, grace=3600)
+
+        assert (out["cancelled"], out["refused"]) == (64, 0), out
+        # One subtransaction id per writing savepoint: the rows it cancelled
+        # carry them as xmin, so this counts the savepoints that wrote.
+        assert _one(
+            off_db,
+            "SELECT count(DISTINCT xmin::text) FROM post_intents"
+            " WHERE workspace_id = %s AND state = 'cancelled'",
+            (ws["ws"],),
+        ) == (64,)
+        assert _one(
+            off_db,
+            "SELECT count(*) FROM post_intents WHERE workspace_id = %s"
+            "   AND state <> 'cancelled'",
+            (ws["ws"],),
+        ) == (7,)
+        assert (out["outcome"], out["more"]) == ("draining", True), out
+        assert _one(
+            off_db,
+            "SELECT run_at <= now() FROM jobs WHERE id = %s",
+            (out["successor"],),
+        ) == (True,), "the rest drain on the next run now, not at the window's end"
+        assert _one(
+            off_db, "SELECT state FROM oauth_credentials WHERE id = %s", (credential,)
+        ) == ("active",), "revoke waits for the drain to finish"
+
+        # The next run cancels the rest, and only then do legs 2-3 run.
+        out = run_job(off_db, ws, grace=3600)
+        assert (out["outcome"], out["cancelled"], out["more"]) == ("drained", 7, False)
+        assert _one(
+            off_db,
+            "SELECT count(*) FROM post_intents WHERE workspace_id = %s"
+            "   AND state <> 'cancelled'",
+            (ws["ws"],),
+        ) == (0,)
+        assert _one(
+            off_db, "SELECT state FROM oauth_credentials WHERE id = %s", (credential,)
+        ) == ("revoked",)
+
+    def test_exactly_64_live_drain_and_revoke_in_one_run(self, off_db, ws):
+        """64 cancels with nothing left is the last run, not a bounded one: legs
+        2-3 run in it. Re-running at once needs the bound to have stopped the
+        drain with intents left, not 64 cancels alone."""
+        credential = _credential(off_db, ws)
+        for _ in range(63):  # plus the chain's own `scheduled` intent: 64 live
+            _intent(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        out = run_job(off_db, ws, grace=3600)
+
+        assert (out["outcome"], out["cancelled"], out["more"]) == (
+            "drained",
+            64,
+            False,
+        ), out
+        assert out["revoked"] == 1, out
+        assert _one(
+            off_db, "SELECT state FROM oauth_credentials WHERE id = %s", (credential,)
+        ) == ("revoked",), "the run that cancelled the last intent revokes"
+
+    def test_while_publishing_drains_a_bounded_run_rechecks_at_once(self, off_db, ws):
+        """The bound's next run does not wait for the recheck either, while an
+        intent is still publishing: its cancels are what stop the rest posting."""
+        for _ in range(70):
+            _intent(off_db, ws)
+        _intent(off_db, ws, state="publishing_ambiguous")
+        offboard(off_db, ws, confirm=True)
+        out = run_job(off_db, ws, grace=3600, drain_timeout=900)
+
+        assert (out["outcome"], out["publishing"], out["cancelled"]) == (
+            "draining",
+            1,
+            64,
+        ), out
+        assert _one(
+            off_db,
+            "SELECT run_at <= now() FROM jobs WHERE id = %s",
+            (out["successor"],),
+        ) == (True,)
+
+    def test_refusals_do_not_use_up_the_bound(self, off_db, ws):
+        """A refused cancel's savepoint rolls back and holds no subtransaction id,
+        so refusals that sort first do not strand the intents behind them."""
+        for _ in range(64):
+            _intent(off_db, ws, state="approved", intent_id=_first_id())
+        offboard(off_db, ws, confirm=True)
+        with _without_edge(off_db, "approved", "cancelled"):
+            out = run_job(off_db, ws, grace=3600)
+
+        assert _refusals(off_db, ws) == 64
+        # The chain's own `scheduled` intent sorts after them, and is cancelled.
+        assert (out["cancelled"], out["refused"], out["more"]) == (1, 64, False), out
+
+    def test_a_run_the_bound_did_not_stop_waits_for_the_window(self, off_db, ws):
+        """A run that read its limit with fewer than 64 cancels does not re-run at
+        once: a window of refusals would otherwise become back-to-back runs of a
+        few cancels each, recording the same refusals every time."""
+        for _ in range(2):
+            _intent(off_db, ws, state="approved", intent_id=_first_id())
+        _intent(off_db, ws, intent_id="00000001" + uuid.uuid4().hex[8:])  # third
+        offboard(off_db, ws, confirm=True)
+        with _without_edge(off_db, "approved", "cancelled"):
+            out = run_job(off_db, ws, grace=3600, drain_limit=3)
+
+        assert (out["cancelled"], out["refused"], out["more"]) == (1, 2, True), out
+        assert _one(
+            off_db,
+            "SELECT run_at = (SELECT offboarding_at + interval '3600 seconds'"
+            "                   FROM workspaces WHERE id = %s)"
+            "  FROM jobs WHERE id = %s",
+            (ws["ws"], out["successor"]),
+        ) == (True,)
 
 
 class TestTheDrainPark:

@@ -26,6 +26,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     async_url,
+    ingress_engine,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -106,6 +107,24 @@ def _exec(ops_db, sql, params=None, fetch=False):
 
 def _engine(ops_db):
     return ops_db["engine"]
+
+
+def _state(ops_db, table, row_id):
+    return _exec(
+        ops_db, f"SELECT state FROM {table} WHERE id = %s", (row_id,), fetch=True
+    )[0][0]
+
+
+def _leave_ambiguity(ops_db, intent_id):
+    """A concurrent move out of `publishing_ambiguous`, to `review_required`: the
+    one non-terminal way out (a terminal one would make the unguarded evidence
+    write raise first, on the freeze)."""
+    _exec(
+        ops_db,
+        "SET app.actor_kind = 'migration';"
+        " UPDATE post_intents SET state = 'review_required' WHERE id = %s",
+        (intent_id,),
+    )
 
 
 def _new_intent(ops_db, state="publishing", publish_step=None):
@@ -535,6 +554,33 @@ class TestKillBetweenPermitAndCall:
             "to make impossible"
         )
 
+    def test_a_park_whose_intent_already_left_publishing_raises(self, ops_db):
+        """#1438: the flip to `publishing_ambiguous` is state-guarded. An intent
+        that already left `publishing` matched no row, and the park still
+        returned "parked"; it raises now, and its transaction takes the op's
+        `ambiguous` mark back with it."""
+        intent, op = self._permitted_publish(ops_db)
+        before = _state(ops_db, "provider_operations", op["id"])
+        _exec(
+            ops_db,
+            "SET app.actor_kind = 'migration';"
+            " UPDATE post_intents SET state = 'approved' WHERE id = %s",
+            (intent,),
+        )
+        engine = _engine(ops_db)
+
+        async def go():
+            async with engine.connect() as conn:
+                await provider_ops.resume_unresolved(
+                    conn, op={"id": op["id"], "op_kind": "publish"}, intent_id=intent
+                )
+                await conn.commit()
+
+        with pytest.raises(ValueError, match="left 'publishing'"):
+            _run(go())
+        assert _state(ops_db, "provider_operations", op["id"]) == before
+        assert _state(ops_db, "post_intents", intent) == "approved"
+
 
 class TestTheReconcilerResolvesTheAmbiguityInBothModes:
     """The gate's second half. Container-verdict terminalizes from the
@@ -564,11 +610,18 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
 
         return intent, _run(go())
 
-    def _reconcile(self, ops_db, intent, *, status, mode, checks=0):
+    def _reconcile(self, ops_db, intent, *, status, mode, checks=0, on_poll=None):
+        """*on_poll* runs as the provider is polled, before any write."""
         from src.services.target import reconciler
 
         engine = _engine(ops_db)
         seen = []
+
+        def poll(intent_id, workspace_id=None):
+            if on_poll is not None:
+                on_poll(intent_id)
+            seen.append(intent_id)
+            return status
 
         async def go():
             async with engine.connect() as conn:
@@ -576,9 +629,7 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
                     conn,
                     intent_id=intent,
                     workspace_id=ops_db["ws"],
-                    poll=lambda intent_id, workspace_id=None: (
-                        seen.append(intent_id) or status
-                    ),
+                    poll=poll,
                     stories_check=lambda intent_id: {"stories": []},
                     mode=mode,
                     checks=checks,
@@ -627,6 +678,15 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         assert (
             _exec(
                 ops_db,
+                "SELECT state FROM post_intents WHERE id = %s",
+                (intent,),
+                fetch=True,
+            )[0][0]
+            == "failed"
+        )
+        assert (
+            _exec(
+                ops_db,
                 "SELECT state FROM provider_operations WHERE id = %s",
                 (op["id"],),
                 fetch=True,
@@ -652,6 +712,120 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             )[0][0]
             == "publishing_ambiguous"
         )
+
+    @pytest.mark.parametrize(
+        "status, verdict", [("PUBLISHED", "posted"), ("EXPIRED", "failed")]
+    )
+    def test_a_verdict_whose_intent_already_left_raises_and_leaves_the_op_open(
+        self, ops_db, status, verdict
+    ):
+        """#1438: the verdict's flip is state-guarded. When it matched no row,
+        the op was closed anyway and the verdict returned as if the intent had
+        moved; it raises now, before the op is touched."""
+        intent, op = self._ambiguous(ops_db)
+        with pytest.raises(ValueError, match=f"before its '{verdict}' verdict"):
+            self._reconcile(
+                ops_db,
+                intent,
+                status=status,
+                mode="container_verdict",
+                on_poll=lambda i: _leave_ambiguity(ops_db, i),
+            )
+        assert _state(ops_db, "provider_operations", op["id"]) == "ambiguous", (
+            "a verdict that moved nothing must not close the op it judged"
+        )
+
+    def test_a_park_whose_intent_already_left_raises(self, ops_db):
+        """#1438: the park is state-guarded too, and a miss returned silently."""
+        intent, _ = self._ambiguous(ops_db)
+        with pytest.raises(ValueError, match="before it was parked"):
+            self._reconcile(
+                ops_db,
+                intent,
+                status="PUBLISHED",
+                mode="evidence_capture",
+                checks=99,
+                on_poll=lambda i: _leave_ambiguity(ops_db, i),
+            )
+
+    def test_under_an_empty_tenant_the_verdict_raises_instead_of_reporting_it(
+        self, ops_db
+    ):
+        """The way these writes miss today (#1349's shape): as `svc_worker` with
+        an empty tenant claim, every statement is invisible to the tenant
+        policy, so the flip and the op read match no row. The verdict raised
+        nothing and returned "posted". Control: the owning tenant moves it."""
+        from src.services.target import reconciler, unit_of_work
+
+        intent, op = self._ambiguous(ops_db)
+
+        async def go(tenant):
+            async with ingress_engine(ops_db["worker"]) as engine:
+                async with engine.connect() as conn:
+                    await unit_of_work.apply_gucs(
+                        conn, tenant_id=tenant, actor_kind="system"
+                    )
+                    out = await reconciler.reconcile_intent(
+                        conn,
+                        intent_id=intent,
+                        workspace_id=ops_db["ws"],
+                        poll=lambda intent_id, workspace_id=None: "PUBLISHED",
+                        mode="container_verdict",
+                    )
+                    await conn.commit()
+                    return out
+
+        with pytest.raises(ValueError, match="before its 'posted' verdict"):
+            _run(go(""))
+        assert _state(ops_db, "post_intents", intent) == "publishing_ambiguous"
+        assert _run(go(str(ops_db["ws"]))) == "posted"
+        assert _state(ops_db, "provider_operations", op["id"]) == "succeeded"
+
+    def test_a_missed_flip_fails_the_reconcile_beat(self, ops_db):
+        """The raise reaches the executor: `reconcile_ambiguous` runs as
+        `svc_worker`, and a verdict whose flip matched no row fails the beat
+        rather than reporting the row resolved. Driven through the sweep, since
+        a guard around `reconcile_intent` there would silence the raise while
+        every direct test stayed green."""
+        from src.services.target import unit_of_work, work_loop
+
+        intent, _ = self._ambiguous(ops_db)
+        # The sweep takes the oldest ambiguity first (`fn_reconciler_sweep`
+        # orders by entered_state_at), so the module's other ambiguous rows
+        # cannot crowd this one out of the beat.
+        _exec(
+            ops_db,
+            "SET app.actor_kind = 'migration';"
+            " UPDATE post_intents SET entered_state_at = now() - interval '1 day'"
+            " WHERE id = %s",
+            (intent,),
+        )
+
+        def poll(intent_id, workspace_id=None):
+            if str(intent_id) != str(intent):
+                return "IN_PROGRESS"
+            _leave_ambiguity(ops_db, intent_id)
+            return "PUBLISHED"
+
+        async def beat():
+            registry = work_loop.build_registry(work_loop.WorkerDeps(poll=poll))
+            async with ingress_engine(ops_db["worker"]) as engine:
+                async with engine.connect() as conn:
+                    await unit_of_work.apply_gucs(
+                        conn, tenant_id="", actor_kind="system"
+                    )
+                    await registry["reconcile_ambiguous"](
+                        conn,
+                        {
+                            "id": "j-rec",
+                            "kind": "reconcile_ambiguous",
+                            "workspace_id": None,
+                            "payload": {"v": 1},
+                        },
+                    )
+
+        with pytest.raises(ValueError, match=f"intent {intent} matched no"):
+            _run(beat())
 
     def test_evidence_capture_parks_review_required_WITH_the_trail(self, ops_db):
         """Same authoritative-positive value, opposite outcome — which is the
