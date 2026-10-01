@@ -16,7 +16,12 @@ from fastapi.testclient import TestClient
 from src import __version__
 from src.api.app import create_app
 from src.config.settings import settings
-from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target import (
+    backpressure,
+    delivery_health,
+    posting_health,
+    scheduling_health,
+)
 
 
 class TestEngineConfiguration:
@@ -557,6 +562,140 @@ class TestPostingHealthIsATHIRDSurface:
         down for a fault no restart repairs."""
         app = create_app(env={})
         assert TestClient(app).get("/health").status_code == 200
+
+
+class _DeliveryDoors:
+    """A connection that answers 090's two doors from scripted rows, so the
+    REAL `delivery_health` builds the body the route serves: the poller's wire
+    contract is then tested on code that runs, not on a hand-written copy."""
+
+    def __init__(self, failures, sent):
+        self.failures, self.sent = failures, sent
+        self.statements = []
+
+    async def execute(self, stmt, params=None):
+        sql = str(stmt)
+        assert "fn_health_outbox_" in sql, f"the route reached past its doors: {sql}"
+        self.statements.append(sql)
+        doors = self
+
+        class _Result:
+            def mappings(self_inner):
+                return self_inner
+
+            def all(self_inner):
+                return [
+                    {"failure_class": c, "error_code": code, "rows": n, "alerting": a}
+                    for c, code, n, a in doors.failures
+                ]
+
+            def scalar_one(self_inner):
+                return doors.sent
+
+        return _Result()
+
+
+class _DeliveryEngine:
+    def __init__(self, conn):
+        self.conn = conn
+
+    @asynccontextmanager
+    async def connect(self):
+        yield self.conn
+
+
+class TestDeliveryHealthIsAFOURTHSurface:
+    """#1482. Deliveries failing and posts not landing are independent causes,
+    so the outbox's failures get their own surface rather than a key in either
+    of the other two payloads, which would rank one cause against the other."""
+
+    def test_it_is_its_own_route_beside_the_other_three(self):
+        paths = {r.path for r in create_app(env={}).routes}
+        assert {
+            "/health",
+            "/health/scheduling",
+            "/health/posting",
+            "/health/delivery",
+        } <= paths
+
+    def test_it_refuses_rather_than_reassures_when_it_cannot_look(self):
+        """No engine is a 503, never an hour of zero failures."""
+        app = create_app(env={})
+        assert app.state.engine is None
+        assert TestClient(app).get("/health/delivery").status_code == 503
+
+    def test_it_reaches_its_seam_with_the_default_window(self, client, monkeypatch):
+        seen = []
+
+        async def fake(executor, **kwargs):
+            seen.append((executor, kwargs))
+            return {
+                "window_seconds": 3600,
+                "sent_in_window": 3,
+                "failed_or_ambiguous": 0,
+                "by_class": {},
+            }
+
+        monkeypatch.setattr(delivery_health, "outbox_failures", fake)
+        resp = client.get("/health/delivery")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["sent_in_window"] == 3
+        ((executor, kwargs),) = seen
+        assert hasattr(executor, "execute") and kwargs == {}
+
+    @staticmethod
+    def _get(failures, sent=40):
+        doors = _DeliveryDoors(failures, sent)
+        app = create_app(engine=_DeliveryEngine(doors))
+        resp = TestClient(app).get("/health/delivery")
+        assert resp.status_code == 200, resp.text
+        return resp, doors
+
+    def test_the_body_is_aggregates_only(self):
+        """The route is unauthenticated: counts and codes, and nothing that
+        names a workspace, a chat or a message."""
+        resp, doors = self._get(
+            [("destination_gone", 403, 5, 5), ("rate_limited", 429, 9, 0)]
+        )
+        body = resp.json()
+        assert body["window_seconds"] == 3600 and body["sent_in_window"] == 40
+        assert body["failed_or_ambiguous"] == 5
+        assert body["by_class"]["destination_gone"] == {
+            "rows": 5,
+            "alerting": 5,
+            "codes": {"403": 5},
+        }
+        assert body["by_class"]["rate_limited"]["alerting"] == 0
+        for word in ("workspace", "chat", "binding", "payload", "external"):
+            assert word not in resp.text
+        assert len(doors.statements) == 2
+
+    @pytest.mark.parametrize(
+        "failures, reading",
+        [
+            ([("destination_gone", 403, 5, 5)], "above"),
+            ([("refused", 400, 4, 4)], "band"),
+            ([("rate_limited", 429, 30, 0), ("ambiguous", None, 1, 1)], "below"),
+        ],
+        ids=["five fires", "four holds", "a 429 storm is context"],
+    )
+    def test_the_payload_satisfies_the_pollers_strictness(self, failures, reading):
+        """The REAL classifier over the REAL body: a key the route drops or
+        mistypes reads as `unreachable` there, and fails here."""
+        from scripts.delivery_monitor import (
+            DEFAULT_CLEAR_AT,
+            DEFAULT_RAISE_AT,
+            classify,
+        )
+
+        resp, _ = self._get(failures)
+        verdict = classify(
+            resp.status_code,
+            resp.text,
+            raise_at=DEFAULT_RAISE_AT,
+            clear_at=DEFAULT_CLEAR_AT,
+        )
+        assert verdict.state == reading
 
 
 class _RoleResult:

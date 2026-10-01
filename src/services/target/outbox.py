@@ -131,10 +131,18 @@ class ChannelPaced(StorydumpError):
     on the pacing rows so every replica's poller defers until it passes —
     never an in-task sleep (#1035). `scope` is `global` or `chat`."""
 
-    def __init__(self, message: str, *, retry_after_s: float, scope: str = "global"):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_s: float,
+        scope: str = "global",
+        code: int = 429,
+    ):
         super().__init__(message)
         self.retry_after_s = float(retry_after_s)
         self.scope = scope
+        self.code = code
 
 
 #: A provider's `retry_after` is honoured up to this long on the GLOBAL row
@@ -161,7 +169,13 @@ class ChannelRefused(StorydumpError):
     gone destination, a dead credential nor a flood limit. DEFINITIVE, like
     :class:`DestinationGone`: the message as shaped never landed, so the row
     fails outright instead of entering the ambiguity policy (a refused edit
-    retried to the resend cap was four paced calls for nothing; #1297)."""
+    retried to the resend cap was four paced calls for nothing; #1297).
+    *code* is the provider's own code for the refusal (090, #1482)."""
+
+    def __init__(self, *args, code: Optional[int] = None):
+        super().__init__(*args)
+        # After super(): a channel subclass's other base may set it too.
+        self.code = code
 
 
 #: A live sender's lost answer (`settle` → `ambiguous`) waits this long
@@ -183,9 +197,31 @@ class DestinationGone(StorydumpError):
     the caller retires or re-points the binding. *migrate_to* carries the
     successor chat id when the provider named one."""
 
-    def __init__(self, detail: str = "", *, migrate_to: Optional[str] = None):
+    def __init__(
+        self,
+        detail: str = "",
+        *,
+        migrate_to: Optional[str] = None,
+        code: Optional[int] = None,
+    ):
         self.migrate_to = migrate_to
         super().__init__(f"destination gone{': ' + detail if detail else ''}")
+        self.code = code
+
+
+class CredentialDead(StorydumpError):
+    """The provider rejected the channel's CREDENTIAL (Telegram: 401), not the
+    message and not the destination: every send will meet the same answer until
+    the token is replaced. Channel-neutral so the outbox never imports a
+    channel (`TelegramAuthDead` subclasses it).
+
+    `settle` records it as `credential_dead` (090, #1482) and, for now, still
+    treats the row as ambiguous: whether it should fail at once is #1493's
+    decision, kept out of the schema change."""
+
+    def __init__(self, *args, code: Optional[int] = None):
+        super().__init__(*args)
+        self.code = code
 
 
 class OutboxFenced(StorydumpError):
@@ -357,9 +393,22 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
     One spelling so the fence cannot be present on some edges and absent on
     others — the divergence that made the intent ledger's CAS and its test copy
     two independent statements (#890).
+
+    ``failure=(class, code)`` records why the attempt failed in the SAME
+    statement (090, #1482): the record is written exactly when, and only if, the
+    state change is, so a fenced writer records nothing.
     """
     sets = ["state = :s"]
     params = {"s": to_state, "i": outbox_id}
+    if extra.get("failure"):
+        failure_class, error_code = extra["failure"]
+        sets += [
+            "last_failure_class = :fc",
+            "last_error_code = :fcode",
+            "last_failed_at = now()",
+        ]
+        params["fc"] = str(failure_class)
+        params["fcode"] = error_code
     if "external_message_ref" in extra:
         sets.append("external_message_ref = :ref")
         params["ref"] = extra["external_message_ref"]
@@ -414,7 +463,9 @@ async def mark_sent(
     )
 
 
-async def mark_ambiguous(session, *, outbox_id: str) -> None:
+async def mark_ambiguous(
+    session, *, outbox_id: str, failure: tuple = ("ambiguous", None)
+) -> None:
     """`sending → ambiguous`: the send left, the response did not come back.
 
     R8's no-blind-retry rule lands here. Resolution is the per-kind policy in
@@ -422,7 +473,7 @@ async def mark_ambiguous(session, *, outbox_id: str) -> None:
     the binding's sender applies it on a later tick, once the row has waited
     `AMBIGUOUS_RESOLVE_AFTER_SECONDS` (`resolve_aged_ambiguous`).
     """
-    await _leave_sending(session, outbox_id, "ambiguous")
+    await _leave_sending(session, outbox_id, "ambiguous", failure=failure)
 
 
 async def resolve_ambiguous(session, *, outbox_id: str) -> str:
@@ -472,9 +523,19 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
     else:
         to_state = "failed"  # spent it; a second duplicate is not the cost
 
+    # A row that FAILS here is counted when it fails (090, #1482): the time
+    # moves to now and the class stays what the send recorded, `ambiguous` for a
+    # row from before the columns existed.
+    failed = (
+        ", last_failed_at = now(),"
+        " last_failure_class = COALESCE(last_failure_class, 'ambiguous')"
+        if to_state == "failed"
+        else ""
+    )
     result = await session.execute(
         text(
-            "UPDATE channel_outbox SET state = :s WHERE id = :i AND state = 'ambiguous'"
+            f"UPDATE channel_outbox SET state = :s{failed}"
+            " WHERE id = :i AND state = 'ambiguous'"
         ),
         {"s": to_state, "i": outbox_id},
     )
@@ -992,7 +1053,9 @@ async def recover_stranded(session, *, binding_id: str) -> list:
     rows = (
         await session.execute(
             text(
-                "UPDATE channel_outbox SET state = 'ambiguous'"
+                "UPDATE channel_outbox SET state = 'ambiguous',"
+                "       last_failure_class = 'ambiguous', last_error_code = NULL,"
+                "       last_failed_at = now()"
                 " WHERE binding_id = :b AND state = 'sending' RETURNING id"
             ),
             {"b": binding_id},
@@ -1156,6 +1219,13 @@ async def write_pacing_hold(
     return int(result.rowcount or 0)
 
 
+def _provider_code(error) -> Optional[int]:
+    """The provider's own code on a transport error, when it carries one: an
+    int, never a bool, and nothing invented for an error that has none."""
+    code = getattr(error, "code", None)
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
 async def settle(
     session,
     row: dict,
@@ -1212,8 +1282,15 @@ async def settle(
                 window_seconds=global_window_seconds or DEFAULT_GLOBAL_WINDOW_SECONDS,
             )
         # The row goes back to `pending` with the attempt the claim consumed
-        # restored: the provider's limit is not this row's failure.
-        await _leave_sending(session, row["id"], "pending", restore_attempt=True)
+        # restored: the provider's limit is not this row's failure. It is
+        # still RECORDED (a deferral, never counted as a failure — 090).
+        await _leave_sending(
+            session,
+            row["id"],
+            "pending",
+            restore_attempt=True,
+            failure=("rate_limited", _provider_code(error)),
+        )
         return {
             **row,
             "state": "paced",
@@ -1225,7 +1302,12 @@ async def settle(
         # Definitive, not ambiguous: the provider said the chat will not take
         # it. The row fails; the caller retires the binding so the sweep stops
         # minting for a chat that is gone (a kicked bot is NOT a dead token).
-        await _leave_sending(session, row["id"], "failed")
+        await _leave_sending(
+            session,
+            row["id"],
+            "failed",
+            failure=("destination_gone", _provider_code(error)),
+        )
         return {
             **row,
             "state": "failed",
@@ -1236,11 +1318,21 @@ async def settle(
     if isinstance(error, ChannelRefused):
         # Definitive, like a gone destination: the provider said this message
         # as shaped will never land. Nothing to resend; the row fails.
-        await _leave_sending(session, row["id"], "failed")
+        await _leave_sending(
+            session, row["id"], "failed", failure=("refused", _provider_code(error))
+        )
         return {**row, "state": "failed", "external_message_ref": None}
     if error is not None:
-        # A lost response is the ambiguous case.
-        await mark_ambiguous(session, outbox_id=row["id"])
+        # A lost response is the ambiguous case: a timeout carries no code, a
+        # 5xx carries the provider's. A refused token is recorded as such (090),
+        # but its STATE is still the ambiguous case until #1493 decides it
+        # should fail at once, so this moves no row differently than before.
+        dead = isinstance(error, CredentialDead)
+        await mark_ambiguous(
+            session,
+            outbox_id=row["id"],
+            failure=("credential_dead" if dead else "ambiguous", _provider_code(error)),
+        )
         return {**row, "state": "ambiguous", "external_message_ref": None}
 
     await mark_sent(

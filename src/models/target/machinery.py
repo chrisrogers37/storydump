@@ -146,6 +146,13 @@ class ChannelOutbox(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'pending'"))
     attempts = Column(Integer, nullable=False, server_default=text("0"))
     external_message_ref = Column(Text, nullable=True)
+    # The row's LAST failed attempt, not how it ended (090, #1482): the class
+    # (`vocabulary.OUTBOX_FAILURE_CLASSES`), the provider's own code for it
+    # (Telegram's `error_code`; NULL when no answer came back) and when. A later
+    # success does not clear them; `state` says how the row ended.
+    last_failure_class = Column(Text, nullable=True)
+    last_error_code = Column(Integer, nullable=True)
+    last_failed_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
 
     __table_args__ = (
@@ -153,6 +160,11 @@ class ChannelOutbox(TargetBase):
             "kind IN ('approval_prompt','prompt_supersede','notification','ack',"
             "'invitation')",
             name="ck_outbox_kind",
+        ),
+        CheckConstraint(
+            "last_failure_class IN ('rate_limited','destination_gone','refused',"
+            "'credential_dead','ambiguous')",
+            name="ck_outbox_failure_class",
         ),
         CheckConstraint(
             "jsonb_typeof(payload->'v') = 'number'", name="ck_outbox_payload_v"
@@ -172,6 +184,11 @@ class ChannelOutbox(TargetBase):
             "binding_id",
             "created_at",
             postgresql_where=text("state = 'pending'"),
+        ),
+        Index(
+            "ix_outbox_last_failed",
+            "last_failed_at",
+            postgresql_where=text("last_failed_at IS NOT NULL"),
         ),
         # 072: the tap's supersede-everywhere and the settled-card sweep select
         # by intent (07 §18).

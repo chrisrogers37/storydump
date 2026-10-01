@@ -24,7 +24,12 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request
 
 from src import __version__
-from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target import (
+    backpressure,
+    delivery_health,
+    posting_health,
+    scheduling_health,
+)
 from src.services.target.work_loop import WorkerConfig
 
 #: The one version string: the OpenAPI document's and `/health`'s. Read by
@@ -205,3 +210,29 @@ async def posting_health_check(request: Request):
         # Every key spelled in the service that computes it, so a rename
         # cannot leave the route publishing a name nothing produces.
         return {**posting, **attempts, **dests}
+
+
+@router.get("/health/delivery")
+async def delivery_health_check(request: Request):
+    """Are the messages the product sends getting through? (#1482)
+
+    A FOURTH health surface, by `/health/posting`'s own rule. Deliveries failing
+    and posts not landing are independent causes, so folding this axis into
+    either payload would rank one against the other, and ranking is what masks.
+
+    The last hour's outbox rows whose last failure fell in it, by class and the
+    provider's code, how many of them ended `failed` or sit `ambiguous`, and how
+    many rows were sent in the same hour (`delivery_health`, through 090's
+    doors). NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: the
+    alert is `scripts/delivery_monitor.py`, run outside the app. Unauthenticated,
+    so AGGREGATES ONLY: counts and codes, never a workspace, a chat or a message.
+
+    503 when the engine is absent, never a reassuring zero.
+    """
+    engine = request.app.state.engine
+    if engine is None:
+        raise HTTPException(status_code=503, detail="target database not configured")
+    # A direct connection, as on `/health/posting`: the read is estate-wide and
+    # has no tenant, and its cross-tenant reach is 090's doors.
+    async with engine.connect() as conn:
+        return await delivery_health.outbox_failures(conn)
