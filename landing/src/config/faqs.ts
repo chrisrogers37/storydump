@@ -32,7 +32,7 @@ export const faqs = [
   {
     question: "Is my content stored on your servers?",
     answer:
-      "No. Your media stays in your Google Drive. Storydump reads from your drive to schedule posts, but your files are never permanently stored on our infrastructure.",
+      "Not permanently. Your media stays in your Google Drive. To post a story, Storydump makes a framed copy for Instagram to fetch and deletes it as soon as the story posts or is cancelled; any copy left over is deleted once it is 48 hours old. What we keep is a reference to each file (its Drive ID, name, type, size and folder), not the file.",
   },
   {
     question: "Who built this?",
