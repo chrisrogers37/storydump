@@ -1416,13 +1416,17 @@ async def _ladder(
         if stop is not None:
             return stop
         async with _leased_tx(uow, ctx.job) as session:
-            await session.execute(
-                text(
-                    "UPDATE post_intents SET publish_step = 'container_ready'"
-                    " WHERE id = :intent AND state = 'publishing'"
-                ),
-                {"intent": ctx.intent_id},
-            )
+            ready = (
+                await session.execute(
+                    text(
+                        "UPDATE post_intents SET publish_step = 'container_ready'"
+                        " WHERE id = :intent AND state = 'publishing' RETURNING id"
+                    ),
+                    {"intent": ctx.intent_id},
+                )
+            ).fetchone()
+        if ready is None:
+            raise ValueError(f"intent {ctx.intent_id} left 'publishing' mid-ladder")
         step = "container_ready"
 
     if step == "publish_called":

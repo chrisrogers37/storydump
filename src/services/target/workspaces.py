@@ -44,6 +44,7 @@ from src.exceptions.base import StorydumpError
 from src.services.target import vocabulary
 from src.services.target import google_drive_oauth, identity, offboarding, readers
 from src.services.target._dbapi import driver_error_is
+from src.services.target.publish_cap import _SPENDS_CAP_SQL
 from src.services.target.unit_of_work import apply_gucs
 
 #: `workspaces.name` is VARCHAR(100).
@@ -494,7 +495,8 @@ async def get_media(executor, *, workspace_id: str, media_id: str) -> Optional[d
     )
 
 
-#: `stats.posts_by_day` looks back this many days of `daily_post_counts`.
+#: The stats window: `posts_by_day` and `posted_by_source` count today and the
+#: `STATS_DAYS` local dates before it, on the date a post debited the daily cap.
 STATS_DAYS = 30
 
 
@@ -510,10 +512,10 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
     """
     ws = str(workspace_id)
 
-    async def by(sql: str) -> dict[str, int]:
+    async def by(sql: str, **params: Any) -> dict[str, int]:
         return {
             (row["k"] if row["k"] is not None else ""): int(row["n"])
-            for row in await readers.rows(executor, sql, ws=ws)
+            for row in await readers.rows(executor, sql, ws=ws, **params)
         }
 
     intents_by_state = await by(
@@ -528,12 +530,24 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
         "SELECT category AS k, count(*) AS n FROM media_items"
         " WHERE workspace_id = :ws AND state = 'available' GROUP BY 1"
     )
-    posted_by_category = await by(
-        "SELECT m.category AS k, count(*) AS n"
+    posted_by_source = await by(
+        # Keyed on the connected folder the post's media came from, as the
+        # category-mix route keys its weights (`source_id`, the text of
+        # `media_sources.id`); `category` is a display label no weight keys on.
+        # Counted as `posts_by_day` counts: only stories that spend the cap
+        # (`_SPENDS_CAP_SQL`), since a story a person planned is outside the
+        # cadence the mix draws, and windowed on the local date the post
+        # debited the cap, the date `daily_post_counts` counts it on. A
+        # `legacy_backfill` row never debited the cap, so it is outside the
+        # window here as it is in the ledger.
+        "SELECT m.source_id::text AS k, count(*) AS n"
         "  FROM post_intents i"
         "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
         " WHERE i.workspace_id = :ws AND i.state = 'posted'"
-        "   AND i.published_via <> 'dry_run' GROUP BY 1"
+        "   AND i.published_via <> 'dry_run'"
+        "   AND i.cap_consumed_on >= current_date - make_interval(days => :days)"
+        "   AND " + _SPENDS_CAP_SQL + " GROUP BY 1",
+        days=STATS_DAYS,
     )
     counts = await readers.row(
         executor,
@@ -559,7 +573,7 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
         "media_by_state": media_by_state,
         "media_never_posted": int(counts["media_never_posted"]),
         "media_by_category": media_by_category,
-        "posted_by_category": posted_by_category,
+        "posted_by_source": posted_by_source,
         "posts_by_day": [
             {
                 "local_date": r["local_date"],

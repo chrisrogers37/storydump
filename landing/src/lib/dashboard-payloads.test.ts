@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
-  deriveCategories,
+  deriveFolderMix,
   derivePoolHealth,
   deriveSummary,
   type StatsResponse,
 } from "./dashboard-payloads";
+import type { MixSourceRow } from "./category-mix";
 
 /**
  * The derivations that used to happen server-side (#1044).
@@ -18,7 +19,7 @@ const stats = (over: Partial<StatsResponse> = {}): StatsResponse => ({
   media_by_state: {},
   media_never_posted: 0,
   media_by_category: {},
-  posted_by_category: {},
+  posted_by_source: {},
   posts_by_day: [],
   accounts: 0,
   sources: 0,
@@ -86,33 +87,81 @@ describe("deriveSummary", () => {
   });
 });
 
-describe("deriveCategories", () => {
-  it("joins the two dicts and shares out of posted, not out of library", () => {
-    const rows = deriveCategories(
-      stats({
-        media_by_category: { coffee: 10, pastry: 6 },
-        posted_by_category: { coffee: 3, pastry: 1 },
-      }),
+const folder = (
+  over: Partial<MixSourceRow> & { source_id: string },
+): MixSourceRow => ({
+  provider: "gdrive",
+  name: over.source_id,
+  state: "active",
+  media_count: 1,
+  ratio: null,
+  effective: 0,
+  ...over,
+});
+
+describe("deriveFolderMix", () => {
+  const mix = {
+    rows: [
+      folder({ source_id: "s-memes", name: "memes", ratio: 0.7, effective: 70 }),
+      folder({ source_id: "s-merch", name: "merch", ratio: null, effective: 30 }),
+      folder({ source_id: "s-old", name: "old", ratio: 0, effective: 0 }),
+    ],
+  };
+
+  it("sets each folder's plan beside its share of every post in the window", () => {
+    const { folders, total, fromRemoved } = deriveFolderMix(
+      stats({ posted_by_source: { "s-memes": 6, "s-merch": 2, "s-gone": 2 } }),
+      mix,
     );
-    expect(rows.map((r) => r.category)).toEqual(["coffee", "pastry"]);
-    expect(rows[0]).toMatchObject({ posted: 3, total: 10 });
-    expect(rows[0].actual_ratio).toBeCloseTo(0.75);
-    expect(rows[1].actual_ratio).toBeCloseTo(0.25);
+    expect(folders.map((f) => [f.name, f.mode, f.planned])).toEqual([
+      ["memes", "explicit", 70],
+      ["merch", "automatic", 30],
+      ["old", "off", 0],
+    ]);
+    // Out of all ten posts, the two from a folder no longer connected included.
+    expect(folders[0].posted).toBeCloseTo(60);
+    expect(folders[1].posted).toBeCloseTo(20);
+    expect({ total, fromRemoved }).toEqual({ total: 10, fromRemoved: 2 });
   });
 
-  it("keeps a category that has media but no posts", () => {
-    const rows = deriveCategories(
-      stats({ media_by_category: { unposted: 4 }, posted_by_category: {} }),
+  it("gives a folder with no post in the window a real 0%", () => {
+    const { folders } = deriveFolderMix(
+      stats({ posted_by_source: { "s-memes": 3 } }),
+      mix,
     );
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ posted: 0, total: 4, actual_ratio: 0 });
+    expect(folders.map((f) => f.posted)).toEqual([100, 0, 0]);
   });
 
-  it("drops the empty-string key the SQL GROUP BY produces for NULL", () => {
-    const rows = deriveCategories(
-      stats({ media_by_category: { "": 3, coffee: 1 } }),
+  it("withholds every posted share when the window holds no post", () => {
+    const { folders, total } = deriveFolderMix(stats(), mix);
+    expect(total).toBe(0);
+    for (const f of folders) {
+      expect(f.posted, `${f.name} must be withheld`).toBeNull();
+      expect(typeof f.posted, `${f.name} must not be a number`).not.toBe("number");
+    }
+  });
+
+  it("reads an API that sent no posted_by_source as unavailable, not as no posts", () => {
+    const older: Partial<StatsResponse> = stats();
+    delete older.posted_by_source;
+    const { folders, total, fromRemoved } = deriveFolderMix(
+      older as StatsResponse,
+      mix,
     );
-    expect(rows.map((r) => r.category)).toEqual(["coffee"]);
+    expect(total).toBeNull();
+    expect(fromRemoved).toBe(0);
+    for (const f of folders) {
+      expect(f.posted, `${f.name} must be withheld`).toBeNull();
+    }
+  });
+
+  it("joins on source_id, never on the folder's name", () => {
+    const { folders, fromRemoved } = deriveFolderMix(
+      stats({ posted_by_source: { memes: 5 } }),
+      mix,
+    );
+    expect(folders[0].posted).toBe(0);
+    expect(fromRemoved).toBe(5);
   });
 });
 
@@ -152,7 +201,7 @@ describe("the contested figures stay withheld", () => {
     media_by_state: { available: 9 },
     media_never_posted: 2,
     media_by_category: { coffee: 9 },
-    posted_by_category: { coffee: 4 },
+    posted_by_source: { "s-coffee": 4 },
   });
 
   it("keeps the pool buckets null on a workspace with real data", () => {
@@ -165,13 +214,6 @@ describe("the contested figures stay withheld", () => {
       expect(value, `${name} must be withheld`).toBeNull();
       expect(typeof value, `${name} must not be a number`).not.toBe("number");
     }
-  });
-
-  it("keeps the configured mix null even where actual is known", () => {
-    const rows = deriveCategories(populated);
-    expect(rows[0].actual_ratio).toBeCloseTo(1);
-    expect(rows[0].configured_ratio).toBeNull();
-    expect(typeof rows[0].configured_ratio).not.toBe("number");
   });
 });
 

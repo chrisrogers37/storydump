@@ -19,10 +19,11 @@
  *
  * ── UNAVAILABLE is not zero, and the type system enforces it ───────────────
  *
- * Two figures the old screens showed have NO source on the target tier
- * (#1048): the configured category mix, and the `times_posted` buckets. Chris
- * rules on whether to drop them or serve them; until then they are `null`, NOT
- * `0` and NOT omitted.
+ * Two figures the old screens showed had NO source on the target tier
+ * (#1048): the configured category mix, and the `times_posted` buckets. The
+ * mix has one now, the category-mix route, which the overview's mix card
+ * reads. The buckets still have none: Chris rules on whether to drop them or
+ * serve them, and until then they are `null`, NOT `0` and NOT omitted.
  *
  * `null` rather than optional is deliberate and load-bearing. An optional field
  * lets a consumer write `?? 0` and silently render a fabricated figure as a
@@ -33,6 +34,7 @@
  */
 
 import { NON_TERMINAL_STATES, TERMINAL_STATES as TERMINAL_STATE_LIST } from "./intents";
+import { cardRows, type CategoryMixResponse, type WeightMode } from "./category-mix";
 
 // ── What the routes actually return ────────────────────────────────────────
 
@@ -42,7 +44,12 @@ export type StatsResponse = {
   media_by_state: Record<string, number>;
   media_never_posted: number;
   media_by_category: Record<string, number>;
-  posted_by_category: Record<string, number>;
+  /**
+   * Posts per connected folder over the stats window, keyed on `source_id`,
+   * the key the category-mix route keys its weights on. A folder with no post
+   * in the window has no key.
+   */
+  posted_by_source: Record<string, number>;
   posts_by_day: { local_date: string; count: number; cap: number }[];
   accounts: number;
   sources: number;
@@ -251,13 +258,32 @@ export type SummaryView = {
   avg_per_day: number | Unavailable;
 };
 
-export type CategoryView = {
-  category: string;
-  posted: number;
-  total: number;
-  actual_ratio: number;
-  /** #1048: the configured mix has no target-side source. */
-  configured_ratio: number | Unavailable;
+/** One connected folder on the overview's mix card. */
+export type FolderMixView = {
+  sourceId: string;
+  name: string;
+  mode: WeightMode;
+  /**
+   * The share of posts the mix plans for this folder, in percent: the API's
+   * `effective`, which Settings shows as "posts about".
+   */
+  planned: number;
+  /**
+   * Its share of every post in the stats window, in percent. `Unavailable`
+   * when the window holds no post: a share of nothing is not 0%.
+   */
+  posted: number | Unavailable;
+};
+
+export type FolderMix = {
+  folders: FolderMixView[];
+  /**
+   * Every post in the window: the divisor of each posted share. `Unavailable`
+   * when the API sent no `posted_by_source` (one deployed before it).
+   */
+  total: number | Unavailable;
+  /** Posts in the window from folders no longer connected: in `total`, on no row. */
+  fromRemoved: number;
 };
 
 export type PoolHealthView = {
@@ -312,22 +338,32 @@ export function deriveSummary(stats: StatsResponse): SummaryView {
   };
 }
 
-/** The category table, joined from the two count dicts. */
-export function deriveCategories(stats: StatsResponse): CategoryView[] {
-  const totals = stats.media_by_category ?? {};
-  const posted = stats.posted_by_category ?? {};
-  const postedOverall = sum(posted);
-  return Object.keys({ ...totals, ...posted })
-    .filter((c) => c !== "")
-    .sort()
-    .map((category) => ({
-      category,
-      posted: posted[category] ?? 0,
-      total: totals[category] ?? 0,
-      actual_ratio:
-        postedOverall === 0 ? 0 : (posted[category] ?? 0) / postedOverall,
-      configured_ratio: null,
-    }));
+/**
+ * The mix card: every connected folder from the category-mix route, in its
+ * order, beside its share of the posts `stats` counted over the window. The
+ * join is on `source_id`, never the folder's name, which is a label a rename
+ * changes.
+ */
+export function deriveFolderMix(
+  stats: StatsResponse,
+  mix: CategoryMixResponse,
+): FolderMix {
+  // An API deployed before `posted_by_source` answers without it. That is no
+  // window to share out of, not an empty one: `Unavailable`, never 0.
+  const posted = stats.posted_by_source as Record<string, number> | undefined;
+  const total = posted === undefined ? null : sum(posted);
+  const folders = cardRows(mix).map((row) => ({
+    sourceId: row.sourceId,
+    name: row.name,
+    mode: row.mode,
+    planned: row.effective,
+    posted:
+      posted === undefined || total === null || total === 0
+        ? null
+        : ((posted[row.sourceId] ?? 0) / total) * 100,
+  }));
+  const listed = folders.reduce((a, f) => a + (posted?.[f.sourceId] ?? 0), 0);
+  return { folders, total, fromRemoved: total === null ? 0 : total - listed };
 }
 
 /** Pool health, as far as `stats` can answer it. */

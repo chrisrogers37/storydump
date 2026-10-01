@@ -943,6 +943,36 @@ class TestTheReadinessPoll:
         row = _intent_row(pipe_db, intent)
         assert row["state"] == "approved" and row["publish_step"] == "container_created"
 
+    def test_a_ready_checkpoint_that_matches_no_row_stops_before_the_publish(
+        self, pipe_db
+    ):
+        """#1438: the `container_ready` checkpoint is state-guarded, and a miss
+        went on to the publish permit and the provider's publish call. It
+        raises now, as the checkpoints either side of it do."""
+        intent, ref = _new_intent(
+            pipe_db,
+            state="publishing",
+            publish_step="container_created",
+            transit_ref=f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}",
+        )
+
+        class _StepsBackWhilePolled(StubMetaAdapter):
+            async def container_status(self, container_id, **kw):
+                _exec(
+                    pipe_db,
+                    "UPDATE post_intents SET state = 'approved' WHERE id = %s",
+                    (intent,),
+                )
+                return await super().container_status(container_id, **kw)
+
+        meta = _StepsBackWhilePolled()
+        job = _leased_job(pipe_db, intent, ref=ref)
+        with pytest.raises(ValueError) as raised:
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert meta.publish_calls == [], "a missed checkpoint must not reach Meta"
+        assert "left 'publishing' mid-ladder" in str(raised.value)
+        assert [op for op in _ops(pipe_db, intent) if op["op_kind"] == "publish"] == []
+
 
 class TestPauseAndDryRun:
     """Settings › General, live 2026-09-10 (owner): Pause Posting holds an

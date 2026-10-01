@@ -2,19 +2,20 @@ import { requireWorkspacePage } from "@/lib/page-guards";
 import { workspaceFetch } from "@/lib/workspaces";
 import {
   HISTORY_STATES,
-  deriveCategories,
+  deriveFolderMix,
   deriveSummary,
   type AccountsResponse,
   type SourcesResponse,
   type StatsResponse,
 } from "@/lib/dashboard-payloads";
+import type { CategoryMixResponse } from "@/lib/category-mix";
 import { deriveConditions } from "@/lib/conditions";
 import type { IntentsResponse } from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { PostingChart } from "@/components/dashboard/posting-chart";
-import { CategoryBreakdown } from "@/components/dashboard/category-breakdown";
+import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
 
 /**
@@ -34,7 +35,7 @@ export default async function DashboardPage() {
   // bounded list, which is what made the old figures wrong on any workspace
   // past the page size. History is the intent ledger filtered to its terminal
   // states, which is one call rather than a separate endpoint.
-  const [statsResult, historyResult, accountsResult, sourcesResult] =
+  const [statsResult, historyResult, accountsResult, sourcesResult, mixResult] =
     await Promise.all([
       workspaceFetch<StatsResponse>("stats", workspaceId),
       workspaceFetch<IntentsResponse>(
@@ -46,6 +47,8 @@ export default async function DashboardPage() {
       // size. Its review count comes from `stats`.
       workspaceFetch<AccountsResponse>("accounts", workspaceId),
       workspaceFetch<SourcesResponse>("sources", workspaceId),
+      // The mix card's plan per connected folder; what each posted is `stats`.
+      workspaceFetch<CategoryMixResponse>("category-mix", workspaceId),
     ]);
 
   // EVERY dependency, not just the one that fills the most pixels. Two
@@ -56,14 +59,15 @@ export default async function DashboardPage() {
     !statsResult.ok ||
     !historyResult.ok ||
     !accountsResult.ok ||
-    !sourcesResult.ok
+    !sourcesResult.ok ||
+    !mixResult.ok
   ) {
     return <RouterUnavailable what="Your dashboard" />;
   }
 
   const stats = statsResult.data;
   const summary = deriveSummary(stats);
-  const categories = deriveCategories(stats);
+  const mix = deriveFolderMix(stats, mixResult.data);
   const conditions = deriveConditions({
     accounts: accountsResult.data.accounts,
     sources: sourcesResult.data.sources,
@@ -85,7 +89,7 @@ export default async function DashboardPage() {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <PostingChart data={stats.posts_by_day ?? []} />
-        <CategoryBreakdown categories={categories} />
+        <PostingMixCard mix={mix} />
       </div>
 
       <RecentActivity items={historyResult.data.intents ?? []} />

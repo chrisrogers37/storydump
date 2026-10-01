@@ -60,7 +60,7 @@ const STATS: StatsResponse = {
   media_by_state: { available: 12 },
   media_never_posted: 5,
   media_by_category: { surf: 7 },
-  posted_by_category: { surf: 3 },
+  posted_by_source: { "src-surf": 3 },
   posts_by_day: [],
   accounts: 1,
   sources: 1,

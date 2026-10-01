@@ -437,32 +437,38 @@ async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:
     ``provider_operations`` row, so no op stays ambiguous after its intent
     resolves and the ``ix_ops_retire`` retention class eventually drains.
     Skipping this is how a table grows a permanently un-retirable class.
+
+    The flip must land before the op is closed. A flip that matched no row —
+    the intent left `publishing_ambiguous`, or the session's tenant cannot see
+    it (#1349's shape) — raises instead, so the verdict never closes the op of
+    an intent that stayed put (#1438).
     """
     from src.services.target import provider_ops
 
     await _record_evidence(conn, intent_id=intent_id, checks=len(trail), trail=trail)
+    sets = "state = :state"
     if state == "posted":
         # `ck_posted_complete` refuses a bare state flip, and it is right to:
         # for the `api` route it demands ig_container_id, publish_step =
         # 'effect_confirmed' AND a cap debit. A verdict that set only `state`
         # would leave a posted row that cannot say what it posted. The schema
         # caught this — the first version of this function did exactly that.
+        sets += ", published_via = 'api', publish_step = 'effect_confirmed'"
+    flipped = (
         await conn.execute(
             text(
-                "UPDATE post_intents"
-                " SET state = 'posted', published_via = 'api',"
-                "     publish_step = 'effect_confirmed'"
+                f"UPDATE post_intents SET {sets}"
                 " WHERE id = :intent AND state = 'publishing_ambiguous'"
-            ),
-            {"intent": str(intent_id)},
-        )
-    else:
-        await conn.execute(
-            text(
-                "UPDATE post_intents SET state = :state"
-                " WHERE id = :intent AND state = 'publishing_ambiguous'"
+                " RETURNING id"
             ),
             {"intent": str(intent_id), "state": state},
+        )
+    ).first()
+    if flipped is None:
+        raise ValueError(
+            f"intent {intent_id} matched no 'publishing_ambiguous' row before its"
+            f" {state!r} verdict: it left that state, or this session's tenant"
+            " cannot see it"
         )
     result = await conn.execute(
         text(
@@ -486,7 +492,8 @@ async def _park_review_required(conn, *, intent_id, workspace_id) -> None:
     """Park, and put the review on the card at once (2026-09-12): the
     workspace resolves its own `review_required` intent, so every card of it
     is restated with the review line and the three resolution buttons. The
-    notice keeps `06` §5's window (`notify_parked`)."""
+    notice keeps `06` §5's window (`notify_parked`). A park that matched no
+    row raises, as `_terminalize`'s flip does (#1438)."""
     from datetime import datetime, timezone  # noqa: PLC0415 — local, as the module's other imports
 
     from src.services.target import outbox, prompts  # noqa: PLC0415 — cycle
@@ -504,7 +511,10 @@ async def _park_review_required(conn, *, intent_id, workspace_id) -> None:
         )
     ).first()
     if moved is None:
-        return
+        raise ValueError(
+            f"intent {intent_id} matched no 'publishing_ambiguous' row before it was"
+            " parked: it left that state, or this session's tenant cannot see it"
+        )
     line = prompts.outcome_line(
         "review_required",
         by=None,

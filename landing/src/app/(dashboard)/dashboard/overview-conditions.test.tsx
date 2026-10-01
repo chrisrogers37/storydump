@@ -19,8 +19,10 @@ vi.mock("@/lib/workspaces", () => ({ workspaceFetch }));
 import DashboardPage from "./page";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
+import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import type { Condition } from "@/lib/conditions";
+import type { FolderMix } from "@/lib/dashboard-payloads";
 
 /** Depth-first walk of a returned tree, children flattened. */
 function* walk(node: ReactNode): Generator<ReactElement> {
@@ -37,21 +39,24 @@ function* walk(node: ReactNode): Generator<ReactElement> {
 const ok = (data: unknown) => ({ ok: true, data });
 const DOWN = { ok: false, status: 503, error: "http_503" };
 
-type Read = "stats" | "intents" | "accounts" | "sources";
+type Read = "stats" | "intents" | "accounts" | "sources" | "category-mix";
+
+const STATS = {
+  intents_by_state: { review_required: 2, scheduled: 3 },
+  media_by_state: {},
+  media_never_posted: 0,
+  media_by_category: {},
+  posted_by_source: {},
+  posts_by_day: [],
+  accounts: 1,
+  sources: 1,
+};
 
 /** Answer each read by the first segment of its path; `overrides` replaces one. */
 function answer(overrides: Partial<Record<Read, unknown>> = {}) {
   const table: Record<Read, unknown> = {
-    stats: ok({
-      intents_by_state: { review_required: 2, scheduled: 3 },
-      media_by_state: {},
-      media_never_posted: 0,
-      media_by_category: {},
-      posted_by_category: {},
-      posts_by_day: [],
-      accounts: 1,
-      sources: 1,
-    }),
+    stats: ok(STATS),
+    "category-mix": ok({ rows: [] }),
     intents: ok({ intents: [], limit: 10 }),
     accounts: ok({
       accounts: [
@@ -106,7 +111,7 @@ describe("the overview's condition panel", () => {
     expect(paths).toContain("sources");
   });
 
-  it.each<Read>(["accounts", "sources", "stats"])(
+  it.each<Read>(["accounts", "sources", "stats", "category-mix"])(
     "a failed %s read is the unavailable state — never an all-clear",
     async (read) => {
       answer({ [read]: DOWN });
@@ -115,4 +120,30 @@ describe("the overview's condition panel", () => {
       expect(elements.some((el) => el.type === ConditionsPanel)).toBe(false);
     },
   );
+});
+
+describe("the overview's mix card", () => {
+  it("plans from the category-mix read and shares from stats", async () => {
+    answer({
+      stats: ok({ ...STATS, posted_by_source: { s1: 3, s2: 1 } }),
+      "category-mix": ok({
+        rows: [
+          { source_id: "s1", provider: "gdrive", name: "memes", state: "active", media_count: 8, ratio: 0.5, effective: 50 },
+          { source_id: "s2", provider: "gdrive", name: "merch", state: "active", media_count: 2, ratio: 0.5, effective: 50 },
+        ],
+      }),
+    });
+    const card = [...walk(await DashboardPage())].find(
+      (el) => el.type === PostingMixCard,
+    );
+    expect(card, "the overview renders no mix card").toBeDefined();
+    const { mix } = card!.props as { mix: FolderMix };
+    expect(mix.folders.map((f) => [f.name, f.planned, f.posted])).toEqual([
+      ["memes", 50, 75],
+      ["merch", 50, 25],
+    ]);
+    expect(workspaceFetch.mock.calls.map(([path]) => path)).toContain(
+      "category-mix",
+    );
+  });
 });

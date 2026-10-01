@@ -319,11 +319,18 @@ async def resume_unresolved(conn, *, op: dict, intent_id) -> str:
         to_state="ambiguous",
         response_ref={"v": 1, "error": "lost_response"},
     )
-    await conn.execute(
-        text(
-            "UPDATE post_intents SET state = 'publishing_ambiguous'"
-            " WHERE id = :intent AND state = 'publishing'"
-        ),
-        {"intent": str(intent_id)},
-    )
+    # Checked like `_advance` above: an intent that already left `publishing`
+    # is not parked, and the raise takes the op's `ambiguous` mark back with
+    # the caller's transaction (#1438).
+    moved = (
+        await conn.execute(
+            text(
+                "UPDATE post_intents SET state = 'publishing_ambiguous'"
+                " WHERE id = :intent AND state = 'publishing' RETURNING id"
+            ),
+            {"intent": str(intent_id)},
+        )
+    ).first()
+    if moved is None:
+        raise ValueError(f"intent {intent_id} left 'publishing' before it was parked")
     return "parked"
