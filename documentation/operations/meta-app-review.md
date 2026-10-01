@@ -51,7 +51,7 @@ The gate is keyed off the app's **use case** in the Meta Developer Portal — *"
 
 | Permission | Declared at | Used for |
 |---|---|---|
-| `instagram_business_basic` | `src/services/target/ig_login_oauth.py:83` | Reading the connected account's own profile and its own media |
+| `instagram_business_basic` | `REQUIRED_SCOPES` in `src/services/target/ig_login_oauth.py` | Reading the connected account's own profile (`GET /me?fields=user_id,username`, once at connect); also a dependency of `instagram_business_content_publish` |
 | `instagram_business_content_publish` | same | Creating and publishing media containers to the connected account |
 
 Nothing else is requested. There is no messaging permission anywhere in the tree.
@@ -149,17 +149,17 @@ Full endpoint behaviour, cascade scope and the RLS bound:
 
 **Marker: NOT-YET-ATTEMPTED for the submission; the copy below is drafted and ready to paste.**
 
-This is the longest track and the one that gates everything else, so its inputs are written now rather than when the other two clear. Both permissions need **justification copy** and a **demo video**.
+This is the longest track and the one that gates everything else, so its inputs are written now rather than when the other two clear. Both permissions need **justification copy**, a **demo video**, and **one successful API call made within 30 days before submitting** (Submission flow, step 4).
 
 ### `instagram_business_basic` — justification copy
 
-> Storydump is a scheduling tool for Instagram Stories. After a user connects their own Instagram Business account through Instagram Login, we use `instagram_business_basic` for exactly two things. First, to read that account's own profile (`GET /{ig-user-id}`) so the app can display which account is connected and store the account id the publishing calls need — without it a user with several connected accounts cannot tell them apart. Second, to read the account's own media and stories (`GET /{ig-user-id}/media`, `GET /{ig-user-id}/stories`) so the app can confirm that a story it scheduled actually published, and can avoid re-posting content that is already live. We read only the connected account's own data. We do not read other users' profiles, media, comments, or follower data, and we request no messaging permission of any kind.
+> Storydump is a scheduling tool for Instagram Stories. After a user connects their own Instagram Business account through Instagram Login, we use `instagram_business_basic` for one thing: to read that account's own profile (`GET /me?fields=user_id,username`, once at connect) so the app can display which account is connected and store the account id the publishing calls need — without it a user with several connected accounts cannot tell them apart. We read only the connected account's own data. We do not read other users' profiles, media, comments, or follower data, and we request no messaging permission of any kind.
 
 ### `instagram_business_content_publish` — justification copy
 
 > Publishing is the product. A user points Storydump at a folder of their own media and sets a posting schedule; at each scheduled slot the app publishes one item to that user's own Instagram Business account as a Story. We use the standard two-step container flow: `POST /{ig-user-id}/media` with `media_type=STORIES` and an `image_url` or `video_url` pointing at the user's own media, then `POST /{ig-user-id}/media_publish` with the returned `creation_id`, polling `GET /{container_id}?fields=status_code,status` in between until the container is ready. Every publish is initiated by a schedule the account owner configured and can pause or cancel at any time; the app never publishes to an account other than the one whose owner connected it, and never publishes content the user did not place in their own connected media source.
 
-*(Both are meant to describe what the code actually calls; check them against it before submitting. The container flow is `src/services/target/instagram_graph.py` — `create_container`, `container_status`, `publish` — driven by `src/services/target/publish_pipeline.py`, and the profile read is `GET /me?fields=user_id,username` at connect (`src/services/target/ig_login_oauth.py:636-642`). **The second use in the `instagram_business_basic` copy has no caller today:** as of 2026-09-18 nothing in the target tier reads the account's media or stories — the legacy tier's backfill did, and went with it (#1216), and the reconciler's `stories_check` seam (`src/services/target/reconciler.py:377`) is wired to nothing. Revise that copy or build the read first: a justification that describes a call the app no longer makes is a rejection waiting to happen.)*
+*(Both describe what the code calls; check them against it again before submitting. The container flow is `src/services/target/instagram_graph.py` — `create_container`, `container_status`, `publish` — driven by `src/services/target/publish_pipeline.py`, and the profile read is `GET /me?fields=user_id,username` at connect (`PROFILE_URL` in `src/services/target/ig_login_oauth.py`). **The `instagram_business_basic` copy names only the profile read because that is the only call it covers:** nothing in the target tier reads the account's media or stories — the reconciler's `stories_check` seam (`src/services/target/reconciler.py`) is wired to nothing. If such a read is built, add it to the copy in the same PR: a justification that describes a call the app does not make is a rejection waiting to happen.)*
 
 ### Demo video script
 
@@ -193,17 +193,18 @@ Order matters, because the later tracks depend on the earlier ones being accepte
 1. **Rename** (Step 0) — App settings → Basic.
 2. **Business Verification** — Business Manager → Security Centre. Start early: Advanced Access is not granted while it is outstanding. *(That dependency is Meta's; **COMMUNITY-REPORTED:** that it is the longest of the three tracks is other developers' experience, not a published figure.)*
 3. **Fill App settings → Basic completely** — privacy URL, terms URL, deauthorize callback, data deletion URL, app logo, category.
-4. **App Review → Permissions and Features** — request Advanced Access on `instagram_business_basic` and `instagram_business_content_publish`, pasting the justification copy above into each.
-5. **Attach the demo video** to the submission (both permissions can reference the same video; say so in each justification).
-6. **Submit**, then watch the App Dashboard *and* the email on the developer account. *(**COMMUNITY-REPORTED:** that the dashboard notification is easy to miss is other developers' experience — watch both regardless, which costs nothing either way.)*
+4. **One successful API call per permission, within 30 days before submitting.** Meta's submission guide: "Make at least 1 successful API call using each permission for which you are requesting advanced access. Calls must be made within 30 days of submitting for App Review and can be made using your app or the Graph API Explorer tool." With an account added under App Dashboard → Roles, that is the profile read at connect (`instagram_business_basic`) and one Story publish (`instagram_business_content_publish`). Make them last, so the window cannot lapse before the submission ([submission guide](https://developers.facebook.com/docs/resp-plat-initiatives/individual-processes/app-review/submission-guide), read 2026-09-30).
+5. **App Review → Permissions and Features** — request Advanced Access on `instagram_business_basic` and `instagram_business_content_publish`, pasting the justification copy above into each.
+6. **Attach the demo video** to the submission (both permissions can reference the same video; say so in each justification).
+7. **Submit**, then watch the App Dashboard *and* the email on the developer account. *(**COMMUNITY-REPORTED:** that the dashboard notification is easy to miss is other developers' experience — watch both regardless, which costs nothing either way.)*
 
 ---
 
 ## Wait times
 
-**Marker: COMMUNITY-REPORTED — the whole section.** Meta publishes no processing-time commitment for either track, so every number below is other developers' experience, including the one this runbook's own issue carried. Plan against them; do not quote them to anyone as Meta's.
+**Marker: mixed.** The review-decision figure is DOCUMENTED-FROM-META'S-DOCS; everything else below is COMMUNITY-REPORTED — other developers' experience, including the figure this runbook's own issue carried. Do not quote a community figure to anyone as Meta's.
 
-- **App Review: 1–3 weeks** typically reported.
+- **App Review: "a decision within a week"** — Meta's [submission guide](https://developers.facebook.com/docs/resp-plat-initiatives/individual-processes/app-review/submission-guide) (read 2026-09-30): "Once you accept the terms and submit, your submission will be queued and you should receive a decision within a week." It is a *should*, it runs from submission to decision, and it does not cover Business Verification. Other developers report **1–3 weeks** (COMMUNITY-REPORTED).
 - **Business Verification: longer, and unbounded if documents are rejected.** Each rejection costs a full round trip.
   - An address mismatch between the uploaded document and the value entered in Business Manager is frequently cited by other developers as the cause. **Meta's own documentation does not state this**, and no frequency claim in this section is sourced — treat it as a thing worth double-checking before submitting, not as a documented failure mode.
 - Treat the two as sequential for planning even though they run in parallel: Advanced Access will not be granted while Business Verification is outstanding.
