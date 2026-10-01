@@ -69,8 +69,8 @@ export default function PrivacyPolicy() {
               Telegram account to Storydump: your Telegram user ID and your
               Telegram username, or your first name if you have no username.
               When you start the bot in a chat, we also store that chat&apos;s
-              Telegram ID, whether it is a direct chat or a group, and your
-              notification settings for it, so we can deliver to it.
+              Telegram ID and whether it is a direct chat or a group, so we can
+              deliver to it.
             </li>
             <li>
               <span className="font-medium text-foreground">
@@ -79,12 +79,12 @@ export default function PrivacyPolicy() {
               — only when you explicitly grant the Google Drive scope during
               setup. We read file metadata (id, name, MIME type, size, parent
               folder) and the file bytes needed to render and post a Story. We
-              do not keep your files: we store references (Drive file IDs and
-              the metadata above). To post a Story, we upload a framed copy to
-              our media processor, Cloudinary, for Instagram to fetch. We
-              delete it as soon as the Story posts or is cancelled, and a
-              cleanup that runs every 6 hours deletes any copy older than 48
-              hours.
+              do not keep your files: we store a reference to each (its Drive
+              file ID, name, type, folder and checksum). To post a Story, we
+              upload a copy of the file to our media processor, Cloudinary,
+              which frames it for Instagram. We delete the copy as soon as the
+              Story posts or is cancelled, and a cleanup that runs every 6
+              hours deletes any copy older than 48 hours.
             </li>
             <li>
               <span className="font-medium text-foreground">
@@ -262,7 +262,8 @@ export default function PrivacyPolicy() {
                 <tr className="border-b">
                   <td className="py-2 pr-4">Cloudinary</td>
                   <td className="py-2 pr-4">
-                    Holding a Story&apos;s framed copy for Instagram to fetch
+                    Holding a copy of a Story&apos;s file and framing it for
+                    Instagram
                   </td>
                   <td className="py-2">Global</td>
                 </tr>
@@ -403,7 +404,7 @@ export default function PrivacyPolicy() {
             </li>
             <li>
               <span className="font-medium text-foreground">
-                Framed copies for posting
+                Copies for posting
               </span>{" "}
               — deleted when the Story posts or is cancelled; any left over are
               deleted once they are 48 hours old, by a cleanup that runs every 6
