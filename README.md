@@ -1,6 +1,20 @@
-# Storydump - Instagram Story Automation System
+# Storydump
 
-A hosted, multi-tenant Instagram Story scheduling service with Telegram-based team collaboration.
+Storydump turns a Google Drive folder into a daily Instagram Stories queue. On
+the schedule you set, it picks an item from your connected folders and asks your
+team to approve it, as a card in your Telegram group and a row in the web Queue.
+An approved Story is published through the Instagram API where a workspace has
+API publishing on; otherwise a teammate posts it by hand and taps *Posted
+myself*.
+
+**Storydump is in early access.** To try it,
+[join the waitlist at storydump.app](https://storydump.app/#waitlist). Already
+have an account? [Sign in](https://storydump.app/login).
+
+The rest of this page is for developers working on the service itself: a
+hosted, multi-tenant Instagram Story scheduling service with Telegram-based team
+collaboration. It runs as one deployment that we operate, so nobody installs it
+to use Storydump.
 
 ## Features
 
