@@ -7,6 +7,22 @@ import { UTM_KEYS } from "@/lib/analytics"
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+/**
+ * Postgres's unique-violation code, on the error or on its `cause`. Drizzle
+ * wraps a failed query in a DrizzleQueryError whose own `code` is undefined
+ * and puts the driver's error, which carries the code, in `cause`. Reading
+ * only the outer error sent every returning visitor a 500.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  for (let e = err, depth = 0; e && depth < 3; depth++) {
+    if (typeof e === "object" && (e as { code?: unknown }).code === "23505") {
+      return true
+    }
+    e = (e as { cause?: unknown }).cause
+  }
+  return false
+}
+
 export async function POST(req: NextRequest) {
   const refused = refuseCrossSite(req)
   if (refused) return refused
@@ -35,11 +51,7 @@ export async function POST(req: NextRequest) {
       await getDb().insert(waitlistSignups).values({ email, notes })
     } catch (err: unknown) {
       // Unique constraint violation = already registered
-      if (
-        err instanceof Error &&
-        "code" in err &&
-        (err as Record<string, unknown>).code === "23505"
-      ) {
+      if (isUniqueViolation(err)) {
         return NextResponse.json({
           status: "success",
           message: "You're already on the list!",
@@ -56,7 +68,11 @@ export async function POST(req: NextRequest) {
       status: "success",
       message: "You're on the list!",
     })
-  } catch {
+  } catch (err) {
+    // The visitor sees one generic sentence; the cause (an unset
+    // DATABASE_URL, a missing table) goes to the server log, where the
+    // deployment's function logs show it.
+    console.error("waitlist signup failed:", err)
     return NextResponse.json(
       { status: "error", message: "Something went wrong. Please try again." },
       { status: 500 }
