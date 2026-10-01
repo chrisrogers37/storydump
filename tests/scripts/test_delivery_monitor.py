@@ -16,6 +16,7 @@ import json
 import pytest
 
 from scripts.delivery_monitor import (
+    CLEARING,
     DEFAULT_CLEAR_AT,
     DEFAULT_RAISE_AT,
     DELIVERING,
@@ -36,7 +37,7 @@ T0 = 1_000_000.0
 POLL = 300.0
 
 
-def payload(n, *, sent=40, by_class=None, window=HOUR):
+def payload(n, *, sent=40, by_class=None):
     """A well-formed `/health/delivery` body with *n* alerting rows."""
     if by_class is None:
         by_class = (
@@ -46,7 +47,7 @@ def payload(n, *, sent=40, by_class=None, window=HOUR):
         )
     return json.dumps(
         {
-            "window_seconds": window,
+            "window_seconds": HOUR,
             "sent_in_window": sent,
             "failed_or_ambiguous": n,
             "by_class": by_class,
@@ -125,7 +126,7 @@ class TestTheBandHolds:
 class TestItClearsOnlyAfterTwoPollsAtOneOrFewer:
     def test_one_quiet_poll_is_not_a_recovery(self):
         state, said = run([read(5), read(1)])
-        assert said[1] is None and state["effective"] == FAILING
+        assert said[1] is None and state["effective"] == CLEARING
 
     def test_the_second_quiet_poll_recovers_and_says_so(self):
         state, said = run([read(5), read(1), read(0)])
@@ -139,13 +140,13 @@ class TestItClearsOnlyAfterTwoPollsAtOneOrFewer:
 
     def test_a_band_reading_between_quiet_polls_restarts_the_dwell(self):
         state, said = run([read(5), read(1), read(3), read(1)])
-        assert said[1:] == [None, None, None] and state["effective"] == FAILING
+        assert said[1:] == [None, None, None] and state["effective"] == CLEARING
         state, (message,) = run([read(1)], prior=state, start=T0 + 4 * POLL)
         assert message.startswith("RECOVERED") and state["effective"] == DELIVERING
 
     def test_after_an_unreachable_spell_a_quiet_reading_never_pages_failing(self):
-        """`announced` is UNREACHABLE by then, so a dwell reading must not be
-        taken for a failure the human has not been told about."""
+        """`announced` is UNREACHABLE by then: a reading at or under the clear
+        line is clearing, which never pages, not a failure to tell again."""
         state, said = run(
             [read(5), UNREACHABLE_READING, UNREACHABLE_READING, read(1), read(1)]
         )
@@ -300,7 +301,7 @@ class TestMainEndToEnd:
         rc, _, _ = self._run(monkeypatch, tmp_path, payload(5))
         assert rc == EXIT_SPOKE
         rc, sent, state = self._run(monkeypatch, tmp_path, payload(1))
-        assert rc == EXIT_QUIET and state["effective"] == FAILING
+        assert rc == EXIT_QUIET and state["effective"] == CLEARING
         rc, sent, state = self._run(monkeypatch, tmp_path, payload(1))
         assert rc == EXIT_SPOKE and sent[-1].startswith("RECOVERED")
 

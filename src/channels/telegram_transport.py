@@ -46,6 +46,7 @@ from src.services.target.egress import EgressPolicy
 from src.services.target.outbox import (
     ChannelPaced,
     ChannelRefused,
+    ChannelSendError,
     CredentialDead,
     DestinationGone,
 )
@@ -99,14 +100,9 @@ def _method_for(kind: str, mime: Optional[str]) -> tuple[str, str]:
 _UPLOAD_BUDGET_S = 120.0
 
 
-class TelegramSendError(Exception):
-    """The transport could not produce an external ref for this row. *code* is
-    the provider's own code when it answered with one; the outbox records it
-    beside the failure's class (090, #1482)."""
-
-    def __init__(self, *args, code: Optional[int] = None):
-        super().__init__(*args)
-        self.code = code
+class TelegramSendError(ChannelSendError):
+    """The transport could not produce an external ref for this row. Telegram's
+    own code, when it answered with one, rides as ``code`` (090, #1482)."""
 
 
 class TelegramChatGone(DestinationGone, TelegramSendError):
@@ -149,9 +145,8 @@ class MediaTransient(Exception):
 
 class TelegramAuthDead(CredentialDead, TelegramSendError):
     """Telegram rejected the credential itself (401; a 403 is the chat's,
-    `_chat_gone`) — the loud class. For
-    the outbox it is a `CredentialDead`, recorded as `credential_dead` rather
-    than as a lost response (090, #1482)."""
+    `_chat_gone`) — the loud class. For the outbox it is a `CredentialDead`,
+    recorded as `credential_dead` rather than as a lost response (090, #1482)."""
 
 
 class SendReceipt(str):
@@ -323,6 +318,7 @@ class TelegramTransport:
                 f"{method}: 429 retry_after={retry_after_s:g}s {description}",
                 retry_after_s=retry_after_s,
                 scope="chat" if has_chat else "global",
+                code=code,
             )
         raise TelegramSendError(f"{method}: {code} {description}", code=code)
 

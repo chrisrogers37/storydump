@@ -1,16 +1,14 @@
 """`delivery_health.outbox_failures`: the read behind `/health/delivery` (#1482).
 
-The statements are the doors 090 creates, called with the window as an
+The statements are the doors 090 creates, called with the hour as an
 explicitly typed parameter (asyncpg infers nothing from a bare `:w`). The
 aggregation is what the monitor reads: the alerting count sums only the rows
-that ended `failed` or sit `ambiguous`, a code is a string key with `none` for
-no answer, and the reported window is the one the door actually used. What the
-doors answer is the gate's (`tests/scripts/test_outbox_failure_record_gate.py`);
-here the rows are scripted."""
+that ended `failed` or sit `ambiguous`, and a code is a string key with `none`
+for no answer. What the doors answer, the window's clamp included, is the
+gate's (`tests/scripts/test_outbox_failure_record_gate.py`); here the rows are
+scripted."""
 
 from __future__ import annotations
-
-import pytest
 
 from src.services.target import delivery_health
 
@@ -55,11 +53,6 @@ class TestItReadsThroughTheDoors:
         assert sent_sql == "SELECT fn_health_outbox_sent(CAST(:w AS integer)) AS sent"
         assert failures_params == sent_params == {"w": 3600}
 
-    async def test_the_window_is_a_parameter(self):
-        doors = _Doors()
-        await delivery_health.outbox_failures(doors, window_seconds=900)
-        assert [p for _, p in doors.statements] == [{"w": 900}, {"w": 900}]
-
 
 class TestWhatItReturns:
     ROWS = [
@@ -103,23 +96,3 @@ class TestWhatItReturns:
             "failed_or_ambiguous": 0,
             "by_class": {},
         }
-
-
-class TestTheReportedWindowIsTheOneTheDoorUsed:
-    @pytest.mark.parametrize(
-        "asked, used",
-        [
-            (-5, 60),
-            (0, 60),
-            (59, 60),
-            (60, 60),
-            (3600, 3600),
-            (86400, 86400),
-            (10**6, 86400),
-        ],
-    )
-    async def test_the_clamp(self, asked, used):
-        doors = _Doors()
-        got = await delivery_health.outbox_failures(doors, window_seconds=asked)
-        assert got["window_seconds"] == used
-        assert doors.statements[0][1] == {"w": asked}, "the door clamps, not the caller"

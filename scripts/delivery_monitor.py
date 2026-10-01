@@ -5,7 +5,9 @@ in the last hour, by class and the provider's code (migration 090). This polls
 it and says so when the count is high, the way `posting_monitor.py` beside it
 polls `/health/posting`. It runs outside the app for the reason that one gives:
 an alert whose sending is done by the system it watches cannot fire when that
-system is down.
+system is down. It runs as a module from the checkout's root
+(`python3 -m scripts.delivery_monitor`), which is how it shares that file's
+HTTP, state-file and notify helpers rather than keeping a third copy.
 
 ## When it speaks
 
@@ -16,9 +18,11 @@ system is down.
   none in any other hour. At most 43 sends an hour, so an absolute count is
   steadier than a rate: a rate over three sends is noise.
 - **It clears only at `--clear-at` (1) or fewer, on two consecutive polls.**
-  Between the two it holds whatever it last said. The gap between the
-  thresholds is the hysteresis; the second poll is the dwell. Together they keep
-  a count that wobbles around one number from paging on every poll.
+  The first such poll makes a failure `clearing`, which never pages; the second
+  makes it `delivering`, and says RECOVERED if it had alerted. Between the two
+  thresholds it holds whatever it last said. The gap between the thresholds is
+  the hysteresis; the second poll is the dwell. Together they keep a count that
+  wobbles around one number from paging on every poll.
 - **While failing, it repeats every six hours** (`REALERT_AFTER_S`, the
   siblings'), so a long outage does not look like a resolved one.
 - **An unreachable endpoint speaks on the second consecutive poll**, as in both
@@ -36,30 +40,18 @@ import json
 import sys
 import time
 
-try:  # imported as a package (the tests, the route's wire-contract test)
-    from scripts.posting_monitor import (
-        EXIT_NOTIFY_FAILED,
-        EXIT_QUIET,
-        EXIT_SPOKE,
-        REALERT_AFTER_S,
-        Verdict,
-        fetch,
-        load_state,
-        notify,
-        save_state,
-    )
-except ImportError:  # run as a file from scripts/ by the systemd unit
-    from posting_monitor import (  # type: ignore[no-redef]
-        EXIT_NOTIFY_FAILED,
-        EXIT_QUIET,
-        EXIT_SPOKE,
-        REALERT_AFTER_S,
-        Verdict,
-        fetch,
-        load_state,
-        notify,
-        save_state,
-    )
+from scripts.posting_monitor import (
+    EXIT_NOTIFY_FAILED,
+    EXIT_QUIET,
+    EXIT_SPOKE,
+    REALERT_AFTER_S,
+    Verdict,
+    _is_count,
+    fetch,
+    load_state,
+    notify,
+    save_state,
+)
 
 DEFAULT_RAISE_AT = 5
 DEFAULT_CLEAR_AT = 1
@@ -67,19 +59,18 @@ DEFAULT_CLEAR_AT = 1
 #: over. One quiet poll inside a burst is not a recovery.
 CLEAR_POLLS = 2
 
-#: The three things a human can have been told.
+#: What the monitor believes. CLEARING is a failure that has read at or under
+#: `--clear-at` and is waiting out its dwell: it never pages.
 DELIVERING = "delivering"
 FAILING = "failing"
+CLEARING = "clearing"
+#: A reading, and a thing the human can have been told: the detector cannot look.
 UNREACHABLE = "unreachable"
 
 #: What one reading says on its own, before any history is applied.
 ABOVE = "above"
 BAND = "band"
 BELOW = "below"
-
-
-def _is_count(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool)
 
 
 def _summary(by_class: dict) -> str:
@@ -104,13 +95,17 @@ def _summary(by_class: dict) -> str:
 def classify(status: int, body: str, *, raise_at: int, clear_at: int) -> Verdict:
     """One reading → ABOVE, BAND, BELOW or UNREACHABLE. Pure."""
     if status != 200:
-        return Verdict(UNREACHABLE, f"HTTP {status}" if status else body[:200])
+        # `fetch` reports a transport failure as status 0, with the exception
+        # in the body: name it, as `posting_monitor` does.
+        return Verdict(
+            UNREACHABLE, body.strip()[:200] if status == 0 else f"HTTP {status}"
+        )
     try:
         data = json.loads(body)
-    except ValueError:
-        return Verdict(UNREACHABLE, "the response is not JSON")
+    except (ValueError, TypeError):
+        return Verdict(UNREACHABLE, "response was not JSON")
     if not isinstance(data, dict):
-        return Verdict(UNREACHABLE, "the response is not an object")
+        return Verdict(UNREACHABLE, "response was not an object")
     n, sent, window = (
         data.get(k) for k in ("failed_or_ambiguous", "sent_in_window", "window_seconds")
     )
@@ -123,9 +118,10 @@ def classify(status: int, body: str, *, raise_at: int, clear_at: int) -> Verdict
     ):
         # A missing or mistyped key is a broken detector, never a quiet hour.
         return Verdict(UNREACHABLE, "the payload is missing or mistypes a key")
-    hours = window / 3600
-    span = f"the last {hours:g}h" if hours >= 1 else f"the last {window // 60} min"
-    detail = f"{n} failed or ambiguous in {span} ({_summary(by_class)}); {sent} sent in the same window"
+    detail = (
+        f"{n} failed or ambiguous in the last {window / 3600:g}h"
+        f" ({_summary(by_class)}); {sent} sent in the same window"
+    )
     reading = ABOVE if n >= raise_at else BELOW if n <= clear_at else BAND
     return Verdict(
         reading,
@@ -145,11 +141,17 @@ def decide(
     run = (
         prior.get("consecutive", 0) + 1 if prior.get("reading") == verdict.state else 1
     )
+    failing = was in (FAILING, CLEARING)
     if verdict.state == ABOVE:
         now_is = FAILING
     elif verdict.state == BELOW:
-        now_is = FAILING if was == FAILING and run < CLEAR_POLLS else DELIVERING
-    else:  # BAND holds; UNREACHABLE knows nothing new about deliveries
+        # A failure is over only after CLEAR_POLLS readings in a row at or
+        # under --clear-at; until then it is clearing.
+        now_is = CLEARING if failing and run < CLEAR_POLLS else DELIVERING
+    elif verdict.state == BAND:
+        # The band holds the verdict, and a dwell it interrupts starts again.
+        now_is = FAILING if failing else DELIVERING
+    else:  # UNREACHABLE knows nothing new about deliveries
         now_is = was
     state = {
         "reading": verdict.state,
@@ -182,10 +184,7 @@ def decide(
             UNREACHABLE,
         )
     if now_is == FAILING:
-        # A reading at or under `--clear-at` is a recovery waiting out its
-        # dwell: it never pages "failing", even after an unreachable spell
-        # left `announced` elsewhere.
-        if verdict.state == BELOW or not due(FAILING):
+        if not due(FAILING):
             return state, None, None
         return (
             state,
@@ -194,7 +193,7 @@ def decide(
             ),
             FAILING,
         )
-    if announced in (FAILING, UNREACHABLE):
+    if now_is == DELIVERING and announced in (FAILING, UNREACHABLE):
         return (
             state,
             f"RECOVERED: storydump outbox deliveries — {verdict.detail}.",

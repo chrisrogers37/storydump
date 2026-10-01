@@ -5,9 +5,9 @@ writes both, with the time, in the SAME CAS update that moves the row out of
 `sending`, so a writer that lost the row records nothing. Asserted on the real
 statements, through a scripted session, from a real Telegram reply (the
 transport's own error mapping, with httpx faked as `test_telegram_transport.py`
-fakes it) to the parameters of that one UPDATE. The two other writers, a
-resolution that fails the row and the recovery of a stranded one, are pinned
-the same way.
+fakes it) to the parameters of that one UPDATE. The recovery of a stranded row
+records too, and a resolution of an ambiguous row records nothing: the columns
+describe the last failed ATTEMPT, and a resolution is not one.
 """
 
 from __future__ import annotations
@@ -15,10 +15,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from src.channels.telegram_transport import TelegramTransport
-from src.services.target import outbox
-
-TOKEN = "8675309:AAtestSECRETtokenVALUExyz"
+from src.services.target import outbox, vocabulary
+from tests.src.channels.test_telegram_transport import _transport
 
 ROW = {
     "id": "row-1",
@@ -65,11 +63,8 @@ async def _raised_by(status=None, body=None, *, text=None, exc=None):
             return httpx.Response(status, text=text)
         return httpx.Response(status, json=body)
 
-    transport = TelegramTransport(
-        TOKEN, client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    )
     with pytest.raises(Exception) as caught:
-        await transport.for_chat("7")(ROW)
+        await _transport(handler).for_chat("7")(ROW)
     return caught.value
 
 
@@ -203,66 +198,77 @@ class TestTheClassAndCodeRideTheOneCAS:
         assert params["s"] == "sent"
 
 
-class TestTheProviderCode:
-    """Only a code the provider actually sent is recorded."""
+class TestTheErrorCarriesItsClassAndCode:
+    """Each definitive answer names its own class, set on the type, and the
+    code is set once, by the base: an int the provider sent, or nothing."""
+
+    def test_each_error_names_a_class_the_column_allows(self):
+        classes = {
+            outbox.ChannelSendError: "ambiguous",
+            outbox.ChannelPaced: "rate_limited",
+            outbox.DestinationGone: "destination_gone",
+            outbox.ChannelRefused: "refused",
+            outbox.CredentialDead: "credential_dead",
+        }
+        assert {cls: cls.failure_class for cls in classes} == classes
+        assert set(classes.values()) == set(vocabulary.OUTBOX_FAILURE_CLASSES)
 
     def test_an_int_is_kept(self):
-        assert outbox._provider_code(outbox.ChannelRefused("x", code=400)) == 400
+        assert outbox.ChannelRefused("x", code=400).code == 400
+        assert outbox.DestinationGone("kicked", code=403).code == 403
 
     @pytest.mark.parametrize(
         "error",
         [
-            RuntimeError("timeout"),
             outbox.ChannelRefused("x"),
             outbox.ChannelRefused("x", code="400"),
             outbox.ChannelRefused("x", code=True),
+            outbox.ChannelPaced("429", retry_after_s=1),
         ],
-        ids=["no attribute", "None", "a string", "a bool"],
+        ids=["none sent", "a string", "a bool", "a 429 with no code sent"],
     )
     def test_anything_else_is_none(self, error):
-        assert outbox._provider_code(error) is None
+        assert error.code is None
 
-    def test_a_channel_neutral_error_carries_its_code(self):
-        assert outbox.CredentialDead("x", code=401).code == 401
-        assert outbox.DestinationGone("kicked", code=403).code == 403
-        assert outbox.ChannelPaced("429", retry_after_s=1).code == 429
+    async def test_a_foreign_error_is_a_lost_answer_whatever_it_carries(self):
+        """A `.code` on an exception that is not the transport's is not the
+        provider's, and is not recorded as one."""
+
+        class Foreign(Exception):
+            code = 418
+            failure_class = "refused"
+
+        session = _Session()
+        await outbox.settle(session, ROW, error=Foreign("boom"))
+        _, params = session.statements[0]
+        assert (params["fc"], params["fcode"], params["s"]) == (
+            "ambiguous",
+            None,
+            "ambiguous",
+        )
 
 
-class TestTheOtherWritersRecordIt:
-    async def test_a_resolution_that_fails_the_row_moves_the_time_and_keeps_the_class(
-        self,
-    ):
-        """The row is counted when it FAILS, not when it first went ambiguous;
-        its class stays what the send recorded (`ambiguous` for a row older
-        than the columns)."""
-        spent = outbox.MAX_NOTIFICATION_RESENDS + 1
-        session = _Session(first=("notification", spent, False))
-        assert await outbox.resolve_ambiguous(session, outbox_id="row-1") == "failed"
-        sql, params = session.statements[-1]
-        assert sql.startswith("UPDATE channel_outbox SET state = :s,")
-        assert "last_failed_at = now()" in sql
-        assert "last_failure_class = COALESCE(last_failure_class, 'ambiguous')" in sql
-        assert "last_error_code" not in sql, "the code the send recorded stays"
-        assert sql.endswith("WHERE id = :i AND state = 'ambiguous'")
-        assert params == {"s": "failed", "i": "row-1"}
-
+class TestTheOtherWriters:
     @pytest.mark.parametrize(
         "row, to_state",
         [
+            (("notification", outbox.MAX_NOTIFICATION_RESENDS + 1, False), "failed"),
             (("notification", outbox.MAX_NOTIFICATION_RESENDS, False), "pending"),
             (("prompt_supersede", 1, True), "superseded"),
         ],
-        ids=["resent", "superseded"],
+        ids=["failed", "resent", "superseded"],
     )
-    async def test_a_resolution_that_does_not_fail_it_records_nothing(
-        self, row, to_state
-    ):
+    async def test_a_resolution_never_touches_the_record(self, row, to_state):
+        """The columns describe the last failed attempt, and a resolution is
+        not one: a row that fails here keeps the class, code and time its last
+        attempt recorded, and is counted from then."""
         session = _Session(first=row)
         assert await outbox.resolve_ambiguous(session, outbox_id="row-1") == to_state
-        sql, _ = session.statements[-1]
+        sql, params = session.statements[-1]
         assert sql == (
             "UPDATE channel_outbox SET state = :s WHERE id = :i AND state = 'ambiguous'"
         )
+        assert params == {"s": to_state, "i": "row-1"}
 
     async def test_a_stranded_row_is_recorded_ambiguous_with_no_code(self):
         session = _Session(fetched=["row-1"])

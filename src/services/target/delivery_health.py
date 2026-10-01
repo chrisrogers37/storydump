@@ -41,33 +41,21 @@ from typing import Any
 
 from sqlalchemy import text
 
-#: The window a reading covers: one hour, the unit the alert is stated in.
-DEFAULT_WINDOW_SECONDS = 3600
-
-#: The door clamps any window to this range (090). The bounds are repeated here
-#: only to REPORT the window a reading actually covered; the gate pins the two
-#: to each other.
-WINDOW_MIN_SECONDS = 60
-WINDOW_MAX_SECONDS = 86400
+#: The window a reading covers: one hour, the unit the alert is stated in. It
+#: sits inside the [60 s, 24 h] the doors clamp to, so it is the window used.
+WINDOW_SECONDS = 3600
 
 
-def effective_window(window_seconds: int) -> int:
-    """The window the door will use for *window_seconds*."""
-    return max(WINDOW_MIN_SECONDS, min(int(window_seconds), WINDOW_MAX_SECONDS))
-
-
-async def outbox_failures(
-    executor, *, window_seconds: int = DEFAULT_WINDOW_SECONDS
-) -> dict[str, Any]:
-    """The last *window_seconds* of delivery failures and deliveries,
-    estate-wide, through 090's two doors.
+async def outbox_failures(executor) -> dict[str, Any]:
+    """The last hour of delivery failures and deliveries, estate-wide, through
+    090's two doors.
 
     ``by_class`` maps each failure class to ``{rows, alerting, codes}``, with
     ``codes`` keyed by the provider's code as a string (``"none"`` when no
     answer came back). ``failed_or_ambiguous`` is the sum of ``alerting``: the
     number the poller alerts on.
     """
-    params = {"w": int(window_seconds)}
+    params = {"w": WINDOW_SECONDS}
     rows = (
         (
             await executor.execute(
@@ -97,9 +85,10 @@ async def outbox_failures(
         entry["rows"] += int(row["rows"])
         entry["alerting"] += int(row["alerting"])
         code = "none" if row["error_code"] is None else str(int(row["error_code"]))
-        entry["codes"][code] = entry["codes"].get(code, 0) + int(row["rows"])
+        # The door groups by (class, code): each code arrives once per class.
+        entry["codes"][code] = int(row["rows"])
     return {
-        "window_seconds": effective_window(window_seconds),
+        "window_seconds": WINDOW_SECONDS,
         "sent_in_window": int(sent),
         "failed_or_ambiguous": sum(e["alerting"] for e in by_class.values()),
         "by_class": by_class,

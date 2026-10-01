@@ -38,7 +38,7 @@ def floor(monkeypatch):
     async def _leave_sending(session, outbox_id, to_state, **extra):
         seen["left"].append((outbox_id, to_state, extra))
 
-    async def mark_ambiguous(session, *, outbox_id, failure=("ambiguous", None)):
+    async def mark_ambiguous(session, *, outbox_id, failure):
         seen["ambiguous"].append((outbox_id, failure))
 
     async def write_pacing_hold(session, **kw):
@@ -76,7 +76,7 @@ class TestSettleOnAFloodLimit:
             (
                 "row-1",
                 "pending",
-                {"restore_attempt": True, "failure": ("rate_limited", 429)},
+                {"restore_attempt": True, "failure": ("rate_limited", None)},
             )
         ]
         assert floor["ambiguous"] == [], "a 429 is not a lost response"
@@ -175,7 +175,7 @@ class TestSettleOnAFloodLimit:
             (
                 "row-1",
                 "pending",
-                {"restore_attempt": True, "failure": ("rate_limited", 429)},
+                {"restore_attempt": True, "failure": ("rate_limited", None)},
             )
         ]
         assert floor["holds"] == [], "no budget was named, so nothing is held"
@@ -201,7 +201,7 @@ class TestDeliverOnAFloodLimit:
             (
                 "row-1",
                 "pending",
-                {"restore_attempt": True, "failure": ("rate_limited", 429)},
+                {"restore_attempt": True, "failure": ("rate_limited", None)},
             )
         ]
         assert len(floor["holds"]) == 2

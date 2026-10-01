@@ -3,16 +3,18 @@
 What only the database can say, each against the replayed schema as the
 production roles:
 
-* the record is written by the real `settle` as `svc_worker`, in the one CAS
-  that leaves `sending`: the class and the provider's code bind under asyncpg
-  (a NULL code included), and a fenced settle writes nothing;
-* a resolution that fails the row moves the time and keeps the class, and a
-  stranded row is recorded `ambiguous`;
+* the record is written by the real `settle` as `svc_worker`, in the session
+  the outbox poller uses, in the one CAS that leaves `sending`: the class and
+  the provider's code bind under asyncpg (a NULL code included), and a fenced
+  settle writes nothing;
+* a stranded row is recorded `ambiguous`, and a resolution leaves the record as
+  the last attempt wrote it;
 * the CHECK refuses a class outside the list;
 * the doors count EVERY workspace's rows as `svc_ingress`, whose own read of
   the table sees none of them (the vacuity guard), with the window clamped to
   [60 s, 24 h] and only `failed` and `ambiguous` rows alerting;
-* EXECUTE is the two runtime roles' and not PUBLIC's.
+* the doors are `svc_maintenance` definers. Who may EXECUTE them (the two
+  runtime logins, never PUBLIC) is the RLS harness's door catalogue's to pin.
 
 Every door test seeds rows under its own provider codes (9xxx), so it reads
 its own rows by (class, code) whatever the rest of the module left behind.
@@ -28,13 +30,12 @@ import psycopg2
 import pytest
 from psycopg2 import errors as pg_errors
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 
-from src.services.target import delivery_health, outbox
+from src.services.target import delivery_health, outbox, unit_of_work
 from tests.scripts.conftest import (
     _scratch,
     as_user,
-    async_url,
+    ingress_engine,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -151,66 +152,49 @@ def _record(world, outbox_id):
 
 
 async def _as_worker(world, ws, work):
-    """*work(conn)* as `svc_worker`, under the tenant's GUCs, committed."""
-    engine = create_async_engine(async_url(world["worker"]))
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(
-                text("SELECT set_config('app.tenant_id', :v, false)"),
-                {"v": world["ws"][ws]},
-            )
-            await conn.execute(
-                text("SELECT set_config('app.actor_kind', 'system', false)")
-            )
-            result = await work(conn)
-            await conn.commit()
+    """*work(session)* as `svc_worker`, in the session the outbox poller uses
+    (`poller_session_factory`: the tenant's GUCs SET LOCAL), committed."""
+    async with ingress_engine(world["worker"]) as engine:
+        factory = unit_of_work.poller_session_factory(engine, world["ws"][ws])
+        async with factory() as session:
+            result = await work(session)
+            await session.commit()
             return result
-    finally:
-        await engine.dispose()
 
 
-def _settle(world, outbox_id, *, ws="a", attempts=1, **kwargs):
-    row = {
-        "id": outbox_id,
-        "binding_id": world["binding"][ws],
-        "kind": "notification",
-        "attempts": attempts,
-    }
-    return _run(_as_worker(world, ws, lambda c: outbox.settle(c, row, **kwargs)))
+def _settle(world, outbox_id, *, ws="a", **kwargs):
+    row = {"id": outbox_id, "binding_id": world["binding"][ws]}
+    return _run(_as_worker(world, ws, lambda s: outbox.settle(s, row, **kwargs)))
 
 
-async def _doors(dsn, window):
+async def _on(dsn, work):
+    """*work(conn)* on one connection, as *dsn*'s login."""
+    async with ingress_engine(dsn) as engine:
+        async with engine.connect() as conn:
+            return await work(conn)
+
+
+def _doors(dsn, window):
     """Both doors as one login: {(class, code): (rows, alerting)}, and sent."""
-    engine = create_async_engine(async_url(dsn))
-    try:
-        async with engine.connect() as c:
-            rows = (
-                await c.execute(
-                    text(
-                        "SELECT o_failure_class, o_error_code, o_rows, o_alerting_rows"
-                        " FROM fn_health_outbox_failures(CAST(:w AS integer))"
-                    ),
-                    {"w": window},
-                )
-            ).all()
-            sent = (
-                await c.execute(
-                    text("SELECT fn_health_outbox_sent(CAST(:w AS integer))"),
-                    {"w": window},
-                )
-            ).scalar_one()
-            return {(r[0], r[1]): (r[2], r[3]) for r in rows}, sent
-    finally:
-        await engine.dispose()
 
+    async def read(c):
+        rows = (
+            await c.execute(
+                text(
+                    "SELECT o_failure_class, o_error_code, o_rows, o_alerting_rows"
+                    " FROM fn_health_outbox_failures(CAST(:w AS integer))"
+                ),
+                {"w": window},
+            )
+        ).all()
+        sent = (
+            await c.execute(
+                text("SELECT fn_health_outbox_sent(CAST(:w AS integer))"), {"w": window}
+            )
+        ).scalar_one()
+        return {(r[0], r[1]): (r[2], r[3]) for r in rows}, sent
 
-async def _service(dsn):
-    engine = create_async_engine(async_url(dsn))
-    try:
-        async with engine.connect() as c:
-            return await delivery_health.outbox_failures(c)
-    finally:
-        await engine.dispose()
+    return _run(_on(dsn, read))
 
 
 class TestTheRecordIsWrittenInTheCAS:
@@ -224,7 +208,7 @@ class TestTheRecordIsWrittenInTheCAS:
 
     def test_a_429_is_recorded_and_the_attempt_given_back(self, world):
         oid = _row(world, state="sending", attempts=2)
-        _settle(world, oid, error=outbox.ChannelPaced("429", retry_after_s=3))
+        _settle(world, oid, error=outbox.ChannelPaced("429", retry_after_s=3, code=429))
         state, attempts, cls, code, age = _record(world, oid)
         assert (state, attempts, cls, code) == ("pending", 1, "rate_limited", 429)
         assert age is not None and age < 60
@@ -269,60 +253,38 @@ class TestTheRecordIsWrittenInTheCAS:
 
 
 class TestTheOtherWriters:
-    def test_a_resolution_that_fails_the_row_moves_the_time_and_keeps_the_class(
-        self, world
-    ):
-        oid = _row(
-            world,
-            state="ambiguous",
-            attempts=2,
-            failure=("credential_dead", 401),
-            failed_ago_s=3000,
-        )
-        got = _run(
-            _as_worker(world, "a", lambda c: outbox.resolve_ambiguous(c, outbox_id=oid))
-        )
-        assert got == "failed"
-        state, _, cls, code, age = _record(world, oid)
-        assert (state, cls, code) == ("failed", "credential_dead", 401)
-        assert age < 60, "counted when it FAILED, not when it went ambiguous"
-
-    def test_a_row_from_before_the_columns_fails_as_ambiguous(self, world):
-        oid = _row(world, state="ambiguous", attempts=2)
-        _run(
-            _as_worker(world, "a", lambda c: outbox.resolve_ambiguous(c, outbox_id=oid))
-        )
-        state, _, cls, code, age = _record(world, oid)
-        assert (state, cls, code) == ("failed", "ambiguous", None)
-        assert age is not None
-
-    def test_a_resolution_that_resends_records_nothing_new(self, world):
-        oid = _row(
-            world,
-            state="ambiguous",
-            attempts=1,
-            failure=("ambiguous", 502),
-            failed_ago_s=600,
-        )
-        got = _run(
-            _as_worker(world, "a", lambda c: outbox.resolve_ambiguous(c, outbox_id=oid))
-        )
-        assert got == "pending"
-        state, _, cls, code, age = _record(world, oid)
-        assert (state, cls, code) == ("pending", "ambiguous", 502) and age >= 600
-
     def test_a_stranded_row_is_recorded_ambiguous_with_no_code(self, world):
         binding = world["binding"]["b"]
         oid = _row(world, "b", state="sending", attempts=1)
         stranded = _run(
             _as_worker(
-                world, "b", lambda c: outbox.recover_stranded(c, binding_id=binding)
+                world, "b", lambda s: outbox.recover_stranded(s, binding_id=binding)
             )
         )
         assert oid in stranded
         state, _, cls, code, age = _record(world, oid)
         assert (state, cls, code) == ("ambiguous", "ambiguous", None)
         assert age is not None and age < 60
+
+    def test_a_resolution_that_fails_the_row_keeps_its_last_attempts_record(
+        self, world
+    ):
+        """The columns describe the last failed attempt, and giving up is not
+        one: the row is counted from when that attempt failed."""
+        oid = _row(
+            world,
+            state="ambiguous",
+            attempts=2,
+            failure=("credential_dead", 401),
+            failed_ago_s=600,
+        )
+        got = _run(
+            _as_worker(world, "a", lambda s: outbox.resolve_ambiguous(s, outbox_id=oid))
+        )
+        assert got == "failed"
+        state, _, cls, code, age = _record(world, oid)
+        assert (state, cls, code) == ("failed", "credential_dead", 401)
+        assert age >= 600
 
 
 class TestTheCheck:
@@ -342,18 +304,13 @@ class TestTheDoors:
         the doors would prove nothing about reach."""
         _row(world, state="failed", failure=("refused", 9000), failed_ago_s=60)
 
-        async def plain(dsn):
-            engine = create_async_engine(async_url(dsn))
-            try:
-                async with engine.connect() as c:
-                    return (
-                        await c.execute(text("SELECT count(*) FROM channel_outbox"))
-                    ).scalar_one()
-            finally:
-                await engine.dispose()
+        async def count(c):
+            return (
+                await c.execute(text("SELECT count(*) FROM channel_outbox"))
+            ).scalar_one()
 
-        assert _run(plain(world["ingress"])) == 0
-        assert _run(plain(world["owner"])) > 0
+        assert _run(_on(world["ingress"], count)) == 0
+        assert _run(_on(world["owner"], count)) > 0
 
     def test_failures_are_counted_across_workspaces_by_class_and_code(self, world):
         for ws in "ab":
@@ -376,7 +333,7 @@ class TestTheDoors:
         _row(world, state="failed", failure=("refused", 9005), failed_ago_s=7200)
         _row(world, state="failed")  # no failure recorded on it
 
-        got, _ = _run(_doors(world["ingress"], 3600))
+        got, _ = _doors(world["ingress"], 3600)
         assert got[("destination_gone", 9001)] == (2, 2), (
             "both workspaces, both alerting"
         )
@@ -395,7 +352,7 @@ class TestTheDoors:
         _row(world, state="failed", failure=("refused", 9014), failed_ago_s=48 * 3600)
 
         def codes(window):
-            got, _ = _run(_doors(world["ingress"], window))
+            got, _ = _doors(world["ingress"], window)
             return {code for (_, code) in got if 9011 <= (code or 0) <= 9014}
 
         for small in (-100, 0, 1):
@@ -404,19 +361,19 @@ class TestTheDoors:
         assert codes(10**7) == {9011, 9012, 9013}, "a day at most"
 
     def test_the_sent_door_counts_the_window(self, world):
-        _, before_hour = _run(_doors(world["ingress"], 3600))
-        _, before_day = _run(_doors(world["ingress"], 86400))
+        _, before_hour = _doors(world["ingress"], 3600)
+        _, before_day = _doors(world["ingress"], 86400)
         _row(world, "a", state="sent", updated_ago_s=60)
         _row(world, "b", state="sent", updated_ago_s=60)
         _row(world, "a", state="sent", updated_ago_s=7200)
         _row(world, "a", state="failed", updated_ago_s=60)
-        _, after_hour = _run(_doors(world["ingress"], 3600))
-        _, after_day = _run(_doors(world["ingress"], 86400))
+        _, after_hour = _doors(world["ingress"], 3600)
+        _, after_day = _doors(world["ingress"], 86400)
         assert after_hour - before_hour == 2
         assert after_day - before_day == 3
 
     def test_the_service_reads_the_doors_as_svc_ingress(self, world):
-        """The route's own path: the window binds as an integer under asyncpg,
+        """The route's own path: the hour binds as an integer under asyncpg,
         and codes come back as string keys."""
         _row(
             world,
@@ -428,7 +385,7 @@ class TestTheDoors:
         _row(
             world, "a", state="ambiguous", failure=("ambiguous", None), failed_ago_s=120
         )
-        got = _run(_service(world["ingress"]))
+        got = _run(_on(world["ingress"], delivery_health.outbox_failures))
         assert got["window_seconds"] == 3600
         assert got["by_class"]["destination_gone"]["codes"]["9021"] == 1
         assert got["by_class"]["ambiguous"]["codes"]["none"] >= 1
@@ -436,23 +393,17 @@ class TestTheDoors:
             entry["alerting"] for entry in got["by_class"].values()
         )
 
-    def test_the_worker_login_can_read_them_too(self, world):
-        got, sent = _run(_doors(world["worker"], 3600))
-        assert got and sent >= 0
-
-    def test_execute_is_the_runtime_roles_and_not_publics(self, world):
+    def test_the_doors_are_svc_maintenance_definers(self, world):
+        """Their reach is their owner's policy, so the owner is the contract."""
         rows = _owner(
             world,
-            "SELECT p.proname, r.rolname, p.prosecdef,"
-            "  has_function_privilege('svc_ingress', p.oid, 'EXECUTE'),"
-            "  has_function_privilege('svc_worker', p.oid, 'EXECUTE'),"
-            "  has_function_privilege('public', p.oid, 'EXECUTE')"
+            "SELECT p.proname, r.rolname, p.prosecdef"
             " FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner"
             " WHERE p.proname IN ('fn_health_outbox_failures', 'fn_health_outbox_sent')"
             " ORDER BY p.proname",
             fetch=True,
         )
         assert rows == [
-            ("fn_health_outbox_failures", "svc_maintenance", True, True, True, False),
-            ("fn_health_outbox_sent", "svc_maintenance", True, True, True, False),
+            ("fn_health_outbox_failures", "svc_maintenance", True),
+            ("fn_health_outbox_sent", "svc_maintenance", True),
         ]

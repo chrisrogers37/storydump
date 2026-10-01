@@ -88,18 +88,20 @@ DB=tests/scripts/test_outbox_failure_record_gate.py
 LANE="tests/scripts/test_lineage_lane.py -k one_run_applies_the_whole_corpus"
 
 # settle() records the class and the provider's code in the one CAS that leaves `sending`.
-check "a dead token is filed as a lost response again" $OUTBOX 'failure=("credential_dead" if dead else "ambiguous", _provider_code(error)),' 'failure=("ambiguous", _provider_code(error)),' "$UNIT" "$RECORD -k credential_dead"
+check "a dead token is filed as a lost response again" $OUTBOX '    failure_class = "credential_dead"' '    failure_class = "ambiguous"' "$UNIT" "$RECORD -k credential_dead"
 check "settle records no failure at all" $OUTBOX '    if extra.get("failure"):' '    if False:' "$UNIT" "$RECORD -k recorded_in_the_update_that_leaves_sending"
 check "the provider's code is dropped" $OUTBOX '        params["fcode"] = error_code' '        params["fcode"] = None' "$UNIT" "$RECORD -k 5xx"
 check "the transport stops carrying a 401's code" src/channels/telegram_transport.py 'raise TelegramAuthDead(f"{method}: {code} {description}", code=code)' 'raise TelegramAuthDead(f"{method}: {code} {description}")' "$UNIT" "$RECORD -k credential_dead"
-# The other two writers, against the real table as svc_worker.
-check "a failing resolution leaves the failure's old time" $OUTBOX '        ", last_failed_at = now(),"' '        ","' "$GATE" "$DB -k moves_the_time"
+check "the transport stops carrying a 429's code" src/channels/telegram_transport.py $'scope="chat" if has_chat else "global",\n                code=code,' 'scope="chat" if has_chat else "global",' "$UNIT" "$RECORD -k rate_limited"
+check "an error keeps a code of any type" $OUTBOX '        self.code = code if valid else None' '        self.code = code' "$UNIT" "$RECORD -k anything_else_is_none"
+check "a foreign error's code is recorded as the provider's" $OUTBOX '        if isinstance(error, ChannelSendError)' '        if hasattr(error, "code")' "$UNIT" "$RECORD -k foreign_error"
+# The other writer, against the real table as svc_worker.
 check "a stranded row is recorded with no time" $OUTBOX '"       last_failed_at = now()"' '"       last_failed_at = NULL"' "$GATE" "$DB -k stranded_row_is_recorded"
 # The doors, mutated in the plan's replayed block and read as svc_ingress.
 check2 "a deferral counts as alerting" "         count(*) FILTER (WHERE state IN ('failed', 'ambiguous'))" "         count(*)" "$GATE" "$DB -k counted_across_workspaces"
 check2 "the failures window is not clamped" "   WHERE last_failed_at >= now() - make_interval(secs => LEAST(GREATEST(p_window_seconds, 60), 86400))" "   WHERE last_failed_at >= now() - make_interval(secs => p_window_seconds)" "$GATE" "$DB -k window_is_clamped"
 check2 "the sent door counts failed rows as sent" "   WHERE state = 'sent'" "   WHERE state IN ('sent', 'failed')" "$GATE" "$DB -k sent_door_counts_the_window"
-check2 "PUBLIC keeps EXECUTE on the failures door" "REVOKE ALL ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) FROM PUBLIC;" "-- (PUBLIC keeps EXECUTE)" "$GATE" "$DB -k not_publics"
+check2 "PUBLIC keeps EXECUTE on the failures door" "REVOKE ALL ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) FROM PUBLIC;" "-- (PUBLIC keeps EXECUTE)" "$GATE" "tests/scripts/test_rls_runtime_harness.py -k catalog_agrees_on_every_door"
 # The file's own adoption probes: the runner refuses a file that does not leave what it claims.
 check "the worker loses EXECUTE on the failures door" scripts/migrations/090_outbox_failure_record.sql 'GRANT EXECUTE ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) TO svc_ingress, svc_worker;' 'GRANT EXECUTE ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) TO svc_ingress;' "$GATE" "$LANE"
 # What the route serves: the poller's wire contract and the alerting count.
@@ -110,7 +112,7 @@ check "the alert fires at 6" $MONITOR 'DEFAULT_RAISE_AT = 5' 'DEFAULT_RAISE_AT =
 check "one quiet poll clears" $MONITOR 'CLEAR_POLLS = 2' 'CLEAR_POLLS = 1' "$UNIT" "$MON_TESTS -k one_quiet_poll_is_not_a_recovery"
 check "the clear line moves to 2" $MONITOR 'DEFAULT_CLEAR_AT = 1' 'DEFAULT_CLEAR_AT = 2' "$UNIT" "$MON_TESTS -k two_is_not_quiet_enough"
 check "a standing failure repeats at 5 hours" scripts/posting_monitor.py 'REALERT_AFTER_S = 6 * 3600' 'REALERT_AFTER_S = 5 * 3600' "$UNIT" "$MON_TESTS -k repeats_at_six_hours_and_not_before"
-check "a reading in the dwell pages failing again" $MONITOR '        if verdict.state == BELOW or not due(FAILING):' '        if not due(FAILING):' "$UNIT" "$MON_TESTS -k quiet_reading_never_pages_failing"
+check "a reading in the dwell pages failing again" $MONITOR '        now_is = CLEARING if failing and run < CLEAR_POLLS else DELIVERING' '        now_is = FAILING if failing and run < CLEAR_POLLS else DELIVERING' "$UNIT" "$MON_TESTS -k quiet_reading_never_pages_failing"
 
 rm -f "$LOG"
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"

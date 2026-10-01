@@ -34,7 +34,7 @@ A 429 is a deferral, not a failure: the payload lists it as context, and it neve
 |---|---|
 | **5 or more** (`--raise-at`) | Raises at once: `FLEET ALERT: storydump OUTBOX DELIVERIES ARE FAILING`, naming the classes and codes. |
 | **2 to 4** | Holds whatever it last said. That band between the thresholds is the hysteresis. |
-| **1 or fewer** (`--clear-at`), on two consecutive polls | Clears, and says `RECOVERED` if it had alerted. One quiet poll inside a burst is not a recovery. |
+| **1 or fewer** (`--clear-at`), on two consecutive polls | The first such poll makes a failure `clearing`, which never pages; the second clears it, and says `RECOVERED` if it had alerted. One quiet poll inside a burst is not a recovery. |
 | Still failing 6 hours after the last alert | Repeats, so a long outage does not look like a resolved one. |
 | The endpoint unreachable on two consecutive polls | Says so. The detector cannot look, which is not the same as deliveries being fine. |
 
@@ -49,8 +49,9 @@ magnitude.
 
 ## Deploying it
 
-Stdlib only; no venv. The script imports its HTTP, state-file and notify helpers from `posting_monitor.py` in the
-same directory, so it runs from a checkout that has both. The fleet host's `~/ops/storydump` does.
+Stdlib only; no venv. The script imports its HTTP, state-file and notify helpers from `posting_monitor.py`, so it
+runs as a module from the root of a checkout that has both (`python3 -m scripts.delivery_monitor`). The fleet
+host's `~/ops/storydump` does.
 
 ```ini
 # ~/.config/systemd/user/storydump-delivery-monitor.service
@@ -63,7 +64,8 @@ Type=oneshot
 # for, and the two failures a missing or wrong one produces, are in `posting-monitor.md` (Deploying it).
 Environment=TELEGRAM_GROUP_CHAT_ID=<the operator group chat id>
 Environment=TELEGRAM_STATE_DIR=<a channel dir whose token is authorised there>
-ExecStart=/usr/bin/python3 %h/ops/storydump/scripts/delivery_monitor.py \
+WorkingDirectory=%h/ops/storydump
+ExecStart=/usr/bin/python3 -m scripts.delivery_monitor \
   --url https://<api-host>/health/delivery \
   --state-file %h/.local/state/storydump-delivery-monitor.json \
   --notify-command %h/claudlobby/lib/tg-post.sh
@@ -115,7 +117,7 @@ last recorded state without polling.
 
 `--state-file` holds:
 
-- **`effective`:** delivering or failing.
+- **`effective`:** delivering, failing, or clearing (a failure waiting out its two quiet polls).
 - **`reading`** and **`consecutive`:** the raw reading, and how many polls in a row have given it.
 - **`announced`** and **`spoke_at`:** what the human was last told, and when.
 

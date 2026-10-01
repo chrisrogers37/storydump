@@ -22,6 +22,7 @@ from src.services.target import (
     posting_health,
     scheduling_health,
 )
+from tests.src.services.target.test_delivery_health import _Doors
 
 
 class TestEngineConfiguration:
@@ -564,46 +565,6 @@ class TestPostingHealthIsATHIRDSurface:
         assert TestClient(app).get("/health").status_code == 200
 
 
-class _DeliveryDoors:
-    """A connection that answers 090's two doors from scripted rows, so the
-    REAL `delivery_health` builds the body the route serves: the poller's wire
-    contract is then tested on code that runs, not on a hand-written copy."""
-
-    def __init__(self, failures, sent):
-        self.failures, self.sent = failures, sent
-        self.statements = []
-
-    async def execute(self, stmt, params=None):
-        sql = str(stmt)
-        assert "fn_health_outbox_" in sql, f"the route reached past its doors: {sql}"
-        self.statements.append(sql)
-        doors = self
-
-        class _Result:
-            def mappings(self_inner):
-                return self_inner
-
-            def all(self_inner):
-                return [
-                    {"failure_class": c, "error_code": code, "rows": n, "alerting": a}
-                    for c, code, n, a in doors.failures
-                ]
-
-            def scalar_one(self_inner):
-                return doors.sent
-
-        return _Result()
-
-
-class _DeliveryEngine:
-    def __init__(self, conn):
-        self.conn = conn
-
-    @asynccontextmanager
-    async def connect(self):
-        yield self.conn
-
-
 class TestDeliveryHealthIsAFOURTHSurface:
     """#1482. Deliveries failing and posts not landing are independent causes,
     so the outbox's failures get their own surface rather than a key in either
@@ -624,11 +585,11 @@ class TestDeliveryHealthIsAFOURTHSurface:
         assert app.state.engine is None
         assert TestClient(app).get("/health/delivery").status_code == 503
 
-    def test_it_reaches_its_seam_with_the_default_window(self, client, monkeypatch):
+    def test_it_reaches_its_seam(self, client, monkeypatch):
         seen = []
 
-        async def fake(executor, **kwargs):
-            seen.append((executor, kwargs))
+        async def fake(executor):
+            seen.append(executor)
             return {
                 "window_seconds": 3600,
                 "sent_in_window": 3,
@@ -640,22 +601,25 @@ class TestDeliveryHealthIsAFOURTHSurface:
         resp = client.get("/health/delivery")
         assert resp.status_code == 200, resp.text
         assert resp.json()["sent_in_window"] == 3
-        ((executor, kwargs),) = seen
-        assert hasattr(executor, "execute") and kwargs == {}
+        (executor,) = seen
+        assert hasattr(executor, "execute")
 
     @staticmethod
-    def _get(failures, sent=40):
-        doors = _DeliveryDoors(failures, sent)
-        app = create_app(engine=_DeliveryEngine(doors))
-        resp = TestClient(app).get("/health/delivery")
+    def _get(engine, client, failures, sent=40):
+        """The REAL `delivery_health` behind the route, over 090's doors
+        scripted on the conftest engine's connection."""
+        engine.session = doors = _Doors(failures, sent)
+        resp = client.get("/health/delivery")
         assert resp.status_code == 200, resp.text
         return resp, doors
 
-    def test_the_body_is_aggregates_only(self):
+    def test_the_body_is_aggregates_only(self, engine, client):
         """The route is unauthenticated: counts and codes, and nothing that
         names a workspace, a chat or a message."""
         resp, doors = self._get(
-            [("destination_gone", 403, 5, 5), ("rate_limited", 429, 9, 0)]
+            engine,
+            client,
+            [("destination_gone", 403, 5, 5), ("rate_limited", 429, 9, 0)],
         )
         body = resp.json()
         assert body["window_seconds"] == 3600 and body["sent_in_window"] == 40
@@ -679,7 +643,9 @@ class TestDeliveryHealthIsAFOURTHSurface:
         ],
         ids=["five fires", "four holds", "a 429 storm is context"],
     )
-    def test_the_payload_satisfies_the_pollers_strictness(self, failures, reading):
+    def test_the_payload_satisfies_the_pollers_strictness(
+        self, engine, client, failures, reading
+    ):
         """The REAL classifier over the REAL body: a key the route drops or
         mistypes reads as `unreachable` there, and fails here."""
         from scripts.delivery_monitor import (
@@ -688,7 +654,7 @@ class TestDeliveryHealthIsAFOURTHSurface:
             classify,
         )
 
-        resp, _ = self._get(failures)
+        resp, _ = self._get(engine, client, failures)
         verdict = classify(
             resp.status_code,
             resp.text,

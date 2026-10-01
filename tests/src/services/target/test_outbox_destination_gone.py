@@ -34,7 +34,7 @@ def floor(monkeypatch):
     async def _leave_sending(session, outbox_id, to_state, **extra):
         seen["left"].append((outbox_id, to_state, extra))
 
-    async def mark_ambiguous(session, *, outbox_id, failure=("ambiguous", None)):
+    async def mark_ambiguous(session, *, outbox_id, failure):
         seen["ambiguous"].append((outbox_id, failure))
 
     monkeypatch.setattr(outbox, "recover_stranded", recover_stranded)
