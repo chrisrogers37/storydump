@@ -259,19 +259,34 @@ class ResendSender:
         return ref
 
 
+def email_configured(env: Mapping[str, str]) -> bool:
+    """Whether ``env`` carries a provider this tier can send through.
+
+    The ONE rule for "email is configured", read by both halves. The worker
+    composes its sender from it (:func:`sender_from_env`); the API reads it
+    before queueing a ``send_email`` (``invite_member``), so a deployment that
+    cannot send says so at the command instead of parking the job where nobody
+    is told (#1130). Both values are required together: a key with no sender
+    address cannot send.
+    """
+    return bool(
+        (env.get("RESEND_API_KEY") or "").strip()
+        and (env.get("EMAIL_FROM") or "").strip()
+    )
+
+
 def sender_from_env(env: Mapping[str, str]) -> Optional[ResendSender]:
     """The configured sender, or **None** when the provider is not wired.
 
     None is the honest answer and the registry turns it into a parked kind with
-    a reason. Both values are required together: a key with no sender address
-    cannot send, and returning a half-configured sender would fail at the
-    provider instead of at composition, where it is readable.
+    a reason. Returning a half-configured sender would fail at the provider
+    instead of at composition, where it is readable.
     """
-    api_key = (env.get("RESEND_API_KEY") or "").strip()
-    sender = (env.get("EMAIL_FROM") or "").strip()
-    if not api_key or not sender:
+    if not email_configured(env):
         return None
-    return ResendSender(api_key=api_key, sender=sender)
+    return ResendSender(
+        api_key=env["RESEND_API_KEY"].strip(), sender=env["EMAIL_FROM"].strip()
+    )
 
 
 # ---------------------------------------------------------------------------

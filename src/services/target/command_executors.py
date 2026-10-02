@@ -56,6 +56,7 @@ caught here: `commands.execute` maps it once, for every executor.
 
 from __future__ import annotations
 
+import os
 import re
 import uuid
 from datetime import datetime
@@ -67,6 +68,7 @@ from src.config.defaults import DEFAULT_SKIP_TTL_DAYS
 from src.config.settings import settings
 from src.services.target import (
     audit,
+    email_sender,
     google_drive_oauth,
     identity,
     intent_ledger,
@@ -1494,8 +1496,14 @@ async def invite_member(session, command: Command) -> CommandResult:
             token=token,
             email=email,
             web_app_origin=settings.web_app_origin,
+            # This process's own provider variables, by the worker's rule: set
+            # them on the API as well as the worker, or the invitation reports
+            # not_configured rather than parking where nobody is told (#1130).
+            email_configured=email_sender.email_configured(os.environ),
         )
         if job_id is None:
+            # No accept URL or no provider: nothing was queued, and the token
+            # in this result is the only way the invitation reaches anyone.
             delivery["state"] = "not_configured"
         else:
             delivery["state"] = "queued"

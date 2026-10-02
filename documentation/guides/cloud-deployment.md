@@ -224,7 +224,7 @@ reads. Variables are per service on Railway.
 | `TARGET_USAGE_PRECHECK_ENABLED` | Optional, default off: the advisory read of Meta's publishing quota before a publish | `true` |
 | `TARGET_WORKER_INTERACTIVE_CONCURRENCY`, `TARGET_WORKER_BULK_CONCURRENCY` | Optional, defaults 3 and 2: claim-and-run tasks per lane; the worker refuses a sum the pool cannot fit (`src/worker.py`) | `3`, `2` |
 | `META_GRAPH_VERSION` | Optional; overrides the Graph API version the publish adapter calls (`src/worker.py`) | `v21.0` |
-| `RESEND_API_KEY`, `EMAIL_FROM` | The notification-email sender (`src/services/target/email_sender.py`). Deliberately unset today: outbound email does not send, and the worker logs that no provider is configured | |
+| `RESEND_API_KEY`, `EMAIL_FROM` | The notification-email sender (`src/services/target/email_sender.py`). Set both on the API as well as the worker: the worker sends, and the API reads them before it queues an invitation email, reporting `not_configured` without them (#1130). Deliberately unset today: outbound email does not send, and the worker logs that no provider is configured | |
 | `WORKER_LOG_LEVEL` | Optional; the API's is `LOG_LEVEL` | `INFO` |
 
 `TARGET_TELEGRAM_API_BASE` (a test double for `api.telegram.org`) is the load

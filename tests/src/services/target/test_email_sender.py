@@ -24,6 +24,7 @@ from src.services.target.email_sender import (
     EmailRefused,
     ResendSender,
     backoff_seconds,
+    email_configured,
     render,
     sender_from_env,
 )
@@ -127,6 +128,28 @@ class TestSenderFromEnv:
         half-configured sender would fail at the provider instead of at
         composition, where it is readable."""
         assert sender_from_env(env) is None
+
+
+class TestEmailConfigured:
+    """The one rule both halves read: the worker composes its sender from it,
+    and the API reads it before queueing a `send_email` (#1130)."""
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"RESEND_API_KEY": "re_k", "EMAIL_FROM": "a@b.com"},
+            {},
+            {"RESEND_API_KEY": "re_k"},
+            {"EMAIL_FROM": "a@b.com"},
+            {"RESEND_API_KEY": "  ", "EMAIL_FROM": "a@b.com"},
+            {"RESEND_API_KEY": "re_k", "EMAIL_FROM": ""},
+        ],
+    )
+    def test_the_api_and_the_worker_cannot_disagree(self, env):
+        """A deployment the API calls configured is one the worker can compose
+        a sender for, and the other way round. `TestSenderFromEnv` pins which
+        side each case is on; this pins that the API reads the same answer."""
+        assert email_configured(env) is (sender_from_env(env) is not None)
 
 
 class TestBackoff:

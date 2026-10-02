@@ -20,6 +20,7 @@ deployed ones rather than a fixture's idea of them.
 
 from __future__ import annotations
 
+import os
 import uuid
 
 import psycopg2
@@ -393,14 +394,27 @@ class TestTheEmailProducer:
     defect showed can disagree.
     """
 
-    async def _invite(self, world, args, *, origin="https://app.example.test"):
+    #: A provider for the producer's happy path. The executor reads this
+    #: process's own variables (`email_sender.email_configured`), so a test runs
+    #: with both set unless it passes `email=False` (#1130). Not a real key.
+    _EMAIL_ENV = {"RESEND_API_KEY": "re_k", "EMAIL_FROM": "invites@example.test"}
+
+    async def _invite(
+        self, world, args, *, origin="https://app.example.test", email=True
+    ):
         engine = create_async_engine(async_url(world["dsn"]))
+        saved = {key: os.environ.get(key) for key in self._EMAIL_ENV}
         try:
             import src.services.target.command_executors as ce
 
             class _Settings:
                 web_app_origin = origin
 
+            for key, value in self._EMAIL_ENV.items():
+                if email:
+                    os.environ[key] = value
+                else:
+                    os.environ.pop(key, None)
             original = ce.settings
             ce.settings = _Settings()
             try:
@@ -418,6 +432,11 @@ class TestTheEmailProducer:
             finally:
                 ce.settings = original
         finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
             await engine.dispose()
 
     async def _job(self, world, job_id):
@@ -522,21 +541,42 @@ class TestTheEmailProducer:
         }
         assert result.data["invite_token"]
 
-        # Scoped to THIS invitation, not the whole table: the lane is
-        # module-scoped, so earlier tests in this class have left their own
-        # `send_email` rows behind and a global count would answer about them.
+        count = await self._sends(world, result.data["invitation_id"])
+        assert count == 0, "a job was enqueued that could never render"
+
+    async def test_no_email_provider_enqueues_nothing_and_says_so(self, world):
+        """#1130: with an origin but no provider, the worker parks `send_email`
+        until someone sets RESEND_API_KEY and EMAIL_FROM, and the command used
+        to report `queued` all the while. The API reads the same two variables,
+        so it now gives the outcome a missing origin already gives: nothing
+        queued, `not_configured`, and the token returned to share by hand."""
+        result = await self._invite(
+            world, {"email": "noprovider@example.com"}, email=False
+        )
+        assert result.data["delivery"] == {
+            "channel": "email",
+            "state": "not_configured",
+        }
+        assert result.data["invite_token"]
+        count = await self._sends(world, result.data["invitation_id"])
+        assert count == 0, "a job was enqueued that no provider could send"
+
+    async def _sends(self, world, invitation_id):
+        """The `send_email` rows for ONE invitation. Scoped by its key, not the
+        whole table: the lane is module-scoped, so earlier tests in this class
+        have left their own rows behind and a global count would answer about
+        them."""
         engine = create_async_engine(async_url(world["dsn"]))
         try:
             async with engine.begin() as conn:
-                count = (
+                return (
                     await conn.execute(
                         text(
                             "SELECT count(*) FROM jobs WHERE kind = 'send_email'"
                             " AND serialization_key = :k"
                         ),
-                        {"k": f"email:inv:{result.data['invitation_id']}"},
+                        {"k": f"email:inv:{invitation_id}"},
                     )
                 ).scalar()
         finally:
             await engine.dispose()
-        assert count == 0, "a job was enqueued that could never render"

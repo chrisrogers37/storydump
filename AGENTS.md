@@ -348,13 +348,16 @@ the worker and the API.
 ## What is deliberately not wired
 
 **Outbound email does not send.** `src/services/target/email_sender.py` ships
-inert by design: `sender_from_env` returns `None` unless `RESEND_API_KEY` and
-the sender address (`EMAIL_FROM`) are both set, and the job registry parks
-`send_email` with a reason naming what is missing. The provider choice is a
-flagged decision that has not been ratified, and deferring it is deliberate.
-An invitation created today therefore reports
-`delivery: {"channel": "email", "state": "not_configured"}` — the row and its
-token are real, the message is never delivered.
+inert by design: `email_configured` is false unless `RESEND_API_KEY` and the
+sender address (`EMAIL_FROM`) are both set, so `sender_from_env` returns `None`
+and the job registry parks `send_email` with a reason naming what is missing.
+The provider choice is a flagged decision that has not been ratified, and
+deferring it is deliberate. The API reads the same two variables before it
+queues an invitation email, so an invitation created today reports
+`delivery: {"channel": "email", "state": "not_configured"}` and queues nothing
+(#1130). The row and its token are real, and the link can be shared by hand.
+Set both variables on the API as well as the worker: the API decides whether to
+queue, and the worker sends.
 
 Do not describe email as working, and do not wire a provider without the owner
 acknowledgement the design calls for.
