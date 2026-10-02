@@ -8,7 +8,7 @@ tags: [plan, security, egress]
 links: []
 ---
 
-> Phase 05 of [`00_EPIC.md`](00_EPIC.md), ratified 2026-09-20 at the forge gate and folded after ironclad cycle 1 (2026-09-25). **Deferred by F10 (ruled 2026-09-28):** built only if a named need the drop cannot meet reopens it; re-verify every citation first. Spec: [`2026-09-20-device-native-inbound-spec.md`](../2026-09-20-device-native-inbound-spec.md). The ledger is [`RUN_LOG.md`](RUN_LOG.md); its entry for this phase records where the build departs from this text.
+> Phase 05 of [`00_EPIC.md`](00_EPIC.md), ratified 2026-09-20 at the forge gate and folded after ironclad cycle 1 (2026-09-25). **Deferred by F10 (ruled 2026-09-28):** built only if a named need the drop cannot meet reopens it; re-verify every citation first. **2026-10-01 ([the review](review-2026-10-01.md)):** if revived, re-plan rather than refresh. Apple changed Shared Albums on 2026-09-14 (iOS 27): new and upgraded albums keep original resolution, and whether they still expose the public feed this train read is unknown, so a fresh probe comes first. Spec: [`2026-09-20-device-native-inbound-spec.md`](../2026-09-20-device-native-inbound-spec.md). The ledger is [`RUN_LOG.md`](RUN_LOG.md); its entry for this phase records where the build departs from this text.
 
 ## Summary
 
