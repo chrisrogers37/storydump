@@ -3,9 +3,9 @@
 # owns its transactions. It reads the sweep in one short transaction and runs each row in one of its
 # own, so a row that raises rolls back alone, and the rows behind it land. No savepoint is carried
 # across rows (#1441's subtransaction bound), whatever `reconcile_limit` is. After the beat, the
-# first failure is re-raised, so the job still fails and retries (#1438's alarm). Before it does,
-# the beat takes back the no-surface stamps its notices wrote, so the retry re-signals the owed
-# notice. A caller that passes its own session (the unit seam) gets a savepoint per row instead.
+# first failure is re-raised, so the job still fails and retries (#1438's alarm). A notice nobody
+# can hear is recorded only by a beat that returns, so a failing beat leaves no attempt on record.
+# A caller that passes its own session (the unit seam) gets a savepoint per row instead.
 #
 # Each behaviour has one named mutation, and it must make its test FAIL ("killed"). It must PASS on
 # the clean tree first; otherwise the verdict is BASELINE RED. A selector that selects nothing is NO
@@ -62,6 +62,7 @@ check() {  # name file old new test-selector [old2 new2]
 }
 
 W=src/services/target/work_loop.py
+R=src/services/target/reconciler.py
 U=tests/src/services/target/test_work_loop.py
 L3=tests/scripts/test_l3_permit_rail.py
 
@@ -75,11 +76,18 @@ check "the unit seam loses its per-row savepoint" $W '                    nullco
 # The alarm: after the beat the FIRST failure is re-raised, so the job fails (#1438).
 check "the beat swallows its failures" $W '            raise failures[0]' '            pass' "$L3 -k 'missed_flip_fails_the_reconcile_beat'"
 check "the last failure is the one raised" $W '            raise failures[0]' '            raise failures[-1]' "$U -k 'first_failure_is_raised'"
-# From the review of #1509: the failure wins over a notice nobody heard, and a failing beat takes back
-# the no-surface stamps it wrote, so the retry re-signals the owed notice.
-check "UNDELIVERABLE stands in for the alarm" $W $'        if failures:\n            if unreachable:' $'        if failures and not unreachable:\n            if unreachable:' "$U -k 'alarm_stays_loud_when_another_row_reaches_nobody'"
-check "a failed beat keeps the stamps of its unheard notices (unit)" $W $'            if unreachable:\n                # A failing beat' $'            if False:\n                # A failing beat' "$U -k 'takes_back_the_stamps_of_its_unheard_notices'"
-check "a failed beat keeps the stamps of its unheard notices (gate)" $W $'            if unreachable:\n                # A failing beat' $'            if False:\n                # A failing beat' "$L3 -k 'takes_back_the_stamp_of_a_notice_nobody_heard'"
+# A notice nobody can hear: the alarm wins over it, and only a beat that returns records the attempt,
+# from the beat rather than the row, on the configured window and in the row's own workspace.
+NOBODY=$'        if failures:\n            # Loud, as #1438 asks'
+EARLY=$'        async with short(session, job) as w:\n            for op in unreachable:\n                await reconciler.record_no_surface(w, intent_id=op["intent_id"], workspace_id=op["workspace_id"], retry_after_seconds=0)\n'"$NOBODY"
+check "UNDELIVERABLE stands in for the alarm" $W $'        if failures:\n' $'        if failures and not unreachable:\n' "$U -k 'stays_loud_and_records_no_unheard_notice'"
+check "a beat records its unheard notices before its outcome (unit)" $W "$NOBODY" "$EARLY" "$U -k 'stays_loud_and_records_no_unheard_notice'"
+check "a beat records its unheard notices before its outcome (gate)" $W "$NOBODY" "$EARLY" "$L3 -k 'records_no_attempt_for_a_notice_nobody_heard'"
+check "the row records its own unheard notice" $R $'    if not bindings:\n        return outbox.UNDELIVERABLE\n' $'    if not bindings:\n        await record_no_surface(conn, intent_id=intent_id, workspace_id=workspace_id, retry_after_seconds=0)\n        return outbox.UNDELIVERABLE\n' "$L3 -k 'records_no_attempt_for_a_notice_nobody_heard'"
+check "a returning beat drops its unheard notices" $W '            if outbox.UNDELIVERABLE in recorded:' '            if False:' "$U -k 'returning_beat_records_only_its_unheard_notices'"
+check "inside the window the beat still reads as unheard" $W '            if outbox.UNDELIVERABLE in recorded:' '            if recorded:' "$U -k 'inside_the_window_an_unheard_notice_is_a_clean_run'"
+check "the record ignores the configured window" $W '                        retry_after_seconds=cfg.reconcile_notify_after_seconds,' '                        retry_after_seconds=0,' "$U -k 'no_surface_makes_the_sweep_undeliverable'"
+check "the record runs outside the row's workspace" $R $'    await unit_of_work.apply_gucs(\n        conn, tenant_id=str(workspace_id), actor_kind="system"\n    )\n    fresh = (' '    fresh = (' "$L3 -k 'records_no_attempt_for_a_notice_nobody_heard'"
 # The mark: the loop hands the executor no session, so its rows are transactions, not savepoints.
 check "the executor runs in the job's transaction" $W $'    @own_transactions\n    async def reconcile_ambiguous(session, job):' '    async def reconcile_ambiguous(session, job):' "$U -k 'provider_facing_kinds_are_exactly_the_marked_ones'"
 

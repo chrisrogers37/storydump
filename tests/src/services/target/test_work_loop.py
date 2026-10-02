@@ -258,9 +258,7 @@ class TestReconcilerSweepBranchesOnItsReason:
         async def fake_sweep(session, *, limit, notify_after_seconds):
             return rows
 
-        async def fake_notify(
-            session, *, intent_id, workspace_id, web_app_origin, retry_after_seconds
-        ):
+        async def fake_notify(session, *, intent_id, workspace_id, web_app_origin):
             notified.append((intent_id, web_app_origin))
             return 1
 
@@ -341,10 +339,9 @@ class TestReconcilerSweepBranchesOnItsReason:
             "the row's workspace is claimed before its ladder is counted"
         )
 
-    async def test_a_workspace_with_no_surface_makes_the_sweep_undeliverable(
-        self, monkeypatch
-    ):
-        """The executor must not report a delivery it could not make."""
+    async def _unheard(self, monkeypatch, session):
+        """One notify row whose workspace has nowhere to receive the notice,
+        swept on *session*: the beat's answer."""
         from src.services.target import outbox
 
         rows = [{"intent_id": "i-5", "workspace_id": "ws-1", "reason": "notify_window"}]
@@ -358,8 +355,33 @@ class TestReconcilerSweepBranchesOnItsReason:
         monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
         monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
         registry = build_registry(full_deps())
-        got = await registry["reconcile_ambiguous"](_FakeSession(), _reconcile_job())
-        assert got == outbox.UNDELIVERABLE
+        return await registry["reconcile_ambiguous"](session, _reconcile_job())
+
+    async def test_a_workspace_with_no_surface_makes_the_sweep_undeliverable(
+        self, monkeypatch
+    ):
+        """The executor must not report a delivery it could not make. The
+        attempt is recorded in the row's workspace, with the window the config
+        names."""
+        from src.services.target import outbox
+
+        session = _FakeSession(rows=[{"id": "i-5"}])  # the stamp landed: a fresh record
+        assert await self._unheard(monkeypatch, session) == outbox.UNDELIVERABLE
+        claim, stamp = session.statements
+        assert "app.tenant_id" in claim[0] and claim[1]["v0"] == "ws-1"
+        assert "notify_attempted_at" in stamp[0]
+        assert stamp[1] == {
+            "intent": "i-5",
+            "age": float(WorkerConfig().reconcile_notify_after_seconds),
+        }
+
+    async def test_inside_the_window_an_unheard_notice_is_a_clean_run(
+        self, monkeypatch
+    ):
+        """Bounded, not silenced: once recorded, the condition stands on the
+        ledger, and re-reporting it every 60 s would park a job per beat."""
+        session = _FakeSession()  # the stamp is inside the window: nothing recorded
+        assert await self._unheard(monkeypatch, session) is None
 
     async def test_the_sweep_keys_match_what_the_door_returns(self):
         """The `KeyError` that could not surface while the kind was parked.
@@ -476,36 +498,10 @@ class TestReconcilerRowsFailAlone:
         assert [r.args[1] for r in failed] == ["i-0", "i-2"], "every failure is logged"
         assert any("2 of 3 row(s) failed" in r.message for r in caplog.records)
 
-    async def test_the_alarm_stays_loud_when_another_row_reaches_nobody(
-        self, monkeypatch
-    ):
-        """A beat with a failed ladder row AND a notice nobody could receive
-        still fails with the row's error: `UNDELIVERABLE` must never stand in
-        for the alarm (#1438). (From the review of #1509.)"""
-        from src.services.target import outbox
-
-        self._own_transactions(monkeypatch)
-        rows = [
-            {"intent_id": "i-0", "workspace_id": "ws-1", "reason": "ladder_due"},
-            {"intent_id": "n-1", "workspace_id": "ws-1", "reason": "notify_window"},
-        ]
-
-        async def fake_reconcile(session, *, intent_id, **kw):
-            raise ValueError(f"intent {intent_id} matched no row")
-
-        async def fake_notify(session, **kw):
-            return outbox.UNDELIVERABLE
-
-        self._sweep(monkeypatch, rows, fake_reconcile)
-        monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
-        registry = build_registry(full_deps())
-        with pytest.raises(ValueError, match="intent i-0 matched no row"):
-            await registry["reconcile_ambiguous"](None, _reconcile_job())
-
     def _mixed(self, monkeypatch, *, ladder_fails):
         """A ladder row, a notice nobody can hear (n-1) and a delivered one
-        (n-2); returns the (intent, workspace) pairs whose stamp was taken
-        back."""
+        (n-2); returns the (intent, workspace) pairs the beat recorded as
+        unheard."""
         from src.services.target import outbox
 
         self._own_transactions(monkeypatch)
@@ -514,7 +510,7 @@ class TestReconcilerRowsFailAlone:
             {"intent_id": "n-1", "workspace_id": "ws-2", "reason": "notify_window"},
             {"intent_id": "n-2", "workspace_id": "ws-3", "reason": "notify_window"},
         ]
-        taken_back = []
+        recorded = []
 
         async def fake_reconcile(session, *, intent_id, **kw):
             if ladder_fails:
@@ -524,37 +520,36 @@ class TestReconcilerRowsFailAlone:
         async def fake_notify(session, *, intent_id, **kw):
             return outbox.UNDELIVERABLE if intent_id == "n-1" else 1
 
-        async def fake_unrecord(session, *, intent_id, workspace_id):
-            taken_back.append((intent_id, workspace_id))
+        async def fake_record(session, *, intent_id, workspace_id, **kw):
+            recorded.append((intent_id, workspace_id))
+            return outbox.UNDELIVERABLE
 
         self._sweep(monkeypatch, rows, fake_reconcile)
         monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
-        monkeypatch.setattr(work_loop.reconciler, "unrecord_no_surface", fake_unrecord)
-        return taken_back
+        monkeypatch.setattr(work_loop.reconciler, "record_no_surface", fake_record)
+        return recorded
 
-    async def test_a_failed_beat_takes_back_the_stamps_of_its_unheard_notices(
+    async def test_a_failed_beat_stays_loud_and_records_no_unheard_notice(
         self, monkeypatch
     ):
-        """A failing job cannot end `review_required`, so the stamp a notice
-        nobody could hear wrote this beat is taken back: the retry re-signals
-        it rather than reading it as told for the whole window. A delivered
-        notice is left alone."""
-        taken_back = self._mixed(monkeypatch, ladder_fails=True)
+        """A beat with a failed ladder row AND a notice nobody can hear fails
+        with the row's error: `UNDELIVERABLE` never stands in for the alarm
+        (#1438). Nor is the notice recorded, so the first beat that returns
+        signals it."""
+        recorded = self._mixed(monkeypatch, ladder_fails=True)
         registry = build_registry(full_deps())
         with pytest.raises(ValueError, match="intent i-0 matched no row"):
             await registry["reconcile_ambiguous"](None, _reconcile_job())
-        assert taken_back == [("n-1", "ws-2")]
+        assert recorded == []
 
-    async def test_a_clean_beat_keeps_its_stamps_and_reports_nobody_heard(
-        self, monkeypatch
-    ):
+    async def test_a_returning_beat_records_only_its_unheard_notices(self, monkeypatch):
         from src.services.target import outbox
 
-        taken_back = self._mixed(monkeypatch, ladder_fails=False)
+        recorded = self._mixed(monkeypatch, ladder_fails=False)
         registry = build_registry(full_deps())
         got = await registry["reconcile_ambiguous"](None, _reconcile_job())
         assert got == outbox.UNDELIVERABLE
-        assert taken_back == [], "the signal left with the job, so the stamp stays"
+        assert recorded == [("n-1", "ws-2")], "a delivered notice is not an attempt"
 
     async def test_a_passed_session_gets_a_savepoint_per_row(self, monkeypatch):
         """The unit seam: a caller that passes its own session keeps it, and

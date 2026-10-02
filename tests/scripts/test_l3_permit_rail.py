@@ -801,6 +801,26 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             "payload": {"v": 1},
         }
 
+    def _beat(self, ops_db, poll, **config):
+        """One `reconcile_ambiguous` beat on the path production runs: the loop
+        hands the executor no session, and it opens its own on the engine."""
+        from src.services.target import work_loop
+
+        async def go():
+            async with ingress_engine(ops_db["worker"]) as engine:
+                registry = work_loop.build_registry(
+                    work_loop.WorkerDeps(
+                        poll=poll,
+                        engine=engine,
+                        config=work_loop.WorkerConfig(**config),
+                    )
+                )
+                return await registry["reconcile_ambiguous"](
+                    None, self._reconcile_job()
+                )
+
+        return _run(go())
+
     def test_a_missed_flip_fails_the_reconcile_beat(self, ops_db):
         """The raise reaches the executor: `reconcile_ambiguous` runs as
         `svc_worker`, and a verdict whose flip matched no row fails the beat
@@ -835,8 +855,6 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         session, so the sweep reads in one transaction and each row commits in
         one of its own. The older row's flip misses and the beat still fails
         with it, while the row behind it is resolved and stays resolved."""
-        from src.services.target import work_loop
-
         missed, _ = self._ambiguous(ops_db)
         resolved, resolved_op = self._ambiguous(ops_db)
         # The two oldest ambiguities in the module, so a sweep limited to two
@@ -850,19 +868,8 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
                 _leave_ambiguity(ops_db, intent_id)
             return "PUBLISHED"
 
-        async def beat():
-            async with ingress_engine(ops_db["worker"]) as engine:
-                registry = work_loop.build_registry(
-                    work_loop.WorkerDeps(
-                        poll=poll,
-                        engine=engine,
-                        config=work_loop.WorkerConfig(reconcile_limit=2),
-                    )
-                )
-                await registry["reconcile_ambiguous"](None, self._reconcile_job())
-
         with pytest.raises(ValueError, match=f"intent {missed} matched no"):
-            _run(beat())
+            self._beat(ops_db, poll, reconcile_limit=2)
         assert _state(ops_db, "post_intents", resolved) == "posted"
         assert _state(ops_db, "provider_operations", resolved_op["id"]) == "succeeded"
         assert _state(ops_db, "post_intents", missed) == "review_required", (
@@ -870,13 +877,14 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             " transaction rolled back, so its verdict wrote nothing"
         )
 
-    def test_a_failed_beat_takes_back_the_stamp_of_a_notice_nobody_heard(self, ops_db):
-        """From the review of #1509: a beat with a failed ladder row AND a parked
-        intent whose workspace has no push binding (this world's has none). The
-        notify row's own transaction stamps `notify_attempted_at`, and the beat
-        then raises, so the job never ends `review_required`. The stamp must
-        not outlive the beat, or the next six hours read as a clean run while
-        the notice is still owed. On the path production runs."""
+    def test_a_failed_beat_records_no_attempt_for_a_notice_nobody_heard(
+        self, ops_db, monkeypatch
+    ):
+        """A beat with a failed ladder row AND a parked intent whose workspace
+        has no push binding (this world's has none), on the path production
+        runs. The beat raises, so the job never ends `review_required`, and the
+        attempt must not be recorded either: a stamp would hold the rest of
+        the window to a clean run while the notice is still owed."""
         from src.services.target import outbox, reconciler, work_loop
 
         missed, _ = self._ambiguous(ops_db)
@@ -892,35 +900,45 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             _leave_ambiguity(ops_db, intent_id)
             return "PUBLISHED"
 
-        async def beat():
-            async with ingress_engine(ops_db["worker"]) as engine:
-                registry = work_loop.build_registry(
-                    work_loop.WorkerDeps(poll=poll, engine=engine)
-                )
-                await registry["reconcile_ambiguous"](None, self._reconcile_job())
+        heard = []
+        notify = reconciler.notify_parked_customer
 
+        async def spy(conn, **kw):
+            got = await notify(conn, **kw)
+            heard.append((str(kw["intent_id"]), got))
+            return got
+
+        monkeypatch.setattr(reconciler, "notify_parked_customer", spy)
         with pytest.raises(ValueError, match=f"intent {missed} matched no"):
-            _run(beat())
-        stamp = _exec(
-            ops_db,
-            "SELECT last_error->'evidence'->>'notify_attempted_at'"
-            " FROM post_intents WHERE id = %s",
-            (parked,),
-            fetch=True,
-        )[0][0]
-        assert stamp is None, "the failed beat took back the stamp it wrote"
+            self._beat(ops_db, poll)
+        assert (str(parked), outbox.UNDELIVERABLE) in heard, (
+            "the beat reached the notice, and it reached nobody"
+        )
 
-        async def retry():
+        def stamp():
+            return _exec(
+                ops_db,
+                "SELECT last_error->'evidence'->>'notify_attempted_at'"
+                " FROM post_intents WHERE id = %s",
+                (parked,),
+                fetch=True,
+            )[0][0]
+
+        assert stamp() is None, "the failed beat recorded no attempt"
+
+        async def record():
+            # What the first beat that returns does for this row.
             async with ingress_engine(ops_db["worker"]) as engine:
                 async with engine.begin() as conn:
-                    return await reconciler.notify_parked_customer(
+                    return await reconciler.record_no_surface(
                         conn,
                         intent_id=parked,
                         workspace_id=ops_db["ws"],
                         retry_after_seconds=work_loop.WorkerConfig().reconcile_notify_after_seconds,
                     )
 
-        assert _run(retry()) == outbox.UNDELIVERABLE, "the retry re-signals"
+        assert _run(record()) == outbox.UNDELIVERABLE, "the window is still open"
+        assert stamp() is not None, "and the attempt, once recorded, reads back"
 
     def test_evidence_capture_parks_review_required_WITH_the_trail(self, ops_db):
         """Same authoritative-positive value, opposite outcome — which is the

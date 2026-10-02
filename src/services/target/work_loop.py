@@ -352,12 +352,11 @@ def build_registry(deps: WorkerDeps) -> dict:
         `uq_publish_exclusive`). Not a savepoint per row in one transaction: a
         batch larger than `offboarding.MAX_WRITING_SAVEPOINTS` overflows the
         backend's subtransaction cache (#1441). After the beat the first
-        failure is re-raised, so the job still fails and retries. Before it
-        does, the beat takes back the no-surface stamps its notify rows wrote
-        (`reconciler.unrecord_no_surface`): a failing job cannot end
-        `review_required`, and an owed notice must be re-signalled on the
-        retry, not read as told for the whole window. A caller that passes its
-        own session (the unit seam) gets a savepoint per row on it instead.
+        failure is re-raised, so the job still fails and retries. A notice
+        nobody can hear is recorded only by a beat that returns
+        (`reconciler.record_no_surface` says why), so a failing beat leaves
+        none behind. A caller that passes its own session (the unit seam) gets
+        a savepoint per row on it instead.
         """
         async with short(session, job) as reader:
             due = await reconciler.sweep_due(
@@ -373,7 +372,6 @@ def build_registry(deps: WorkerDeps) -> dict:
                     intent_id=op["intent_id"],
                     workspace_id=op["workspace_id"],
                     web_app_origin=cfg.web_app_origin,
-                    retry_after_seconds=cfg.reconcile_notify_after_seconds,
                 )
             # Scope the ladder row too. 059 says every write from this sweep
             # "runs tenant-scoped as svc_worker" and nothing did — the session
@@ -401,7 +399,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             )
 
         ladder_skipped = 0
-        # The notify rows that recorded, this beat, a notice nobody can hear.
+        # The notify rows whose workspace has nowhere to receive the notice.
         unreachable = []
         failures = []
         for op in due:
@@ -435,25 +433,6 @@ def build_registry(deps: WorkerDeps) -> dict:
                 ladder_skipped,
             )
         if failures:
-            if unreachable:
-                # A failing beat cannot end `review_required`, so the owed
-                # notices it stamped would read as told for the whole window.
-                # Their stamps are taken back so the next beat re-signals.
-                try:
-                    async with short(session, job) as writer:
-                        for op in unreachable:
-                            await reconciler.unrecord_no_surface(
-                                writer,
-                                intent_id=op["intent_id"],
-                                workspace_id=op["workspace_id"],
-                            )
-                except Exception:  # noqa: BLE001 — the beat raises its own failure below
-                    logger.exception(
-                        "reconcile_ambiguous: could not take back the no-surface"
-                        " stamp of intent(s) %s — their owed notice is NOT"
-                        " re-signalled until the window ends",
-                        [op["intent_id"] for op in unreachable],
-                    )
             # Loud, as #1438 asks: the job fails and retries. The rows that
             # resolved have committed, so only the failed rows come round again.
             logger.error(
@@ -464,11 +443,22 @@ def build_registry(deps: WorkerDeps) -> dict:
             )
             raise failures[0]
         if unreachable:
-            # One workspace with nowhere to receive its notice makes the WHOLE
-            # sweep not-a-delivery. The rows that did land have committed;
-            # what must not happen is the run reading as clean when somebody
-            # was owed a message and got none.
-            return outbox.UNDELIVERABLE
+            async with short(session, job) as writer:
+                recorded = [
+                    await reconciler.record_no_surface(
+                        writer,
+                        intent_id=op["intent_id"],
+                        workspace_id=op["workspace_id"],
+                        retry_after_seconds=cfg.reconcile_notify_after_seconds,
+                    )
+                    for op in unreachable
+                ]
+            if outbox.UNDELIVERABLE in recorded:
+                # One workspace with nowhere to receive its notice makes the
+                # WHOLE sweep not-a-delivery. The rows that did land have
+                # committed; what must not happen is the run reading as clean
+                # when somebody was owed a message and got none.
+                return outbox.UNDELIVERABLE
 
     async def alert_stranded_sources(session, job):
         # Alert-only: nothing here re-arms a source or enqueues a sync. The
