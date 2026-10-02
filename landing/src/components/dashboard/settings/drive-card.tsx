@@ -11,6 +11,7 @@ import {
   connectedFolderRefs,
   driveConnectControl,
   driveConnectRefusalCopy,
+  driveConnectWarning,
   driveConnectedSince,
   driveStatusBadge,
   removeDriveFolder,
@@ -64,6 +65,7 @@ export function DriveCard({
   );
   const grant = driveStatusBadge(drive?.status);
   const connectControl = drive ? driveConnectControl(drive.status) : null;
+  const connectWarning = drive ? driveConnectWarning(drive.status) : null;
   const driveActive = drive?.status === "active";
 
   /** Folders that are sources here already: the picker greys them. */
@@ -224,6 +226,10 @@ export function DriveCard({
               )}
             </div>
           </div>
+        )}
+
+        {connectWarning && (
+          <p className="text-xs text-muted-foreground">{connectWarning}</p>
         )}
 
         <div className="space-y-2 border-t pt-4">

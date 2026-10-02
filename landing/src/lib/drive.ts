@@ -142,6 +142,27 @@ export function driveConnectControl(
   return { label: "Connect Google Drive", kind: "connect" };
 }
 
+/**
+ * What a person should know BEFORE the browser leaves for Google.
+ *
+ * Until the Drive scope is verified (#333), Google puts its own "hasn't
+ * verified this app" page in front of the consent screen, and the way on is
+ * Advanced, then on to the app. The page is Google's, so nothing on it says
+ * this is expected; said here, it is a step rather than an alarm.
+ *
+ * Wherever the grant is not live — before the first grant, and for an
+ * expired or revoked one, since a reconnect goes back through Google's
+ * consent. Not for a live grant: that person has been through it. "Read-only"
+ * is the scope's own meaning: `drive.readonly`
+ * (`src/services/target/google_drive_oauth.py`).
+ */
+export function driveConnectWarning(
+  status: string | null | undefined,
+): string | null {
+  if (status === "active") return null;
+  return "Google will warn that it hasn't verified this app yet. To continue, choose Advanced, then go on to the app. Storydump asks for read-only access to your Drive.";
+}
+
 /** The picker's second root — the folders shared TO the connected account. */
 export const SHARED_ROOT = "shared-with-me";
 

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   addDriveFolder,
   driveConnectControl,
+  driveConnectWarning,
   driveStatusBadge,
   fetchDriveFolders,
   isGoogleAuthorizationUrl,
@@ -82,6 +83,26 @@ describe("the workspace's Drive grant, said on screen", () => {
     // Google can revoke on its side without the projection knowing; the road
     // back must not be Disconnect → Connect.
     expect(driveConnectControl("active")?.kind).toBe("reconnect");
+  });
+  it("warns about Google's unverified-app page wherever the grant is not live", () => {
+    for (const status of [
+      "none",
+      "expired",
+      "revoked",
+      "weird",
+      null,
+      undefined,
+    ]) {
+      expect(driveConnectWarning(status), String(status)).not.toBeNull();
+    }
+    // A live grant has been through Google's page already.
+    expect(driveConnectWarning("active")).toBeNull();
+  });
+  it("says what Google will show, the way past it, and what is asked for", () => {
+    const warning = driveConnectWarning("none") ?? "";
+    expect(warning).toMatch(/hasn't verified this app/);
+    expect(warning).toMatch(/Advanced/);
+    expect(warning).toMatch(/read-only/);
   });
 });
 
