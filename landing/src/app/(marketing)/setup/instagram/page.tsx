@@ -18,7 +18,7 @@ export const metadata: Metadata = pageMetadata({
 export default function InstagramSetup() {
   return (
     <div>
-      <h1 className="text-3xl font-bold tracking-tight">
+      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
         Instagram Business Account
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">

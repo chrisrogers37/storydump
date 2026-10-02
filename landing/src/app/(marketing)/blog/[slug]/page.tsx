@@ -82,7 +82,7 @@ export default async function BlogPost({ params }: { params: Params }) {
           <span aria-hidden="true">&middot;</span>
           <span>{post.readTime}</span>
         </div>
-        <h1 className="mt-4 text-4xl font-bold tracking-tight">
+        <h1 className="mt-4 font-display text-4xl font-extrabold tracking-[-0.03em] text-ink md:text-5xl">
           {post.title}
         </h1>
         <p className="mt-4 text-lg text-muted-foreground leading-relaxed">

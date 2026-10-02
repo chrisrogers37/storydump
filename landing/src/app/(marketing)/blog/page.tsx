@@ -24,7 +24,7 @@ export default function BlogIndex() {
           { name: "Blog", path: "/blog" },
         ])}
       />
-      <h1 className="text-4xl font-bold tracking-tight">Blog</h1>
+      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink md:text-5xl">Blog</h1>
       <p className="mt-4 text-lg text-muted-foreground">{description}</p>
 
       <div className="mt-12 space-y-10">

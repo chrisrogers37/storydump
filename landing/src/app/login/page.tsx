@@ -37,7 +37,7 @@ export const metadata = {
  */
 export default function LoginPage() {
   return (
-    <div className={`${bricolage.variable} flex min-h-svh flex-col items-center justify-center bg-background px-4 font-sans`}>
+    <main className={`${bricolage.variable} flex min-h-svh flex-col items-center justify-center bg-background px-4 font-sans`}>
       <div className="w-full max-w-sm space-y-6">
         <Link
           href="/"
@@ -65,6 +65,6 @@ export default function LoginPage() {
           New here? Signing in creates your account.
         </p>
       </div>
-    </div>
+    </main>
   );
 }

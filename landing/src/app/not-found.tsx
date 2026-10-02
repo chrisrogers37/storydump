@@ -20,7 +20,7 @@ export default function NotFound() {
   return (
     <div className={`${bricolage.variable} flex min-h-svh flex-col font-sans`}>
       <Header />
-      <main className="flex-1 bg-paper">
+      <main id="main" className="flex-1 bg-paper">
         <div className="mx-auto max-w-3xl px-4 py-24 md:py-32">
           <p className="kicker text-tap-ink">404</p>
           <h1 className="section-title mt-4">That page isn’t here.</h1>

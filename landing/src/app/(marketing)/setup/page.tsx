@@ -20,7 +20,7 @@ const prerequisites = [
 export default function SetupOverview() {
   return (
     <div>
-      <h1 className="text-3xl font-bold tracking-tight">
+      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
         Getting Started with Storydump
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">

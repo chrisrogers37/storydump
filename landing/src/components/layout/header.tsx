@@ -5,6 +5,13 @@ import { BrandMark } from "./brand-mark"
 export function Header() {
   return (
     <header className="sticky top-0 z-50 w-full border-b border-ink/10 bg-white/85 backdrop-blur-sm">
+      {/* The first stop for a keyboard: past the header to the page itself. */}
+      <a
+        href="#main"
+        className="sr-only rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white focus:not-sr-only focus:absolute focus:left-4 focus:top-3 focus:z-50 focus:px-4 focus:py-2"
+      >
+        Skip to content
+      </a>
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4">
         <Link
           href="/"

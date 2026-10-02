@@ -13,7 +13,7 @@ export default function MarketingLayout({
     // set it here.
     <div className={`${bricolage.variable} flex min-h-svh flex-col font-sans`}>
       <Header />
-      <main className="flex-1">{children}</main>
+      <main id="main" className="flex-1">{children}</main>
       <Footer />
     </div>
   )
