@@ -781,6 +781,26 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         assert _run(go(str(ops_db["ws"]))) == "posted"
         assert _state(ops_db, "provider_operations", op["id"]) == "succeeded"
 
+    def _age(self, ops_db, intent, interval):
+        """Make *intent* older. The sweep takes the oldest ambiguity first
+        (`fn_reconciler_sweep` orders by entered_state_at), so the module's
+        other ambiguous rows cannot crowd it out of the beat."""
+        _exec(
+            ops_db,
+            "SET app.actor_kind = 'migration';"
+            " UPDATE post_intents SET entered_state_at = now() - %s::interval"
+            " WHERE id = %s",
+            (interval, intent),
+        )
+
+    def _reconcile_job(self):
+        return {
+            "id": "j-rec",
+            "kind": "reconcile_ambiguous",
+            "workspace_id": None,
+            "payload": {"v": 1},
+        }
+
     def test_a_missed_flip_fails_the_reconcile_beat(self, ops_db):
         """The raise reaches the executor: `reconcile_ambiguous` runs as
         `svc_worker`, and a verdict whose flip matched no row fails the beat
@@ -790,16 +810,7 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         from src.services.target import unit_of_work, work_loop
 
         intent, _ = self._ambiguous(ops_db)
-        # The sweep takes the oldest ambiguity first (`fn_reconciler_sweep`
-        # orders by entered_state_at), so the module's other ambiguous rows
-        # cannot crowd this one out of the beat.
-        _exec(
-            ops_db,
-            "SET app.actor_kind = 'migration';"
-            " UPDATE post_intents SET entered_state_at = now() - interval '1 day'"
-            " WHERE id = %s",
-            (intent,),
-        )
+        self._age(ops_db, intent, "1 day")
 
         def poll(intent_id, workspace_id=None):
             if str(intent_id) != str(intent):
@@ -814,18 +825,50 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
                     await unit_of_work.apply_gucs(
                         conn, tenant_id="", actor_kind="system"
                     )
-                    await registry["reconcile_ambiguous"](
-                        conn,
-                        {
-                            "id": "j-rec",
-                            "kind": "reconcile_ambiguous",
-                            "workspace_id": None,
-                            "payload": {"v": 1},
-                        },
-                    )
+                    await registry["reconcile_ambiguous"](conn, self._reconcile_job())
 
         with pytest.raises(ValueError, match=f"intent {intent} matched no"):
             _run(beat())
+
+    def test_a_missed_flip_fails_only_its_own_row(self, ops_db):
+        """#1492, on the path production runs: the loop hands the executor no
+        session, so the sweep reads in one transaction and each row commits in
+        one of its own. The older row's flip misses and the beat still fails
+        with it, while the row behind it is resolved and stays resolved."""
+        from src.services.target import work_loop
+
+        missed, _ = self._ambiguous(ops_db)
+        resolved, resolved_op = self._ambiguous(ops_db)
+        # The two oldest ambiguities in the module, so a sweep limited to two
+        # takes exactly these, in this order, and commits nothing for the
+        # module's other rows.
+        self._age(ops_db, missed, "10 days")
+        self._age(ops_db, resolved, "9 days")
+
+        def poll(intent_id, workspace_id=None):
+            if str(intent_id) == str(missed):
+                _leave_ambiguity(ops_db, intent_id)
+            return "PUBLISHED"
+
+        async def beat():
+            async with ingress_engine(ops_db["worker"]) as engine:
+                registry = work_loop.build_registry(
+                    work_loop.WorkerDeps(
+                        poll=poll,
+                        engine=engine,
+                        config=work_loop.WorkerConfig(reconcile_limit=2),
+                    )
+                )
+                await registry["reconcile_ambiguous"](None, self._reconcile_job())
+
+        with pytest.raises(ValueError, match=f"intent {missed} matched no"):
+            _run(beat())
+        assert _state(ops_db, "post_intents", resolved) == "posted"
+        assert _state(ops_db, "provider_operations", resolved_op["id"]) == "succeeded"
+        assert _state(ops_db, "post_intents", missed) == "review_required", (
+            "the missed row stays where the concurrent move put it: its own"
+            " transaction rolled back, so its verdict wrote nothing"
+        )
 
     def test_evidence_capture_parks_review_required_WITH_the_trail(self, ops_db):
         """Same authoritative-positive value, opposite outcome — which is the
