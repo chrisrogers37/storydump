@@ -39,7 +39,7 @@ Phase 03: the relay job refuses a drop when the grant is not writable, the folde
 
 **PR 02a — the reader.**
 
-1. **The envelope reader.** `google_drive_oauth.py`: `SCOPE_WRITE = ".../drive.file"`; `decode_payload` accepts `v == 1` (scopes `(SCOPE,)`) and `v == 2` (`{"v": 2, "access_token", "refresh_token", "scopes": [...]}`); `DrivePayload` gains `scopes` and a `writable` property (`SCOPE_WRITE in scopes`). `encode_payload` writes the version of the payload it is given, and `_store_refreshed` (`drive_credentials.py:247`) re-encodes in the version it read, with the stored scopes and never the refresh response's — so a v2 envelope survives a refresh by 02a code, and a rollback of 02b loses nothing. No behaviour changes.
+1. **The envelope reader.** `google_drive_oauth.py`: `SCOPE_WRITE = ".../drive.file"`; `decode_payload` accepts `v == 1` (scopes `(SCOPE,)`) and `v == 2` (`{"v": 2, "access_token", "refresh_token", "scopes": [...]}`, any other key accepted and kept through a re-encode, so a later field needs no reader change); `DrivePayload` gains `scopes` and a `writable` property (`SCOPE_WRITE in scopes`). `encode_payload` writes the version of the payload it is given, and `_store_refreshed` (`drive_credentials.py:247`) re-encodes in the version it read, with the stored scopes and never the refresh response's — so a v2 envelope survives a refresh by 02a code, and a rollback of 02b loses nothing. No behaviour changes.
 
 **PR 02b — the writer, after 02a is live on both services.**
 

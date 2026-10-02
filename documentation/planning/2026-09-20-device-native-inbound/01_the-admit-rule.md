@@ -34,7 +34,7 @@ Cited on `main` at `29acea2e` (`728b087d`); `category_mix.py` is unchanged on `9
 
 ### Dependencies
 
-F12 (b), locked 2026-09-28; F16; #1507 merged; the stall fix ([the review](review-2026-10-01.md) §4), so a reserved share never concentrates a file the publish cannot fetch.
+F12 (b), locked 2026-09-28; F16; #1507 merged; the stall fix (#1545; [the review](review-2026-10-01.md) §4), so a reserved share never concentrates a file the publish cannot fetch.
 
 ### Blocks
 
@@ -44,7 +44,7 @@ Customers' drops: phase 03 merges dark without this phase, and the switch is off
 
 1. **`weights()`** (`category_mix.py:106-145`). A row marked `reserved` and left on Automatic takes `RESERVED_SHARE = 0.2` off the top while its count is above zero; today's rule then runs unchanged over the remaining `1 - 0.2` — explicit rows by ratio, the automatic pool by file count and capped as today. When the reserved source is the only one with a count, it takes everything. An explicit Weight or Off on the reserved row overrides the reservation, as for any row. `RESERVED_SHARE` sits beside `SUM_TOLERANCE` with a comment naming the decision doc and F12.
 2. **The role reaches the draw.** The draw's folder read (`category_mix.pool_folders` once #1507 merges; the SELECT in `scheduler.py` before it) and `mix_view` select `config->>'role' = 'telegram_drops'` as `reserved`. The count the reservation uses is F16's: every eligible file under (a), or `FILTER (WHERE m.last_posted_at IS NULL)` under (b), the lean.
-3. **The cards.** `mix_view`'s rows answer `reserved`; `cardRows` keeps the mode `automatic`, and both mix cards label the row "Default 20%". The weights card's rule copy and its all-automatic copy (`category-weights-card.tsx:123-129`, `:207`) gain one sentence: a folder Storydump creates for the workspace, such as Telegram drops, draws 20% while it has new media, and Weight or Off on its row overrides that.
+3. **The cards.** `mix_view`'s rows answer `reserved`; `cardRows` keeps the mode `automatic`, and both mix cards label the row "Default 20%". The weights card's rule copy and its all-automatic copy (`category-weights-card.tsx:123-129`, `:207`) gain one sentence: a folder Storydump creates for the workspace, such as Telegram drops, draws 20% while it has media to post (under F16 (b), new media), and Weight or Off on its row overrides that.
 4. **The design record.** Amend the 2026-09-08 ruling in place (`documentation/planning/2026-08-02-consolidated-design-plan/03-decision-record.md:205`) with the reserved share, dated 2026-09-28, citing the decision doc and F12; no new ruling id (`:185`). The advertised-DDL pin is unaffected: no SQL fence changes.
 5. **CHANGELOG** under Unreleased.
 
@@ -53,7 +53,7 @@ Customers' drops: phase 03 merges dark without this phase, and the switch is off
 - Unit, `tests/src/services/target/test_category_mix.py`, a new `TestTheReservedShare`: a reserved Automatic source with media beside Automatic folders of 300 and 50 files → 20%, and the other 80% split by file count under today's cap; beside 70/30 explicit → 20/56/24; reserved with nothing to count → 0, the rest renormalized; reserved and alone → 100%; the reserved row given a Weight → its ratio, no reservation; given Off → 0; under F16 (b), a source whose files have all been posted falls back to today's rule.
 - Gate, `tests/scripts/test_scheduler_clock_gate.py` beside `TestTheCategoryMixShapesTheDraw`: a role-marked source draws its 20% on the gate's shaped rows, and no row is written to `category_post_case_mix`.
 - Web: a reserved row reads as Automatic in `cardRows` and round-trips unchanged through `toMixBySource`.
-- Mutation battery `tests/mutations/device_native_01.sh` per `.claude/rules/testing.md:171-197`: one named mutation each for the off-the-top reservation, the renormalization when alone, the override by Weight or Off, and F16's filter.
+- Mutation battery `tests/mutations/device_native_01.sh` per `.claude/rules/testing.md:171-197`: one named mutation each for the off-the-top reservation, the renormalization when alone, the override by Weight or Off, and, under F16 (b), its filter.
 
 ## Verification Checklist
 
