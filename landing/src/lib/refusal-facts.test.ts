@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { describe, expect, it } from "vitest";
-import { isPlainCode, refusalFacts } from "./refusal-facts";
+import { IN_THE_WAY_MAX, isPlainCode, refusalFacts } from "./refusal-facts";
 
 /**
  * What of a port refusal may reach the browser (#1413 phase 6).
@@ -32,6 +32,8 @@ const FREE_TEXT = [
   "item-hold", // punctuation
   "x".repeat(65), // past the code bound
   "", // empty
+  "past\n", // a code with a trailing newline
+  "locked\nBearer eyJhbGciOiJIUzI1NiJ9", // a code, then a second line
 ];
 
 describe("the allow-list", () => {
@@ -112,6 +114,56 @@ describe("unknown keys are dropped", () => {
       }),
     ).toEqual({ existing: { state: "scheduled" } });
   });
+
+  // The cases above feed values the code SHAPE already refuses (hyphenated ids,
+  // sentences), so they pin the shape, not the key list. These feed code-shaped
+  // values, which only the key list can stop.
+  it("drops a code-shaped value at a key the list does not name, at both levels", () => {
+    expect(
+      refusalFacts({
+        intent_id: "abc123",
+        workspace_id: "abc123",
+        detail: "abc123",
+        token: "abc123",
+        overridable: true,
+      }),
+    ).toStrictEqual({ overridable: true });
+    expect(
+      refusalFacts({
+        existing: { intent_id: "abc123", workspace_id: "abc123", note: "abc123", state: "scheduled" },
+      }),
+    ).toStrictEqual({ existing: { state: "scheduled" } });
+  });
+
+  it("drops a nested object under a key the list does not name, at both levels", () => {
+    expect(refusalFacts({ extra: { state: "scheduled" }, overridable: true })).toStrictEqual({
+      overridable: true,
+    });
+    expect(
+      refusalFacts({ existing: { state: "scheduled", extra: { origin: "planned" } } }),
+    ).toStrictEqual({ existing: { state: "scheduled" } });
+  });
+});
+
+describe("in_the_way is bounded, all or none", () => {
+  const codes = (n: number) => Array.from({ length: n }, (_, i) => `lock_${i}`);
+
+  it("is bounded at 16", () => {
+    expect(IN_THE_WAY_MAX).toBe(16);
+  });
+
+  it("passes a list at the bound whole", () => {
+    expect(refusalFacts({ in_the_way: codes(IN_THE_WAY_MAX) })).toStrictEqual({
+      in_the_way: codes(IN_THE_WAY_MAX),
+    });
+  });
+
+  it("drops a longer list whole rather than cutting it short", () => {
+    expect(refusalFacts({ in_the_way: codes(IN_THE_WAY_MAX + 1), overridable: true })).toStrictEqual({
+      overridable: true,
+    });
+    expect(refusalFacts({ in_the_way: codes(100_000) })).toBeNull();
+  });
 });
 
 describe("a value of the wrong type is dropped", () => {
@@ -155,9 +207,13 @@ describe("isPlainCode — the one shape a refusal's text may take", () => {
 });
 
 describe("only the command route asks for facts", () => {
-  // `refusalFacts: true` is the one switch that lets facts cross, so where it
-  // is thrown is pinned: in the command route and nowhere else in the app.
+  // `targetFetch`'s `refusalFacts` option is the one switch that lets facts
+  // cross. It is pinned by the property NAME, so any spelling of the value
+  // (`true`, `!0`, a variable, a shorthand) is caught, not only the literal.
   const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+  /** Where the name is the definition: the option's own module and the allow-list's. */
+  const DEFINING = [path.join("lib", "target-api.ts"), path.join("lib", "refusal-facts.ts")];
 
   function sources(dir: string): string[] {
     return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -167,11 +223,37 @@ describe("only the command route asks for facts", () => {
     });
   }
 
+  /** A line that uses the name as a property: not an import, not a call of the allow-list. */
+  function asksForFacts(source: string): boolean {
+    return source
+      .split("\n")
+      .some((line) => !/^\s*import\b/.test(line) && /\brefusalFacts\b(?!\s*\()/.test(line));
+  }
+
+  it("catches every spelling of the switch, and not the allow-list's own calls", () => {
+    for (const asking of [
+      "targetFetch(p, t, { refusalFacts: true });",
+      "targetFetch(p, t, { refusalFacts: !0 });",
+      "targetFetch(p, t, { refusalFacts });",
+      'targetFetch(p, t, { "refusalFacts": on });',
+      "init.refusalFacts = true;",
+    ]) {
+      expect(asksForFacts(asking), asking).toBe(true);
+    }
+    for (const other of [
+      "const facts = refusalFacts(result.body.facts);",
+      'import { refusalFacts, type RefusalFacts } from "./refusal-facts";',
+    ]) {
+      expect(asksForFacts(other), other).toBe(false);
+    }
+  });
+
   it("is the command route", () => {
-    const asking = sources(SRC).filter((file) =>
-      /refusalFacts:\s*true/.test(readFileSync(file, "utf8")),
-    );
-    expect(asking.map((file) => path.relative(SRC, file))).toEqual([
+    const asking = sources(SRC)
+      .map((file) => path.relative(SRC, file))
+      .filter((file) => !DEFINING.includes(file))
+      .filter((file) => asksForFacts(readFileSync(path.join(SRC, file), "utf8")));
+    expect(asking).toEqual([
       path.join("app", "api", "workspaces", "[id]", "commands", "[command]", "route.ts"),
     ]);
   });
