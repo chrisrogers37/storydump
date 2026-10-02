@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable, Mapping, Optional
@@ -142,8 +142,7 @@ class WorkerConfig:
 #: the STEADY holders: the clock's pinned election connection, plus two
 #: periodic holders that may coincide (a clock tick's session and a
 #: heartbeat beat). The other periodic readers — the status reporter (60 s),
-#: the sender sweeper (3 s), the prompt sweeper (5 s) — and a kind that opens
-#: a second session inside its job (`reconcile_ambiguous`'s poll) are
+#: the sender sweeper (3 s), the prompt sweeper (5 s) — are
 #: transient waiters: they hold a connection for milliseconds, and when the
 #: pool is momentarily full they wait `pool_timeout`, which is not a fault
 #: (`run_once` counts a claim's pool wait apart from errors). So the ceiling
@@ -152,10 +151,11 @@ RESERVED_CONNECTIONS = 3
 #: What one task holds at its peak, per lane. An interactive task's kinds run
 #: their own transactions (the sender) or one short job transaction: one
 #: connection. A bulk task's plain kinds — a sync walk, a credential refresh —
-#: open sessions of their own UNDER the loop's job transaction, and the
-#: ambiguous reconciler's poll opens one under that row's own transaction
-#: (#1492), so a bulk task holds two at its peak (adversarial review of the 3b
-#: PR). The ceiling weighs them so, rather than pretending.
+#: open sessions of their own UNDER the loop's job transaction, so a bulk task
+#: holds two at its peak (adversarial review of the 3b PR). The ambiguous
+#: reconciler polls with no transaction open (#1508), so the poll's own session
+#: is the only one it holds then. The ceiling weighs them so, rather than
+#: pretending.
 TASK_CONNECTIONS = {"interactive": 1, "bulk": 2}
 
 
@@ -345,7 +345,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         customer notification too.
 
         **A failed row fails alone** (#1492). The sweep reads in one short
-        transaction and each row runs in a transaction of its own, so a row
+        transaction and each row runs in transactions of its own, so a row
         that raises — a verdict whose flip matched no row is #1438's alarm —
         rolls back alone, and the rows behind it still land rather than wait
         behind it (an unresolved ambiguity holds its account's next publish,
@@ -356,7 +356,16 @@ def build_registry(deps: WorkerDeps) -> dict:
         nobody can hear is recorded only by a beat that returns
         (`reconciler.record_no_surface` says why), so a failing beat leaves
         none behind. A caller that passes its own session (the unit seam) gets
-        a savepoint per row on it instead.
+        a savepoint for each of them on it instead.
+
+        **The provider is asked with no transaction open** (#1508). A ladder
+        row claims its workspace and reads how far its ladder has climbed in
+        one short transaction, asks the provider (`reconciler.observe`) with
+        none open, and records the answer in a second: the egress floor refuses
+        a provider call made inside a transaction (`02` §5), so a poll inside
+        one could never resolve an ambiguity. A verdict that changes the
+        intent's state is a compare-and-set on the state it leaves, so an
+        intent that moved while the provider was asked fails its row, loudly.
         """
         async with short(session, job) as reader:
             due = await reconciler.sweep_due(
@@ -365,14 +374,16 @@ def build_registry(deps: WorkerDeps) -> dict:
                 notify_after_seconds=cfg.reconcile_notify_after_seconds,
             )
 
-        async def reconcile_row(session, op):
-            if op["reason"] == "notify_window":
-                return await reconciler.notify_parked_customer(
-                    session,
-                    intent_id=op["intent_id"],
-                    workspace_id=op["workspace_id"],
-                    web_app_origin=cfg.web_app_origin,
-                )
+        @asynccontextmanager
+        async def row_transaction():
+            # A transaction of the row's own; on the unit seam, a savepoint.
+            async with (
+                short(session, job) as row_session,
+                nullcontext() if session is None else session.begin_nested(),
+            ):
+                yield row_session
+
+        async def claim(session, op):
             # Scope the ladder row too. 059 says every write from this sweep
             # "runs tenant-scoped as svc_worker" and nothing did — the session
             # carries `app.tenant_id = ''` because this is a system singleton,
@@ -388,15 +399,35 @@ def build_registry(deps: WorkerDeps) -> dict:
                 tenant_id=str(op["workspace_id"]),
                 actor_kind="system",
             )
-            await reconciler.reconcile_intent(
-                session,
-                intent_id=op["intent_id"],
-                workspace_id=op["workspace_id"],
-                poll=deps.poll,
-                checks=await reconciler.checks_so_far(
+
+        async def reconcile_row(op):
+            if op["reason"] == "notify_window":
+                async with row_transaction() as session:
+                    return await reconciler.notify_parked_customer(
+                        session,
+                        intent_id=op["intent_id"],
+                        workspace_id=op["workspace_id"],
+                        web_app_origin=cfg.web_app_origin,
+                    )
+            async with row_transaction() as session:
+                await claim(session, op)
+                climbed = await reconciler.checks_so_far(
                     session, intent_id=op["intent_id"]
-                ),
+                )
+            # Between the two transactions, never inside one: the egress floor
+            # refuses a provider call made inside a transaction (`02` §5, #1508).
+            status_code = await reconciler.observe(
+                deps.poll, intent_id=op["intent_id"], workspace_id=op["workspace_id"]
             )
+            async with row_transaction() as session:
+                await claim(session, op)
+                await reconciler.reconcile_intent(
+                    session,
+                    intent_id=op["intent_id"],
+                    workspace_id=op["workspace_id"],
+                    status_code=status_code,
+                    checks=climbed,
+                )
 
         ladder_skipped = 0
         # The notify rows whose workspace has nowhere to receive the notice.
@@ -407,13 +438,8 @@ def build_registry(deps: WorkerDeps) -> dict:
                 ladder_skipped += 1
                 continue
             try:
-                # A transaction per row; on the unit seam, a savepoint per row.
-                async with (
-                    short(session, job) as row_session,
-                    nullcontext() if session is None else session.begin_nested(),
-                ):
-                    if await reconcile_row(row_session, op) == outbox.UNDELIVERABLE:
-                        unreachable.append(op)
+                if await reconcile_row(op) == outbox.UNDELIVERABLE:
+                    unreachable.append(op)
             except Exception as exc:  # noqa: BLE001 — re-raised after the beat
                 logger.exception(
                     "reconcile_ambiguous: the %s row of intent %s failed; its"

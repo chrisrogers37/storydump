@@ -60,6 +60,11 @@ def _reconcile_job():
     return {"id": "j-rec", "kind": "reconcile_ambiguous", "workspace_id": None}
 
 
+async def _in_progress(*, intent_id, workspace_id):
+    """The reconciler's provider poll, answering a container still in flight."""
+    return "IN_PROGRESS"
+
+
 class TestEveryProviderFacingExecutorOwnsItsTransactions:
     """An executor that reaches the egress floor runs with NO job session.
 
@@ -291,7 +296,7 @@ class TestReconcilerSweepBranchesOnItsReason:
         cannot tell "routes correctly" from "routes everything one way"."""
         rows = [{"intent_id": "i-2", "workspace_id": "ws-1", "reason": "ladder_due"}]
         notified, reconciled = await self._drive(
-            monkeypatch, rows=rows, deps=full_deps()
+            monkeypatch, rows=rows, deps=full_deps(poll=_in_progress)
         )
         assert reconciled == ["i-2"]
         assert notified == []
@@ -329,7 +334,7 @@ class TestReconcilerSweepBranchesOnItsReason:
         monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
         monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", fake_reconcile)
         session = _FakeSession(rows=[7])  # the evidence on the row: seven checks
-        registry = build_registry(full_deps())
+        registry = build_registry(full_deps(poll=_in_progress))
         await registry["reconcile_ambiguous"](session, _reconcile_job())
         assert seen == [7]
         sql = [s for s, _ in session.statements]
@@ -410,11 +415,13 @@ class TestReconcilerRowsFailAlone:
 
     def _own_transactions(self, monkeypatch):
         """`make_session_for` replaced by a factory that records how each of
-        its transactions ended. A savepoint inside one fails the test: in
-        the loop's mode nothing should nest."""
+        its transactions ended, and keeps `self.open`, the count open now. A
+        savepoint inside one fails the test: in the loop's mode nothing should
+        nest."""
         from contextlib import asynccontextmanager
 
         ended = []
+        self.open = 0
 
         class _NoSavepoints(_FakeSession):
             def begin_nested(self):
@@ -424,11 +431,14 @@ class TestReconcilerRowsFailAlone:
             def session_for(job):
                 @asynccontextmanager
                 async def ctx():
+                    self.open += 1
                     try:
                         yield _NoSavepoints()
                     except BaseException:
                         ended.append("rolled_back")
                         raise
+                    finally:
+                        self.open -= 1
                     ended.append("committed")
 
                 return ctx()
@@ -440,6 +450,17 @@ class TestReconcilerRowsFailAlone:
         )
         return ended
 
+    def _deps(self, **over):
+        """The seams, with a provider poll that has not settled; `self.polled`
+        records each ask and how many transactions were open as it was made."""
+        self.polled = []
+
+        async def poll(*, intent_id, workspace_id):
+            self.polled.append((intent_id, getattr(self, "open", 0)))
+            return "IN_PROGRESS"
+
+        return full_deps(poll=poll, **over)
+
     def _sweep(self, monkeypatch, rows, reconcile):
         async def fake_sweep(session, *, limit, notify_after_seconds):
             return rows[:limit]
@@ -449,8 +470,8 @@ class TestReconcilerRowsFailAlone:
 
     async def test_no_transaction_carries_more_than_one_row(self, monkeypatch):
         """The bound #1441 put on the drain, pinned with more due rows than it
-        allows: one transaction per row, so none can collect the writing
-        savepoints a batch of `MAX_WRITING_SAVEPOINTS + 1` rows would."""
+        allows: a row's transactions are its own, so none can collect the
+        writing savepoints a batch of `MAX_WRITING_SAVEPOINTS + 1` rows would."""
         from src.services.target.offboarding import MAX_WRITING_SAVEPOINTS
 
         ended = self._own_transactions(monkeypatch)
@@ -463,12 +484,26 @@ class TestReconcilerRowsFailAlone:
 
         self._sweep(monkeypatch, rows, fake_reconcile)
         registry = build_registry(
-            full_deps(config=WorkerConfig(reconcile_limit=len(rows)))
+            self._deps(config=WorkerConfig(reconcile_limit=len(rows)))
         )
         assert await registry["reconcile_ambiguous"](None, _reconcile_job()) is None
         assert reconciled == [r["intent_id"] for r in rows]
-        # The sweep's one short read, then one transaction per row.
-        assert ended == ["committed"] * (1 + len(rows))
+        # The sweep's one short read, then two per row: its count, its verdict.
+        assert ended == ["committed"] * (1 + 2 * len(rows))
+
+    async def test_the_provider_is_asked_with_no_transaction_open(self, monkeypatch):
+        """#1508: the egress floor refuses a provider call made inside a
+        transaction, so a ladder row asks between its two, never in one."""
+        self._own_transactions(monkeypatch)
+
+        async def fake_reconcile(session, *, intent_id, status_code, **kw):
+            assert status_code == "IN_PROGRESS", "the verdict gets what was observed"
+            return "pending"
+
+        self._sweep(monkeypatch, self._rows(2), fake_reconcile)
+        registry = build_registry(self._deps())
+        await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert self.polled == [("i-0", 0), ("i-1", 0)]
 
     async def test_a_failed_row_rolls_back_alone_and_the_first_failure_is_raised(
         self, monkeypatch, caplog
@@ -488,12 +523,19 @@ class TestReconcilerRowsFailAlone:
             return "posted"
 
         self._sweep(monkeypatch, self._rows(3), fake_reconcile)
-        registry = build_registry(full_deps())
+        registry = build_registry(self._deps())
         with caplog.at_level("ERROR", logger=work_loop.__name__):
             with pytest.raises(ValueError, match="intent i-0 matched no row"):
                 await registry["reconcile_ambiguous"](None, _reconcile_job())
         assert reconciled == ["i-1"], "the row behind a failure still ran"
-        assert ended == ["committed", "rolled_back", "committed", "rolled_back"]
+        # The sweep, then each row's count and verdict: the verdicts of i-0
+        # and i-2 roll back, and only theirs.
+        assert ended == [
+            "committed",
+            *("committed", "rolled_back"),
+            *("committed", "committed"),
+            *("committed", "rolled_back"),
+        ]
         failed = [r for r in caplog.records if "NO verdict was recorded" in r.message]
         assert [r.args[1] for r in failed] == ["i-0", "i-2"], "every failure is logged"
         assert any("2 of 3 row(s) failed" in r.message for r in caplog.records)
@@ -537,7 +579,7 @@ class TestReconcilerRowsFailAlone:
         (#1438). Nor is the notice recorded, so the first beat that returns
         signals it."""
         recorded = self._mixed(monkeypatch, ladder_fails=True)
-        registry = build_registry(full_deps())
+        registry = build_registry(self._deps())
         with pytest.raises(ValueError, match="intent i-0 matched no row"):
             await registry["reconcile_ambiguous"](None, _reconcile_job())
         assert recorded == []
@@ -546,14 +588,14 @@ class TestReconcilerRowsFailAlone:
         from src.services.target import outbox
 
         recorded = self._mixed(monkeypatch, ladder_fails=False)
-        registry = build_registry(full_deps())
+        registry = build_registry(self._deps())
         got = await registry["reconcile_ambiguous"](None, _reconcile_job())
         assert got == outbox.UNDELIVERABLE
         assert recorded == [("n-1", "ws-2")], "a delivered notice is not an attempt"
 
-    async def test_a_passed_session_gets_a_savepoint_per_row(self, monkeypatch):
+    async def test_a_passed_session_gets_a_savepoint_per_transaction(self, monkeypatch):
         """The unit seam: a caller that passes its own session keeps it, and
-        each row nests a savepoint on it rather than opening a transaction."""
+        each of a row's transactions is a savepoint on it instead."""
         ended = self._own_transactions(monkeypatch)
         nested = []
 
@@ -566,9 +608,9 @@ class TestReconcilerRowsFailAlone:
             return "pending"
 
         self._sweep(monkeypatch, self._rows(2), fake_reconcile)
-        registry = build_registry(full_deps())
+        registry = build_registry(self._deps())
         await registry["reconcile_ambiguous"](_Counting(), _reconcile_job())
-        assert len(nested) == 2
+        assert len(nested) == 4, "two rows, a count and a verdict each"
         assert ended == [], "the seam's session is used, never a new one"
 
 
