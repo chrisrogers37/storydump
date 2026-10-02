@@ -430,6 +430,20 @@ class TelegramTransport:
             raise TelegramSendError("sendMessage: ok response without a message_id")
         return str(message_id)
 
+    async def edit_text(self, chat_id: str, message_id: str, text: str) -> None:
+        """One `editMessageText` that also removes the message's keyboard —
+        the identity link's prompt, rewritten to its outcome after a Confirm
+        or Cancel tap. Telegram's "message is not modified" is success."""
+        await self._edit(
+            "editMessageText",
+            {
+                "chat_id": chat_id,
+                "message_id": _message_id(message_id),
+                "text": text[:4096],
+                "reply_markup": _EMPTY_KEYBOARD,
+            },
+        )
+
     async def send_media(
         self,
         chat_id: str,

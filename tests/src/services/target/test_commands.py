@@ -507,6 +507,8 @@ class TestRemoveMemberGoesThroughTheDoor:
             row = self.row
 
             class _R:
+                rowcount = 1
+
                 def first(self_inner):
                     return row
 
@@ -520,9 +522,25 @@ class TestRemoveMemberGoesThroughTheDoor:
             ex, workspace_id="ws", user_id="u2", by_user_id="u1"
         )
         assert role == "member"
-        ((sql, params),) = ex.calls
+        (sql, params), (revoke_sql, revoke_params) = ex.calls
         assert "fn_member_remove(" in sql and "DELETE" not in sql.upper()
         assert params == {"ws": "ws", "u": "u2", "by": "u1"}
+        # 090: the service identities the removed person minted go with them,
+        # in the same transaction — this workspace's, and only theirs.
+        assert "UPDATE service_tokens SET revoked_at = now()" in revoke_sql
+        assert "created_by_user_id = :u" in revoke_sql
+        assert "workspace_id = :ws" in revoke_sql
+        assert revoke_params == {"ws": "ws", "u": "u2"}
+
+    async def test_a_refused_removal_revokes_nothing(self):
+        from src.services.target import workspaces
+
+        ex = self._Exec(("owner", "owner"))
+        with pytest.raises(ValueError):
+            await workspaces.remove_member(
+                ex, workspace_id="ws", user_id="u2", by_user_id="u1"
+            )
+        assert len(ex.calls) == 1
 
     @pytest.mark.parametrize(
         "row, exc, text_",
