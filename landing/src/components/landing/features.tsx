@@ -11,7 +11,7 @@ const features = [
     icon: HardDrive,
     title: "Your Cloud, Your Content",
     description:
-      "Connect Google Drive and keep your media library wherever you want. No uploads to third-party servers.",
+      "Your media library stays in your Google Drive. Storydump keeps a reference to each file, not the file.",
   },
   {
     icon: RefreshCw,
@@ -39,9 +39,8 @@ const features = [
   },
   {
     icon: Shield,
-    title: "Self-Hosted Media",
-    description:
-      "Your images stay in your cloud storage. Storydump orchestrates — it never owns your content.",
+    title: "Your content stays yours",
+    description: "Storydump orchestrates — it never owns your content.",
   },
 ]
 
