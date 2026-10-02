@@ -129,7 +129,11 @@ class TestPlanSlotEndToEnd:
             % (chain["iga"], slot.isoformat()),
         )
 
-        wl, claimed = await _run_once(lane_db)
+        # This test is the mint and its finalization. Minting the world's one
+        # free file leaves no content, which owes the runway notice (#1478),
+        # and with no push binding the job would park for review; the notice
+        # gate pins that, so the runway level is off here (0 never warns).
+        wl, claimed = await _run_once(lane_db, config=WorkerConfig(low_runway_days=0))
 
         assert claimed is True and wl.processed == 1
         row = _job_row(sync_conn, job_id)
