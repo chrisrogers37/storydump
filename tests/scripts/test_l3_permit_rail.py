@@ -870,6 +870,58 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             " transaction rolled back, so its verdict wrote nothing"
         )
 
+    def test_a_failed_beat_takes_back_the_stamp_of_a_notice_nobody_heard(self, ops_db):
+        """From the review of #1509: a beat with a failed ladder row AND a parked
+        intent whose workspace has no push binding (this world's has none). The
+        notify row's own transaction stamps `notify_attempted_at`, and the beat
+        then raises, so the job never ends `review_required`. The stamp must
+        not outlive the beat, or the next six hours read as a clean run while
+        the notice is still owed. On the path production runs."""
+        from src.services.target import outbox, reconciler, work_loop
+
+        missed, _ = self._ambiguous(ops_db)
+        self._age(ops_db, missed, "30 days")
+        parked, _ = self._ambiguous(ops_db)
+        _leave_ambiguity(ops_db, parked)
+        self._age(ops_db, parked, "2 days")  # past the notification window
+
+        def poll(intent_id, workspace_id=None):
+            if str(intent_id) != str(missed):
+                # Any other due row in the module fails alone and writes nothing.
+                raise RuntimeError("only the row under test is polled")
+            _leave_ambiguity(ops_db, intent_id)
+            return "PUBLISHED"
+
+        async def beat():
+            async with ingress_engine(ops_db["worker"]) as engine:
+                registry = work_loop.build_registry(
+                    work_loop.WorkerDeps(poll=poll, engine=engine)
+                )
+                await registry["reconcile_ambiguous"](None, self._reconcile_job())
+
+        with pytest.raises(ValueError, match=f"intent {missed} matched no"):
+            _run(beat())
+        stamp = _exec(
+            ops_db,
+            "SELECT last_error->'evidence'->>'notify_attempted_at'"
+            " FROM post_intents WHERE id = %s",
+            (parked,),
+            fetch=True,
+        )[0][0]
+        assert stamp is None, "the failed beat took back the stamp it wrote"
+
+        async def retry():
+            async with ingress_engine(ops_db["worker"]) as engine:
+                async with engine.begin() as conn:
+                    return await reconciler.notify_parked_customer(
+                        conn,
+                        intent_id=parked,
+                        workspace_id=ops_db["ws"],
+                        retry_after_seconds=work_loop.WorkerConfig().reconcile_notify_after_seconds,
+                    )
+
+        assert _run(retry()) == outbox.UNDELIVERABLE, "the retry re-signals"
+
     def test_evidence_capture_parks_review_required_WITH_the_trail(self, ops_db):
         """Same authoritative-positive value, opposite outcome — which is the
         whole content of the mode. Driven at the exhausted rung so the park is

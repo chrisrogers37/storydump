@@ -476,6 +476,86 @@ class TestReconcilerRowsFailAlone:
         assert [r.args[1] for r in failed] == ["i-0", "i-2"], "every failure is logged"
         assert any("2 of 3 row(s) failed" in r.message for r in caplog.records)
 
+    async def test_the_alarm_stays_loud_when_another_row_reaches_nobody(
+        self, monkeypatch
+    ):
+        """A beat with a failed ladder row AND a notice nobody could receive
+        still fails with the row's error: `UNDELIVERABLE` must never stand in
+        for the alarm (#1438). (From the review of #1509.)"""
+        from src.services.target import outbox
+
+        self._own_transactions(monkeypatch)
+        rows = [
+            {"intent_id": "i-0", "workspace_id": "ws-1", "reason": "ladder_due"},
+            {"intent_id": "n-1", "workspace_id": "ws-1", "reason": "notify_window"},
+        ]
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            raise ValueError(f"intent {intent_id} matched no row")
+
+        async def fake_notify(session, **kw):
+            return outbox.UNDELIVERABLE
+
+        self._sweep(monkeypatch, rows, fake_reconcile)
+        monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
+        registry = build_registry(full_deps())
+        with pytest.raises(ValueError, match="intent i-0 matched no row"):
+            await registry["reconcile_ambiguous"](None, _reconcile_job())
+
+    def _mixed(self, monkeypatch, *, ladder_fails):
+        """A ladder row, a notice nobody can hear (n-1) and a delivered one
+        (n-2); returns the (intent, workspace) pairs whose stamp was taken
+        back."""
+        from src.services.target import outbox
+
+        self._own_transactions(monkeypatch)
+        rows = [
+            {"intent_id": "i-0", "workspace_id": "ws-1", "reason": "ladder_due"},
+            {"intent_id": "n-1", "workspace_id": "ws-2", "reason": "notify_window"},
+            {"intent_id": "n-2", "workspace_id": "ws-3", "reason": "notify_window"},
+        ]
+        taken_back = []
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            if ladder_fails:
+                raise ValueError(f"intent {intent_id} matched no row")
+            return "pending"
+
+        async def fake_notify(session, *, intent_id, **kw):
+            return outbox.UNDELIVERABLE if intent_id == "n-1" else 1
+
+        async def fake_unrecord(session, *, intent_id, workspace_id):
+            taken_back.append((intent_id, workspace_id))
+
+        self._sweep(monkeypatch, rows, fake_reconcile)
+        monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
+        monkeypatch.setattr(work_loop.reconciler, "unrecord_no_surface", fake_unrecord)
+        return taken_back
+
+    async def test_a_failed_beat_takes_back_the_stamps_of_its_unheard_notices(
+        self, monkeypatch
+    ):
+        """A failing job cannot end `review_required`, so the stamp a notice
+        nobody could hear wrote this beat is taken back: the retry re-signals
+        it rather than reading it as told for the whole window. A delivered
+        notice is left alone."""
+        taken_back = self._mixed(monkeypatch, ladder_fails=True)
+        registry = build_registry(full_deps())
+        with pytest.raises(ValueError, match="intent i-0 matched no row"):
+            await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert taken_back == [("n-1", "ws-2")]
+
+    async def test_a_clean_beat_keeps_its_stamps_and_reports_nobody_heard(
+        self, monkeypatch
+    ):
+        from src.services.target import outbox
+
+        taken_back = self._mixed(monkeypatch, ladder_fails=False)
+        registry = build_registry(full_deps())
+        got = await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert got == outbox.UNDELIVERABLE
+        assert taken_back == [], "the signal left with the job, so the stamp stays"
+
     async def test_a_passed_session_gets_a_savepoint_per_row(self, monkeypatch):
         """The unit seam: a caller that passes its own session keeps it, and
         each row nests a savepoint on it rather than opening a transaction."""

@@ -235,6 +235,36 @@ async def _record_no_surface(
     return UNDELIVERABLE
 
 
+async def unrecord_no_surface(conn, *, intent_id, workspace_id) -> None:
+    """Take back the stamp :func:`_record_no_surface` wrote, for a sweep beat
+    that recorded it and then failed.
+
+    The stamp and the signal belong together. `UNDELIVERABLE` reaches the
+    ledger only when the job ends `review_required`, and a beat that raises
+    does not. So a stamp left behind would make the beats inside the window
+    read as a clean run while the notice is still owed. Removed, the next beat
+    re-attempts and re-signals, as it did when the whole beat was one
+    transaction and its rollback removed the stamp. Removing the key and
+    rolling back to an older stamp are the same to the window, and nothing
+    else reads the stamp. The rest of the evidence is kept (``#-`` removes
+    one key; :func:`notify_parked_customer` explains why the evidence must
+    survive).
+    """
+    from src.services.target import unit_of_work
+
+    await unit_of_work.apply_gucs(
+        conn, tenant_id=str(workspace_id), actor_kind="system"
+    )
+    await conn.execute(
+        text(
+            "UPDATE post_intents"
+            " SET last_error = last_error #- '{evidence,notify_attempted_at}'"
+            " WHERE id = :intent AND state = 'review_required'"
+        ),
+        {"intent": str(intent_id)},
+    )
+
+
 async def notify_parked_customer(
     conn,
     *,
