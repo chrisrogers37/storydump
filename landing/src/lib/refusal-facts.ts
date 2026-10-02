@@ -12,11 +12,20 @@
  * holding an item was cancelled a moment ago.
  *
  * So facts cross as an ALLOW-LIST, never as a filter over whatever arrived: the
- * keys below, each with its one type, and nothing else. A code is the shape
- * `readError` admits for a reason; the one nested object is `existing`, with
- * its own three keys. No string that is not a code passes, so no sentence,
- * token, path or id can ride a fact. An unlisted key is dropped, and so is a
- * listed one whose value has the wrong type; facts with nothing left are none.
+ * five keys below, each with its one type, and nothing else. The one nested
+ * object is `existing`, with its own three keys. An unlisted key is dropped, and
+ * so is a listed one whose value has the wrong type; `in_the_way` is all codes
+ * or none, at most `IN_THE_WAY_MAX` of them; facts with nothing left are none.
+ *
+ * What this guarantees about a string is its shape, the one `readError` admits
+ * for a reason: 1 to 64 lowercase letters, digits or underscores. So no
+ * whitespace, markup, URL character or hyphenated id passes, but a lowercase hex
+ * string of the right length would. What bounds a fact's CONTENT is the port:
+ * every value it puts at these keys comes from a closed set of codes (the lock
+ * kinds, origins and intent states in `src/services/target/vocabulary.py`, the
+ * media item states behind `item_<state>`, and `schedule_item`'s `at_rule` and
+ * `missing` constants), and the ids, times and names a person typed appear only
+ * in `detail`.
  *
  * Only the command route asks for them (`targetFetch`'s `refusalFacts`), and
  * the browser re-checks what it receives with this same function.
@@ -55,14 +64,26 @@ function existingFacts(value: unknown): RefusalFacts["existing"] | null {
   return Object.keys(existing).length > 0 ? existing : null;
 }
 
+/**
+ * The longest `in_the_way` that crosses. The port names at most the item's own
+ * state and each lock kind once (`wire-contract.test.ts` holds the room under
+ * this), so a longer list is not one it sent.
+ */
+export const IN_THE_WAY_MAX = 16;
+
 /** The facts the allow-list admits from `value`, or null when none survive. */
 export function refusalFacts(value: unknown): RefusalFacts | null {
   if (!isPlainObject(value)) return null;
   const facts: RefusalFacts = {};
   if (typeof value.overridable === "boolean") facts.overridable = value.overridable;
-  // All codes or none: a partial list would misstate what is in the way.
+  // All codes and within the bound, or none: a partial list would misstate
+  // what is in the way.
   const inTheWay = value.in_the_way;
-  if (Array.isArray(inTheWay) && inTheWay.every(isPlainCode)) {
+  if (
+    Array.isArray(inTheWay) &&
+    inTheWay.length <= IN_THE_WAY_MAX &&
+    inTheWay.every(isPlainCode)
+  ) {
     facts.in_the_way = [...inTheWay];
   }
   if (isPlainCode(value.at_rule)) facts.at_rule = value.at_rule;
