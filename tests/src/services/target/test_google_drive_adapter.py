@@ -940,9 +940,12 @@ class TestTheWalkGoesToAnyDepth:
         )
         assert [r for r, _, _ in seen] == ["r1", "m1"]
         assert all(c["walk"] == "minted-by-the-sync" for c in cursors)
-        assert cursors[-1] == {"v": 2, "walk": "minted-by-the-sync", "seen": 1}, (
-            "complete: the token and the folder count, nothing pending"
-        )
+        assert cursors[-1] == {
+            "v": 2,
+            "walk": "minted-by-the-sync",
+            "seen": 1,
+            "whole": True,
+        }, "complete: the token, the folder count and nothing skipped, nothing pending"
 
     @pytest.mark.asyncio
     async def test_a_pre_v2_in_flight_cursor_is_ignored_and_the_walk_starts_over(self):
