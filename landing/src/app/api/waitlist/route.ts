@@ -6,6 +6,10 @@ import { notifyAdmin } from "@/lib/telegram"
 import { UTM_KEYS } from "@/lib/analytics"
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+/** The longest address SMTP can carry: RFC 5321's 256-octet path less its brackets. */
+const MAX_EMAIL_LENGTH = 254
+/** Each UTM value is cut to this, so a public form cannot grow `notes` without bound. */
+const MAX_UTM_LENGTH = 100
 
 /**
  * Postgres's unique-violation code, on the error or on its `cause`. Drizzle
@@ -31,7 +35,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
     const email = body.email?.trim().toLowerCase()
 
-    if (!email || !EMAIL_REGEX.test(email)) {
+    if (!email || email.length > MAX_EMAIL_LENGTH || !EMAIL_REGEX.test(email)) {
       return NextResponse.json(
         { status: "error", message: "Please enter a valid email address." },
         { status: 400 }
@@ -42,7 +46,7 @@ export async function POST(req: NextRequest) {
     const utm: Record<string, string> = {}
     for (const key of UTM_KEYS) {
       if (typeof body[key] === "string" && body[key].trim()) {
-        utm[key] = body[key].trim()
+        utm[key] = body[key].trim().slice(0, MAX_UTM_LENGTH)
       }
     }
     const notes = Object.keys(utm).length > 0 ? JSON.stringify(utm) : null

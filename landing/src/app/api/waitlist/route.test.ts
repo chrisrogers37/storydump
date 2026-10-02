@@ -10,11 +10,11 @@ vi.mock("@/lib/telegram", () => ({ notifyAdmin: vi.fn(async () => {}) }))
 
 import { POST } from "./route"
 
-function signup(email: string) {
+function signup(email: string, extra: Record<string, unknown> = {}) {
   return new NextRequest("https://storydump.app/api/waitlist", {
     method: "POST",
     headers: { "content-type": "application/json", "sec-fetch-site": "same-origin" },
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, ...extra }),
   })
 }
 
@@ -55,5 +55,36 @@ describe("POST /api/waitlist", () => {
     const res = await POST(signup("someone@example.com"))
     expect(res.status).toBe(500)
     expect(console.error).toHaveBeenCalledWith("waitlist signup failed:", expect.anything())
+  })
+
+  it("accepts a 254-character email and refuses a 255-character one as invalid", async () => {
+    insertValues.mockResolvedValue(undefined)
+    const at254 = `${"a".repeat(254 - "@example.com".length)}@example.com`
+    expect((await POST(signup(at254))).status).toBe(200)
+
+    insertValues.mockClear()
+    const res = await POST(signup(`a${at254}`))
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({
+      status: "error",
+      message: "Please enter a valid email address.",
+    })
+    expect(insertValues).not.toHaveBeenCalled()
+  })
+
+  it("cuts each UTM value to 100 characters and ignores a non-string one", async () => {
+    insertValues.mockResolvedValue(undefined)
+    const res = await POST(
+      signup("utm@example.com", {
+        utm_source: ` ${"s".repeat(150)} `,
+        utm_medium: "email",
+        utm_campaign: { nested: "x".repeat(500) },
+      })
+    )
+    expect(res.status).toBe(200)
+    expect(insertValues).toHaveBeenCalledWith({
+      email: "utm@example.com",
+      notes: JSON.stringify({ utm_source: "s".repeat(100), utm_medium: "email" }),
+    })
   })
 })
