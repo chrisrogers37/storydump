@@ -167,7 +167,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 ### Reading the Ledger
 **[operations/reading-the-ledger.md](operations/reading-the-ledger.md)**
-- The eight `storydump` read verbs (story, cards, floating, account, jobs, outbox, burst, posture) that replaced the one-off SQL probes: what each answers, `--since`, `--watch`, and what they never read
+- The `storydump` read verbs (story, cards, floating, account, jobs, outbox, burst, posture, and `planned` for the stories a person planned) that replaced the one-off SQL probes: what each answers, `--since`, `--watch`, and what they never read
 - `psql` through Railway as the read-only escape hatch
 
 ### Troubleshooting

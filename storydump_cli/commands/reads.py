@@ -1,5 +1,5 @@
 """The read views: ``story``, ``cards``, ``floating``, ``account``, ``jobs``,
-``outbox``, ``burst`` and ``posture``.
+``outbox``, ``burst``, ``posture`` and ``planned``.
 
 Every view answers for ONE workspace — the API's envelope carries that
 workspace's rows — and the CLI does the looping. ``--workspace`` names one:
@@ -9,8 +9,9 @@ a workspace the principal cannot see is its 404), a name is resolved through
 Without it, every workspace the principal lists is read in turn. Whatever
 was read, ``data`` has one shape — ``{"workspaces": [{"workspace_id",
 "rows"}]}`` — so an agent parses one document whether the token sees one
-workspace or ten. ``posture`` is the exception: not a workspace's rows but
-the deployment's own, so its ``data`` is the view's object.
+workspace or ten (``planned``'s also carries the page size it asked for,
+``limit``). ``posture`` is the exception: not a workspace's rows but the
+deployment's own, so its ``data`` is the view's object.
 
 A key (``story``, ``cards``, ``account``) that resolves to nothing in every
 workspace is an answer, not a traceback: exit 1 with the CLI's sentence.

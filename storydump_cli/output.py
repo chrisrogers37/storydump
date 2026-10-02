@@ -32,6 +32,7 @@ from rich.table import Table
 
 from src.services.target.vocabulary import (
     LIST_LIMIT_MAX,
+    TERMINAL_STATES,
     WARNING_SENTENCES,
     write_sentence,
 )
@@ -373,9 +374,10 @@ def _planned_due(row: Mapping[str, Any]) -> Any:
 
 def _planned_state(row: Mapping[str, Any]) -> Any:
     """The state, a cancel that is still landing, and why a story missed at
-    its time was missed."""
+    its time was missed. The cancel flag is never cleared, so on a story that
+    has ended it says nothing."""
     state = row.get("state")
-    if row.get("cancel_requested"):
+    if row.get("cancel_requested") and state not in TERMINAL_STATES:
         return f"{state} (cancelling)"
     if row.get("miss_reason"):
         return f"{state} ({row['miss_reason']})"

@@ -11,13 +11,13 @@
 # Phase 5 has no DDL, so every mutation here is Python: the executors, the vocabulary's F7 split,
 # the Queue read, the name rule, the API's refusal body and token gate, the CLI, the prompt sweeps'
 # re-read of a due story, and what a card and the burst view take for a move. A rule that is a
-# statement's shape (a predicate, a bound parameter) is judged by the unit tests, which assert it;
-# a new unit test gets its own check beside the gate's, so each kill is seen. A lock set's mutation
-# is judged by a test that names its kinds, never by one parametrized over the mutated set (that
-# test's case would vanish with the mutant). The account read's own `workspace_id` predicate
-# is not mutated: the gates run as `svc_ingress`, whose policies hide another tenant's row anyway, so
-# that mutant is equivalent here — `test_ops_views_gate.py`'s bypass arm is where predicates are
-# proven without the policies.
+# statement's shape (a predicate, a bound parameter, a row lock) is judged by the unit tests, which
+# assert it; where a unit test pins what a gate already pins, the gate's check stands for both, and
+# a check of its own marks what only the unit can see. A lock set's mutation is judged by a test
+# that names its kinds, never by one parametrized over the mutated set (that test's case would vanish
+# with the mutant). The port's tenant predicates (`workspace_id = :ws`) are judged at the SQL seam:
+# the gates run as `svc_ingress`, whose policies hide another tenant's row anyway, so at the gate
+# those mutants would be equivalent.
 set -u
 ROOT=${STORYDUMP_ROOT:-/Users/chris/Projects/storydump}
 PY=${STORYDUMP_PY:-/Users/chris/Projects/storydump/.venv/bin/python}
@@ -105,6 +105,13 @@ check "the scheduler is not recorded" $EX "        \"         'planned', :by)\""
 check "a planned story is born cadence" $EX "        \"         'planned', :by)\"" "        \"         'cadence', :by)\"" "$S -k 'born_planned_by_the_person'"
 check "no bound chat goes unsaid" $EX '        warnings=[] if bound else [vocabulary.NO_PUSH_BINDING],' '        warnings=[],' "$S -k 'no_bound_chat'"
 check "a member cannot schedule" src/services/target/commands.py '    "schedule_item": "member",' '    "schedule_item": "admin",' "$S -k 'member_schedules'"
+check "the account is read in any workspace" $EX '        " WHERE a.id = :acct AND a.workspace_id = :ws"' '        " WHERE a.id = :acct"' "$PE -k 'inserted_under_the_person'"
+check "the item is read in any workspace" $EX '        "  FROM media_items m WHERE m.id = :media AND m.workspace_id = :ws",' '        "  FROM media_items m WHERE m.id = :media",' "$PE -k 'inserted_under_the_person'"
+check "the story in the way is read in any workspace" $EX '            " WHERE workspace_id = :ws AND media_item_id = :media"' '            " WHERE media_item_id = :media"' "$PE -k 'duplicate_is_the_databases'"
+check "a removal slips between the account read and the story" $EX '        " FOR SHARE OF a",' '        "",' "$PE -k 'inserted_under_the_person'"
+check "a new story is born unaudited" $EX '    await _audit_intent(
+        session, born, from_state=None, to_state="scheduled", detail=detail
+    )' '    pass' "$S -k 'the_audit_row_names_the_person'"
 
 # The wall time: Postgres's reading, a skipped time refused, the first occurrence, the window.
 check "a skipped wall time has an instant" $EX '    "SELECT min(v.at) FILTER (WHERE v.at AT TIME ZONE p.z = p.l) AS at,"' '    "SELECT min(v.at) FILTER (WHERE true) AS at,"' "$S -k 'clocks_skip or skipped_wall_time'"
@@ -131,6 +138,7 @@ check "the time is judged before the story (unit)" $EX '    intent = await _inte
     if intent["origin"] != "planned" or intent["state"] != "scheduled":' "$PE -k 'judged_before_its_new_time'"
 check "a malformed story id is a 500" $EX '    intent_id = _id_arg(command, "intent_id")' '    intent_id = _arg(command, "intent_id")' "$S -k 'malformed_or_foreign_story_id or any_spelling'"
 check "the move is not audited" $EX '            "event": "rescheduled",' '            "event": "moved",' "$S -k 'moves_in_place'"
+check "a reschedule moves nothing" $EX '            "UPDATE post_intents SET schedule_slot_at = :at"' '            "UPDATE post_intents SET schedule_slot_at = schedule_slot_at"' "$S -k 'time_moves_in_place'"
 check "cancel's flag names no tenant" $EX '            "UPDATE post_intents SET cancel_requested = true"
             " WHERE id = :id AND workspace_id = :ws"' '            "UPDATE post_intents SET cancel_requested = true"
             " WHERE id = :id"' "$PE -k 'flag_is_bound_to_the_tenant'"
@@ -146,6 +154,7 @@ TP=tests/src/services/target/test_prompts.py
 check "the serve sweep serves a story changed under it" $PR '        if not await _still_due(session, row):' '        if False:' "$S -k 'serve_sweep_leaves or another_sweep_served'"
 check "the serve re-read takes no lock" $PR '        " WHERE id = :id AND workspace_id = :ws FOR UPDATE",' '        " WHERE id = :id AND workspace_id = :ws",' "$S -k 'serve_sweep_leaves_a_story_moved'"
 check "the serve re-read takes no lock (unit)" $PR '        " WHERE id = :id AND workspace_id = :ws FOR UPDATE",' '        " WHERE id = :id AND workspace_id = :ws",' "$TP -k 'as_the_door_read_it_is_served'"
+check "the serve re-read names no tenant" $PR '        " WHERE id = :id AND workspace_id = :ws FOR UPDATE",' '        " WHERE id = :id FOR UPDATE",' "$TP -k 'as_the_door_read_it_is_served'"
 check "the serve re-read ignores the time" $PR '        and found["schedule_slot_at"] == row["schedule_slot_at"]' '        and True' "$S -k 'serve_sweep_leaves_a_story_moved'"
 check "the serve re-read ignores the time (unit)" $PR '        and found["schedule_slot_at"] == row["schedule_slot_at"]' '        and True' "$TP -k 'changed_since_the_door_read_it and moved'"
 check "the serve re-read ignores the cancel flag" $PR '        and not found["cancel_requested"]' '        and True' "$S -k 'serve_sweep_leaves_a_story_flagged'"
@@ -161,6 +170,7 @@ check "the serve sweep serves nothing (unit)" $PR '    return (
 check "a story left to its next reading goes unsaid" $PR '            logger.info("prompt sweep: intent %s changed under the sweep", row["id"])' '            pass' "$TP -k 'changed_since_the_door_read_it and moved'"
 check "the miss sweep misses a moved story (unit)" $PR '                            "   AND schedule_slot_at = :slot RETURNING id"' '                            "   RETURNING id"' "$TP -k 'each_miss_is_ended'"
 check "the miss sweep misses a moved story" $PR '                            "   AND schedule_slot_at = :slot RETURNING id"' '                            "   RETURNING id"' "$S -k 'miss_sweep_leaves'"
+check "the sweeps take tied rows in the order they came" $PR '    return (str(row["workspace_id"]), row["schedule_slot_at"], str(row["id"]))' '    return (str(row["workspace_id"]), row["schedule_slot_at"])' "$TP -k 'tied_rows_by_id'"
 check "a cancel request is who last moved it" src/services/target/intent_ledger.py "                    f\"       AND {audit.moved('e')}\"" '                    ""' "$S -k 'who_only_asked_for_a_cancel'"
 check "a cancel request is a tap" src/services/target/ops_views.py "    f\"   AND {audit.moved('a')}\"," '    "",' "$OV -k 'only_this_workspaces_rows'"
 check "a cancel request is a tap (unit)" src/services/target/ops_views.py "    f\"   AND {audit.moved('a')}\"," '    "",' "tests/src/services/target/test_ops_views.py -k 'tap_is_a_move'"
@@ -194,14 +204,18 @@ check "a token cannot read the Queue (the route gate)" src/api/routes/v1.py '   
 # The CLI: the handle, the keys, the refusal's words, the read's filter.
 check "a handle takes a removed account" storydump_cli/commands/writes.py '        and ("state" not in row or row["state"] in LIVE_ACCOUNT_STATES)' '        and True' "$CU -k 'one_live_account'"
 check "a handle on an older API finds no account" storydump_cli/commands/writes.py '        and ("state" not in row or row["state"] in LIVE_ACCOUNT_STATES)' '        and row.get("state") in LIVE_ACCOUNT_STATES' "$CU -k 'older_than_the_cli'"
+check "the account view drops the account's state" src/services/target/ops_views.py '    "SELECT a.workspace_id, a.id, a.handle, a.state,"' '    "SELECT a.workspace_id, a.id, a.handle,"' "$OV -k 'only_this_workspaces_rows'"
 check "a blank account is looked up" storydump_cli/commands/writes.py '    if not account.strip():' '    if False:' "$CU -k 'blank_account'"
 check "the story in the way is not named" storydump_cli/commands/writes.py '        if isinstance(existing, dict) and existing.get("intent_id"):' '        if False:' "$CU -k 'names_the_story_in_the_way'"
+check "a cadence story in the way is called the person's" storydump_cli/commands/writes.py '            if existing.get("origin") == "planned":' '            if True:' "$CU -k 'names_the_story_in_the_way'"
 check "a handle naming two live accounts takes the first" storydump_cli/commands/writes.py '    if len(live) > 1:' '    if False:' "$CU -k 'two_live_accounts'"
 check "a not_found names nothing" storydump_cli/commands/writes.py '    if exc.reason == "not_found" and exc.facts.get("missing") in MISSING_SENTENCES:' '    if False:' "$CU -k 'names_what_is_missing'"
+check "a missing item points at the account view" storydump_cli/commands/writes.py "    \"item\": \"check the item's id: storydump story <story> shows a story's item as media\"," '    "item": "storydump account <handle> shows an account",' "$CU -k 'names_what_is_missing'"
 check "a refused write exits with the verb's own code" storydump_cli/commands/writes.py '                code=exit_code_for(exc.status, exc.reason),' '                code=EXIT_USAGE,' "$CU -k 'held_back'"
 check "a schedule replays its first answer" storydump_cli/commands/writes.py '        key_for=_fresh_key("schedule"),' '        key_for=_story_key("schedule_item", item),' "$CU -k 'fresh_key or new_attempt'"
 check "a reschedule replays its first answer" storydump_cli/commands/writes.py '        key_for=_fresh_key("reschedule"),' '        key_for=_story_key("reschedule_item", story),' "$CU -k 'reschedule_sends'"
 check "a held-back item offers no override" storydump_cli/commands/writes.py '        if exc.facts.get("overridable") is True:' '        if False:' "$CU -k 'held_back'"
+check "the override is sent unasked" storydump_cli/commands/writes.py '    if override_locks:' '    if True:' "$CU -k 'override_locks_is_sent_only_when_asked'"
 check "a refused time says only that it was refused" storydump_cli/commands/writes.py '    if exc.reason == "invalid_args" and rule in AT_RULE_SENTENCES:' '    if False:' "$CU -k 'which_rule'"
 check "planned lists cadence stories too" storydump_cli/commands/reads.py '                origin="planned",' '                origin=None,' "$CU -k 'queue_read_filtered'"
 check "planned reads a history oldest first" storydump_cli/client.py '        if newest_first:
@@ -218,6 +232,7 @@ check "a time with no zone is read in the terminal's own" storydump_cli/output.p
             return at' "$CU -k 'names_no_instant'"
 check "an account's state is not shown" storydump_cli/output.py "        console.print(f\"    state     {_cell(row.get('state'))}\")" '        pass' "tests/storydump_cli/test_reads.py -k 'account_by_handle_json_and_human'"
 check "a story being cancelled reads as one that waits" storydump_cli/commands/writes.py '            if existing.get("cancel_requested"):' '            if False:' "$CU -k 'being_cancelled_says_to_wait'"
+check "a cancel that landed reads as still landing" storydump_cli/output.py '    if row.get("cancel_requested") and state not in TERMINAL_STATES:' '    if row.get("cancel_requested"):' "$CU -k 'cancel_that_landed'"
 check "the page size is dropped" storydump_cli/commands/reads.py '    if isinstance(data.get("limit"), int):' '    if False:' "$CU -k 'full_page or bounds_the_page'"
 
 # The vocabulary: every fact a refusal carries keeps its words (the CLI's tests are parametrized over

@@ -471,6 +471,8 @@ def test_every_view_returns_only_this_workspaces_rows_as_svc_ingress(
                 assert account.status_code == 200, (key, account.text)
                 (acct,) = account.json()["data"]["rows"]
                 assert acct["id"] == a["iga"] and acct["posts_per_day"] == 5
+                # the CLI resolves a handle to a live account by this state
+                assert acct["state"] == "active"
                 assert acct["tz"] == "America/New_York"
                 assert acct["today"] == {
                     "local_date": acct["today"]["local_date"],

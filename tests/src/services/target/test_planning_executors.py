@@ -106,6 +106,13 @@ class TestScheduleItem:
             },
         )
         account, item, instant, insert, audit, bindings = ex.statements
+        # each read names its tenant: the gates run under the policies, which
+        # would hide another workspace's row whether or not the SQL says so
+        assert " WHERE a.id = :acct AND a.workspace_id = :ws" in account[0]
+        assert "WHERE m.id = :media AND m.workspace_id = :ws" in item[0]
+        # the account is held until the story is in, so a removal cannot slip
+        # between this read and the INSERT
+        assert " FOR SHARE OF a" in account[0]
         assert account[1] == {"acct": ACCOUNT, "ws": WS}
         assert item[1] == {"acct": ACCOUNT, "media": ITEM, "ws": WS}
         assert instant[1] == {
@@ -165,6 +172,7 @@ class TestScheduleItem:
         }
         assert len(ex.statements) == 5, "no audit row, nothing else"
         sql, params = ex.statements[-1]
+        assert " WHERE workspace_id = :ws AND media_item_id = :media" in sql
         assert f"AND {intent_ledger.NOT_TERMINAL}" in sql
         assert params == {"ws": WS, "media": ITEM, "acct": ACCOUNT}
 

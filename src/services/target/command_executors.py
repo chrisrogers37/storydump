@@ -909,10 +909,12 @@ async def schedule_item(session, command: Command) -> CommandResult:
     is served at its time or missed out loud (phase 3), and only a person
     approves it (088).
 
-    The database decides what it can: the account must be live here, the
-    time must exist in its zone, and `uq_intent_live_subject` — the same
-    item waiting on the same account — is the INSERT's to refuse, with no
-    read before it. The lock and item rule (F7) is the one decision made
+    The database decides what it can: the account must be live here, and
+    its row is held (`FOR SHARE`) until the story is in, so a removal that
+    disables it either waits and then flags the story, or lands first and the
+    account reads as gone; the time must exist in its zone, and
+    `uq_intent_live_subject` — the same item waiting on the same account — is
+    the INSERT's to refuse, with no read before it. The lock and item rule (F7) is the one decision made
     here (`vocabulary.BLOCKING_LOCKS`: an item that cannot post, or a lock
     that would miss it at its time), and `override_locks` gets past only its
     warnings."""
@@ -927,7 +929,8 @@ async def schedule_item(session, command: Command) -> CommandResult:
         "SELECT a.provider_account_ref, COALESCE(a.tz, w.tz) AS eff_tz"
         "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
         " WHERE a.id = :acct AND a.workspace_id = :ws"
-        f"   AND {_LIVE_ACCOUNT}",
+        f"   AND {_LIVE_ACCOUNT}"
+        " FOR SHARE OF a",
         acct=account_id,
         ws=command.workspace_id,
     )

@@ -247,9 +247,30 @@ def test_a_not_found_names_what_is_missing(tmp_path, missing):
     assert result.exit_code == EXIT_NOT_FOUND
     assert error["reason"] == "not_found"
     assert error["detail"] == MISSING_SENTENCES[missing]
+    # where to look, by what is missing: an item's id is never on the web
+    assert (
+        error["fix"]
+        == {
+            "account": "storydump account <handle> shows an account",
+            "item": "check the item's id: storydump story <story> shows a story's item"
+            " as media",
+        }[missing]
+    )
 
 
-def test_an_item_already_waiting_names_the_story_in_the_way(tmp_path):
+def test_every_missing_thing_has_its_own_fix():
+    assert set(writes.MISSING_FIXES) == set(MISSING_SENTENCES)
+
+
+@pytest.mark.parametrize(
+    ("origin", "whose"),
+    [
+        # a re-run after an answer that never arrived meets the person's own story
+        ("planned", "if you just ran this, it is the story you planned; otherwise "),
+        ("cadence", "the cadence picked that item for that account; "),
+    ],
+)
+def test_an_item_already_waiting_names_the_story_in_the_way(tmp_path, origin, whose):
     """Whatever its origin or state, the story holding the item is the one to
     look at: the refusal names it, so the fix is that story's own view."""
     result, error = refused(
@@ -261,7 +282,7 @@ def test_an_item_already_waiting_names_the_story_in_the_way(tmp_path):
                 "existing": {
                     "intent_id": STORY,
                     "state": "awaiting_approval",
-                    "origin": "cadence",
+                    "origin": origin,
                 }
             },
         },
@@ -269,12 +290,10 @@ def test_an_item_already_waiting_names_the_story_in_the_way(tmp_path):
     assert result.exit_code == EXIT_REFUSED
     assert error["detail"] == (
         f"that item already waits on that account: story {STORY}"
-        " (cadence, awaiting_approval)"
+        f" ({origin}, awaiting_approval)"
     )
-    # a re-run after an answer that never arrived meets the person's own story
     assert error["fix"] == (
-        f"storydump story {STORY} shows it: if you just ran this, it is the story"
-        " you planned; otherwise cancel it to plan the item again"
+        f"storydump story {STORY} shows it: {whose}cancel it to plan the item again"
     )
 
 
@@ -521,6 +540,23 @@ def test_planned_says_a_cancel_still_landing(tmp_path):
     api = write_api(queue(WS, [{**ROW, "cancel_requested": True}]))
     result = run(write_runtime(tmp_path, api), "planned", "--workspace", WS)
     assert "scheduled (cancelling)" in result.output
+
+
+def test_planned_says_nothing_of_a_cancel_that_landed(tmp_path):
+    """The flag is never cleared, so a story that has ended still carries it."""
+    ended = {**ROW, "state": "cancelled", "cancel_requested": True}
+    api = write_api(queue(WS, [ended]))
+    result = run(
+        write_runtime(tmp_path, api),
+        "planned",
+        "--workspace",
+        WS,
+        "--state",
+        "cancelled",
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    assert "cancelled" in result.output
+    assert "(cancelling)" not in result.output
 
 
 def test_planned_widens_by_state_and_bounds_the_page(tmp_path):

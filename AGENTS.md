@@ -233,13 +233,14 @@ client, never a database connection
    `storydump story <intent_id>` (the timeline: audit rows, provider
    operations, cards) · `storydump cards <intent_id>` · `storydump floating`
    (approved stories waiting between attempts, with their retry job) ·
-   `storydump account <handle>` (cap, zone, next slot, today's bucket, recent
-   outcomes) · `storydump jobs --since 3h` · `storydump outbox --since 3h` ·
+   `storydump account <handle>` (its state, cap, zone, next slot, today's
+   bucket, recent outcomes) · `storydump jobs --since 3h` · `storydump outbox --since 3h` ·
    `storydump burst --since 2026-09-15T14:50:00Z` (taps, permits, float
    waits, siblings, review cards, outcomes) · `storydump posture` (the
    migration ledger, the role, RLS, the doors) · `storydump planned [--state
    scheduled,awaiting_approval] [--newest-first]` (the planned stories, soonest
-   first: when each is due, its account and item, and who planned it). The guide:
+   first: when each is due, its account and item, and who planned it; it takes
+   no `--watch`). The guide:
    `documentation/operations/reading-the-ledger.md`.
 5. Write through the command port — the same door a tap or a web click uses,
    so admission, tenancy and audit apply unchanged. `--workspace <id or name>`

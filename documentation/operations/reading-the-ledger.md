@@ -1,7 +1,8 @@
 # Reading the ledger with `storydump`
 
 The questions the last two days of production validation answered with fifty-five one-off SQL
-probes are eight `storydump` verbs (the v2 CLI plan, phase 02). Each is one bounded,
+probes are eight `storydump` verbs (the v2 CLI plan, phase 02); a ninth, `planned`, reads the
+stories a person planned (#1413). Each is one bounded,
 tenant-scoped read through the API — never a database connection — under your token, for every
 workspace you belong to (or one, with `--workspace`). `psql` through Railway stays the escape
 hatch for a question these do not answer; the probes the verbs were built from are kept at
@@ -17,7 +18,7 @@ any verb for one envelope `{"v": 1, "kind", "data", "error"}` — a workspace re
 | What happened to this story, in order? | `storydump story <intent_id>` | one row: the intent, its audit rows (the `cli_command` rows included), its provider operations (each container permit with the url variant and Meta's answer), its cards |
 | Which cards does this story have, on which chats? | `storydump cards <intent_id>` | one per outbox row, adopted twins included, in send order |
 | What is floating — approved, carrying a debit, waiting between attempts? | `storydump floating [--limit N]` | one per story with the job that retries it and the last wait's class and rung |
-| Where is this account against its cap today? | `storydump account <handle or id>` | cap per day, zone, next slot, today's bucket, the last twenty outcomes |
+| Where is this account against its cap today? | `storydump account <handle or id>` | its state, cap per day, zone, next slot, today's bucket, the last twenty outcomes |
 | What is the job queue doing? | `storydump jobs [--since 3h]` | one per kind × lane × state with the oldest runnable and failed samples |
 | What is still owed or lost on the chats? | `storydump outbox [--since 3h]` | pending, sending, ambiguous and failed rows by binding |
 | What did the burst do? | `storydump burst [--since 3h]` | one timeline: taps, permits, float waits, siblings posting past a waiter, review cards, and the window's outcome counts |

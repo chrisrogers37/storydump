@@ -1074,7 +1074,10 @@ class TestTheServeLegServesAStoryAsTheDoorReadIt:
         session = _SweepSession(due=[_due_story(origin)])
         counts = await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
         assert seen["served"] == [f"i-{origin}"] and counts["prompted"] == 1
-        (reread,) = [p for s, p in session.statements if "FOR UPDATE" in s]
+        ((sql, reread),) = [(s, p) for s, p in session.statements if "FOR UPDATE" in s]
+        # the tenant is the SQL's own: the gates run under the policies, which
+        # would hide another workspace's row whether or not the SQL says so
+        assert " WHERE id = :id AND workspace_id = :ws FOR UPDATE" in sql
         assert reread == {"id": f"i-{origin}", "ws": "ws-1"}
 
     @pytest.mark.parametrize("origin", ["planned", "cadence"])
@@ -1100,3 +1103,37 @@ class TestTheServeLegServesAStoryAsTheDoorReadIt:
         assert f"intent i-{origin} changed under the sweep" in caplog.text, (
             "never silent"
         )
+
+
+class TestBothSweepsTakeTheirRowsInOneOrder:
+    """Each sweep locks a row as it reaches it, so both take rows that tie on
+    workspace and due time in one total order, by id. The rows arrive here
+    in the opposite order, so a sort that kept their order would show."""
+
+    async def test_the_serve_leg_takes_tied_rows_by_id(self, monkeypatch):
+        seen = _serving(monkeypatch)
+        session = _SweepSession(due=[_due_story(id=i) for i in ("i-3", "i-2", "i-1")])
+        await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        locked = [p["id"] for s, p in session.statements if "FOR UPDATE" in s]
+        assert locked == ["i-1", "i-2", "i-3"]
+        assert seen["served"] == ["i-1", "i-2", "i-3"]
+
+    async def test_the_miss_leg_takes_tied_rows_by_id(self, monkeypatch):
+        async def say(session, row, *, reason, surface, by):
+            return 1
+
+        async def bindings(session, workspace_id):
+            return []
+
+        async def no_name(session, user_id, names=None):
+            return None
+
+        monkeypatch.setattr(prompts, "say_not_served", say)
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(prompts, "_scheduler_name", no_name)
+        session = _SweepSession(
+            misses=[_miss_row(i, "ws-1") for i in ("i-3", "i-2", "i-1")]
+        )
+        await prompts.sweep_planned_misses(session, limit=5, late_seconds=900)
+        ended = [p["id"] for s, p in session.statements if s.startswith("UPDATE")]
+        assert ended == ["i-1", "i-2", "i-3"]

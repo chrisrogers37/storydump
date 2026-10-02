@@ -57,7 +57,7 @@ from sqlalchemy.exc import DBAPIError
 
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
 from src.exceptions.base import StorydumpError
-from src.services.target import audit
+from src.services.target import audit, vocabulary
 from src.services.target._dbapi import driver_error_is
 
 
@@ -104,20 +104,15 @@ async def legal_transitions(session) -> set:
 
 
 #: `02` §4's terminal intent states — the closed set no edge leaves. ONE Python
-#: home, because two of the copies that existed had to AGREE for a workflow to
-#: converge at all: `offboarding.drain` selects `NOT terminal` and cancels it,
+#: home (`vocabulary`, where the CLI reads it too; this is its name for the
+#: services), because two of the copies that existed had to AGREE for a
+#: workflow to converge at all: `offboarding.drain` selects `NOT terminal` and
+#: cancels it,
 #: and `fn_offboard_finalize` (`059`) refuses while any `NOT terminal` row
 #: survives, so a state one list carries and the other does not is an offboard
 #: that mints successors forever. The database is still the authority — this is
 #: a name for `trg_intent_guard`'s set, not a second one.
-TERMINAL_STATES: tuple[str, ...] = (
-    "posted",
-    "skipped",
-    "rejected",
-    "expired",
-    "failed",
-    "cancelled",
-)
+TERMINAL_STATES: tuple[str, ...] = vocabulary.TERMINAL_STATES
 
 #: A story still in flight, as SQL on a bare `state`: the predicate of
 #: `uq_intent_live_subject` (one live story per item and account), which is

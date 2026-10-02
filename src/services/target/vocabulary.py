@@ -91,12 +91,24 @@ INTENT_STATES: tuple[str, ...] = (
     "cancelled",
 )
 
+#: The states a story ends in, which no edge leaves (`trg_intent_guard`'s
+#: terminal set). One spelling: `intent_ledger.TERMINAL_STATES` names it for
+#: the services, and the CLI reads it here.
+TERMINAL_STATES: tuple[str, ...] = (
+    "posted",
+    "skipped",
+    "rejected",
+    "expired",
+    "failed",
+    "cancelled",
+)
+
 #: `post_intents.origin` (088 ``ck_intent_origin``): a ``cadence`` story is
 #: minted by the clock for a slot, a ``planned`` one by a person who chose the
 #: item, the account and the time (`schedule_item`).
 INTENT_ORIGINS: tuple[str, ...] = ("cadence", "planned")
 
-#: The `ig_accounts.state`s a story is served on (054 ``ck_iga_state`` less
+#: The `ig_accounts.state`s a story is served on (054 ``ck_ig_accounts_state`` less
 #: `disabled` and `moved`): a planned story is scheduled only on one of
 #: these, and served only while its account is still in one.
 LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required")

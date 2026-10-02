@@ -480,6 +480,12 @@ AT_FIX = (
     "give --at as 'YYYY-MM-DD HH:MM' in the account's zone, after now and"
     f" within {PLAN_HORIZON_DAYS} days"
 )
+#: Where to look for what the port could not find, by its `missing` fact
+#: (the keys of `MISSING_SENTENCES`).
+MISSING_FIXES = {
+    "account": "storydump account <handle> shows an account",
+    "item": "check the item's id: storydump story <story> shows a story's item as media",
+}
 
 
 def _at_option(command):
@@ -512,10 +518,8 @@ def _schedule_refused(exc: ApiError) -> Optional[tuple[str, str]]:
             "pick another item — --override-locks does not get past this",
         )
     if exc.reason == "not_found" and exc.facts.get("missing") in MISSING_SENTENCES:
-        return (
-            MISSING_SENTENCES[exc.facts["missing"]],
-            "storydump account <handle> shows an account; an item's id is on the web",
-        )
+        missing = exc.facts["missing"]
+        return MISSING_SENTENCES[missing], MISSING_FIXES[missing]
     if exc.reason == "illegal_transition":
         existing = exc.facts.get("existing")
         if isinstance(existing, dict) and existing.get("intent_id"):
@@ -527,11 +531,16 @@ def _schedule_refused(exc: ApiError) -> Optional[tuple[str, str]]:
                     f"run it again once the cancel has landed (storydump story"
                     f" {story} shows it)",
                 )
+            if existing.get("origin") == "planned":
+                # a re-run after an answer that never arrived meets its own story
+                whose = "if you just ran this, it is the story you planned; otherwise "
+            else:
+                whose = "the cadence picked that item for that account; "
             return (
                 f"that item already waits on that account: story {story}"
                 f" ({existing.get('origin')}, {existing.get('state')})",
-                f"storydump story {story} shows it: if you just ran this, it is"
-                " the story you planned; otherwise cancel it to plan the item again",
+                f"storydump story {story} shows it: {whose}cancel it to plan the"
+                " item again",
             )
         return (
             "that item is already waiting to post on that account",
@@ -601,7 +610,7 @@ def _account_id(client: Client, ws: str, key: str) -> str:
     is_flag=True,
     help=(
         "Schedule it although it was skipped or posted recently. A rejection, a"
-        " hold, or an item that cannot post still refuses."
+        " hold, an item out of season or one that cannot post still refuses."
     ),
 )
 @click.pass_context
