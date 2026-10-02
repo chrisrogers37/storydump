@@ -1,4 +1,5 @@
 import Link from "next/link"
+import { Fragment } from "react"
 import { siteConfig } from "@/config/site"
 import { pathForUseCase, useCases } from "@/lib/use-cases"
 
@@ -13,15 +14,18 @@ const siteLinks = [
   { href: "/terms", label: "Terms" },
 ]
 
-/** Links joined by middots, the way the footer has always read. */
+/**
+ * Links joined by middots, the way the footer has always read. Each link
+ * keeps its words together; the separator sits outside so a row can wrap.
+ */
 function Dotted({ links }: { links: { href: string; label: string }[] }) {
   return links.map(({ href, label }, i) => (
-    <span key={href} className="whitespace-nowrap">
+    <Fragment key={href}>
       {i > 0 && " · "}
-      <Link href={href} className={linkClass}>
-          {label}
-        </Link>
-    </span>
+      <Link href={href} className={`whitespace-nowrap ${linkClass}`}>
+        {label}
+      </Link>
+    </Fragment>
   ))
 }
 

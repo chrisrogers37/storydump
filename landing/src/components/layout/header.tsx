@@ -1,6 +1,7 @@
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 import { BrandMark } from "./brand-mark"
+import { WaitlistLink } from "./waitlist-link"
 
 export function Header() {
   return (
@@ -39,8 +40,7 @@ export function Header() {
           >
             Sign in
           </Link>
-          <Link
-            href="/#waitlist"
+          <WaitlistLink
             className="whitespace-nowrap rounded-full bg-ink px-3 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-ink/85 sm:px-4 sm:text-sm"
           >
             {/*
@@ -49,7 +49,7 @@ export function Header() {
               offer; the alternative was letting the CTA overflow the viewport.
             */}
             Join <span className="hidden sm:inline">the </span>waitlist
-          </Link>
+          </WaitlistLink>
         </div>
       </div>
     </header>
