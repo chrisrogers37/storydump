@@ -197,6 +197,8 @@ class TestConfirmingLinks:
         assert first.outcome == "linked"
         assert second.outcome == "state_refused"
         assert second.answer_text == identity_link.REFUSAL
+        # the "now linked" prompt is not overwritten by the late tap
+        assert second.edit_text is None
         assert len(patched.linked) == 1
 
     @pytest.mark.asyncio

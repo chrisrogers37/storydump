@@ -282,7 +282,10 @@ async def handle_tap(
         )
     except oauth_states.OAuthStateRefused as exc:
         logger.warning("identity link %s refused: %s", tap.action, exc)
-        return LinkTapOutcome("state_refused", REFUSAL, True, edit_text=REFUSAL)
+        # The prompt is left as it is: a second tap on a prompt whose Confirm
+        # already landed must not overwrite "now linked" with a refusal (the
+        # two edits run after their commits, in no fixed order).
+        return LinkTapOutcome("state_refused", REFUSAL, show_alert=True)
 
     if tap.action == callback_tokens.LINK_CANCEL:
         logger.info("identity link cancelled by the tapper; the state is spent")
