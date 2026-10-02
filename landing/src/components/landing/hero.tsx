@@ -1,57 +1,47 @@
-import { Lock, Instagram, KeyRound } from "lucide-react"
+import Link from "next/link"
 import { WaitlistForm } from "@/components/landing/waitlist-form"
-
-const trustBadges = [
-  { icon: Lock, text: "Your content stays in Google Drive" },
-  { icon: Instagram, text: "Official Instagram API" },
-  { icon: KeyRound, text: "No password required" },
-]
+import { TapDemo } from "@/components/landing/tap-demo"
 
 export function Hero() {
   return (
-    <section aria-label="Hero" className="py-20 md:py-32">
-      <div className="mx-auto max-w-5xl px-4 text-center">
-        <h1 className="text-4xl font-bold tracking-tight sm:text-5xl md:text-6xl">
-          Instagram Stories on Autopilot
-        </h1>
-        {/*
-          "no dashboard logins" was here and is FALSE. Every workspace has web
-          access by construction, and the dashboard is where the queue,
-          settings, Drive connect and sync now live — so the first sentence a
-          visitor read asserted the opposite of the product (#1090 A1).
-
-          The differentiator was never the absence of a dashboard; it is
-          one-tap approval from a chat you already have open, and that is
-          untouched. Telegram moves from "instead of" to "as well as", which is
-          what is true: a workspace with no Telegram binding still reaches
-          `awaiting_approval` and stays actionable on the web.
-        */}
-        <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground">
-          Your content library, posted to Stories on a schedule you set.
-          Approve each post with one tap — no manual uploads, no missed days.
-        </p>
-        <p className="mt-3 text-sm font-medium text-foreground/80">
-          The only Story tool that lives where you already are — approve from
-          Telegram, or from your dashboard.
-        </p>
-        <div className="mt-10">
-          <WaitlistForm variant="hero" />
-        </div>
-        <div className="mt-4 flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
-          {trustBadges.map((badge) => (
-            <span
-              key={badge.text}
-              className="flex items-center gap-1.5 text-xs text-muted-foreground"
-            >
-              <badge.icon className="h-3.5 w-3.5" />
-              {badge.text}
+    <section aria-labelledby="hero-heading" className="py-14 md:py-20">
+      <div className="mx-auto grid max-w-6xl items-center gap-12 px-4 md:grid-cols-[1.1fr_1fr] md:gap-10">
+        <div>
+          <p className="flex items-center gap-2 font-mono text-xs font-medium uppercase tracking-[0.14em] text-ink">
+            <span aria-hidden="true" className="size-2 rounded-full bg-tap" />
+            Instagram Stories for small teams
+          </p>
+          <h1
+            id="hero-heading"
+            className="mt-5 font-display text-6xl font-extrabold leading-[0.9] tracking-[-0.04em] text-ink sm:text-7xl lg:text-[6.5rem]"
+          >
+            Instagram <br />
+            Stories, <br />
+            on tap<span className="text-tap">.</span>
+          </h1>
+          <p className="mt-7 max-w-xl text-lg leading-relaxed text-ink/80">
+            Storydump picks today’s Story from your own photos and videos, gets
+            it ready and brings it to your team right on time. Tap{" "}
+            <strong className="font-semibold text-ink">Post now</strong> and
+            it’s up.
+          </p>
+          <div className="mt-8 max-w-xl">
+            <WaitlistForm variant="hero" />
+          </div>
+          <p className="mt-4 text-sm text-ink/70">
+            Free during beta · No credit card required ·{" "}
+            <span className="whitespace-nowrap">
+              Already using Storydump?{" "}
+              <Link
+                href="/login"
+                className="font-medium text-ink underline underline-offset-4 hover:text-tap-ink"
+              >
+                Sign in
+              </Link>
             </span>
-          ))}
+          </p>
         </div>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Free during beta &middot; No credit card required &middot; 2,400+
-          stories posted and counting
-        </p>
+        <TapDemo />
       </div>
     </section>
   )

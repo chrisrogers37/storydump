@@ -1,11 +1,10 @@
 import type { Metadata } from "next"
 import { Hero } from "@/components/landing/hero"
-import { SocialProof } from "@/components/landing/social-proof"
-import { HowItWorks } from "@/components/landing/how-it-works"
-import { TelegramPreview } from "@/components/landing/telegram-preview"
-import { Features } from "@/components/landing/features"
-import { Comparison } from "@/components/landing/comparison"
-import { Pricing } from "@/components/landing/pricing"
+import { Chores } from "@/components/landing/chores"
+import { WhereTap } from "@/components/landing/where-tap"
+import { SetItOnce } from "@/components/landing/set-it-once"
+import { WhoItsFor } from "@/components/landing/who-its-for"
+import { TrustRow } from "@/components/landing/trust-row"
 import { FAQ } from "@/components/landing/faq"
 import { FinalCTA } from "@/components/landing/final-cta"
 import { StructuredData } from "@/components/landing/structured-data"
@@ -22,12 +21,11 @@ export default function Home() {
     <>
       <StructuredData />
       <Hero />
-      <SocialProof />
-      <HowItWorks />
-      <TelegramPreview />
-      <Features />
-      <Comparison />
-      <Pricing />
+      <Chores />
+      <WhereTap />
+      <SetItOnce />
+      <WhoItsFor />
+      <TrustRow />
       <FAQ />
       <FinalCTA />
     </>

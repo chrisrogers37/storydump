@@ -3,8 +3,8 @@ import { siteConfig } from "@/config/site"
 
 export function Footer() {
   return (
-    <footer className="border-t py-8">
-      <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-4 px-4 text-sm text-muted-foreground sm:flex-row">
+    <footer className="border-t border-ink/10 py-8">
+      <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-4 text-sm text-muted-foreground sm:flex-row">
         <p>&copy; {new Date().getFullYear()} {siteConfig.name}</p>
         <nav aria-label="Footer">
           Built by{" "}
@@ -16,6 +16,13 @@ export function Footer() {
           >
             Chris
           </a>
+          {" "}&middot;{" "}
+          <Link
+            href="/blog"
+            className="underline underline-offset-4 hover:text-foreground"
+          >
+            Blog
+          </Link>
           {" "}&middot;{" "}
           <a
             href={`mailto:${siteConfig.contact.email}`}

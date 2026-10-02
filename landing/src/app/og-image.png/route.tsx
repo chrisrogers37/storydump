@@ -7,7 +7,7 @@ export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl
   const title = searchParams.get("title") || "Storydump"
   const subtitle =
-    searchParams.get("subtitle") || "Instagram Stories on Autopilot"
+    searchParams.get("subtitle") || "Instagram Stories, on tap"
 
   return new ImageResponse(
     (

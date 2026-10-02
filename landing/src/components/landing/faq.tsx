@@ -12,15 +12,17 @@ import { trackEvent } from "@/lib/analytics"
 
 export function FAQ() {
   return (
-    <section className="py-16 md:py-24">
-      <div className="mx-auto max-w-3xl px-4">
-        <h2 className="text-center text-3xl font-bold tracking-tight">
-          Frequently Asked Questions
+    <section aria-labelledby="faq-heading" className="py-16 md:py-24">
+      <div className="mx-auto grid max-w-6xl gap-8 px-4 md:grid-cols-[1fr_1.6fr] md:gap-16">
+        <h2
+          id="faq-heading"
+          className="font-display text-4xl font-extrabold tracking-[-0.035em] text-ink sm:text-5xl md:text-6xl"
+        >
+          Questions
         </h2>
         <Accordion
           type="single"
           collapsible
-          className="mt-12"
           onValueChange={(value) => {
             if (value) {
               const idx = parseInt(value.replace("faq-", ""), 10)

@@ -1,6 +1,6 @@
 import type { Metadata } from "next"
 import Script from "next/script"
-import { Geist, Geist_Mono } from "next/font/google"
+import { Bricolage_Grotesque, Geist, Geist_Mono } from "next/font/google"
 import { siteConfig } from "@/config/site"
 import "./globals.css"
 
@@ -16,10 +16,18 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 })
 
+// The marketing headlines. next/font downloads it at build time and serves it
+// from this site, so a visitor's browser never contacts Google.
+const bricolage = Bricolage_Grotesque({
+  variable: "--font-bricolage",
+  subsets: ["latin"],
+  weight: ["600", "800"],
+})
+
 export const metadata: Metadata = {
   title: {
     template: "%s | Storydump",
-    default: siteConfig.name + " — Keep Your Stories Alive",
+    default: siteConfig.name + " — Instagram Stories, on tap",
   },
   description: siteConfig.description,
   authors: [{ name: siteConfig.author.name, url: siteConfig.contact.portfolio }],
@@ -39,7 +47,7 @@ export const metadata: Metadata = {
     },
   },
   openGraph: {
-    title: siteConfig.name + " — Instagram Stories on Autopilot",
+    title: siteConfig.name + " — Instagram Stories, on tap",
     description: siteConfig.description,
     url: siteConfig.url,
     siteName: siteConfig.name,
@@ -50,13 +58,13 @@ export const metadata: Metadata = {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: siteConfig.name + " — Instagram Story automation tool",
+        alt: siteConfig.name + " — Instagram Stories, on tap",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: siteConfig.name + " — Instagram Stories on Autopilot",
+    title: siteConfig.name + " — Instagram Stories, on tap",
     description: siteConfig.description,
     images: ["/og-image.png"],
   },
@@ -70,7 +78,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} ${bricolage.variable} antialiased`}
       >
         {children}
         {/* An invite link's path is the invitation token, a bearer credential
