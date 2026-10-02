@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import path from "path";
 import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, RESOLUTIONS } from "./commands";
 import { LOCK_CLAUSES, NO_PUSH_BINDING, PLAN_HORIZON_DAYS } from "./command-client";
+import { IN_THE_WAY_MAX } from "./refusal-facts";
 import {
   EXPIRY_DAYS_DEFAULT,
   EXPIRY_DAYS_MAX,
@@ -88,5 +89,11 @@ describe("the wire spellings are the vocabulary's", () => {
     expect(Object.keys(LOCK_CLAUSES).sort()).toEqual(
       [...tuple("BLOCKING_LOCKS"), ...tuple("WARNING_LOCKS")].sort(),
     );
+  });
+  it("room under the in_the_way cap for the longest list the port can name", () => {
+    // `schedule_item` names at most the item's own state, then each lock kind
+    // once, so the cap must never cut a list the port can actually send.
+    const longest = 1 + tuple("BLOCKING_LOCKS").length + tuple("WARNING_LOCKS").length;
+    expect(IN_THE_WAY_MAX).toBeGreaterThanOrEqual(longest);
   });
 });
