@@ -84,7 +84,10 @@ export default function PrivacyPolicy() {
               upload a copy of the file to our media processor, Cloudinary,
               which frames it for Instagram. We delete the copy as soon as the
               Story posts or is cancelled, and a cleanup that runs every 6
-              hours deletes any copy older than 48 hours.
+              hours deletes any copy older than 48 hours. If you link the
+              Storydump Telegram bot, each approval card it sends to your chat
+              carries a copy of the Story&apos;s photo or video, which stays in
+              the chat like any other message.
             </li>
             <li>
               <span className="font-medium text-foreground">
@@ -246,7 +249,10 @@ export default function PrivacyPolicy() {
                 </tr>
                 <tr className="border-b">
                   <td className="py-2 pr-4">Telegram</td>
-                  <td className="py-2 pr-4">Chat &amp; bot platform</td>
+                  <td className="py-2 pr-4">
+                    Chat &amp; bot platform; with the bot linked, holding a copy
+                    of each approval card&apos;s photo or video in your chat
+                  </td>
                   <td className="py-2">Global</td>
                 </tr>
                 <tr className="border-b">
