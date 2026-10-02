@@ -727,7 +727,13 @@ async def _land_page(
                     # `available` — so a retired or tombstoned row comes back,
                     # and a raised cap brings an `unsupported` one back too.
                     "       state = EXCLUDED.state,"
-                    "       last_listed_at = EXCLUDED.last_listed_at"
+                    # The stamp only moves forward. now() is a transaction's
+                    # START, so a writer that opened before a walk and lands
+                    # after a page re-stamped the row would otherwise move it
+                    # backwards, past the walk's start, and the walk's last
+                    # page would tombstone a file it listed.
+                    "       last_listed_at = GREATEST(media_items.last_listed_at,"
+                    "                                 EXCLUDED.last_listed_at)"
                     # A retired row is adopted by whichever CONNECTED folder
                     # lists its bytes — including its own, should it find one
                     # retired under itself (a re-pick's revive lost a race).
