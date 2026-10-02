@@ -32,7 +32,7 @@ export function TrustRow() {
           {promises.map(({ icon: Icon, title, text }) => (
             <li key={title} className="rounded-2xl bg-white p-6">
               <Icon className="size-5 text-ink" />
-              <h3 className="mt-4 font-semibold text-ink">{title}</h3>
+              <h3 className="mt-4 font-display text-lg font-extrabold tracking-[-0.02em] text-ink">{title}</h3>
               <p className="mt-1 text-sm leading-relaxed text-ink/80">{text}</p>
             </li>
           ))}

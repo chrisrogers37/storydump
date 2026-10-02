@@ -53,7 +53,7 @@ export function WhereTap() {
 
         <div className="mt-12 grid gap-5 md:grid-cols-2">
           <figure className="rounded-3xl border border-ink/10 p-5 sm:p-7">
-            <div className="flex h-full min-h-[260px] items-center rounded-2xl bg-[#dfe6ee] p-4">
+            <div className="flex min-h-[260px] items-center rounded-2xl bg-[#dfe6ee] p-4">
               <ApprovalCard
                 art="monday"
                 slot="2026-10-02 13:30 Europe/London"
@@ -67,7 +67,7 @@ export function WhereTap() {
           </figure>
 
           <figure className="rounded-3xl border border-ink/10 p-5 sm:p-7">
-            <div className="h-full min-h-[260px] rounded-2xl border border-ink/10 bg-[#fbfaf7]">
+            <div className="rounded-2xl border border-ink/10 bg-[#fbfaf7]">
               <div className="flex items-center justify-between border-b border-ink/10 px-4 py-3 text-sm">
                 <span className="font-semibold text-ink">Queue</span>
                 <span className="text-ink/60">Today</span>
@@ -111,7 +111,7 @@ export function WhereTap() {
           </figure>
         </div>
 
-        <dl className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <dl className="mt-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
           {legend.map(({ label, text }) => (
             <div key={label} className="rounded-2xl bg-paper p-5">
               <dt className="font-semibold text-ink">{label}</dt>

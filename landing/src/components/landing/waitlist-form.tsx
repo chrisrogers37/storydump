@@ -144,11 +144,11 @@ export function WaitlistForm({
         aria-live="polite"
       >
         <p className="font-display text-2xl font-extrabold tracking-[-0.02em] text-ink">
-          {shownMessage}
+          {shownMessage.replace(/'/g, "’")}
         </p>
         <p className="mt-2 leading-relaxed text-ink/80">
-          We&apos;re inviting people in small batches as spots open, and
-          we&apos;ll email you when yours is ready.
+          We’re inviting people in small batches as spots open, and we’ll
+          email you when yours is ready.
         </p>
       </div>
     )

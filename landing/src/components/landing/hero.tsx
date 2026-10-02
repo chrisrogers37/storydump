@@ -13,11 +13,11 @@ export function Hero() {
           </p>
           <h1
             id="hero-heading"
-            className="mt-5 font-display text-6xl font-extrabold leading-[0.9] tracking-[-0.04em] text-ink sm:text-7xl lg:text-[6.5rem]"
+            className="mt-5 font-display text-6xl font-extrabold leading-[0.9] tracking-[-0.04em] text-ink sm:text-7xl lg:text-[7.25rem] xl:text-[7.75rem]"
           >
             Instagram <br />
             Stories, <br />
-            on tap<span className="text-tap">.</span>
+            on tap<span aria-hidden="true" className="text-tap">.</span>
           </h1>
           <p className="mt-7 max-w-xl text-lg leading-relaxed text-ink/80">
             Storydump picks today’s Story from your Google Drive library, gets
@@ -29,9 +29,9 @@ export function Hero() {
             <WaitlistForm variant="hero" />
           </div>
           <p className="mt-4 text-sm text-ink/70">
-            Free during beta · No credit card required ·{" "}
+            Free during beta · No credit card required{" "}
             <span className="whitespace-nowrap">
-              Already using Storydump?{" "}
+              · Already using Storydump?{" "}
               <Link
                 href="/login"
                 className="font-medium text-ink underline underline-offset-4 hover:text-tap-ink"

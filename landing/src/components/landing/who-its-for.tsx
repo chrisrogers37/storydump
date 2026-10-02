@@ -39,8 +39,8 @@ export function WhoItsFor() {
         <ul className="mt-12 grid grid-cols-2 gap-x-4 gap-y-8 lg:grid-cols-4 lg:gap-6">
           {audiences.map(({ art, name, text }) => (
             <li key={name}>
-              <StoryArt kind={art} className="aspect-square w-full rounded-2xl text-[18px] sm:text-[26px]" />
-              <h3 className="mt-4 font-semibold text-ink">{name}</h3>
+              <StoryArt kind={art} className="aspect-[4/5] w-full rounded-2xl text-[18px] sm:text-[26px]" />
+              <h3 className="mt-4 font-display text-xl font-extrabold tracking-[-0.02em] text-ink">{name}</h3>
               <p className="mt-1 text-sm leading-relaxed text-ink/80">{text}</p>
             </li>
           ))}

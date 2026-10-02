@@ -67,12 +67,19 @@ export function TapDemo() {
       ? POSTING
       : settled?.said ?? (tapped === "open" ? OPEN : WAITING)
 
+  const phoneRef = useRef<HTMLDivElement>(null)
+
   useEffect(() => {
-    if (stage === "settled" && moveFocus.current) {
+    if (!moveFocus.current) return
+    if (stage === "settled") {
       moveFocus.current = false
       anotherRef.current?.focus()
+    } else if (stage === "waiting") {
+      // After "Show me another", focus goes to the new card's Post now.
+      moveFocus.current = false
+      phoneRef.current?.querySelector("button")?.focus()
     }
-  }, [stage])
+  }, [stage, photo])
 
   // The timer list is one array for the demo's life ("Show me another"
   // empties it in place), so the cleanup clears whatever is pending at unmount.
@@ -98,6 +105,7 @@ export function TapDemo() {
 
   function another() {
     clearAll(timers.current)
+    moveFocus.current = true
     setPhoto((p) => (p + 1) % PHOTOS.length)
     setStage("waiting")
     setTapped(undefined)
@@ -113,6 +121,7 @@ export function TapDemo() {
       </p>
 
       <div
+        ref={phoneRef}
         role="group"
         aria-label="Demo: a Storydump card in a team's Telegram group"
         className="mx-auto w-full max-w-[300px] overflow-hidden rounded-[2.2rem] border-[7px] border-[#151515] bg-[#dfe6ee] shadow-2xl"

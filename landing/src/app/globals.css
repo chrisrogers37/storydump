@@ -123,7 +123,7 @@
 }
 
 @utility section-title {
-  @apply font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.035em] text-ink sm:text-5xl md:text-6xl;
+  @apply font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.035em] text-ink sm:text-5xl md:text-[4.25rem];
 }
 
 /* The hero demo's Story progress bar. */

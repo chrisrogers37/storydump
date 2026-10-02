@@ -33,7 +33,9 @@ export function FAQ() {
         >
           {faqs.map((faq, i) => (
             <AccordionItem key={i} value={`faq-${i}`}>
-              <AccordionTrigger>{faq.question}</AccordionTrigger>
+              <AccordionTrigger className="text-base font-semibold text-ink md:text-lg">
+                {faq.question}
+              </AccordionTrigger>
               <AccordionContent>
                 {faq.question === "Who built this?" ? (
                   <p className="text-muted-foreground">
@@ -44,7 +46,7 @@ export function FAQ() {
                       rel="noopener noreferrer"
                       className="underline underline-offset-4 hover:text-foreground"
                     >
-                      Chris
+                      {siteConfig.author.name}
                     </a>
                     . Have questions or feedback? Reach out at{" "}
                     <a
