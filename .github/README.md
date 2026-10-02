@@ -32,9 +32,10 @@ request into `main` or `develop`, six jobs:
 All jobs run on **GitHub's cloud runners** (`ubuntu-latest`) — safe for public
 repositories. The `main` ruleset requires a pull request and six of these
 checks by name (Lint, FC-2 Telegram ratchet, Test, Security Scan, Front End,
-Changelog Check), so GitHub refuses a merge until they are green; only a
-repository admin can bypass it, and only on a pull request. Renaming one of
-those jobs means updating the ruleset too.
+Changelog Check), so GitHub refuses a merge until they are green. The ruleset
+has no bypass list: every agent here works as the owner's account, so an admin
+bypass would be a bypass for all of them. Renaming one of those jobs means
+updating the ruleset too.
 
 ### Scheduled: `schema-drift.yml`
 

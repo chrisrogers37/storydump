@@ -50,8 +50,10 @@ jobs:
 request for every change (no approval count, since PRs are opened under the
 owner's own account), and six required checks: Lint, FC-2 Telegram ratchet,
 Test, Security Scan, Front End and Changelog Check. "Branch up to date" is not
-required. A repository admin may bypass it on a pull request only, so nothing
-pushes to `main` directly. Vercel and GitGuardian report on every PR but are not
+required. It has no bypass list: every agent working here acts as the owner's
+GitHub account, so an admin bypass would let any of them merge red. An
+emergency merge means disabling the ruleset by hand. Vercel and GitGuardian
+report on every PR but are not
 required. Renaming a required job strands open PRs on a check that never
 arrives, so the ruleset changes with it (`ci.yml`'s note on `Front End` says
 the same). A red check also makes Railway skip a deploy (below).
