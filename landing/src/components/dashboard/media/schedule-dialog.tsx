@@ -172,6 +172,9 @@ export function ScheduleDialog({
   async function submit() {
     if (!item || !account || !localAt || phase.kind === "done") return;
     const plan = schedulePlan(phase.kind, { accountId: account.id, itemId: item.id, localAt });
+    // An alert whose text does not change is not read again, so the same
+    // refusal twice would pass in silence: clear it before asking.
+    if (phase.kind === "form" && phase.notice) setPhase({ kind: "form", notice: null });
     setPending(true);
     try {
       const step = scheduleStep(
@@ -324,13 +327,18 @@ export function ScheduleDialog({
             id={`${ids}-when`}
             type="datetime-local"
             required
+            aria-describedby={describedBy(zone && `${ids}-zone`, phase.notice && `${ids}-notice`)}
             value={localAt}
             onChange={(event) => setLocalAt(event.target.value)}
           />
-          {zone && <p className="text-xs text-muted-foreground">{zoneNote(zone)}</p>}
+          {zone && (
+            <p id={`${ids}-zone`} className="text-xs text-muted-foreground">
+              {zoneNote(zone)}
+            </p>
+          )}
         </div>
         {phase.notice && (
-          <p role="alert" className="text-sm text-destructive">
+          <p id={`${ids}-notice`} role="alert" className="text-sm text-destructive">
             {phase.notice}
           </p>
         )}
