@@ -403,6 +403,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # loud: the slot key's contract, the serve and miss doors and the
             # reaper's cadence-only slot expiry (#1413, phase 3).
             "089_planned_serve_and_misses.sql",
+            # 095 appends §38: every SECURITY DEFINER function pins its
+            # search_path with pg_temp last, and a census holds the doors to it.
+            "095_definer_search_path_pinned.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

@@ -340,6 +340,13 @@
       "label": "§32 planned stories are served on time or missed out loud (089, #1413) — the unconditional slot key dropped and the cadence-only key renamed to it (contract), fn_prompts_due re-created serving planned rows only while servable and in their late window and skipping every cancel-flagged row, fn_reaper_sweep replace whose slot expiry takes cadence rows only, and fn_planned_misses listing the planned rows that will not be served with their reason",
       "doc": "07-security-model.md",
       "ordinal": 30
+    },
+    {
+      "sha256": "0a9c8e5783f817633e0cdcf84ee5955846eb23128d6a2d81128e25d7ddda1014",
+      "class": "normative",
+      "label": "§38 every SECURITY DEFINER function pins search_path = pg_catalog, public, pg_temp, with pg_temp last (095) — one ALTER FUNCTION ... SET search_path per door, the 29 definer functions in public written out by signature, no body restated",
+      "doc": "07-security-model.md",
+      "ordinal": 31
     }
   ],
   "policy_expansion": {

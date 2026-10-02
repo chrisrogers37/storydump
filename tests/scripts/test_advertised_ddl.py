@@ -298,8 +298,10 @@ class TestAgainstTheRealDocs:
         # deadline (086, #1429) makes it 41; §30's reaper leg for the
         # cancels users asked for (087, #1235) makes it 42; §31's ledger
         # learning 'planned' (088, #1413) makes it 43; and §32's planned
-        # stories served on time or missed out loud (089, #1413) make it 44.
-        assert classes.count("normative") == 44
+        # stories served on time or missed out loud (089, #1413) make it 44;
+        # §38's definer functions pinning search_path with pg_temp last (095)
+        # make it 45.
+        assert classes.count("normative") == 45
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
