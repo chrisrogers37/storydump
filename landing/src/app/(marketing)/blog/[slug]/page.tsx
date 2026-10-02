@@ -93,14 +93,15 @@ export default async function BlogPost({ params }: { params: Params }) {
       <footer className="mt-16 rounded-lg border bg-muted/50 p-8 text-center">
         <h2 className="text-xl font-semibold">Ready to automate your Stories?</h2>
         <p className="mt-2 text-muted-foreground">
-          Storydump connects Google Drive, Telegram, and the Instagram API into
-          one hands-off pipeline. Free during beta.
+          Storydump picks today&apos;s Story from your own photos and videos and
+          brings it to your team on time, in Telegram or on the web. One tap
+          posts it. Free during beta.
         </p>
         <Link
           href="/#waitlist"
           className="mt-4 inline-block rounded-md bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
-          Get Early Access
+          Join the waitlist
         </Link>
       </footer>
     </article>

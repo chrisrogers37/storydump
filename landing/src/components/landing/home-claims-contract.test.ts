@@ -10,7 +10,8 @@
  *      signup offers no Telegram community link (linking a group is setup).
  *   4. No real account appears in the demos: only the placeholders.
  *
- * Checked by source, across every file the marketing pages render from.
+ * Checked by source, across the landing and layout components and the
+ * marketing pages that carry their own call to action.
  */
 
 import { readdirSync, readFileSync } from "fs"
@@ -20,15 +21,17 @@ import { describe, expect, it } from "vitest"
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const DIRS = ["components/landing", "components/layout"]
+// Marketing pages that carry their own signup call to action.
+const FILES = ["app/(marketing)/blog/[slug]/page.tsx"]
 
-const sources = DIRS.flatMap((dir) =>
-  readdirSync(path.join(SRC, dir))
-    .filter((f) => f.endsWith(".tsx") && !f.includes(".test."))
-    .map((f) => ({
-      file: `${dir}/${f}`,
-      text: readFileSync(path.join(SRC, dir, f), "utf8"),
-    }))
-)
+const sources = [
+  ...DIRS.flatMap((dir) =>
+    readdirSync(path.join(SRC, dir))
+      .filter((f) => f.endsWith(".tsx") && !f.includes(".test."))
+      .map((f) => `${dir}/${f}`)
+  ),
+  ...FILES,
+].map((file) => ({ file, text: readFileSync(path.join(SRC, file), "utf8") }))
 const all = sources.map((s) => s.text).join("\n")
 const read = (file: string) => readFileSync(path.join(SRC, file), "utf8")
 
@@ -40,6 +43,7 @@ describe("the home page's claims", () => {
         "components/landing/waitlist-form.tsx",
         "components/landing/final-cta.tsx",
         "components/layout/header.tsx",
+        "app/(marketing)/blog/[slug]/page.tsx",
       ])
     )
   })
@@ -79,6 +83,7 @@ describe("the home page's claims", () => {
   it("labels every signup button Join the waitlist", () => {
     expect(read("components/landing/waitlist-form.tsx")).toContain("Join the waitlist")
     expect(read("components/layout/header.tsx")).toMatch(/Join\s.*waitlist/)
+    expect(read("app/(marketing)/blog/[slug]/page.tsx")).toContain("Join the waitlist")
   })
 
   it("uses only placeholder handles and addresses", () => {

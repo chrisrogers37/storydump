@@ -43,9 +43,18 @@ function readRegistered(): boolean {
   }
 }
 
+// The browser's "storage" event reaches other tabs only, so a signup also
+// announces itself here: the page's other form (hero and closing section)
+// stops offering the input once either one succeeds.
+const REGISTERED_EVENT = "storydump-waitlist-registered"
+
 function subscribeToStorage(onChange: () => void): () => void {
   window.addEventListener("storage", onChange)
-  return () => window.removeEventListener("storage", onChange)
+  window.addEventListener(REGISTERED_EVENT, onChange)
+  return () => {
+    window.removeEventListener("storage", onChange)
+    window.removeEventListener(REGISTERED_EVENT, onChange)
+  }
 }
 
 function markRegistered() {
@@ -54,6 +63,7 @@ function markRegistered() {
   } catch {
     // Storage blocked (private mode, a policy): the form still worked.
   }
+  window.dispatchEvent(new Event(REGISTERED_EVENT))
 }
 
 export function WaitlistForm({
@@ -73,6 +83,9 @@ export function WaitlistForm({
   const seenBefore = status === "idle" && registered
   const shownStatus: FormStatus = seenBefore ? "duplicate" : status
   const shownMessage = seenBefore ? "You're already on the list!" : message
+  // Header links and the blog's call to action point at #waitlist: the hero's
+  // form. The closing section's form takes its own id so the page has one.
+  const anchorId = variant === "hero" ? "waitlist" : "waitlist-footer"
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -121,7 +134,7 @@ export function WaitlistForm({
   if (shownStatus === "success" || shownStatus === "duplicate") {
     return (
       <div
-        id="waitlist"
+        id={anchorId}
         className={cn(
           variant === "hero" ? "text-left" : "text-center",
           className
@@ -142,7 +155,7 @@ export function WaitlistForm({
 
   return (
     <form
-      id="waitlist"
+      id={anchorId}
       onSubmit={handleSubmit}
       className={cn("w-full", className)}
     >
@@ -181,7 +194,7 @@ export function WaitlistForm({
           className="mt-2 text-sm font-medium text-[#9f1d1d]"
           role="alert"
         >
-          {shownMessage}
+          {message}
         </p>
       )}
     </form>
