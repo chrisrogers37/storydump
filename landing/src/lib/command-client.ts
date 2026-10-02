@@ -1,4 +1,5 @@
 import { callBff, postJson } from "./bff";
+import { refusalFacts, type RefusalFacts } from "./refusal-facts";
 import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 /**
  * The browser's one door to the command route (#1057/#1063, epic P3).
@@ -45,7 +46,7 @@ import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 
 export type SubmitResult =
   | { ok: true; data: Record<string, unknown> }
-  | { ok: false; error: string; status: number };
+  | { ok: false; error: string; status: number; facts?: RefusalFacts };
 
 /**
  * The reason string for a `replayed` answer. Its own code, not folded into a
@@ -100,7 +101,12 @@ export async function submitCommand(
         : typeof result.body.reason === "string"
           ? result.body.reason
           : result.error;
-    return { ok: false, error, status: result.status };
+    // Re-checked with the route's own allow-list, so the browser holds nothing
+    // the list would not pass, whatever arrived.
+    const facts = refusalFacts(result.body.facts);
+    return facts
+      ? { ok: false, error, status: result.status, facts }
+      : { ok: false, error, status: result.status };
   }
 
   if (result.data.outcome === "replayed") {
