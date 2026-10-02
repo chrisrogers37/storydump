@@ -766,8 +766,6 @@ async def _notify_exhausted(session, job) -> None:
         # line — never left reading Approved behind a generic notice.
         await publish_pipeline.park_exhausted(session, job)
         return
-    if kind in _SYNC_KINDS:
-        await _rearm_source(session, job)
     bindings = await prompts.push_bindings(session, str(workspace_id))
     await outbox.fanout_notification(
         session,
@@ -993,6 +991,12 @@ class WorkLoop:
                 )
                 try:
                     async with self._session_for(job) as session:
+                        # A spent sync's source is re-armed here, in the
+                        # finalize's own transaction and ahead of the notice:
+                        # the re-arm is what makes "will try again tomorrow"
+                        # true, so the notice's rollback must not take it too.
+                        if kind in _SYNC_KINDS:
+                            await _rearm_source(session, job)
                         # The notice rides a savepoint: a failure writing it
                         # must not take the finalize down with it (the log
                         # already carries the failure; the notice is a
