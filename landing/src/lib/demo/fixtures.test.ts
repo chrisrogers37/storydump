@@ -1,11 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { deriveConditions } from "@/lib/conditions";
 import { deriveFolderMix, deriveSummary } from "@/lib/dashboard-payloads";
-import { sampleWorkspace } from "./fixtures";
+import { SAMPLE_POSTING_HOURS, SAMPLE_TZ, sampleWorkspace } from "./fixtures";
 
 const NOW = new Date("2026-10-15T16:20:00.000Z");
 const w = sampleWorkspace(NOW);
 const stories = [...w.queue, ...w.history];
+
+/** An instant on the sample workspace's own clock. */
+function onItsClock(iso: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: SAMPLE_TZ,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "numeric",
+    minute: "numeric",
+  }).formatToParts(new Date(iso));
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return {
+    date: `${part("year")}-${part("month")}-${part("day")}`,
+    hour: Number(part("hour")),
+    minute: Number(part("minute")),
+  };
+}
 
 describe("the sample workspace", () => {
   it("needs nothing: a raised condition would link into the real dashboard", () => {
@@ -46,6 +65,25 @@ describe("the sample workspace", () => {
 
     const slots = w.queue.map((i) => Date.parse(i.schedule_slot_at));
     expect(slots).toEqual([...slots].sort((a, b) => a - b));
+  });
+
+  it("posts only inside its posting hours, on its own clock, across both clock changes", () => {
+    // Mid-October; the morning after clocks go back; the morning after they go forward.
+    for (const at of ["2026-10-15T16:20:00Z", "2026-11-01T14:00:00Z", "2026-03-08T15:00:00Z"]) {
+      const sample = sampleWorkspace(new Date(at));
+      for (const story of [...sample.queue, ...sample.history]) {
+        const { hour, minute } = onItsClock(story.schedule_slot_at);
+        expect(SAMPLE_POSTING_HOURS, `${at}: ${story.file_name}`).toContain(hour);
+        expect(minute, `${at}: ${story.file_name}`).toBe(0);
+      }
+    }
+  });
+
+  it("counts its days by its own calendar, as `local_date` does", () => {
+    // 22:00 in New York is already the next day in UTC.
+    const evening = sampleWorkspace(new Date("2026-10-16T02:00:00Z"));
+    expect(evening.stats.posts_by_day.at(-1)?.local_date).toBe("2026-10-15");
+    expect(w.stats.posts_by_day.at(-1)?.local_date).toBe(onItsClock(NOW.toISOString()).date);
   });
 
   it("is built from now, so it is always current", () => {
