@@ -97,8 +97,8 @@ check "the transport stops carrying a 429's code" src/channels/telegram_transpor
 check "an error keeps a code of any type" $OUTBOX '        self.code = code if valid else None' '        self.code = code' "$UNIT" "$RECORD -k anything_else_is_none"
 check "a foreign error's code is recorded as the provider's" $OUTBOX '        if isinstance(error, ChannelSendError)' '        if hasattr(error, "code")' "$UNIT" "$RECORD -k foreign_error"
 # A dead token is definitive (#1493): its row fails after the one attempt, and nothing resends it.
-check "a dead token goes ambiguous again (unit)" $OUTBOX '    if isinstance(error, (ChannelRefused, CredentialDead)):' '    if isinstance(error, ChannelRefused):' "$UNIT" "$RECORD -k dead_token_fails_the_row"
-check "a dead token goes ambiguous again (gate)" $OUTBOX '    if isinstance(error, (ChannelRefused, CredentialDead)):' '    if isinstance(error, ChannelRefused):' "$GATE" "tests/scripts/test_w2_transport_gate.py -k auth_dead_send_fails"
+check "a dead token goes ambiguous again (unit)" $OUTBOX '    if isinstance(error, (ChannelRefused, CredentialDead)):' '    if isinstance(error, ChannelRefused):' "$UNIT" "$RECORD -k credential_dead"
+check "a dead token goes ambiguous again (gate)" $OUTBOX '    if isinstance(error, (ChannelRefused, CredentialDead)):' '    if isinstance(error, ChannelRefused):' "$GATE" "$DB -k dead_token_is_recorded_and_fails"
 # The other writer, against the real table as svc_worker.
 check "a stranded row is recorded with no time" $OUTBOX '"       last_failed_at = now()"' '"       last_failed_at = NULL"' "$GATE" "$DB -k stranded_row_is_recorded"
 # The doors, mutated in the plan's replayed block and read as svc_ingress.

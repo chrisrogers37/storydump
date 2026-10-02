@@ -95,9 +95,10 @@ async def _run_interactive_once(lane_db, engine, transport, *, config=None):
     return wl, claimed
 
 
-def _age_outbox(sync_conn, binding, seconds):
-    """Backdate a binding's outbox rows by *seconds*, with the trigger that
-    would stamp `updated_at` back to now held off for the one statement."""
+def _age_past_ambiguity_backoff(sync_conn, binding):
+    """Backdate a binding's outbox rows past `AMBIGUOUS_RESOLVE_AFTER_SECONDS`,
+    with the trigger that would stamp `updated_at` back to now held off for
+    the one statement."""
     with sync_conn.cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
         cur.execute(
@@ -108,7 +109,7 @@ def _age_outbox(sync_conn, binding, seconds):
                 "UPDATE channel_outbox"
                 " SET updated_at = now() - make_interval(secs => %s)"
                 " WHERE binding_id = %s",
-                (seconds, binding),
+                (AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1, binding),
             )
         finally:
             cur.execute(
@@ -179,7 +180,7 @@ class TestDeliveryEndToEnd:
         engine = create_async_engine(async_url(lane_db))
         try:
             assert await _sweep(engine) == 0, "a fresh ambiguous row waits"
-            _age_outbox(sync_conn, binding, AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1)
+            _age_past_ambiguity_backoff(sync_conn, binding)
             assert await _sweep(engine) == 1, "an aged ambiguous row needs a sender"
         finally:
             await engine.dispose()
@@ -189,10 +190,9 @@ class TestDeadCredentialMidRun:
     async def test_an_auth_dead_send_fails_its_row_once_and_the_worker_survives(
         self, lane_db, sync_conn
     ):
-        """A dead token is definitive (#1493): the row fails after its one
-        attempt, recorded as `credential_dead`, and nothing resends it. Aged
-        past the ambiguity backoff, an ambiguous row would mint a sender (the
-        test above); this one mints none."""
+        """Aged past the ambiguity backoff, an ambiguous row would mint a
+        sender (the test above); a failed one mints none. The binding stays
+        active: a dead token is not a gone chat."""
         chain, binding = _seed_binding_with_pending(sync_conn, "w2dead", rows=1)
         engine = create_async_engine(async_url(lane_db))
         try:
@@ -208,7 +208,7 @@ class TestDeadCredentialMidRun:
             assert claimed is True and wl.processed == 1, (
                 "the hold ends and the job finalizes; the ROW carries the state"
             )
-            assert transport.auth_failures == 1, "one attempt"
+            assert transport.auth_failures == 1
             with sync_conn.cursor() as cur:
                 cur.execute(
                     "SELECT state, attempts, last_failure_class, last_error_code"
@@ -216,9 +216,13 @@ class TestDeadCredentialMidRun:
                     (binding,),
                 )
                 assert cur.fetchone() == ("failed", 1, "credential_dead", 401)
+                cur.execute(
+                    "SELECT state FROM channel_bindings WHERE id = %s", (binding,)
+                )
+                assert cur.fetchone()[0] == "active"
                 cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
                 assert cur.fetchone()[0] == 0
-            _age_outbox(sync_conn, binding, AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1)
+            _age_past_ambiguity_backoff(sync_conn, binding)
             assert await _sweep(engine) == 0, "a failed row mints no sender"
         finally:
             await engine.dispose()

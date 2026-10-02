@@ -145,9 +145,8 @@ class MediaTransient(Exception):
 
 class TelegramAuthDead(CredentialDead, TelegramSendError):
     """Telegram rejected the credential itself (401; a 403 is the chat's,
-    `_chat_gone`) — the loud class. For the outbox it is a `CredentialDead`:
-    recorded as `credential_dead` (090, #1482), and the row fails at once
-    rather than going ambiguous (#1493)."""
+    `_chat_gone`) — the loud class. For the outbox it is a `CredentialDead`,
+    recorded as `credential_dead` rather than as a lost response (090, #1482)."""
 
 
 class SendReceipt(str):

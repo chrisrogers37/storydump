@@ -170,15 +170,13 @@ class TestTheClassAndCodeRideTheOneCAS:
         assert params["s"] == to_state and params["i"] == "row-1"
         assert result["external_message_ref"] is None
 
-    async def test_a_dead_token_fails_the_row_and_keeps_the_binding(self):
-        """A 401 is definitive (#1493): every resend would meet it again, so
-        the row fails instead of going ambiguous. It is the bot's credential,
-        not the chat: the result names no gone destination, so the sender
-        does not retire the binding."""
+    async def test_a_dead_token_keeps_the_binding(self):
+        """A 401 fails its row (#1493; the 401 case above), but it is the bot's
+        credential, not the chat: the result names no gone destination, which
+        is what the sender reads before it retires a binding."""
         error = await _raised_by(401, _refusal(401, "Unauthorized"))
         result = await outbox.settle(_Session(), ROW, error=error)
-        assert result["state"] == "failed"
-        assert set(result) == set(ROW) | {"state", "external_message_ref"}
+        assert not result.get("destination_gone")
 
     async def test_a_fenced_settle_records_nothing(self):
         """The row left `sending` under us: the CAS matches nothing, so the
