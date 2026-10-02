@@ -91,6 +91,7 @@ def test_a_refused_link_states_the_rule_whole(tmp_path):
     assert error["reason"] == "invalid_args"
     assert "https://" in error["detail"]
     assert f"{LINK_URL_MAX:,} characters" in error["detail"]
+    assert "no user name or password" in error["detail"]
     assert "--clear" in error["fix"]
 
 

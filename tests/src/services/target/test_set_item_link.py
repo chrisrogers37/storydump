@@ -117,6 +117,10 @@ class TestRefusedBeforeTheDatabaseIsAsked:
             # A line break inside would put a second line on the card.
             "https://example.com/a\nb",
             "https://example.com/a\tb",
+            # A user name or a password would sit on the card in the clear.
+            "https://user:secret@example.com/spring-sale",
+            "https://user@example.com/spring-sale",
+            "https://:secret@example.com/spring-sale",
             "",
             "   ",
         ],

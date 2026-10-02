@@ -696,7 +696,7 @@ def _link_refused(exc: ApiError) -> Optional[tuple[str, str]]:
     if exc.reason == "invalid_args":
         return (
             f"a link is an https:// address of at most {LINK_URL_MAX:,} characters,"
-            " with no spaces in it",
+            " with no spaces and no user name or password in it",
             "give the whole link, starting https://, or --clear to remove it",
         )
     if exc.reason == "not_found" and exc.facts.get("missing") in MISSING_SENTENCES:

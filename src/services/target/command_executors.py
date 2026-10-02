@@ -1084,7 +1084,8 @@ async def reschedule_item(session, command: Command) -> CommandResult:
 
 def _link_url(command: Command) -> Optional[str]:
     """`link_url`: an `https://` address of at most `LINK_URL_MAX` characters
-    with no space or control character inside, or `null` to clear the link.
+    with no space, control character, user name or password in it, or `null`
+    to clear the link.
     It reaches a card as a line of text and the web as an anchor, so only
     https is taken; a missing key is refused, never read as a clear."""
     if "link_url" not in command.args:
@@ -1114,6 +1115,11 @@ def _link_url(command: Command) -> Optional[str]:
         raise CommandRefused("invalid_args", "link_url is not an https link") from None
     if parts.scheme != "https" or not parts.hostname:
         raise CommandRefused("invalid_args", "link_url is not an https link")
+    if "@" in parts.netloc:
+        # A user name or a password would sit on the card in the clear.
+        raise CommandRefused(
+            "invalid_args", "link_url has a user name or password in it"
+        )
     return link
 
 
