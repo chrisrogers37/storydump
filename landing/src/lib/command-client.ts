@@ -223,6 +223,9 @@ export const LOCK_CLAUSES: Record<string, string> = {
 /** `item_<state>`: the item itself is what is in the way. */
 const ITEM_GONE_CLAUSE = "it is no longer available";
 
+/** Except an item Instagram cannot post, which is still in the library: the remedy is another item. */
+const ITEM_UNSUPPORTED_CLAUSE = "Instagram can't post it";
+
 /**
  * A refused planned time, by the rule it broke (`facts.at_rule`), keyed by the
  * vocabulary's `AT_RULE_SENTENCES` (`wire-contract.test.ts` holds the keys
@@ -240,7 +243,8 @@ export const AT_RULE_COPY: Record<string, string> = {
 function lockClauses(inTheWay: readonly string[] | undefined): string[] {
   const clauses: string[] = [];
   for (const kind of inTheWay ?? []) {
-    if (kind.startsWith("item_")) clauses.push(ITEM_GONE_CLAUSE);
+    if (kind === "item_unsupported") clauses.push(ITEM_UNSUPPORTED_CLAUSE);
+    else if (kind.startsWith("item_")) clauses.push(ITEM_GONE_CLAUSE);
     else if (Object.hasOwn(LOCK_CLAUSES, kind)) clauses.push(LOCK_CLAUSES[kind]);
   }
   return clauses;

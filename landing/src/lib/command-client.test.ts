@@ -495,6 +495,17 @@ describe("scheduleRefusalCopy", () => {
     ).toMatch(/no longer available/);
   });
 
+  it("says Instagram can't post an item it can't, rather than that the item is gone", () => {
+    // The item is still in the library, so "no longer available" would send a
+    // person looking for it; another item is the remedy.
+    const copy = scheduleRefusalCopy("locked", 409, {
+      in_the_way: ["item_unsupported"],
+      overridable: false,
+    });
+    expect(copy).toMatch(/Instagram can't post it/);
+    expect(copy).not.toMatch(/no longer available/);
+  });
+
   it("tells a person whose earlier story was just cancelled to plan it again once it clears", () => {
     expect(
       scheduleRefusalCopy("illegal_transition", 409, {
