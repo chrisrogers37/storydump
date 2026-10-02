@@ -10,9 +10,9 @@
  * (#1048's class). Typing the response for what it is, is the fix.
  *
  * A NARROWING, not the whole projection: `workspaces.list_accounts` also returns
- * `posts_per_day`, `posting_hours_start/end`, `tz` and `created_at`. They are
- * omitted because nothing renders them yet, not because the API stopped sending
- * them — add the field here when a screen needs it.
+ * `posts_per_day`, `posting_hours_start/end` and `created_at`. They are omitted
+ * because nothing renders them yet, not because the API stopped sending them —
+ * add the field here when a screen needs it.
  */
 export interface Destination {
   id: string;
@@ -27,6 +27,11 @@ export interface Destination {
   /** #1220 step 2. `none` = never connected; `expired`/`revoked` = reconnect needed. */
   credential_status: "none" | "active" | "expired" | "revoked";
   credential_connected_at: string | null;
+  /**
+   * The account's own IANA zone. Null means it reads in the workspace's, as
+   * `schedule_item` does (`COALESCE(a.tz, w.tz)`); the Schedule dialog names it.
+   */
+  tz: string | null;
 }
 
 /** A Telegram chat this workspace's cards go to (`GET /workspaces/{ws}/bindings`). */
