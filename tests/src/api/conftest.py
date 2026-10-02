@@ -22,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
+from starlette.types import ASGIApp
 
 from src.api.app import create_app
 from src.api.principal import COOKIE, Principal, current_principal
@@ -102,6 +103,46 @@ def post_body(
     request = client.build_request("POST", path, content=content, headers=headers)
     assert ("content-length" in request.headers) is not streamed
     return client.send(request)
+
+
+async def post_messages(
+    app: ASGIApp,
+    path: str,
+    chunks: list[bytes],
+    *,
+    declared: bool = False,
+    content_type: str | None = None,
+) -> tuple[httpx.Response, list[int]]:
+    """POST *chunks* to *app* at *path*, each as its own ``http.request``
+    message, which `post_body` cannot do: the TestClient joins a streamed body
+    into one message. No Content-Length is sent unless *declared*, which is
+    checked. Returns the response and the size of each non-empty body message
+    the app received, so a test can show that more than one arrived."""
+    received: list[int] = []
+
+    async def recording(scope, receive, send):
+        async def recorded():
+            message = await receive()
+            if message["type"] == "http.request" and message.get("body"):
+                received.append(len(message["body"]))
+            return message
+
+        await app(scope, recorded, send)
+
+    async def body():
+        for chunk in chunks:
+            yield chunk
+
+    headers = {"Content-Type": content_type} if content_type else {}
+    if declared:
+        headers["Content-Length"] = str(sum(map(len, chunks)))
+    transport = httpx.ASGITransport(app=recording)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        resp = await client.post(path, content=body(), headers=headers)
+    assert ("content-length" in resp.request.headers) is declared
+    return resp, received
 
 
 class FakeSession:

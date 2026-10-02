@@ -24,9 +24,10 @@ from fastapi.testclient import TestClient
 from starlette.formparsers import MultiPartParser
 
 from src.api.app import create_app
+from src.api.routes.meta import SIGNED_REQUEST_MAX_BYTES
 from src.config.settings import settings
 from src.services.target import meta_callbacks
-from tests.src.api.conftest import post_body
+from tests.src.api.conftest import post_body, post_messages
 
 SECRET = "test-app-secret-not-a-real-one"
 SUBJECT = "1234567890"
@@ -470,6 +471,13 @@ META_POSTS = ("/webhooks/meta/deauthorize", "/webhooks/meta/data-deletion")
 FORM_TYPE = "application/x-www-form-urlencoded"
 
 
+def _form_in_two(size: int) -> list[bytes]:
+    """A urlencoded body of exactly *size* bytes, one field, as two messages."""
+    prefix = b"signed_request="
+    body = prefix + b"a" * (size - len(prefix))
+    return [body[: size // 2], body[size // 2 :]]
+
+
 class TestTheBodyIsBoundedBeforeItIsParsed:
     """Both doors are anonymous until the signature verifies, so neither lets
     the framework parse what arrives: only Meta's urlencoded form is read, only
@@ -512,6 +520,81 @@ class TestTheBodyIsBoundedBeforeItIsParsed:
             content_type=FORM_TYPE,
         )
         assert r.status_code == 413, r.text
+
+    @pytest.mark.parametrize("path", META_POSTS)
+    async def test_a_declared_length_over_the_cap_is_refused_before_the_body_is_read(
+        self, client, path
+    ):
+        """The declared length alone refuses the body: no body message is
+        received."""
+        chunk = b"a" * 1024
+        reads = []
+
+        async def receive():
+            reads.append(len(chunk))
+            return {"type": "http.request", "body": chunk, "more_body": True}
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", FORM_TYPE.encode()),
+                (b"content-length", str(SIGNED_REQUEST_MAX_BYTES + 1).encode()),
+            ],
+            "client": ("127.0.0.1", 123),
+            "server": ("testserver", 80),
+        }
+        await client.app(scope, receive, send)
+        starts = [m["status"] for m in sent if m["type"] == "http.response.start"]
+        assert starts == [413]
+        assert reads == []
+
+    @pytest.mark.parametrize("path", META_POSTS)
+    async def test_the_cap_is_on_the_total_across_messages(self, client, path):
+        """Each message is under the cap and their total is over it: the cap
+        counts the whole body, not one message at a time."""
+        resp, received = await post_messages(
+            client.app,
+            path,
+            _form_in_two(SIGNED_REQUEST_MAX_BYTES + 1),
+            content_type=FORM_TYPE,
+        )
+        assert len(received) == 2
+        assert max(received) <= SIGNED_REQUEST_MAX_BYTES < sum(received)
+        assert resp.status_code == 413, resp.text
+
+    @pytest.mark.parametrize("declared", [True, False], ids=["declared", "streamed"])
+    @pytest.mark.parametrize("path", META_POSTS)
+    async def test_a_form_of_exactly_the_cap_reaches_verification(
+        self, client, path, declared
+    ):
+        """The cap is the most that is read: a body of exactly
+        `SIGNED_REQUEST_MAX_BYTES`, its length declared or not, is read in full
+        and answered by verification."""
+        resp, received = await post_messages(
+            client.app,
+            path,
+            _form_in_two(SIGNED_REQUEST_MAX_BYTES),
+            declared=declared,
+            content_type=FORM_TYPE,
+        )
+        assert len(received) == 2
+        assert sum(received) == SIGNED_REQUEST_MAX_BYTES
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {"detail": "invalid signed_request"}
 
     @pytest.mark.parametrize(
         "body",

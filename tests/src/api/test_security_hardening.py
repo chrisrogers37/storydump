@@ -2,8 +2,9 @@
 startup-secret check went with the legacy tier's `ConfigValidator`, #1216)."""
 
 import pytest
+from fastapi.routing import APIRoute
 
-from tests.src.api.conftest import post_body
+from tests.src.api.conftest import post_body, post_messages
 
 
 # =============================================================================
@@ -357,3 +358,32 @@ class TestBodySizeLimit:
         resp = post_body(client, "/probe", b"x" * self.LIMIT, streamed=streamed)
         assert resp.status_code == 200, resp.text
         assert seen == ["ran", self.LIMIT]
+
+    async def test_the_limit_is_on_the_total_across_messages(self, probe):
+        """Each message is under the limit and their total is over it: the
+        limit counts the whole body, not one message at a time."""
+        client, seen = probe
+        resp, received = await post_messages(client.app, "/probe", [b"x" * 600] * 2)
+        assert received == [600, 600]
+        assert max(received) <= self.LIMIT < sum(received)
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        # The route ran -- no length was declared to refuse on -- and the read
+        # it began never completed.
+        assert seen == ["ran"]
+
+
+class TestRoutesReadTheirOwnBodies:
+    def test_no_route_declares_a_body_parameter(self, app):
+        """A route reads its own body after its gate, so none declares a body
+        parameter for the framework to parse first; bounds on the body live in
+        the app's body size limit and in the routes themselves."""
+        routes = [route for route in app.routes if isinstance(route, APIRoute)]
+        assert routes, "no APIRoute to walk"
+        declared = sorted(
+            f"{method} {route.path}"
+            for route in routes
+            if route.body_field is not None
+            for method in route.methods
+        )
+        assert declared == [], declared
