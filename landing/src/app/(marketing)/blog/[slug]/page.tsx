@@ -16,6 +16,10 @@ const articleComponents: Record<string, React.ComponentType> = {
   "telegram-instagram-approval-workflow": TelegramInstagramApproval,
 }
 
+// An unknown slug is a 404 at routing, served by app/not-found.tsx like any
+// other unmatched URL, rather than rendered and then refused.
+export const dynamicParams = false
+
 export function generateStaticParams() {
   return posts.map((post) => ({ slug: post.slug }))
 }

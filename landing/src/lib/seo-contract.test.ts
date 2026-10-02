@@ -30,7 +30,7 @@ import sitemap from "@/app/sitemap"
 import { siteConfig } from "@/config/site"
 import { posts } from "@/lib/blog"
 import { blogPosting, breadcrumbList } from "@/lib/json-ld"
-import { homeSocial } from "@/lib/seo"
+import { homeSocial, ogImageUrl } from "@/lib/seo"
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const APP = path.join(SRC, "app")
@@ -72,7 +72,9 @@ function sourcesFor(file: string): string[] {
 const isNoindex = (file: string) =>
   sourcesFor(file).some((src) => src.includes("...noindexMetadata"))
 
-const sitemapPaths = sitemap().map((entry) => entry.url.slice(siteConfig.url.length))
+const sitemapPaths = sitemap().map(
+  (entry) => entry.url.slice(siteConfig.url.length) || "/"
+)
 
 /** The rendered metadata of the marketing page serving `urlPath`. */
 async function metadataFor(urlPath: string): Promise<Metadata> {
@@ -199,8 +201,24 @@ describe("JSON-LD", () => {
       { name: "Blog", path: "/blog" },
     ])
     expect(data.itemListElement.map((i) => [i.position, i.item])).toEqual([
-      [1, `${siteConfig.url}/`],
+      [1, siteConfig.url], // the canonical form: no trailing slash
       [2, `${siteConfig.url}/blog`],
     ])
+  })
+})
+
+describe("social card", () => {
+  const subtitleOf = (subtitle: string) =>
+    new URL(ogImageUrl("Title", subtitle)).searchParams.get("subtitle")
+
+  it("passes a short subtitle through unchanged", () => {
+    expect(subtitleOf("One tap posts it.")).toBe("One tap posts it.")
+  })
+
+  it("shortens a long subtitle at a word break, never mid-word", () => {
+    const long = "word ".repeat(40).trim()
+    const shown = subtitleOf(long)!
+    expect(shown.length).toBeLessThanOrEqual(100)
+    expect(shown).toMatch(/ word…$/)
   })
 })

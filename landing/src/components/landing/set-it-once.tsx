@@ -110,11 +110,11 @@ export function SetItOnce() {
               adding, and it keeps going.
             </p>
           </div>
-          <ol aria-label="Next five in line" className="grid grid-cols-3 gap-3 sm:grid-cols-5">
+          <ol aria-label="Next five in line" className="grid grid-cols-5 gap-2 sm:gap-3">
             {nextUp.map(({ art, note }, i) => (
               <li key={art}>
-                <StoryArt kind={art} className="aspect-[9/16] w-full rounded-xl text-[13px]" />
-                <p className={`mt-2 font-mono text-[11px] leading-tight ${note === NEW ? "text-tap" : "text-white/70"}`}>
+                <StoryArt kind={art} className="aspect-[9/16] w-full rounded-lg text-[8px] sm:rounded-xl sm:text-[13px]" />
+                <p className={`mt-2 font-mono text-[10px] leading-tight sm:text-[11px] ${note === NEW ? "text-tap" : "text-white/70"}`}>
                   <span className="sr-only">{i + 1}: </span>
                   {note}
                 </p>

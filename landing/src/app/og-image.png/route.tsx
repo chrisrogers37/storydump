@@ -3,11 +3,18 @@ import type { NextRequest } from "next/server"
 
 export const runtime = "edge"
 
+// Direction A's palette (globals.css: paper, ink, tap). The card is drawn with
+// next/og's bundled font, so it fetches nothing from another origin.
+const PAPER = "#f4f1ea"
+const INK = "#15130f"
+const TAP = "#ff5a1f"
+
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl
-  const title = searchParams.get("title") || "Storydump"
+  const title = searchParams.get("title") || "Instagram Stories, on tap"
   const subtitle =
-    searchParams.get("subtitle") || "Instagram Stories, on tap"
+    searchParams.get("subtitle") ||
+    "Stories from your Google Drive, brought to your team and posted with one tap."
 
   return new ImageResponse(
     (
@@ -17,56 +24,63 @@ export async function GET(request: NextRequest) {
           width: "100%",
           display: "flex",
           flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          backgroundColor: "#09090b",
-          color: "#fafafa",
-          fontFamily: "system-ui, sans-serif",
+          justifyContent: "space-between",
+          padding: "72px 80px",
+          backgroundColor: PAPER,
+          color: INK,
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: "24px",
-            padding: "0 80px",
-          }}
-        >
+        <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
           <div
             style={{
-              fontSize: "20px",
-              fontWeight: 600,
-              color: "#a855f7",
-              letterSpacing: "0.05em",
-              textTransform: "uppercase" as const,
+              width: "44px",
+              height: "44px",
+              borderRadius: "9999px",
+              border: `8px solid ${TAP}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
             }}
           >
+            <div
+              style={{
+                width: "12px",
+                height: "12px",
+                borderRadius: "9999px",
+                backgroundColor: INK,
+              }}
+            />
+          </div>
+          <div style={{ fontSize: "36px", fontWeight: 800, letterSpacing: "-0.03em" }}>
             Storydump
           </div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
           <div
             style={{
-              fontSize: "64px",
-              fontWeight: 700,
-              letterSpacing: "-0.02em",
-              textAlign: "center",
-              lineHeight: 1.1,
+              display: "flex",
+              fontSize: title.length > 40 ? "68px" : "84px",
+              fontWeight: 800,
+              letterSpacing: "-0.04em",
+              lineHeight: 1,
+              maxWidth: "1000px",
             }}
           >
             {title}
           </div>
           <div
             style={{
-              fontSize: "28px",
-              color: "#a1a1aa",
-              maxWidth: "800px",
-              textAlign: "center",
-              lineHeight: 1.4,
+              display: "flex",
+              fontSize: "30px",
+              lineHeight: 1.35,
+              color: "rgba(21, 19, 15, 0.75)",
+              maxWidth: "940px",
             }}
           >
             {subtitle}
           </div>
         </div>
+        <div style={{ display: "flex", height: "12px", width: "160px", borderRadius: "9999px", backgroundColor: TAP }} />
       </div>
     ),
     {

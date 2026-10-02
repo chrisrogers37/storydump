@@ -73,7 +73,8 @@ export function GoogleDriveInstagramIntegration() {
         the web. Someone taps <strong>Post now</strong>, and it goes out
         through Instagram&apos;s official API. For that step a private,
         temporary copy, framed to the 9:16 Story size, sits on Cloudinary
-        until the Story posts, and is then deleted. The{" "}
+        until the Story posts or is cancelled, and is then deleted; any copy
+        left over is deleted once it is 48 hours old. The{" "}
         <Link href="/privacy">Privacy page</Link> covers this in full.
       </p>
       <p>

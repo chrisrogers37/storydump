@@ -95,7 +95,8 @@ export function AutomateInstagramStories() {
         Instagram fetches the file itself, so it has to sit somewhere
         reachable for a moment. Storydump puts a private, temporary copy on
         Cloudinary, framed to the 9:16 Story size without cropping, and
-        deletes it once the Story posts. The{" "}
+        deletes it once the Story posts or is cancelled; any copy left over
+        is deleted once it is 48 hours old. The{" "}
         <Link href="/privacy">Privacy page</Link> describes each step.
       </p>
 

@@ -18,7 +18,9 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-  --font-display: var(--font-bricolage);
+  /* The generic fallbacks keep a sans face if the font is late on a device
+     without the metric-matched fallback's Arial. */
+  --font-display: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
   --color-chart-5: var(--chart-5);
   --color-chart-4: var(--chart-4);
   --color-chart-3: var(--chart-3);
@@ -118,6 +120,12 @@
 }
 
 /* The marketing sections' kicker and heading. */
+/* A right-edge fade on a box that scrolls sideways, so a phone reader can
+   see there is more. Used below md, where the content overflows. */
+@utility scroll-hint {
+  mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
+}
+
 @utility kicker {
   @apply font-mono text-xs font-medium tracking-[0.14em] uppercase;
 }

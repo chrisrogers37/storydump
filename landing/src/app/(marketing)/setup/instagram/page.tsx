@@ -7,7 +7,7 @@ import { Callout } from "@/components/setup/callout"
 import { Screenshot } from "@/components/setup/screenshot"
 
 const description =
-  "How to switch your Instagram account to Business or Creator for API access and automated Story posting."
+  "How to switch your Instagram account to Business or Creator, which Instagram requires before Storydump can post your Stories through its API."
 
 export const metadata: Metadata = pageMetadata({
   title: "Instagram Business Account Setup",

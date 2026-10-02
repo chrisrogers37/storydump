@@ -34,7 +34,7 @@ export default function MediaOrganize() {
             folders — subfolders inside a connected folder are just structure.
             Rename folders freely; the weight follows the folder.
           </p>
-          <pre className="mt-3 overflow-x-auto rounded-lg bg-muted p-4 text-sm">
+          <pre className="mt-3 overflow-x-auto rounded-lg bg-muted p-4 text-xs max-md:scroll-hint sm:text-sm">
             {`My Instagram Stories/
 ├── memes/                     ← connect this folder  (group "memes", 70%)
 │   ├── 2025/

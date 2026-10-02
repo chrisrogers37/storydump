@@ -7,7 +7,7 @@ import { Checklist } from "@/components/setup/checklist"
 export const metadata: Metadata = pageMetadata({
   title: "Getting Started",
   description:
-    "Connect your Instagram Business account, Google Drive, and Telegram to start automating your Stories.",
+    "What to have ready before you start with Storydump: an Instagram Business or Creator account, a Google Drive folder of media, and Telegram if you want it.",
   path: "/setup",
 })
 

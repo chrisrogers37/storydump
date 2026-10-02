@@ -1,5 +1,6 @@
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
+import { BrandMark } from "./brand-mark"
 
 export function Header() {
   return (
@@ -9,12 +10,7 @@ export function Header() {
           href="/"
           className="flex shrink-0 items-center gap-2 pr-2 font-display text-lg font-extrabold tracking-[-0.03em] text-ink sm:pr-0 sm:text-xl"
         >
-          <span
-            aria-hidden="true"
-            className="flex size-5 items-center justify-center rounded-full border-[3px] border-tap"
-          >
-            <span className="size-1.5 rounded-full bg-ink" />
-          </span>
+          <BrandMark />
           {siteConfig.name}
         </Link>
         <div className="flex items-center gap-2 sm:gap-4">

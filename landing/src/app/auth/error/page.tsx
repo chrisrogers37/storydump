@@ -32,7 +32,11 @@ export async function generateMetadata({
       : resolved === "instagram"
         ? "Instagram connection problem"
         : "Sign-in problem";
-  return { title: what, ...noindexMetadata };
+  return {
+    title: what,
+    description: `${siteConfig.name} couldn’t finish connecting your account.`,
+    ...noindexMetadata,
+  };
 }
 
 export default async function AuthErrorPage({
