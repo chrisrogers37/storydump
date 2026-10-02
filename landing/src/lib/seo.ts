@@ -18,7 +18,7 @@ export const indexablePages = [
   { path: "/setup", lastModified: "2026-09-21", changeFrequency: "monthly", priority: 0.8 },
   { path: "/setup/instagram", lastModified: "2026-09-21", changeFrequency: "monthly", priority: 0.7 },
   { path: "/setup/media-organize", lastModified: "2026-09-21", changeFrequency: "monthly", priority: 0.7 },
-  { path: "/privacy", lastModified: "2026-09-30", changeFrequency: "monthly", priority: 0.5 },
+  { path: "/privacy", lastModified: "2026-10-02", changeFrequency: "monthly", priority: 0.5 },
   { path: "/terms", lastModified: "2026-09-30", changeFrequency: "monthly", priority: 0.5 },
 ] as const
 
@@ -31,6 +31,32 @@ export const indexablePages = [
  */
 export const noindexMetadata = {
   robots: { index: false, follow: false },
+} satisfies Metadata
+
+const homeTitle = `${siteConfig.name} — Instagram Stories, on tap`
+
+/**
+ * The home page's social card, which the root layout also sets as every
+ * page's default. It carries no `url`: the home page adds `url: "/"` itself,
+ * and every indexable page sets its own through `pageMetadata`.
+ */
+export const homeSocial = {
+  openGraph: {
+    title: homeTitle,
+    description: siteConfig.description,
+    siteName: siteConfig.name,
+    type: "website",
+    locale: "en_US",
+    images: [
+      { url: "/og-image.png", width: 1200, height: 630, alt: homeTitle },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: homeTitle,
+    description: siteConfig.description,
+    images: ["/og-image.png"],
+  },
 } satisfies Metadata
 
 /** A path on this site as a full URL ("/" gives "https://storydump.app/"). */

@@ -3,7 +3,7 @@ import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
-const LAST_UPDATED = "September 30, 2026"
+const LAST_UPDATED = "October 2, 2026"
 
 export const metadata: Metadata = pageMetadata({
   title: "Privacy Policy",
@@ -247,6 +247,17 @@ export default function PrivacyPolicy() {
                 <tr className="border-b">
                   <td className="py-2 pr-4">Meta (Instagram Graph API)</td>
                   <td className="py-2 pr-4">Posting to Instagram</td>
+                  <td className="py-2">Global</td>
+                </tr>
+                <tr className="border-b">
+                  <td className="py-2 pr-4">Cloudinary</td>
+                  <td className="py-2 pr-4">
+                    A temporary, private copy of a Story&apos;s photo or video,
+                    framed to Instagram&apos;s 9:16 Story size, held only while
+                    it is posted through the Instagram API. It is deleted once
+                    the Story posts, and a scheduled sweep removes any copy left
+                    behind.
+                  </td>
                   <td className="py-2">Global</td>
                 </tr>
                 <tr className="border-b">
