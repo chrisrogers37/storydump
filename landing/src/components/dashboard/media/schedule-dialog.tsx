@@ -127,6 +127,12 @@ export function schedulePlan(
   return from === "confirm" ? { ...pick, overrideLocks: true } : { ...pick };
 }
 
+/** An `aria-describedby` from the ids of the sentences on screen, or none. */
+function describedBy(...ids: (string | false | null)[]): string | undefined {
+  const present = ids.filter((id): id is string => Boolean(id));
+  return present.length > 0 ? present.join(" ") : undefined;
+}
+
 /** The accounts and the workspace's zone, or null when they could not be read. */
 export type ScheduleTargets = { accounts: Destination[]; workspaceTz: string | null } | null;
 
@@ -220,16 +226,19 @@ export function ScheduleDialog({
       );
     }
 
+    // The result and the override's question replace the form, and the pressed
+    // button goes with it. So the button that answers each takes focus,
+    // described by its sentence, and a screen reader hears what happened.
     if (phase.kind === "done") {
       return (
         <>
-          <p className="text-sm">
+          <p id={`${ids}-result`} className="text-sm">
             {phase.outcome.when
               ? `Planned for ${phase.accountName}. Approval is asked on ${phase.outcome.when}.`
               : `Planned for ${phase.accountName}.`}
           </p>
           {phase.outcome.noChat && (
-            <p className="text-sm text-muted-foreground">
+            <p id={`${ids}-no-chat`} className="text-sm text-muted-foreground">
               No Telegram chat is linked to this workspace yet, so nothing is asked until one is.{" "}
               <Link href="/dashboard/settings?tab=integrations" className="underline">
                 Link one in Settings
@@ -239,7 +248,15 @@ export function ScheduleDialog({
           )}
           <DialogFooter>
             <DialogClose asChild>
-              <Button>Done</Button>
+              <Button
+                autoFocus
+                aria-describedby={describedBy(
+                  `${ids}-result`,
+                  phase.outcome.noChat && `${ids}-no-chat`,
+                )}
+              >
+                Done
+              </Button>
             </DialogClose>
           </DialogFooter>
         </>
@@ -249,7 +266,9 @@ export function ScheduleDialog({
     if (phase.kind === "confirm") {
       return (
         <>
-          <p className="text-sm">{phase.copy}</p>
+          <p id={`${ids}-question`} className="text-sm">
+            {phase.copy}
+          </p>
           <DialogFooter>
             <Button
               variant="outline"
@@ -258,7 +277,12 @@ export function ScheduleDialog({
             >
               Back
             </Button>
-            <Button disabled={pending} onClick={() => void submit()}>
+            <Button
+              autoFocus
+              aria-describedby={`${ids}-question`}
+              disabled={pending}
+              onClick={() => void submit()}
+            >
               {spinner}
               Schedule anyway
             </Button>
