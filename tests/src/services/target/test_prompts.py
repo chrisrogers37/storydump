@@ -1106,9 +1106,10 @@ class TestTheServeLegServesAStoryAsTheDoorReadIt:
 
 
 class TestBothSweepsTakeTheirRowsInOneOrder:
-    """Each sweep locks a row as it reaches it, so both take rows that tie on
-    workspace and due time in one total order, by id. The rows arrive here
-    in the opposite order, so a sort that kept their order would show."""
+    """Each sweep locks a row as it reaches it, so both take their rows in one
+    total order: by due time, and rows that tie on workspace and due time by
+    id. The rows arrive here out of that order, so a sort that kept their
+    order would show."""
 
     async def test_the_serve_leg_takes_tied_rows_by_id(self, monkeypatch):
         seen = _serving(monkeypatch)
@@ -1138,14 +1139,13 @@ class TestBothSweepsTakeTheirRowsInOneOrder:
         ended = [p["id"] for s, p in session.statements if s.startswith("UPDATE")]
         assert ended == ["i-1", "i-2", "i-3"]
 
-    def test_the_sweeps_take_due_stories_in_due_order(self):
-        def at(hour):
-            return datetime(2030, 1, 1, hour, tzinfo=timezone.utc)
-
-        rows = [
-            {"workspace_id": "w1", "schedule_slot_at": at(10), "id": "b"},
-            {"workspace_id": "w1", "schedule_slot_at": at(9), "id": "c"},
-            {"workspace_id": "w1", "schedule_slot_at": at(9), "id": "a"},
-        ]
-        order = sorted(rows, key=prompts._sweep_order)
-        assert [r["id"] for r in order] == ["a", "c", "b"]
+    async def test_the_serve_leg_takes_an_earlier_story_before_a_lower_id(
+        self, monkeypatch
+    ):
+        seen = _serving(monkeypatch)
+        later = SLOT + timedelta(hours=1)
+        session = _SweepSession(
+            due=[_due_story(id="i-1", schedule_slot_at=later), _due_story(id="i-2")]
+        )
+        await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        assert seen["served"] == ["i-2", "i-1"]

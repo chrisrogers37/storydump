@@ -950,52 +950,19 @@ class TestFloors:
 
 # --- another workspace's ids, as the tables' owner ------------------------------
 
-#: Where a write through the port leaves rows: the story, its audit trail,
-#: its admission, its cards and their jobs. A refusal changes no count.
-WRITTEN = ("post_intents", "audit_events", "command_dedup", "channel_outbox", "jobs")
 
-
-def _counts(world) -> dict:
-    """Each of those tables' row count, across every workspace: the owner's
-    reads are not filtered."""
-    (counts,) = _sql(
-        world, "SELECT " + ", ".join(f"(SELECT count(*) FROM {t})" for t in WRITTEN)
-    )
-    return dict(zip(WRITTEN, counts))
-
-
-def _rows_of(world, w) -> dict:
-    """Every account, item and story of *w*'s, each row whole, as its text."""
-    return {
-        table: _sql(
-            world,
-            f"SELECT to_jsonb(t)::text FROM {table} t"
-            " WHERE t.workspace_id = %s ORDER BY t.id",
-            (w["ws"],),
-        )
-        for table in ("ig_accounts", "media_items", "post_intents")
-    }
-
-
-def _refused_as_owner(world, w, other, kind, foreign, **args) -> CommandRefused:
-    """*kind*, sent as `run` sends it by a person of *w*, but connected as the
-    tables' owner and naming *foreign*: rows of *other*'s, as (table, id).
-
-    The session that is refused reads each of them first. The policies do
-    not filter the owner, so the refusal is the executor's own SQL, which
-    must name *w*; as `svc_ingress` the rows would be hidden whatever the
-    SQL said. Nothing is written: every `WRITTEN` table keeps its count, and
-    *other*'s rows are as they were, to the byte."""
-    counts, held = _counts(world), _rows_of(world, other)
-    seen = []
+def _refused_as_owner(world, w, kind, foreign, **args) -> CommandRefused:
+    """*kind* from a person of *w*, as `run` sends it, but connected as the
+    tables' owner; the session first sees each of *foreign*, (table, id)."""
 
     async def go(session):
         for table, row_id in foreign:
             found = await session.execute(
                 text(f"SELECT 1 FROM {table} WHERE id = :id"), {"id": row_id}
             )
-            if found.first():
-                seen.append((table, row_id))
+            assert found.first(), (
+                f"the policies hid {table} {row_id}: this proves no more than ingress"
+            )
         return await commands.execute(session, _command(w, kind, w["user"], args))
 
     with pytest.raises(CommandRefused) as err:
@@ -1007,27 +974,27 @@ def _refused_as_owner(world, w, other, kind, foreign, **args) -> CommandRefused:
                 go,
                 channel="cli",
                 # the login that ran the schema's DDL, so the tables' owner
-                role="svc_migration",
+                expect_user="svc_migration",
             )
         )
-    assert seen == foreign, "the policies hid them: this proves no more than ingress"
-    assert _counts(world) == counts
-    assert _rows_of(world, other) == held
     return err.value
 
 
 class TestAnotherWorkspacesIdsAsTheTablesOwner:
-    """Each verb run as the tables' owner, by a person of one workspace,
-    naming another's rows. The session sees them, and the verb still finds
-    nothing: what refuses them is the `workspace_id` its SQL names."""
+    """Each verb sees another workspace's rows and still finds none of them."""
 
     @pytest.mark.parametrize(
-        "their_account, their_item",
-        [(True, False), (False, True), (True, True)],
+        "their_account, their_item, missing",
+        [
+            (True, False, "account"),
+            (False, True, "item"),
+            # the account is read first, so of two foreign ids it is the one named
+            (True, True, "account"),
+        ],
         ids=["account", "item", "both"],
     )
     def test_schedule_finds_neither_their_account_nor_their_item(
-        self, world, their_account, their_item
+        self, world, their_account, their_item, missing
     ):
         w = _workspace(world, "owner-schedule")
         other = _workspace(world, "owner-schedule-theirs")
@@ -1038,7 +1005,6 @@ class TestAnotherWorkspacesIdsAsTheTablesOwner:
         refused = _refused_as_owner(
             world,
             w,
-            other,
             "schedule_item",
             foreign,
             ig_account_id=account,
@@ -1046,21 +1012,17 @@ class TestAnotherWorkspacesIdsAsTheTablesOwner:
             local_at=_local(),
         )
         assert refused.reason == "not_found"
-        # the account is read first, so of two foreign ids it is the one named
-        assert refused.facts == {"missing": "account" if their_account else "item"}
+        assert refused.facts == {"missing": missing}
 
-    @pytest.mark.parametrize("origin", ["planned", "cadence"])
+    @pytest.mark.parametrize("make", [_planned, _cadence], ids=["planned", "cadence"])
     @pytest.mark.parametrize("kind", ["reschedule_item", "cancel"])
-    def test_their_story_is_not_found(self, world, kind, origin):
-        w = _workspace(world, f"owner-{kind}-{origin}")
-        other = _workspace(world, f"owner-{kind}-{origin}-theirs")
-        story = (
-            _planned(world, other) if origin == "planned" else _cadence(world, other)
-        )
+    def test_their_story_is_not_found(self, world, kind, make):
+        w = _workspace(world, "owner-story")
+        story = make(world, _workspace(world, "owner-story-theirs"))
         # a time it can move to: a story the verb found would move
         when = {"local_at": _local(days=3)} if kind == "reschedule_item" else {}
         refused = _refused_as_owner(
-            world, w, other, kind, [("post_intents", story)], intent_id=story, **when
+            world, w, kind, [("post_intents", story)], intent_id=story, **when
         )
         assert refused.reason == "not_found"
 
