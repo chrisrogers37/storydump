@@ -221,6 +221,42 @@ describe("refusals", () => {
   });
 });
 
+describe("a refusal's facts reach the caller through the same allow-list (#1413 phase 6)", () => {
+  // The port sends facts on its planning refusals; which command is beside the
+  // point here, so the stub answers any.
+  it("surfaces the facts the route relayed", async () => {
+    stubFetch({ error: "locked", facts: { overridable: true, in_the_way: ["recent"] } }, 409);
+    expect(await submitCommand(WS, "schedule_item", {})).toEqual({
+      ok: false,
+      error: "locked",
+      status: 409,
+      facts: { overridable: true, in_the_way: ["recent"] },
+    });
+  });
+
+  it("re-checks them, so the browser holds no free text even if the route relayed some", async () => {
+    stubFetch(
+      { error: "locked", facts: { overridable: true, note: "Bearer eyJhbGciOi...", at_rule: "two words" } },
+      409,
+    );
+    expect(await submitCommand(WS, "schedule_item", {})).toEqual({
+      ok: false,
+      error: "locked",
+      status: 409,
+      facts: { overridable: true },
+    });
+  });
+
+  it("adds no facts key to a refusal that has none", async () => {
+    stubFetch({ error: "illegal_transition" }, 409);
+    expect(await submitCommand(WS, "approve", {})).toEqual({
+      ok: false,
+      error: "illegal_transition",
+      status: 409,
+    });
+  });
+});
+
 describe("a permission refusal is not a network blip", () => {
   // The port maps `insufficient_role` to 403 and answers `{detail: "forbidden"}`
   // — no `error`, no `reason` — so `submitCommand` synthesises `http_403` and
