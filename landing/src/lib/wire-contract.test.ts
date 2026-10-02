@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, RESOLUTIONS } from "./commands";
+import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, NO_PUSH_BINDING, RESOLUTIONS } from "./commands";
 import {
   EXPIRY_DAYS_DEFAULT,
   EXPIRY_DAYS_MAX,
@@ -73,5 +73,10 @@ describe("the wire spellings are the vocabulary's", () => {
   it("the review resolutions and the one verdict", () => {
     expect([...RESOLUTIONS]).toEqual(tuple("RESOLUTIONS"));
     expect(NOT_POSTED).toBe(scalar("NOT_POSTED"));
+  });
+  it("the planned story's warning that no chat is bound", () => {
+    // A drift here would not fail a request: the warning would simply stop
+    // being shown, and a person would not be told that nothing is asked.
+    expect(NO_PUSH_BINDING).toBe(scalar("NO_PUSH_BINDING"));
   });
 });

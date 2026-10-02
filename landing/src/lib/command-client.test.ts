@@ -33,6 +33,8 @@ import {
   disableAccountRefusalCopy,
   submitRemoveMember,
   removeMemberRefusalCopy,
+  submitScheduleItem,
+  scheduleRefusalCopy,
 } from "./command-client";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -379,6 +381,75 @@ describe("disableAccountRefusalCopy", () => {
 
   it("has a sentence for the unknown case that promises nothing", () => {
     expect(disableAccountRefusalCopy("something_new")).toMatch(/nothing changed/i);
+  });
+});
+
+describe("planning a story — schedule_item (#1413 phase 6)", () => {
+  const plan = {
+    accountId: "55555555-5555-4555-8555-555555555555",
+    itemId: "66666666-6666-4666-8666-666666666666",
+    localAt: "2026-10-03T14:30",
+  };
+
+  it("sends the account, the item and the wall time as typed, to the port's door", async () => {
+    stubFetch({ outcome: "executed", state: "scheduled" }, 200);
+    const result = await submitScheduleItem(WS, plan);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/schedule_item`);
+    const { submission_id, ...args } = sentBody(0);
+    expect(typeof submission_id).toBe("string");
+    expect(args).toEqual({
+      ig_account_id: plan.accountId,
+      media_item_id: plan.itemId,
+      local_at: plan.localAt,
+    });
+    expect(portKey(0, "schedule_item")).toMatch(/^schedule_item:/);
+  });
+
+  it("two attempts are two submissions, so a deliberate retry is never deduped", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitScheduleItem(WS, plan);
+    await submitScheduleItem(WS, plan);
+    expect(portKey(0, "schedule_item")).not.toBe(portKey(1, "schedule_item"));
+  });
+
+  it("surfaces the port's reason, not a status code", async () => {
+    stubFetch({ error: "locked" }, 409);
+    expect(await submitScheduleItem(WS, plan)).toEqual({
+      ok: false,
+      error: "locked",
+      status: 409,
+    });
+  });
+});
+
+describe("scheduleRefusalCopy", () => {
+  it("names the member floor on a role refusal", () => {
+    expect(scheduleRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+  });
+
+  it("says a lock or the item itself keeps it out", () => {
+    expect(scheduleRefusalCopy("locked", 409)).toMatch(/lock/i);
+  });
+
+  it("says the item already waits on that account when it is a duplicate", () => {
+    expect(scheduleRefusalCopy("illegal_transition", 409)).toMatch(/already/i);
+  });
+
+  it("asks for another time when the port refuses the time", () => {
+    expect(scheduleRefusalCopy("invalid_args", 400)).toMatch(/time/i);
+  });
+
+  it("sends a stale screen back when the account or the item is gone", () => {
+    expect(scheduleRefusalCopy("not_found", 404)).toMatch(/reload/i);
+  });
+
+  it("does not smooth a replay into success", () => {
+    expect(scheduleRefusalCopy(REPLAYED_ERROR)).toMatch(/not/i);
+  });
+
+  it("has a sentence for the unknown case that promises nothing", () => {
+    expect(scheduleRefusalCopy("something_new")).toMatch(/nothing was scheduled/i);
   });
 });
 
