@@ -241,14 +241,15 @@ async def unrecord_no_surface(conn, *, intent_id, workspace_id) -> None:
 
     The stamp and the signal belong together. `UNDELIVERABLE` reaches the
     ledger only when the job ends `review_required`, and a beat that raises
-    does not. So a stamp left behind would make the beats inside the window
-    read as a clean run while the notice is still owed. Removed, the next beat
-    re-attempts and re-signals, as it did when the whole beat was one
-    transaction and its rollback removed the stamp. Removing the key and
-    rolling back to an older stamp are the same to the window, and nothing
-    else reads the stamp. The rest of the evidence is kept (``#-`` removes
-    one key; :func:`notify_parked_customer` explains why the evidence must
-    survive).
+    does not. A stamp left behind would answer `0`, a clean run, for the rest
+    of the window while the notice is still owed. Removed, the next beat
+    re-attempts and re-signals. Only :func:`_record_no_surface` decides on the
+    stamp, and to its window a missing stamp and one older than the window are
+    the same, so removing the key equals restoring whatever this beat
+    replaced. The operator views print `last_error` whole: until a beat stamps
+    again, they show no attempt. The rest of the evidence is kept (``#-``
+    removes one key; :func:`notify_parked_customer` explains why the evidence
+    must survive).
     """
     from src.services.target import unit_of_work
 
