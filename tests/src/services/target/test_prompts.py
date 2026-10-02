@@ -1137,3 +1137,15 @@ class TestBothSweepsTakeTheirRowsInOneOrder:
         await prompts.sweep_planned_misses(session, limit=5, late_seconds=900)
         ended = [p["id"] for s, p in session.statements if s.startswith("UPDATE")]
         assert ended == ["i-1", "i-2", "i-3"]
+
+    def test_the_sweeps_take_due_stories_in_due_order(self):
+        def at(hour):
+            return datetime(2030, 1, 1, hour, tzinfo=timezone.utc)
+
+        rows = [
+            {"workspace_id": "w1", "schedule_slot_at": at(10), "id": "b"},
+            {"workspace_id": "w1", "schedule_slot_at": at(9), "id": "c"},
+            {"workspace_id": "w1", "schedule_slot_at": at(9), "id": "a"},
+        ]
+        order = sorted(rows, key=prompts._sweep_order)
+        assert [r["id"] for r in order] == ["a", "c", "b"]

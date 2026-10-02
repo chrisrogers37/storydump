@@ -23,6 +23,11 @@ What each class pins, and why it is here rather than in a unit test:
 - **Each refusal says why in facts**, so a front end never parses its prose:
   what is in the way (`locked`), what is missing (`not_found`), which time
   rule broke (`invalid_args`).
+- **Another workspace's ids are refused by the verbs' own SQL.** The
+  policies are not the only fence (`.claude/rules/database.md`): a login
+  that owns the tables reads straight through them, so the `workspace_id`
+  each read names is what refuses, and only a session as that owner shows
+  it. Under the policies a dropped predicate would go unseen.
 
 Every workspace here is its own, so a zone or a lock set by one test cannot
 reach another's answer.
@@ -219,6 +224,13 @@ def _audit(world, intent_id, event):
 # --- the port, as the production role ------------------------------------------
 
 
+def _command(w, kind, user, args) -> Command:
+    """*kind* as a person of *w* sends it over the CLI's channel."""
+    return Command(
+        kind=kind, workspace_id=w["ws"], actor_user_id=user, channel="cli", args=args
+    )
+
+
 def run(world, w, kind, *, user=None, **args):
     """*kind* through the real registry, as a person over the CLI's channel."""
     user = user or w["user"]
@@ -227,16 +239,7 @@ def run(world, w, kind, *, user=None, **args):
             world["ingress"],
             w["ws"],
             user,
-            lambda session: commands.execute(
-                session,
-                Command(
-                    kind=kind,
-                    workspace_id=w["ws"],
-                    actor_user_id=user,
-                    channel="cli",
-                    args=args,
-                ),
-            ),
+            lambda session: commands.execute(session, _command(w, kind, user, args)),
             channel="cli",
         )
     )
@@ -943,6 +946,123 @@ class TestFloors:
         with pytest.raises(TenantResolutionError) as err:
             schedule(world, w, _item(world, w), _local(), user=stranger)
         assert err.value.reason == "not_a_member"
+
+
+# --- another workspace's ids, as the tables' owner ------------------------------
+
+#: Where a write through the port leaves rows: the story, its audit trail,
+#: its admission, its cards and their jobs. A refusal changes no count.
+WRITTEN = ("post_intents", "audit_events", "command_dedup", "channel_outbox", "jobs")
+
+
+def _counts(world) -> dict:
+    """Each of those tables' row count, across every workspace: the owner's
+    reads are not filtered."""
+    (counts,) = _sql(
+        world, "SELECT " + ", ".join(f"(SELECT count(*) FROM {t})" for t in WRITTEN)
+    )
+    return dict(zip(WRITTEN, counts))
+
+
+def _rows_of(world, w) -> dict:
+    """Every account, item and story of *w*'s, each row whole, as its text."""
+    return {
+        table: _sql(
+            world,
+            f"SELECT to_jsonb(t)::text FROM {table} t"
+            " WHERE t.workspace_id = %s ORDER BY t.id",
+            (w["ws"],),
+        )
+        for table in ("ig_accounts", "media_items", "post_intents")
+    }
+
+
+def _refused_as_owner(world, w, other, kind, foreign, **args) -> CommandRefused:
+    """*kind*, sent as `run` sends it by a person of *w*, but connected as the
+    tables' owner and naming *foreign*: rows of *other*'s, as (table, id).
+
+    The session that is refused reads each of them first. The policies do
+    not filter the owner, so the refusal is the executor's own SQL, which
+    must name *w*; as `svc_ingress` the rows would be hidden whatever the
+    SQL said. Nothing is written: every `WRITTEN` table keeps its count, and
+    *other*'s rows are as they were, to the byte."""
+    counts, held = _counts(world), _rows_of(world, other)
+    seen = []
+
+    async def go(session):
+        for table, row_id in foreign:
+            found = await session.execute(
+                text(f"SELECT 1 FROM {table} WHERE id = :id"), {"id": row_id}
+            )
+            if found.first():
+                seen.append((table, row_id))
+        return await commands.execute(session, _command(w, kind, w["user"], args))
+
+    with pytest.raises(CommandRefused) as err:
+        asyncio.run(
+            in_tenant(
+                world["owner"],
+                w["ws"],
+                w["user"],
+                go,
+                channel="cli",
+                # the login that ran the schema's DDL, so the tables' owner
+                role="svc_migration",
+            )
+        )
+    assert seen == foreign, "the policies hid them: this proves no more than ingress"
+    assert _counts(world) == counts
+    assert _rows_of(world, other) == held
+    return err.value
+
+
+class TestAnotherWorkspacesIdsAsTheTablesOwner:
+    """Each verb run as the tables' owner, by a person of one workspace,
+    naming another's rows. The session sees them, and the verb still finds
+    nothing: what refuses them is the `workspace_id` its SQL names."""
+
+    @pytest.mark.parametrize(
+        "their_account, their_item",
+        [(True, False), (False, True), (True, True)],
+        ids=["account", "item", "both"],
+    )
+    def test_schedule_finds_neither_their_account_nor_their_item(
+        self, world, their_account, their_item
+    ):
+        w = _workspace(world, "owner-schedule")
+        other = _workspace(world, "owner-schedule-theirs")
+        account = (other if their_account else w)["account"]
+        item = _item(world, other if their_item else w)
+        foreign = [("ig_accounts", account)] if their_account else []
+        foreign += [("media_items", item)] if their_item else []
+        refused = _refused_as_owner(
+            world,
+            w,
+            other,
+            "schedule_item",
+            foreign,
+            ig_account_id=account,
+            media_item_id=item,
+            local_at=_local(),
+        )
+        assert refused.reason == "not_found"
+        # the account is read first, so of two foreign ids it is the one named
+        assert refused.facts == {"missing": "account" if their_account else "item"}
+
+    @pytest.mark.parametrize("origin", ["planned", "cadence"])
+    @pytest.mark.parametrize("kind", ["reschedule_item", "cancel"])
+    def test_their_story_is_not_found(self, world, kind, origin):
+        w = _workspace(world, f"owner-{kind}-{origin}")
+        other = _workspace(world, f"owner-{kind}-{origin}-theirs")
+        story = (
+            _planned(world, other) if origin == "planned" else _cadence(world, other)
+        )
+        # a time it can move to: a story the verb found would move
+        when = {"local_at": _local(days=3)} if kind == "reschedule_item" else {}
+        refused = _refused_as_owner(
+            world, w, other, kind, [("post_intents", story)], intent_id=story, **when
+        )
+        assert refused.reason == "not_found"
 
 
 def _read(world, w, **kw):

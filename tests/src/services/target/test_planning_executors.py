@@ -374,6 +374,8 @@ class TestRescheduleItem:
         [
             ({"origin": "cadence"}, "illegal_transition"),
             ({"state": "awaiting_approval"}, "illegal_transition"),
+            ({"state": "approved"}, "illegal_transition"),
+            ({"state": "publishing"}, "illegal_transition"),
             ({"cancel_requested": True}, "cancelling"),
         ],
     )

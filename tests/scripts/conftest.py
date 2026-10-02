@@ -1324,15 +1324,18 @@ async def ingress_engine(dsn):
         await engine.dispose()
 
 
-async def in_tenant(dsn, ws, user, fn, *, channel="web"):
-    """Run *fn(session)* in one committed unit of work as `svc_ingress`, the
-    person *user* acting over *channel* (`web`, or `cli` for a token's write).
+async def in_tenant(dsn, ws, user, fn, *, channel="web", role="svc_ingress"):
+    """Run *fn(session)* in one committed unit of work as *role*, the person
+    *user* acting over *channel* (`web`, or `cli` for a token's write).
 
     The role is ASSERTED rather than assumed: a driver that quietly connected
     as the owner would bypass RLS, and every isolation claim built on it would
     be vacuous while still reading green. ONE spelling for the suites that
     measure under RLS (the provisioning and Drive gates), for the reason `txn`
-    is one spelling.
+    is one spelling. *role* is `svc_ingress` unless a gate measures what the
+    SQL alone confines, with the policies out of the way: it then names the
+    tables' owner, and a driver that connected as anyone else fails the same
+    way.
     """
     async with ingress_engine(dsn) as engine:
         uow = unit_of_work(
@@ -1340,7 +1343,7 @@ async def in_tenant(dsn, ws, user, fn, *, channel="web"):
         )
         async with uow.begin() as session:
             who = (await session.execute(text("SELECT current_user"))).scalar()
-            assert who == "svc_ingress", who
+            assert who == role, who
             return await fn(session)
 
 
