@@ -245,12 +245,14 @@ async def deliver_by_email(
     token: str,
     email: str,
     web_app_origin: str | None,
+    email_configured: bool,
     inviter_name: str | None = None,
 ) -> str | None:
     """Enqueue the `send_email` job that carries this invitation's token.
 
-    Returns the job id, or **None** when no accept URL can be built — see the
-    refusal note below. The caller must not discard either answer.
+    Returns the job id, or **None** when no accept URL can be built or no
+    provider can send it — see the notes below. The caller must not discard
+    either answer.
 
     **This is the producer half of a split the tier already made.**
     `email_sender` is the transport and says outright that it decides nothing;
@@ -290,12 +292,28 @@ async def deliver_by_email(
     delivery outcome to report, not a reason to refuse the whole command.
     What it must never be is silent: a run where nobody could have been told
     must be distinguishable from a delivered one.
+
+    **With no email provider it enqueues NOTHING either, for the same reason.**
+    `email_configured` is `email_sender.email_configured` read by the caller
+    (the rule the worker composes its sender with), passed down like the
+    origin. Without it the worker parks `send_email` until someone sets the
+    two variables, so an invitation reported as queued would sit undelivered,
+    with nobody told, for as long as that takes (#1130). Saying `None` here
+    lets the caller report it as not configured, while the token still goes
+    back to be shared by hand.
     """
     origin = (web_app_origin or "").strip().rstrip("/")
     if not origin:
         logger.warning(
             "invitation %s created but no email enqueued: no web_app_origin"
             " configured, so no accept URL can be built",
+            invitation_id,
+        )
+        return None
+    if not email_configured:
+        logger.warning(
+            "invitation %s created but no email enqueued: no email provider"
+            " configured (RESEND_API_KEY and EMAIL_FROM), so nothing would send it",
             invitation_id,
         )
         return None
