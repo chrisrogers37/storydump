@@ -10,8 +10,8 @@
  *      signup offers no Telegram community link (linking a group is setup).
  *   4. No real account appears in the demos: only the placeholders.
  *
- * Checked by source, across the landing and layout components and the
- * marketing pages that carry their own call to action.
+ * Checked by source, across the landing and layout components, the blog
+ * posts, the use-case pages and the 404 page.
  */
 
 import { readdirSync, readFileSync } from "fs"
@@ -21,8 +21,23 @@ import { describe, expect, it } from "vitest"
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const DIRS = ["components/landing", "components/layout"]
-// Marketing pages that carry their own signup call to action.
-const FILES = ["app/(marketing)/blog/[slug]/page.tsx"]
+// Marketing pages that carry their own signup call to action, and the copy
+// they render.
+const ARTICLES = "app/(marketing)/blog/[slug]/_articles"
+const USE_CASES = "app/(marketing)/use-cases/[slug]"
+function useCaseFiles() {
+  return [
+    `${USE_CASES}/page.tsx`,
+    ...readdirSync(path.join(SRC, USE_CASES, "_content")).map((f) => `${USE_CASES}/_content/${f}`),
+    "lib/use-cases.ts",
+  ]
+}
+const FILES = [
+  "app/(marketing)/blog/[slug]/page.tsx",
+  ...readdirSync(path.join(SRC, ARTICLES)).map((f) => `${ARTICLES}/${f}`),
+  ...useCaseFiles(),
+  "app/not-found.tsx",
+]
 
 const sources = [
   ...DIRS.flatMap((dir) =>
@@ -44,6 +59,10 @@ describe("the home page's claims", () => {
         "components/landing/final-cta.tsx",
         "components/layout/header.tsx",
         "app/(marketing)/blog/[slug]/page.tsx",
+        "app/(marketing)/blog/[slug]/_articles/automate-instagram-stories.tsx",
+        "app/(marketing)/use-cases/[slug]/page.tsx",
+        "app/(marketing)/use-cases/[slug]/_content/evergreen.tsx",
+        "lib/use-cases.ts",
       ])
     )
   })
@@ -61,12 +80,19 @@ describe("the home page's claims", () => {
     "Trusted by",
     "Get Early Access",
     "Early Access",
+    "auto-approve",
+    "Auto Post",
+    "hands-off",
   ])("never says %s", (phrase) => {
     expect(all.toLowerCase()).not.toContain(phrase.toLowerCase())
   })
 
-  it("carries the locked price line in the hero and the closing section", () => {
-    for (const file of ["components/landing/hero.tsx", "components/landing/final-cta.tsx"]) {
+  it("carries the locked price line wherever there is a signup form", () => {
+    for (const file of [
+      "components/landing/hero.tsx",
+      "components/landing/final-cta.tsx",
+      "app/(marketing)/use-cases/[slug]/page.tsx",
+    ]) {
       expect(read(file)).toContain("Free during beta · No credit card required")
     }
   })
@@ -84,10 +110,51 @@ describe("the home page's claims", () => {
     expect(read("components/landing/waitlist-form.tsx")).toContain("Join the waitlist")
     expect(read("components/layout/header.tsx")).toMatch(/Join\s.*waitlist/)
     expect(read("app/(marketing)/blog/[slug]/page.tsx")).toContain("Join the waitlist")
+    expect(read("app/(marketing)/use-cases/[slug]/page.tsx")).toContain("Join the waitlist")
   })
 
   it("uses only placeholder handles and addresses", () => {
     const handles = all.match(/@[a-z0-9_.]+\.[a-z]+/gi) ?? []
     for (const h of handles) expect(["@example.brand", "@example.com"]).toContain(h)
+  })
+})
+
+describe("the use-case pages' claims", () => {
+  // The Phase 3 content brief's "never on these pages" list: no automation
+  // the product doesn't do, no superlatives, no sync speed, no store
+  // integration, no competitor, and no counts.
+  const pages = useCaseFiles()
+    .map(read)
+    .join("\n")
+    .toLowerCase()
+
+  it.each([
+    "autopilot",
+    "automatic",
+    "auto-post",
+    "set and forget",
+    "the only",
+    "the best",
+    "instantly",
+    "in minutes",
+    "real time",
+    "jitter",
+    "create a bot",
+    "shopify",
+    "shoppable",
+    "catalog sync",
+    "product feed",
+    "storrito",
+    "buffer",
+    "later.com",
+    "zapier",
+    "make.com",
+    "pabbly",
+  ])("never says %s", (phrase) => {
+    expect(pages).not.toContain(phrase)
+  })
+
+  it("says the store is not connected", () => {
+    expect(pages).toContain("doesn’t connect to your store")
   })
 })

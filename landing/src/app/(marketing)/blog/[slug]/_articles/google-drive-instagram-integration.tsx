@@ -83,7 +83,11 @@ export function GoogleDriveInstagramIntegration() {
         posts.
       </p>
       <p>
-        That is <Link href="/">Storydump</Link>. It is in a free beta and
+        That is <Link href="/">Storydump</Link>: see{" "}
+        <Link href="/use-cases/google-drive-to-instagram-stories">
+          Google Drive to Instagram Stories
+        </Link>
+        . It is in a free beta and
         invites people in small batches;{" "}
         <Link href="/#waitlist">join the waitlist</Link> to get a spot.
       </p>

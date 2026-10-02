@@ -29,6 +29,7 @@ import robots, { disallowedPaths } from "@/app/robots"
 import sitemap from "@/app/sitemap"
 import { siteConfig } from "@/config/site"
 import { posts } from "@/lib/blog"
+import { useCases } from "@/lib/use-cases"
 import { blogPosting, breadcrumbList } from "@/lib/json-ld"
 import { homeSocial, ogImageUrl } from "@/lib/seo"
 
@@ -83,6 +84,11 @@ async function metadataFor(urlPath: string): Promise<Metadata> {
     const mod = await import("@/app/(marketing)/blog/[slug]/page")
     return mod.generateMetadata({ params: Promise.resolve({ slug: blog[1] }) })
   }
+  const useCase = urlPath.match(/^\/use-cases\/([^/]+)$/)
+  if (useCase) {
+    const mod = await import("@/app/(marketing)/use-cases/[slug]/page")
+    return mod.generateMetadata({ params: Promise.resolve({ slug: useCase[1] }) })
+  }
   const file = pageFiles().find(
     (f) => f.startsWith("(marketing)") && routeOf(f) === urlPath
   )
@@ -127,6 +133,10 @@ describe("noindex and the sitemap agree", () => {
       if (route === "/blog/[slug]") {
         for (const post of posts) {
           expect(sitemapPaths).toContain(`/blog/${post.slug}`)
+        }
+      } else if (route === "/use-cases/[slug]") {
+        for (const useCase of useCases) {
+          expect(sitemapPaths).toContain(`/use-cases/${useCase.slug}`)
         }
       } else {
         expect(sitemapPaths).toContain(route)
@@ -220,5 +230,19 @@ describe("social card", () => {
     const shown = subtitleOf(long)!
     expect(shown.length).toBeLessThanOrEqual(100)
     expect(shown).toMatch(/ word…$/)
+  })
+})
+
+describe("snippet lengths", () => {
+  // The root layout's template adds " | Storydump" (12 characters); Google
+  // shows about 60 characters of a title and 155 to 160 of a description.
+  const titled = [
+    ...posts.map((p) => ({ name: p.slug, title: p.seoTitle ?? p.title, description: p.description })),
+    ...useCases.map((u) => ({ name: u.slug, title: u.seoTitle, description: u.description })),
+  ]
+
+  it.each(titled)("$name fits a search result", ({ title, description }) => {
+    expect(`${title} | Storydump`.length).toBeLessThanOrEqual(60)
+    expect(description.length).toBeLessThanOrEqual(160)
   })
 })

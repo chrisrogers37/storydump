@@ -95,6 +95,9 @@ interface PageMetadataInput {
   /** A blog post's dates, for `article:published_time` and `article:modified_time`. */
   publishedTime?: string
   modifiedTime?: string
+  /** The social card's own lines, when the title and description don't fit it. */
+  ogTitle?: string
+  ogSubtitle?: string
 }
 
 /**
@@ -109,9 +112,11 @@ export function pageMetadata({
   type = "website",
   publishedTime,
   modifiedTime,
+  ogTitle = title,
+  ogSubtitle = description,
 }: PageMetadataInput): Metadata {
   const socialTitle = `${title} | ${siteConfig.name}`
-  const image = ogImageUrl(title, description)
+  const image = ogImageUrl(ogTitle, ogSubtitle)
   return {
     title,
     description,
@@ -122,7 +127,7 @@ export function pageMetadata({
       url: path,
       siteName: siteConfig.name,
       locale: "en_US",
-      images: [{ url: image, width: 1200, height: 630, alt: title }],
+      images: [{ url: image, width: 1200, height: 630, alt: ogTitle }],
       ...(type === "article"
         ? { type: "article" as const, publishedTime, modifiedTime }
         : { type: "website" as const }),

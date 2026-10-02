@@ -1,10 +1,12 @@
 import Link from "next/link"
+import { pathForUseCase } from "@/lib/use-cases"
 import { HardDrive, Instagram, MousePointerClick, ScrollText } from "lucide-react"
 
-const promises = [
+const promises: { icon: typeof HardDrive; title: string; text: string; href?: string }[] = [
   {
     icon: HardDrive,
     title: "Read-only Google Drive",
+    href: pathForUseCase("google-drive-to-instagram-stories"),
     text: "Storydump can’t change or delete your files. Your originals stay in your Drive.",
   },
   {
@@ -29,10 +31,18 @@ export function TrustRow() {
     <section aria-label="How Storydump treats your accounts" className="bg-paper py-14 md:py-20">
       <div className="mx-auto max-w-6xl px-4">
         <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {promises.map(({ icon: Icon, title, text }) => (
+          {promises.map(({ icon: Icon, title, text, href }) => (
             <li key={title} className="rounded-2xl bg-white p-6">
               <Icon className="size-5 text-ink" />
-              <h3 className="mt-4 font-display text-lg font-extrabold tracking-[-0.02em] text-ink">{title}</h3>
+              <h3 className="mt-4 font-display text-lg font-extrabold tracking-[-0.02em] text-ink">
+                {href ? (
+                  <Link href={href} className="underline decoration-ink/25 decoration-2 underline-offset-4 hover:text-tap-ink hover:decoration-tap-ink">
+                    {title}
+                  </Link>
+                ) : (
+                  title
+                )}
+              </h3>
               <p className="mt-1 text-sm leading-relaxed text-ink/80">{text}</p>
             </li>
           ))}

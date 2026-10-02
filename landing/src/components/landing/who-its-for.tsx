@@ -1,19 +1,24 @@
+import Link from "next/link"
 import { StoryArt, type ArtKind } from "@/components/landing/story-art"
+import { pathForUseCase, type UseCaseSlug } from "@/lib/use-cases"
 
-const audiences: { art: ArtKind; name: string; text: string }[] = [
+const audiences: { art: ArtKind; name: string; text: string; useCase?: UseCaseSlug }[] = [
   {
     art: "stock",
     name: "Online shops",
+    useCase: "instagram-stories-for-online-stores",
     text: "Product shots, restocks and behind-the-scenes every day, without making it anyone’s whole job.",
   },
   {
     art: "monday",
     name: "Niche and community pages",
+    useCase: "evergreen-instagram-stories",
     text: "Years of memes and posts, back in rotation.",
   },
   {
     art: "sunset",
     name: "Creators",
+    useCase: "evergreen-instagram-stories",
     text: "A back catalogue that deserves another look.",
   },
   {
@@ -37,10 +42,21 @@ export function WhoItsFor() {
           Made for small teams with a deep library.
         </h2>
         <ul className="mt-12 grid grid-cols-2 gap-x-4 gap-y-8 lg:grid-cols-4 lg:gap-6">
-          {audiences.map(({ art, name, text }) => (
+          {audiences.map(({ art, name, text, useCase }) => (
             <li key={name}>
               <StoryArt kind={art} className="aspect-[4/5] w-full rounded-2xl text-[18px] sm:text-[26px]" />
-              <h3 className="mt-4 font-display text-xl font-extrabold tracking-[-0.02em] text-ink">{name}</h3>
+              <h3 className="mt-4 font-display text-xl font-extrabold tracking-[-0.02em] text-ink">
+                {useCase ? (
+                  <Link
+                    href={pathForUseCase(useCase)}
+                    className="underline decoration-ink/25 decoration-2 underline-offset-4 hover:text-tap-ink hover:decoration-tap-ink"
+                  >
+                    {name}
+                  </Link>
+                ) : (
+                  name
+                )}
+              </h3>
               <p className="mt-1 text-sm leading-relaxed text-ink/80">{text}</p>
             </li>
           ))}

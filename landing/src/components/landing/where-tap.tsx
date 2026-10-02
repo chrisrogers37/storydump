@@ -13,13 +13,13 @@ const explain: Partial<Record<CardAction, string>> = {
   reject: "Not ever. It won’t come up again.",
 }
 
-const legend = cardButtons.flatMap(({ action, label }) =>
+export const cardLegend = cardButtons.flatMap(({ action, label }) =>
   explain[action] ? [{ label, text: explain[action] }] : []
 )
 
 // The web Queue's buttons for a story awaiting approval, as the dashboard
 // renders them, with Instagram API publishing on.
-const queueButtons = actionsFor("awaiting_approval", true).map(
+export const queueButtons = actionsFor("awaiting_approval", true).map(
   (a) => ACTION_LABELS[a]
 )
 
@@ -112,7 +112,7 @@ export function WhereTap() {
         </div>
 
         <dl className="mt-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {legend.map(({ label, text }) => (
+          {cardLegend.map(({ label, text }) => (
             <div key={label} className="rounded-2xl bg-paper p-5">
               <dt className="font-semibold text-ink">{label}</dt>
               <dd className="mt-1 text-sm leading-relaxed text-ink/80">{text}</dd>

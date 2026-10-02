@@ -16,6 +16,23 @@ const nextUp: { art: ArtKind; note: string }[] = [
   { art: "mug", note: "Last up 7 weeks ago" },
 ]
 
+/** The rotation's next five, as drawn on an ink background. */
+export function NextUp() {
+  return (
+    <ol aria-label="Next five in line" className="grid grid-cols-5 gap-2 sm:gap-3">
+      {nextUp.map(({ art, note }, i) => (
+        <li key={art}>
+          <StoryArt kind={art} className="aspect-[9/16] w-full rounded-lg text-[8px] sm:rounded-xl sm:text-[13px]" />
+          <p className={`mt-2 font-mono text-[10px] leading-tight sm:text-[11px] ${note === NEW ? "text-tap" : "text-white/70"}`}>
+            <span className="sr-only">{i + 1}: </span>
+            {note}
+          </p>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-4 border-b border-ink/10 py-4">
@@ -110,17 +127,7 @@ export function SetItOnce() {
               adding, and it keeps going.
             </p>
           </div>
-          <ol aria-label="Next five in line" className="grid grid-cols-5 gap-2 sm:gap-3">
-            {nextUp.map(({ art, note }, i) => (
-              <li key={art}>
-                <StoryArt kind={art} className="aspect-[9/16] w-full rounded-lg text-[8px] sm:rounded-xl sm:text-[13px]" />
-                <p className={`mt-2 font-mono text-[10px] leading-tight sm:text-[11px] ${note === NEW ? "text-tap" : "text-white/70"}`}>
-                  <span className="sr-only">{i + 1}: </span>
-                  {note}
-                </p>
-              </li>
-            ))}
-          </ol>
+          <NextUp />
         </div>
       </div>
     </section>

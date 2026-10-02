@@ -21,7 +21,12 @@ export function AutomateInstagramStories() {
       <ol>
         <li>
           <strong>A media source</strong>: where your photos and videos live.
-          For most small teams that is already a shared Google Drive folder.
+          For most small teams that is already a shared Google Drive folder,
+          and Storydump posts{" "}
+          <Link href="/use-cases/google-drive-to-instagram-stories">
+            from a Google Drive folder
+          </Link>
+          .
         </li>
         <li>
           <strong>An approval step</strong>: somewhere a person sees
@@ -46,7 +51,12 @@ export function AutomateInstagramStories() {
         Then decide how things take turns. A simple rule that works: anything
         never posted goes first, then whatever has gone longest without a
         turn. Give each posted item a rest before it can come back, so your
-        best older content returns without repeating every week.
+        best older content returns without repeating every week. That is how
+        Storydump keeps{" "}
+        <Link href="/use-cases/evergreen-instagram-stories">
+          evergreen Instagram Stories
+        </Link>{" "}
+        coming back.
       </p>
       <p>
         See the{" "}

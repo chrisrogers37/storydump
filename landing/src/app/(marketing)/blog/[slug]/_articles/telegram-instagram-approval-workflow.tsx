@@ -87,7 +87,12 @@ export function TelegramInstagramApproval() {
       <h2>Not on Telegram?</h2>
       <p>
         Telegram is optional. The same Story waits in your Queue on the web,
-        with the same choices, so a team can work from either or both.
+        with the same choices, so a team can work from either or both. More
+        on the{" "}
+        <Link href="/use-cases/approve-instagram-stories-in-telegram">
+          Instagram Story approval in Telegram
+        </Link>
+        .
       </p>
       <p>
         <Link href="/">Storydump</Link> is in a free beta and invites people
