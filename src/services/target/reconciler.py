@@ -377,13 +377,13 @@ async def _record_evidence(conn, *, intent_id, checks: int, trail: list) -> None
 
 
 async def observe(poll: Callable[..., Any], *, intent_id, workspace_id):
-    """Ask the provider for an ambiguous intent's container status.
-
-    Call it with NO transaction open: the egress floor refuses a provider call
-    made inside one (`02` §5, #1508). The ladder step that records the answer,
-    :func:`reconcile_intent`, is a transaction of its own after it.
-    """
-    return await _maybe_await(poll, intent_id=intent_id, workspace_id=workspace_id)
+    """Ask the provider for an ambiguous intent's container status, with NO
+    transaction open: the egress floor refuses a provider call inside one
+    (#1508). *poll* may be sync or async."""
+    status = poll(intent_id=intent_id, workspace_id=workspace_id)
+    if hasattr(status, "__await__"):
+        return await status
+    return status
 
 
 async def reconcile_intent(
@@ -439,13 +439,6 @@ async def reconcile_intent(
     await _record_evidence(conn, intent_id=intent_id, checks=checks + 1, trail=trail)
     await _park_review_required(conn, intent_id=intent_id, workspace_id=workspace_id)
     return "review_required"
-
-
-async def _maybe_await(fn, **kwargs):
-    out = fn(**kwargs)
-    if hasattr(out, "__await__"):
-        return await out
-    return out
 
 
 async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:

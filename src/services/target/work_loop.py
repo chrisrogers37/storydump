@@ -152,10 +152,8 @@ RESERVED_CONNECTIONS = 3
 #: their own transactions (the sender) or one short job transaction: one
 #: connection. A bulk task's plain kinds — a sync walk, a credential refresh —
 #: open sessions of their own UNDER the loop's job transaction, so a bulk task
-#: holds two at its peak (adversarial review of the 3b PR). The ambiguous
-#: reconciler polls with no transaction open (#1508), so the poll's own session
-#: is the only one it holds then. The ceiling weighs them so, rather than
-#: pretending.
+#: holds two at its peak (adversarial review of the 3b PR). The ceiling weighs
+#: them so, rather than pretending.
 TASK_CONNECTIONS = {"interactive": 1, "bulk": 2}
 
 
@@ -345,7 +343,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         customer notification too.
 
         **A failed row fails alone** (#1492). The sweep reads in one short
-        transaction and each row runs in transactions of its own, so a row
+        transaction and each row runs in a transaction of its own, so a row
         that raises — a verdict whose flip matched no row is #1438's alarm —
         rolls back alone, and the rows behind it still land rather than wait
         behind it (an unresolved ambiguity holds its account's next publish,
@@ -356,16 +354,16 @@ def build_registry(deps: WorkerDeps) -> dict:
         nobody can hear is recorded only by a beat that returns
         (`reconciler.record_no_surface` says why), so a failing beat leaves
         none behind. A caller that passes its own session (the unit seam) gets
-        a savepoint for each of them on it instead.
+        a savepoint per row on it instead.
 
         **The provider is asked with no transaction open** (#1508). A ladder
-        row claims its workspace and reads how far its ladder has climbed in
-        one short transaction, asks the provider (`reconciler.observe`) with
-        none open, and records the answer in a second: the egress floor refuses
-        a provider call made inside a transaction (`02` §5), so a poll inside
-        one could never resolve an ambiguity. A verdict that changes the
-        intent's state is a compare-and-set on the state it leaves, so an
-        intent that moved while the provider was asked fails its row, loudly.
+        row asks the provider (`reconciler.observe`) before its transaction
+        opens, then claims its workspace, reads how far its ladder has climbed
+        and records the answer in it: the egress floor refuses a provider call
+        made inside a transaction (`02` §5), so a poll inside one could never
+        resolve an ambiguity. A verdict that changes the intent's state is a
+        compare-and-set on the state it leaves, so an intent that moved while
+        the provider was asked fails its row, loudly.
         """
         async with short(session, job) as reader:
             due = await reconciler.sweep_due(
@@ -383,23 +381,6 @@ def build_registry(deps: WorkerDeps) -> dict:
             ):
                 yield row_session
 
-        async def claim(session, op):
-            # Scope the ladder row too. 059 says every write from this sweep
-            # "runs tenant-scoped as svc_worker" and nothing did — the session
-            # carries `app.tenant_id = ''` because this is a system singleton,
-            # so these writes were invisible to `p_tenant` already. On the unit
-            # seam the rows share one session, and asserting the tenant per row
-            # is what keeps a ladder row from inheriting the scope of whichever
-            # row preceded it. The ladder's count is read AFTER the claim for
-            # the same reason: `post_intents` is policy-covered, and a read with
-            # no tenant answers 0 for every row — a ladder that never exhausts
-            # (#1349 review).
-            await unit_of_work.apply_gucs(
-                session,
-                tenant_id=str(op["workspace_id"]),
-                actor_kind="system",
-            )
-
         async def reconcile_row(op):
             if op["reason"] == "notify_window":
                 async with row_transaction() as session:
@@ -409,24 +390,35 @@ def build_registry(deps: WorkerDeps) -> dict:
                         workspace_id=op["workspace_id"],
                         web_app_origin=cfg.web_app_origin,
                     )
-            async with row_transaction() as session:
-                await claim(session, op)
-                climbed = await reconciler.checks_so_far(
-                    session, intent_id=op["intent_id"]
-                )
-            # Between the two transactions, never inside one: the egress floor
-            # refuses a provider call made inside a transaction (`02` §5, #1508).
+            # Asked before the row's transaction opens (#1508, the docstring).
             status_code = await reconciler.observe(
                 deps.poll, intent_id=op["intent_id"], workspace_id=op["workspace_id"]
             )
             async with row_transaction() as session:
-                await claim(session, op)
+                # Scope the ladder row too. 059 says every write from this sweep
+                # "runs tenant-scoped as svc_worker" and nothing did — the
+                # session carries `app.tenant_id = ''` because this is a system
+                # singleton, so these writes were invisible to `p_tenant`
+                # already. On the unit seam the rows share one session, and
+                # asserting the tenant per row is what keeps a ladder row from
+                # inheriting the scope of whichever row preceded it. The
+                # ladder's count is read AFTER the claim for the same reason:
+                # `post_intents` is policy-covered, and a read with no tenant
+                # answers 0 for every row — a ladder that never exhausts
+                # (#1349 review).
+                await unit_of_work.apply_gucs(
+                    session,
+                    tenant_id=str(op["workspace_id"]),
+                    actor_kind="system",
+                )
                 await reconciler.reconcile_intent(
                     session,
                     intent_id=op["intent_id"],
                     workspace_id=op["workspace_id"],
                     status_code=status_code,
-                    checks=climbed,
+                    checks=await reconciler.checks_so_far(
+                        session, intent_id=op["intent_id"]
+                    ),
                 )
 
         ladder_skipped = 0

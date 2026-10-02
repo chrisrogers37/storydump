@@ -1,9 +1,9 @@
 #!/bin/zsh
 # Mutation battery for #1508: the reconciler asks the provider with no transaction open. The egress
 # floor refuses a provider call made inside a transaction, so a ladder row of `reconcile_ambiguous`
-# reads how far its ladder has climbed in one short transaction, asks the provider
-# (`reconciler.observe`) with none open, and records the answer in a second, claimed for the row's
-# workspace. `reconcile_intent` takes what was observed, and never calls a provider.
+# asks the provider (`reconciler.observe`) before its transaction opens, then claims the row's
+# workspace, reads how far its ladder has climbed and records the answer in that one transaction.
+# `reconcile_intent` takes what was observed, and never calls a provider.
 #
 # Each behaviour has one named mutation, and it must make its test FAIL ("killed"). It must PASS on
 # the clean tree first; otherwise the verdict is BASELINE RED. A selector that selects nothing is NO
@@ -64,18 +64,15 @@ R=src/services/target/reconciler.py
 U=tests/src/services/target/test_work_loop.py
 L3=tests/scripts/test_l3_permit_rail.py
 
-# The ask, and the two places it must not be: inside the count's transaction, inside the verdict's.
-ASK=$'            # Between the two transactions, never inside one: the egress floor\n            # refuses a provider call made inside a transaction (`02` §5, #1508).\n            status_code = await reconciler.observe(\n                deps.poll, intent_id=op["intent_id"], workspace_id=op["workspace_id"]\n            )\n'
+# The ask, and where it must not be: inside the row's transaction.
+ASK=$'            status_code = await reconciler.observe(\n                deps.poll, intent_id=op["intent_id"], workspace_id=op["workspace_id"]\n            )\n'
 INSIDE=$'                status_code = await reconciler.observe(\n                    deps.poll, intent_id=op["intent_id"], workspace_id=op["workspace_id"]\n                )\n'
-COUNT=$'                climbed = await reconciler.checks_so_far(\n                    session, intent_id=op["intent_id"]\n                )\n'
-VERDICT=$'                await claim(session, op)\n                await reconciler.reconcile_intent(\n'
-check "the provider is asked inside the count's transaction (unit)" $W "$COUNT" "$COUNT$INSIDE" "$U -k 'provider_is_asked_with_no_transaction_open'" "$ASK" ''
-check "the provider is asked inside the count's transaction (gate)" $W "$COUNT" "$COUNT$INSIDE" "$L3 -k 'real_poll_reaches_the_provider'" "$ASK" ''
-check "the provider is asked inside the verdict's transaction" $W "$ASK" '' "$U -k 'provider_is_asked_with_no_transaction_open'" "$VERDICT" $'                await claim(session, op)\n'"$INSIDE"$'                await reconciler.reconcile_intent(\n'
+CLAIM=$'                await unit_of_work.apply_gucs(\n                    session,\n                    tenant_id=str(op["workspace_id"]),\n                    actor_kind="system",\n                )\n'
+check "the provider is asked inside the row's transaction (unit)" $W "$ASK" '' "$U -k 'provider_is_asked_with_no_transaction_open'" "$CLAIM" "$INSIDE$CLAIM"
+check "the provider is asked inside the row's transaction (gate)" $W "$ASK" '' "$L3 -k 'real_poll_reaches_the_provider'" "$CLAIM" "$INSIDE$CLAIM"
 # The verdict: claimed for the row's workspace, and made from what was observed.
-check "the verdict forgets to claim its workspace" $W "$VERDICT" $'                await reconciler.reconcile_intent(\n' "$L3 -k 'real_poll_reaches_the_provider'"
+check "the row forgets to claim its workspace" $W "$CLAIM" '' "$L3 -k 'real_poll_reaches_the_provider'"
 check "the verdict ignores what was observed" $W $'                    status_code=status_code,\n' $'                    status_code=None,\n' "$U -k 'provider_is_asked_with_no_transaction_open'"
-check "the observation ignores the provider's answer" $R '    return await _maybe_await(poll, intent_id=intent_id, workspace_id=workspace_id)' '    return None' "$U -k 'provider_is_asked_with_no_transaction_open'"
 # The stories listing still reaches the evidence trail, now passed in rather than fetched.
 check "the stories listing is dropped from the trail" $R $'    if stories is not None:\n' $'    if False:\n' "$L3 -k 'evidence_capture_parks_review_required_WITH_the_trail'"
 

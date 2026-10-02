@@ -610,30 +610,20 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
 
         return intent, _run(go())
 
-    def _reconcile(self, ops_db, intent, *, status, mode, checks=0, on_poll=None):
-        """*on_poll* runs as the provider is polled, before any write."""
+    def _reconcile(self, ops_db, intent, *, status, mode, checks=0):
+        """One ladder step from an observed *status*: `reconcile_intent` never
+        asks the provider itself."""
         from src.services.target import reconciler
 
         engine = _engine(ops_db)
-        seen = []
-
-        def poll(intent_id, workspace_id=None):
-            if on_poll is not None:
-                on_poll(intent_id)
-            seen.append(intent_id)
-            return status
 
         async def go():
-            # Observed first, with no transaction open, as the sweep does.
-            status_code = await reconciler.observe(
-                poll, intent_id=intent, workspace_id=ops_db["ws"]
-            )
             async with engine.connect() as conn:
                 out = await reconciler.reconcile_intent(
                     conn,
                     intent_id=intent,
                     workspace_id=ops_db["ws"],
-                    status_code=status_code,
+                    status_code=status,
                     stories={"stories": []},
                     mode=mode,
                     checks=checks,
@@ -641,16 +631,16 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
                 await conn.commit()
                 return out
 
-        return _run(go()), seen
+        return _run(go())
 
     def test_container_verdict_terminalizes_posted_from_the_authoritative_value(
         self, ops_db
     ):
         intent, op = self._ambiguous(ops_db)
-        outcome, seen = self._reconcile(
+        outcome = self._reconcile(
             ops_db, intent, status="PUBLISHED", mode="container_verdict"
         )
-        assert outcome == "posted" and len(seen) == 1
+        assert outcome == "posted"
         assert (
             _exec(
                 ops_db,
@@ -675,7 +665,7 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
 
     def test_container_verdict_terminalizes_failed_and_the_op_follows(self, ops_db):
         intent, op = self._ambiguous(ops_db)
-        outcome, _ = self._reconcile(
+        outcome = self._reconcile(
             ops_db, intent, status="EXPIRED", mode="container_verdict"
         )
         assert outcome == "failed"
@@ -703,7 +693,7 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         after `publish_called`, FINISHED means *ready to publish*, so acting on
         it would terminalize a still-live publish as a definite non-event."""
         intent, _ = self._ambiguous(ops_db)
-        outcome, _ = self._reconcile(
+        outcome = self._reconcile(
             ops_db, intent, status="FINISHED", mode="container_verdict"
         )
         assert outcome == "pending"
@@ -727,14 +717,9 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         the op was closed anyway and the verdict returned as if the intent had
         moved; it raises now, before the op is touched."""
         intent, op = self._ambiguous(ops_db)
+        _leave_ambiguity(ops_db, intent)  # moved after the provider was asked
         with pytest.raises(ValueError, match=f"before its '{verdict}' verdict"):
-            self._reconcile(
-                ops_db,
-                intent,
-                status=status,
-                mode="container_verdict",
-                on_poll=lambda i: _leave_ambiguity(ops_db, i),
-            )
+            self._reconcile(ops_db, intent, status=status, mode="container_verdict")
         assert _state(ops_db, "provider_operations", op["id"]) == "ambiguous", (
             "a verdict that moved nothing must not close the op it judged"
         )
@@ -742,14 +727,10 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
     def test_a_park_whose_intent_already_left_raises(self, ops_db):
         """#1438: the park is state-guarded too, and a miss returned silently."""
         intent, _ = self._ambiguous(ops_db)
+        _leave_ambiguity(ops_db, intent)  # moved after the provider was asked
         with pytest.raises(ValueError, match="before it was parked"):
             self._reconcile(
-                ops_db,
-                intent,
-                status="PUBLISHED",
-                mode="evidence_capture",
-                checks=99,
-                on_poll=lambda i: _leave_ambiguity(ops_db, i),
+                ops_db, intent, status="PUBLISHED", mode="evidence_capture", checks=99
             )
 
     def test_under_an_empty_tenant_the_verdict_raises_instead_of_reporting_it(
@@ -805,23 +786,24 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             "payload": {"v": 1},
         }
 
-    def _beat(self, ops_db, poll, **config):
+    async def _beat_on(self, engine, poll, **config):
         """One `reconcile_ambiguous` beat on the path production runs: the loop
-        hands the executor no session, and it opens its own on the engine."""
+        hands the executor no session, and it opens its own on *engine*."""
         from src.services.target import work_loop
+
+        registry = work_loop.build_registry(
+            work_loop.WorkerDeps(
+                poll=poll, engine=engine, config=work_loop.WorkerConfig(**config)
+            )
+        )
+        return await registry["reconcile_ambiguous"](None, self._reconcile_job())
+
+    def _beat(self, ops_db, poll, **config):
+        """`_beat_on`, on an engine of its own as `svc_worker`."""
 
         async def go():
             async with ingress_engine(ops_db["worker"]) as engine:
-                registry = work_loop.build_registry(
-                    work_loop.WorkerDeps(
-                        poll=poll,
-                        engine=engine,
-                        config=work_loop.WorkerConfig(**config),
-                    )
-                )
-                return await registry["reconcile_ambiguous"](
-                    None, self._reconcile_job()
-                )
+                return await self._beat_on(engine, poll, **config)
 
         return _run(go())
 
@@ -951,7 +933,6 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         provider call made inside a transaction (`02` §5). The verdict lands."""
         import httpx
 
-        from src.services.target import work_loop
         from src.services.target.instagram_graph import InstagramGraphAdapter
         from src.worker import _poll_from
 
@@ -967,31 +948,24 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             return "IGQVJtestTOKEN"
 
         async def beat():
-            async with ingress_engine(ops_db["worker"]) as engine:
-                async with httpx.AsyncClient(
-                    transport=httpx.MockTransport(graph)
-                ) as client:
-                    meta = InstagramGraphAdapter(
-                        token_for_account=token_for_account,
-                        client=client,
-                        resolver=lambda host: ["93.184.216.34"],
-                    )
-                    poll = _poll_from(engine, meta)
-                    # The control: with no transaction open the floor lets the
-                    # same poll through, so a refusal in the beat is the
-                    # transaction's, not this test's wiring.
-                    assert (
-                        await poll(intent_id=intent, workspace_id=ops_db["ws"])
-                        == "PUBLISHED"
-                    )
-                    registry = work_loop.build_registry(
-                        work_loop.WorkerDeps(
-                            poll=poll,
-                            engine=engine,
-                            config=work_loop.WorkerConfig(reconcile_limit=1),
-                        )
-                    )
-                    await registry["reconcile_ambiguous"](None, self._reconcile_job())
+            async with (
+                ingress_engine(ops_db["worker"]) as engine,
+                httpx.AsyncClient(transport=httpx.MockTransport(graph)) as client,
+            ):
+                meta = InstagramGraphAdapter(
+                    token_for_account=token_for_account,
+                    client=client,
+                    resolver=lambda host: ["93.184.216.34"],
+                )
+                poll = _poll_from(engine, meta)
+                # The control: with no transaction open the floor lets the same
+                # poll through, so a refusal in the beat is the transaction's,
+                # not this test's wiring.
+                assert (
+                    await poll(intent_id=intent, workspace_id=ops_db["ws"])
+                    == "PUBLISHED"
+                )
+                await self._beat_on(engine, poll, reconcile_limit=1)
 
         _run(beat())
         assert len(asked) == 2, "the control and the beat each asked once"
@@ -1003,7 +977,7 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
         whole content of the mode. Driven at the exhausted rung so the park is
         reachable."""
         intent, _ = self._ambiguous(ops_db)
-        outcome, _ = self._reconcile(
+        outcome = self._reconcile(
             ops_db, intent, status="PUBLISHED", mode="evidence_capture", checks=99
         )
         assert outcome == "review_required"
@@ -1048,7 +1022,7 @@ class TestTheReconcilerResolvesTheAmbiguityInBothModes:
             " \"outcome_text\": \"✅ Approved by Ada · 12:00 UTC\"}', 'superseded', '88001')",
             (ops_db["ws"], binding, intent),
         )
-        outcome, _ = self._reconcile(
+        outcome = self._reconcile(
             ops_db, intent, status="PUBLISHED", mode="evidence_capture", checks=99
         )
         assert outcome == "review_required"
