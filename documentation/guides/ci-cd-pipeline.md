@@ -46,10 +46,15 @@ jobs:
 | Front end | `npm test`, `tsc --noEmit`, `npm run lint` | The web app in `landing/` (Node 22). `next build` is left to Vercel, which builds every PR |
 | Changelog | Custom check | A pull request must change `CHANGELOG.md`, unless it touches only `documentation/`, `*.md` files or `.github/` |
 
-The workflow's own note (`ci.yml:195-199`) records that `main` declares no
-required status checks, so every check is advisory as far as GitHub is
-concerned. Treat a red check as blocking anyway: a red check has made Railway
-skip a deploy (below).
+`main` is guarded by a repository ruleset: no force-push, no deletion, a pull
+request for every change (no approval count, since PRs are opened under the
+owner's own account), and six required checks: Lint, FC-2 Telegram ratchet,
+Test, Security Scan, Front End and Changelog Check. "Branch up to date" is not
+required. A repository admin may bypass it on a pull request only, so nothing
+pushes to `main` directly. Vercel and GitGuardian report on every PR but are not
+required. Renaming a required job strands open PRs on a check that never
+arrives, so the ruleset changes with it (`ci.yml`'s note on `Front End` says
+the same). A red check also makes Railway skip a deploy (below).
 
 ### The scheduled schema-drift audit
 

@@ -199,11 +199,11 @@ jobs:
     # the wall-clock a person waits for, and a gate that costs nothing is a
     # gate nobody routes around.
     #
-    # NOT REQUIRED, deliberately: `rules/branches/main` declares no
-    # `required_status_checks` at all, so every check on this repo is advisory
-    # today. Making this one the sole required check would be an inconsistency,
-    # and whether the repo should enforce checks is a policy decision about all
-    # of them rather than something to smuggle in under a front-end ticket.
+    # REQUIRED, with the other five pull-request jobs: the `main` ruleset
+    # requires a pull request and these six checks by name (Lint, FC-2
+    # Telegram ratchet, Test, Security Scan, Front End, Changelog Check).
+    # Renaming a job here strands every open PR on a check that never
+    # arrives, so a rename changes the ruleset in the same breath.
     #
     # `next build` is deliberately ABSENT: Vercel already builds every PR, so
     # duplicating it here buys nothing but minutes.

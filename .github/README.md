@@ -30,9 +30,11 @@ request into `main` or `develop`, six jobs:
   the PR touches only `documentation/`, `*.md` files or `.github/`
 
 All jobs run on **GitHub's cloud runners** (`ubuntu-latest`) — safe for public
-repositories. `main` declares no required status checks, so every check is
-advisory to GitHub; merge on green is a rule, not an enforcement (a red Test
-job has still made Railway skip a deploy — see the CI/CD guide).
+repositories. The `main` ruleset requires a pull request and six of these
+checks by name (Lint, FC-2 Telegram ratchet, Test, Security Scan, Front End,
+Changelog Check), so GitHub refuses a merge until they are green; only a
+repository admin can bypass it, and only on a pull request. Renaming one of
+those jobs means updating the ruleset too.
 
 ### Scheduled: `schema-drift.yml`
 
