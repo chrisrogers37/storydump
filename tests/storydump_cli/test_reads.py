@@ -211,6 +211,7 @@ def account_row(ws: str, **over) -> dict:
         "workspace_id": ws,
         "id": ACCOUNT_ID,
         "handle": "storydump.studio",
+        "state": "active",
         "posts_per_day": 3,
         "tz": "America/New_York",
         "next_slot_at": "2026-09-15T18:00:00Z",
@@ -620,6 +621,7 @@ def test_account_by_handle_json_and_human(tmp_path):
     ):
         assert word in out, word
     assert "2/3 on 2026-09-15" in out
+    assert "state     active" in out, "a handle's live row is told from a removed one"
     assert "no such account here" in out
 
 

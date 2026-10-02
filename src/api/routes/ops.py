@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -23,7 +22,6 @@ from src.api.principal import (
     Principal,
     current_principal,
     require_engine,
-    require_own_workspace,
 )
 from src.api import principal as principal_mod
 from src.services.target import ops_views, vocabulary
@@ -46,20 +44,6 @@ def _window(since: Optional[str]) -> dt.datetime:
         raise HTTPException(status_code=422, detail=str(exc))
 
 
-@asynccontextmanager
-async def _scoped(request: Request, ws: uuid.UUID, principal: Principal):
-    """The workspace's unit of work for this principal: a service identity
-    reads its own workspace with nothing to gate on; everyone else passes
-    the membership gate."""
-    if principal.is_service_identity:
-        require_own_workspace(principal, str(ws))
-        async with principal_mod.open_tenant(request, str(ws), principal) as session:
-            yield session
-        return
-    async with principal_mod.member_session(request, str(ws), principal) as session:
-        yield session
-
-
 def _envelope(kind: str, ws: uuid.UUID, rows: list[dict[str, Any]]) -> Any:
     return jsonable_encoder(
         vocabulary.envelope(kind, {"workspace_id": str(ws), "rows": rows})
@@ -73,7 +57,7 @@ async def story(
     request: Request,
     principal: Principal = Depends(current_principal),
 ):
-    async with _scoped(request, ws, principal) as session:
+    async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await ops_views.story(
             session, workspace_id=str(ws), intent_id=str(intent_id)
         )
@@ -87,7 +71,7 @@ async def cards(
     request: Request,
     principal: Principal = Depends(current_principal),
 ):
-    async with _scoped(request, ws, principal) as session:
+    async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await ops_views.cards(
             session, workspace_id=str(ws), intent_id=str(intent_id)
         )
@@ -101,7 +85,7 @@ async def floating(
     limit: int = Query(ops_views.FLOATING_LIMIT, ge=1, le=ops_views.FLOATING_LIMIT_MAX),
     principal: Principal = Depends(current_principal),
 ):
-    async with _scoped(request, ws, principal) as session:
+    async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await ops_views.floating(session, workspace_id=str(ws), limit=limit)
     return _envelope("floating", ws, rows)
 
@@ -113,7 +97,7 @@ async def account(
     request: Request,
     principal: Principal = Depends(current_principal),
 ):
-    async with _scoped(request, ws, principal) as session:
+    async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await ops_views.account(session, workspace_id=str(ws), key=key)
     return _envelope("account", ws, rows)
 
@@ -126,7 +110,7 @@ async def jobs(
     principal: Principal = Depends(current_principal),
 ):
     window = _window(since)
-    async with _scoped(request, ws, principal) as session:
+    async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await ops_views.jobs(session, workspace_id=str(ws), since=window)
     return _envelope("jobs", ws, rows)
 
@@ -139,7 +123,7 @@ async def outbox(
     principal: Principal = Depends(current_principal),
 ):
     window = _window(since)
-    async with _scoped(request, ws, principal) as session:
+    async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await ops_views.outbox(session, workspace_id=str(ws), since=window)
     return _envelope("outbox", ws, rows)
 
@@ -152,7 +136,7 @@ async def burst(
     principal: Principal = Depends(current_principal),
 ):
     window = _window(since)
-    async with _scoped(request, ws, principal) as session:
+    async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await ops_views.burst(session, workspace_id=str(ws), since=window)
     return _envelope("burst", ws, rows)
 
