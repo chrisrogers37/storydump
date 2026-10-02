@@ -2,7 +2,7 @@ import { Fragment } from "react"
 import { MaybeTrackedLink } from "@/components/analytics/maybe-tracked-link"
 import { siteConfig } from "@/config/site"
 import type { Tracked } from "@/lib/analytics"
-import { pathForUseCase, useCases } from "@/lib/use-cases"
+import { pathForUseCase, useCases, useCasesPath } from "@/lib/use-cases"
 
 const linkClass = "underline underline-offset-4 hover:text-foreground"
 
@@ -52,7 +52,10 @@ export function Footer() {
             <Dotted links={siteLinks} />
           </nav>
           <nav aria-label="Use cases">
-            Use cases:{" "}
+            <MaybeTrackedLink href={useCasesPath} className={linkClass}>
+              Use cases
+            </MaybeTrackedLink>
+            :{" "}
             <Dotted
               links={useCases.map(({ slug, navLabel }) => ({ href: pathForUseCase(slug), label: navLabel }))}
             />

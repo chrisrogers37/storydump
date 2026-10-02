@@ -6,7 +6,7 @@ import { TrackedLink } from "@/components/analytics/tracked-link"
 
 // Pages that carry their own hero form (id "waitlist"): the header's button
 // scrolls to it there, and goes to the home page's everywhere else.
-const hasForm = (pathname: string) => pathname === "/" || pathname.startsWith("/use-cases/")
+const hasForm = (pathname: string) => pathname === "/" || pathname === "/use-cases" || pathname.startsWith("/use-cases/")
 
 export function WaitlistLink({ className, children }: { className?: string; children: ReactNode }) {
   const pathname = usePathname()
