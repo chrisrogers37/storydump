@@ -27,6 +27,7 @@ const ARTICLES = "app/(marketing)/blog/[slug]/_articles"
 const USE_CASES = "app/(marketing)/use-cases/[slug]"
 function filesOfUseCases() {
   return [
+    "app/(marketing)/use-cases/page.tsx",
     `${USE_CASES}/page.tsx`,
     ...readdirSync(path.join(SRC, USE_CASES, "_content")).map((f) => `${USE_CASES}/_content/${f}`),
     "lib/use-cases.ts",
@@ -176,5 +177,56 @@ describe("the use-case pages' claims", () => {
 
   it("says the store is not connected", () => {
     expect(pages).toContain("doesn’t connect to your store")
+  })
+})
+
+describe("the setup guide", () => {
+  const SETUP = "app/(marketing)/setup"
+  const guide = ["page.tsx", "instagram/page.tsx", "media-organize/page.tsx", "connect/page.tsx"]
+    .map((f) => read(`${SETUP}/${f}`))
+    .join("\n")
+
+  it("lists Telegram as optional, never as a requirement", () => {
+    expect(read(`${SETUP}/page.tsx`)).toMatch(/Optional: a Telegram group/)
+    expect(guide).not.toMatch(/Telegram account \(the app/)
+  })
+
+  it("sets the mix per folder on the web, not from Telegram", () => {
+    expect(guide).not.toMatch(/from Telegram using the settings/i)
+    expect(guide).not.toMatch(/Category mixing/)
+    expect(read(`${SETUP}/media-organize/page.tsx`)).toContain("Posting mix")
+  })
+
+  // Each button or tab the guide tells a reader to tap, and the dashboard
+  // file that renders it: renaming one there fails here.
+  it.each([
+    ["Connect Instagram", "components/dashboard/settings/accounts-tab.tsx"],
+    ["Connect Google Drive", "lib/drive.ts"],
+    ["Add folder", "components/dashboard/settings/drive-folder-picker.tsx"],
+    ["Sync Now", "components/dashboard/settings/drive-card.tsx"],
+    ["Posts per day", "components/dashboard/settings/general-tab.tsx"],
+    ["Start hour", "components/dashboard/settings/general-tab.tsx"],
+    ["End hour", "components/dashboard/settings/general-tab.tsx"],
+    ["Time zone", "components/dashboard/settings/general-tab.tsx"],
+    ["Save Schedule", "components/dashboard/settings/general-tab.tsx"],
+    ["Posting mix", "components/dashboard/settings/category-weights-card.tsx"],
+    ["Split evenly", "components/dashboard/settings/category-weights-card.tsx"],
+    ["Link Telegram", "components/dashboard/settings/telegram-card.tsx"],
+    ["Open Telegram to finish linking", "components/dashboard/settings/telegram-card.tsx"],
+    ["Telegram groups", "components/dashboard/settings/telegram-card.tsx"],
+    ["Add a Telegram group", "components/dashboard/settings/telegram-card.tsx"],
+    ["Open Telegram to choose a group", "components/dashboard/settings/telegram-card.tsx"],
+    ["Bound", "components/dashboard/settings/telegram-card.tsx"],
+    ["Posted myself", "lib/intents.ts"],
+    ["Queue", "components/dashboard/sidebar.tsx"],
+  ])("names %s, which the dashboard shows", (label, file) => {
+    expect(guide).toContain(label)
+    expect(read(file)).toContain(label)
+  })
+
+  it("walks through linking a group, not a bot link sent by email", () => {
+    const connect = read(`${SETUP}/connect/page.tsx`)
+    expect(connect).toContain("Add a Telegram group")
+    expect(connect).not.toMatch(/invite link will be shared/i)
   })
 })

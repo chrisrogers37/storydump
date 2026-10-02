@@ -82,7 +82,10 @@ export const useCases = [
 
 export type UseCaseSlug = (typeof useCases)[number]["slug"]
 
-export const pathForUseCase = (slug: UseCaseSlug) => `/use-cases/${slug}`
+/** The index page that lists them all. */
+export const useCasesPath = "/use-cases"
+
+export const pathForUseCase = (slug: UseCaseSlug) => `${useCasesPath}/${slug}`
 
 export function getUseCase(slug: string) {
   return useCases.find((useCase) => useCase.slug === slug)

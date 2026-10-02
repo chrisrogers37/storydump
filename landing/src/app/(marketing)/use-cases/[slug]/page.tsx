@@ -8,7 +8,7 @@ import { JsonLd } from "@/components/seo/json-ld"
 import type { Tracked } from "@/lib/analytics"
 import { breadcrumbList } from "@/lib/json-ld"
 import { noindexMetadata, pageMetadata } from "@/lib/seo"
-import { getUseCase, pathForUseCase, useCases, type UseCaseSlug } from "@/lib/use-cases"
+import { getUseCase, pathForUseCase, useCases, useCasesPath, type UseCaseSlug } from "@/lib/use-cases"
 import { evergreen } from "./_content/evergreen"
 import { googleDrive } from "./_content/google-drive"
 import { onlineStores } from "./_content/online-stores"
@@ -62,6 +62,7 @@ export default async function UseCasePage({ params }: { params: Params }) {
       <JsonLd
         data={breadcrumbList([
           { name: "Home", path: "/" },
+          { name: "Use cases", path: useCasesPath },
           { name: useCase.seoTitle, path: pathForUseCase(slug) },
         ])}
       />

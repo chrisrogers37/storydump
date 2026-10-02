@@ -15,9 +15,10 @@ import { siteConfig } from "@/config/site"
 export const indexablePages = [
   { path: "/", lastModified: "2026-10-02", changeFrequency: "weekly", priority: 1 },
   { path: "/blog", lastModified: "2026-10-02", changeFrequency: "weekly", priority: 0.8 },
-  { path: "/setup", lastModified: "2026-09-21", changeFrequency: "monthly", priority: 0.8 },
-  { path: "/setup/instagram", lastModified: "2026-09-21", changeFrequency: "monthly", priority: 0.7 },
-  { path: "/setup/media-organize", lastModified: "2026-10-01", changeFrequency: "monthly", priority: 0.7 },
+  { path: "/use-cases", lastModified: "2026-10-02", changeFrequency: "monthly", priority: 0.8 },
+  { path: "/setup", lastModified: "2026-10-02", changeFrequency: "monthly", priority: 0.8 },
+  { path: "/setup/instagram", lastModified: "2026-10-02", changeFrequency: "monthly", priority: 0.7 },
+  { path: "/setup/media-organize", lastModified: "2026-10-02", changeFrequency: "monthly", priority: 0.7 },
   { path: "/privacy", lastModified: "2026-10-01", changeFrequency: "monthly", priority: 0.5 },
   { path: "/terms", lastModified: "2026-10-01", changeFrequency: "monthly", priority: 0.5 },
 ] as const
