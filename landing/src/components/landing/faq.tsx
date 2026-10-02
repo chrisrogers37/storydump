@@ -1,5 +1,6 @@
 "use client"
 
+import { TextLink } from "@/components/landing/text-link"
 import { siteConfig } from "@/config/site"
 import { faqs } from "@/config/faqs"
 import {
@@ -12,15 +13,17 @@ import { trackEvent } from "@/lib/analytics"
 
 export function FAQ() {
   return (
-    <section className="py-16 md:py-24">
-      <div className="mx-auto max-w-3xl px-4">
-        <h2 className="text-center text-3xl font-bold tracking-tight">
-          Frequently Asked Questions
+    <section aria-labelledby="faq-heading" className="py-16 md:py-24">
+      <div className="mx-auto grid max-w-6xl gap-8 px-4 md:grid-cols-[1fr_1.6fr] md:gap-16">
+        <h2
+          id="faq-heading"
+          className="section-title"
+        >
+          Questions
         </h2>
         <Accordion
           type="single"
           collapsible
-          className="mt-12"
           onValueChange={(value) => {
             if (value) {
               const idx = parseInt(value.replace("faq-", ""), 10)
@@ -31,7 +34,9 @@ export function FAQ() {
         >
           {faqs.map((faq, i) => (
             <AccordionItem key={i} value={`faq-${i}`}>
-              <AccordionTrigger>{faq.question}</AccordionTrigger>
+              <AccordionTrigger className="text-base font-semibold text-ink md:text-lg">
+                {faq.question}
+              </AccordionTrigger>
               <AccordionContent>
                 {faq.question === "Who built this?" ? (
                   <p className="text-muted-foreground">
@@ -42,7 +47,7 @@ export function FAQ() {
                       rel="noopener noreferrer"
                       className="underline underline-offset-4 hover:text-foreground"
                     >
-                      Chris
+                      {siteConfig.author.name}
                     </a>
                     . Have questions or feedback? Reach out at{" "}
                     <a
@@ -60,6 +65,13 @@ export function FAQ() {
             </AccordionItem>
           ))}
         </Accordion>
+        <p className="mt-8 text-sm text-ink/70">
+          Read more on the blog:{" "}
+          <TextLink href="/blog/automate-instagram-stories">how to automate Instagram Stories</TextLink>
+          {" "}and{" "}
+          <TextLink href="/blog/telegram-instagram-approval-workflow">approving Instagram Stories in Telegram</TextLink>
+          .
+        </p>
       </div>
     </section>
   )

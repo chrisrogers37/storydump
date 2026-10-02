@@ -1,70 +1,34 @@
 import type { MetadataRoute } from "next"
-import { siteConfig } from "@/config/site"
 import { posts } from "@/lib/blog"
+import { absoluteUrl, indexablePages } from "@/lib/seo"
+import { pathForUseCase, useCases } from "@/lib/use-cases"
 
-export const dynamic = "force-dynamic"
-
+/**
+ * Every indexable page with the date its content last changed: the static
+ * pages from `indexablePages`, the posts from `lib/blog.ts` and the use cases
+ * from `lib/use-cases.ts`. No entry is
+ * stamped with the request time, which told crawlers every page changed on
+ * every fetch.
+ */
 export default function sitemap(): MetadataRoute.Sitemap {
-  const now = new Date()
-
-  const blogEntries: MetadataRoute.Sitemap = [
-    {
-      url: `${siteConfig.url}/blog`,
-      lastModified: now,
-      changeFrequency: "weekly",
-      priority: 0.8,
-    },
+  return [
+    ...indexablePages.map((page) => ({
+      url: absoluteUrl(page.path),
+      lastModified: page.lastModified,
+      changeFrequency: page.changeFrequency,
+      priority: page.priority,
+    })),
     ...posts.map((post) => ({
-      url: `${siteConfig.url}/blog/${post.slug}`,
-      lastModified: new Date(post.date),
+      url: absoluteUrl(`/blog/${post.slug}`),
+      lastModified: post.updated ?? post.date,
       changeFrequency: "monthly" as const,
       priority: 0.7,
     })),
-  ]
-
-  return [
-    {
-      url: siteConfig.url,
-      lastModified: now,
-      changeFrequency: "weekly",
-      priority: 1,
-    },
-    ...blogEntries,
-    {
-      url: `${siteConfig.url}/setup`,
-      lastModified: now,
-      changeFrequency: "monthly",
-      priority: 0.8,
-    },
-    {
-      url: `${siteConfig.url}/setup/instagram`,
-      lastModified: now,
-      changeFrequency: "monthly",
+    ...useCases.map((useCase) => ({
+      url: absoluteUrl(pathForUseCase(useCase.slug)),
+      lastModified: useCase.lastModified,
+      changeFrequency: "monthly" as const,
       priority: 0.7,
-    },
-    {
-      url: `${siteConfig.url}/setup/media-organize`,
-      lastModified: now,
-      changeFrequency: "monthly",
-      priority: 0.7,
-    },
-    {
-      url: `${siteConfig.url}/login`,
-      lastModified: now,
-      changeFrequency: "monthly",
-      priority: 0.5,
-    },
-    {
-      url: `${siteConfig.url}/privacy`,
-      lastModified: now,
-      changeFrequency: "monthly",
-      priority: 0.5,
-    },
-    {
-      url: `${siteConfig.url}/terms`,
-      lastModified: now,
-      changeFrequency: "monthly",
-      priority: 0.5,
-    },
+    })),
   ]
 }
