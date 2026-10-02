@@ -31,7 +31,12 @@ import {
   type SubmitResult,
 } from "@/lib/command-client";
 import type { MediaRow } from "@/lib/dashboard-payloads";
-import { destinationIsActive, destinationName, destinationStateBadge } from "@/lib/destination";
+import {
+  LIVE_ACCOUNT_STATES,
+  destinationIsActive,
+  destinationName,
+  destinationStateBadge,
+} from "@/lib/destination";
 import { formatSlot } from "@/lib/intents";
 import type { Destination } from "@/lib/types";
 
@@ -80,6 +85,34 @@ export function accountChoiceLabel(
   return destinationIsActive(account.state)
     ? name
     : `${name} — ${destinationStateBadge(account.state).label}`;
+}
+
+/**
+ * The accounts the picker offers: those `schedule_item` takes. The listing
+ * drops only `disabled`, so a `moved` account would be offered and refused,
+ * and a reload shows it again.
+ */
+export function plannableAccounts<T extends Pick<Destination, "state">>(
+  accounts: readonly T[],
+): T[] {
+  return accounts.filter((account) => LIVE_ACCOUNT_STATES.includes(account.state));
+}
+
+/**
+ * The account a press schedules onto: the one picked, else the first active
+ * one, else the first. A pick no longer listed falls back the same way, so the
+ * picker never shows no choice beside a Schedule button that cannot be pressed.
+ */
+export function pickedAccount<T extends Pick<Destination, "id" | "state">>(
+  accounts: readonly T[],
+  accountId: string,
+): T | null {
+  return (
+    accounts.find((account) => account.id === accountId) ??
+    accounts.find((account) => destinationIsActive(account.state)) ??
+    accounts[0] ??
+    null
+  );
 }
 
 export type ScheduledOutcome = { when: string | null; noChat: boolean };
@@ -160,13 +193,13 @@ export function ScheduleDialog({
   returnFocusTo: RefObject<HTMLElement | null>;
 }) {
   const ids = useId();
-  const accounts = targets?.accounts ?? [];
-  const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const accounts = plannableAccounts(targets?.accounts ?? []);
+  const [accountId, setAccountId] = useState("");
   const [localAt, setLocalAt] = useState("");
   const [phase, setPhase] = useState<Phase>({ kind: "form", notice: null });
   const [pending, setPending] = useState(false);
 
-  const account = accounts.find((a) => a.id === accountId) ?? null;
+  const account = pickedAccount(accounts, accountId);
   const zone = account && targets ? scheduleZone(account, targets.workspaceTz) : null;
 
   function close() {
@@ -311,7 +344,7 @@ export function ScheduleDialog({
         {accounts.length > 1 ? (
           <div className="space-y-2">
             <Label htmlFor={`${ids}-account`}>Account</Label>
-            <Select value={accountId} onValueChange={setAccountId}>
+            <Select value={account?.id ?? ""} onValueChange={setAccountId}>
               <SelectTrigger id={`${ids}-account`} className="w-full">
                 <SelectValue />
               </SelectTrigger>

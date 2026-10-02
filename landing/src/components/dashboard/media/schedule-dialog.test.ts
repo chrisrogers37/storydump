@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   accountChoiceLabel,
+  pickedAccount,
+  plannableAccounts,
   scheduledOutcome,
   schedulePlan,
   scheduleStep,
@@ -61,6 +63,45 @@ describe("accountChoiceLabel", () => {
     expect(
       accountChoiceLabel({ display_name: null, handle: "storyco", state: "reauth_required" }),
     ).toBe("storyco — Reconnect needed");
+  });
+});
+
+describe("plannableAccounts — what the picker offers", () => {
+  it("offers only the accounts schedule_item takes", () => {
+    // The listing drops only `disabled`; a `moved` account would be offered,
+    // refused, and offered again after the reload the refusal asks for.
+    const listed = [
+      { id: "a", state: "active" },
+      { id: "r", state: "reauth_required" },
+      { id: "m", state: "moved" },
+      { id: "d", state: "disabled" },
+    ];
+    expect(plannableAccounts(listed).map((account) => account.id)).toEqual(["a", "r"]);
+  });
+});
+
+describe("pickedAccount — the account a press schedules onto", () => {
+  const reconnect = { id: "r", state: "reauth_required" };
+  const active = { id: "a", state: "active" };
+
+  it("starts on the first active account, not the first listed", () => {
+    expect(pickedAccount([reconnect, active, { id: "b", state: "active" }], "")).toBe(active);
+  });
+
+  it("keeps the person's pick, whatever its state", () => {
+    expect(pickedAccount([reconnect, active], "r")).toBe(reconnect);
+  });
+
+  it("falls back when the pick is no longer listed, rather than offering none", () => {
+    expect(pickedAccount([reconnect, active], "gone")).toBe(active);
+  });
+
+  it("is the first listed when none is active", () => {
+    expect(pickedAccount([reconnect, { id: "s", state: "reauth_required" }], "")).toBe(reconnect);
+  });
+
+  it("is none when there are none", () => {
+    expect(pickedAccount([], "")).toBeNull();
   });
 });
 

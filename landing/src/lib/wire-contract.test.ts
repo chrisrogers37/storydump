@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import path from "path";
 import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, RESOLUTIONS } from "./commands";
 import { AT_RULE_COPY, LOCK_CLAUSES, NO_PUSH_BINDING, PLAN_HORIZON_DAYS } from "./command-client";
+import { LIVE_ACCOUNT_STATES } from "./destination";
 import { IN_THE_WAY_MAX } from "./refusal-facts";
 import {
   EXPIRY_DAYS_DEFAULT,
@@ -100,6 +101,10 @@ describe("the wire spellings are the vocabulary's", () => {
     expect(Object.keys(LOCK_CLAUSES).sort()).toEqual(
       [...tuple("BLOCKING_LOCKS"), ...tuple("WARNING_LOCKS")].sort(),
     );
+  });
+  it("the account states a story can be planned onto", () => {
+    // A drift here would offer an account the port refuses, or hide one it takes.
+    expect([...LIVE_ACCOUNT_STATES]).toEqual(tuple("LIVE_ACCOUNT_STATES"));
   });
   it("the rules a refused time can name, each with its sentence", () => {
     // A rule the port adds without one here would read as the sentence with
