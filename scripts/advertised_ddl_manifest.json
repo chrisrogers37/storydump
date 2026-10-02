@@ -340,6 +340,13 @@
       "label": "§32 planned stories are served on time or missed out loud (089, #1413) — the unconditional slot key dropped and the cadence-only key renamed to it (contract), fn_prompts_due re-created serving planned rows only while servable and in their late window and skipping every cancel-flagged row, fn_reaper_sweep replace whose slot expiry takes cadence rows only, and fn_planned_misses listing the planned rows that will not be served with their reason",
       "doc": "07-security-model.md",
       "ordinal": 30
+    },
+    {
+      "sha256": "4bd78e6e523c52bac371525304cf49b2f5d28bd89faf4122d2ac6b74a34587ad",
+      "class": "normative",
+      "label": "§39 the sync retires what the publish can never fetch (096, #1545) — media_items.last_listed_at, the stamp a walk leaves on every file it lists, missing added to ck_media_state for a file a walk that saw the whole tree no longer lists, and fn_planned_misses replaced to name it item_missing",
+      "doc": "07-security-model.md",
+      "ordinal": 31
     }
   ],
   "policy_expansion": {

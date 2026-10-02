@@ -163,15 +163,15 @@ def _resume_walk(
     *,
     root: str,
     source_id: str,
-) -> tuple[str, dict, list, Optional[str], int, bool, list]:
+) -> tuple[str, dict, list, Optional[str], int, bool, list, bool]:
     """The walk a stored cursor resumes, or the fresh one that replaces it.
 
     Split out of :meth:`GoogleDriveAdapter.list_changes` (the tech-debt audit,
     2026-09-20): deciding whether a stored cursor can be believed is one
     decision, and it was the first third of the listing verb. Returns the
-    seven values the walk reads — ``(walk, current, queue, page_token, seen,
-    truncated, visited)`` — under the names the walk already used, so the
-    listing body is unchanged by the move.
+    eight values the walk reads — ``(walk, current, queue, page_token, seen,
+    truncated, visited, partial)`` — under the names the walk already used, so
+    the listing body is unchanged by the move.
 
     A cursor is resumable only when it is v2, carries a `walk` token and names
     a `current` folder whose id is a Drive id; anything else starts over, and
@@ -196,6 +196,7 @@ def _resume_walk(
         seen = int(cp.get("seen") or 0)
         truncated = bool(cp.get("truncated"))
         visited = [v for v in (cp.get("visited") or []) if isinstance(v, str)]
+        partial = bool(cp.get("partial"))
     else:
         if cp.get("current") or cp.get("page_token"):
             logger.warning(
@@ -213,7 +214,8 @@ def _resume_walk(
             "listed": False,
         }
         queue, page_token, seen, truncated, visited = [], None, 0, False, []
-    return walk, current, queue, page_token, seen, truncated, visited
+        partial = False
+    return walk, current, queue, page_token, seen, truncated, visited, partial
 
 
 @dataclass(frozen=True)
@@ -390,6 +392,7 @@ class GoogleDriveAdapter:
 
             {"v": 2, "walk": <token>,
              "seen": <folders queued so far>, "truncated": <cap hit>,
+             "partial": <part of the tree skipped otherwise>,
              "current": {"id", "name", "top", "top_name", "path", "listed"},
              "queue":   [ … the same shape … ],   # folders still to list
              "page_token": <within current>}       # only while more pages
@@ -399,14 +402,20 @@ class GoogleDriveAdapter:
         that did not mint — gets a fresh token here). A pre-v2 cursor with a
         `current` (the one-level walk of 2026-09-06, in flight at deploy) is
         ignored and the walk starts over. The complete checkpoint is
-        `{"v": 2, "walk": …}` with at most `truncated` beside it: no
+        `{"v": 2, "walk": …}` with at most `seen`, `truncated` and `partial`
+        beside it: no
         `current`, `queue` or `page_token` (`checkpoint_incomplete` is the one
         definition the sync's chain reads), and the bare `page_token` shape is
         never emitted.
 
         `FOLDER_WALK_CAP` bounds the folders queued per walk; past it the rest
         is skipped and the cut is SAID (one warning) and carried to completion
-        as `truncated`, never absorbed.
+        as `truncated`, never absorbed. Every other skip — a folder past
+        `FOLDER_LIST_CAP`, a subfolder listing that repeats its page token, a
+        folder that vanished before or during its listing — is said where it
+        happens and carried to completion as `partial`. A walk carrying either
+        did not see the whole tree, and the sync tombstones nothing after it
+        (`media_sync._tombstone_unlisted`).
         """
         _refuse_unsupported_config(config)
         cp = dict(checkpoint or {})
@@ -415,18 +424,21 @@ class GoogleDriveAdapter:
             await self._token_provider(source_id, workspace_id=workspace_id)
         )
 
-        walk, current, queue, page_token, seen, truncated, visited = _resume_walk(
-            cp, config, root=root, source_id=source_id
+        walk, current, queue, page_token, seen, truncated, visited, partial = (
+            _resume_walk(cp, config, root=root, source_id=source_id)
         )
 
         def cursor(**extra: Any) -> dict:
-            # `seen` and `truncated` ride to completion (the log reads them);
-            # `visited` only while the walk is in flight.
+            # `seen`, `truncated` and `partial` ride to completion (the log
+            # reads them; the sync judges nothing after a walk carrying either
+            # of the last two); `visited` only while the walk is in flight.
             out: dict = {"v": 2, "walk": walk}
             if seen:
                 out["seen"] = seen
             if truncated:
                 out["truncated"] = True
+            if partial:
+                out["partial"] = True
             if extra:
                 out["visited"] = visited
                 out.update(extra)
@@ -464,7 +476,7 @@ class GoogleDriveAdapter:
         if not current.get("listed"):
             # Lazy discovery: this folder's subfolders, once, as it is popped.
             try:
-                children = await self._subfolders(
+                children, cut = await self._subfolders(
                     str(current["id"]),
                     source_id=source_id,
                     workspace_id=workspace_id,
@@ -479,7 +491,10 @@ class GoogleDriveAdapter:
                     current.get("path"),
                     current["id"],
                 )
+                partial = True
                 return [], advanced()
+            if cut:
+                partial = True
             known = set(visited) | {str(current["id"])} | {str(f["id"]) for f in queue}
             for child in children:
                 if child["id"] in known:
@@ -524,6 +539,7 @@ class GoogleDriveAdapter:
                 current.get("path"),
                 current["id"],
             )
+            partial = True
             return [], advanced()
         except DriveTerminalError:
             if not page_token:
@@ -606,12 +622,13 @@ class GoogleDriveAdapter:
         source_id: str,
         workspace_id: str,
         box: Optional[_TokenBox] = None,
-    ) -> list[dict]:
-        """A folder's immediate subfolders in name order. Paged to
-        `FOLDER_LIST_CAP` and the cut is SAID (one warning), never absorbed: a
-        folder past the cap would otherwise quietly never sync. A provider
-        handing the same page token back forever (a stub, or a Drive bug) ends
-        the listing, said once."""
+    ) -> tuple[list[dict], bool]:
+        """A folder's immediate subfolders in name order, and whether the
+        listing was cut short. Paged to `FOLDER_LIST_CAP` and the cut is SAID
+        (one warning), never absorbed: a folder past the cap would otherwise
+        quietly never sync. A provider handing the same page token back
+        forever (a stub, or a Drive bug) ends the listing, said once. Either
+        cut makes the walk `partial`."""
         params = {
             "q": _subfolder_query(parent),
             "fields": "nextPageToken,files(id,name,mimeType)",
@@ -631,7 +648,7 @@ class GoogleDriveAdapter:
                         "drive source %s: subfolder listing repeated page token; stopping",
                         source_id,
                     )
-                    return folders
+                    return folders, True
                 seen_tokens.add(page)
                 params["pageToken"] = page
             payload = await self._get_as_workspace(
@@ -676,9 +693,9 @@ class GoogleDriveAdapter:
                     parent,
                     FOLDER_LIST_CAP,
                 )
-                return folders[:FOLDER_LIST_CAP]
+                return folders[:FOLDER_LIST_CAP], True
             if not page:
-                return folders
+                return folders, False
 
     async def fetch_bytes(
         self,

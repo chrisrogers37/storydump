@@ -455,6 +455,9 @@ class TestEachMissSaysWhy:
                 {"media_state": "unsupported"},
                 id="media-unsupported",
             ),
+            pytest.param(
+                "item_missing", {"media_state": "missing"}, id="media-missing"
+            ),
             *[
                 pytest.param("item_locked", {"lock": (kind, None)}, id=f"{kind}-lock")
                 for kind in BLOCKING_LOCKS
@@ -577,6 +580,7 @@ class TestTheDoorsPartitionTheDuePlannedRows:
         "available": None,
         "removed": "item_removed",
         "unsupported": "item_unsupported",
+        "missing": "item_missing",
     }
     ACCOUNT = {
         "active": None,

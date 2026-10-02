@@ -403,6 +403,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # loud: the slot key's contract, the serve and miss doors and the
             # reaper's cadence-only slot expiry (#1413, phase 3).
             "089_planned_serve_and_misses.sql",
+            # 096 appends §39, the sync retiring what the publish can never
+            # fetch: the `last_listed_at` stamp, `missing` in ck_media_state and
+            # the miss door's `item_missing` (#1545).
+            "096_media_item_missing_and_last_listed.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

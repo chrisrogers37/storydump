@@ -388,8 +388,11 @@ INTENT_STATES: tuple[str, ...] = vocabulary.INTENT_STATES
 #: `ck_intent_origin`: the list filter's other closed set.
 INTENT_ORIGINS: tuple[str, ...] = vocabulary.INTENT_ORIGINS
 
-#: `ck_media_state`.
-MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed")
+#: `ck_media_state`. Only `available` is drawn. `unsupported` is the sync's
+#: judgment that the publish could never fetch the file (past its byte cap),
+#: `removed` is the folder's retirement (a re-pick undoes it), and `missing`
+#: is the file's own absence from its folder (a listing undoes it).
+MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed", "missing")
 
 #: The intent row plus the two joins the queue renders it with: the media it
 #: posts, and the account it posts to (`06` §3 — the handle is how a person

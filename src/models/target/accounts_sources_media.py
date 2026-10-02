@@ -266,6 +266,9 @@ class MediaItem(TargetBase):
     folder_path = Column(
         Text, nullable=True
     )  # 070: the folder's path under the connected folder
+    last_listed_at = Column(
+        TZ, nullable=True
+    )  # 096: when a walk of its folder last listed the file
     title = Column(Text, nullable=True)
     caption = Column(Text, nullable=True)
     generated_caption = Column(Text, nullable=True)
@@ -281,7 +284,8 @@ class MediaItem(TargetBase):
     __table_args__ = (
         CheckConstraint("media_kind IN ('image','video')", name="ck_media_kind"),
         CheckConstraint(
-            "state IN ('available','unsupported','removed')", name="ck_media_state"
+            "state IN ('available','unsupported','removed','missing')",
+            name="ck_media_state",
         ),
         UniqueConstraint("workspace_id", "id", name="uq_media_ws_id"),
         ForeignKeyConstraint(

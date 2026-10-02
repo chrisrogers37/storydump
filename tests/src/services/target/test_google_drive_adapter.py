@@ -1113,6 +1113,85 @@ class TestTheWalkGoesToAnyDepth:
         )
         assert cursors[-1].get("truncated") is True
 
+    # #1545: the sync tombstones what a walk that saw the WHOLE tree no longer
+    # lists, so every way a walk skips part of the tree rides the completed
+    # cursor: the folder cap as `truncated` (above), every other skip as
+    # `partial`. A folder reached twice is walked once and skips nothing (the
+    # cycle test above keeps that).
+
+    @pytest.mark.asyncio
+    async def test_a_folder_that_vanished_before_its_listing_leaves_the_walk_partial(
+        self,
+    ):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("GONE", "gone"), ("KEEP", "keep")]},
+            files={"KEEP": [_file("k1")]},
+            gone_listing={"GONE"},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["k1"]
+        assert cursors[-1].get("partial") is True
+
+    @pytest.mark.asyncio
+    async def test_a_folder_gone_mid_walk_leaves_the_walk_partial(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            parent = q.split("'")[1]
+            if "vnd.google-apps.folder" in q:
+                children = (
+                    [_folder_entry("GONE", "gone"), _folder_entry("KEEP", "keep")]
+                    if parent == self.ROOT
+                    else []
+                )
+                return httpx.Response(200, json={"files": children})
+            if parent == "GONE":
+                return httpx.Response(
+                    404, json={"error": {"message": "File not found"}}
+                )
+            return httpx.Response(
+                200, json={"files": [_file("k1")] if parent == "KEEP" else []}
+            )
+
+        seen, cursors = await self._walk(_adapter(handler))
+        assert [r for r, _, _ in seen] == ["k1"]
+        assert cursors[-1].get("partial") is True
+
+    @pytest.mark.asyncio
+    async def test_the_subfolder_cap_leaves_the_walk_partial(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_LIST_CAP", 2)
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("A", "a"), ("B", "b"), ("C", "c")]},
+            files={"A": [_file("fa")], "B": [_file("fb")], "C": [_file("fc")]},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa", "fb"], "past the cap, never synced"
+        assert cursors[-1].get("partial") is True
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_subfolder_page_token_leaves_the_walk_partial(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            parent = q.split("'")[1]
+            if "vnd.google-apps.folder" in q:
+                if parent == self.ROOT:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "files": [_folder_entry("A", "a")],
+                            "nextPageToken": "same",
+                        },
+                    )
+                return httpx.Response(200, json={"files": []})
+            return httpx.Response(
+                200, json={"files": [_file("fa")] if parent == "A" else []}
+            )
+
+        seen, cursors = await self._walk(_adapter(handler))
+        assert [r for r, _, _ in seen] == ["fa"]
+        assert cursors[-1].get("partial") is True
+
 
 class TestFetchBytes:
     """The media bytes for the approval card (owner, 2026-09-08 — legacy

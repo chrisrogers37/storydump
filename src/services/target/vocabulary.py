@@ -130,6 +130,25 @@ NO_PUSH_BINDING = "no_push_binding"
 BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")
 WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
 
+#: What a story may weigh on the way to Meta, by `media_items.media_kind`
+#: (Meta's own limits: 8 MB for a story image, 100 MB for a story video pulled
+#: by URL). Distinct from the Telegram card's caps (`MEDIA_CARD_MAX_BYTES`): a
+#: file too large for a Telegram preview may still be a fine story.
+#: The video cap is Cloudinary's, not Meta's: a story video is framed on the
+#: fly at its delivery URL (`transit.story_transformation`), and Cloudinary
+#: transforms a video synchronously only up to 40 MB on the free plan (100 MB
+#: on paid); above that the URL answers 400 and Meta's fetch can never
+#: succeed. A file over the cap is refused by name at the fetch rung
+#: (`DriveMediaTooLarge` → failed + refund, the reason on the intent) rather
+#: than burning five attempts. Raising it means eager, asynchronous framing
+#: at upload — a follow-up. The sync judges a listed file against the same
+#: numbers and lands one past them `unsupported`, so the draw never takes a
+#: file the publish could never fetch (`media_sync._listed_state`).
+PUBLISH_MAX_BYTES: Mapping[str, int] = {
+    "image": 8 * 1024 * 1024,
+    "video": 40 * 1000 * 1000,
+}
+
 #: `post_intents.publish_step` (055 ``ck_intent_step``).
 PUBLISH_STEPS: tuple[str, ...] = (
     "none",
@@ -380,6 +399,7 @@ OUTCOME_SENTENCES: Mapping[str, str] = {
 IN_THE_WAY: Mapping[str, str] = {
     "item_removed": "it was removed from the library",
     "item_unsupported": "Instagram cannot post it",
+    "item_missing": "its file is no longer in its Drive folder",
     "reject": "it was rejected",
     "unsupported": "it is marked as one that cannot be posted",
     "hold": "it is on hold",
