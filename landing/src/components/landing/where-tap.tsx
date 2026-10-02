@@ -52,8 +52,8 @@ export function WhereTap() {
         </p>
 
         <div className="mt-12 grid gap-5 md:grid-cols-2">
-          <figure className="rounded-3xl border border-ink/10 p-5 sm:p-7">
-            <div className="flex min-h-[260px] items-center rounded-2xl bg-[#dfe6ee] p-4">
+          <figure className="flex flex-col rounded-3xl border border-ink/10 p-5 sm:p-7">
+            <div className="flex min-h-[260px] flex-1 items-center rounded-2xl bg-[#dfe6ee] p-4">
               <ApprovalCard
                 art="monday"
                 slot="2026-10-02 13:30 Europe/London"
@@ -66,8 +66,8 @@ export function WhereTap() {
             </figcaption>
           </figure>
 
-          <figure className="rounded-3xl border border-ink/10 p-5 sm:p-7">
-            <div className="rounded-2xl border border-ink/10 bg-[#fbfaf7]">
+          <figure className="flex flex-col rounded-3xl border border-ink/10 p-5 sm:p-7">
+            <div className="flex-1 rounded-2xl border border-ink/10 bg-[#fbfaf7]">
               <div className="flex items-center justify-between border-b border-ink/10 px-4 py-3 text-sm">
                 <span className="font-semibold text-ink">Queue</span>
                 <span className="text-ink/60">Today</span>
