@@ -6,7 +6,8 @@ const chores = [
   },
   {
     chore: "Crop it to fit.",
-    answer: "Photos and videos are sized for Stories, 9:16, without cropping.",
+    answer:
+      "Tap Post now and photos and videos are sized for Stories, 9:16, without cropping.",
   },
   {
     chore: "Remember to post today.",

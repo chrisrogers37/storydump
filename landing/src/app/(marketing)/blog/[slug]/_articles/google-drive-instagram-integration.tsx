@@ -4,60 +4,51 @@ export function GoogleDriveInstagramIntegration() {
   return (
     <>
       <p>
-        Most content teams already have a media library in Google Drive.
-        Product photos from the photographer go into a shared folder. The
-        designer exports Stories-ready assets there. The social media person
-        then downloads them, opens Instagram, and uploads manually.
+        Most small teams already keep their media in Google Drive. The
+        photographer&apos;s product shots go into a shared folder, and so do
+        the designer&apos;s exports. Then someone downloads them, opens
+        Instagram and uploads them by hand.
       </p>
       <p>
-        That download-upload loop is the bottleneck. Google Drive and
-        Instagram don&apos;t talk to each other natively. No Zapier zap, no
-        official integration, no &ldquo;share to Instagram&rdquo; button.
-      </p>
-      <p>
-        Here&apos;s how to close that gap.
+        That download-and-upload loop is the bottleneck, because Google
+        Drive has no button that posts to Instagram. Here&apos;s how to
+        close the gap.
       </p>
 
       <h2>Why Google Drive as a media source?</h2>
-      <p>
-        Drive has three properties that make it a solid foundation for an
-        Instagram pipeline:
-      </p>
       <ul>
         <li>
-          <strong>15 GB free</strong> — enough for thousands of
-          Story-resolution images. No CDN bills.
+          <strong>It is where the files already are</strong>, so nobody has
+          to move a library to a new tool.
         </li>
         <li>
-          <strong>Shared folders</strong> — your designer drops files in,
-          your automation picks them up. No handoffs, no &ldquo;can you
-          send me the file?&rdquo; messages.
+          <strong>Shared folders</strong>: your designer drops files in, and
+          they are ready for the schedule. No &ldquo;can you send me the
+          file?&rdquo; messages.
         </li>
         <li>
-          <strong>Mature API</strong> — the Google Drive API supports
-          listing, filtering, and downloading files programmatically.
-          Combined with OAuth, your automation can read the folder in
-          real time.
+          <strong>A read-only connection</strong>: a tool can read a folder
+          without being able to change or delete anything in it.
         </li>
       </ul>
 
       <h2>The folder-to-category mapping</h2>
       <p>
-        The key insight is that folder names map to content categories.
+        The useful trick is to let folders stand for kinds of content.
         Structure your Drive like this:
       </p>
       <pre>
         <code>{`Storydump/
-├── product-shots/    → "product" category
-├── behind-scenes/    → "bts" category
-├── memes/            → "memes" category
-└── seasonal/         → "seasonal" category`}</code>
+├── product-shots/
+├── behind-scenes/
+├── memes/
+└── seasonal/`}</code>
       </pre>
       <p>
-        Your automation tool scans each folder, indexes the files, and
-        assigns a category based on which folder the file lives in. Then a
-        configurable mix ratio (say 40% product, 30% BTS, 20% memes, 10%
-        seasonal) controls what gets posted when.
+        Then give each folder a share of the posting mix, say 50% product
+        shots, 30% behind-the-scenes and 20% memes. The mix decides which
+        folder is up next, and within that folder anything never posted goes
+        first, then whatever has gone longest without a turn.
       </p>
       <p>
         See the{" "}
@@ -65,47 +56,35 @@ export function GoogleDriveInstagramIntegration() {
         {" "}for the full folder structure.
       </p>
 
-      <h2>Connecting Drive to the pipeline</h2>
+      <h2>Connecting Drive</h2>
       <p>
-        You connect Drive from inside Storydump — authorize access, then pick
-        your folder. There is no Google Cloud project to create and no OAuth
+        You connect Drive from inside Storydump: authorize access, then pick
+        your folders. There is no Google Cloud project to create and no
         credentials to manage. Storydump requests the{" "}
-        <code>drive.readonly</code> scope, the narrowest one that can list and
-        download files: it can never modify or delete them. Your media library
-        stays safe.
-      </p>
-
-      <h2>The sync loop</h2>
-      <p>
-        Once connected, a background sync loop periodically checks Drive
-        for new or changed files:
-      </p>
-      <ol>
-        <li>List files in each configured folder</li>
-        <li>Compare against known files (by Drive file ID)</li>
-        <li>Index new files with metadata: name, size, MIME type, category</li>
-        <li>Mark deleted files as inactive</li>
-      </ol>
-      <p>
-        The sync runs every few minutes. New content appears in the posting
-        pipeline automatically — no manual trigger needed.
+        <code>drive.readonly</code> scope, so it can list and read your
+        files but never change or delete them. Your originals stay in your
+        Drive.
       </p>
 
       <h2>From Drive to Instagram</h2>
       <p>
-        When it&apos;s time to post, the pipeline downloads the file from
-        Drive, uploads it to a temporary CDN (Cloudinary works well), and
-        hands the public URL to the Instagram Graph API for publishing.
-        After the Story is live, the temporary CDN upload is deleted.
+        When a Story is due, Storydump picks it from your folders and brings
+        it to your team as a card, in your Telegram group or in the Queue on
+        the web. Someone taps <strong>Post now</strong>, and it goes out
+        through Instagram&apos;s official API. For that step a private,
+        temporary copy, framed to the 9:16 Story size, sits on Cloudinary
+        until the Story posts, and is then deleted. The{" "}
+        <Link href="/privacy">Privacy page</Link> covers this in full.
       </p>
       <p>
-        The result: your designer drops a file into Google Drive, and within
-        minutes it&apos;s available for posting to Instagram — with
-        one-tap approval in between.
+        The result: your designer drops a file into Google Drive, and it
+        joins the rotation, with one tap from your team before anything
+        posts.
       </p>
       <p>
-        <Link href="/">Storydump</Link> handles this entire flow. Connect
-        your Drive, set a schedule, and your Stories post themselves.
+        That is <Link href="/">Storydump</Link>. It is in a free beta and
+        invites people in small batches;{" "}
+        <Link href="/#waitlist">join the waitlist</Link> to get a spot.
       </p>
     </>
   )

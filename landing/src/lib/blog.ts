@@ -6,6 +6,8 @@ export interface BlogPost {
   date: string
   /** Set when the content changes after publication, YYYY-MM-DD. */
   updated?: string
+  /** A shorter title for search results, when `title` plus " | Storydump" runs past 60 characters. */
+  seoTitle?: string
   readTime: string
   keywords: string[]
 }
@@ -15,8 +17,9 @@ export const posts: BlogPost[] = [
     slug: "automate-instagram-stories",
     title: "How to Automate Instagram Stories in 2026",
     description:
-      "Manual posting burns hours every week. Here's how to set up a hands-off Instagram Story pipeline with Google Drive, Telegram approvals, and the Instagram Graph API.",
+      "Automate everything up to the tap: a Google Drive library, a schedule you set and a one-tap approval in Telegram or on the web, step by step.",
     date: "2026-05-25",
+    updated: "2026-10-02",
     readTime: "6 min read",
     keywords: [
       "automate instagram stories",
@@ -28,9 +31,11 @@ export const posts: BlogPost[] = [
   {
     slug: "google-drive-instagram-integration",
     title: "Google Drive to Instagram: The Missing Integration",
+    seoTitle: "Google Drive to Instagram Stories",
     description:
-      "Your media library lives in Google Drive. Your audience lives on Instagram. Here's how to bridge the gap without manual downloads, re-uploads, or third-party storage fees.",
+      "Your media lives in Google Drive and your audience on Instagram. Here's how to post Stories from a Drive folder without downloading and re-uploading.",
     date: "2026-05-25",
+    updated: "2026-10-02",
     readTime: "5 min read",
     keywords: [
       "google drive instagram integration",
@@ -41,10 +46,11 @@ export const posts: BlogPost[] = [
   },
   {
     slug: "telegram-instagram-approval-workflow",
-    title: "Why Telegram Is the Best Instagram Content Approval Tool",
+    title: "Approving Instagram Stories in Telegram",
     description:
-      "Slack is too noisy. Email is too slow. Telegram bots give you one-tap approve/skip/reject for every Instagram Story — from your phone, in real time.",
+      "A one-tap approval step for your team's Instagram Stories, in a Telegram group or on the web: see the photo, tap Post now, and everyone sees who did.",
     date: "2026-05-25",
+    updated: "2026-10-02",
     readTime: "4 min read",
     keywords: [
       "telegram bot for instagram",

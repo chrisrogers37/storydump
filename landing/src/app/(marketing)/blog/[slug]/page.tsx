@@ -3,7 +3,7 @@ import { notFound } from "next/navigation"
 import Link from "next/link"
 import { ArrowLeft } from "lucide-react"
 import { posts, getPost } from "@/lib/blog"
-import { pageMetadata } from "@/lib/seo"
+import { noindexMetadata, pageMetadata } from "@/lib/seo"
 import { blogPosting, breadcrumbList } from "@/lib/json-ld"
 import { JsonLd } from "@/components/seo/json-ld"
 import { AutomateInstagramStories } from "./_articles/automate-instagram-stories"
@@ -29,10 +29,10 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { slug } = await params
   const post = getPost(slug)
-  if (!post) return {}
+  if (!post) return noindexMetadata
 
   return pageMetadata({
-    title: post.title,
+    title: post.seoTitle ?? post.title,
     description: post.description,
     path: `/blog/${slug}`,
     type: "article",
