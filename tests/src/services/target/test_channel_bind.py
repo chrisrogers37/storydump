@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.target import bindings, channel_bind
+from src.exceptions.tenancy import TenantResolutionError
+from src.services.target import bindings, channel_bind, tenant_resolution
 from src.services.target.start_router import StartContext, StartRouter
 
 
@@ -38,6 +39,8 @@ class _Fake:
         self.name = "Northside Coffee"
         self.tapper_user = "u1"
         self.gucs = []
+        self.gate = []
+        self.role_refusal = None
 
 
 @pytest.fixture()
@@ -64,11 +67,20 @@ def patched(monkeypatch):
     async def apply_gucs(executor, **kw):
         f.gucs.append(kw)
 
+    async def authorize_member(
+        executor, workspace_id, user_id, minimum_role="member", **kw
+    ):
+        f.gate.append((workspace_id, user_id, minimum_role, kw.get("tenant_bound")))
+        if f.role_refusal:
+            raise TenantResolutionError(f.role_refusal)
+        return "admin"
+
     monkeypatch.setattr(channel_bind.oauth_states, "consume_state", consume)
     monkeypatch.setattr(channel_bind.bindings, "bind", bind)
     monkeypatch.setattr(channel_bind.readers, "row", row)
     monkeypatch.setattr(channel_bind.identity, "user_for_identity", user_for_identity)
     monkeypatch.setattr(channel_bind.unit_of_work, "apply_gucs", apply_gucs)
+    monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
     return f
 
 
@@ -161,6 +173,25 @@ class TestOnceTheTapperIsProvenRefusalsAreAnswered:
         monkeypatch.setattr(channel_bind.bindings, "bind", bind)
         result = await channel_bind.handle_bind(object(), ctx())
         assert not result.handled and result.outcome == "external_ref_malformed"
+
+
+class TestTheMinterMustStillBeAnAdmin:
+    """`07` §2: admin+ when the link is minted AND when it is used. The
+    minter is re-checked inside the bind's own transaction, under the tenant
+    the state pins, before anything is written."""
+
+    async def test_the_minter_is_re_checked_as_admin_under_the_states_tenant(
+        self, patched
+    ):
+        await channel_bind.handle_bind(object(), ctx())
+        assert patched.gate == [("ws-1", "u1", "admin", True)]
+
+    @pytest.mark.parametrize("reason", ["insufficient_role", "not_a_member"])
+    async def test_a_minter_no_longer_admin_binds_nothing(self, patched, reason):
+        patched.role_refusal = reason
+        result = await channel_bind.handle_bind(object(), ctx())
+        assert (result.outcome, result.handled, result.reply) == (reason, False, None)
+        assert patched.bound == []
 
 
 class TestTheDeepLinkAndRegistration:

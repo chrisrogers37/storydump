@@ -519,6 +519,56 @@ class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
         row = _row(world, "-1009000000001")
         assert row is not None and str(row[0]) == str(world["a"]["ws"])
 
+    def test_an_admin_demoted_after_minting_binds_nothing(self, world):
+        """`07` §2: admin+ when the link is minted AND when it is used."""
+        from src.services.target import channel_bind
+
+        conn = psycopg2.connect(world["stream"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
+                admin = str(cur.fetchone()[0])
+                cur.execute(
+                    "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                    " VALUES (%s, %s, 'admin')",
+                    (str(world["a"]["ws"]), admin),
+                )
+                cur.execute(
+                    "INSERT INTO user_identities"
+                    " (user_id, provider, external_id, display_name)"
+                    " VALUES (%s, 'telegram', 'tg-admin-demoted', 'ada')",
+                    (admin,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        ids = {"ws": world["a"]["ws"], "user": admin}
+        link = run(
+            world,
+            lambda s: channel_bind.issue_bind_state(
+                s,
+                user_id=admin,
+                workspace_id=str(world["a"]["ws"]),
+                bot_username="storydump_app_bot",
+            ),
+            ids=ids,
+        )
+        _migrate(
+            world,
+            "UPDATE workspace_members SET role = 'member'"
+            " WHERE workspace_id = %s AND user_id = %s",
+            (str(world["a"]["ws"]), admin),
+        )
+        result = self._tap(
+            world,
+            link.rsplit("bind-", 1)[1],
+            tg_user_id="tg-admin-demoted",
+            external_ref="-1009000000003",
+        )
+        assert (result.outcome, result.handled) == ("insufficient_role", False)
+        assert _row(world, "-1009000000003") is None
+
     def test_a_stranger_holding_the_link_binds_nothing(self, world):
         self._linked_admin(world, "tg-admin-1")
         state = self._mint(world).rsplit("bind-", 1)[1]
