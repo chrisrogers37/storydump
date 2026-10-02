@@ -166,6 +166,12 @@ TOKEN_EXPIRY_DAYS_MIN = 1
 TOKEN_EXPIRY_DAYS_DEFAULT = 90
 TOKEN_EXPIRY_DAYS_MAX = 365
 
+#: The range of a workspace's TTL settings (`workspaces.SETTINGS_RANGES`): at
+#: least one of the setting's unit, at most a year.
+SETTINGS_TTL_MIN = 1
+SETTINGS_TTL_DAYS_MAX = 365
+SETTINGS_APPROVAL_TTL_MINUTES_MAX = SETTINGS_TTL_DAYS_MAX * 24 * 60
+
 #: Every API token starts with this; the resolver routes on it and secret
 #: scanners recognise it. The rest is 32 url-safe random bytes (43 chars).
 TOKEN_PREFIX = "sdt_"
