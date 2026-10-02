@@ -20,7 +20,7 @@ export function Hero() {
             on tap<span className="text-tap">.</span>
           </h1>
           <p className="mt-7 max-w-xl text-lg leading-relaxed text-ink/80">
-            Storydump picks today’s Story from your own photos and videos, gets
+            Storydump picks today’s Story from your Google Drive library, gets
             it ready and brings it to your team right on time. Tap{" "}
             <strong className="font-semibold text-ink">Post now</strong> and
             it’s up.

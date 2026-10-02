@@ -33,7 +33,7 @@ export const noindexMetadata = {
   robots: { index: false, follow: false },
 } satisfies Metadata
 
-const homeTitle = `${siteConfig.name} — Instagram Stories, on tap`
+const homeTitle = `${siteConfig.name} — Instagram Stories from Google Drive, on tap`
 
 /**
  * The home page's social card, which the root layout also sets as every

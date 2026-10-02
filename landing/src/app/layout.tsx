@@ -15,12 +15,14 @@ const geistSans = Geist({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+  // Small labels only: not worth a high-priority download ahead of the H1.
+  preload: false,
 })
 
 export const metadata: Metadata = {
   title: {
     template: "%s | Storydump",
-    default: siteConfig.name + " — Instagram Stories, on tap",
+    default: siteConfig.name + " — Instagram Stories from Google Drive, on tap",
   },
   description: siteConfig.description,
   authors: [{ name: siteConfig.author.name, url: siteConfig.contact.portfolio }],

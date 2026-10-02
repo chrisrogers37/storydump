@@ -136,6 +136,7 @@ export function WaitlistForm({
       <div
         id={anchorId}
         className={cn(
+          "scroll-mt-20",
           variant === "hero" ? "text-left" : "text-center",
           className
         )}
@@ -157,7 +158,7 @@ export function WaitlistForm({
     <form
       id={anchorId}
       onSubmit={handleSubmit}
-      className={cn("w-full", className)}
+      className={cn("w-full scroll-mt-20", className)}
     >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:rounded-full sm:border sm:border-ink sm:bg-white sm:p-1.5 sm:pl-5">
         <label htmlFor={`waitlist-email-${variant}`} className="sr-only">

@@ -9,6 +9,9 @@ const bricolage = Bricolage_Grotesque({
   variable: "--font-bricolage",
   subsets: ["latin"],
   weight: "800",
+  // The H1 is the home page's largest paint. "optional" lets the metric-
+  // matched fallback stand if the font is late, rather than repainting it.
+  display: "optional",
 })
 
 export default function MarketingLayout({
