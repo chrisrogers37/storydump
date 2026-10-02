@@ -324,6 +324,73 @@ class TestErrorRouting:
             )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reason, message, expected",
+        [
+            # A limit passes, so it is retried: a daily limit read as a dead
+            # grant used to flip the source to `error` and alert.
+            ("dailyLimitExceeded", "Daily Limit Exceeded", DriveRetryableError),
+            ("rateLimitExceeded", "Too many requests", DriveRetryableError),
+            ("userRateLimitExceeded", "Slow down", DriveRetryableError),
+            # One item the app may not reach: the item is gone to the app, not
+            # the credential dead, and a reconnect would not bring it back.
+            (
+                "appNotAuthorizedToFile",
+                "The user has not granted the app access to the file",
+                DriveSourceGone,
+            ),
+            (
+                "insufficientFilePermissions",
+                "The user does not have sufficient permissions for this file",
+                DriveSourceGone,
+            ),
+            # Any other 403 stays the credential's.
+            ("forbidden", "Forbidden", DriveCredentialDead),
+        ],
+    )
+    async def test_a_403_routes_on_googles_reason_first(
+        self, reason, message, expected
+    ):
+        record = []
+        handler, _ = _json_handler(
+            {
+                "error": {
+                    "code": 403,
+                    "message": message,
+                    "errors": [{"reason": reason, "message": message}],
+                }
+            },
+            status=403,
+        )
+        with pytest.raises(expected):
+            await _adapter(handler, record=record).list_changes(
+                CONFIG, None, source_id=SRC, workspace_id=WS
+            )
+        fresh = [call for call in record if len(call) == 3]
+        assert fresh == (
+            [(SRC, WS, "fresh")] if expected is DriveCredentialDead else []
+        ), "only a credential refusal re-mints the token"
+
+    @pytest.mark.asyncio
+    async def test_a_file_the_app_may_not_reach_is_a_gone_file_on_the_fetch(self):
+        from src.services.target.drive_adapter import DriveMediaGone
+
+        handler, _ = _json_handler(
+            {
+                "error": {
+                    "code": 403,
+                    "message": "no",
+                    "errors": [{"reason": "insufficientFilePermissions"}],
+                }
+            },
+            status=403,
+        )
+        with pytest.raises(DriveMediaGone):
+            await _adapter(handler).fetch_bytes(
+                source_id=SRC, workspace_id=WS, file_ref="F", max_bytes=1000
+            )
+
+    @pytest.mark.asyncio
     async def test_a_dead_transport_is_not_catchable_as_a_drive_error(self):
         """`DriveLostResponse` is deliberately not a `DriveError`: "no answer
         exists" must not be catchable as "it failed"."""
