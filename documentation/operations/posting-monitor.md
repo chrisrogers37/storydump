@@ -377,13 +377,17 @@ captured payloads and mutation checks. A later reader must not read *tested*
 for *seen in production*; this file's own subject is that the difference is
 easy to miss.
 
-**Cross-tenant reach rests on a tracked gap.** Production connects as
-`neondb_owner`, which owns these tables and bypasses RLS, so `p_tenant` is inert
-(#751) — the same footing `scheduling_lag` documents. Under a role the policy
-covers, a tenant-less read returns zero rows, and zero rows here reads as
-*nothing has posted*: this fails toward the **alarm**, which is the survivable
-direction, but it would be alarming for the wrong reason. Whoever closes #751
-must give this a door.
+**Cross-tenant reach goes through doors.** The monitor's three reads are 081's
+SECURITY DEFINER doors, `fn_health_posting_freshness`,
+`fn_health_publish_attempts` and `fn_health_destinations` (`posting_health.py`),
+owned by `svc_maintenance` and executable by the API's login. So they see the
+whole estate under the API's own login, which is `svc_ingress` since 2026-09-21:
+`/health` read `db_role` `svc_ingress`, `bypassrls` false, on 2026-10-02 (#751).
+The direct reads they replaced worked only as the owner, which bypasses RLS.
+Under a role the policy covers, a tenant-less read returns zero rows, and zero
+rows here would read as *nothing has posted*. The API's first switch to
+`svc_ingress`, on 2026-09-20, showed exactly that before it was rolled back.
+`scheduling_lag` stands on the same footing through `fn_health_scheduling_lag`.
 
 **The `oldest_intent_age_seconds` anchor assumes intents are minted near their
 slot.** `fn_clock_tick` selects `next_slot_at <= now()`, so `created_at` tracks
