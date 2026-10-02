@@ -59,11 +59,14 @@ export async function POST(
     method: "POST",
     body: JSON.stringify(parsed.body),
     headers: { "Idempotency-Key": idempotencyKeyFor(command, parsed.identity) },
+    // The one route that asks for a refusal's facts: what a person needs to act
+    // on a planning refusal, through the allow-list (`refusal-facts.ts`).
+    refusalFacts: true,
   });
 
   // The port's 409s (`illegal_transition`, `manual_mode`) are normal answers
-  // and ride through with their reason; the client turns them into a
-  // sentence and re-reads the ledger.
+  // and ride through with their reason, and their facts when there are any;
+  // the client turns them into a sentence and re-reads the ledger.
   if (!result.ok) return passThrough(result);
   return NextResponse.json(result.data);
 }
