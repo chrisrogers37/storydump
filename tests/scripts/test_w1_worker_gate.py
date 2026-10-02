@@ -10,7 +10,6 @@ exists to prevent.
 """
 
 import asyncio
-import json
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -507,8 +506,8 @@ class TestTheBudgetCeilingOnTheRealMachinery:
     ):
         """The notice rides a savepoint and the re-arm does not. When the
         notice cannot be written, PostgreSQL rolls its savepoint back, and the
-        source the job carried is still re-armed for tomorrow in the
-        finalize's commit, never left active with no next sync."""
+        source the job carried is still re-armed for tomorrow, in the same
+        transaction that ends the job: never left active with no next sync."""
         from src.services.target import outbox, work_loop
 
         chain = seed_workspace_chain(sync_conn, "w1rearm")
@@ -517,7 +516,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
             sync_conn,
             kind="sync_media_source",
             workspace_id=chain["ws"],
-            payload=json.dumps({"v": 1, "source_id": str(chain["src"])}),
+            payload='{"v": 1, "source_id": "%s"}' % chain["src"],
         )
         _set(sync_conn, job_id, "max_attempts = 1")
 
@@ -536,16 +535,18 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         assert _job_row(sync_conn, job_id)["state"] == "failed"
         assert _notices(sync_conn, chain["ws"]) == []
         with sync_conn.cursor() as cur:
+            # The jobs row's touch trigger stamps `updated_at` with the
+            # transaction's now(), so the span is exact only when the re-arm
+            # committed with the finalize. NULL is the re-arm rolled back.
             cur.execute(
-                "SELECT state, next_sync_at - now() FROM media_sources WHERE id = %s",
-                (str(chain["src"]),),
+                "SELECT s.next_sync_at - j.updated_at FROM media_sources s, jobs j"
+                " WHERE s.id = %s AND j.id = %s",
+                (str(chain["src"]), str(job_id)),
             )
-            state, ahead = cur.fetchone()
-        assert state == "active" and ahead is not None, (
-            "the re-arm went down with the notice: active, with no next sync"
+            (span,) = cur.fetchone()
+        assert span == timedelta(seconds=work_loop.REARM_AFTER_SECONDS), (
+            f"the re-arm did not commit with the finalize: {span}"
         )
-        tomorrow = timedelta(seconds=work_loop.REARM_AFTER_SECONDS)
-        assert tomorrow - timedelta(minutes=5) < ahead <= tomorrow, ahead
         _assert_no_stranded_lease(sync_conn)
 
     async def test_a_passed_deadline_ends_the_job_on_its_first_failure(

@@ -1223,72 +1223,54 @@ class TestTheBudgetCeiling:
             "the sweep re-mints a sender; 'will not retry' would be a lie"
         )
 
-    async def test_a_spent_sync_re_arms_its_source_for_tomorrow(self, monkeypatch):
-        """Leg 4 nulls `next_sync_at` at mint and only a completed sync re-arms
-        it; a sync the loop ends `failed` would leave the source never selected
-        again. The exhausted path re-arms it, so "will try again tomorrow" is
-        true — in the finalize's own transaction, ahead of the notice's
-        savepoint."""
+    SRC = "5c0f2e8a-0b1d-4c3e-9f00-00000000c001"
 
-        async def executor(session, job):
-            raise RuntimeError("drive down")
-
-        loop, calls = self._loop(monkeypatch, executor=executor)
-        await loop._run_job(
-            self._job(attempts=5, payload={"v": 1, "source_id": "src-1"})
-        )
-        assert calls["finalized"] == ["failed"] and len(calls["notices"]) == 1
-        updates = [
+    @staticmethod
+    def _rearms(calls):
+        return [
             (sql, params)
             for session in calls["sessions"]
             for sql, params in session.statements
             if "UPDATE media_sources" in sql
         ]
-        assert len(updates) == 1, updates
-        sql, params = updates[0]
+
+    async def test_a_spent_sync_re_arms_its_source_for_tomorrow(self, monkeypatch):
+        """Leg 4 nulls `next_sync_at` at mint and only a completed sync re-arms
+        it; a sync the loop ends `failed` would leave the source never selected
+        again. The exhausted path re-arms it, so "will try again tomorrow" is
+        true."""
+
+        async def executor(session, job):
+            raise RuntimeError("drive down")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        await loop._run_job(
+            self._job(attempts=5, payload={"v": 1, "source_id": self.SRC})
+        )
+        assert calls["finalized"] == ["failed"] and len(calls["notices"]) == 1
+        ((sql, params),) = self._rearms(calls)
         assert "next_sync_at IS NULL" in sql and "state = 'active'" in sql
-        assert params["s"] == "src-1" and params["ws"] == "ws-1"
+        assert params["s"] == self.SRC and params["ws"] == "ws-1"
         assert params["secs"] == work_loop.REARM_AFTER_SECONDS
 
-    async def test_a_notice_that_cannot_be_written_keeps_the_re_arm(self, monkeypatch):
-        """The notice is a courtesy and rides a savepoint; the re-arm is what
-        makes "will try again tomorrow" true. A notice that cannot be written
-        rolls its savepoint back, and must not take the re-arm with it: the
-        source would stay active with nothing left to select it again."""
-        from src.services.target import outbox
+    @pytest.mark.parametrize(
+        "payload",
+        [{"v": 1}, {"v": 1, "source_id": "not-a-uuid"}],
+        ids=["no source", "a source that is not a uuid"],
+    )
+    async def test_a_spent_sync_without_a_usable_source_re_arms_nothing(
+        self, monkeypatch, payload
+    ):
+        """A malformed id is refused before the cast: the re-arm runs in the
+        finalize's own transaction, and a raise there would abort it."""
 
         async def executor(session, job):
             raise RuntimeError("drive down")
 
-        async def fanout_notification(session, **kwargs):
-            raise RuntimeError("the outbox refused the notice")
-
         loop, calls = self._loop(monkeypatch, executor=executor)
-        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
-        await loop._run_job(
-            self._job(attempts=5, payload={"v": 1, "source_id": "src-1"})
-        )
-
-        assert calls["finalized"] == ["failed"] and loop.exhausted == 1
-        rearmed = [
-            params["s"]
-            for session in calls["sessions"]
-            for sql, params in session.statements
-            if "UPDATE media_sources" in sql
-        ]
-        assert rearmed == ["src-1"], "the re-arm went down with the notice"
-
-    async def test_a_spent_sync_without_a_source_re_arms_nothing(self, monkeypatch):
-        async def executor(session, job):
-            raise RuntimeError("drive down")
-
-        loop, calls = self._loop(monkeypatch, executor=executor)
-        await loop._run_job(self._job(attempts=5))
-        assert not any(
-            "UPDATE media_sources" in sql
-            for session in calls["sessions"]
-            for sql, _ in session.statements
-        )
+        await loop._run_job(self._job(attempts=5, payload=payload))
+        assert calls["finalized"] == ["failed"]
+        assert self._rearms(calls) == []
 
     async def test_a_publish_job_the_loop_fails_parks_its_story_for_review(
         self, monkeypatch
@@ -1317,9 +1299,12 @@ class TestTheBudgetCeiling:
         assert calls["finalized"] == ["failed"]
         assert parked == [job["id"]] and calls["notices"] == []
 
-    async def test_a_notice_that_cannot_be_written_does_not_stop_the_finalize(
+    async def test_a_failed_notice_stops_neither_the_finalize_nor_the_re_arm(
         self, monkeypatch
     ):
+        """The notice is a courtesy and rides a savepoint. The re-arm is what
+        makes "will try again tomorrow" true, so the notice's rollback must not
+        take it: the source would stay active with nothing to select it."""
         from src.services.target import prompts
 
         async def executor(session, job):
@@ -1330,9 +1315,14 @@ class TestTheBudgetCeiling:
 
         loop, calls = self._loop(monkeypatch, executor=executor)
         monkeypatch.setattr(prompts, "push_bindings", broken_bindings)
-        await loop._run_job(self._job(attempts=5))
+        await loop._run_job(
+            self._job(attempts=5, payload={"v": 1, "source_id": self.SRC})
+        )
         assert calls["finalized"] == ["failed"] and calls["notices"] == []
         assert loop.exhausted == 1
+        assert [params["s"] for _, params in self._rearms(calls)] == [self.SRC], (
+            "the re-arm went down with the notice"
+        )
 
     async def test_a_workspace_with_no_binding_gets_the_log_line_only(
         self, monkeypatch
