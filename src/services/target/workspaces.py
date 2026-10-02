@@ -42,7 +42,7 @@ from sqlalchemy.exc import DBAPIError
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
 from src.exceptions.base import StorydumpError
 from src.services.target import vocabulary
-from src.services.target import google_drive_oauth, offboarding, readers
+from src.services.target import google_drive_oauth, identity, offboarding, readers
 from src.services.target._dbapi import driver_error_is
 from src.services.target.publish_cap import _SPENDS_CAP_SQL
 from src.services.target.unit_of_work import apply_gucs
@@ -395,6 +395,9 @@ async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
 #: filter validates against this so a typo is a 422, not an empty page.
 INTENT_STATES: tuple[str, ...] = vocabulary.INTENT_STATES
 
+#: `ck_intent_origin`: the list filter's other closed set.
+INTENT_ORIGINS: tuple[str, ...] = vocabulary.INTENT_ORIGINS
+
 #: `ck_media_state`.
 MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed")
 
@@ -405,6 +408,15 @@ _INTENT_COLUMNS = (
     "i.id, i.state, i.ig_account_id, i.media_item_id, i.schedule_slot_at,"
     " i.approval_mode, i.published_via, i.publish_step, i.cancel_requested,"
     " i.ig_permalink, i.entered_state_at, i.created_at,"
+    " i.origin, i.scheduled_by_user_id,"
+    " CASE WHEN i.scheduled_by_user_id IS NOT NULL"
+    f"      THEN {identity.display_name_sql('i.scheduled_by_user_id')}"
+    " END AS scheduled_by,"
+    # the zone the story's times read in: the account's, else the workspace's
+    # (the one `schedule_item` resolved its wall time in)
+    " COALESCE(a.tz, w.tz) AS tz,"
+    f" CASE WHEN i.last_error->>'class' = '{vocabulary.PLANNED_MISSED}'"
+    "      THEN i.last_error->>'message' END AS miss_reason,"
     " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category,"
     " a.handle AS account_handle, a.display_name AS account_display_name"
 )
@@ -413,6 +425,7 @@ _INTENT_FROM = (
     "  FROM post_intents i"
     "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
     "  JOIN ig_accounts a ON a.workspace_id = i.workspace_id AND a.id = i.ig_account_id"
+    "  JOIN workspaces w ON w.id = i.workspace_id"
 )
 
 _MEDIA_COLUMNS = (
@@ -427,21 +440,30 @@ async def list_intents(
     *,
     workspace_id: str,
     states: Sequence[str] = (),
+    origin: Optional[str] = None,
+    newest_first: bool = False,
     limit: int = 50,
 ) -> list[dict]:
     """The ledger read model (X.2: "reads pending approvals from the ledger").
     *states* narrows to any of several states — a history tab is one call —
-    and must already be validated against :data:`INTENT_STATES`. Bounded
+    and must already be validated against :data:`INTENT_STATES`; *origin*
+    (one of :data:`INTENT_ORIGINS`) to the planned stories or the cadence's —
+    "what is coming" is the planned ones still `scheduled`. Soonest first, or
+    *newest_first* for a history (the latest misses, not the oldest). Bounded
     (`01` H5) — *limit* is applied after the caller's clamp."""
     params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
     where = "i.workspace_id = :ws"
     if states:
         where += " AND i.state = ANY(CAST(:states AS text[]))"
         params["states"] = list(states)
+    if origin is not None:
+        where += " AND i.origin = :origin"
+        params["origin"] = origin
+    order = "DESC" if newest_first else "ASC"
     return await readers.rows(
         executor,
         f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE {where}"
-        " ORDER BY i.schedule_slot_at, i.id LIMIT :lim",
+        f" ORDER BY i.schedule_slot_at {order}, i.id {order} LIMIT :lim",
         **params,
     )
 

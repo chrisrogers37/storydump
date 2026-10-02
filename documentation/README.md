@@ -36,7 +36,7 @@ documentation/
 - Position: Phases 0, F and L built · the M.3 window applied by hand; 3f ran as migration 078; 3g and the stand-down ran as the gated 079 and 080 in the owner's window on 2026-09-19 ([its record](archive/2026-09-16-legacy-tear-out/legacy-window-close.md)) · X.3 in progress (#1172) · S partly built
 
 ### Increment specs (live; each carries a status banner)
-- **[2026-09-20-device-native-inbound-spec.md](planning/2026-09-20-device-native-inbound-spec.md)** — device-native inbound: a Telegram drop relayed into the team's Drive, entering the posting mix at a reserved 20% — SPEC (kindle, 2026-09-20; the two junctions weighed and ratified in [2026-09-20-device-native-inbound-decision.md](planning/2026-09-20-device-native-inbound-decision.md)); plan: [2026-09-20-device-native-inbound/](planning/2026-09-20-device-native-inbound/00_EPIC.md), ratified 2026-09-20; ironclad cycle 1 folded 2026-09-25; F10–F12 ruled 2026-09-28 (the album deferred); cycle 2 pending (#1430)
+- **[2026-09-20-device-native-inbound-spec.md](planning/2026-09-20-device-native-inbound-spec.md)** — device-native inbound: a Telegram drop relayed into the team's Drive, entering the posting mix at a reserved 20% — SPEC (kindle, 2026-09-20; the two junctions weighed and ratified in [2026-09-20-device-native-inbound-decision.md](planning/2026-09-20-device-native-inbound-decision.md)); plan: [2026-09-20-device-native-inbound/](planning/2026-09-20-device-native-inbound/00_EPIC.md), ratified 2026-09-20; ironclad cycle 1 folded 2026-09-25; F10–F12 ruled 2026-09-28 (the album deferred); reviewed against main 2026-10-01 ([review](planning/2026-09-20-device-native-inbound/review-2026-10-01.md); re-cut, F13–F17 open for the owner); cycle 2 after #1505, #1507 and #1517 (tracking #1430)
 
 ### Archive
 **[archive/README.md](archive/README.md)** — index of completed, superseded and abandoned plans, moved out of `planning/` on 2026-09-02: the two 2026-07-29 design packages the consolidated plan adjudicated, the 2026-07 full-system review, the 2026-05/06 Instagram investigations, the pre-refactor product phases (Shopify, Printify, LLM, order email, dashboard) and roadmap, and the completed credential-refactor, session-isolation, web-app-migration and Meta-launch plans.
@@ -167,7 +167,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 ### Reading the Ledger
 **[operations/reading-the-ledger.md](operations/reading-the-ledger.md)**
-- The eight `storydump` read verbs (story, cards, floating, account, jobs, outbox, burst, posture) that replaced the one-off SQL probes: what each answers, `--since`, `--watch`, and what they never read
+- The `storydump` read verbs (story, cards, floating, account, jobs, outbox, burst, posture, and `planned` for the stories a person planned) that replaced the one-off SQL probes: what each answers, `--since`, `--watch`, and what they never read
 - `psql` through Railway as the read-only escape hatch
 
 ### Troubleshooting

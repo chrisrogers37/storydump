@@ -13,9 +13,9 @@ import { notAuthenticatedCopy } from "./refusal-copy";
  * lever from `awaiting_approval` only: Approve (`approve`, and only where the
  * workspace can publish by API — otherwise the port refuses `manual_mode`),
  * Posted myself (`mark_posted`, the manual-mode path), Skip and Reject.
- * `cancel` sets an overlay flag the worker honours with no audit row of its
- * own, and `autopost_now` is unbuilt (501); each is a follow-up with its own
- * semantics, not a missing entry in this list.
+ * `cancel` sets an overlay flag the worker honours (its audit row names the
+ * person), and `autopost_now` is unbuilt (501); each is a follow-up with its
+ * own semantics, not a missing entry in this list.
  */
 
 /** The states the queue lists: everything the reaper or worker has not yet closed. */
@@ -85,7 +85,7 @@ export type IntentsResponse = { intents: Intent[]; limit: number };
  * The intent-keyed commands the web adapter offers — the four the queue
  * renders a button and a refusal sentence for. `cancel` takes the same
  * `{intent_id}` shape but is not offered here (decision 3 on #1033: an
- * overlay flag the worker honours, no audit row — its own follow-up). The
+ * overlay flag the worker honours — its own follow-up). The
  * port re-validates the name, the role floor and the transition; this list
  * decides what the web tier fronts, nothing more.
  */

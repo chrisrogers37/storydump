@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { RefusalFacts } from "./refusal-facts";
 import { getSessionToken, isWorkspaceId } from "./session";
 
 /**
@@ -87,12 +88,20 @@ export async function requireWorkspace(context: {
  * `illegal_transition` is a normal answer this tier has no opinion about,
  * and re-coding it here is how the two tiers come to disagree about what
  * happened.
+ *
+ * A command refusal's facts ride beside the reason when the result carries
+ * them. They are already through the allow-list (`refusal-facts.ts`), and only
+ * the command route asks for them.
  */
 export function passThrough(result: {
   error: string;
   status: number;
+  facts?: RefusalFacts;
 }): NextResponse {
-  return NextResponse.json({ error: result.error }, { status: result.status });
+  return NextResponse.json(
+    result.facts ? { error: result.error, facts: result.facts } : { error: result.error },
+    { status: result.status },
+  );
 }
 
 /**

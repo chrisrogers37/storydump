@@ -142,7 +142,15 @@ class TestWorkspaceReads:
     ):
         seen = {}
 
-        async def list_intents(session, *, workspace_id, states=(), limit=50):
+        async def list_intents(
+            session,
+            *,
+            workspace_id,
+            states=(),
+            origin=None,
+            newest_first=False,
+            limit=50,
+        ):
             seen.update(states=list(states), limit=limit)
             return []
 
@@ -163,6 +171,42 @@ class TestWorkspaceReads:
         assert resp.status_code == 200
         assert seen == {"states": ["posted", "skipped", "rejected"], "limit": 50}
         assert resp.json() == {"intents": [], "limit": 50}
+
+    def test_the_origin_is_a_closed_list_and_reaches_the_read(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        """What is coming is the Queue read filtered to planned stories: no
+        endpoint of its own (#1413 phase 5)."""
+        seen = {}
+
+        async def list_intents(
+            session,
+            *,
+            workspace_id,
+            states=(),
+            origin=None,
+            newest_first=False,
+            limit=50,
+        ):
+            seen.update(states=list(states), origin=origin, newest_first=newest_first)
+            return []
+
+        monkeypatch.setattr(workspaces, "list_intents", list_intents)
+        for bad, word in (("origin=someday", "someday"), ("order=up", "up")):
+            resp = client.get(f"/api/v1/workspaces/{WS}/intents?{bad}")
+            assert resp.status_code == 422 and word in resp.json()["detail"]
+        assert seen == {}
+        resp = client.get(
+            f"/api/v1/workspaces/{WS}/intents?origin=planned&state=scheduled"
+        )
+        assert resp.status_code == 200
+        assert seen == {
+            "states": ["scheduled"],
+            "origin": "planned",
+            "newest_first": False,
+        }
+        client.get(f"/api/v1/workspaces/{WS}/intents?state=expired&order=desc")
+        assert seen["origin"] is None and seen["newest_first"] is True
 
     def test_media_reads_pass_the_gate_and_validate_the_state(
         self, client, signed_in, tenant, monkeypatch
@@ -356,6 +400,7 @@ class TestCommands:
             ("not_found", 404),
             ("illegal_transition", 409),
             ("manual_mode", 409),
+            ("locked", 409),
         ],
     )
     def test_each_port_refusal_maps_to_its_status(
@@ -365,6 +410,26 @@ class TestCommands:
         resp = client.post(self.URL, json={"intent_id": INTENT}, headers=KEY)
         assert resp.status_code == status
         assert resp.json()["reason"] == reason
+        assert "facts" not in resp.json(), "a refusal with no facts carries no key"
+
+    def test_a_refusals_facts_ride_its_body_under_their_own_key(
+        self, client, signed_in, tenant, port
+    ):
+        """`locked` names what is in the way and whether an override gets past
+        it, beside the reason — a front end acts on them without parsing the
+        prose — under one key, so no fact can stand in for `reason`."""
+        port["outcome"] = CommandRefused(
+            "locked",
+            "item x: skip",
+            facts={"in_the_way": ["skip"], "overridable": True, "reason": "forged"},
+        )
+        resp = client.post(self.URL, json={"intent_id": INTENT}, headers=KEY)
+        assert resp.status_code == 409
+        assert resp.json() == {
+            "reason": "locked",
+            "detail": "command refused: locked — item x: skip",
+            "facts": {"in_the_way": ["skip"], "overridable": True, "reason": "forged"},
+        }
 
     def test_a_member_below_the_floor_is_403(self, client, signed_in, tenant, port):
         port["outcome"] = TenantResolutionError("insufficient_role", "member < admin")

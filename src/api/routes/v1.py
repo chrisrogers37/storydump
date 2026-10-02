@@ -126,8 +126,8 @@ IDEMPOTENCY_HEADER = vocabulary.IDEMPOTENCY_HEADER
 IDEMPOTENCY_KEY_MAX = vocabulary.IDEMPOTENCY_KEY_MAX
 #: `01` H5: every list is bounded. The clamp is a Query constraint, so an
 #: out-of-range value is a 422 rather than silently narrowed.
-LIST_LIMIT_DEFAULT = 50
-LIST_LIMIT_MAX = 200
+LIST_LIMIT_DEFAULT = vocabulary.LIST_LIMIT_DEFAULT
+LIST_LIMIT_MAX = vocabulary.LIST_LIMIT_MAX
 
 
 # --- seams ---------------------------------------------------------------
@@ -455,17 +455,31 @@ def _states(state: Optional[str]) -> list[str]:
 async def list_intents(
     ws: uuid.UUID,
     request: Request,
-    principal: Principal = Depends(require_session),
+    principal: Principal = Depends(current_principal),
     state: Optional[str] = Query(None),
+    origin: Optional[str] = Query(None),
+    order: str = Query("asc"),
     limit: int = Query(LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
 ):
     """The ledger read model — X.2's "reads pending approvals from the ledger"
     is ``?state=awaiting_approval``; a history tab is
-    ``?state=posted,skipped,rejected`` (one call, several states)."""
+    ``?state=posted,skipped,rejected`` (one call, several states); what is
+    coming is ``?origin=planned&state=scheduled``, and the latest misses
+    ``?origin=planned&state=expired&order=desc``. A token reads it too (the
+    CLI's ``planned``), as it reads the ops views."""
     states = _states(state)
-    async with principal_mod.member_session(request, str(ws), principal) as session:
+    if origin is not None and origin not in workspaces.INTENT_ORIGINS:
+        raise HTTPException(status_code=422, detail=f"unknown origin: {origin!r}")
+    if order not in ("asc", "desc"):
+        raise HTTPException(status_code=422, detail=f"order is asc or desc: {order!r}")
+    async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await workspaces.list_intents(
-            session, workspace_id=str(ws), states=states, limit=limit
+            session,
+            workspace_id=str(ws),
+            states=states,
+            origin=origin,
+            newest_first=order == "desc",
+            limit=limit,
         )
     return {"intents": rows, "limit": limit}
 

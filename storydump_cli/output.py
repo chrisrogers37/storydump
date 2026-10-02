@@ -22,13 +22,20 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import datetime
 from typing import Any, Callable, Mapping, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from rich.console import Console
 from rich.padding import Padding
 from rich.table import Table
 
-from src.services.target.vocabulary import write_sentence
+from src.services.target.vocabulary import (
+    LIST_LIMIT_MAX,
+    TERMINAL_STATES,
+    WARNING_SENTENCES,
+    write_sentence,
+)
 
 #: The three secret shapes the spec names (§6, redaction at the client).
 TOKEN_PATTERN = re.compile(r"sdt_[A-Za-z0-9_-]{8,}")
@@ -257,6 +264,7 @@ EMPTY: Mapping[str, str] = {
     "jobs": "no jobs",
     "outbox": "outbox empty",
     "burst": "nothing in the window",
+    "planned": "nothing planned",
 }
 
 STORY_FIELDS: Sequence[Column] = (
@@ -344,6 +352,45 @@ FLOATING_COLUMNS: Sequence[Column] = (
     ("run at", "job_run_at"),
     ("wait", _wait_of),
     ("waited at", "last_wait_at"),
+)
+
+
+def _planned_due(row: Mapping[str, Any]) -> Any:
+    """When a planned story is due, in its account's zone, else the
+    workspace's (the row's `tz`), as that zone is now; or as the API gave it
+    where the zone is one the IANA database does not name, or the time names
+    no instant."""
+    at, tz = row.get("schedule_slot_at"), row.get("tz")
+    try:
+        instant = datetime.fromisoformat(str(at))
+        if instant.tzinfo is None:
+            return at
+        local = instant.astimezone(ZoneInfo(str(tz)))
+    except (ValueError, OSError, ZoneInfoNotFoundError):
+        return at
+    clock = "%H:%M:%S" if local.second else "%H:%M"
+    return f"{local.strftime('%Y-%m-%d ' + clock)} {tz}"
+
+
+def _planned_state(row: Mapping[str, Any]) -> Any:
+    """The state, a cancel that is still landing, and why a story missed at
+    its time was missed. The cancel flag is never cleared, so on a story that
+    has ended it says nothing."""
+    state = row.get("state")
+    if row.get("cancel_requested") and state not in TERMINAL_STATES:
+        return f"{state} (cancelling)"
+    if row.get("miss_reason"):
+        return f"{state} ({row['miss_reason']})"
+    return state
+
+
+PLANNED_COLUMNS: Sequence[Column] = (
+    ("id", "id"),
+    ("due", _planned_due),
+    ("account", "account_handle"),
+    ("item", "file_name"),
+    ("state", _planned_state),
+    ("planned by", "scheduled_by"),
 )
 RECENT_COLUMNS: Sequence[Column] = (
     ("id", "id"),
@@ -562,6 +609,7 @@ def _render_account_rows(console: Console, rows: list[dict[str, Any]]) -> None:
             else "nothing yet"
         )
         console.print(f"  {_handle(row.get('handle'))}  {_text(row.get('id'), '?')}")
+        console.print(f"    state     {_cell(row.get('state'))}")
         console.print(f"    cap/day   {_cell(row.get('posts_per_day'))}")
         console.print(f"    today     {used}")
         console.print(f"    tz        {_cell(row.get('tz'))}")
@@ -616,14 +664,24 @@ def _render_write(console: Console, data: Any) -> None:
     result = write.get("result") if isinstance(write.get("result"), dict) else {}
     outcome = str(write.get("outcome"))
     line = write_sentence(str(write.get("command")), outcome)
-    if args.get("intent_id"):
-        line += f" — story {args['intent_id']}"
+    story = args.get("intent_id") or result.get("intent_id")
+    if story:
+        line += f" — story {story}"
     elif args.get("source_id"):
         line += f" — source {args['source_id']}"
     state = result.get("state") or result.get("to_state")
     if isinstance(state, str) and outcome != "replayed":
         line += f" (now {state})"
+    if result.get("local_at") and result.get("tz"):
+        # a planned story: when it is due, as the account's zone reads it
+        line += f", due {result['local_at']} {result['tz']}"
     console.print(line)
+    overridden = result.get("overridden")
+    if isinstance(overridden, list) and overridden:
+        console.print(f"  scheduled over: {', '.join(str(k) for k in overridden)}")
+    warnings = result.get("warnings")
+    for code in warnings if isinstance(warnings, list) else []:
+        console.print(f"  {WARNING_SENTENCES.get(str(code), str(code))}")
 
 
 def _tap_outcomes(payload: Any) -> str:
@@ -765,6 +823,24 @@ def _render_doctor(console: Console, data: Any) -> None:
     console.print("doctor: ok" if doctor.get("ok") else "doctor: something is wrong")
 
 
+def _render_planned(console: Console, data: Any) -> None:
+    """The planned stories per workspace — and, where a page came back full,
+    that there may be more, never a list that reads as complete."""
+    _view("planned", _table_of(PLANNED_COLUMNS))(console, data)
+    for entry in _dicts(data.get("workspaces") if isinstance(data, dict) else None):
+        limit = entry.get("limit")
+        if isinstance(limit, int) and len(_dicts(entry.get("rows"))) >= limit:
+            wider = (
+                f"pass --limit up to {LIST_LIMIT_MAX}"
+                if limit < LIST_LIMIT_MAX
+                else f"{limit} is the most one read returns"
+            )
+            console.print(
+                f"workspace {_text(entry.get('workspace_id'), '?')}: {limit} shown,"
+                f" a full page — there may be more; {wider}"
+            )
+
+
 RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
     "approve": _render_write,
     "skip": _render_write,
@@ -775,6 +851,8 @@ RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
     "pause": _render_write,
     "resume": _render_write,
     "sync": _render_write,
+    "schedule": _render_write,
+    "reschedule": _render_write,
     "health": _render_health,
     "deploys": _render_deploys,
     "webhook": _render_webhook,
@@ -790,5 +868,6 @@ RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
     "jobs": _view("jobs", _render_jobs_rows),
     "outbox": _view("outbox", _table_of(OUTBOX_COLUMNS)),
     "burst": _view("burst", _render_burst_rows),
+    "planned": _render_planned,
     "posture": _render_posture,
 }

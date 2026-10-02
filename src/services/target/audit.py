@@ -1,19 +1,18 @@
 """The one place a service writes an `audit_events` row directly.
 
 The triggers own state-change audit (`trg_governance_audit`,
-`trg_intent_audit`). Four writers need a row the triggers cannot produce — a
-`cap_deferred`, a float wait, a `revoke_failed`, a parked drain — and each
-wrote the nine-column INSERT out by hand, two of them disagreeing on how the
-actor is recorded. The columns are one statement here; the actor spelling is a
-named fragment, because the two spellings are a real difference and not a
-drift.
+`trg_intent_audit`). Some writes need a row the triggers cannot produce — a
+`cap_deferred`, a float wait, a `revoke_failed`, a parked drain, a story's
+birth, new time or cancel flag. The nine columns are one statement here, and
+the actor's two spellings are named fragments, because the two are a real
+difference and not a drift.
 
 `src/api/routes/v1.py`'s `cli_command` row is the documented API-side
 exception and stays where it is: it is the API tier's, not this one's.
 
-What a caller keeps: its own transaction. Two of the four open one
-deliberately (`credential_lifecycle._audit_revoke_failed`,
-`offboarding._audit`) so the record survives the raise that follows;
+What a caller keeps: its own transaction.
+`credential_lifecycle._audit_revoke_failed` and `offboarding._audit` open one
+deliberately, so the record survives the raise that follows;
 :func:`record` takes the executor and writes one statement, and commits
 nothing.
 """
@@ -25,12 +24,22 @@ import json
 from sqlalchemy import text
 
 #: Read the actor from the transaction's GUCs, exactly as the triggers do.
-#: The default, and what three of the four writers use.
+#: The default.
 ACTOR_FROM_GUCS = (
     "current_setting('app.actor_kind'),"
     " NULLIF(current_setting('app.actor_user_id', true), '')::uuid,"
     " NULLIF(current_setting('app.channel', true), '')"
 )
+
+
+def moved(alias: str) -> str:
+    """The rows of the `audit_events` alias *alias* that record a change of
+    state. A direct row whose from and to states are equal, or both NULL,
+    records something else about its entity — a cancel request, a new time,
+    a CLI admission, a cap deferral, a float wait — so it never answers who
+    moved it, or what a tap did."""
+    return f"{alias}.from_state IS DISTINCT FROM {alias}.to_state"
+
 
 #: A worker session that sets no `app.channel` (`work_loop.poller_session_factory`),
 #: naming the channel itself so the row still says where the write came from —
