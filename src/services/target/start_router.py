@@ -95,6 +95,9 @@ class StartResult:
     outcome: str
     handled: bool
     reply: Optional[str] = None
+    #: An inline keyboard sent with ``reply`` (the `link-` lane's Confirm and
+    #: Cancel). Success-only, like ``reply``, and meaningless without it.
+    reply_markup: Optional[dict] = None
 
     def __post_init__(self) -> None:
         if not self.handled and self.reply is not None:
@@ -102,6 +105,8 @@ class StartResult:
                 "a refusing handler must not supply reply text: refusal copy is"
                 " the router's, so a shared door cannot become an existence oracle"
             )
+        if self.reply_markup is not None and self.reply is None:
+            raise ValueError("reply_markup rides a reply; there is none to carry it")
 
 
 Handler = Callable[[object, StartContext], Awaitable[StartResult]]
