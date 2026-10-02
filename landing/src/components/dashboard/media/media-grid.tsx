@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ImageOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -70,6 +70,8 @@ export function MediaGrid({
 }) {
   const [category, setCategory] = useState<string | null>(null);
   const [scheduling, setScheduling] = useState<MediaRow | null>(null);
+  // The Schedule… that opened the dialog, where focus goes back on close.
+  const opener = useRef<HTMLButtonElement | null>(null);
 
   const categories = useMemo(() => {
     const counts = new Map<string, number>();
@@ -161,7 +163,10 @@ export function MediaGrid({
                     variant="outline"
                     size="sm"
                     aria-label={`Schedule ${item.file_name}`}
-                    onClick={() => setScheduling(item)}
+                    onClick={(event) => {
+                      opener.current = event.currentTarget;
+                      setScheduling(item);
+                    }}
                   >
                     Schedule…
                   </Button>
@@ -186,6 +191,7 @@ export function MediaGrid({
         item={scheduling}
         targets={targets}
         onClose={() => setScheduling(null)}
+        returnFocusTo={opener}
       />
     </div>
   );

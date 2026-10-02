@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useId, useState, type RefObject } from "react";
 import Link from "next/link";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -146,12 +146,18 @@ export function ScheduleDialog({
   item,
   targets,
   onClose,
+  returnFocusTo,
 }: {
   workspaceId: string;
   /** The item being scheduled; the dialog is open while there is one. */
   item: MediaRow | null;
   targets: ScheduleTargets;
   onClose: () => void;
+  /**
+   * Where focus goes on close. Radix returns it to a `DialogTrigger`, and this
+   * dialog opens from state, so without it focus falls to the page's top.
+   */
+  returnFocusTo: RefObject<HTMLElement | null>;
 }) {
   const ids = useId();
   const accounts = targets?.accounts ?? [];
@@ -364,7 +370,14 @@ export function ScheduleDialog({
         if (!open && !pending) close();
       }}
     >
-      <DialogContent>
+      <DialogContent
+        onCloseAutoFocus={(event) => {
+          const opener = returnFocusTo.current;
+          if (!opener) return;
+          event.preventDefault();
+          opener.focus();
+        }}
+      >
         <DialogHeader>
           <DialogTitle className="break-words">
             {phase.kind === "done" ? "Scheduled" : `Schedule ${item?.file_name ?? "this story"}`}
