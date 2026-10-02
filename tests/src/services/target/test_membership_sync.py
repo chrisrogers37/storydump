@@ -3,6 +3,8 @@ door is asked, and that every outcome is named and silent."""
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from src.services.target import membership_sync
@@ -141,6 +143,33 @@ class TestObserve:
             and not result.handled
             and result.reply is None
         )
+
+    async def test_a_person_an_admin_removed_is_not_added_back_and_it_is_said(
+        self, linked, caplog
+    ):
+        """`07` §37: the door wrote nothing, and the caller names the person,
+        the workspace and the chat, at DEBUG."""
+        conn = _Conn(("ws-1", "removed_by_admin"))
+        with caplog.at_level(logging.DEBUG, logger=membership_sync.logger.name):
+            result = await membership_sync.observe(
+                conn,
+                chat_type="supergroup",
+                external_ref="-100777",
+                telegram_user_id="42",
+            )
+        assert result.outcome == "removed_by_admin" and not result.handled
+        assert result.reply is None
+        ((sql, _params),) = conn.statements
+        assert "fn_group_member_seen" in sql
+        said = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == membership_sync.logger.name
+        ]
+        assert said == [
+            "membership sync: user u-1 was removed from workspace ws-1 by an admin;"
+            " chat -100777 does not add them back"
+        ]
 
 
 class TestADisabledAccountIsRefusedByTheCaller:

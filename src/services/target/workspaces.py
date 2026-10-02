@@ -42,7 +42,13 @@ from sqlalchemy.exc import DBAPIError
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
 from src.exceptions.base import StorydumpError
 from src.services.target import vocabulary
-from src.services.target import google_drive_oauth, identity, offboarding, readers
+from src.services.target import (
+    google_drive_oauth,
+    identity,
+    oauth_states,
+    offboarding,
+    readers,
+)
 from src.services.target._dbapi import driver_error_is
 from src.services.target.publish_cap import _SPENDS_CAP_SQL
 from src.services.target.unit_of_work import apply_gucs
@@ -748,7 +754,11 @@ async def remove_member(
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
-    non-member is `not_found`."""
+    non-member is `not_found`.
+
+    A removal holds (`07` §37): the door records it, so the join path adds the
+    person back only after an invitation, and this retires every live link
+    state the person holds for this workspace, in the same unit of work."""
     row = (
         await executor.execute(
             text(
@@ -760,6 +770,9 @@ async def remove_member(
     ).first()
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
+        await oauth_states.retire_live_states(
+            executor, user_id=user_id, workspace_id=workspace_id
+        )
         return str(row[1])
     if outcome == "not_found":
         raise LookupError("not_found")

@@ -19,8 +19,8 @@ production's schemas are `archive`, `public` and `runner`. Nothing under
 
 ## The tables
 
-Twenty-six, in five model modules named after the migrations that create them
-(`src/models/target/__init__.py`; the count and the nineteen tenant-keyed are
+Twenty-seven, in six model modules named after the migrations that create them
+(`src/models/target/__init__.py`; the count and the twenty tenant-keyed are
 pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
 
 | Models (migration) | Tables |
@@ -30,6 +30,7 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
 | `intent_ledger.py` (055) | `post_intents`, `post_intent_transitions`, `audit_events`, `daily_post_counts`, `category_post_case_mix` |
 | `machinery.py` (056) | `jobs`, `channel_outbox`, `provider_operations`, `command_dedup`, `rate_counters` |
 | `auth_plane.py` (060) | `session_tokens`, `oauth_states`, `service_tokens` |
+| `member_removals.py` (094) | `workspace_member_removals` |
 
 - **`workspaces` is the tenant** (`tenant_id == workspaces.id`). Product settings
   are its columns, never environment variables: `workspaces.SETTINGS_COLUMNS`

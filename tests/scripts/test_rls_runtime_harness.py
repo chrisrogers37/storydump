@@ -58,7 +58,7 @@ WS_B_NAME = "f4-tenant-b"
 LOGINS = ("svc_worker", "svc_ingress")
 T = ("svc_ingress", "svc_worker")  # the tenant-policy TO-list, alphabetical
 
-#: THE ORACLE — every policy in 058/060 at (policy, table, cmd, roles) grain,
+#: THE ORACLE — every policy in 058/060/094 at (policy, table, cmd, roles) grain,
 #: with its disposition in this module. Asserted equal to pg_policies by
 #: test_the_census_matches_the_catalog_exactly; dispositions are asserted
 #: complete (every row has one) and honest (the disclosed set is pinned).
@@ -92,6 +92,12 @@ POLICY_CENSUS = {
         "ALL",
         ("svc_membership",),
     ): "door:fn_invitation_accept",
+    (
+        "p_member_removals",
+        "workspace_member_removals",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_member_remove",
     ("p_tenant", "workspace_invitations", "ALL", T): "matrix",
     (
         "p_maint_invites",
@@ -369,7 +375,9 @@ DOORS = {
     # carries no arguments — the caller is app.actor_user_id, read inside the
     # body, and an unclaimed session reads zero rows rather than anyone's.
     # The thirteenth door (068, #1242): the revoke for every join edge. Three
-    # uuids that name nobody — the door answers not_found, never a raise.
+    # uuids that name nobody. Since 094 the door checks its caller first, so
+    # this call raises (by message) in an unclaimed session; it only ever runs
+    # as the denied login, whose missing EXECUTE refuses it before the body.
     "fn_member_remove": (
         "svc_ingress",
         "SELECT * FROM fn_member_remove('00000000-0000-4000-8000-000000000001'::uuid,"
@@ -800,7 +808,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 63
+        assert len(POLICY_CENSUS) == 64
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -818,8 +826,8 @@ class TestRuntimeTenantIsolationMatrix:
         # Exact split, so a re-tagged disposition is a visible diff:
         assert len(by_kind["matrix"]) == 16
         # 081: p_maint_accts; 082: the three maintenance reads; 086: the
-        # reaper's source re-arm.
-        assert len(by_kind["door"]) == 34
+        # reaper's source re-arm; 094: the removal record's policy.
+        assert len(by_kind["door"]) == 35
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():

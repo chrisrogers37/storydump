@@ -68,6 +68,7 @@ from src.models.target.identity_and_tenancy import (
     WorkspaceInvitation,
     WorkspaceMember,
 )
+from src.models.target.member_removals import WorkspaceMemberRemoval
 
 __all__ = [
     "TargetBase",
@@ -97,4 +98,5 @@ __all__ = [
     "Workspace",
     "WorkspaceInvitation",
     "WorkspaceMember",
+    "WorkspaceMemberRemoval",
 ]

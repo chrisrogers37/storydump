@@ -495,6 +495,8 @@ class TestRemoveMemberGoesThroughTheDoor:
             row = self.row
 
             class _R:
+                rowcount = 0
+
                 def first(self_inner):
                     return row
 
@@ -508,9 +510,25 @@ class TestRemoveMemberGoesThroughTheDoor:
             ex, workspace_id="ws", user_id="u2", by_user_id="u1"
         )
         assert role == "member"
-        ((sql, params),) = ex.calls
+        (sql, params), *_retires = ex.calls
         assert "fn_member_remove(" in sql and "DELETE" not in sql.upper()
         assert params == {"ws": "ws", "u": "u2", "by": "u1"}
+
+    async def test_a_removal_retires_the_persons_live_states_in_that_workspace(
+        self,
+    ):
+        """`07` §37: once the door answers removed, one retire selecting this
+        person AND this workspace, whatever the provider."""
+        from src.services.target import workspaces
+
+        ex = self._Exec(("removed", "member"))
+        await workspaces.remove_member(
+            ex, workspace_id="ws", user_id="u2", by_user_id="u1"
+        )
+        _door, (sql, params) = ex.calls
+        assert sql.startswith("UPDATE oauth_states SET consumed_at = now()")
+        assert "consumed_at IS NULL" in sql and "provider" not in sql
+        assert params == {"uid": "u2", "ws": "ws"}
 
     @pytest.mark.parametrize(
         "row, exc, text_",
@@ -524,8 +542,10 @@ class TestRemoveMemberGoesThroughTheDoor:
     async def test_the_doors_refusals_come_back_by_name(self, row, exc, text_):
         from src.services.target import workspaces
 
+        ex = self._Exec(row)
         with pytest.raises(exc) as info:
             await workspaces.remove_member(
-                self._Exec(row), workspace_id="ws", user_id="u2", by_user_id="u1"
+                ex, workspace_id="ws", user_id="u2", by_user_id="u1"
             )
         assert str(info.value) == text_
+        assert len(ex.calls) == 1, "a refusal retires nothing"
