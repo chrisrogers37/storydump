@@ -18,13 +18,15 @@ refused request leaves no debit behind. That first transaction is
 `_consume_callback`, written once for both callbacks.
 
 `GET /auth/google-drive/callback` is the other half of
-`POST /api/v1/workspaces/{ws}/sources/{id}/connect` (the gdrive epic, P3).
-The state was minted for a signed-in admin and pins the workspace, the user
-and the source, and **the state row is the only thing the callback trusts**:
-it carries no session, a state minted for another leg is refused by name at
-consume, and the credential is written inside a unit of work for THAT
-workspace as THAT user, so the audit trigger names the actor and `p_tenant`
-binds the row. Both legs' redirect URIs come from `google_client`.
+`POST /api/v1/workspaces/{ws}/drive/connect` (069: the grant is the
+workspace's). The state was minted for a signed-in admin and pins the
+workspace, as its own target, and the user. **The state row is necessary and
+not sufficient**: the returning browser's session must be the state's user,
+that user must still be an admin when the write runs, a state minted for
+another leg is refused by name at consume, and the credential is written
+inside a unit of work for THAT workspace as THAT user, so the audit trigger
+names the actor and `p_tenant` binds the row. Both legs' redirect URIs come
+from `google_client`.
 
 Failures redirect to the front end's `/auth/error` with a closed ``reason``
 (virgil's P3 already renders it) when `WEB_APP_URL` is set, and answer JSON
@@ -42,8 +44,7 @@ sign-in-shaped by default and needs to know which leg it renders for.
 `GET /auth/instagram-login/callback` is the other half of
 `POST /api/v1/workspaces/{ws}/accounts/{id}/connect` (#1220 step 2): the same
 shape as the Drive leg on the LEGACY flow's registered path, so the Meta app
-needs no console change. The `07` §2 admin check runs again at the callback,
-inside the write transaction.
+needs no console change, and it makes the same callback-time checks.
 """
 
 from __future__ import annotations
@@ -305,9 +306,11 @@ async def google_drive_callback(
     code: Optional[str] = None,
     error: Optional[str] = None,
 ) -> Response:
-    """The Drive connect leg's return: consume the state, exchange the code,
-    write the credential — the sign-in callback's shape, trusting the state
-    row alone (the module docstring has what that buys)."""
+    """The Drive connect leg's return: consume the state, check the returning
+    browser is the one that started the flow, exchange the code, and write the
+    credential as the workspace's, with the `07` §2 callback-time checks the
+    Instagram leg makes: the returning session must be the state's user, and
+    that user must still be an admin when the grant is written."""
     client_id, client_secret, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )
@@ -331,6 +334,15 @@ async def google_drive_callback(
         # not one this leg can act on.
         logger.warning(
             "drive connect: state does not pin its workspace as the grant's owner"
+        )
+        return _fail("state_refused", flow=DRIVE_FLOW)
+
+    presenter = await _presenting_user(request)
+    if presenter is None or presenter != str(row["user_id"]):
+        logger.warning(
+            "drive connect: the returning browser's session is not the"
+            " state's user (presented=%s)",
+            "none" if presenter is None else "other",
         )
         return _fail("state_refused", flow=DRIVE_FLOW)
 
@@ -365,14 +377,29 @@ async def google_drive_callback(
         actor_user_id=str(row["user_id"]),
         channel=principal_mod.WEB_CHANNEL,
     )
-    async with uow.begin() as session:
-        await google_drive_oauth.store_credential(
-            session, workspace_id=row["workspace_id"], grant=grant
-        )
-        # F4 (a), in THIS transaction — `store_credential`'s contract, now
-        # workspace-wide: every gdrive folder becomes eligible again beside
-        # the write that makes it so.
-        await media_sync.rearm_after_connect(session, workspace_id=row["workspace_id"])
+    try:
+        async with uow.begin() as session:
+            # `07` §2: admin+ checked at issue AND at callback. What can change
+            # between the two is the membership, and a removed or demoted
+            # admin's pending state must not land a grant.
+            await tenant_resolution.authorize_member(
+                session,
+                str(row["workspace_id"]),
+                str(row["user_id"]),
+                minimum_role="admin",
+            )
+            await google_drive_oauth.store_credential(
+                session, workspace_id=row["workspace_id"], grant=grant
+            )
+            # F4 (a), in THIS transaction — `store_credential`'s contract, now
+            # workspace-wide: every gdrive folder becomes eligible again beside
+            # the write that makes it so.
+            await media_sync.rearm_after_connect(
+                session, workspace_id=row["workspace_id"]
+            )
+    except TenantResolutionError as exc:
+        logger.warning("drive connect: callback authorization refused: %s", exc)
+        return _fail("state_refused", flow=DRIVE_FLOW)
 
     return RedirectResponse(
         _landing("/dashboard/settings?connected=gdrive"), status_code=302
@@ -391,8 +418,8 @@ async def instagram_login_callback(
     the code for a long-lived token and its owner, land that identity on a
     destination — the one the state pinned, or (untargeted: the workspace-
     level ADD, owner ruling 2026-09-04) the row this account already has
-    here or a new one — and write the credential. The Drive callback's shape
-    plus the `07` §2 callback-time checks.
+    here or a new one — and write the credential. The Drive callback's shape,
+    with the same `07` §2 callback-time checks.
 
     **The state row is necessary and not sufficient.** It pins the user who
     started the flow; it does not prove the browser that returned is theirs.

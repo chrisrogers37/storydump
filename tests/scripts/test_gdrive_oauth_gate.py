@@ -439,6 +439,7 @@ class TestTheRoutePairAsSvcIngress:
                 monkeypatch.setattr(drive, "exchange_code", exchange_code)
                 done = await client.get(
                     f"/auth/google-drive/callback?state={state}&code=c0de",
+                    headers=owner,
                     follow_redirects=False,
                 )
                 assert done.status_code == 302, done.text
@@ -467,6 +468,7 @@ class TestTheRoutePairAsSvcIngress:
                 # 3. A replayed callback is refused: the state is one-shot.
                 again = await client.get(
                     f"/auth/google-drive/callback?state={state}&code=c0de",
+                    headers=owner,
                     follow_redirects=False,
                 )
                 assert again.status_code == 302
@@ -487,6 +489,7 @@ class TestTheRoutePairAsSvcIngress:
                 ) == ("reconnect", ws)
                 redone = await client.get(
                     f"/auth/google-drive/callback?state={state2}&code=c0de",
+                    headers=owner,
                     follow_redirects=False,
                 )
                 assert redone.status_code == 302, redone.text
@@ -583,6 +586,7 @@ class TestTheRoutePairAsSvcIngress:
                 )["state"][0]
                 redone = await client.get(
                     f"/auth/google-drive/callback?state={state3}&code=c0de",
+                    headers=owner,
                     follow_redirects=False,
                 )
                 assert redone.status_code == 302, redone.text
@@ -648,5 +652,126 @@ class TestTheRoutePairAsSvcIngress:
                 )
                 assert done.status_code == 302
                 assert done.headers["location"] == _error_page("denied")
+
+        _run(main())
+
+
+def _as_migration(world, sql, params=()):
+    """One committed statement as the migration actor (the governance audit
+    triggers refuse an anonymous write)."""
+    conn = psycopg2.connect(world["stream"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def _drive_connect(client, ws, headers) -> str:
+    """Start a Drive connect as *headers*' user; the state it minted."""
+    started = await client.post(
+        f"/api/v1/workspaces/{ws}/drive/connect", headers=headers
+    )
+    assert started.status_code == 200, started.text
+    return parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
+
+
+class TestTheCallbackChecksWhoCameBack:
+    """`07` §2 at the Drive callback, through the real app as `svc_ingress`:
+    the state pins the user who started the flow, and only that user's
+    session may bring it back; and that user must still be an admin when it
+    does. Every refusal lands nothing, and a session refusal comes before the
+    code is spent."""
+
+    def test_a_state_brought_back_without_its_users_session_lands_nothing(
+        self, world, google_configured, monkeypatch
+    ):
+        exchanged = []
+
+        async def exchange_code(client_, **kw):
+            exchanged.append(kw["code"])
+            return drive_grant()
+
+        async def main():
+            async with api_client(world["ingress"]) as (client, _):
+                owner = await sign_in(
+                    client, monkeypatch, sub="sub-drive-who", email="who@example.test"
+                )
+                made = await client.post(
+                    "/api/v1/workspaces",
+                    json={"name": "Who"},
+                    headers={**owner, "Idempotency-Key": "drive-who-1"},
+                )
+                ws = made.json()["workspace_id"]
+                other = await sign_in(
+                    client, monkeypatch, sub="sub-drive-other", email="o@example.test"
+                )
+                monkeypatch.setattr(drive, "exchange_code", exchange_code)
+                for presented in ({}, other):
+                    state = await _drive_connect(client, ws, owner)
+                    # Only the explicit header decides who came back: the
+                    # jar may hold the last sign-in's cookie.
+                    client.cookies.clear()
+                    back = await client.get(
+                        f"/auth/google-drive/callback?state={state}&code=c0de",
+                        headers=presented,
+                        follow_redirects=False,
+                    )
+                    assert back.headers["location"] == _error_page("state_refused")
+                assert exchanged == [], "a refused return spent the code"
+                assert _credential_rows(world, ws) == []
+
+        _run(main())
+
+    def test_an_admin_demoted_after_minting_lands_nothing(
+        self, world, google_configured, monkeypatch
+    ):
+        async def exchange_code(client_, **kw):
+            return drive_grant()
+
+        async def main():
+            async with api_client(world["ingress"]) as (client, _):
+                owner = await sign_in(
+                    client, monkeypatch, sub="sub-drive-own2", email="own2@example.test"
+                )
+                made = await client.post(
+                    "/api/v1/workspaces",
+                    json={"name": "Demoted"},
+                    headers={**owner, "Idempotency-Key": "drive-dem-1"},
+                )
+                ws = made.json()["workspace_id"]
+                admin = await sign_in(
+                    client, monkeypatch, sub="sub-drive-adm", email="adm@example.test"
+                )
+                (admin_id,) = fetch_one(
+                    world["stream"],
+                    "SELECT user_id::text FROM user_identities"
+                    " WHERE provider = 'google' AND external_id = %s",
+                    ("sub-drive-adm",),
+                )
+                _as_migration(
+                    world,
+                    "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                    " VALUES (%s, %s, 'admin')",
+                    (ws, admin_id),
+                )
+                state = await _drive_connect(client, ws, admin)
+                _as_migration(
+                    world,
+                    "UPDATE workspace_members SET role = 'member'"
+                    " WHERE workspace_id = %s AND user_id = %s",
+                    (ws, admin_id),
+                )
+                monkeypatch.setattr(drive, "exchange_code", exchange_code)
+                client.cookies.clear()
+                back = await client.get(
+                    f"/auth/google-drive/callback?state={state}&code=c0de",
+                    headers=admin,
+                    follow_redirects=False,
+                )
+                assert back.headers["location"] == _error_page("state_refused")
+                assert _credential_rows(world, ws) == []
 
         _run(main())
