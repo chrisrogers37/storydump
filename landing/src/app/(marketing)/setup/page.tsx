@@ -1,14 +1,15 @@
 import type { Metadata } from "next"
+import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { ArrowRight } from "lucide-react"
 import { Checklist } from "@/components/setup/checklist"
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: "Getting Started",
   description:
-    "Connect your Instagram Business account, Google Drive, and Telegram to start automating your Stories.",
-  alternates: { canonical: "/setup" },
-}
+    "What to have ready before you start with Storydump: an Instagram Business or Creator account, a Google Drive folder of media, and Telegram if you want it.",
+  path: "/setup",
+})
 
 const prerequisites = [
   { label: "Instagram Business or Creator account" },
@@ -19,7 +20,7 @@ const prerequisites = [
 export default function SetupOverview() {
   return (
     <div>
-      <h1 className="text-3xl font-bold tracking-tight">
+      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
         Getting Started with Storydump
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">

@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import Script from "next/script"
 import { Geist, Geist_Mono } from "next/font/google"
 import { siteConfig } from "@/config/site"
+import { homeSocial } from "@/lib/seo"
 import "./globals.css"
 
 const plausibleDomain = process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN
@@ -14,20 +15,18 @@ const geistSans = Geist({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+  // Small labels only: not worth a high-priority download ahead of the H1.
+  preload: false,
 })
 
 export const metadata: Metadata = {
   title: {
     template: "%s | Storydump",
-    default: siteConfig.name + " — Keep Your Stories Alive",
+    default: siteConfig.name + " — Instagram Stories from Google Drive, on tap",
   },
   description: siteConfig.description,
-  keywords: siteConfig.keywords,
-  authors: [{ name: "Chris Rogers", url: siteConfig.contact.portfolio }],
+  authors: [{ name: siteConfig.author.name, url: siteConfig.contact.portfolio }],
   metadataBase: new URL(siteConfig.url),
-  alternates: {
-    canonical: "/",
-  },
   verification: {
     google: "JqcV49p6TP9UbtzZgflEngO3ijSsHRx8jtPV4qqxAj0",
   },
@@ -42,28 +41,9 @@ export const metadata: Metadata = {
       "max-snippet": -1,
     },
   },
-  openGraph: {
-    title: siteConfig.name + " — Instagram Stories on Autopilot",
-    description: siteConfig.description,
-    url: siteConfig.url,
-    siteName: siteConfig.name,
-    type: "website",
-    locale: "en_US",
-    images: [
-      {
-        url: "/og-image.png",
-        width: 1200,
-        height: 630,
-        alt: siteConfig.name + " — Instagram Story automation tool",
-      },
-    ],
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: siteConfig.name + " — Instagram Stories on Autopilot",
-    description: siteConfig.description,
-    images: ["/og-image.png"],
-  },
+  // The home page's card is every page's default; the home page adds its own
+  // og:url, so no other page claims to be the home page (seo-contract.test.ts).
+  ...homeSocial,
 }
 
 export default function RootLayout({

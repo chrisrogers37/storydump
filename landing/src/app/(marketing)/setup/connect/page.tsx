@@ -1,19 +1,25 @@
 import type { Metadata } from "next"
+import { noindexMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { ArrowLeft, CheckCircle2 } from "lucide-react"
 import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
 import { siteConfig } from "@/config/site"
 
+// Optional and reached from the dashboard, so kept out of search results; it
+// still names itself as canonical rather than inheriting another page's.
 export const metadata: Metadata = {
-  title: "Connect to Telegram — Storydump",
-  robots: { index: false, follow: false },
+  title: "Connect to Telegram",
+  description:
+    "Optional: link the Storydump Telegram bot to approve Instagram Stories from your phone. Everything also works on the web.",
+  alternates: { canonical: "/setup/connect" },
+  ...noindexMetadata,
 }
 
 export default function ConnectTelegram() {
   return (
     <div>
-      <h1 className="text-3xl font-bold tracking-tight">
+      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
         Connect to Telegram
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">

@@ -1,24 +1,23 @@
 import type { Metadata } from "next";
+import { pageMetadata } from "@/lib/seo";
 import Link from "next/link";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { StepCard } from "@/components/setup/step-card";
 import { Callout } from "@/components/setup/callout";
-import { ogMeta } from "@/lib/og";
 
 const description =
   "How to structure your Google Drive folders for Storydump. Folder layout determines content categories and posting mix for your Instagram Stories.";
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: "Organize Your Media",
   description,
-  alternates: { canonical: "/setup/media-organize" },
-  ...ogMeta("Organize Your Media", description),
-};
+  path: "/setup/media-organize",
+});
 
 export default function MediaOrganize() {
   return (
     <div>
-      <h1 className="text-3xl font-bold tracking-tight">
+      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
         Organizing Your Media
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">
@@ -35,7 +34,7 @@ export default function MediaOrganize() {
             folders — subfolders inside a connected folder are just structure.
             Rename folders freely; the weight follows the folder.
           </p>
-          <pre className="mt-3 overflow-x-auto rounded-lg bg-muted p-4 text-sm">
+          <pre className="mt-3 overflow-x-auto rounded-lg bg-muted p-4 text-xs max-md:scroll-hint sm:text-sm">
             {`My Instagram Stories/
 ├── memes/                     ← connect this folder  (group "memes", 70%)
 │   ├── 2025/
