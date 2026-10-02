@@ -459,13 +459,19 @@ class _FakeSession:
         self.statements = []
 
     def begin_nested(self):
-        # The exhausted notice rides a savepoint (phase 3a); the double
-        # offers one that does nothing.
+        # The exhausted notice rides a savepoint (phase 3a). When its body
+        # raises, the double drops what ran inside it, as ROLLBACK TO
+        # SAVEPOINT does, and passes the error on.
         from contextlib import asynccontextmanager
 
         @asynccontextmanager
         async def _sp():
-            yield self
+            mark = len(self.statements)
+            try:
+                yield self
+            except BaseException:
+                del self.statements[mark:]
+                raise
 
         return _sp()
 
@@ -1221,7 +1227,8 @@ class TestTheBudgetCeiling:
         """Leg 4 nulls `next_sync_at` at mint and only a completed sync re-arms
         it; a sync the loop ends `failed` would leave the source never selected
         again. The exhausted path re-arms it, so "will try again tomorrow" is
-        true — in the same savepoint as the notice."""
+        true — in the finalize's own transaction, ahead of the notice's
+        savepoint."""
 
         async def executor(session, job):
             raise RuntimeError("drive down")
@@ -1242,6 +1249,34 @@ class TestTheBudgetCeiling:
         assert "next_sync_at IS NULL" in sql and "state = 'active'" in sql
         assert params["s"] == "src-1" and params["ws"] == "ws-1"
         assert params["secs"] == work_loop.REARM_AFTER_SECONDS
+
+    async def test_a_notice_that_cannot_be_written_keeps_the_re_arm(self, monkeypatch):
+        """The notice is a courtesy and rides a savepoint; the re-arm is what
+        makes "will try again tomorrow" true. A notice that cannot be written
+        rolls its savepoint back, and must not take the re-arm with it: the
+        source would stay active with nothing left to select it again."""
+        from src.services.target import outbox
+
+        async def executor(session, job):
+            raise RuntimeError("drive down")
+
+        async def fanout_notification(session, **kwargs):
+            raise RuntimeError("the outbox refused the notice")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        monkeypatch.setattr(outbox, "fanout_notification", fanout_notification)
+        await loop._run_job(
+            self._job(attempts=5, payload={"v": 1, "source_id": "src-1"})
+        )
+
+        assert calls["finalized"] == ["failed"] and loop.exhausted == 1
+        rearmed = [
+            params["s"]
+            for session in calls["sessions"]
+            for sql, params in session.statements
+            if "UPDATE media_sources" in sql
+        ]
+        assert rearmed == ["src-1"], "the re-arm went down with the notice"
 
     async def test_a_spent_sync_without_a_source_re_arms_nothing(self, monkeypatch):
         async def executor(session, job):

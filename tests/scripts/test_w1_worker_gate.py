@@ -10,6 +10,7 @@ exists to prevent.
 """
 
 import asyncio
+import json
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -499,6 +500,52 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         notices = _notices(sync_conn, chain["ws"])
         assert len(notices) == 1 and "will try again tomorrow" in notices[0], notices
         assert "adapter is down" not in notices[0]
+        _assert_no_stranded_lease(sync_conn)
+
+    async def test_a_notice_that_cannot_be_written_keeps_the_re_arm(
+        self, lane_db, sync_conn, monkeypatch
+    ):
+        """The notice rides a savepoint and the re-arm does not. When the
+        notice cannot be written, PostgreSQL rolls its savepoint back, and the
+        source the job carried is still re-armed for tomorrow in the
+        finalize's commit, never left active with no next sync."""
+        from src.services.target import outbox, work_loop
+
+        chain = seed_workspace_chain(sync_conn, "w1rearm")
+        _binding(sync_conn, chain["ws"])
+        job_id = _insert_job(
+            sync_conn,
+            kind="sync_media_source",
+            workspace_id=chain["ws"],
+            payload=json.dumps({"v": 1, "source_id": str(chain["src"])}),
+        )
+        _set(sync_conn, job_id, "max_attempts = 1")
+
+        async def failing(session, job):
+            raise RuntimeError("the adapter is down")
+
+        async def refused(*args, **kwargs):
+            raise RuntimeError("the outbox refused the notice")
+
+        monkeypatch.setattr(outbox, "fanout_notification", refused)
+        wl, claimed = await _run_once(
+            lane_db, registry_override={"sync_media_source": failing}
+        )
+
+        assert claimed is True and wl.exhausted == 1
+        assert _job_row(sync_conn, job_id)["state"] == "failed"
+        assert _notices(sync_conn, chain["ws"]) == []
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT state, next_sync_at - now() FROM media_sources WHERE id = %s",
+                (str(chain["src"]),),
+            )
+            state, ahead = cur.fetchone()
+        assert state == "active" and ahead is not None, (
+            "the re-arm went down with the notice: active, with no next sync"
+        )
+        tomorrow = timedelta(seconds=work_loop.REARM_AFTER_SECONDS)
+        assert tomorrow - timedelta(minutes=5) < ahead <= tomorrow, ahead
         _assert_no_stranded_lease(sync_conn)
 
     async def test_a_passed_deadline_ends_the_job_on_its_first_failure(
