@@ -119,6 +119,22 @@ def checkpoint_incomplete(checkpoint: Optional[Mapping[str, Any]]) -> bool:
     return any(checkpoint.get(k) for k in ("page_token", "current", "queue"))
 
 
+def walk_saw_whole_tree(checkpoint: Optional[Mapping[str, Any]]) -> bool:
+    """Whether a completed walk listed every folder under the connected one:
+    the one fact that lets the sync judge what the walk did NOT list (#1545).
+    Positive by design. Only a completed cursor whose adapter says `whole`,
+    with no skip beside it (`truncated`, `partial`), is a whole walk. A cursor
+    that does not say so reads as partial, and nothing is judged: an adapter
+    or a fake that predates the key, or a lister that returns only changes."""
+    if not checkpoint or checkpoint_incomplete(checkpoint):
+        return False
+    return (
+        checkpoint.get("whole") is True
+        and not checkpoint.get("truncated")
+        and not checkpoint.get("partial")
+    )
+
+
 def validate_source_config(config: Mapping[str, Any]) -> None:
     """Refuse a config the door cannot honour. PART OF THE SEAM CONTRACT.
 

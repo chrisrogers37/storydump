@@ -24,11 +24,8 @@ class TestTheListingDecidesWhatTheDrawMayTake:
 
     def test_the_cap_is_the_publishs_own(self):
         """One spelling: the worker refuses past the same numbers the sync
-        judges by, so a cap changed in one place moves both."""
+        judges by, so a cap changed in one place moves both. The numbers
+        themselves are pinned beside the worker's fetch (`test_worker.py`)."""
         from src import worker
 
         assert worker.PUBLISH_MAX_BYTES is vocabulary.PUBLISH_MAX_BYTES
-        assert vocabulary.PUBLISH_MAX_BYTES == {
-            "image": 8 * 1024 * 1024,
-            "video": 40 * 1000 * 1000,
-        }

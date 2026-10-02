@@ -52,7 +52,10 @@ from typing import Optional, Any
 from sqlalchemy import text
 
 from src.services.target import jobs, outbox, prompts, unit_of_work, vocabulary
-from src.services.target.drive_adapter import checkpoint_incomplete
+from src.services.target.drive_adapter import (
+    checkpoint_incomplete,
+    walk_saw_whole_tree,
+)
 from src.services.target.workspaces import CONNECTED_FLAG_SQL
 
 from src.exceptions.base import StorydumpError
@@ -79,9 +82,9 @@ def _listed_state(kind: str, size_bytes: Optional[int]) -> str:
     """The state a listed file lands in: `unsupported` when its size is past
     the publish's cap for its kind — the fetch refuses it by its metadata, so
     no slot could ever post it (#1545) — and `available` otherwise. A listing
-    that states no size is not judged."""
-    cap = vocabulary.PUBLISH_MAX_BYTES.get(kind)
-    if size_bytes is not None and cap is not None and size_bytes > cap:
+    that states no size is not judged. A kind with no cap is a KeyError: every
+    kind the sync lands has one."""
+    if size_bytes is not None and size_bytes > vocabulary.PUBLISH_MAX_BYTES[kind]:
         return "unsupported"
     return "available"
 
@@ -389,13 +392,11 @@ async def _run_sync(deps, job, *, reason) -> str:
     # The adapter's cursor carries the adapter's own keys. The walk's start is
     # the sync's, so it goes back onto every cursor of the walk it began, and
     # the walk's last page judges against it.
-    started = (start.checkpoint or {}).get("started_at")
-    if (
-        started
-        and isinstance(new_checkpoint, dict)
-        and new_checkpoint.get("walk") == start.walk
-    ):
-        new_checkpoint = {**new_checkpoint, "started_at": started}
+    if "started_at" in start.checkpoint:
+        new_checkpoint = {
+            **new_checkpoint,
+            "started_at": start.checkpoint["started_at"],
+        }
 
     return await _land_page(
         factory,
@@ -828,25 +829,22 @@ async def _tombstone_unlisted(s, checkpoint, *, source_id, workspace_id) -> int:
 
     Only what predates the walk is judged: a row created or listed since the
     walk began waits for the next walk, since rows land outside any walk too
-    (a relay's drop). A walk that skipped part of the tree — `truncated` (the
-    folder cap cut it) or `partial` (any other skip: a folder that could not
-    be listed, a subfolder listing cut short) — judges nothing, and nor does a
-    walk with no start on its cursor (one in flight at the deploy that added
-    the start). Returns the rows tombstoned."""
-    cp = checkpoint or {}
-    if not cp.get("started_at") or cp.get("truncated") or cp.get("partial"):
+    (a relay's drop). Only a walk the adapter says was whole is judged
+    (`walk_saw_whole_tree`): one that skipped part of the tree, or whose
+    adapter does not say, judges nothing, and nor does a walk with no start on
+    its cursor (one in flight at the deploy that added the start). Returns
+    the rows tombstoned."""
+    started = (checkpoint or {}).get("started_at")
+    if not started or not walk_saw_whole_tree(checkpoint):
         return 0
-    started = cp["started_at"]
     result = await s.execute(
         text(
-            "WITH walk AS ("
-            "  SELECT CAST(CAST(:started AS text) AS timestamptz) AS started_at)"
-            " UPDATE media_items m SET state = 'missing'"
-            "   FROM walk"
-            "  WHERE m.workspace_id = :ws AND m.source_id = :s"
-            "    AND m.state IN ('available', 'unsupported')"
-            "    AND m.created_at < walk.started_at"
-            "    AND (m.last_listed_at IS NULL OR m.last_listed_at < walk.started_at)"
+            "UPDATE media_items SET state = 'missing'"
+            " WHERE workspace_id = :ws AND source_id = :s"
+            "   AND state IN ('available', 'unsupported')"
+            # GREATEST skips a NULL: a row never stamped is judged by its birth.
+            "   AND GREATEST(created_at, last_listed_at)"
+            "       < CAST(CAST(:started AS text) AS timestamptz)"
         ),
         {"started": started, "ws": workspace_id, "s": source_id},
     )

@@ -758,6 +758,8 @@ class TestAWalkSurvivesWhatDriveDoesMidWalk:
             CONFIG, cp, source_id=SRC, workspace_id=WS
         )
         assert [i["ref"] for i in items] == ["k1"] and not checkpoint_incomplete(cp)
+        # #1545: a folder the walk could not list leaves it partial, never whole.
+        assert cp.get("partial") is True and "whole" not in cp
 
     @pytest.mark.asyncio
     async def test_the_root_itself_gone_is_still_the_sources_fault(self):
@@ -1004,6 +1006,7 @@ class TestTheWalkGoesToAnyDepth:
             "folders past the cap never sync"
         )
         assert cursors[-1].get("truncated") is True, "the cut is carried to completion"
+        assert "whole" not in cursors[-1]
         assert not checkpoint_incomplete(cursors[-1])
 
     @pytest.mark.asyncio
@@ -1032,6 +1035,7 @@ class TestTheWalkGoesToAnyDepth:
         )
         seen, cursors = await self._walk(adapter)
         assert [r for r, _, _ in seen] == ["k1"]
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
 
     @pytest.mark.asyncio
     async def test_a_folder_reachable_twice_is_walked_once_and_a_cycle_does_not_spin(
@@ -1052,6 +1056,9 @@ class TestTheWalkGoesToAnyDepth:
             "each folder listed once"
         )
         assert not cursors[-1].get("truncated"), "a cycle is not a size cap"
+        assert not cursors[-1].get("partial") and cursors[-1].get("whole") is True, (
+            "a folder reached twice is walked once: nothing was skipped"
+        )
 
     @pytest.mark.asyncio
     async def test_a_child_id_outside_the_drive_id_shape_is_skipped(self):
@@ -1115,46 +1122,10 @@ class TestTheWalkGoesToAnyDepth:
 
     # #1545: the sync tombstones what a walk that saw the WHOLE tree no longer
     # lists, so every way a walk skips part of the tree rides the completed
-    # cursor: the folder cap as `truncated` (above), every other skip as
-    # `partial`. A folder reached twice is walked once and skips nothing (the
-    # cycle test above keeps that).
-
-    @pytest.mark.asyncio
-    async def test_a_folder_that_vanished_before_its_listing_leaves_the_walk_partial(
-        self,
-    ):
-        adapter, calls = self._tree(
-            tree={self.ROOT: [("GONE", "gone"), ("KEEP", "keep")]},
-            files={"KEEP": [_file("k1")]},
-            gone_listing={"GONE"},
-        )
-        seen, cursors = await self._walk(adapter)
-        assert [r for r, _, _ in seen] == ["k1"]
-        assert cursors[-1].get("partial") is True
-
-    @pytest.mark.asyncio
-    async def test_a_folder_gone_mid_walk_leaves_the_walk_partial(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            q = request.url.params["q"]
-            parent = q.split("'")[1]
-            if "vnd.google-apps.folder" in q:
-                children = (
-                    [_folder_entry("GONE", "gone"), _folder_entry("KEEP", "keep")]
-                    if parent == self.ROOT
-                    else []
-                )
-                return httpx.Response(200, json={"files": children})
-            if parent == "GONE":
-                return httpx.Response(
-                    404, json={"error": {"message": "File not found"}}
-                )
-            return httpx.Response(
-                200, json={"files": [_file("k1")] if parent == "KEEP" else []}
-            )
-
-        seen, cursors = await self._walk(_adapter(handler))
-        assert [r for r, _, _ in seen] == ["k1"]
-        assert cursors[-1].get("partial") is True
+    # cursor (the folder cap as `truncated`, every other skip as `partial`),
+    # and only a walk that skipped nothing ends `whole`. The vanished-folder
+    # skips are pinned in their own tests above; a folder reached twice is
+    # walked once and skips nothing (the cycle test).
 
     @pytest.mark.asyncio
     async def test_the_subfolder_cap_leaves_the_walk_partial(self, monkeypatch):
@@ -1167,7 +1138,7 @@ class TestTheWalkGoesToAnyDepth:
         )
         seen, cursors = await self._walk(adapter)
         assert [r for r, _, _ in seen] == ["fa", "fb"], "past the cap, never synced"
-        assert cursors[-1].get("partial") is True
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
 
     @pytest.mark.asyncio
     async def test_a_repeated_subfolder_page_token_leaves_the_walk_partial(self):
@@ -1190,7 +1161,7 @@ class TestTheWalkGoesToAnyDepth:
 
         seen, cursors = await self._walk(_adapter(handler))
         assert [r for r, _, _ in seen] == ["fa"]
-        assert cursors[-1].get("partial") is True
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
 
 
 class TestFetchBytes:

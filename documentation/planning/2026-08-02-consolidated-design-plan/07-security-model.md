@@ -2614,7 +2614,9 @@ with no cap cutting it and no folder left unlisted, ends by moving the source's 
 `unsupported` rows that it did not list to `missing`, if they were created and last listed before
 the walk began. The start is read from the database's clock when the walk is minted, and rides its
 cursor. A row landed outside any walk while it ran (the device-native drop relay lands rows so) is
-judged by the next walk, not this one. A walk that skipped part of the tree judges nothing.
+judged by the next walk, not this one. The signal is positive: the adapter ends a walk that skipped
+nothing `whole`, and a walk that skipped part of the tree, or whose adapter does not say, judges
+nothing.
 
 **`missing` is not `removed`.** `removed` is the folder's retirement, which a re-pick undoes;
 `missing` is the file's own absence, which only a listing undoes: a walk that lists the file again,

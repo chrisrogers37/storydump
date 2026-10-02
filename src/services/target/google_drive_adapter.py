@@ -220,7 +220,8 @@ def _resume_walk(
 
 @dataclass(frozen=True)
 class FolderPage:
-    """What the browser returns: the folders, and whether the cap cut them."""
+    """A folder listing (the browser's, the walk's): the folders, and whether
+    the listing was cut short."""
 
     folders: list[dict]
     truncated: bool = False
@@ -393,6 +394,7 @@ class GoogleDriveAdapter:
             {"v": 2, "walk": <token>,
              "seen": <folders queued so far>, "truncated": <cap hit>,
              "partial": <part of the tree skipped otherwise>,
+             "whole": <done, and nothing skipped>,
              "current": {"id", "name", "top", "top_name", "path", "listed"},
              "queue":   [ … the same shape … ],   # folders still to list
              "page_token": <within current>}       # only while more pages
@@ -402,11 +404,10 @@ class GoogleDriveAdapter:
         that did not mint — gets a fresh token here). A pre-v2 cursor with a
         `current` (the one-level walk of 2026-09-06, in flight at deploy) is
         ignored and the walk starts over. The complete checkpoint is
-        `{"v": 2, "walk": …}` with at most `seen`, `truncated` and `partial`
-        beside it: no
-        `current`, `queue` or `page_token` (`checkpoint_incomplete` is the one
-        definition the sync's chain reads), and the bare `page_token` shape is
-        never emitted.
+        `{"v": 2, "walk": …}` with at most `seen`, `truncated`, `partial` and
+        `whole` beside it: no `current`, `queue` or `page_token`
+        (`checkpoint_incomplete` is the one definition the sync's chain
+        reads), and the bare `page_token` shape is never emitted.
 
         `FOLDER_WALK_CAP` bounds the folders queued per walk; past it the rest
         is skipped and the cut is SAID (one warning) and carried to completion
@@ -414,8 +415,9 @@ class GoogleDriveAdapter:
         `FOLDER_LIST_CAP`, a subfolder listing that repeats its page token, a
         folder that vanished before or during its listing — is said where it
         happens and carried to completion as `partial`. A walk carrying either
-        did not see the whole tree, and the sync tombstones nothing after it
-        (`media_sync._tombstone_unlisted`).
+        did not see the whole tree. Only a walk that skipped nothing ends
+        `whole`, and only after one does the sync tombstone what it did not
+        list (`drive_adapter.walk_saw_whole_tree`).
         """
         _refuse_unsupported_config(config)
         cp = dict(checkpoint or {})
@@ -430,8 +432,9 @@ class GoogleDriveAdapter:
 
         def cursor(**extra: Any) -> dict:
             # `seen`, `truncated` and `partial` ride to completion (the log
-            # reads them; the sync judges nothing after a walk carrying either
-            # of the last two); `visited` only while the walk is in flight.
+            # reads them); `visited` only while the walk is in flight. A
+            # completed walk that skipped nothing says so, `whole`: the one
+            # key the sync's tombstone acts on (`walk_saw_whole_tree`).
             out: dict = {"v": 2, "walk": walk}
             if seen:
                 out["seen"] = seen
@@ -442,6 +445,8 @@ class GoogleDriveAdapter:
             if extra:
                 out["visited"] = visited
                 out.update(extra)
+            elif not (truncated or partial):
+                out["whole"] = True
             return out
 
         def advanced() -> dict:
@@ -476,7 +481,7 @@ class GoogleDriveAdapter:
         if not current.get("listed"):
             # Lazy discovery: this folder's subfolders, once, as it is popped.
             try:
-                children, cut = await self._subfolders(
+                listing = await self._subfolders(
                     str(current["id"]),
                     source_id=source_id,
                     workspace_id=workspace_id,
@@ -493,10 +498,10 @@ class GoogleDriveAdapter:
                 )
                 partial = True
                 return [], advanced()
-            if cut:
+            if listing.truncated:
                 partial = True
             known = set(visited) | {str(current["id"])} | {str(f["id"]) for f in queue}
-            for child in children:
+            for child in listing.folders:
                 if child["id"] in known:
                     # Reachable by two paths (a multi-parent folder) or a cycle
                     # (a provider handing back an ancestor): walked once, and
@@ -622,13 +627,13 @@ class GoogleDriveAdapter:
         source_id: str,
         workspace_id: str,
         box: Optional[_TokenBox] = None,
-    ) -> tuple[list[dict], bool]:
-        """A folder's immediate subfolders in name order, and whether the
-        listing was cut short. Paged to `FOLDER_LIST_CAP` and the cut is SAID
-        (one warning), never absorbed: a folder past the cap would otherwise
-        quietly never sync. A provider handing the same page token back
-        forever (a stub, or a Drive bug) ends the listing, said once. Either
-        cut makes the walk `partial`."""
+    ) -> FolderPage:
+        """A folder's immediate subfolders in name order. Paged to
+        `FOLDER_LIST_CAP` and the cut is SAID (one warning), never absorbed: a
+        folder past the cap would otherwise quietly never sync. A provider
+        handing the same page token back forever (a stub, or a Drive bug) ends
+        the listing, said once. Either cut is the page's `truncated`, and
+        makes the walk `partial`."""
         params = {
             "q": _subfolder_query(parent),
             "fields": "nextPageToken,files(id,name,mimeType)",
@@ -648,7 +653,7 @@ class GoogleDriveAdapter:
                         "drive source %s: subfolder listing repeated page token; stopping",
                         source_id,
                     )
-                    return folders, True
+                    return FolderPage(folders, truncated=True)
                 seen_tokens.add(page)
                 params["pageToken"] = page
             payload = await self._get_as_workspace(
@@ -693,9 +698,9 @@ class GoogleDriveAdapter:
                     parent,
                     FOLDER_LIST_CAP,
                 )
-                return folders[:FOLDER_LIST_CAP], True
+                return FolderPage(folders[:FOLDER_LIST_CAP], truncated=True)
             if not page:
-                return folders, False
+                return FolderPage(folders, truncated=False)
 
     async def fetch_bytes(
         self,

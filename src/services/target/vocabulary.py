@@ -130,6 +130,13 @@ NO_PUSH_BINDING = "no_push_binding"
 BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")
 WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
 
+#: `media_items.state` (096 ``ck_media_state``). Only `available` is drawn.
+#: `unsupported` is the sync's judgment that the publish could never fetch the
+#: file (past its byte cap); `removed` is the folder's retirement, which a
+#: re-pick undoes; `missing` is the file's own absence from its folder, which
+#: only a listing undoes.
+MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed", "missing")
+
 #: What a story may weigh on the way to Meta, by `media_items.media_kind`
 #: (Meta's own limits: 8 MB for a story image, 100 MB for a story video pulled
 #: by URL). Distinct from the Telegram card's caps (`MEDIA_CARD_MAX_BYTES`): a

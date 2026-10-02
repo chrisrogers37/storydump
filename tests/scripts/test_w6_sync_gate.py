@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from src.services.target import jobs
+from src.services.target import jobs, vocabulary
 from src.services.target.commands import CommandRefused
 from src.services.target.work_loop import WorkerConfig
 from src.worker import compose
@@ -1441,7 +1441,8 @@ class TestAChunkCarriesOneWalk:
 def _media_rows(conn, ws):
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT content_hash, source_id, state, category, folder_path, provider_file_ref"
+            "SELECT content_hash, source_id, state, category, folder_path, provider_file_ref,"
+            "       file_size"
             "  FROM media_items WHERE workspace_id = %s ORDER BY content_hash",
             (ws,),
         )
@@ -1453,6 +1454,7 @@ def _media_rows(conn, ws):
                 "category": r[3],
                 "path": r[4],
                 "ref": r[5],
+                "size": r[6],
             }
             for r in cur.fetchall()
         ]
@@ -1688,17 +1690,9 @@ class TestMediaFollowsTheConnectedFolder:
         assert rows[0]["source_id"] == str(chain["src"])
 
 
-def _state_and_size(conn, ws, ref):
-    """A row's `state` and `file_size`, by ref; None when no row has it."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT state, file_size FROM media_items"
-            " WHERE workspace_id = %s AND provider_file_ref = %s",
-            (ws, ref),
-        )
-        r = cur.fetchone()
-    conn.commit()
-    return None if r is None else (r[0], r[1])
+def _states(conn, ws):
+    """Every row's state in the workspace, by ref (`_media_rows`)."""
+    return {r["ref"]: r["state"] for r in _media_rows(conn, ws)}
 
 
 def _insert_row(conn, ws, src, ref, *, state="available"):
@@ -1725,10 +1719,16 @@ async def _walk(lane_db, sync_conn, src, drive, *, jobs_to_run=1):
         await _run_once_w6(lane_db, drive)
 
 
-#: The publish's byte caps (`vocabulary.PUBLISH_MAX_BYTES`), written out as
-#: numbers: the gate pins the boundary itself, not a copy of the constant.
-_IMAGE_CAP = 8 * 1024 * 1024
-_VIDEO_CAP = 40 * 1000 * 1000
+#: What the Drive adapter's last cursor says after a walk that skipped nothing
+#: (`drive_adapter.walk_saw_whole_tree`). A scripted walk says it only where a
+#: test means it, so every other scripted walk judges nothing.
+_WHOLE = {"whole": True}
+
+#: The publish's byte caps. The gate pins the comparison (a file AT the cap
+#: posts, one byte past it never can); the numbers are pinned beside the
+#: worker's fetch (`tests/src/test_worker.py`).
+_IMAGE_CAP = vocabulary.PUBLISH_MAX_BYTES["image"]
+_VIDEO_CAP = vocabulary.PUBLISH_MAX_BYTES["video"]
 
 
 class TestTheSyncRetiresWhatThePublishCanNeverFetch:
@@ -1744,10 +1744,9 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         chain = seed_workspace_chain(sync_conn, "w6-size")
         drive = ScriptedDrive([([_item("s1", size=1234), _item("s2")], None)])
         await _walk(lane_db, sync_conn, chain["src"], drive)
-        assert _state_and_size(sync_conn, chain["ws"], "s1") == ("available", 1234)
-        assert _state_and_size(sync_conn, chain["ws"], "s2") == ("available", None), (
-            "an adapter that states no size leaves the column NULL"
-        )
+        sizes = {r["ref"]: r["size"] for r in _media_rows(sync_conn, chain["ws"])}
+        assert sizes["s1"] == 1234
+        assert sizes["s2"] is None, "an adapter that states no size leaves it NULL"
 
     @pytest.mark.asyncio
     async def test_a_file_over_the_publish_cap_lands_unsupported(
@@ -1761,15 +1760,12 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
             _item("vid-over", kind="video", size=_VIDEO_CAP + 1),
         ]
         await _walk(lane_db, sync_conn, chain["src"], ScriptedDrive([(page, None)]))
-        states = {
-            item["ref"]: _state_and_size(sync_conn, chain["ws"], item["ref"])
-            for item in page
-        }
-        assert states == {
-            "img-at-cap": ("available", _IMAGE_CAP),
-            "img-over": ("unsupported", _IMAGE_CAP + 1),
-            "vid-at-cap": ("available", _VIDEO_CAP),
-            "vid-over": ("unsupported", _VIDEO_CAP + 1),
+        states = _states(sync_conn, chain["ws"])
+        assert {item["ref"]: states[item["ref"]] for item in page} == {
+            "img-at-cap": "available",
+            "img-over": "unsupported",
+            "vid-at-cap": "available",
+            "vid-over": "unsupported",
         }, "the publish refuses past its cap, per kind; a file AT the cap posts"
 
     @pytest.mark.asyncio
@@ -1779,74 +1775,73 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         """Every row synced before #1545 has no size. The next walk that lists
         it records the size and, past the cap, takes it out of the draw."""
         chain = seed_workspace_chain(sync_conn, "w6-judged")
-        seeded = _media_rows(sync_conn, chain["ws"])[0]
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"]) == (
-            "available",
-            None,
-        )
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        assert (seeded["state"], seeded["size"]) == ("available", None)
         same_file = _item(seeded["ref"], h=seeded["hash"], size=_IMAGE_CAP + 1)
         await _walk(
             lane_db, sync_conn, chain["src"], ScriptedDrive([([same_file], None)])
         )
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"]) == (
-            "unsupported",
-            _IMAGE_CAP + 1,
-        )
+        [after] = _media_rows(sync_conn, chain["ws"])
+        assert (after["state"], after["size"]) == ("unsupported", _IMAGE_CAP + 1)
 
     @pytest.mark.asyncio
     async def test_a_complete_walk_tombstones_what_it_no_longer_lists(
         self, lane_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w6-tomb")
-        seeded = _media_rows(sync_conn, chain["ws"])[0]
-        await _walk(
-            lane_db,
-            sync_conn,
-            chain["src"],
-            ScriptedDrive([([_item("t1"), _item("t2")], None)]),
-        )
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"])[0] == (
-            "missing"
-        ), "the seeded file is not in a listing that saw the whole tree"
-        await _walk(
-            lane_db, sync_conn, chain["src"], ScriptedDrive([([_item("t1")], None)])
-        )
-        assert _state_and_size(sync_conn, chain["ws"], "t1")[0] == "available"
-        assert _state_and_size(sync_conn, chain["ws"], "t2")[0] == "missing"
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        drive = ScriptedDrive([([_item("t1"), _item("t2")], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "missing",
+            "t1": "available",
+            "t2": "available",
+        }, "the seeded file is not in a listing that saw the whole tree"
+        drive = ScriptedDrive([([_item("t1")], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "missing",
+            "t1": "available",
+            "t2": "missing",
+        }
 
     @pytest.mark.asyncio
     async def test_a_tombstoned_file_listed_again_comes_back(self, lane_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w6-back")
-        seeded = _media_rows(sync_conn, chain["ws"])[0]
-        await _walk(
-            lane_db, sync_conn, chain["src"], ScriptedDrive([([_item("b1")], None)])
-        )
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"])[0] == "missing"
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        drive = ScriptedDrive([([_item("b1")], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"])[seeded["ref"]] == "missing"
         again = _item(seeded["ref"], h=seeded["hash"])
-        await _walk(
-            lane_db,
-            sync_conn,
-            chain["src"],
-            ScriptedDrive([([again, _item("b1")], None)]),
-        )
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"])[0] == (
-            "available"
-        ), "restored in Drive and listed again: the same item, drawable again"
+        drive = ScriptedDrive([([again, _item("b1")], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "available",
+            "b1": "available",
+        }, "restored in Drive and listed again: the same item, drawable again"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("skipped", ["truncated", "partial"])
-    async def test_a_walk_that_did_not_see_the_whole_tree_tombstones_nothing(
-        self, lane_db, sync_conn, skipped
+    @pytest.mark.parametrize(
+        "case, final",
+        [
+            ("silent", {}),
+            ("truncated", {**_WHOLE, "truncated": True}),
+            ("partial", {**_WHOLE, "partial": True}),
+        ],
+    )
+    async def test_a_walk_not_known_to_be_whole_tombstones_nothing(
+        self, lane_db, sync_conn, case, final
     ):
-        """`truncated` is the folder cap's cut, `partial` every other skip
-        (the adapter's docstring): either way the walk saw part of the tree."""
-        chain = seed_workspace_chain(sync_conn, f"w6-{skipped}")
-        seeded = _media_rows(sync_conn, chain["ws"])[0]
-        drive = ScriptedDrive([([_item("q1")], None)], final={skipped: True})
+        """An adapter that does not say `whole` (silent), or says a skip
+        beside it, saw part of the tree at best: nothing is judged."""
+        chain = seed_workspace_chain(sync_conn, f"w6-notwhole-{case}")
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        drive = ScriptedDrive([([_item("q1")], None)], final=final)
         await _walk(lane_db, sync_conn, chain["src"], drive)
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"])[0] == (
-            "available"
-        ), "a folder the walk skipped may still hold the file"
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "available",
+            "q1": "available",
+        }
 
     @pytest.mark.asyncio
     async def test_a_row_listed_on_an_earlier_page_of_the_walk_is_kept(
@@ -1855,17 +1850,19 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         """A walk spans chunks, one page each in its own transaction: what an
         earlier page listed stays, and what no page listed goes."""
         chain = seed_workspace_chain(sync_conn, "w6-pages")
-        seeded = _media_rows(sync_conn, chain["ws"])[0]
+        [seeded] = _media_rows(sync_conn, chain["ws"])
         _insert_row(sync_conn, chain["ws"], chain["src"], "old-unlisted")
         first_page = [_item(seeded["ref"], h=seeded["hash"])]
-        drive = ScriptedDrive([(first_page, "tok-2"), ([_item("m2")], None)])
+        drive = ScriptedDrive(
+            [(first_page, "tok-2"), ([_item("m2")], None)], final=_WHOLE
+        )
         await _walk(lane_db, sync_conn, chain["src"], drive, jobs_to_run=2)
         assert len(drive.calls) == 2, "two pages, two chunks"
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"])[0] == (
-            "available"
-        )
-        assert _state_and_size(sync_conn, chain["ws"], "m2")[0] == "available"
-        assert _state_and_size(sync_conn, chain["ws"], "old-unlisted")[0] == "missing"
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "available",
+            "m2": "available",
+            "old-unlisted": "missing",
+        }
 
     @pytest.mark.asyncio
     async def test_a_row_landed_after_the_walk_began_is_not_tombstoned(
@@ -1875,17 +1872,20 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         walk that listed the folder before the upload and completes after it
         must not tombstone the drop: only what predates the walk is judged."""
         chain = seed_workspace_chain(sync_conn, "w6-race")
-        seeded = _media_rows(sync_conn, chain["ws"])[0]
+        [seeded] = _media_rows(sync_conn, chain["ws"])
 
         def relay_lands_a_drop():
             _insert_row(sync_conn, chain["ws"], chain["src"], "dropped")
 
-        drive = ScriptedDrive([([_item("r1")], None)], on_call=relay_lands_a_drop)
+        drive = ScriptedDrive(
+            [([_item("r1")], None)], on_call=relay_lands_a_drop, final=_WHOLE
+        )
         await _walk(lane_db, sync_conn, chain["src"], drive)
-        assert _state_and_size(sync_conn, chain["ws"], "dropped")[0] == "available"
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"])[0] == (
-            "missing"
-        ), "the control: a row older than the walk and unlisted IS tombstoned"
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "missing",
+            "r1": "available",
+            "dropped": "available",
+        }, "older than the walk and unlisted: tombstoned; landed during it: kept"
 
     @pytest.mark.asyncio
     async def test_a_walk_minted_without_a_start_time_tombstones_nothing(
@@ -1894,17 +1894,18 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         """A walk in flight at the deploy carries no start time: it finishes
         without judging anything, and the next walk does the judging."""
         chain = seed_workspace_chain(sync_conn, "w6-nostart")
-        seeded = _media_rows(sync_conn, chain["ws"])[0]
+        [seeded] = _media_rows(sync_conn, chain["ws"])
         _set_cursor(sync_conn, chain["src"], IN_FLIGHT)
         _enqueue_chunk(sync_conn, chain["ws"], chain["src"], IN_FLIGHT["walk"])
-        drive = ScriptedDrive([([_item("n1")], None)])
+        drive = ScriptedDrive([([_item("n1")], None)], final=_WHOLE)
         await _run_once_w6(lane_db, drive)
         assert len(drive.calls) == 1 and not checkpoint_incomplete(
             _source_row(sync_conn, chain["src"])["sync_checkpoint"]
         ), "the walk completed"
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"])[0] == (
-            "available"
-        )
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "available",
+            "n1": "available",
+        }
 
     @pytest.mark.asyncio
     async def test_a_re_pick_revives_retired_rows_but_not_a_tombstone(
@@ -1912,21 +1913,15 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
     ):
         """`removed` is the folder's retirement, and a re-pick undoes it;
         `missing` is the file's own absence, and only a listing undoes that."""
-        from src.services.target import media_sync as ms
-
         chain = seed_workspace_chain(sync_conn, "w6-repick")
-        seeded = _media_rows(sync_conn, chain["ws"])[0]
-        await _walk(
-            lane_db, sync_conn, chain["src"], ScriptedDrive([([_item("k1")], None)])
-        )
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"])[0] == "missing"
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        drive = ScriptedDrive([([_item("k1")], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"])[seeded["ref"]] == "missing"
         _insert_row(sync_conn, chain["ws"], chain["src"], "retired", state="removed")
-
-        async def repick(session):
-            return await ms.rearm_after_connect(
-                session, workspace_id=chain["ws"], source_id=chain["src"]
-            )
-
-        assert await _in_session(lane_db, repick) == 1
-        assert _state_and_size(sync_conn, chain["ws"], "retired")[0] == "available"
-        assert _state_and_size(sync_conn, chain["ws"], seeded["ref"])[0] == "missing"
+        assert await _rearm(lane_db, chain["ws"], chain["src"]) is True
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "missing",
+            "k1": "available",
+            "retired": "available",
+        }
