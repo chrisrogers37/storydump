@@ -10,8 +10,7 @@ export function GoogleDriveInstagramIntegration() {
         Instagram and uploads them by hand.
       </p>
       <p>
-        That download-and-upload loop is the bottleneck, because Google
-        Drive has no button that posts to Instagram. Here&apos;s how to
+        That download-and-upload loop is the bottleneck. Here&apos;s how to
         close the gap.
       </p>
 
