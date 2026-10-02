@@ -383,6 +383,7 @@ async def _answer_tap(
             answered = False
         if answered is False and metrics is not None:
             metrics.answer_failed += 1
+    answer_ms = int((time.monotonic() - started) * 1000)
     edit_text = getattr(result, "edit_text", None)
     if (
         edit_text
@@ -403,7 +404,7 @@ async def _answer_tap(
         payload.get("update_id"),
         result.outcome,
         answered,
-        int((time.monotonic() - started) * 1000),
+        answer_ms,
     )
 
 
