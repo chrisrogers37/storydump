@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   accountChoiceLabel,
   scheduledOutcome,
+  schedulePlan,
   scheduleStep,
   scheduleZone,
   zoneNote,
@@ -122,7 +123,48 @@ describe("scheduleStep — where one answer from the port leaves the dialog", ()
     expect(scheduleStep({ ok: false, error: "locked", status: 409 }, false).kind).toBe("refused");
   });
 
+  it("takes the port's word over the lock kinds: a warning beside a blocker is refused", () => {
+    // `skip` alone could be overridden; a removed item cannot be, and the port
+    // says so. A guess from the kinds would offer the override here.
+    expect(
+      scheduleStep(
+        {
+          ok: false,
+          error: "locked",
+          status: 409,
+          facts: { overridable: false, in_the_way: ["item_removed", "skip"] },
+        },
+        false,
+      ).kind,
+    ).toBe("refused");
+  });
+
   it("does not ask twice: a refusal of the override itself is final", () => {
     expect(scheduleStep(overridable, true).kind).toBe("refused");
+  });
+});
+
+describe("schedulePlan — what one press sends", () => {
+  const pick = {
+    accountId: "55555555-5555-4555-8555-555555555555",
+    itemId: "66666666-6666-4666-8666-666666666666",
+    localAt: "2026-10-03T14:30",
+  };
+
+  it("sends the override from the question the port's word opened", () => {
+    expect(schedulePlan("confirm", pick)).toStrictEqual({
+      accountId: "55555555-5555-4555-8555-555555555555",
+      itemId: "66666666-6666-4666-8666-666666666666",
+      localAt: "2026-10-03T14:30",
+      overrideLocks: true,
+    });
+  });
+
+  it("never sends it from the form", () => {
+    expect(schedulePlan("form", pick)).toStrictEqual({
+      accountId: "55555555-5555-4555-8555-555555555555",
+      itemId: "66666666-6666-4666-8666-666666666666",
+      localAt: "2026-10-03T14:30",
+    });
   });
 });

@@ -27,6 +27,7 @@ import {
   scheduleOverrideCopy,
   scheduleRefusalCopy,
   submitScheduleItem,
+  type SchedulePlan,
   type SubmitResult,
 } from "@/lib/command-client";
 import type { MediaRow } from "@/lib/dashboard-payloads";
@@ -43,8 +44,9 @@ import type { Destination } from "@/lib/types";
  * names the zone, and the port resolves it there (`schedule_item`). Nothing
  * here converts a time between zones, so the browser's own zone plays no part.
  *
- * What the dialog says is decided by the pure functions below, which
- * `schedule-dialog.test.ts` pins; the component holds state and nothing else.
+ * What the dialog says, and what a press sends, is decided by the pure
+ * functions below, which `schedule-dialog.test.ts` pins; the component holds
+ * state and nothing else.
  */
 
 export type ScheduleZone = { zone: string; source: "account" | "workspace" | "default" };
@@ -113,6 +115,18 @@ export function scheduleStep(result: SubmitResult, overriding: boolean): Schedul
   };
 }
 
+/**
+ * What one press sends. The step it is pressed from decides the override, so
+ * no button chooses it: only the question `scheduleStep` opened on the port's
+ * word sends `override_locks`, and the form never does.
+ */
+export function schedulePlan(
+  from: "form" | "confirm",
+  pick: Omit<SchedulePlan, "overrideLocks">,
+): SchedulePlan {
+  return from === "confirm" ? { ...pick, overrideLocks: true } : { ...pick };
+}
+
 /** The accounts and the workspace's zone, or null when they could not be read. */
 export type ScheduleTargets = { accounts: Destination[]; workspaceTz: string | null } | null;
 
@@ -149,18 +163,14 @@ export function ScheduleDialog({
     onClose();
   }
 
-  async function submit(overriding: boolean) {
-    if (!item || !account || !localAt) return;
+  async function submit() {
+    if (!item || !account || !localAt || phase.kind === "done") return;
+    const plan = schedulePlan(phase.kind, { accountId: account.id, itemId: item.id, localAt });
     setPending(true);
     try {
       const step = scheduleStep(
-        await submitScheduleItem(workspaceId, {
-          accountId: account.id,
-          itemId: item.id,
-          localAt,
-          overrideLocks: overriding,
-        }),
-        overriding,
+        await submitScheduleItem(workspaceId, plan),
+        plan.overrideLocks === true,
       );
       if (step.kind === "done") {
         setPhase({ kind: "done", outcome: step.outcome, accountName: destinationName(account) });
@@ -248,7 +258,7 @@ export function ScheduleDialog({
             >
               Back
             </Button>
-            <Button disabled={pending} onClick={() => void submit(true)}>
+            <Button disabled={pending} onClick={() => void submit()}>
               {spinner}
               Schedule anyway
             </Button>
@@ -262,7 +272,7 @@ export function ScheduleDialog({
         className="space-y-4"
         onSubmit={(event) => {
           event.preventDefault();
-          void submit(false);
+          void submit();
         }}
       >
         {accounts.length > 1 ? (
