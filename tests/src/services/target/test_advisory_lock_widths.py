@@ -76,11 +76,12 @@ class TestTheTwoWidthsStayApart:
         """Positive control: the regex sees the sites, so a pass below means
         agreement rather than an empty scan."""
         sites = _sites()
-        assert len(sites) >= 5, f"expected every hashed lock site, saw {sites}"
+        assert len(sites) >= 6, f"expected every hashed lock site, saw {sites}"
         assert {s[0] for s in sites} >= {
             "identity.py",
             "provisioning.py",
             "category_mix.py",
+            "content_runway.py",
         }
 
     def test_each_namespace_is_hashed_at_one_width_only(self):

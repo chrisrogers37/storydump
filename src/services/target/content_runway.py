@@ -40,7 +40,20 @@ notice writes a `low_content_notice` row on the account, a re-arm a
 `low_content_rearmed` row, and the newest of the two is the state. It is read
 and written under the account's own advisory lock, inside `plan_slot`, which
 the job layer already serializes per account (`acct:<id>`), so one writer
-decides at a time.
+decides at a time. The latch lives in `audit_events`, so a retention sweep
+that deletes an account's latch row re-arms it, and the next crossing below
+the level is told again.
+
+## The notice never decides the slot
+
+The mint is the slot's work; the notice is said beside it. `execute_plan_slot`
+settles the latch in a savepoint after the mint and returns the minted intent
+alone, so the slot's job finalizes succeeded whether or not anyone could be
+told, and a failure writing the notice is logged and costs the mint nothing.
+A workspace with no push binding is latched all the same (the row's `told` is
+0) with a warning in the log, once per crossing; the Overview's card is that
+workspace's channel. Only the empty library's notice, where nothing was
+minted, can park a `plan_slot` job for review.
 """
 
 from __future__ import annotations
@@ -107,6 +120,16 @@ def days_left(eligible: int, posts_per_day: Optional[int]) -> Optional[int]:
     return eligible // posts_per_day
 
 
+def is_low(days: Optional[int], below_days: int) -> bool:
+    """Whether *days* of content left (:func:`days_left`) is under the
+    warning level *below_days*. The one comparison: the notice is owed by it
+    (:func:`latch_action`) and the Overview marks an account ``low`` by it
+    (:func:`runway`), so the card marks exactly the accounts the notice is
+    about. Never low with no days, which is an account not being posted for.
+    """
+    return days is not None and days < below_days
+
+
 def latch_action(
     *,
     days: Optional[int],
@@ -117,14 +140,14 @@ def latch_action(
     (:func:`days_left`): tell (`NOTICE_EVENT`), re-arm (`REARM_EVENT`), or
     nothing (None).
 
-    Told once on the way down, below *below_days*; re-armed only at
-    :data:`REARM_MARGIN_DAYS` above it or more, so the band between the two
-    changes nothing in either direction. The days are whole, so fewer than
-    *below_days* of them is exactly fewer files than *below_days* days of
+    Told once on the way down, below *below_days* (:func:`is_low`); re-armed
+    only at :data:`REARM_MARGIN_DAYS` above it or more, so the band between
+    the two changes nothing in either direction. The days are whole, so fewer
+    than *below_days* of them is exactly fewer files than *below_days* days of
     posts. Nothing with no days, the case the database's CHECKs rule out."""
     if days is None:
         return None
-    if days < below_days:
+    if is_low(days, below_days):
         return None if latched else NOTICE_EVENT
     if latched and days >= below_days + REARM_MARGIN_DAYS:
         return REARM_EVENT
@@ -133,7 +156,15 @@ def latch_action(
 
 def notice_text(*, label: str, days: int, eligible: int, posts_per_day: int) -> str:
     """The notice, naming the account, its *days* left — the figure the
-    Overview shows (:func:`days_left`) — and the arithmetic behind them."""
+    Overview shows (:func:`days_left`) — and the arithmetic behind them.
+
+    No eligible file at all is said as no content, never as "less than a
+    day": that span is the part of a day a few files still cover."""
+    if not eligible:
+        return (
+            f"⏳ {label} has no content left. Add media to this workspace's"
+            " Drive source to keep it posting."
+        )
     if not days:
         span = "less than a day"
     elif days == 1:
@@ -169,8 +200,11 @@ async def after_mint(
 
     **The latch row is written on the undeliverable attempt too**, as
     `_notice_no_media` stamps its marker: it records that this crossing was
-    spoken for, so a workspace with no binding raises one `review_required`
-    job per crossing rather than one per slot.
+    spoken for, so a workspace with no binding is warned about once per
+    crossing in the log rather than once per slot. The return value is for
+    the caller to read, not to finalize on: `execute_plan_slot` minted
+    before it asked, so its job succeeds either way (module docstring, "The
+    notice never decides the slot").
     """
     # Its own statement, before the read: a second transaction on the account
     # waits here until the first ends, and the read below, a statement of its
@@ -285,10 +319,11 @@ async def runway(executor, *, workspace_id: str, below_days: int) -> dict:
     they are spent at, and the whole days left (#1478).
 
     Every destination the Accounts tab lists, in the same order
-    (`workspaces.LISTED_ACCOUNT_SQL`). ``low`` is the notice's own test at
-    *below_days*, which the caller passes from the worker's level
-    (`WorkerConfig.low_runway_days`), so the card marks exactly the accounts
-    the notice is about. The folders are read once, for every account."""
+    (`workspaces.LISTED_ACCOUNT_SQL`). ``low`` is the notice's own test
+    (:func:`is_low`) at *below_days*, which the caller passes from the
+    worker's level (`WorkerConfig.low_runway_days`), so the card marks
+    exactly the accounts the notice is about. The folders are read once, for
+    every account."""
     accounts = await readers.rows(
         executor,
         "SELECT a.id, a.handle, a.display_name, a.state,"
@@ -323,7 +358,7 @@ async def runway(executor, *, workspace_id: str, below_days: int) -> dict:
                 "posts_per_day": posts_per_day,
                 "eligible": eligible,
                 "days_left": days,
-                "low": days is not None and days < below_days,
+                "low": is_low(days, below_days),
             }
         )
     return {"below_days": below_days, "accounts": out}

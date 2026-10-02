@@ -297,22 +297,20 @@ def build_registry(deps: WorkerDeps) -> dict:
             no_media_notice_after_seconds=cfg.no_media_notice_after_seconds,
             low_runway_days=cfg.low_runway_days,
         )
+        if outcome.notice is not None:
+            # The library was empty AND there was no surface to say so on.
+            # Passed through rather than re-derived: `notice` already IS the
+            # verdict, so re-testing it here would be a second place to keep
+            # in step with the sentinel.
+            return outcome.notice
         if outcome.intent_id is not None:
             # The fast path of the `02` §4 prompt edge: mint and prompt on
             # the same beat, same transaction. The prompt sweep is the
             # correctness backstop for anything this misses (a crash between
-            # mint and prompt, or intents minted before W3 existed). It runs
-            # before the verdict below, because a runway notice nobody could
-            # receive rides beside a minted intent (#1478).
+            # mint and prompt, or intents minted before W3 existed).
             await prompts.sweep_due_prompts(
                 session, limit=1, late_seconds=cfg.planned_late_seconds
             )
-        if outcome.notice is not None:
-            # A notice the slot owed — the empty library, or the runway — AND
-            # no surface to say it on. Passed through rather than re-derived:
-            # `notice` already IS the verdict, so re-testing it here would be
-            # a second place to keep in step with the sentinel.
-            return outcome.notice
 
     async def reap_expired(session, job):
         await scheduler.execute_reap_expired(

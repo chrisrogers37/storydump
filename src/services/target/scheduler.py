@@ -192,9 +192,7 @@ class SlotOutcome:
 
     The two are independent and the executor needs both: `intent_id` is None
     for a duplicate slot AND for an empty library, while `notice` is set only
-    when a notice the slot owed — the empty library, or a runway that has just
-    dropped below its warning level (#1478) — could not be reported to anyone.
-    The second rides beside a minted intent. Collapsing them
+    when the empty library could not be reported to anyone. Collapsing them
     back into a single `Optional[str]` is what would hide an undeliverable
     notice behind an ordinary "nothing minted".
     """
@@ -326,7 +324,10 @@ async def execute_plan_slot(
     days of eligible content than this tells the workspace once, and the next
     drop is told only after the account has climbed back
     `content_runway.REARM_MARGIN_DAYS` above it. Required for the same reason
-    as the dedup window.
+    as the dedup window. **That notice never decides the slot**: it is said
+    in a savepoint after the mint and its verdict is not carried back, so a
+    slot that minted returns the intent alone, whether the notice reached
+    nobody or could not be written at all.
 
     **Idempotent by key 1, not by checking first.** The insert carries
     ``ON CONFLICT … DO NOTHING`` against `uq_intent_slot`, so a duplicate
@@ -446,19 +447,29 @@ async def execute_plan_slot(
     ).first()
     if row is None:
         return SlotOutcome()
-    # Nothing in this transaction moved the pool between its read and the
-    # mint, so what is left is the pool less the minted file (#1478).
-    said = await content_runway.after_mint(
-        session,
-        workspace_id=workspace_id,
-        ig_account_id=ig_account_id,
-        eligible=drawn.eligible_after_a_mint,
-        below_days=low_runway_days,
-    )
-    return SlotOutcome(
-        intent_id=str(row[0]),
-        notice=said if said == outbox.UNDELIVERABLE else None,
-    )
+    # The runway notice is said beside the mint and never decides the slot
+    # (`content_runway`, "The notice never decides the slot"): its verdict is
+    # not carried back, so a notice nobody could receive still finalizes the
+    # job succeeded. It rides a savepoint, so a failure writing it rolls back
+    # alone and the mint stands.
+    try:
+        async with session.begin_nested():
+            # Nothing in this transaction moved the pool between its read and
+            # the mint, so what is left is the pool less the minted file.
+            await content_runway.after_mint(
+                session,
+                workspace_id=workspace_id,
+                ig_account_id=ig_account_id,
+                eligible=drawn.eligible_after_a_mint,
+                below_days=low_runway_days,
+            )
+    except Exception:  # noqa: BLE001 — logged; the mint stands
+        logger.exception(
+            "plan_slot: the runway notice for account %s was NOT written;"
+            " the mint stands",
+            ig_account_id,
+        )
+    return SlotOutcome(intent_id=str(row[0]))
 
 
 async def execute_reap_expired(

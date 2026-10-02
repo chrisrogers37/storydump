@@ -193,8 +193,10 @@ class Pool:
 
     #: :func:`weights` over the connected folders, in the order read.
     weights: dict[str, float]
-    #: Eligible files per connected folder; 0 for an Off one, which can never
-    #: be drawn and so is not counted (:func:`pool`).
+    #: Eligible files per folder a draw can land on, and only those: a
+    #: connected folder with no ratio or a ratio above 0 (0 when nothing in it
+    #: is eligible). An Off folder is never counted (:func:`pool`), so it is
+    #: not here, whatever it holds.
     counts: dict[str, int]
 
     @property
@@ -205,8 +207,10 @@ class Pool:
 
     @property
     def eligible(self) -> int:
-        """Every file the planner could pick for this account now."""
-        return sum(self.counts.get(sid, 0) for sid, _ in self.drawable)
+        """Every file the planner could pick for this account now: every
+        count :attr:`counts` holds, since it holds only the folders a draw can
+        land on."""
+        return sum(self.counts.values())
 
     @property
     def eligible_after_a_mint(self) -> int:
@@ -249,9 +253,16 @@ async def pool(
     it, so the files drawn from and the days left cannot disagree."""
     if folders is None:
         folders = await pool_folders(executor, workspace_id=workspace_id)
-    # Counted in the folders that can be drawn only: an Off folder (ratio 0)
-    # weighs 0 whatever it holds. With none of them the count still runs,
-    # bound to no folder, so the read is the same statement every time.
+    # Counted in the folders that can be drawn only, the one guard on an Off
+    # folder (ratio 0): it weighs 0 whatever it holds, so its files are never
+    # read and :attr:`Pool.counts` holds only these. With none of them the
+    # count still runs, bound to no folder, so the read is the same statement
+    # every time.
+    sources = [
+        str(row["source_id"])
+        for row in folders
+        if row["ratio"] is None or row["ratio"] > 0
+    ]
     counts = await readers.rows(
         executor,
         "SELECT m.source_id, count(*) AS n FROM media_items m"
@@ -260,11 +271,7 @@ async def pool(
         + " GROUP BY m.source_id",
         ws=workspace_id,
         acct=ig_account_id,
-        sources=[
-            str(row["source_id"])
-            for row in folders
-            if row["ratio"] is None or row["ratio"] > 0
-        ],
+        sources=sources,
     )
     have = {str(row["source_id"]): int(row["n"]) for row in counts}
     # The folder rows as read, each with its count: :func:`weights` reads the
@@ -272,7 +279,7 @@ async def pool(
     shaped = [{**row, "n": have.get(str(row["source_id"]), 0)} for row in folders]
     return Pool(
         weights=weights(shaped),
-        counts={str(row["source_id"]): row["n"] for row in shaped},
+        counts={source_id: have.get(source_id, 0) for source_id in sources},
     )
 
 

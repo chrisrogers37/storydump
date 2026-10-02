@@ -53,7 +53,7 @@ describe("deriveRunway", () => {
     expect(row.name).toBe("Story Co");
   });
 
-  it("does not divide for an account the clock does not post for", () => {
+  it("shows an account the clock does not post for as not posting, with its files ready", () => {
     const [row] = deriveRunway({
       below_days: 7,
       accounts: [account({ posting: false, days_left: null, low: false, eligible: 1 })],
@@ -61,6 +61,30 @@ describe("deriveRunway", () => {
     expect(row.headline).toBe("Not posting");
     expect(row.detail).toBe("1 file ready");
     expect(row.low).toBe(false);
+  });
+
+  it("says a posting account with no file at all has no content left", () => {
+    const rows = deriveRunway({
+      below_days: 7,
+      accounts: [
+        account({ id: "a1", eligible: 0, days_left: 0 }),
+        // Not posting outranks empty: nothing is being spent.
+        account({ id: "a2", posting: false, eligible: 0, days_left: null, low: false }),
+      ],
+    });
+    expect(rows.map((row) => [row.headline, row.detail])).toEqual([
+      ["No content left", "0 files at 3 a day"],
+      ["Not posting", "0 files ready"],
+    ]);
+  });
+
+  it("keeps less than a day for files short of one day's posts", () => {
+    const [row] = deriveRunway({
+      below_days: 7,
+      accounts: [account({ eligible: 1, days_left: 0 })],
+    });
+    expect(row.headline).toBe("Less than a day");
+    expect(row.detail).toBe("1 file at 3 a day");
   });
 
   it("takes the low mark from the server rather than recounting it", () => {

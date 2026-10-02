@@ -37,7 +37,7 @@ export interface RunwayResponse {
 export interface RunwayRow {
   key: string;
   name: string;
-  /** "About 6 days", "Less than a day", or "Not posting". */
+  /** "About 6 days", "Less than a day", "No content left", or "Not posting". */
   headline: string;
   /** The arithmetic behind the headline: "20 files at 3 a day". */
   detail: string;
@@ -50,7 +50,9 @@ function files(count: number): string {
 
 /**
  * The server's whole days, as they are. It counts them down once, so a
- * part-day is never promised and nothing here rounds.
+ * part-day is never promised and nothing here rounds. Zero days is a part-day
+ * only while a file is left, which the days cannot show: `deriveRunway`,
+ * which has the files, says when there is none.
  */
 export function runwayHeadline(daysLeft: number | null): string {
   if (daysLeft === null) return "Not posting";
@@ -58,11 +60,20 @@ export function runwayHeadline(daysLeft: number | null): string {
   return daysLeft === 1 ? "About 1 day" : `About ${daysLeft} days`;
 }
 
+/**
+ * One row per account, in the server's order. An account the clock posts for
+ * with no file at all has no content left rather than less than a day of it:
+ * nothing is there to post, which is also how an account reads before any
+ * Drive folder is connected.
+ */
 export function deriveRunway(runway: RunwayResponse): RunwayRow[] {
   return runway.accounts.map((account) => ({
     key: account.id,
     name: destinationName(account),
-    headline: runwayHeadline(account.days_left),
+    headline:
+      account.posting && account.eligible === 0
+        ? "No content left"
+        : runwayHeadline(account.days_left),
     detail: account.posting
       ? `${files(account.eligible)} at ${account.posts_per_day} a day`
       : `${files(account.eligible)} ready`,

@@ -210,6 +210,8 @@ class TestWorkspaceReads:
     def test_runway_is_served_under_the_gate(
         self, client, signed_in, tenant, monkeypatch
     ):
+        from src.api.routes import v1
+
         seen = {}
 
         async def runway(session, *, workspace_id, below_days):
@@ -220,14 +222,17 @@ class TestWorkspaceReads:
             }
 
         monkeypatch.setattr(content_runway, "runway", runway)
+        # A worker level that is not the default, so what is pinned is the
+        # worker's level, the one the notice is told at, not the constant.
+        assert content_runway.LOW_RUNWAY_DAYS != 5
+        monkeypatch.setattr(v1, "WorkerConfig", lambda: WorkerConfig(low_runway_days=5))
         resp = client.get(f"/api/v1/workspaces/{WS}/runway")
         assert resp.status_code == 200
         assert resp.json() == {
-            "below_days": 7,
+            "below_days": 5,
             "accounts": [{"id": "a-1", "days_left": 4}],
         }
-        # The notice's own level, so the card marks the accounts it is about.
-        assert seen == {"ws": str(WS), "below_days": WorkerConfig().low_runway_days}
+        assert seen == {"ws": str(WS), "below_days": 5}
         assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
 
 

@@ -74,7 +74,7 @@ does.
 
 `plan_slot` mints at most one intent for its slot: the insert is
 `ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at) WHERE origin = 'cadence' DO NOTHING`
-(`scheduler.py:435`), so a duplicate job mints nothing. The predicate is the slot key's own:
+(`scheduler.py:436`), so a duplicate job mints nothing. The predicate is the slot key's own:
 `uq_intent_slot` is cadence-only (089), so a planned story (`origin = 'planned'`) never absorbs
 a slot. Keep the predicate: without it a bare `ON CONFLICT` finds no arbiter in the partial
 index and every cadence mint raises.
@@ -83,11 +83,11 @@ The draw is weighted over the CONNECTED FOLDERS that have eligible media —
 explicit ratios; automatic folders in proportion to their files, together never
 more than the smallest explicit weight; Off (ratio 0) never
 (`category_mix.py:121`). Within the drawn folder: never-posted files first in
-the row id's shuffled order, then least-recently-posted (`scheduler.py:374`).
+the row id's shuffled order, then least-recently-posted (`scheduler.py:375`).
 Eligible means `available`, not already live for this account, and not under a
 live `post_locks` row. There is no pool behind the weighted set: when nothing
 is eligible the slot lapses and the workspace is told at most once per 24 h
-(`_notice_no_media`, `:207`).
+(`_notice_no_media`, `:205`).
 
 The rule and the folders' weights are ONE per-account read, `category_mix.pool`
 (the rule is `category_mix.ELIGIBLE_SQL`), which the draw and the Overview's
@@ -102,7 +102,13 @@ the next drop is told only after the account climbs back to 8 days,
 (`content_runway.after_mint`; the latch is the account's `low_content_notice` /
 `low_content_rearmed` audit rows, read and written under the account's
 `runway:` advisory lock). The Overview marks an account low at the same
-`low_runway_days`: its read takes the level from `WorkerConfig`.
+`low_runway_days`: its read takes the level from `WorkerConfig`. That notice
+never decides the slot: it is written in a savepoint after the mint, and its
+verdict is not carried back on `SlotOutcome`, so a slot that minted finalizes
+`succeeded` even when the workspace has no push binding (the latch row records
+`told: 0`, and the warning is logged once per crossing) or the notice could not
+be written. Only the empty library's notice, where nothing was minted, parks a
+`plan_slot` job `review_required`.
 
 ## Jobs (`jobs.py`, `work_loop.py`)
 

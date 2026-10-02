@@ -88,6 +88,8 @@ V=src/api/routes/v1.py
 G=tests/scripts/test_customer_notice_gate.py
 U=tests/src/services/target/test_content_runway.py
 R=tests/src/api/test_v1_routes.py
+WL=tests/src/services/target/test_work_loop.py
+LIB=landing/src/lib/runway.ts
 CARD=landing/src/components/dashboard/runway-card.tsx
 PAGE='landing/src/app/(dashboard)/dashboard/page.tsx'
 
@@ -95,29 +97,37 @@ PAGE='landing/src/app/(dashboard)/dashboard/page.tsx'
 check "a file live for this account still counts" PYTEST $K '                     AND p.ig_account_id = :acct"' '                     AND p.ig_account_id = :acct AND false"' "$G -k 'count_is_the_planners_pool'"
 check "this account's own recent lock holds nothing" PYTEST $K '(l.ig_account_id IS NULL OR l.ig_account_id = :acct)' '(l.ig_account_id IS NULL)' "$G -k 'count_is_the_planners_pool'"
 check "an expired lock still holds its file" PYTEST $K '(l.expires_at IS NULL OR l.expires_at > now())' '(true)' "$G -k 'count_is_the_planners_pool'"
-check "an Off folder's files count" PYTEST $K '        return sum(self.counts.get(sid, 0) for sid, _ in self.drawable)' '        return sum(self.counts.values())' "$U -k 'TestThePool'"
-check "a folder with no mix of its own is not counted" PYTEST $K '            if row["ratio"] is None or row["ratio"] > 0' '            if row["ratio"] is not None and row["ratio"] > 0' "$U -k 'TestThePool'"
+check "a terminal intent still holds its file" PYTEST $K '    f"                    AND p.state NOT IN ({_TERMINAL_STATES_SQL}))"' '    "                    AND true)"' "$G -k 'terminal_intent_releases'"
+check "an Off folder's files count" PYTEST $K '        if row["ratio"] is None or row["ratio"] > 0' '        if row["ratio"] is None or row["ratio"] >= 0' "$G -k 'count_is_the_planners_pool'"
+check "a folder with no mix of its own is not counted" PYTEST $K '        if row["ratio"] is None or row["ratio"] > 0' '        if row["ratio"] is not None and row["ratio"] > 0' "$U -k 'TestThePool'"
 check "the mint is not taken off the count" PYTEST $K '        return self.eligible - 1' '        return self.eligible' "$G -k 'crosses_a_week'"
 # The cadence: the account's own posts per day, else the workspace's, for the card and the notice alike.
 check "the workspace's cadence comes first" PYTEST $C '_POSTS_PER_DAY_SQL = "COALESCE(a.posts_per_day, w.posts_per_day)"' '_POSTS_PER_DAY_SQL = "COALESCE(w.posts_per_day, a.posts_per_day)"' "$G -k 'crosses_a_week or count_is_the_planners_pool'"
 # Not posting: no days left, and never low.
 check "an account with no slot cursor is posting" PYTEST $C '    "(a.state = '"'"'active'"'"' AND a.next_slot_at IS NOT NULL"' '    "(a.state = '"'"'active'"'"'"' "$G -k 'does_not_post_for'"
 check "a paused workspace is posting" PYTEST $C '    " AND w.state = '"'"'active'"'"' AND NOT w.is_paused)"' '    " AND w.state = '"'"'active'"'"')"' "$G -k 'does_not_post_for'"
+check "an inactive account is posting" PYTEST $C '    "(a.state = '"'"'active'"'"' AND a.next_slot_at IS NOT NULL"' '    "(a.next_slot_at IS NOT NULL"' "$U -k 'TestThePostingPredicate'"
+check "another workspace's runway is read" PYTEST $C '        " WHERE a.workspace_id = :ws"' '        " WHERE true"' "$G -k 'another_workspaces'"
 check "an account not posting is given days left" PYTEST $C '        days = days_left(eligible, posts_per_day) if posting else None' '        days = days_left(eligible, posts_per_day)' "$G -k 'does_not_post_for'"
-check "an account not posting is marked low" PYTEST $C '                "low": days is not None and days < below_days,' '                "low": days is None or days < below_days,' "$G -k 'does_not_post_for'"
+check "an account not posting is marked low" PYTEST $C '    return days is not None and days < below_days' '    return days is None or days < below_days' "$G -k 'does_not_post_for'"
 # Once per crossing, re-armed a day above the warning level, through the empty library's path.
-check "exactly a week left is below it" PYTEST $C '    if days < below_days:' '    if days <= below_days:' "$G -k 'crosses_a_week'"
+check "exactly a week left is below it" PYTEST $C '    return days is not None and days < below_days' '    return days is not None and days <= below_days' "$U -k 'TestTheRunway'"
 check "every mint below the line is told" PYTEST $C '        return None if latched else NOTICE_EVENT' '        return NOTICE_EVENT' "$G -k 'crosses_a_week'"
 check "the notice writes no latch" PYTEST $C $'    detail.update(below_days=below_days, told=len(bindings))\n    await _latch(session, workspace_id, ig_account_id, detail)\n' $'    detail.update(below_days=below_days, told=len(bindings))\n' "$G -k 'crosses_a_week'"
 check "the latch never re-arms" PYTEST $C '    if latched and days >= below_days + REARM_MARGIN_DAYS:' '    if False:' "$G -k 'refills_rearms'"
 check "the latch re-arms at the warning level" PYTEST $C '    if latched and days >= below_days + REARM_MARGIN_DAYS:' '    if latched and days >= below_days:' "$G -k 'hovering_at_the_line'"
+check "the re-arm does not move with the level" PYTEST $C '    if latched and days >= below_days + REARM_MARGIN_DAYS:' '    if latched and days >= 8:' "$U -k 'margin_over_the_warning_level'"
 check "the latch reads its oldest row" PYTEST $C '        "         ORDER BY e.id DESC LIMIT 1) AS latch"' '        "         ORDER BY e.id LIMIT 1) AS latch"' "$G -k 'refills_rearms'"
-check "an undeliverable notice reads as delivered" PYTEST $C '        return outbox.UNDELIVERABLE' '        return 0' "$G -k 'undeliverable_once_per_crossing'"
-check "the latch is read without the account's lock" PYTEST $C '        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),' '        text("SELECT 1"),' "$U -k 'under_the_accounts_own_lock'"
+check "a notice that fails costs the mint" PYTEST $S '    except Exception:  # noqa: BLE001 — logged; the mint stands' '    except ZeroDivisionError:  # noqa: BLE001 — logged; the mint stands' "$WL -k 'never_costs_the_mint'"
+check "a minted slot reports an undeliverable notice" PYTEST $S '    return SlotOutcome(intent_id=str(row[0]))' '    return SlotOutcome(intent_id=str(row[0]), notice=outbox.UNDELIVERABLE)' "$WL -k 'nobody_receives'"
+check "the undeliverable attempt writes no latch" PYTEST $C $'    detail.update(below_days=below_days, told=len(bindings))\n    await _latch(session, workspace_id, ig_account_id, detail)\n' $'    detail.update(below_days=below_days, told=len(bindings))\n' "$G -k 'no_binding_still_mints_and_latches'"
+check "a second writer does not wait for the first" PYTEST $C '        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),' '        text("SELECT 1"),' "$G -k 'second_writer_waits'"
 # The Overview's figure: whole days, counted once on the server, at the notice's own level.
 check "a part-day is rounded up into a promise" PYTEST $C '    return eligible // posts_per_day' '    return round(eligible / posts_per_day)' "$U -k 'TestDaysLeft'"
+check "no content left reads as less than a day" PYTEST $C '    if not eligible:' '    if False:' "$U -k 'no_content_is_not'"
 check "the card marks low at a level of its own" PYTEST $V '            below_days=WorkerConfig().low_runway_days,' '            below_days=WorkerConfig().low_runway_days + 1,' "$R -k 'runway'"
-check "the low mark is on the wrong accounts" VITEST $CARD '                  {row.low && (' '                  {!row.low && (' "src/components/dashboard/runway-card.test.tsx"
+check "the low mark is on the wrong accounts" VITEST $CARD '                    {row.low && (' '                    {!row.low && (' "src/components/dashboard/runway-card.test.tsx"
+check "an empty library reads as less than a day" VITEST $LIB '      account.posting && account.eligible === 0' '      account.posting && account.eligible < 0' "src/lib/runway.test.ts"
 check "a failed runway read does not stop the page" VITEST $PAGE $'    !statsResult.ok ||\n    !runwayResult.ok ||\n' $'    !statsResult.ok ||\n' "'src/app/(dashboard)/dashboard/overview-conditions.test.tsx'"
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"

@@ -45,13 +45,20 @@ function* walk(node: ReactNode): Generator<ReactElement> {
 const ok = (data: unknown) => ({ ok: true, data });
 const DOWN = { ok: false, status: 503, error: "http_503" };
 
-type Read =
-  | "stats"
-  | "intents"
-  | "accounts"
-  | "sources"
-  | "category-mix"
-  | "runway";
+/**
+ * Every read the page makes, by the first segment of its path. `answer()`'s
+ * table must answer each (a `Record` over them) and the failed-read cases run
+ * over all of them, so a read listed here is both answered and failed.
+ */
+const READS = [
+  "stats",
+  "intents",
+  "accounts",
+  "sources",
+  "category-mix",
+  "runway",
+] as const;
+type Read = (typeof READS)[number];
 
 const STATS = {
   intents_by_state: { review_required: 2, scheduled: 3 },
@@ -65,7 +72,8 @@ const STATS = {
 };
 
 const RUNWAY = {
-  below_days: 7,
+  // Not the server's default, so a level hardcoded in the page cannot pass.
+  below_days: 5,
   accounts: [
     {
       id: "a1",
@@ -74,9 +82,9 @@ const RUNWAY = {
       state: "active",
       posting: true,
       posts_per_day: 3,
-      eligible: 20,
-      // Whole days of 20 files at 3 a day, counted down on the server.
-      days_left: 6,
+      eligible: 14,
+      // Whole days of 14 files at 3 a day, counted down on the server.
+      days_left: 4,
       low: true,
     },
   ],
@@ -104,7 +112,7 @@ function answer(overrides: Partial<Record<Read, unknown>> = {}) {
       ],
     }),
     sources: ok({ sources: [] }),
-    runway: ok({ below_days: 7, accounts: [] }),
+    runway: ok({ below_days: 5, accounts: [] }),
     ...overrides,
   };
   workspaceFetch.mockImplementation(async (path: string) => {
@@ -142,7 +150,7 @@ describe("the overview's condition panel", () => {
     expect(paths).toContain("sources");
   });
 
-  it.each<Read>(["accounts", "sources", "stats", "category-mix", "runway"])(
+  it.each(READS)(
     "a failed %s read is the unavailable state — never an all-clear",
     async (read) => {
       answer({ [read]: DOWN });
@@ -191,13 +199,13 @@ describe("the overview's runway card", () => {
       rows: RunwayRow[];
       belowDays: number;
     };
-    expect(belowDays).toBe(7);
+    expect(belowDays).toBe(5);
     expect(rows).toEqual([
       {
         key: "a1",
         name: "storyco",
-        headline: "About 6 days",
-        detail: "20 files at 3 a day",
+        headline: "About 4 days",
+        detail: "14 files at 3 a day",
         low: true,
       },
     ]);

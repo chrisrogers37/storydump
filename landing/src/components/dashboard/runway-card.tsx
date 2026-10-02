@@ -11,9 +11,12 @@ import type { RunwayRow } from "@/lib/runway";
  * posting from what its library holds now (`deriveRunway`).
  *
  * An account below the warning level is marked, and the sentence under the
- * list says what the workspace is told and when, so the mark is never the only
- * place the rule lives. The figure is a floor: a posted file comes back once
- * its repost window passes, which this does not count ahead of time.
+ * list says who is told and when, so the mark is never the only place the
+ * rule lives. It names this workspace's Telegram chats, where the notice goes,
+ * rather than the reader: a workspace with none bound is told nothing. The
+ * empty card has no list and so no sentence. The figure is a floor: a posted
+ * file comes back once its repost window passes, which this does not count
+ * ahead of time.
  */
 export function RunwayCard({
   rows,
@@ -39,30 +42,32 @@ export function RunwayCard({
             }}
           />
         ) : (
-          <ul className="divide-y">
-            {rows.map((row) => (
-              <li
-                key={row.key}
-                className="flex flex-wrap items-center justify-between gap-3 py-2 text-sm"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">{row.name}</span>
-                  {row.low && (
-                    <Badge variant="secondary" className={TONE_CLASS.attention}>
-                      Running low
-                    </Badge>
-                  )}
-                </div>
-                <span className="text-muted-foreground">
-                  {row.headline} · {row.detail}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="divide-y">
+              {rows.map((row) => (
+                <li
+                  key={row.key}
+                  className="flex flex-wrap items-center justify-between gap-3 py-2 text-sm"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate font-medium">{row.name}</span>
+                    {row.low && (
+                      <Badge variant="secondary" className={TONE_CLASS.attention}>
+                        Running low
+                      </Badge>
+                    )}
+                  </div>
+                  <span className="text-muted-foreground">
+                    {row.headline} · {row.detail}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-xs text-muted-foreground">
+              {`This workspace's Telegram chats are told once when an account drops below ${belowDays} days of content.`}
+            </p>
+          </>
         )}
-        <p className="mt-3 text-xs text-muted-foreground">
-          {`You are told once when an account drops below ${belowDays} days of content.`}
-        </p>
       </CardContent>
     </Card>
   );

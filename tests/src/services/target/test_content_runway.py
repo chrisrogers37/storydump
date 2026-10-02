@@ -157,13 +157,23 @@ class TestTheNoticeText:
 
     def test_one_day_and_less_than_a_day(self):
         assert "about 1 day of content" in self._text(4)
-        assert "less than a day of content" in self._text(2)
-        assert "(1 file at 3 a day)" in self._text(1)
+        assert "less than a day of content left (2 files at 3 a day)" in self._text(2)
+        assert "less than a day of content left (1 file at 3 a day)" in self._text(1)
+
+    def test_no_content_is_not_less_than_a_day(self):
+        """The mint that took the last file leaves nothing to count a part of a
+        day from: it says so, and still says what to do."""
+        text = self._text(0, label="@acme")
+        assert "@acme has no content left." in text
+        assert "less than a day" not in text and "0 files" not in text
+        assert "Drive source" in text
 
 
 class _Executor:
-    """A scripted executor: each statement is answered in turn from *answers*,
-    and recorded with its parameters."""
+    """A scripted executor: each statement is answered in turn from *answers*
+    (its rows, or a function of its parameters that returns them, to answer
+    from what the statement binds as the database would), and recorded with
+    its parameters."""
 
     def __init__(self, *answers):
         self.answers, self.sent = list(answers), []
@@ -171,6 +181,8 @@ class _Executor:
     async def execute(self, statement, params=None):
         self.sent.append((str(statement), params))
         rows = self.answers.pop(0) if self.answers else []
+        if callable(rows):
+            rows = rows(params)
 
         class _Result:
             def mappings(self_inner):
@@ -180,12 +192,38 @@ class _Executor:
 
 
 class TestThePool:
-    def test_eligible_counts_only_the_folders_the_draw_can_land_on(self):
-        drawn = Pool(
-            weights={"auto": 0.5, "explicit": 0.5, "off": 0.0, "empty": 0.0},
-            counts={"auto": 4, "explicit": 3, "off": 9, "empty": 0},
+    async def test_an_off_folder_with_files_is_not_counted(self):
+        """Nine files sit in the Off folder and none in the empty one. The
+        executor answers as the database does, for the folders the count
+        binds, so an Off folder's files are counted only if the pool binds
+        it: it does not, and the eligible files are the drawable folders'."""
+        library = {"auto": 4, "explicit": 3, "off": 9, "empty": 0}
+        folders = [
+            {"source_id": "auto", "ratio": None},
+            {"source_id": "explicit", "ratio": 0.5},
+            {"source_id": "off", "ratio": 0},
+            {"source_id": "empty", "ratio": 0.5},
+        ]
+
+        def counted(params):
+            return [
+                {"source_id": source_id, "n": library[source_id]}
+                for source_id in params["sources"]
+                if library[source_id]
+            ]
+
+        executor = _Executor(counted)
+        drawn = await category_mix.pool(
+            executor, workspace_id="ws-1", ig_account_id="a-1", folders=folders
         )
+        ((_, params),) = executor.sent
+        assert params == {
+            "ws": "ws-1",
+            "acct": "a-1",
+            "sources": ["auto", "explicit", "empty"],
+        }
         assert drawn.drawable == [("auto", 0.5), ("explicit", 0.5)]
+        assert drawn.counts == {"auto": 4, "explicit": 3, "empty": 0}
         assert drawn.eligible == 7
 
     def test_a_mint_leaves_one_file_fewer(self):
@@ -207,15 +245,15 @@ class TestThePool:
         )
         ((sql, params),) = executor.sent
         assert "AND m.source_id = ANY(CAST(:sources AS uuid[]))" in sql
-        assert params["sources"] == ["auto", "explicit"]
-        assert drawn.counts == {"auto": 4, "explicit": 0, "off": 0}
+        assert params == {"ws": "ws-1", "acct": "a-1", "sources": ["auto", "explicit"]}
+        assert drawn.counts == {"auto": 4, "explicit": 0}
 
         executor = _Executor([])
         await category_mix.pool(
             executor, workspace_id="ws-1", ig_account_id="a-1", folders=folders[2:]
         )
         ((_, params),) = executor.sent
-        assert params["sources"] == []
+        assert params == {"ws": "ws-1", "acct": "a-1", "sources": []}
 
 
 class TestTheRunway:
@@ -225,7 +263,7 @@ class TestTheRunway:
                 {
                     "id": "a-1",
                     "handle": "one",
-                    "display_name": None,
+                    "display_name": "One",
                     "state": "active",
                     "posts_per_day": 3,
                     "posting": True,
@@ -238,24 +276,55 @@ class TestTheRunway:
                     "posts_per_day": 2,
                     "posting": False,
                 },
+                {
+                    "id": "a-3",
+                    "handle": "three",
+                    "display_name": None,
+                    "state": "active",
+                    "posts_per_day": 3,
+                    "posting": True,
+                },
             ],
             [{"source_id": "s-1", "ratio": None}],
             [{"source_id": "s-1", "n": 20}],
             [{"source_id": "s-1", "n": 5}],
+            [{"source_id": "s-1", "n": 21}],
         )
         out = await content_runway.runway(executor, workspace_id="ws-1", below_days=7)
         statements = [sql for sql, _ in executor.sent]
-        assert len(statements) == 4, (
+        assert len(statements) == 5, (
             "the accounts, the folders once, then one count each"
         )
         assert sum("FROM media_sources" in sql for sql in statements) == 1
         assert workspaces.LISTED_ACCOUNT_SQL in statements[0]
         assert workspaces.LISTED_ACCOUNT_ORDER_SQL in statements[0]
-        assert [params["acct"] for _, params in executor.sent[2:]] == ["a-1", "a-2"]
+        assert [params for _, params in executor.sent] == [
+            {"ws": "ws-1"},
+            {"ws": "ws-1"},
+            {"ws": "ws-1", "acct": "a-1", "sources": ["s-1"]},
+            {"ws": "ws-1", "acct": "a-2", "sources": ["s-1"]},
+            {"ws": "ws-1", "acct": "a-3", "sources": ["s-1"]},
+        ]
         assert out["below_days"] == 7
+        # The whole wire shape, for one account: every key the card reads.
+        assert out["accounts"][0] == {
+            "id": "a-1",
+            "handle": "one",
+            "display_name": "One",
+            "state": "active",
+            "posting": True,
+            "posts_per_day": 3,
+            "eligible": 20,
+            "days_left": 6,
+            "low": True,
+        }
         assert [
             (a["id"], a["eligible"], a["days_left"], a["low"]) for a in out["accounts"]
-        ] == [("a-1", 20, 6, True), ("a-2", 5, None, False)]
+        ] == [
+            ("a-1", 20, 6, True),  # under a week: low
+            ("a-2", 5, None, False),  # not posted for: no days, never low
+            ("a-3", 21, 7, False),  # exactly a week is not under it
+        ]
 
 
 class TestThePostingPredicate:
@@ -431,7 +500,13 @@ class TestAfterMint:
         )
         assert "e.entity_kind = 'ig_account' AND e.entity_id = a.id" in sql
         assert "ORDER BY e.id DESC LIMIT 1" in sql
-        assert params["told"] == NOTICE_EVENT and params["rearmed"] == REARM_EVENT
+        assert "a.id = CAST(:acct AS uuid)" in sql
+        assert params == {
+            "acct": "acct-1",
+            "ws": "ws-1",
+            "told": NOTICE_EVENT,
+            "rearmed": REARM_EVENT,
+        }
 
     async def test_the_latch_is_read_under_the_accounts_own_lock(self, monkeypatch):
         """One decision per account at a time: the lock is its own statement,

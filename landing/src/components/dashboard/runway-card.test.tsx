@@ -32,12 +32,18 @@ function textOf(node: ReactNode): string {
   return textOf((node as ReactElement<{ children?: ReactNode }>).props?.children);
 }
 
+/**
+ * The warning level the rows were marked at. Not the server's default, so a
+ * level hardcoded in the card cannot pass for the one it was handed.
+ */
+const BELOW_DAYS = 5;
+
 const ROWS: RunwayRow[] = [
   {
     key: "a1",
     name: "storyco",
-    headline: "About 6 days",
-    detail: "20 files at 3 a day",
+    headline: "About 4 days",
+    detail: "14 files at 3 a day",
     low: true,
   },
   {
@@ -51,17 +57,17 @@ const ROWS: RunwayRow[] = [
 
 describe("RunwayCard", () => {
   it("gives every account its line, with the days and the arithmetic", () => {
-    const items = [...walk(RunwayCard({ rows: ROWS, belowDays: 7 }))].filter(
+    const items = [...walk(RunwayCard({ rows: ROWS, belowDays: BELOW_DAYS }))].filter(
       (el) => el.type === "li",
     );
     expect(items.map(textOf)).toEqual([
-      "storycoRunning lowAbout 6 days · 20 files at 3 a day",
+      "storycoRunning lowAbout 4 days · 14 files at 3 a day",
       "secondAbout 30 days · 90 files at 3 a day",
     ]);
   });
 
   it("marks only the accounts below the warning level", () => {
-    const items = [...walk(RunwayCard({ rows: ROWS, belowDays: 7 }))].filter(
+    const items = [...walk(RunwayCard({ rows: ROWS, belowDays: BELOW_DAYS }))].filter(
       (el) => el.type === "li",
     );
     const marked = items.map((item) =>
@@ -74,19 +80,26 @@ describe("RunwayCard", () => {
     expect(marked).toEqual([true, false]);
   });
 
-  it("says when the workspace is told, in the server's own number", () => {
-    const text = textOf(RunwayCard({ rows: ROWS, belowDays: 7 }));
-    expect(text).toContain("You are told once when an account drops below 7 days of content.");
+  it("says who is told and when, in the server's own number", () => {
+    const text = textOf(RunwayCard({ rows: ROWS, belowDays: BELOW_DAYS }));
+    expect(text).toContain(
+      "This workspace's Telegram chats are told once when an account drops below 5 days of content.",
+    );
   });
 
   it("says there is nothing to count rather than rendering an empty list", () => {
-    const tree = RunwayCard({ rows: [], belowDays: 7 });
+    const tree = RunwayCard({ rows: [], belowDays: BELOW_DAYS });
     expect([...walk(tree)].some((el) => el.type === EmptyState)).toBe(true);
     expect([...walk(tree)].some((el) => el.type === "ul" || el.type === "li")).toBe(false);
   });
 
+  it("promises no notice on a card with no account to be told about", () => {
+    const text = textOf(RunwayCard({ rows: [], belowDays: BELOW_DAYS }));
+    expect(text).not.toContain("told once");
+  });
+
   it("links an empty card to Accounts, where an account is connected", () => {
-    const empty = [...walk(RunwayCard({ rows: [], belowDays: 7 }))].find(
+    const empty = [...walk(RunwayCard({ rows: [], belowDays: BELOW_DAYS }))].find(
       (el) => el.type === EmptyState,
     );
     expect(empty?.props).toMatchObject({
