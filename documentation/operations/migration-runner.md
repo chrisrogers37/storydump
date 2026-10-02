@@ -27,7 +27,7 @@ at first contact. It lives in the dedicated `runner` schema — never `public`
 ride into `legacy` mid-run. It supersedes the legacy lineage's own version
 table — the one the 001–050 files stamp themselves into, with known gaps; a
 replay still stamps it and the runner never reads it
-(`scripts/migration_runner.py:758`). In production that table rode into
+(`scripts/migration_runner.py:800`). In production that table rode into
 `legacy` with the rest at the 051 move, is snapshotted as
 `archive.schema_version_pre_cutover_20260917` (078), and was dropped with
 `legacy` by 079 in the owner's window on 2026-09-19
@@ -94,6 +94,23 @@ with the new checksum).
   works exactly as it did by hand.
 - New files (051+) should own no `BEGIN`/`COMMIT` — the runner wraps them,
   and the ledger row commits atomically with the DDL.
+
+## Lock waits (#1515)
+
+A wrapped file's lock waits are bounded. The runner sets `lock_timeout` to `LOCK_TIMEOUT` (5 s)
+inside the file's own transaction (`set_config(..., true)`, gone at its commit). An `ALTER TABLE`
+that cannot take ACCESS EXCLUSIVE within the bound fails with SQLSTATE 55P03. Without the bound it
+would hold its place in the lock queue, and every later statement on the table, readers included,
+would wait behind it for as long as the holder ran.
+
+The runner tries that failure again, and no other, after 2 s and then 5 s
+(`LOCK_RETRY_DELAYS_S`). Each retry is announced on stderr, as
+`migration NNN (file): a lock was held past 5s; trying again in 2s`. A file that runs out of
+attempts fails the apply like any failure: no ledger row, no partial change, and the deploy aborts
+with the old version serving.
+
+A self-managed or no-transaction file runs without the bound, because its statements and its
+transactions are its own. A file sets no `lock_timeout` of its own; the tenancy gate refuses `SET`.
 
 ## Adoption — the 45-or-49 design
 

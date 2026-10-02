@@ -49,6 +49,13 @@ runner owns one transaction, ledger row inside it), ``self-managed`` (the file
 carries its own BEGIN/COMMIT, the legacy corpus shape, run with psql
 semantics), or ``no-transaction`` — visible in ``status`` output. New files
 (051+) should be ``wrapped``.
+
+A wrapped file's lock waits are bounded (``LOCK_TIMEOUT``, #1515): a file
+that cannot take a lock in time fails with SQLSTATE 55P03 rather than queue
+every later statement on the table behind it, and the runner tries that
+failure again, and no other, after each of ``LOCK_RETRY_DELAYS_S``. A
+self-managed or no-transaction file runs without the bound: its statements
+and their transactions are its own.
 """
 
 import argparse
@@ -75,6 +82,21 @@ RUNNER_LOCK_KEY = 712_050_2026
 #: The corpus, relative to this file — the home for the path the suites import
 #: (the legacy `src.utils.validators.MIGRATIONS_DIR` went with the legacy tier).
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+
+#: The longest a wrapped file waits for any one lock (#1515). A file that
+#: must wait for ACCESS EXCLUSIVE holds its place in the table's lock queue,
+#: and every later statement on the table, readers included, queues behind
+#: it for as long as the holder runs. Bounded, the file fails with SQLSTATE
+#: 55P03 instead. A failed apply aborts the deploy with the old version
+#: serving (078's header), so failing fast on a lock is safe. Set per file
+#: with ``set_config(..., true)``, so it dies with the file's transaction.
+LOCK_TIMEOUT = "5s"
+
+#: The pauses before each new attempt at a wrapped file that failed on its
+#: lock wait and nothing else (55P03), so a transient holder costs seconds,
+#: not a deploy. A file is one transaction, so every attempt starts clean;
+#: one that runs out of attempts fails like any other failure.
+LOCK_RETRY_DELAYS_S = (2.0, 5.0)
 
 NO_TRANSACTION_MARKER = "-- runner:no-transaction"
 POSTCONDITION_MARKER = "-- runner:postcondition"
@@ -525,6 +547,9 @@ def _apply_one(conn, migration) -> None:
         # One migration = one transaction, ledger row included: applied and
         # recorded are the same fact or neither happens.
         with _transaction(conn) as cur:
+            # The file's lock waits are bounded; `true` makes the setting
+            # local to this transaction (SET LOCAL), as the tap path's is.
+            cur.execute("SELECT set_config('lock_timeout', %s, true)", (LOCK_TIMEOUT,))
             cur.execute(migration.sql)
             _run_postconditions(cur, migration)
             _record(cur, migration, _elapsed_ms(started), "applied")
@@ -547,15 +572,32 @@ def _apply_one(conn, migration) -> None:
 
 def _apply_guarded(conn, migration) -> None:
     """`_apply_one`, with a database failure named by the file — the one
-    wrap both doors share."""
-    try:
-        _apply_one(conn, migration)
-    except MigrationRunnerError:
-        raise
-    except Exception as exc:
-        raise MigrationRunnerError(
-            f"migration {migration.label} failed: {exc}"
-        ) from exc
+    wrap both doors share. A wrapped file that failed on its lock wait and
+    nothing else (55P03, past `LOCK_TIMEOUT`) is tried again after each pause
+    in `LOCK_RETRY_DELAYS_S`, and says so on stderr each time."""
+    pauses = list(LOCK_RETRY_DELAYS_S) if migration.execution_mode == "wrapped" else []
+    while True:
+        try:
+            _apply_one(conn, migration)
+            return
+        except MigrationRunnerError:
+            raise
+        except psycopg2.errors.LockNotAvailable as exc:
+            if not pauses:
+                raise MigrationRunnerError(
+                    f"migration {migration.label} failed: {exc}"
+                ) from exc
+            pause = pauses.pop(0)
+            print(
+                f"migration {migration.label}: a lock was held past {LOCK_TIMEOUT};"
+                f" trying again in {pause:g}s",
+                file=sys.stderr,
+            )
+            time.sleep(pause)
+        except Exception as exc:
+            raise MigrationRunnerError(
+                f"migration {migration.label} failed: {exc}"
+            ) from exc
 
 
 def apply_pending(
