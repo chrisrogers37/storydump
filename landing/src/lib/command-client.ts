@@ -223,8 +223,12 @@ export const LOCK_CLAUSES: Record<string, string> = {
 /** `item_<state>`: the item itself is what is in the way. */
 const ITEM_GONE_CLAUSE = "it is no longer available";
 
-/** A refused planned time, by the rule it broke (`facts.at_rule`). */
-const AT_RULE_COPY: Record<string, string> = {
+/**
+ * A refused planned time, by the rule it broke (`facts.at_rule`), keyed by the
+ * vocabulary's `AT_RULE_SENTENCES` (`wire-contract.test.ts` holds the keys
+ * equal, so a rule the port adds cannot fall through to the sentence with none).
+ */
+export const AT_RULE_COPY: Record<string, string> = {
   past: "That time has already passed on the account's clock. Pick a later one.",
   skipped:
     "That time does not happen on the account's clock: a daylight-saving change skips it. Pick another.",

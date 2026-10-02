@@ -3,7 +3,7 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
 import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, RESOLUTIONS } from "./commands";
-import { LOCK_CLAUSES, NO_PUSH_BINDING, PLAN_HORIZON_DAYS } from "./command-client";
+import { AT_RULE_COPY, LOCK_CLAUSES, NO_PUSH_BINDING, PLAN_HORIZON_DAYS } from "./command-client";
 import { IN_THE_WAY_MAX } from "./refusal-facts";
 import {
   EXPIRY_DAYS_DEFAULT,
@@ -56,6 +56,17 @@ function tuple(name: string): string[] {
   return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
 }
 
+/**
+ * The keys of a module-level dict of strings, anchored at column 0. The body
+ * ends at the `}` that opens a line, since a value may be an f-string with
+ * braces of its own.
+ */
+function mappingKeys(name: string): string[] {
+  const m = source().match(new RegExp(`^${name}[^=]*=\\s*\\{([\\s\\S]*?)^\\}`, "m"));
+  if (!m) throw new Error(`no module-level ${name} mapping in ${VOCABULARY}`);
+  return [...m[1].matchAll(/^\s*"([^"]+)"\s*:/gm)].map((x) => x[1]);
+}
+
 describe("the wire spellings are the vocabulary's", () => {
   it("token roles", () => {
     expect([...TOKEN_ROLES]).toEqual(tuple("TOKEN_ROLES"));
@@ -89,6 +100,11 @@ describe("the wire spellings are the vocabulary's", () => {
     expect(Object.keys(LOCK_CLAUSES).sort()).toEqual(
       [...tuple("BLOCKING_LOCKS"), ...tuple("WARNING_LOCKS")].sort(),
     );
+  });
+  it("the rules a refused time can name, each with its sentence", () => {
+    // A rule the port adds without one here would read as the sentence with
+    // no rule, which names none of them.
+    expect(Object.keys(AT_RULE_COPY).sort()).toEqual(mappingKeys("AT_RULE_SENTENCES").sort());
   });
   it("room under the in_the_way cap for the longest list the port can name", () => {
     // `schedule_item` names at most the item's own state, then each lock kind

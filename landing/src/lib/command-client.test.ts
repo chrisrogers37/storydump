@@ -36,7 +36,6 @@ import {
   submitScheduleItem,
   scheduleRefusalCopy,
   scheduleOverrideCopy,
-  PLAN_HORIZON_DAYS,
 } from "./command-client";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -469,8 +468,16 @@ describe("scheduleRefusalCopy", () => {
   it("says which rule a refused time broke", () => {
     expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "past" })).toMatch(/passed/i);
     expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "skipped" })).toMatch(/daylight/i);
+    // The sentence with no rule names the horizon too ("within 365 days"), so
+    // only "more than" tells the horizon's own sentence from it.
     expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "horizon" })).toMatch(
-      new RegExp(`${PLAN_HORIZON_DAYS} days`),
+      /more than 365 days/,
+    );
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "shape" })).toMatch(
+      /date and a time/,
+    );
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "not_a_date" })).toMatch(
+      /date and a time/,
     );
   });
 
