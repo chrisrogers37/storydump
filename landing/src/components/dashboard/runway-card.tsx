@@ -1,6 +1,8 @@
 import { Hourglass } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import { TONE_CLASS } from "@/components/dashboard/tone";
 import { RESOLVED_IN } from "@/lib/conditions";
 import type { RunwayRow } from "@/lib/runway";
 
@@ -43,14 +45,16 @@ export function RunwayCard({
                 key={row.key}
                 className="flex flex-wrap items-center justify-between gap-3 py-2 text-sm"
               >
-                <span className="font-medium">{row.name}</span>
-                <span
-                  className={
-                    row.low ? "font-medium text-amber-700" : "text-muted-foreground"
-                  }
-                >
-                  {row.headline}
-                  {row.low ? " — running low" : ""} · {row.detail}
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{row.name}</span>
+                  {row.low && (
+                    <Badge variant="secondary" className={TONE_CLASS.attention}>
+                      Running low
+                    </Badge>
+                  )}
+                </div>
+                <span className="text-muted-foreground">
+                  {row.headline} · {row.detail}
                 </span>
               </li>
             ))}

@@ -82,7 +82,6 @@ from sqlalchemy import text
 from src.services.target import (
     category_mix,
     content_runway,
-    intent_ledger,
     outbox,
     prompts,
 )
@@ -302,36 +301,32 @@ async def execute_plan_slot(
     approval_mode: str,
     no_media_notice_after_seconds: int,
     low_runway_days: int,
-    rearm_runway_days: int,
     rng: Optional[random.Random] = None,
 ) -> "SlotOutcome":
     """The `plan_slot` executor: mint the intent for one slot, or nothing.
 
-    Returns a :class:`SlotOutcome`. Its `intent_id` is None when the slot
-    already had one or no media was available — both ordinary outcomes, not
-    failures — and its `notice` reports whether an empty library went
-    unreported for want of a delivery surface.
+    Returns a :class:`SlotOutcome`; its docstring says what `intent_id` and
+    `notice` each report. A None `intent_id` — the slot already had one, or
+    no media was available — is an ordinary outcome, not a failure.
 
     **The two Nones are not the same fact, and only one of them speaks.** A
     slot that already had an intent is the idempotency guard doing its job and
     the customer has nothing to learn from it; a slot that found no media is
     `06` §5's "slot missed" row, which the customer is owed a notice about
-    ("you are told once — not silently nothing", #1090 D3). The return value
-    stays `Optional[str]` because no caller needs to tell them apart — the
-    notice is emitted here, where the empty case already lives — and its
-    fate rides back on `SlotOutcome.notice`, because the caller finalizes the
-    job and a notice nobody received must not finalize as a success.
+    ("you are told once — not silently nothing", #1090 D3). That notice is
+    emitted here, where the empty case already lives.
 
     *no_media_notice_after_seconds* is `05`'s dedup window (24 h) and is
     **required, not defaulted**: a dedup window that can be silently omitted is
     how a once-a-day notice becomes either a flood or a silence, and there is
     exactly one production caller to pass it.
 
-    *low_runway_days* and *rearm_runway_days* are the runway notice's two levels
-    (#1478, `content_runway.after_mint`): a mint that leaves the account with
-    fewer days of eligible content than the first tells the workspace once,
-    and the next drop is told only after the account has climbed back to the
-    second. Required for the same reason as the dedup window.
+    *low_runway_days* is the runway notice's level (#1478,
+    `content_runway.after_mint`): a mint that leaves the account with fewer
+    days of eligible content than this tells the workspace once, and the next
+    drop is told only after the account has climbed back
+    `content_runway.REARM_MARGIN_DAYS` above it. Required for the same reason
+    as the dedup window.
 
     **Idempotent by key 1, not by checking first.** The insert carries
     ``ON CONFLICT … DO NOTHING`` against `uq_intent_slot`, so a duplicate
@@ -415,12 +410,7 @@ async def execute_plan_slot(
                     + "   AND m.source_id = CAST(:source_id AS uuid)"
                     + order
                 ),
-                {
-                    "ws": workspace_id,
-                    "acct": ig_account_id,
-                    "source_id": chosen,
-                    "terminal": list(intent_ledger.TERMINAL_STATES),
-                },
+                {"ws": workspace_id, "acct": ig_account_id, "source_id": chosen},
             )
         ).first()
     if media is None:
@@ -456,16 +446,14 @@ async def execute_plan_slot(
     ).first()
     if row is None:
         return SlotOutcome()
-    # The minted file has just left the pool (it is live for this account now)
-    # and nothing else in this transaction moved it: one fewer than was drawn
-    # from is exactly what is left (#1478).
+    # Nothing in this transaction moved the pool between its read and the
+    # mint, so what is left is the pool less the minted file (#1478).
     said = await content_runway.after_mint(
         session,
         workspace_id=workspace_id,
         ig_account_id=ig_account_id,
-        eligible=drawn.eligible - 1,
+        eligible=drawn.eligible_after_a_mint,
         below_days=low_runway_days,
-        rearm_days=rearm_runway_days,
     )
     return SlotOutcome(
         intent_id=str(row[0]),

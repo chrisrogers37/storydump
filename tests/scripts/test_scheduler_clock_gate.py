@@ -641,7 +641,6 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                     approval_mode="manual",
                     no_media_notice_after_seconds=24 * 3600,
                     low_runway_days=content_runway.LOW_RUNWAY_DAYS,
-                    rearm_runway_days=content_runway.REARM_RUNWAY_DAYS,
                 )
                 await conn.commit()
             assert first.intent_id is not None, "positive control: the first run minted"
@@ -657,7 +656,6 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                     approval_mode="manual",
                     no_media_notice_after_seconds=24 * 3600,
                     low_runway_days=content_runway.LOW_RUNWAY_DAYS,
-                    rearm_runway_days=content_runway.REARM_RUNWAY_DAYS,
                 )
                 await conn.commit()
         finally:
@@ -1213,7 +1211,6 @@ async def _plan_slot(clock_db, account, seed, *, slot_at=None):
                 approval_mode="manual",
                 no_media_notice_after_seconds=24 * 3600,
                 low_runway_days=content_runway.LOW_RUNWAY_DAYS,
-                rearm_runway_days=content_runway.REARM_RUNWAY_DAYS,
                 rng=random.Random(seed),
             )
             await conn.commit()

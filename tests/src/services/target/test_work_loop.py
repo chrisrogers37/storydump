@@ -941,7 +941,6 @@ class TestWeightedCategorySelection:
             approval_mode="manual",
             no_media_notice_after_seconds=86400,
             low_runway_days=content_runway.LOW_RUNWAY_DAYS,
-            rearm_runway_days=content_runway.REARM_RUNWAY_DAYS,
             rng=random.Random(rng),
         )
 

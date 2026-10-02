@@ -19,21 +19,21 @@ lock. Drawable means a connected folder that is not in `error` and not Off
 
 Days left is the eligible files over the account's posts per day — its
 override, else the workspace's (`fn_next_slot`'s cadence) — in whole days,
-rounded down: :func:`days_left`, the one computation the Overview shows and the
-notice names. It is a floor, not a forecast: a posted file's `recent` lock
-expires after `repost_ttl_days` and puts the file back, which this does not
-count ahead of time. It is None for an account the clock does not post for (the
-account or its workspace inactive, or the workspace paused), because a runway
-that is not being spent has no end.
+rounded down: :func:`days_left`, the one computation the Overview shows, the
+notice names and the latch compares. It is a floor, not a forecast: a posted
+file's `recent` lock expires after `repost_ttl_days` and puts the file back,
+which this does not count ahead of time. It is None for an account the clock
+does not post for (the account or its workspace inactive, or the workspace
+paused), because a runway that is not being spent has no end.
 
 ## Once per crossing
 
 `execute_plan_slot` asks :func:`after_mint` what a mint owes the workspace.
 Below :data:`LOW_RUNWAY_DAYS` it is told once; the next notice waits until the
-account has climbed back to :data:`REARM_RUNWAY_DAYS`. The gap is deliberate:
-files whose `recent` lock expires come back one at a time while the account
-keeps posting, so an account near the line would otherwise cross it every few
-slots and be told each time.
+account has climbed back :data:`REARM_MARGIN_DAYS` above that level. The gap is
+deliberate: files whose `recent` lock expires come back one at a time while
+the account keeps posting, so an account near the line would otherwise cross
+it every few slots and be told each time.
 
 The latch is the audit trail, not a column (the issue asked for no DDL): the
 notice writes a `low_content_notice` row on the account, a re-arm a
@@ -67,20 +67,36 @@ logger = logging.getLogger(__name__)
 #: cycle. It is also the level the legacy pool-health check warned at (#152).
 LOW_RUNWAY_DAYS = 7
 
-#: The level an account must climb back to before a later drop is told again:
-#: one day's posts above :data:`LOW_RUNWAY_DAYS`, so a single file coming back
-#: off its `recent` lock cannot re-arm the notice.
-REARM_RUNWAY_DAYS = LOW_RUNWAY_DAYS + 1
+#: How far above the warning level an account must climb before a later drop
+#: is told again: one day's posts, so a single file coming back off its
+#: `recent` lock cannot re-arm the notice. A margin over the level rather than
+#: a level of its own, so the re-arm moves with the warning level and can never
+#: sit at or below it.
+REARM_MARGIN_DAYS = 1
 
 #: The two audit events the latch is made of (`entity_kind = 'ig_account'`).
 NOTICE_EVENT = "low_content_notice"
 REARM_EVENT = "low_content_rearmed"
 
+#: Whether the clock posts for an account: fn_clock_tick's own `plan_slot`
+#: predicate (084, leg 2) less its due-now conjunct, read here because nothing
+#: serves it per account. `test_content_runway.py` pins it to the migration.
+_POSTING_SQL = (
+    "(a.state = 'active' AND a.next_slot_at IS NOT NULL"
+    " AND w.state = 'active' AND NOT w.is_paused)"
+)
+
+#: The posts per day an account is spent at: its own, else its workspace's —
+#: the cadence the same leg advances the account's slot cursor by (its
+#: `eff_ppd`). `test_content_runway.py` pins it to the migration too.
+_POSTS_PER_DAY_SQL = "COALESCE(a.posts_per_day, w.posts_per_day)"
+
 
 def days_left(eligible: int, posts_per_day: Optional[int]) -> Optional[int]:
     """Whole days of eligible content at *posts_per_day*, rounded down, so a
     part of a day is never counted as one. The one place the figure is
-    computed: the Overview shows it and the notice names it.
+    computed: the Overview shows it, the notice names it and the latch
+    compares it (:func:`latch_action`).
 
     None with no posts per day to divide by. The database's CHECKs hold every
     cadence between 1 and 50, so the guard only keeps a division by zero out:
@@ -91,49 +107,39 @@ def days_left(eligible: int, posts_per_day: Optional[int]) -> Optional[int]:
     return eligible // posts_per_day
 
 
-def is_below(eligible: int, posts_per_day: Optional[int], days: int) -> bool:
-    """Fewer than *days* of content. Counted in files (`days * posts_per_day`)
-    so the comparison is exact. Never true with no posts per day, the case
-    the database's CHECKs rule out (:func:`days_left`)."""
-    if not posts_per_day or posts_per_day <= 0:
-        return False
-    return eligible < days * posts_per_day
-
-
 def latch_action(
     *,
-    eligible: int,
-    posts_per_day: Optional[int],
+    days: Optional[int],
     latched: bool,
     below_days: int,
-    rearm_days: int,
 ) -> Optional[str]:
-    """What one mint owes the latch: tell (`NOTICE_EVENT`), re-arm
-    (`REARM_EVENT`), or nothing (None).
+    """What one mint owes the latch at *days* of content left
+    (:func:`days_left`): tell (`NOTICE_EVENT`), re-arm (`REARM_EVENT`), or
+    nothing (None).
 
-    Told once on the way down; re-armed only at *rearm_days* or more, so the
-    band between the two levels changes nothing in either direction. Nothing
-    with no posts per day, the case the database's CHECKs rule out
-    (:func:`days_left`)."""
-    if not posts_per_day or posts_per_day <= 0:
+    Told once on the way down, below *below_days*; re-armed only at
+    :data:`REARM_MARGIN_DAYS` above it or more, so the band between the two
+    changes nothing in either direction. The days are whole, so fewer than
+    *below_days* of them is exactly fewer files than *below_days* days of
+    posts. Nothing with no days, the case the database's CHECKs rule out."""
+    if days is None:
         return None
-    if is_below(eligible, posts_per_day, below_days):
+    if days < below_days:
         return None if latched else NOTICE_EVENT
-    if latched and not is_below(eligible, posts_per_day, rearm_days):
+    if latched and days >= below_days + REARM_MARGIN_DAYS:
         return REARM_EVENT
     return None
 
 
-def notice_text(*, label: str, eligible: int, posts_per_day: int) -> str:
-    """The notice, naming the account, the days the Overview shows
-    (:func:`days_left`) and the arithmetic behind them."""
-    whole = days_left(eligible, posts_per_day)
-    if not whole:
+def notice_text(*, label: str, days: int, eligible: int, posts_per_day: int) -> str:
+    """The notice, naming the account, its *days* left — the figure the
+    Overview shows (:func:`days_left`) — and the arithmetic behind them."""
+    if not days:
         span = "less than a day"
-    elif whole == 1:
+    elif days == 1:
         span = "about 1 day"
     else:
-        span = f"about {whole} days"
+        span = f"about {days} days"
     files = "1 file" if eligible == 1 else f"{eligible} files"
     return (
         f"⏳ {label} has {span} of content left ({files} at"
@@ -149,7 +155,6 @@ async def after_mint(
     ig_account_id: str,
     eligible: int,
     below_days: int,
-    rearm_days: int,
 ) -> Union[int, str, None]:
     """Settle the runway latch after a mint left *eligible* files.
 
@@ -180,14 +185,14 @@ async def after_mint(
     account = await readers.row(
         session,
         "SELECT a.handle,"
-        "       COALESCE(a.posts_per_day, w.posts_per_day) AS posts_per_day,"
+        f"      {_POSTS_PER_DAY_SQL} AS posts_per_day,"
         "       (SELECT e.detail->>'event' FROM audit_events e"
         "         WHERE e.workspace_id = a.workspace_id"
         "           AND e.entity_kind = 'ig_account' AND e.entity_id = a.id"
         "           AND e.detail->>'event' IN (:told, :rearmed)"
         "         ORDER BY e.id DESC LIMIT 1) AS latch"
         "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
-        " WHERE a.id = CAST(:acct AS uuid) AND a.workspace_id = :ws AND w.id = :ws",
+        " WHERE a.id = CAST(:acct AS uuid) AND a.workspace_id = :ws",
         acct=str(ig_account_id),
         ws=str(workspace_id),
         told=NOTICE_EVENT,
@@ -202,12 +207,11 @@ async def after_mint(
         )
         return None
     posts_per_day = account["posts_per_day"]
+    days = days_left(eligible, posts_per_day)
     action = latch_action(
-        eligible=eligible,
-        posts_per_day=posts_per_day,
+        days=days,
         latched=account["latch"] == NOTICE_EVENT,
         below_days=below_days,
-        rearm_days=rearm_days,
     )
     if action is None:
         return None
@@ -219,7 +223,7 @@ async def after_mint(
         "posts_per_day": posts_per_day,
     }
     if action == REARM_EVENT:
-        detail["rearm_days"] = rearm_days
+        detail["rearm_days"] = below_days + REARM_MARGIN_DAYS
         await _latch(session, workspace_id, ig_account_id, detail)
         logger.info(
             "plan_slot: account %s is back to %d file(s) — runway notice re-armed",
@@ -246,6 +250,7 @@ async def after_mint(
         bindings=bindings,
         text=notice_text(
             label=prompts.account_label(account["handle"]),
+            days=days,
             eligible=eligible,
             posts_per_day=posts_per_day,
         ),
@@ -275,15 +280,6 @@ async def _latch(session, workspace_id: str, ig_account_id: str, detail: dict):
     )
 
 
-#: Whether the clock posts for an account: fn_clock_tick's own `plan_slot`
-#: predicate (084, leg 2) less its due-now conjunct, read here because nothing
-#: serves it per account. `test_content_runway.py` pins it to the migration.
-_POSTING_SQL = (
-    "(a.state = 'active' AND a.next_slot_at IS NOT NULL"
-    " AND w.state = 'active' AND NOT w.is_paused)"
-)
-
-
 async def runway(executor, *, workspace_id: str, below_days: int) -> dict:
     """The Overview's read: per account, the eligible files, the posts per day
     they are spent at, and the whole days left (#1478).
@@ -296,10 +292,10 @@ async def runway(executor, *, workspace_id: str, below_days: int) -> dict:
     accounts = await readers.rows(
         executor,
         "SELECT a.id, a.handle, a.display_name, a.state,"
-        "       COALESCE(a.posts_per_day, w.posts_per_day) AS posts_per_day,"
+        f"      {_POSTS_PER_DAY_SQL} AS posts_per_day,"
         f"      {_POSTING_SQL} AS posting"
         "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
-        " WHERE a.workspace_id = :ws AND w.id = :ws"
+        " WHERE a.workspace_id = :ws"
         f"   AND {workspaces.LISTED_ACCOUNT_SQL}"
         f" {workspaces.LISTED_ACCOUNT_ORDER_SQL}",
         ws=str(workspace_id),
@@ -316,6 +312,7 @@ async def runway(executor, *, workspace_id: str, below_days: int) -> dict:
         posting = bool(account["posting"])
         posts_per_day = int(account["posts_per_day"])
         eligible = drawn.eligible
+        days = days_left(eligible, posts_per_day) if posting else None
         out.append(
             {
                 "id": str(account["id"]),
@@ -325,8 +322,8 @@ async def runway(executor, *, workspace_id: str, below_days: int) -> dict:
                 "posting": posting,
                 "posts_per_day": posts_per_day,
                 "eligible": eligible,
-                "days_left": days_left(eligible, posts_per_day) if posting else None,
-                "low": posting and is_below(eligible, posts_per_day, below_days),
+                "days_left": days,
+                "low": days is not None and days < below_days,
             }
         )
     return {"below_days": below_days, "accounts": out}

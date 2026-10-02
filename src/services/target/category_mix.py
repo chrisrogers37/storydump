@@ -52,6 +52,15 @@ MAX_SOURCES = 500
 #: here aliases `media_sources` as `s`, as `CONNECTED_SQL` expects.
 _LABEL = "COALESCE(s.config->>'folder_name', s.config->>'folder_ref', 'folder')"
 
+#: A source's CURRENT mix row, `x`, joined after ``FROM media_sources s``: the
+#: row keyed on that source, in the source's own workspace, still in effect.
+#: :func:`pool_folders` and :func:`mix_view` both read the mix through it.
+_CURRENT_MIX_JOIN = (
+    "  LEFT JOIN category_post_case_mix x"
+    "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
+    "   AND x.effective_to IS NULL"
+)
+
 
 class MixInvalid(RefusalError):
     """The mix cannot be stored as sent. `reason` is one of: not_a_list ·
@@ -151,18 +160,25 @@ def weights(rows: list[dict]) -> dict[str, float]:
     return out
 
 
+#: `02` §4's terminal intent states as a SQL list, spelled from their one home,
+#: `intent_ledger.TERMINAL_STATES`: an intent in one of them holds no file.
+_TERMINAL_STATES_SQL = ", ".join(
+    f"'{state}'" for state in intent_ledger.TERMINAL_STATES
+)
+
 #: `06` §3's rule in full, spliced after ``FROM media_items m``: available, not
-#: already live for this account, minus the workspace-wide locks
-#: (skip/reject/hold/seasonal/unsupported) and minus THIS account's own
-#: `recent` locks — a live lock is one with no expiry or an expiry still ahead.
-#: The planner picks with it and the runway counts with it.
+#: already live for this account (an intent of its own not yet terminal), minus
+#: the workspace-wide locks (skip/reject/hold/seasonal/unsupported) and minus
+#: THIS account's own `recent` locks — a live lock is one with no expiry or an
+#: expiry still ahead. It binds `:ws` and `:acct`, nothing else. The planner
+#: picks with it and the runway counts with it.
 ELIGIBLE_SQL = (
     " WHERE m.workspace_id = :ws AND m.state = 'available'"
     "   AND NOT EXISTS (SELECT 1 FROM post_intents p"
     "                   WHERE p.workspace_id = m.workspace_id"
     "                     AND p.media_item_id = m.id"
     "                     AND p.ig_account_id = :acct"
-    "                     AND p.state <> ALL(CAST(:terminal AS text[])))"
+    f"                    AND p.state NOT IN ({_TERMINAL_STATES_SQL}))"
     "   AND NOT EXISTS (SELECT 1 FROM post_locks l"
     "                   WHERE l.workspace_id = m.workspace_id"
     "                     AND l.media_item_id = m.id"
@@ -177,7 +193,8 @@ class Pool:
 
     #: :func:`weights` over the connected folders, in the order read.
     weights: dict[str, float]
-    #: Eligible files per connected folder.
+    #: Eligible files per connected folder; 0 for an Off one, which can never
+    #: be drawn and so is not counted (:func:`pool`).
     counts: dict[str, int]
 
     @property
@@ -191,6 +208,14 @@ class Pool:
         """Every file the planner could pick for this account now."""
         return sum(self.counts.get(sid, 0) for sid, _ in self.drawable)
 
+    @property
+    def eligible_after_a_mint(self) -> int:
+        """What a mint drawn from this pool leaves: one file fewer. A minted
+        file is live for the account, so :data:`ELIGIBLE_SQL` leaves it out;
+        the rest of the pool is as read, so long as nothing else in the
+        mint's transaction moved it."""
+        return self.eligible - 1
+
 
 async def pool_folders(executor, *, workspace_id: str) -> list[dict]:
     """The folders a draw can land on, with their current ratios — `source_id`,
@@ -203,10 +228,8 @@ async def pool_folders(executor, *, workspace_id: str) -> list[dict]:
         executor,
         "SELECT s.id AS source_id, x.ratio"
         "  FROM media_sources s"
-        "  LEFT JOIN category_post_case_mix x"
-        "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
-        "   AND x.effective_to IS NULL"
-        " WHERE s.workspace_id = :ws AND s.state <> 'error'"
+        + _CURRENT_MIX_JOIN
+        + " WHERE s.workspace_id = :ws AND s.state <> 'error'"
         "   AND " + CONNECTED_SQL,
         ws=workspace_id,
     )
@@ -226,27 +249,30 @@ async def pool(
     it, so the files drawn from and the days left cannot disagree."""
     if folders is None:
         folders = await pool_folders(executor, workspace_id=workspace_id)
+    # Counted in the folders that can be drawn only: an Off folder (ratio 0)
+    # weighs 0 whatever it holds. With none of them the count still runs,
+    # bound to no folder, so the read is the same statement every time.
     counts = await readers.rows(
         executor,
         "SELECT m.source_id, count(*) AS n FROM media_items m"
         + ELIGIBLE_SQL
+        + "   AND m.source_id = ANY(CAST(:sources AS uuid[]))"
         + " GROUP BY m.source_id",
         ws=workspace_id,
         acct=ig_account_id,
-        terminal=list(intent_ledger.TERMINAL_STATES),
+        sources=[
+            str(row["source_id"])
+            for row in folders
+            if row["ratio"] is None or row["ratio"] > 0
+        ],
     )
     have = {str(row["source_id"]): int(row["n"]) for row in counts}
-    shaped = [
-        {
-            "source_id": str(row["source_id"]),
-            "ratio": None if row["ratio"] is None else float(row["ratio"]),
-            "n": have.get(str(row["source_id"]), 0),
-        }
-        for row in folders
-    ]
+    # The folder rows as read, each with its count: :func:`weights` reads the
+    # source id and the ratio itself.
+    shaped = [{**row, "n": have.get(str(row["source_id"]), 0)} for row in folders]
     return Pool(
         weights=weights(shaped),
-        counts={row["source_id"]: row["n"] for row in shaped},
+        counts={str(row["source_id"]): row["n"] for row in shaped},
     )
 
 
@@ -329,10 +355,8 @@ async def mix_view(executor, *, workspace_id: str) -> list[dict]:
         "           AND m.state = 'available') AS media_count,"
         "       x.ratio"
         "  FROM media_sources s"
-        "  LEFT JOIN category_post_case_mix x"
-        "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
-        "   AND x.effective_to IS NULL"
-        " WHERE s.workspace_id = :ws AND "
+        + _CURRENT_MIX_JOIN
+        + " WHERE s.workspace_id = :ws AND "
         + CONNECTED_SQL
         + " ORDER BY s.created_at, s.id",
         ws=str(workspace_id),

@@ -114,10 +114,9 @@ class WorkerConfig:
     stranded_alert_limit: int = 200  # rows re-alerted per beat
     # 05: "no media available" notice dedup 24 h (06 section 5, slot missed).
     no_media_notice_after_seconds: int = 24 * 3600
-    # The runway notice's two levels, in days of eligible content (#1478): told
-    # once below the first, re-armed at the second (`content_runway`).
+    # The runway notice's level, in days of eligible content (#1478): told once
+    # below it, re-armed a margin above it (`content_runway.REARM_MARGIN_DAYS`).
     low_runway_days: int = content_runway.LOW_RUNWAY_DAYS
-    rearm_runway_days: int = content_runway.REARM_RUNWAY_DAYS
     # The front end's origin (`settings.web_app_origin`), for the deep link in
     # the parked-intent notice (06 section 5). None = the notice still fires,
     # without a link: being told late beats not being told.
@@ -297,7 +296,6 @@ def build_registry(deps: WorkerDeps) -> dict:
             approval_mode=row["approval_mode"],
             no_media_notice_after_seconds=cfg.no_media_notice_after_seconds,
             low_runway_days=cfg.low_runway_days,
-            rearm_runway_days=cfg.rearm_runway_days,
         )
         if outcome.intent_id is not None:
             # The fast path of the `02` §4 prompt edge: mint and prompt on

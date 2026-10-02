@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 import type { ReactElement, ReactNode } from "react";
 import { RunwayCard } from "./runway-card";
 import { EmptyState } from "./empty-state";
+import { TONE_CLASS } from "./tone";
+import { Badge } from "@/components/ui/badge";
 import { RESOLVED_IN } from "@/lib/conditions";
 import type { RunwayRow } from "@/lib/runway";
 
@@ -53,7 +55,7 @@ describe("RunwayCard", () => {
       (el) => el.type === "li",
     );
     expect(items.map(textOf)).toEqual([
-      "storycoAbout 6 days — running low · 20 files at 3 a day",
+      "storycoRunning lowAbout 6 days · 20 files at 3 a day",
       "secondAbout 30 days · 90 files at 3 a day",
     ]);
   });
@@ -63,8 +65,10 @@ describe("RunwayCard", () => {
       (el) => el.type === "li",
     );
     const marked = items.map((item) =>
-      [...walk(item)].some((el) =>
-        String((el.props as { className?: string }).className ?? "").includes("amber"),
+      [...walk(item)].some(
+        (el) =>
+          el.type === Badge &&
+          (el.props as { className?: string }).className === TONE_CLASS.attention,
       ),
     );
     expect(marked).toEqual([true, false]);

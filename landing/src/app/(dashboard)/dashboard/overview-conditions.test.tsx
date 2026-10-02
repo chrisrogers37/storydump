@@ -4,6 +4,10 @@
  * `ConditionsPanel`). The page, an async server component, is called directly
  * with its two doors mocked — the session guard and the target fetch — and the
  * returned element tree is read without rendering it (`environment: "node"`).
+ *
+ * Every test of the overview page uses this one harness: `answer()` is the
+ * single table of the reads the page makes, so a read the page adds is answered
+ * in one place rather than in copies that drift apart.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,9 +24,11 @@ import DashboardPage from "./page";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
 import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
+import { RunwayCard } from "@/components/dashboard/runway-card";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import type { Condition } from "@/lib/conditions";
 import type { FolderMix } from "@/lib/dashboard-payloads";
+import type { RunwayRow } from "@/lib/runway";
 
 /** Depth-first walk of a returned tree, children flattened. */
 function* walk(node: ReactNode): Generator<ReactElement> {
@@ -56,6 +62,24 @@ const STATS = {
   posts_by_day: [],
   accounts: 1,
   sources: 1,
+};
+
+const RUNWAY = {
+  below_days: 7,
+  accounts: [
+    {
+      id: "a1",
+      handle: "storyco",
+      display_name: null,
+      state: "active",
+      posting: true,
+      posts_per_day: 3,
+      eligible: 20,
+      // Whole days of 20 files at 3 a day, counted down on the server.
+      days_left: 6,
+      low: true,
+    },
+  ],
 };
 
 /** Answer each read by the first segment of its path; `overrides` replaces one. */
@@ -118,13 +142,14 @@ describe("the overview's condition panel", () => {
     expect(paths).toContain("sources");
   });
 
-  it.each<Read>(["accounts", "sources", "stats", "category-mix"])(
+  it.each<Read>(["accounts", "sources", "stats", "category-mix", "runway"])(
     "a failed %s read is the unavailable state — never an all-clear",
     async (read) => {
       answer({ [read]: DOWN });
       const elements = [...walk(await DashboardPage())];
       expect(elements.some((el) => el.type === RouterUnavailable)).toBe(true);
       expect(elements.some((el) => el.type === ConditionsPanel)).toBe(false);
+      expect(elements.some((el) => el.type === RunwayCard)).toBe(false);
     },
   );
 });
@@ -152,5 +177,40 @@ describe("the overview's mix card", () => {
     expect(workspaceFetch.mock.calls.map(([path]) => path)).toContain(
       "category-mix",
     );
+  });
+});
+
+describe("the overview's runway card", () => {
+  it("renders each account's days left, below the analytics", async () => {
+    answer({ runway: ok(RUNWAY) });
+    const elements = [...walk(await DashboardPage())];
+
+    const card = elements.find((el) => el.type === RunwayCard);
+    expect(card, "the overview renders no runway card").toBeDefined();
+    const { rows, belowDays } = card!.props as {
+      rows: RunwayRow[];
+      belowDays: number;
+    };
+    expect(belowDays).toBe(7);
+    expect(rows).toEqual([
+      {
+        key: "a1",
+        name: "storyco",
+        headline: "About 6 days",
+        detail: "20 files at 3 a day",
+        low: true,
+      },
+    ]);
+
+    const cards = elements.findIndex((el) => el.type === AnalyticsCards);
+    expect(cards).toBeGreaterThan(-1);
+    expect(elements.indexOf(card!)).toBeGreaterThan(cards);
+  });
+
+  it("reads the runway once, by its own path", async () => {
+    answer({ runway: ok(RUNWAY) });
+    await DashboardPage();
+    const paths = workspaceFetch.mock.calls.map(([path]) => path);
+    expect(paths.filter((path) => path === "runway")).toHaveLength(1);
   });
 });

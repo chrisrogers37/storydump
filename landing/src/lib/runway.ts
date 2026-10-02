@@ -62,7 +62,7 @@ export function deriveRunway(runway: RunwayResponse): RunwayRow[] {
   return runway.accounts.map((account) => ({
     key: account.id,
     name: destinationName(account),
-    headline: runwayHeadline(account.posting ? account.days_left : null),
+    headline: runwayHeadline(account.days_left),
     detail: account.posting
       ? `${files(account.eligible)} at ${account.posts_per_day} a day`
       : `${files(account.eligible)} ready`,

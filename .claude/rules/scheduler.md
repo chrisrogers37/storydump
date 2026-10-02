@@ -3,6 +3,7 @@ paths:
   - "src/worker.py"
   - "src/services/target/scheduler*"
   - "src/services/target/category_mix.py"
+  - "src/services/target/content_runway.py"
   - "src/services/target/work_loop.py"
   - "src/services/target/jobs.py"
   - "src/services/target/publish_pipeline.py"
@@ -73,7 +74,7 @@ does.
 
 `plan_slot` mints at most one intent for its slot: the insert is
 `ON CONFLICT (workspace_id, ig_account_id, schedule_slot_at) WHERE origin = 'cadence' DO NOTHING`
-(`scheduler.py:445`), so a duplicate job mints nothing. The predicate is the slot key's own:
+(`scheduler.py:435`), so a duplicate job mints nothing. The predicate is the slot key's own:
 `uq_intent_slot` is cadence-only (089), so a planned story (`origin = 'planned'`) never absorbs
 a slot. Keep the predicate: without it a bare `ON CONFLICT` finds no arbiter in the partial
 index and every cadence mint raises.
@@ -81,20 +82,23 @@ index and every cadence mint raises.
 The draw is weighted over the CONNECTED FOLDERS that have eligible media —
 explicit ratios; automatic folders in proportion to their files, together never
 more than the smallest explicit weight; Off (ratio 0) never
-(`category_mix.py:112`). Within the drawn folder: never-posted files first in
-the row id's shuffled order, then least-recently-posted (`scheduler.py:379`).
+(`category_mix.py:121`). Within the drawn folder: never-posted files first in
+the row id's shuffled order, then least-recently-posted (`scheduler.py:374`).
 Eligible means `available`, not already live for this account, and not under a
 live `post_locks` row. There is no pool behind the weighted set: when nothing
 is eligible the slot lapses and the workspace is told at most once per 24 h
-(`_notice_no_media`, `:208`).
+(`_notice_no_media`, `:207`).
 
-The rule and the folders' weights are ONE read, `category_mix.pool` (the rule is
-`category_mix.ELIGIBLE_SQL`), which the draw and the Overview's days-left figure
-both make (#1478), so the two cannot disagree; a second count of "eligible"
-anywhere is the defect that prevents. A mint that leaves the account with fewer
-than `WorkerConfig.low_runway_days` (7) days of eligible content tells the
-workspace once, through the same push bindings, and the next drop is told only
-after the account climbs back to `rearm_runway_days` (8)
+The rule and the folders' weights are ONE per-account read, `category_mix.pool`
+(the rule is `category_mix.ELIGIBLE_SQL`), which the draw and the Overview's
+days-left figure share (#1478), so the two cannot disagree. The mix card's
+"Posts about" share (`category_mix.mix_view`) is not that read: it weighs each
+folder by its `state = 'available'` files across the workspace, a
+workspace-level approximation of what any one account draws. A mint that
+leaves the account with fewer than `WorkerConfig.low_runway_days` (7) days of
+eligible content tells the workspace once, through the same push bindings, and
+the next drop is told only after the account climbs back to 8 days,
+`content_runway.REARM_MARGIN_DAYS` (1) above that level
 (`content_runway.after_mint`; the latch is the account's `low_content_notice` /
 `low_content_rearmed` audit rows, read and written under the account's
 `runway:` advisory lock). The Overview marks an account low at the same

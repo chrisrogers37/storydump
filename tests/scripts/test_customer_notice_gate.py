@@ -158,9 +158,9 @@ def _notices(notice_db, *, like: str):
     )
 
 
-async def _plan_slot(notice_db, *, window=NO_MEDIA_WINDOW_S):
+async def _plan(notice_db, *, window=NO_MEDIA_WINDOW_S):
     """One `plan_slot` for the chain's account at a fresh slot, as the worker
-    runs it: the executor, at the production levels, committed."""
+    runs it: the executor, at the production level, committed."""
     from src.services.target import content_runway, unit_of_work
     from src.services.target.scheduler import execute_plan_slot
 
@@ -182,7 +182,6 @@ async def _plan_slot(notice_db, *, window=NO_MEDIA_WINDOW_S):
                 approval_mode="manual",
                 no_media_notice_after_seconds=window,
                 low_runway_days=content_runway.LOW_RUNWAY_DAYS,
-                rearm_runway_days=content_runway.REARM_RUNWAY_DAYS,
             )
             await conn.commit()
         return out
@@ -193,8 +192,7 @@ async def _plan_slot(notice_db, *, window=NO_MEDIA_WINDOW_S):
 class TestD3TheNoMediaNotice:
     """D3 — "you are told once, not silently nothing"."""
 
-    async def _plan(self, notice_db, *, window=NO_MEDIA_WINDOW_S):
-        return await _plan_slot(notice_db, window=window)
+    _plan = staticmethod(_plan)
 
     async def test_an_empty_selection_tells_the_workspace_once(self, notice_db):
         """THE D3 OBSERVATION. The seeded chain's only media item is already
@@ -642,16 +640,16 @@ class TestTheRunwayNotice:
 
         _cadence(notice_db, 1)
         _files(notice_db, 8)
-        assert (await _plan_slot(notice_db)).intent_id is not None
+        assert (await _plan(notice_db)).intent_id is not None
         assert _runway_told(notice_db) == [], "seven days left is not below a week"
 
-        await _plan_slot(notice_db)
+        await _plan(notice_db)
         rows = _runway_told(notice_db)
         assert len(rows) == 1, rows
         assert "about 6 days of content left (6 files at 1 a day)" in rows[0][0]
         assert "Drive source" in rows[0][0]
 
-        await _plan_slot(notice_db)
+        await _plan(notice_db)
         assert len(_runway_told(notice_db)) == 1, "once per crossing, not per slot"
         assert _latch(notice_db) == [NOTICE_EVENT]
 
@@ -663,10 +661,10 @@ class TestTheRunwayNotice:
 
         _cadence(notice_db, 1)
         _files(notice_db, 7)
-        await _plan_slot(notice_db)  # 6 left: told
+        await _plan(notice_db)  # 6 left: told
         _files(notice_db, 2)
-        await _plan_slot(notice_db)  # 7 left: above the line, below the re-arm
-        await _plan_slot(notice_db)  # 6 left again
+        await _plan(notice_db)  # 7 left: above the line, below the re-arm
+        await _plan(notice_db)  # 6 left again
         assert len(_runway_told(notice_db)) == 1
         assert _latch(notice_db) == [NOTICE_EVENT]
 
@@ -677,9 +675,9 @@ class TestTheRunwayNotice:
 
         _cadence(notice_db, 1)
         _files(notice_db, 7)
-        await _plan_slot(notice_db)  # 6 left: told
+        await _plan(notice_db)  # 6 left: told
         fresh = _files(notice_db, 10)
-        await _plan_slot(notice_db)  # 15 left: re-armed, and nothing said
+        await _plan(notice_db)  # 15 left: re-armed, and nothing said
         assert len(_runway_told(notice_db)) == 1
         assert _latch(notice_db) == [NOTICE_EVENT, REARM_EVENT]
 
@@ -694,7 +692,7 @@ class TestTheRunwayNotice:
             "   ORDER BY m.id LIMIT 8)",
             (fresh,),
         )
-        await _plan_slot(notice_db)  # 7 eligible, 6 left: told again
+        await _plan(notice_db)  # 7 eligible, 6 left: told again
         assert len(_runway_told(notice_db)) == 2
         assert _latch(notice_db) == [NOTICE_EVENT, REARM_EVENT, NOTICE_EVENT]
 
@@ -703,9 +701,9 @@ class TestTheRunwayNotice:
     ):
         _cadence(notice_db, None)  # the workspace's 3 a day (053's default)
         _files(notice_db, 22)
-        await _plan_slot(notice_db)  # 21 left: exactly a week at 3 a day
+        await _plan(notice_db)  # 21 left: exactly a week at 3 a day
         assert _runway_told(notice_db) == []
-        await _plan_slot(notice_db)  # 20 left
+        await _plan(notice_db)  # 20 left
         rows = _runway_told(notice_db)
         assert len(rows) == 1, rows
         assert "about 6 days of content left (20 files at 3 a day)" in rows[0][0]
@@ -721,13 +719,13 @@ class TestTheRunwayNotice:
         )
         _cadence(notice_db, 1)
         _files(notice_db, 7)
-        out = await _plan_slot(notice_db)
+        out = await _plan(notice_db)
         assert out.intent_id is not None, "the slot still minted"
         assert out.notice == outbox.UNDELIVERABLE, "and nobody could be told"
         assert _runway_told(notice_db) == []
         assert _latch(notice_db) == [NOTICE_EVENT], "the crossing is spoken for"
 
-        out = await _plan_slot(notice_db)
+        out = await _plan(notice_db)
         assert out.notice is None, "one review_required job per crossing, not per slot"
 
     async def test_a_full_library_says_nothing(self, notice_db):
@@ -735,7 +733,7 @@ class TestTheRunwayNotice:
         the once-only tests' first halves; it fails here."""
         _cadence(notice_db, 1)
         _files(notice_db, 20)
-        assert (await _plan_slot(notice_db)).intent_id is not None
+        assert (await _plan(notice_db)).intent_id is not None
         assert _runway_told(notice_db) == []
         assert _latch(notice_db) == []
 
@@ -805,8 +803,8 @@ class TestTheRunwayRead:
 
         # The planner agrees: it can mint exactly those four, and then nothing.
         for _ in range(4):
-            assert (await _plan_slot(notice_db)).intent_id is not None
-        assert (await _plan_slot(notice_db)).intent_id is None
+            assert (await _plan(notice_db)).intent_id is not None
+        assert (await _plan(notice_db)).intent_id is None
         (row,) = (await self._read(notice_db, ingress))["accounts"]
         assert (row["eligible"], row["days_left"]) == (0, 0)
 
