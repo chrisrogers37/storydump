@@ -31,7 +31,7 @@ export const posts: BlogPost[] = [
   {
     slug: "google-drive-instagram-integration",
     title: "Google Drive to Instagram: The Missing Integration",
-    seoTitle: "Google Drive to Instagram Stories",
+    seoTitle: "How to Post Instagram Stories From Google Drive",
     description:
       "Your media lives in Google Drive and your audience on Instagram. Here's how to post Stories from a Drive folder without downloading and re-uploading.",
     date: "2026-05-25",

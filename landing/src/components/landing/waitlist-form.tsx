@@ -174,7 +174,7 @@ export function WaitlistForm({
             if (status === "error") setStatus("idle")
           }}
           disabled={status === "submitting"}
-          className="h-12 flex-1 rounded-full border-ink bg-white px-5 text-base sm:h-10 sm:border-0 sm:px-0 sm:shadow-none sm:focus-visible:ring-0"
+          className="h-12 rounded-full sm:flex-1 border-ink bg-white px-5 text-base sm:h-10 sm:border-0 sm:px-0 sm:shadow-none sm:focus-visible:ring-0"
           aria-invalid={status === "error" || undefined}
           aria-describedby={
             status === "error" ? `waitlist-error-${variant}` : undefined

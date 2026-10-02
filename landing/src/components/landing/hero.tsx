@@ -1,5 +1,4 @@
-import Link from "next/link"
-import { WaitlistForm } from "@/components/landing/waitlist-form"
+import { HeroSignup } from "@/components/landing/hero-signup"
 import { TapDemo } from "@/components/landing/tap-demo"
 
 export function Hero() {
@@ -25,21 +24,7 @@ export function Hero() {
             <strong className="font-semibold text-ink">Post now</strong> and
             it’s up.
           </p>
-          <div className="mt-8 max-w-xl">
-            <WaitlistForm variant="hero" />
-          </div>
-          <p className="mt-4 text-sm text-ink/70">
-            Free during beta · No credit card required{" "}
-            <span className="whitespace-nowrap">
-              · Already using Storydump?{" "}
-              <Link
-                href="/login"
-                className="font-medium text-ink underline underline-offset-4 hover:text-tap-ink"
-              >
-                Sign in
-              </Link>
-            </span>
-          </p>
+          <HeroSignup />
         </div>
         <TapDemo />
       </div>

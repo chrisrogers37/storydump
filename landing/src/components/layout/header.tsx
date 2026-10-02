@@ -22,19 +22,19 @@ export function Header() {
           */}
           <Link
             href="/blog"
-            className="whitespace-nowrap text-sm text-muted-foreground transition-colors hover:text-foreground"
+            className="whitespace-nowrap py-2.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
           >
             Blog
           </Link>
           <Link
             href="/login"
-            className="whitespace-nowrap text-sm text-muted-foreground transition-colors hover:text-foreground"
+            className="whitespace-nowrap py-2.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
           >
             Sign in
           </Link>
           <Link
             href="/#waitlist"
-            className="whitespace-nowrap rounded-full bg-ink px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-ink/85 sm:px-4 sm:text-sm"
+            className="whitespace-nowrap rounded-full bg-ink px-3 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-ink/85 sm:px-4 sm:text-sm"
           >
             {/*
               "the" is dropped below `sm` so all four items fit a 360px phone

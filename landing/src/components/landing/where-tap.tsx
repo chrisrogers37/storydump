@@ -1,27 +1,7 @@
-import {
-  ApprovalCard,
-  cardButtons,
-  type CardAction,
-} from "@/components/landing/approval-card"
+import { ApprovalCard } from "@/components/landing/approval-card"
+import { cardLegend, queueButtons } from "@/components/landing/card-labels"
 import { StoryArt } from "@/components/landing/story-art"
-import { ACTION_LABELS, actionsFor } from "@/lib/intents"
 
-const explain: Partial<Record<CardAction, string>> = {
-  post: "Publishes it to your Story through Instagram’s official API.",
-  posted: "Posted it by hand? One tap keeps the record straight.",
-  skip: "Not today. It goes back in the line-up for later.",
-  reject: "Not ever. It won’t come up again.",
-}
-
-export const cardLegend = cardButtons.flatMap(({ action, label }) =>
-  explain[action] ? [{ label, text: explain[action] }] : []
-)
-
-// The web Queue's buttons for a story awaiting approval, as the dashboard
-// renders them, with Instagram API publishing on.
-export const queueButtons = actionsFor("awaiting_approval", true).map(
-  (a) => ACTION_LABELS[a]
-)
 
 function PanelLabel({ name, tag }: { name: string; tag: string }) {
   return (

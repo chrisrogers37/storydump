@@ -1,5 +1,7 @@
+import { TextLink } from "@/components/landing/text-link"
 import { ApprovalCard } from "@/components/landing/approval-card"
-import { FolderChips, Section, TextLink, UseCaseLink, type UseCaseContent } from "./shared"
+import { DEMO_SLOT } from "@/components/landing/card-labels"
+import { FolderChips, Section, UseCaseLink, type UseCaseContent } from "./shared"
 
 export const googleDrive: UseCaseContent = {
   lede: (
@@ -10,9 +12,9 @@ export const googleDrive: UseCaseContent = {
     </>
   ),
   visual: (
-    <div className="space-y-4">
+    <div className="mx-auto w-full max-w-sm space-y-4">
       <FolderChips names={["Product shots", "Behind the scenes", "Memes"]} />
-      <ApprovalCard art="bottle" slot="2026-10-02 09:00 Europe/London" className="max-w-[18rem]" />
+      <ApprovalCard art="bottle" slot={DEMO_SLOT} className="mx-auto max-w-[18rem]" />
     </div>
   ),
   body: (
@@ -65,9 +67,9 @@ export const googleDrive: UseCaseContent = {
         </p>
         <p>
           There’s nothing to wire: no spreadsheet, no automation flow, no bot
-          to build. For the other ways to get Drive files onto Instagram, read{" "}
-          <TextLink href="/blog/google-drive-instagram-integration">Google Drive to Instagram: the missing integration</TextLink>
-          .
+          to build. Read{" "}
+          <TextLink href="/blog/google-drive-instagram-integration">how posting from a Drive folder works</TextLink>
+          , step by step.
         </p>
       </Section>
 

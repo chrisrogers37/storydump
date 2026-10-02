@@ -17,9 +17,12 @@ const nextUp: { art: ArtKind; note: string }[] = [
 ]
 
 /** The rotation's next five, as drawn on an ink background. */
-export function NextUp() {
+export function NextUp({ labelledBy }: { labelledBy?: string }) {
   return (
-    <ol aria-label="Next five in line" className="grid grid-cols-5 gap-2 sm:gap-3">
+    <ol
+      aria-label={labelledBy ? undefined : "Next five in line"}
+      aria-labelledby={labelledBy}
+      className="grid grid-cols-5 gap-2 sm:gap-3">
       {nextUp.map(({ art, note }, i) => (
         <li key={art}>
           <StoryArt kind={art} className="aspect-[9/16] w-full rounded-lg text-[8px] sm:rounded-xl sm:text-[13px]" />

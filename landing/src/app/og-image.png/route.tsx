@@ -11,10 +11,13 @@ const TAP = "#ff5a1f"
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl
-  const title = searchParams.get("title") || "Instagram Stories, on tap"
-  const subtitle =
+  // Capped so a hand-made URL can't overflow the card; the site's own
+  // titles and subtitles fit well inside these.
+  const title = (searchParams.get("title") || "Instagram Stories, on tap").slice(0, 70)
+  const subtitle = (
     searchParams.get("subtitle") ||
     "Stories from your Google Drive, brought to your team and posted with one tap."
+  ).slice(0, 110)
 
   return new ImageResponse(
     (

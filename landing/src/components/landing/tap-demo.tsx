@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import { DEMO_SLOT } from "@/components/landing/card-labels"
 import { ApprovalCard, type CardAction } from "@/components/landing/approval-card"
 import { StoryArt, artLabels, type ArtKind } from "@/components/landing/story-art"
 import { cn } from "@/lib/utils"
@@ -12,7 +13,7 @@ import { cn } from "@/lib/utils"
  * does. It runs entirely in the browser and sends nothing.
  */
 
-const SLOT = "2026-10-02 09:00 Europe/London"
+const SLOT = DEMO_SLOT
 const PHOTOS: ArtKind[] = ["bottle", "plant", "stock", "sunset", "quote", "mug"]
 
 type Stage = "waiting" | "posting" | "story" | "settled"

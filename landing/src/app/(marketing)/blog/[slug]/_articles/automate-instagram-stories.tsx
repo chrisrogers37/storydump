@@ -7,7 +7,7 @@ export function AutomateInstagramStories() {
         If you run an Instagram account for a shop, a page or your own work,
         you know the daily drill: find something to post, crop it to fit,
         remember to post it, and check nobody else already did. For a Story
-        that is gone in 24 hours, that is a lot of work.
+        that doesn&apos;t stay up for long, that is a lot of work.
       </p>
       <p>
         Most of that work can be automated. The one part worth keeping is
@@ -106,8 +106,8 @@ export function AutomateInstagramStories() {
         reachable for a moment. Storydump puts a private, temporary copy on
         Cloudinary, framed to the 9:16 Story size without cropping, and
         deletes it once the Story posts or is cancelled; any copy left over
-        is deleted once it is 48 hours old. The{" "}
-        <Link href="/privacy">Privacy page</Link> describes each step.
+        is deleted once it is 48 hours old. For how your data is handled, see
+        the <Link href="/privacy">Privacy page</Link>.
       </p>
 
       <h2>Putting it together</h2>

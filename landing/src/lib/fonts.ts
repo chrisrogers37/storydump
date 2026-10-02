@@ -12,3 +12,12 @@ export const bricolage = Bricolage_Grotesque({
   // matched fallback stand if the font is late, rather than repainting it.
   display: "optional",
 })
+
+// The 404 page gets no font preload from Next, so "optional" would leave its
+// headline in the fallback on a first visit; this copy swaps the font in.
+export const bricolageSwap = Bricolage_Grotesque({
+  variable: "--font-bricolage",
+  subsets: ["latin"],
+  weight: "800",
+  display: "swap",
+})

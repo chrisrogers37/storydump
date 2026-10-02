@@ -25,7 +25,7 @@ const DIRS = ["components/landing", "components/layout"]
 // they render.
 const ARTICLES = "app/(marketing)/blog/[slug]/_articles"
 const USE_CASES = "app/(marketing)/use-cases/[slug]"
-function useCaseFiles() {
+function filesOfUseCases() {
   return [
     `${USE_CASES}/page.tsx`,
     ...readdirSync(path.join(SRC, USE_CASES, "_content")).map((f) => `${USE_CASES}/_content/${f}`),
@@ -35,7 +35,7 @@ function useCaseFiles() {
 const FILES = [
   "app/(marketing)/blog/[slug]/page.tsx",
   ...readdirSync(path.join(SRC, ARTICLES)).map((f) => `${ARTICLES}/${f}`),
-  ...useCaseFiles(),
+  ...filesOfUseCases(),
   "app/not-found.tsx",
 ]
 
@@ -89,9 +89,8 @@ describe("the home page's claims", () => {
 
   it("carries the locked price line wherever there is a signup form", () => {
     for (const file of [
-      "components/landing/hero.tsx",
+      "components/landing/hero-signup.tsx",
       "components/landing/final-cta.tsx",
-      "app/(marketing)/use-cases/[slug]/page.tsx",
     ]) {
       expect(read(file)).toContain("Free during beta · No credit card required")
     }
@@ -114,8 +113,12 @@ describe("the home page's claims", () => {
   })
 
   it("uses only placeholder handles and addresses", () => {
-    const handles = all.match(/@[a-z0-9_.]+\.[a-z]+/gi) ?? []
-    for (const h of handles) expect(["@example.brand", "@example.com"]).toContain(h)
+    // Every handle shown in copy, dotted or not; imports ("@/…") don't match.
+    const handles = (all.match(/(?<![\w/])@[a-z][a-z0-9_.]*[a-z0-9]/gi) ?? []).filter(
+      (h) => !h.startsWith("@/") && !["@context", "@type"].includes(h)
+    )
+    // "@handle" is the doc comments' stand-in for the caption's account.
+    for (const h of handles) expect(["@example.brand", "@exampleshop", "@example.com", "@handle"]).toContain(h)
   })
 })
 
@@ -123,7 +126,7 @@ describe("the use-case pages' claims", () => {
   // The Phase 3 content brief's "never on these pages" list: no automation
   // the product doesn't do, no superlatives, no sync speed, no store
   // integration, no competitor, and no counts.
-  const pages = useCaseFiles()
+  const pages = filesOfUseCases()
     .map(read)
     .join("\n")
     .toLowerCase()
@@ -150,8 +153,25 @@ describe("the use-case pages' claims", () => {
     "zapier",
     "make.com",
     "pabbly",
+    "unlimited",
+    "hands-off",
+    "auto-approve",
+    "random",
+    "syncs instantly",
+    "switch accounts",
+    "product tags",
+    "stickers",
   ])("never says %s", (phrase) => {
     expect(pages).not.toContain(phrase)
+  })
+
+  it("never ranks itself #1", () => {
+    // Not a hex colour such as #1e6b2a.
+    expect(pages).not.toMatch(/#1(?![0-9a-f])/)
+  })
+
+  it("never mentions AI", () => {
+    expect(filesOfUseCases().map(read).join("\n")).not.toMatch(/\bAI\b/)
   })
 
   it("says the store is not connected", () => {

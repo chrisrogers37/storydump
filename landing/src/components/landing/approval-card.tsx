@@ -21,6 +21,8 @@ export const cardButtons: { action: CardAction; label: string }[] = [
 
 interface ApprovalCardProps {
   art: ArtKind
+  /** The placeholder account; never a real one. */
+  handle?: string
   slot: string
   /** The settled line, e.g. "✅ Posted by you · …". No buttons once set. */
   outcome?: string
@@ -36,6 +38,7 @@ interface ApprovalCardProps {
 
 export function ApprovalCard({
   art,
+  handle = "@example.brand",
   slot,
   outcome,
   busy,
@@ -46,7 +49,7 @@ export function ApprovalCard({
 }: ApprovalCardProps) {
   const caption = (
     <p className="text-[13px] leading-snug text-ink">
-      📸 @example.brand
+      📸 {handle}
       <br />
       Slot: {slot}
       {outcome && (

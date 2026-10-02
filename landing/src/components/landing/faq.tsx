@@ -1,5 +1,6 @@
 "use client"
 
+import { TextLink } from "@/components/landing/text-link"
 import { siteConfig } from "@/config/site"
 import { faqs } from "@/config/faqs"
 import {
@@ -64,6 +65,13 @@ export function FAQ() {
             </AccordionItem>
           ))}
         </Accordion>
+        <p className="mt-8 text-sm text-ink/70">
+          Read more on the blog:{" "}
+          <TextLink href="/blog/automate-instagram-stories">how to automate Instagram Stories</TextLink>
+          {" "}and{" "}
+          <TextLink href="/blog/telegram-instagram-approval-workflow">approving Instagram Stories in Telegram</TextLink>
+          .
+        </p>
       </div>
     </section>
   )

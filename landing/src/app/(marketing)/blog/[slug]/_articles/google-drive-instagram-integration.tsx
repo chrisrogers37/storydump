@@ -74,8 +74,8 @@ export function GoogleDriveInstagramIntegration() {
         through Instagram&apos;s official API. For that step a private,
         temporary copy, framed to the 9:16 Story size, sits on Cloudinary
         until the Story posts or is cancelled, and is then deleted; any copy
-        left over is deleted once it is 48 hours old. The{" "}
-        <Link href="/privacy">Privacy page</Link> covers this in full.
+        left over is deleted once it is 48 hours old. For how your data is
+        handled, see the <Link href="/privacy">Privacy page</Link>.
       </p>
       <p>
         The result: your designer drops a file into Google Drive, and it

@@ -1,4 +1,4 @@
-import Link from "next/link"
+import { TextLink } from "@/components/landing/text-link"
 import { StoryArt, type ArtKind } from "@/components/landing/story-art"
 import { pathForUseCase, type UseCaseSlug } from "@/lib/use-cases"
 
@@ -47,12 +47,9 @@ export function WhoItsFor() {
               <StoryArt kind={art} className="aspect-[4/5] w-full rounded-2xl text-[18px] sm:text-[26px]" />
               <h3 className="mt-4 font-display text-xl font-extrabold tracking-[-0.02em] text-ink">
                 {useCase ? (
-                  <Link
-                    href={pathForUseCase(useCase)}
-                    className="underline decoration-ink/25 decoration-2 underline-offset-4 hover:text-tap-ink hover:decoration-tap-ink"
-                  >
+                  <TextLink href={pathForUseCase(useCase)} className="font-extrabold decoration-2">
                     {name}
-                  </Link>
+                  </TextLink>
                 ) : (
                   name
                 )}

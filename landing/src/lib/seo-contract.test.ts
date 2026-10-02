@@ -241,6 +241,11 @@ describe("snippet lengths", () => {
     ...useCases.map((u) => ({ name: u.slug, title: u.seoTitle, description: u.description })),
   ]
 
+  it("no two pages share a title", () => {
+    const titles = titled.map((t) => t.title)
+    expect(new Set(titles).size).toBe(titles.length)
+  })
+
   it.each(titled)("$name fits a search result", ({ title, description }) => {
     expect(`${title} | Storydump`.length).toBeLessThanOrEqual(60)
     expect(description.length).toBeLessThanOrEqual(160)

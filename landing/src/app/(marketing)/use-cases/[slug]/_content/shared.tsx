@@ -1,4 +1,4 @@
-import Link from "next/link"
+import { TextLink } from "@/components/landing/text-link"
 import type { ReactNode } from "react"
 import { pathForUseCase, type UseCaseSlug } from "@/lib/use-cases"
 
@@ -7,17 +7,6 @@ export interface UseCaseContent {
   lede: ReactNode
   visual: ReactNode
   body: ReactNode
-}
-
-export const linkClass =
-  "font-medium text-ink underline decoration-ink/30 underline-offset-4 hover:text-tap-ink hover:decoration-tap-ink"
-
-export function TextLink({ href, children }: { href: string; children: ReactNode }) {
-  return (
-    <Link href={href} className={linkClass}>
-      {children}
-    </Link>
-  )
 }
 
 export function UseCaseLink({ slug, children }: { slug: UseCaseSlug; children: ReactNode }) {
@@ -38,7 +27,7 @@ export function Section({ title, children }: { title: string; children: ReactNod
 /** Drive folders as chips, each marked connected. No shares: no new numbers. */
 export function FolderChips({ names }: { names: string[] }) {
   return (
-    <ul aria-label="Connected Google Drive folders" className="flex flex-wrap gap-2">
+    <ul aria-label="Connected Google Drive folders" className="flex flex-wrap justify-center gap-2">
       {names.map((name) => (
         <li
           key={name}

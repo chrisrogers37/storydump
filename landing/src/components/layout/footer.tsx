@@ -16,17 +16,11 @@ const siteLinks = [
 /** Links joined by middots, the way the footer has always read. */
 function Dotted({ links }: { links: { href: string; label: string }[] }) {
   return links.map(({ href, label }, i) => (
-    <span key={href}>
+    <span key={href} className="whitespace-nowrap">
       {i > 0 && " · "}
-      {href.startsWith("mailto:") ? (
-        <a href={href} className={linkClass}>
-          {label}
-        </a>
-      ) : (
-        <Link href={href} className={linkClass}>
+      <Link href={href} className={linkClass}>
           {label}
         </Link>
-      )}
     </span>
   ))
 }
@@ -36,7 +30,7 @@ export function Footer() {
     <footer className="border-t border-ink/10 py-8">
       <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-4 text-center text-sm text-muted-foreground sm:flex-row sm:items-start sm:text-left">
         <p>&copy; {new Date().getFullYear()} {siteConfig.name}</p>
-        <div className="space-y-2 sm:text-right">
+        <div className="space-y-3 leading-7 sm:text-right">
           <nav aria-label="Footer">
             Built by{" "}
             <a

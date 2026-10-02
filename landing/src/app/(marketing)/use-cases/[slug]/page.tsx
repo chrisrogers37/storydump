@@ -1,15 +1,17 @@
 import type { Metadata } from "next"
 import Link from "next/link"
 import { notFound } from "next/navigation"
-import { WaitlistForm } from "@/components/landing/waitlist-form"
+import { FinalCTA } from "@/components/landing/final-cta"
+import { HeroSignup } from "@/components/landing/hero-signup"
+import { TextLink } from "@/components/landing/text-link"
 import { JsonLd } from "@/components/seo/json-ld"
 import { breadcrumbList } from "@/lib/json-ld"
-import { pageMetadata } from "@/lib/seo"
+import { noindexMetadata, pageMetadata } from "@/lib/seo"
 import { getUseCase, pathForUseCase, useCases, type UseCaseSlug } from "@/lib/use-cases"
 import { evergreen } from "./_content/evergreen"
 import { googleDrive } from "./_content/google-drive"
 import { onlineStores } from "./_content/online-stores"
-import { linkClass, type UseCaseContent } from "./_content/shared"
+import { Section, type UseCaseContent } from "./_content/shared"
 import { teamApprovals } from "./_content/team-approvals"
 
 const content: Record<UseCaseSlug, UseCaseContent> = {
@@ -38,7 +40,7 @@ type Params = Promise<{ slug: string }>
 
 export async function generateMetadata({ params }: { params: Params }): Promise<Metadata> {
   const useCase = getUseCase((await params).slug)
-  if (!useCase) return {}
+  if (!useCase) return noindexMetadata
   return pageMetadata({
     title: useCase.seoTitle,
     description: useCase.description,
@@ -46,17 +48,6 @@ export async function generateMetadata({ params }: { params: Params }): Promise<
     ogTitle: useCase.ogTitle,
     ogSubtitle: useCase.ogSubtitle,
   })
-}
-
-function SignIn() {
-  return (
-    <>
-      Already using Storydump?{" "}
-      <Link href="/login" className={linkClass}>
-        Sign in
-      </Link>
-    </>
-  )
 }
 
 export default async function UseCasePage({ params }: { params: Params }) {
@@ -80,15 +71,7 @@ export default async function UseCasePage({ params }: { params: Params }) {
             <p className="kicker text-tap-ink">{useCase.eyebrow}</p>
             <h1 className="section-title mt-4 md:text-[4.25rem]">{useCase.title}</h1>
             <p className="mt-6 max-w-xl text-lg leading-relaxed text-ink/80">{lede}</p>
-            <div className="mt-8 max-w-xl">
-              <WaitlistForm variant="hero" />
-            </div>
-            <p className="mt-4 text-sm text-ink/70">
-              Free during beta · No credit card required{" "}
-              <span className="whitespace-nowrap">
-                · <SignIn />
-              </span>
-            </p>
+            <HeroSignup />
           </div>
           {visual}
         </div>
@@ -97,11 +80,8 @@ export default async function UseCasePage({ params }: { params: Params }) {
       <div className="mx-auto max-w-3xl px-4 py-16 md:py-20">
         {body}
 
-        <section className="mt-14">
-          <h2 className="font-display text-3xl font-extrabold tracking-[-0.03em] text-ink md:text-4xl">
-            Setup, in short
-          </h2>
-          <ol className="mt-6 space-y-4">
+        <Section title="Setup, in short">
+          <ol className="space-y-4 pt-2">
             {setupSteps.map((step, i) => (
               <li key={step.href} className="flex gap-4">
                 <span
@@ -112,30 +92,15 @@ export default async function UseCasePage({ params }: { params: Params }) {
                 </span>
                 <p className="pt-1 leading-relaxed text-ink/80">
                   {step.text}{" "}
-                  <Link href={step.href} className={linkClass}>
-                    {step.link}
-                  </Link>
+                  <TextLink href={step.href}>{step.link}</TextLink>
                 </p>
               </li>
             ))}
           </ol>
-        </section>
+        </Section>
       </div>
 
-      <section aria-labelledby="closing-heading" className="bg-tap py-16 md:py-20">
-        <div className="mx-auto max-w-3xl px-4 text-center">
-          <h2 id="closing-heading" className="section-title">
-            {useCase.closing}
-          </h2>
-          <p className="mt-5 font-medium text-ink">Free during beta · No credit card required.</p>
-          <div className="mx-auto mt-8 max-w-lg">
-            <WaitlistForm variant="footer" />
-          </div>
-          <p className="mt-6 text-sm text-ink">
-            <SignIn />
-          </p>
-        </div>
-      </section>
+      <FinalCTA heading={useCase.closing} headingClassName="" />
 
       <nav aria-labelledby="more-heading" className="py-14">
         <div className="mx-auto max-w-3xl px-4">

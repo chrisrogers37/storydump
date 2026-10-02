@@ -1,4 +1,4 @@
-import Link from "next/link"
+import { TextLink } from "@/components/landing/text-link"
 import { pathForUseCase } from "@/lib/use-cases"
 import { HardDrive, Instagram, MousePointerClick, ScrollText } from "lucide-react"
 
@@ -36,9 +36,9 @@ export function TrustRow() {
               <Icon className="size-5 text-ink" />
               <h3 className="mt-4 font-display text-lg font-extrabold tracking-[-0.02em] text-ink">
                 {href ? (
-                  <Link href={href} className="underline decoration-ink/25 decoration-2 underline-offset-4 hover:text-tap-ink hover:decoration-tap-ink">
+                  <TextLink href={href} className="font-extrabold decoration-2">
                     {title}
-                  </Link>
+                  </TextLink>
                 ) : (
                   title
                 )}
@@ -49,9 +49,9 @@ export function TrustRow() {
         </ul>
         <p className="mt-5 text-sm text-ink/70">
           How your media is handled, step by step:{" "}
-          <Link href="/privacy" className="font-medium text-ink underline underline-offset-4 hover:text-tap-ink">
+          <TextLink href="/privacy">
             Privacy
-          </Link>
+          </TextLink>
           .
         </p>
       </div>

@@ -1,5 +1,6 @@
+import { TextLink } from "@/components/landing/text-link"
 import { ApprovalCard } from "@/components/landing/approval-card"
-import { FolderChips, Section, TextLink, UseCaseLink, type UseCaseContent } from "./shared"
+import { FolderChips, Section, UseCaseLink, type UseCaseContent } from "./shared"
 
 export const onlineStores: UseCaseContent = {
   lede: (
@@ -10,9 +11,9 @@ export const onlineStores: UseCaseContent = {
     </>
   ),
   visual: (
-    <div className="space-y-4">
+    <div className="mx-auto w-full max-w-sm space-y-4">
       <FolderChips names={["Product shots", "Restocks", "Behind the scenes"]} />
-      <ApprovalCard art="stock" slot="2026-10-02 12:00 Europe/London" className="max-w-[18rem]" />
+      <ApprovalCard art="stock" handle="@exampleshop" slot="2026-10-02 12:00 Europe/London" className="mx-auto max-w-[18rem]" />
     </div>
   ),
   body: (

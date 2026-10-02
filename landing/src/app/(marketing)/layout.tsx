@@ -11,9 +11,9 @@ export default function MarketingLayout({
     // The root layout defines Geist as a variable on <body> but nothing
     // applies it, so text fell back to the system font; the marketing pages
     // set it here.
-    <div className={`${bricolage.variable} font-sans`}>
+    <div className={`${bricolage.variable} flex min-h-svh flex-col font-sans`}>
       <Header />
-      <main>{children}</main>
+      <main className="flex-1">{children}</main>
       <Footer />
     </div>
   )

@@ -1,5 +1,6 @@
+import { TextLink } from "@/components/landing/text-link"
 import { NextUp } from "@/components/landing/set-it-once"
-import { Section, TextLink, UseCaseLink, type UseCaseContent } from "./shared"
+import { Section, UseCaseLink, type UseCaseContent } from "./shared"
 
 const rules = [
   { rule: "New goes first.", text: "Anything never posted leads the line." },
@@ -20,8 +21,8 @@ export const evergreen: UseCaseContent = {
   ),
   visual: (
     <div className="rounded-3xl bg-ink p-5 sm:p-6">
-      <p className="kicker mb-4 text-tap">Next five in line</p>
-      <NextUp />
+      <p id="next-up-label" className="kicker mb-4 text-tap">Next five in line</p>
+      <NextUp labelledBy="next-up-label" />
     </div>
   ),
   body: (
@@ -29,7 +30,7 @@ export const evergreen: UseCaseContent = {
       <Section title="A Story posts once. The photo is still good.">
         <p>
           A Story doesn’t stay up for long, so a good shot goes out once and
-          then sits in a folder. Most libraries are full of them.
+          then sits in a folder.
         </p>
       </Section>
 

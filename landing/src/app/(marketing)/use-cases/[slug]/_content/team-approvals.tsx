@@ -1,8 +1,9 @@
+import { TextLink } from "@/components/landing/text-link"
 import { ApprovalCard } from "@/components/landing/approval-card"
-import { cardLegend, queueButtons } from "@/components/landing/where-tap"
-import { Section, TextLink, UseCaseLink, type UseCaseContent } from "./shared"
+import { cardLegend, DEMO_SLOT, joinWithAnd, queueButtons } from "@/components/landing/card-labels"
+import { Section, UseCaseLink, type UseCaseContent } from "./shared"
 
-const SLOT = "2026-10-02 09:00 Europe/London"
+const SETTLED = `✅ Posted by Sam · 2026-10-02 09:01 Europe/London`
 
 export const teamApprovals: UseCaseContent = {
   lede: (
@@ -12,13 +13,14 @@ export const teamApprovals: UseCaseContent = {
     </>
   ),
   visual: (
-    <div className="grid max-w-xl grid-cols-2 gap-3">
-      <figure>
-        <ApprovalCard art="monday" slot={SLOT} />
+    <div className="mx-auto grid w-full max-w-xl items-start gap-3 sm:grid-cols-2">
+      {/* On a phone the settled card alone, so its buttons and line don't wrap. */}
+      <figure className="hidden sm:block">
+        <ApprovalCard art="monday" slot={DEMO_SLOT} />
         <figcaption className="kicker mt-3 text-ink/60">Waiting</figcaption>
       </figure>
-      <figure>
-        <ApprovalCard art="monday" slot={SLOT} outcome="✅ Posted by Sam · 2026-10-02 09:01 Europe/London" />
+      <figure className="mx-auto w-full max-w-[18rem] sm:max-w-none">
+        <ApprovalCard art="monday" slot={DEMO_SLOT} outcome={SETTLED} />
         <figcaption className="kicker mt-3 text-ink/60">Settled</figcaption>
       </figure>
     </div>
@@ -54,7 +56,7 @@ export const teamApprovals: UseCaseContent = {
         <p>
           Anyone in your workspace can act on the card, and people outside it
           can’t. A second tap gets the first tap’s answer, and the card
-          settles on “✅ Posted by Sam · 2026-10-02 09:01 Europe/London”, by
+          settles on “{SETTLED}”, by
           display name, never an email.
         </p>
       </Section>
@@ -69,7 +71,7 @@ export const teamApprovals: UseCaseContent = {
       <Section title="Not on Telegram? Use the web.">
         <p>
           The same Story waits in your Queue on the web, marked “awaiting
-          approval”, with {queueButtons.slice(0, -1).join(", ")} and {queueButtons.at(-1)}. Telegram is optional.
+          approval”, with {joinWithAnd(queueButtons)}. Telegram is optional.
         </p>
       </Section>
 
