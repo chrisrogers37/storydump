@@ -85,3 +85,36 @@ railway run --service worker --environment production -- \
 ```
 
 Read-only. The connection string is never printed.
+
+## Activation, estate-wide
+
+How far the people who signed up got through onboarding, across every workspace: a question no
+verb answers, since a verb reads only the workspaces your token belongs to. Put this one line in
+`probe.sql` and run it through the escape hatch above:
+
+```sql
+SELECT * FROM fn_activation_funnel(now() - interval '30 days');
+```
+
+Five rows come back, one per stage, in order.
+
+| Column | Meaning |
+|---|---|
+| `o_ordinal` | the stage's place, 1 to 5 |
+| `o_stage` | `signed in`, `workspace created`, `Instagram connected`, `folder added`, `first approval` |
+| `o_reached` | how many people who signed up since the date reached the stage. Each stage is counted on its own, so a folder added before Instagram counts for both |
+| `o_stalled` | how many of them stopped after this stage: the next one is missing and nothing has happened for them in 72 hours. The `first approval` row is always 0 |
+
+Each stage is the first time it happened. A workspace counts when the person owns it and it is
+active; Instagram and a folder count from the first one connected in such a workspace, even if it
+was removed later; the first approval is the first story moved from awaiting approval to approved,
+or to posted, which is a person's "Posted myself" in manual mode. "Nothing has happened" means none
+of the five stages is newer than 72 hours; a second argument changes the window, as in
+`fn_activation_funnel(now() - interval '30 days', interval '7 days')`. Someone who owns no
+workspace but belongs to another person's joined a team rather than stopping: they count as signed
+in and are not counted as stalled.
+
+The door returns counts only, never an id, a name or an email. It lives in the database, owned by
+`svc_maintenance` and executable by `svc_worker`, the login the escape hatch connects as. The API's
+login, `svc_ingress`, cannot call it, so no API route or CLI verb reads it until an operator
+principal exists (#1124).

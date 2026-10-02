@@ -158,6 +158,19 @@ POLICY_CENSUS = {
         "UPDATE",
         ("svc_maintenance",),
     ): "door:fn_reaper_sweep",
+    # 091: the two tables svc_maintenance lacked for the activation funnel.
+    (
+        "p_maint_users",
+        "users",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_activation_funnel",
+    (
+        "p_maint_members",
+        "workspace_members",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_activation_funnel",
     ("p_tenant", "provider_quarantine", "ALL", T): "matrix",
     (
         "p_claim_quar",
@@ -453,6 +466,13 @@ DOORS = {
     "fn_planned_misses": (
         "svc_worker",
         "SELECT * FROM fn_planned_misses(50, interval '1 hour')",
+    ),
+    # 091 (`07` §34, #1481): the activation funnel, counts only across every
+    # workspace. The worker's login alone, the one the psql escape hatch
+    # connects as; no API principal until an operator principal exists (#1124).
+    "fn_activation_funnel": (
+        "svc_worker",
+        "SELECT * FROM fn_activation_funnel(now() - interval '30 days')",
     ),
 }
 
@@ -800,7 +820,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 63
+        assert len(POLICY_CENSUS) == 65
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -818,8 +838,8 @@ class TestRuntimeTenantIsolationMatrix:
         # Exact split, so a re-tagged disposition is a visible diff:
         assert len(by_kind["matrix"]) == 16
         # 081: p_maint_accts; 082: the three maintenance reads; 086: the
-        # reaper's source re-arm.
-        assert len(by_kind["door"]) == 34
+        # reaper's source re-arm; 091: the activation funnel's two reads.
+        assert len(by_kind["door"]) == 36
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():

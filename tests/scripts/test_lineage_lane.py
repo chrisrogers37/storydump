@@ -403,6 +403,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # loud: the slot key's contract, the serve and miss doors and the
             # reaper's cadence-only slot expiry (#1413, phase 3).
             "089_planned_serve_and_misses.sql",
+            # 091 appends §34, the activation funnel door: onboarding counted
+            # across every workspace, owned by svc_maintenance and executable
+            # by svc_worker alone (#1481).
+            "091_activation_funnel_door.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

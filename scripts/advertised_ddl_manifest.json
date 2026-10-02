@@ -340,6 +340,13 @@
       "label": "§32 planned stories are served on time or missed out loud (089, #1413) — the unconditional slot key dropped and the cadence-only key renamed to it (contract), fn_prompts_due re-created serving planned rows only while servable and in their late window and skipping every cancel-flagged row, fn_reaper_sweep replace whose slot expiry takes cadence rows only, and fn_planned_misses listing the planned rows that will not be served with their reason",
       "doc": "07-security-model.md",
       "ordinal": 30
+    },
+    {
+      "sha256": "d6a3a34ec3ac4424e191d1856790440770d61c63d0cac98271c2825e6866cee9",
+      "class": "normative",
+      "label": "§34 the activation funnel door (091, #1481) — svc_maintenance's SELECT and a USING (true) policy on users and workspace_members, and fn_activation_funnel: five stage rows of reached and stalled counts for the active users created since p_since, owned by svc_maintenance, EXECUTE for svc_worker only",
+      "doc": "07-security-model.md",
+      "ordinal": 31
     }
   ],
   "policy_expansion": {
