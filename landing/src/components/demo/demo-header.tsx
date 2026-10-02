@@ -30,7 +30,9 @@ export function DemoHeader() {
               <Menu className="h-5 w-5" />
             </Button>
           </SheetTrigger>
-          <SheetContent side="left" className="w-64 p-0">
+          {/* A drawer names itself and needs no description; Radix asks
+              for an explicit `aria-describedby={undefined}` to say so. */}
+          <SheetContent side="left" className="w-64 p-0" aria-describedby={undefined}>
             <SheetTitle className="sr-only">Navigation</SheetTitle>
             <Sidebar mobile items={DEMO_NAV} home={DEMO_HOME} />
           </SheetContent>
