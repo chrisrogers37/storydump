@@ -346,6 +346,14 @@ class TestErrorRouting:
             ),
             # Any other 403 stays the credential's.
             ("forbidden", "Forbidden", DriveCredentialDead),
+            # ...even when its message mentions a quota: a full Drive is not a
+            # limit, and does not pass. The message is read only when the body
+            # names no reason.
+            (
+                "storageQuotaExceeded",
+                "The user's Drive storage quota has been exceeded.",
+                DriveCredentialDead,
+            ),
         ],
     )
     async def test_a_403_routes_on_googles_reason_first(
