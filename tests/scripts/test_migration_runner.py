@@ -26,7 +26,9 @@ from scripts.migration_runner import (
 from src.config.settings import settings
 from tests.scripts.conftest import (
     fetch_ledger,
+    fetch_one,
     table_exists,
+    txn,
     write_migration,
 )
 
@@ -492,32 +494,22 @@ class TestAdvisoryLock:
 
 
 def _column_exists(dsn, table, column):
-    conn = psycopg2.connect(dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.columns"
-                " WHERE table_name = %s AND column_name = %s)",
-                (table, column),
-            )
-            return cur.fetchone()[0]
-    finally:
-        conn.close()
+    return fetch_one(
+        dsn,
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE"
+        " table_schema = 'public' AND table_name = %s AND column_name = %s)",
+        (table, column),
+    )[0]
 
 
-def _lock_waiters(dsn, table) -> int:
+def _lock_waiters(cur, table) -> int:
     """Lock requests on *table* still queued (not granted)."""
-    conn = psycopg2.connect(dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation"
-                " WHERE c.relname = %s AND NOT l.granted",
-                (table,),
-            )
-            return cur.fetchone()[0]
-    finally:
-        conn.close()
+    cur.execute(
+        "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation"
+        " WHERE c.relname = %s AND NOT l.granted",
+        (table,),
+    )
+    return cur.fetchone()[0]
 
 
 def _until(predicate, timeout: float) -> bool:
@@ -529,45 +521,38 @@ def _until(predicate, timeout: float) -> bool:
     return False
 
 
-class TestTheLockWaitIsBounded:
-    """#1515: a wrapped file's lock wait is bounded (`LOCK_TIMEOUT`). A file
-    that waits for ACCESS EXCLUSIVE holds its place in the table's lock queue,
-    and every later statement on the table, readers included, queues behind
-    it. Bounded, it fails with 55P03 instead. The runner tries that failure
-    again, and only that failure (`LOCK_RETRY_DELAYS_S`), so a transient
-    holder costs seconds, not a deploy. Each test keeps its own deadline: with
-    the bound gone, the runner waits on the holder and the test fails on its
-    clock rather than hanging. The knobs are patched with `raising=False` so
-    that, on a runner without them, the tests fail on the unbounded wait
-    itself rather than at setup."""
+def _apply_in_thread(dsn, migrations_dir):
+    """`apply_pending` on a thread; its exception, if any, lands in `errors`."""
+    errors = []
 
-    def _held_table(self, scratch_db, tmp_path):
+    def run():
+        try:
+            apply_pending(dsn, migrations_dir)
+        except Exception as exc:  # noqa: BLE001 - collected for assertion
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, errors
+
+
+class TestTheLockWaitIsBounded:
+    """#1515: a wrapped file's lock waits are bounded (`LOCK_TIMEOUT`), and a
+    lock-wait failure, and no other, is tried again (`LOCK_RETRY_DELAYS_S`).
+
+    A holder reads the table in an open transaction (ACCESS SHARE until it
+    rolls back) while the runner applies an ALTER that needs ACCESS EXCLUSIVE.
+    Each test keeps its own deadline, so a runner whose wait is unbounded
+    fails on the test's clock instead of hanging it. The knobs are patched
+    with `raising=False`, so on a runner without them the tests fail on the
+    unbounded wait itself rather than at setup."""
+
+    def _write_alter(self, scratch_db, tmp_path):
         write_migration(tmp_path, 1, "CREATE TABLE t_held (id INT);")
         apply_pending(scratch_db, tmp_path)
         write_migration(
             tmp_path, 2, "ALTER TABLE t_held ADD COLUMN extra INT;", name="alter"
         )
-        holder = psycopg2.connect(scratch_db)
-        with holder.cursor() as cur:
-            # A read in an open transaction: ACCESS SHARE until it ends, which
-            # the ALTER's ACCESS EXCLUSIVE must wait for.
-            cur.execute("SELECT count(*) FROM t_held")
-        return holder
-
-    def _run_in_thread(self, scratch_db, tmp_path):
-        errors, done = [], threading.Event()
-
-        def run():
-            try:
-                apply_pending(scratch_db, tmp_path)
-            except Exception as exc:  # noqa: BLE001 - collected for assertion
-                errors.append(exc)
-            finally:
-                done.set()
-
-        thread = threading.Thread(target=run)
-        thread.start()
-        return thread, done, errors
 
     def test_a_wrapped_file_runs_under_a_lock_bound(self, scratch_db, tmp_path):
         write_migration(
@@ -582,18 +567,18 @@ class TestTheLockWaitIsBounded:
     def test_a_held_table_fails_the_file_fast_and_leaves_nothing(
         self, scratch_db, tmp_path, monkeypatch
     ):
-        monkeypatch.setattr(runner_module, "LOCK_TIMEOUT", "200ms", raising=False)
+        monkeypatch.setattr(runner_module, "LOCK_TIMEOUT", "20ms", raising=False)
         monkeypatch.setattr(
-            runner_module, "LOCK_RETRY_DELAYS_S", (0.05, 0.05), raising=False
+            runner_module, "LOCK_RETRY_DELAYS_S", (0.0, 0.0), raising=False
         )
-        holder = self._held_table(scratch_db, tmp_path)
-        thread, done, errors = self._run_in_thread(scratch_db, tmp_path)
-        try:
-            finished = done.wait(timeout=10)
-        finally:
-            holder.rollback()
-            holder.close()
-            thread.join(timeout=30)
+        self._write_alter(scratch_db, tmp_path)
+        with txn(scratch_db) as holder:
+            with holder.cursor() as cur:
+                cur.execute("SELECT count(*) FROM t_held")
+            thread, errors = _apply_in_thread(scratch_db, tmp_path)
+            thread.join(timeout=10)
+            finished = not thread.is_alive()
+        thread.join(timeout=30)  # the holder let go, so even an unbounded runner ends
         assert finished, "the runner waited on the holder: its lock wait is unbounded"
         [error] = errors
         assert isinstance(error, MigrationRunnerError) and "002" in str(error)
@@ -606,42 +591,65 @@ class TestTheLockWaitIsBounded:
     ):
         monkeypatch.setattr(runner_module, "LOCK_TIMEOUT", "200ms", raising=False)
         monkeypatch.setattr(runner_module, "LOCK_RETRY_DELAYS_S", (1.0,), raising=False)
-        holder = self._held_table(scratch_db, tmp_path)
-        thread, done, errors = self._run_in_thread(scratch_db, tmp_path)
+        self._write_alter(scratch_db, tmp_path)
+        poll = psycopg2.connect(scratch_db)
+        poll.autocommit = True
         try:
-            queued = _until(lambda: _lock_waiters(scratch_db, "t_held") > 0, 10)
-            gave_up = _until(lambda: _lock_waiters(scratch_db, "t_held") == 0, 5)
-        finally:
-            holder.rollback()  # the holder lets go
-            holder.close()
+            with txn(scratch_db) as holder, poll.cursor() as cur:
+                with holder.cursor() as held:
+                    held.execute("SELECT count(*) FROM t_held")
+                thread, errors = _apply_in_thread(scratch_db, tmp_path)
+                queued = (
+                    _until(
+                        lambda: (
+                            not thread.is_alive() or _lock_waiters(cur, "t_held") > 0
+                        ),
+                        10,
+                    )
+                    and thread.is_alive()
+                )
+                gave_up = queued and _until(
+                    lambda: _lock_waiters(cur, "t_held") == 0, 5
+                )
+            # Leaving the block rolled the holder back: it let go.
             thread.join(timeout=30)
-        assert queued, "the runner never queued for the table's lock"
+        finally:
+            poll.close()
+        assert queued, f"the runner never queued for the table's lock: {errors}"
         assert gave_up, "the first attempt never gave up its place in the queue"
         assert errors == [] and not thread.is_alive()
         assert [r[0] for r in fetch_ledger(scratch_db)] == [1, 2]
         assert _column_exists(scratch_db, "t_held", "extra")
 
-    def test_only_a_lock_wait_is_tried_again(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "failure, marker, attempts",
+        [
+            (psycopg2.errors.LockNotAvailable, "", 3),
+            (psycopg2.errors.DivisionByZero, "", 1),
+            # A non-wrapped file's statements commit as they go: never again.
+            (psycopg2.errors.LockNotAvailable, "-- runner:no-transaction\n", 1),
+        ],
+        ids=["lock-wait", "other-failure", "not-wrapped"],
+    )
+    def test_only_a_wrapped_files_lock_wait_is_tried_again(
+        self, tmp_path, monkeypatch, failure, marker, attempts
+    ):
         monkeypatch.setattr(
             runner_module, "LOCK_RETRY_DELAYS_S", (0.0, 0.0), raising=False
         )
-        write_migration(tmp_path, 1, "CREATE TABLE t_x (id INT);")
+        write_migration(tmp_path, 1, marker + "CREATE TABLE t_x (id INT);")
         [migration] = discover_migrations(tmp_path)
-        for failure, attempts in (
-            (psycopg2.errors.LockNotAvailable, 3),
-            (psycopg2.errors.DivisionByZero, 1),
-        ):
-            calls = []
+        calls = []
 
-            def fails(conn, m, failure=failure, calls=calls):
-                calls.append(m.version)
-                raise failure()
+        def fails(conn, m):
+            calls.append(m.version)
+            raise failure()
 
-            monkeypatch.setattr(runner_module, "_apply_one", fails)
-            with pytest.raises(MigrationRunnerError, match="001") as caught:
-                runner_module._apply_guarded(None, migration)
-            assert isinstance(caught.value.__cause__, failure)
-            assert len(calls) == attempts, failure.__name__
+        monkeypatch.setattr(runner_module, "_apply_one", fails)
+        with pytest.raises(MigrationRunnerError, match="001") as caught:
+            runner_module._apply_guarded(None, migration)
+        assert isinstance(caught.value.__cause__, failure)
+        assert len(calls) == attempts
 
 
 class TestManual:
