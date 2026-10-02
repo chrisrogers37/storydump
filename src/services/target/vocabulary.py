@@ -34,6 +34,7 @@ COMMANDS: tuple[str, ...] = (
     "cancel",
     "schedule_item",
     "reschedule_item",
+    "set_item_link",
     "autopost_now",
     "sync_now",
     "settings_change",
@@ -115,6 +116,10 @@ LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required")
 
 #: How far ahead a story may be planned.
 PLAN_HORIZON_DAYS = 365
+
+#: The longest link an item may carry (`set_item_link`, #1413 phase 7), in
+#: characters: an address that long is no longer one a person adds by hand.
+LINK_URL_MAX = 2048
 
 #: `post_intents.last_error.class` on a planned story that ended unserved
 #: at its time (`prompts.sweep_planned_misses`); its `message` is the reason.
@@ -424,6 +429,7 @@ WRITE_SENTENCES: Mapping[tuple[str, str], str] = {
     ("cancel", "executed"): "cancel requested",
     ("schedule_item", "executed"): "scheduled",
     ("reschedule_item", "executed"): "rescheduled",
+    ("set_item_link", "executed"): "link updated",
     ("resolve_review", "executed"): "resolved",
     ("resolve_review", "enqueued"): "resolved — posting again shortly",
     ("pause_workspace", "executed"): "posting paused for the workspace",

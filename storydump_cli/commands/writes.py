@@ -37,6 +37,7 @@ from src.services.target.vocabulary import (
     EXIT_USAGE,
     IDEMPOTENCY_KEY_MAX,
     IN_THE_WAY,
+    LINK_URL_MAX,
     LIVE_ACCOUNT_STATES,
     MISSING_SENTENCES,
     NOT_POSTED,
@@ -69,6 +70,7 @@ COMMAND_OF: Mapping[str, str] = {
     "sync": "sync_now",
     "schedule": "schedule_item",
     "reschedule": "reschedule_item",
+    "link": "set_item_link",
 }
 
 
@@ -252,8 +254,8 @@ def _key_option(command):
         metavar="KEY",
         help=(
             "Send under a key of your own. A story verb's key is deterministic"
-            " (a re-run replays); schedule, reschedule, pause, resume and sync"
-            " mint a fresh one per run."
+            " (a re-run replays); schedule, reschedule, link, pause, resume and"
+            " sync mint a fresh one per run."
         ),
     )(command)
 
@@ -688,6 +690,62 @@ def reschedule(
     )
 
 
+def _link_refused(exc: ApiError) -> Optional[tuple[str, str]]:
+    """The item id is checked before anything is sent, so the port refuses
+    only the link; the shared sentence would name none of its rule."""
+    if exc.reason == "invalid_args":
+        return (
+            f"a link is an https:// address of at most {LINK_URL_MAX:,} characters,"
+            " with no spaces in it",
+            "give the whole link, starting https://, or --clear to remove it",
+        )
+    if exc.reason == "not_found" and exc.facts.get("missing") in MISSING_SENTENCES:
+        missing = exc.facts["missing"]
+        return MISSING_SENTENCES[missing], MISSING_FIXES[missing]
+    return None
+
+
+@click.command()
+@global_options
+@_workspace_option
+@_key_option
+@click.argument("item", callback=uuid_argument)
+@click.argument("url", required=False)
+@click.option("--clear", is_flag=True, help="Remove the item's link instead.")
+@click.pass_context
+def link(
+    ctx: click.Context,
+    workspace: str,
+    idempotency_key: Optional[str],
+    item: str,
+    url: Optional[str],
+    clear: bool,
+) -> None:
+    """Give an item the link its stories ask a person to add by hand when they
+    post, or remove it with --clear. A story published through the API cannot
+    carry a link sticker, so its approval card shows the link instead. The
+    link is the item's: every story of it asks for the same one.
+
+    Only an https:// address is taken, and an overlong one is refused.
+
+    \b
+    Example:
+      storydump link 3c6e0b8a-9d7f-4a1e-b2c3-4d5e6f7a8b9c https://example.com/spring --workspace <id>
+      storydump link 3c6e0b8a-9d7f-4a1e-b2c3-4d5e6f7a8b9c --clear --workspace <id>
+    """
+    if clear == (url is not None):
+        raise click.UsageError("give a link, or --clear to remove it: one of the two")
+    _write(
+        ctx,
+        "link",
+        workspace=workspace,
+        idempotency_key=idempotency_key,
+        args={"media_item_id": item, "link_url": None if clear else url},
+        key_for=_fresh_key("link"),
+        refused=_link_refused,
+    )
+
+
 COMMANDS = (
     approve,
     skip,
@@ -700,4 +758,5 @@ COMMANDS = (
     sync,
     schedule,
     reschedule,
+    link,
 )
