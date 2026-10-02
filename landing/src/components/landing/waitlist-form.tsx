@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useSyncExternalStore } from "react"
+import { useRef, useState, useSyncExternalStore } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -73,6 +73,8 @@ export function WaitlistForm({
   const [email, setEmail] = useState("")
   const [status, setStatus] = useState<FormStatus>("idle")
   const [message, setMessage] = useState("")
+  // "Waitlist Start" counts each form once per page view, on its first focus.
+  const started = useRef(false)
   const registered = useSyncExternalStore(
     subscribeToStorage,
     readRegistered,
@@ -169,6 +171,11 @@ export function WaitlistForm({
           type="email"
           placeholder="you@example.com"
           value={email}
+          onFocus={() => {
+            if (started.current) return
+            started.current = true
+            trackEvent("Waitlist Start", { variant })
+          }}
           onChange={(e) => {
             setEmail(e.target.value)
             if (status === "error") setStatus("idle")

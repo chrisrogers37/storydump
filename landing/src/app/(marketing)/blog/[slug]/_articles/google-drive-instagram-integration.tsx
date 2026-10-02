@@ -1,4 +1,6 @@
 import Link from "next/link"
+import { TrackedLink } from "@/components/analytics/tracked-link"
+import { blogCta } from "./shared"
 
 export function GoogleDriveInstagramIntegration() {
   return (
@@ -88,7 +90,9 @@ export function GoogleDriveInstagramIntegration() {
         </Link>
         . It is in a free beta and
         invites people in small batches;{" "}
-        <Link href="/#waitlist">join the waitlist</Link> to get a spot.
+        <TrackedLink href="/#waitlist" track={blogCta}>
+          join the waitlist
+        </TrackedLink> to get a spot.
       </p>
     </>
   )

@@ -5,6 +5,7 @@ import { FinalCTA } from "@/components/landing/final-cta"
 import { HeroSignup } from "@/components/landing/hero-signup"
 import { TextLink } from "@/components/landing/text-link"
 import { JsonLd } from "@/components/seo/json-ld"
+import type { Tracked } from "@/lib/analytics"
 import { breadcrumbList } from "@/lib/json-ld"
 import { noindexMetadata, pageMetadata } from "@/lib/seo"
 import { getUseCase, pathForUseCase, useCases, type UseCaseSlug } from "@/lib/use-cases"
@@ -22,8 +23,8 @@ const content: Record<UseCaseSlug, UseCaseContent> = {
 }
 
 // The same four steps on every page; each links to the guide that covers it.
-const setupSteps = [
-  { text: "Join the waitlist. We’re inviting people in small batches, and we’ll email you when your spot is ready.", href: "#waitlist", link: "Join the waitlist" },
+const setupSteps: { text: string; href: string; link: string; track?: Tracked }[] = [
+  { text: "Join the waitlist. We’re inviting people in small batches, and we’ll email you when your spot is ready.", href: "#waitlist", link: "Join the waitlist", track: { event: "CTA Click", props: { location: "use_case" } } },
   { text: "Make sure your Instagram account is a professional account (Business or Creator).", href: "/setup/instagram", link: "Instagram account guide" },
   { text: "Put your photos and videos in Google Drive, one folder for each kind of Story.", href: "/setup/media-organize", link: "Folder guide" },
   { text: "Once you’re in, connect Instagram with its own login and Google Drive read-only, pick your folders, and set Stories a day, hours and time zone. Linking a Telegram group is optional.", href: "/setup", link: "The full setup guide" },
@@ -92,7 +93,9 @@ export default async function UseCasePage({ params }: { params: Params }) {
                 </span>
                 <p className="pt-1 leading-relaxed text-ink/80">
                   {step.text}{" "}
-                  <TextLink href={step.href}>{step.link}</TextLink>
+                  <TextLink href={step.href} track={step.track}>
+                    {step.link}
+                  </TextLink>
                 </p>
               </li>
             ))}

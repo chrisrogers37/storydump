@@ -1,4 +1,5 @@
 import Link from "next/link"
+import { TrackedLink } from "@/components/analytics/tracked-link"
 import { siteConfig } from "@/config/site"
 import { BrandMark } from "./brand-mark"
 import { WaitlistLink } from "./waitlist-link"
@@ -34,12 +35,13 @@ export function Header() {
           >
             Blog
           </Link>
-          <Link
+          <TrackedLink
             href="/login"
+            track={{ event: "Sign In Click", props: { location: "header" } }}
             className="whitespace-nowrap py-2.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
           >
             Sign in
-          </Link>
+          </TrackedLink>
           <WaitlistLink
             className="whitespace-nowrap rounded-full bg-ink px-3 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-ink/85 sm:px-4 sm:text-sm"
           >

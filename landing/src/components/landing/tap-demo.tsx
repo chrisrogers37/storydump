@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { DEMO_SLOT } from "@/components/landing/card-labels"
+import { trackEvent, type DemoAction } from "@/lib/analytics"
 import { ApprovalCard, type CardAction } from "@/components/landing/approval-card"
 import { StoryArt, artLabels, type ArtKind } from "@/components/landing/story-art"
 import { cn } from "@/lib/utils"
@@ -10,7 +11,8 @@ import { cn } from "@/lib/utils"
  * The hero's demo: today's card in a team's Telegram group, and the visitor
  * taps it. Post now walks through what really happens (posting, the Story,
  * the settled card); the other buttons settle the card the way the product
- * does. It runs entirely in the browser and sends nothing.
+ * does. It runs entirely in the browser; the only thing it sends is a
+ * "Demo Tap" event naming the button.
  */
 
 const SLOT = DEMO_SLOT
@@ -18,6 +20,15 @@ const PHOTOS: ArtKind[] = ["bottle", "plant", "stock", "sunset", "quote", "mug"]
 
 type Stage = "waiting" | "posting" | "story" | "settled"
 type Settling = Exclude<CardAction, "open">
+
+/** The "Demo Tap" event's name for each card button. */
+const TAP_ACTION: Record<CardAction, DemoAction> = {
+  post: "post_now",
+  posted: "posted_myself",
+  skip: "skip",
+  reject: "reject",
+  open: "open_instagram",
+}
 
 /** What each tap settles the card as, and what the narration says then. */
 const SETTLED: Record<Settling, { outcome: string; said: string }> = {
@@ -90,6 +101,10 @@ export function TapDemo() {
   }, [])
 
   function act(action: CardAction) {
+    // Open Instagram leaves the card live, so count it once per card.
+    if (action !== "open" || tapped !== "open") {
+      trackEvent("Demo Tap", { action: TAP_ACTION[action] })
+    }
     setTapped(action)
     if (action === "open") return
     moveFocus.current = true
@@ -105,6 +120,7 @@ export function TapDemo() {
   }
 
   function another() {
+    trackEvent("Demo Tap", { action: "another" })
     clearAll(timers.current)
     moveFocus.current = true
     setPhoto((p) => (p + 1) % PHOTOS.length)

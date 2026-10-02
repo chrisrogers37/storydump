@@ -1,15 +1,18 @@
-import Link from "next/link"
 import { Fragment } from "react"
+import { MaybeTrackedLink } from "@/components/analytics/maybe-tracked-link"
 import { siteConfig } from "@/config/site"
+import type { Tracked } from "@/lib/analytics"
 import { pathForUseCase, useCases } from "@/lib/use-cases"
 
 const linkClass = "underline underline-offset-4 hover:text-foreground"
 
-const siteLinks = [
+type FooterLink = { href: string; label: string; track?: Tracked }
+
+const siteLinks: FooterLink[] = [
   { href: "/setup", label: "Setup guide" },
   { href: "/blog", label: "Blog" },
   { href: `mailto:${siteConfig.contact.email}`, label: "Contact" },
-  { href: "/login", label: "Sign in" },
+  { href: "/login", label: "Sign in", track: { event: "Sign In Click", props: { location: "footer" } } },
   { href: "/privacy", label: "Privacy" },
   { href: "/terms", label: "Terms" },
 ]
@@ -18,13 +21,13 @@ const siteLinks = [
  * Links joined by middots, the way the footer has always read. Each link
  * keeps its words together; the separator sits outside so a row can wrap.
  */
-function Dotted({ links }: { links: { href: string; label: string }[] }) {
-  return links.map(({ href, label }, i) => (
+function Dotted({ links }: { links: FooterLink[] }) {
+  return links.map(({ href, label, track }, i) => (
     <Fragment key={href}>
       {i > 0 && " · "}
-      <Link href={href} className={`whitespace-nowrap ${linkClass}`}>
+      <MaybeTrackedLink href={href} track={track} className={`whitespace-nowrap ${linkClass}`}>
         {label}
-      </Link>
+      </MaybeTrackedLink>
     </Fragment>
   ))
 }

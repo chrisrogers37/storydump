@@ -1,5 +1,6 @@
-import Link from "next/link"
 import type { ReactNode } from "react"
+import { MaybeTrackedLink } from "@/components/analytics/maybe-tracked-link"
+import type { Tracked } from "@/lib/analytics"
 import { cn } from "@/lib/utils"
 
 /** The marketing pages' inline link: ink, underlined, orange on hover. */
@@ -9,15 +10,18 @@ export const linkClass =
 export function TextLink({
   href,
   className,
+  track,
   children,
 }: {
   href: string
   className?: string
+  /** An event to send on click. */
+  track?: Tracked
   children: ReactNode
 }) {
   return (
-    <Link href={href} className={cn(linkClass, className)}>
+    <MaybeTrackedLink href={href} className={cn(linkClass, className)} track={track}>
       {children}
-    </Link>
+    </MaybeTrackedLink>
   )
 }

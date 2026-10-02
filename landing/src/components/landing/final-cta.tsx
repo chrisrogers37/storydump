@@ -27,7 +27,9 @@ export function FinalCTA({
         </div>
         <p className="mt-6 text-sm text-ink">
           Already using Storydump?{" "}
-          <TextLink href="/login">Sign in</TextLink>
+          <TextLink href="/login" track={{ event: "Sign In Click", props: { location: "closing" } }}>
+            Sign in
+          </TextLink>
         </p>
       </div>
     </section>

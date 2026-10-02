@@ -11,7 +11,9 @@ export function HeroSignup() {
       <p className="mt-4 text-sm text-ink/70">
         Free during beta · No credit card required{" "}
         <span className="whitespace-nowrap">
-          · Already using Storydump? <TextLink href="/login">Sign in</TextLink>
+          · Already using Storydump? <TextLink href="/login" track={{ event: "Sign In Click", props: { location: "hero" } }}>
+            Sign in
+          </TextLink>
         </span>
       </p>
     </>

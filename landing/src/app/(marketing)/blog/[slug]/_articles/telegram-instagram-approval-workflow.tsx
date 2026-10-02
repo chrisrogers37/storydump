@@ -1,4 +1,6 @@
 import Link from "next/link"
+import { TrackedLink } from "@/components/analytics/tracked-link"
+import { blogCta } from "./shared"
 
 export function TelegramInstagramApproval() {
   return (
@@ -96,7 +98,9 @@ export function TelegramInstagramApproval() {
       </p>
       <p>
         <Link href="/">Storydump</Link> is in a free beta and invites people
-        in small batches; <Link href="/#waitlist">join the waitlist</Link> to
+        in small batches; <TrackedLink href="/#waitlist" track={blogCta}>
+          join the waitlist
+        </TrackedLink> to
         get a spot.
       </p>
     </>

@@ -5,10 +5,12 @@ import { ArrowLeft } from "lucide-react"
 import { posts, getPost } from "@/lib/blog"
 import { noindexMetadata, pageMetadata } from "@/lib/seo"
 import { blogPosting, breadcrumbList } from "@/lib/json-ld"
+import { TrackedLink } from "@/components/analytics/tracked-link"
 import { JsonLd } from "@/components/seo/json-ld"
 import { AutomateInstagramStories } from "./_articles/automate-instagram-stories"
 import { GoogleDriveInstagramIntegration } from "./_articles/google-drive-instagram-integration"
 import { TelegramInstagramApproval } from "./_articles/telegram-instagram-approval-workflow"
+import { blogCta } from "./_articles/shared"
 
 const articleComponents: Record<string, React.ComponentType> = {
   "automate-instagram-stories": AutomateInstagramStories,
@@ -101,12 +103,13 @@ export default async function BlogPost({ params }: { params: Params }) {
           brings it to your team on time, in Telegram or on the web. One tap
           posts it. Free during beta.
         </p>
-        <Link
+        <TrackedLink
           href="/#waitlist"
+          track={blogCta}
           className="mt-4 inline-block rounded-md bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
           Join the waitlist
-        </Link>
+        </TrackedLink>
       </footer>
     </article>
   )
