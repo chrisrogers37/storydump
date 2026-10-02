@@ -31,20 +31,20 @@ describe("POST /api/waitlist", () => {
     expect(await res.json()).toMatchObject({ status: "success", message: "You're on the list!" })
   })
 
-  it("answers a returning email as already on the list when Drizzle wraps the unique violation", async () => {
+  it("answers a returning email exactly like a new one when Drizzle wraps the unique violation", async () => {
     const driverError = Object.assign(new Error("duplicate key value"), { code: "23505" })
     insertValues.mockRejectedValue(
       new DrizzleQueryError("insert into waitlist_signups ...", [], driverError)
     )
     const res = await POST(signup("again@example.com"))
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ status: "success", alreadyRegistered: true })
+    expect(await res.json()).toEqual({ status: "success", message: "You're on the list!" })
   })
 
   it("still reads an unwrapped unique violation", async () => {
     insertValues.mockRejectedValue(Object.assign(new Error("duplicate"), { code: "23505" }))
     const res = await POST(signup("again@example.com"))
-    expect(await res.json()).toMatchObject({ alreadyRegistered: true })
+    expect(await res.json()).toEqual({ status: "success", message: "You're on the list!" })
   })
 
   it("logs any other failure and answers 500", async () => {

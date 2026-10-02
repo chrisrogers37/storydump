@@ -27,6 +27,8 @@ function isUniqueViolation(err: unknown): boolean {
   return false
 }
 
+const JOINED = { status: "success", message: "You're on the list!" }
+
 export async function POST(req: NextRequest) {
   const refused = refuseCrossSite(req)
   if (refused) return refused
@@ -54,24 +56,17 @@ export async function POST(req: NextRequest) {
     try {
       await getDb().insert(waitlistSignups).values({ email, notes })
     } catch (err: unknown) {
-      // Unique constraint violation = already registered
-      if (isUniqueViolation(err)) {
-        return NextResponse.json({
-          status: "success",
-          message: "You're already on the list!",
-          alreadyRegistered: true,
-        })
-      }
-      throw err
+      // A unique violation means the email is already on the list. It gets
+      // the same answer as a new signup, so the form cannot be used to test
+      // whether an address is on the list; only the admin ping is skipped.
+      if (!isUniqueViolation(err)) throw err
+      return NextResponse.json(JOINED)
     }
 
     // Fire-and-forget Telegram notification
     notifyAdmin(email).catch(console.error)
 
-    return NextResponse.json({
-      status: "success",
-      message: "You're on the list!",
-    })
+    return NextResponse.json(JOINED)
   } catch (err) {
     // The visitor sees one generic sentence; the cause (an unset
     // DATABASE_URL, a missing table) goes to the server log, where the
