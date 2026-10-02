@@ -15,6 +15,8 @@ links: []
 > rulings; until then this page is their home.
 >
 > **2026-09-25:** ironclad cycle 1 on the plan reopened Junction 2's mechanism — the freeze — as the plan's fork F12, not its pick or its intent. Junction 1's pick stands; cycle 1 found the plan's drop-folder lookup unscoped by workspace, a defect in the plan's steps and not in this decision, and the plan now scopes it. **2026-09-28:** the owner ruled F12 (b): a reserved share inside `weights()` replaces the freeze, and the pick and M1's intent, an explicit 20%, stand.
+>
+> **2026-10-01:** a top-down review ([`review-2026-10-01.md`](2026-09-20-device-native-inbound/review-2026-10-01.md)) records four corrections; the picks stand. The facts below list the port's `probe`, which #1343 deleted on 2026-09-21: the Drive adapter implements `list_changes` and `fetch_bytes` only. Summary item 2's shrinking of the explicit shares is superseded by F12 (b): nothing is written at admit. The side finding was resolved by #1497 on 2026-09-30, which classes `drive.readonly` as Restricted. And Junction 1's timing argument — a second scope joining the first verification submission — is reopened as the plan's F13, because the submission's demo must show each requested scope in use.
 
 ## Summary
 
