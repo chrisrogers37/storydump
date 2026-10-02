@@ -27,6 +27,21 @@ describe("passThrough relays the API's own refusal", () => {
     expect(res.status).toBe(422);
     expect(await res.json()).toEqual({ error: "not_connected" });
   });
+
+  it("relays a refusal's facts beside its reason when the result carries them", async () => {
+    // Only a command refusal can carry facts, already through the allow-list
+    // (`refusal-facts.ts`); this relays them as it relays the reason.
+    const res = passThrough({
+      error: "locked",
+      status: 409,
+      facts: { overridable: true, in_the_way: ["recent"] },
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "locked",
+      facts: { overridable: true, in_the_way: ["recent"] },
+    });
+  });
 });
 
 const GUARDS = path.resolve(
