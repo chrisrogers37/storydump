@@ -809,8 +809,8 @@ class TestDriveCallback:
             log.append(("gate", workspace_id, user_id, minimum_role))
             return "owner"
 
-        async def store_credential(session, *, workspace_id, grant):
-            log.append(("store", workspace_id, grant.access_token))
+        async def store_credential(session, *, workspace_id, grant, granted_by):
+            log.append(("store", workspace_id, grant.access_token, granted_by))
             return "cred-1"
 
         async def rearm(session, *, workspace_id, source_id=None):
@@ -836,7 +836,9 @@ class TestDriveCallback:
         assert writes == [
             ("uow", WS, USER, "web"),
             ("gate", WS, USER, "admin"),
-            ("store", WS, "ya29.access"),
+            # 091: the state's user — the returning browser, checked — is
+            # the granter, the one person who may browse this Drive.
+            ("store", WS, "ya29.access", USER),
             ("rearm", WS, None),
         ]
 

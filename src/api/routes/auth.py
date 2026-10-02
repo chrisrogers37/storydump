@@ -399,8 +399,14 @@ async def google_drive_callback(
                 str(row["user_id"]),
                 minimum_role="admin",
             )
+            # The state's user is the granter (091, `07` §34): the presenter
+            # check above proved the returning browser is theirs, so the
+            # Google account just consented is theirs, and only they browse it.
             await google_drive_oauth.store_credential(
-                session, workspace_id=row["workspace_id"], grant=grant
+                session,
+                workspace_id=row["workspace_id"],
+                grant=grant,
+                granted_by=str(row["user_id"]),
             )
             # F4 (a), in THIS transaction — `store_credential`'s contract, now
             # workspace-wide: every gdrive folder becomes eligible again beside

@@ -195,6 +195,9 @@ class OAuthCredential(TargetBase):
     expires_at = Column(TZ, nullable=True)
     next_refresh_at = Column(TZ, nullable=True)
     state = Column(Text, nullable=False, server_default=text("'active'"))
+    #: Whose Google account a `gdrive` grant is (091): only they browse it.
+    #: NULL for `ig_login` and for every Drive grant made before 091.
+    granted_by_user_id = fk("users.id", "SET NULL", nullable=True)
     created_at, updated_at = timestamps()
 
     __table_args__ = (

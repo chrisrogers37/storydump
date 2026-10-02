@@ -241,6 +241,9 @@ _PROVISIONING_STATUS = {
     # The connected folders changed between the pick's check and its write
     # (two admins at once): a conflict to retry, not a typo.
     "sources_changed": 409,
+    # An admin who is not the person who connected Drive, at the folder
+    # browser or the pick (091): a floor, like `insufficient_role`.
+    "drive_not_yours": 403,
 }
 
 #: `InvitationRefused.reason` → status, total over `invitations.REASONS`.

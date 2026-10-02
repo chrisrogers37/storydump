@@ -347,6 +347,13 @@
       "label": "§33 a removal sticks, and a removed admin's tokens go with them (090, readiness review 2026-10-02) — workspace_member_removals (tenant plane, written only by svc_membership), service_tokens.created_by_user_id, fn_group_member_seen refusing a removed non-member, and fn_member_remove recording the removal",
       "doc": "07-security-model.md",
       "ordinal": 31
+    },
+    {
+      "sha256": "89557ca2c349312a68cbc1d0b62930a974a0987b58b0695a99f2f3b06bc5654b",
+      "class": "normative",
+      "label": "§34 the Drive grant records who granted it (091, readiness review 2026-10-02) — oauth_credentials.granted_by_user_id, written by the Drive connect callback, so only the granter browses the Drive and picks folders from it",
+      "doc": "07-security-model.md",
+      "ordinal": 32
     }
   ],
   "policy_expansion": {

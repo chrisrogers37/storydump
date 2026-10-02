@@ -407,6 +407,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # Telegram join door honours, and the service-token minter the
             # removal revokes by (readiness review, 2026-10-02).
             "090_member_removal_sticks.sql",
+            # 091 appends §34, the Drive grant records who granted it, so
+            # only they browse it (readiness review, 2026-10-02).
+            "091_drive_grant_owner.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
