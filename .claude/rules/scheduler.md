@@ -111,8 +111,11 @@ is eligible the slot lapses and the workspace is told at most once per 24 h
   wait) moves the deadline with `run_at`, so the job keeps its slack; a
   retryable failure keeps its deadline. A new job kind must be classified in
   that pin.
-- Per-workspace lane caps (interactive 5, bulk 3) are the claim's, so one
-  workspace cannot own a lane.
+- Per-workspace lane caps (interactive 5, bulk 3) are the claim's, and they
+  bind only across several replicas: `fn_claim_job` counts the deployment's
+  leases, and one process runs fewer tasks per lane (3 interactive, 2 bulk)
+  than the caps. So on a single worker one workspace can hold a whole lane
+  (`work_loop.py:70-79`; #1428 pins the relation).
 - An executor that waits on a provider is marked `own_transactions`
   (`work_loop.py:186`): it runs with no job session open and finalizes in a
   short transaction afterwards.

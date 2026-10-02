@@ -2,11 +2,19 @@
 
 Welcome to the Storydump documentation hub. All project documentation is organized here by purpose.
 
-**Last Updated**: 2026-09-20
+**Last Updated**: 2026-10-02
 **Current Version**: 1.6.0 (`src/__init__.py`, and the CHANGELOG's last release heading, 2026-02-09); everything since — the multi-tenant rebuild and the legacy tear-out included — is under `[Unreleased]`
 **Current program**: the [consolidated design plan](planning/2026-08-02-consolidated-design-plan/README.md) — Phases 0, F and L built; the legacy tier retired (the tear-out, #1216), with M.3's last two steps run in the owner's window on 2026-09-19 as the gated migrations 079 and 080; **Phase X.3 (multi-workspace UX) in progress**; Phase S partly built. Per-increment scoreboard in that README's *Live status*.
 **One tier**: the system these pages describe is the tier the plan calls *target* (`src/services/target/`). The legacy tier was retired in the tear-out (#1216, September 2026); its data survives as the `archive.*_pre_cutover_20260917` snapshots. Pages under `archive/`, `planning/` and `updates/` are history and keep the legacy names; `guides/` and `operations/` are live, and `tests/test_agent_docs.py` fails when one of them names a legacy-only table, a deleted module path or a retired variable.
 **Deployment**: Railway (worker + API) + Neon PostgreSQL; landing site and dashboard on Vercel
+
+## The public move (2026-10-01)
+
+The repository was re-published as public on 2026-10-01 with a rewritten history, so a hash or a number written before then may not resolve here.
+
+- **A former pull request** is now an issue with the same number that says so. The pull request itself, with its comments and reviews, stays in the private archive. Issues kept their numbers, and pull requests from #1502 on are this repository's own.
+- **The old hashes the plans cite**, old → new: `29acea2e` → `728b087d`, `ea788875` → `7db9ecfb`, `f5088231` → `6cc5b9a3`, `7561f7f7` → `70c05d1c`, `bbbb6f52` → `53d1b6f1`, `10b03ed2` → `f253b294`. The device-native plan's branch commits are squashed into its merge, `9b8a52d3`.
+- Run logs keep the hashes they were written with, as the record.
 
 ## Documentation Structure
 
