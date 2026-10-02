@@ -38,6 +38,10 @@
 -- The CREATE bracket is 062's, for the reason it gave: ALTER FUNCTION … OWNER TO needs the incoming
 -- owner to hold CREATE on the schema, and the steady state never leaves it there.
 --
+-- SEARCH PATH: pinned to pg_catalog, public, pg_temp, with pg_temp LAST. Unlisted, pg_temp is
+-- searched first, so a temporary object could shadow a name the door resolves while it runs as
+-- svc_maintenance.
+--
 -- DEPLOY ORDER: nothing calls the door. The predeploy applies this file and the services read
 -- nothing new.
 --
@@ -73,7 +77,7 @@ GRANT CREATE ON SCHEMA public TO svc_maintenance;
 
 CREATE FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval DEFAULT interval '72 hours')
 RETURNS TABLE (o_ordinal int, o_stage text, o_reached bigint, o_stalled bigint)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   WITH owned_ws AS (
     SELECT m.user_id, w.id AS workspace_id, w.created_at
       FROM workspace_members m
