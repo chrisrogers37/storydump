@@ -7,6 +7,7 @@ import {
   type AccountsResponse,
   type SourcesResponse,
   type StatsResponse,
+  type WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
 import type { CategoryMixResponse } from "@/lib/category-mix";
 import { deriveConditions } from "@/lib/conditions";
@@ -35,7 +36,7 @@ export default async function DashboardPage() {
   // bounded list, which is what made the old figures wrong on any workspace
   // past the page size. History is the intent ledger filtered to its terminal
   // states, which is one call rather than a separate endpoint.
-  const [statsResult, historyResult, accountsResult, sourcesResult, mixResult] =
+  const [statsResult, historyResult, accountsResult, sourcesResult, mixResult, configResult] =
     await Promise.all([
       workspaceFetch<StatsResponse>("stats", workspaceId),
       workspaceFetch<IntentsResponse>(
@@ -49,6 +50,8 @@ export default async function DashboardPage() {
       workspaceFetch<SourcesResponse>("sources", workspaceId),
       // The mix card's plan per connected folder; what each posted is `stats`.
       workspaceFetch<CategoryMixResponse>("category-mix", workspaceId),
+      // The workspace's zone, which Recent Activity's times are read in.
+      workspaceFetch<WorkspaceConfig>("", workspaceId),
     ]);
 
   // EVERY dependency, not just the one that fills the most pixels. Two
@@ -60,7 +63,8 @@ export default async function DashboardPage() {
     !historyResult.ok ||
     !accountsResult.ok ||
     !sourcesResult.ok ||
-    !mixResult.ok
+    !mixResult.ok ||
+    !configResult.ok
   ) {
     return <RouterUnavailable what="Your dashboard" />;
   }
@@ -92,7 +96,10 @@ export default async function DashboardPage() {
         <PostingMixCard mix={mix} />
       </div>
 
-      <RecentActivity items={historyResult.data.intents ?? []} />
+      <RecentActivity
+        items={historyResult.data.intents ?? []}
+        tz={configResult.data.tz ?? "UTC"}
+      />
     </div>
   );
 }

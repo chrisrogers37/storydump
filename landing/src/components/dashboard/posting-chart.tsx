@@ -13,6 +13,7 @@ import { BarChart3 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/dashboard/empty-state";
 import type { StatsResponse } from "@/lib/dashboard-payloads";
+import { formatCalendarDate } from "@/lib/zoned-dates";
 
 /**
  * One bar per day, from the cap ledger (#1044 `stats.posts_by_day`).
@@ -29,12 +30,11 @@ import type { StatsResponse } from "@/lib/dashboard-payloads";
 type DayCount = StatsResponse["posts_by_day"][number];
 
 export function PostingChart({ data }: { data: DayCount[] }) {
+  // `local_date` already names the workspace's day; label it as that day,
+  // never as an instant read on the viewer's clock.
   const formatted = data.map((d) => ({
     ...d,
-    label: new Date(d.local_date).toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-    }),
+    label: formatCalendarDate(d.local_date, { month: "short", day: "numeric" }),
   }));
 
   return (
