@@ -46,19 +46,20 @@ export default function MediaOrganize() {
           </pre>
         </StepCard>
 
-        <StepCard number={2} title="Image requirements">
+        <StepCard number={2} title="Media requirements">
           <ul className="list-inside list-disc space-y-1">
             <li>
               <span className="font-medium text-foreground">Aspect ratio:</span>{" "}
-              9:16 (1080x1920 ideal)
+              9:16 (1080x1920 ideal). Other shapes are framed to fit, never
+              cropped.
             </li>
             <li>
-              <span className="font-medium text-foreground">Formats:</span> JPG,
-              PNG, GIF
+              <span className="font-medium text-foreground">Formats:</span>{" "}
+              images and videos
             </li>
             <li>
               <span className="font-medium text-foreground">Max size:</span>{" "}
-              100MB per file
+              8 MB per image, 40 MB per video
             </li>
           </ul>
           <Callout type="tip" className="mt-3">

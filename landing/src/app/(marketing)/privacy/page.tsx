@@ -3,7 +3,7 @@ import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
-const LAST_UPDATED = "September 30, 2026"
+const LAST_UPDATED = "October 1, 2026"
 
 export const metadata: Metadata = pageMetadata({
   title: "Privacy Policy",
@@ -69,6 +69,9 @@ export default function PrivacyPolicy() {
               your verified email address, and your display name. If you link a
               Telegram account to Storydump: your Telegram user ID and your
               Telegram username, or your first name if you have no username.
+              When you start the bot in a chat, we also store that chat&apos;s
+              Telegram ID and whether it is a direct chat or a group, so we can
+              deliver to it.
             </li>
             <li>
               <span className="font-medium text-foreground">
@@ -77,9 +80,15 @@ export default function PrivacyPolicy() {
               — only when you explicitly grant the Google Drive scope during
               setup. We read file metadata (id, name, MIME type, size, parent
               folder) and the file bytes needed to render and post a Story. We
-              do not store the original Drive bytes long-term; we store
-              references (Drive file IDs) plus thumbnails and the rendered
-              variants needed to post.
+              do not keep your files: we store a reference to each (its Drive
+              file ID, name, type, folder and checksum). To post a Story, we
+              upload a copy of the file to our media processor, Cloudinary,
+              which frames it for Instagram. We delete the copy as soon as the
+              Story posts or is cancelled, and a cleanup that runs every 6
+              hours deletes any copy older than 48 hours. If you link the
+              Storydump Telegram bot, each approval card it sends to your chat
+              carries a copy of the Story&apos;s photo or video, which stays in
+              the chat like any other message.
             </li>
             <li>
               <span className="font-medium text-foreground">
@@ -241,7 +250,10 @@ export default function PrivacyPolicy() {
                 </tr>
                 <tr className="border-b">
                   <td className="py-2 pr-4">Telegram</td>
-                  <td className="py-2 pr-4">Chat &amp; bot platform</td>
+                  <td className="py-2 pr-4">
+                    Chat &amp; bot platform; with the bot linked, holding a copy
+                    of each approval card&apos;s photo or video in your chat
+                  </td>
                   <td className="py-2">Global</td>
                 </tr>
                 <tr className="border-b">
@@ -252,6 +264,14 @@ export default function PrivacyPolicy() {
                 <tr className="border-b">
                   <td className="py-2 pr-4">Google (Drive API)</td>
                   <td className="py-2 pr-4">Media sync from Drive</td>
+                  <td className="py-2">Global</td>
+                </tr>
+                <tr className="border-b">
+                  <td className="py-2 pr-4">Cloudinary</td>
+                  <td className="py-2 pr-4">
+                    Holding a copy of a Story&apos;s file and framing it for
+                    Instagram
+                  </td>
                   <td className="py-2">Global</td>
                 </tr>
                 <tr>
@@ -388,6 +408,14 @@ export default function PrivacyPolicy() {
                 Queue &amp; media references
               </span>{" "}
               — until you delete them.
+            </li>
+            <li>
+              <span className="font-medium text-foreground">
+                Copies for posting
+              </span>{" "}
+              — deleted when the Story posts or is cancelled; any left over are
+              deleted once they are 48 hours old, by a cleanup that runs every 6
+              hours.
             </li>
             <li>
               <span className="font-medium text-foreground">Backups</span> — 30
