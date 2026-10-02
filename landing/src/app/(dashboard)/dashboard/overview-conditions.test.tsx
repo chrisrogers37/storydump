@@ -21,7 +21,7 @@ import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
 import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
-import type { Condition } from "@/lib/conditions";
+import type { Condition, SetupStep } from "@/lib/conditions";
 import type { FolderMix } from "@/lib/dashboard-payloads";
 
 /** Depth-first walk of a returned tree, children flattened. */
@@ -109,6 +109,31 @@ describe("the overview's condition panel", () => {
     const paths = workspaceFetch.mock.calls.map(([path]) => path);
     expect(paths).toContain("accounts");
     expect(paths).toContain("sources");
+  });
+
+  it("hands the panel the first missing setup step from the same reads", async () => {
+    answer({ accounts: ok({ accounts: [] }), stats: ok({ ...STATS, intents_by_state: {} }) });
+    const panel = [...walk(await DashboardPage())].find(
+      (el) => el.type === ConditionsPanel,
+    );
+    const { conditions, setupStep } = panel!.props as {
+      conditions: Condition[];
+      setupStep: SetupStep | null;
+    };
+    expect(conditions).toEqual([]);
+    expect(setupStep?.number).toBe(1);
+  });
+
+  it("a set-up workspace hands it no setup step", async () => {
+    answer({
+      sources: ok({
+        sources: [{ id: "s1", provider: "gdrive", state: "active", folder_ref: "f1", folder_name: "memes", removed: false }],
+      }),
+    });
+    const panel = [...walk(await DashboardPage())].find(
+      (el) => el.type === ConditionsPanel,
+    );
+    expect((panel!.props as { setupStep: SetupStep | null }).setupStep).toBeNull();
   });
 
   it.each<Read>(["accounts", "sources", "stats", "category-mix"])(

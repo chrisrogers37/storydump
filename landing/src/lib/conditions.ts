@@ -117,3 +117,51 @@ export function deriveConditions({
 
   return conditions;
 }
+
+/**
+ * The first setup step a workspace has not taken, for the overview to point
+ * at instead of an all-clear: a brand-new workspace has nothing that needs
+ * attention only because it has nothing at all, and "nothing needs your
+ * attention" would read as "you are done".
+ *
+ * Two steps, in the order the setup guide takes them: an Instagram account to
+ * post to (a destination exists only once one was connected), then a Drive
+ * folder to post from. A folder counts while it is CONNECTED — not removed,
+ * whatever its state; the API's own definition (`CONNECTED_SQL`).
+ */
+export type SetupStep = {
+  /** 1-based, of `SETUP_STEP_COUNT`. */
+  number: number;
+  title: string;
+  detail: string;
+  href: string;
+  action: string;
+};
+
+export const SETUP_STEP_COUNT = 2;
+
+export function nextSetupStep({
+  accounts,
+  sources,
+}: {
+  accounts: unknown[];
+  sources: Pick<SourceRow, "removed">[];
+}): SetupStep | null {
+  if (accounts.length === 0) {
+    return {
+      number: 1,
+      title: "Connect your Instagram account to get started",
+      detail: "That's the account your Stories will be posted to.",
+      ...RESOLVED_IN.accounts,
+    };
+  }
+  if (!sources.some((s) => !s.removed)) {
+    return {
+      number: 2,
+      title: "Connect Google Drive and pick a folder",
+      detail: "Storydump picks each Story from the photos and videos in the folders you choose.",
+      ...RESOLVED_IN.integrations,
+    };
+  }
+  return null;
+}

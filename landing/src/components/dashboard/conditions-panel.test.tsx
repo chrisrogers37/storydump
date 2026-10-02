@@ -9,7 +9,11 @@ import { describe, expect, it } from "vitest";
 import Link from "next/link";
 import type { ReactElement, ReactNode } from "react";
 import { ConditionsPanel } from "./conditions-panel";
-import { ALL_CLEAR_DETAIL, type Condition } from "@/lib/conditions";
+import {
+  ALL_CLEAR_DETAIL,
+  nextSetupStep,
+  type Condition,
+} from "@/lib/conditions";
 
 /** Depth-first walk of a returned tree, children flattened. */
 function* walk(node: ReactNode): Generator<ReactElement> {
@@ -72,5 +76,47 @@ describe("ConditionsPanel", () => {
     const text = textOf(ConditionsPanel({ conditions: CONDITIONS.slice(0, 1) }));
     expect(text).toContain("Needs your attention");
     expect(text).not.toContain("Nothing needs your attention");
+  });
+});
+
+describe("ConditionsPanel — a workspace that is not set up yet", () => {
+  const NO_INSTAGRAM = nextSetupStep({ accounts: [], sources: [] })!;
+  const NO_FOLDER = nextSetupStep({ accounts: [{}], sources: [] })!;
+
+  it("points at connecting Instagram first, never the all-clear", () => {
+    const tree = ConditionsPanel({ conditions: [], setupStep: NO_INSTAGRAM });
+    const text = textOf(tree);
+    expect(text).toContain("Connect your Instagram account to get started");
+    expect(text).toContain("step 1 of 2");
+    expect(text).not.toContain("Nothing needs your attention");
+    const link = [...walk(tree)].find((el) => el.type === Link);
+    expect((link!.props as { href?: unknown }).href).toBe(
+      "/dashboard/settings?tab=accounts",
+    );
+  });
+
+  it("then at Google Drive and a folder", () => {
+    const tree = ConditionsPanel({ conditions: [], setupStep: NO_FOLDER });
+    const text = textOf(tree);
+    expect(text).toContain("Connect Google Drive and pick a folder");
+    expect(text).toContain("step 2 of 2");
+    expect(text).not.toContain("Nothing needs your attention");
+    const link = [...walk(tree)].find((el) => el.type === Link);
+    expect((link!.props as { href?: unknown }).href).toBe(
+      "/dashboard/settings?tab=integrations",
+    );
+  });
+
+  it("a condition still wins over a setup step", () => {
+    const text = textOf(
+      ConditionsPanel({ conditions: CONDITIONS, setupStep: NO_FOLDER }),
+    );
+    expect(text).toContain("Needs your attention");
+    expect(text).not.toContain("Connect Google Drive");
+  });
+
+  it("a set-up workspace keeps the all-clear", () => {
+    const text = textOf(ConditionsPanel({ conditions: [], setupStep: null }));
+    expect(text).toContain("Nothing needs your attention");
   });
 });

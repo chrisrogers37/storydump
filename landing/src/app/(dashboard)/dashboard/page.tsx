@@ -9,7 +9,7 @@ import {
   type StatsResponse,
 } from "@/lib/dashboard-payloads";
 import type { CategoryMixResponse } from "@/lib/category-mix";
-import { deriveConditions } from "@/lib/conditions";
+import { deriveConditions, nextSetupStep } from "@/lib/conditions";
 import type { IntentsResponse } from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
@@ -73,6 +73,10 @@ export default async function DashboardPage() {
     sources: sourcesResult.data.sources,
     intentsByState: stats.intents_by_state,
   });
+  const setupStep = nextSetupStep({
+    accounts: accountsResult.data.accounts,
+    sources: sourcesResult.data.sources,
+  });
 
   return (
     <div className="space-y-6">
@@ -83,7 +87,7 @@ export default async function DashboardPage() {
         </p>
       </div>
 
-      <ConditionsPanel conditions={conditions} />
+      <ConditionsPanel conditions={conditions} setupStep={setupStep} />
 
       <AnalyticsCards summary={summary} />
 
