@@ -1002,7 +1002,9 @@ class GoogleDriveAdapter:
             # a reconnect would not help it, and no token is re-minted for it.
             # The message is the fallback for a body without a reason.
             code = _reason_code(response)
-            if status == 403 and (code in _LIMIT_REASONS or _is_quota(detail)):
+            if status == 403 and (
+                code in _LIMIT_REASONS or (not code and _is_quota(detail))
+            ):
                 raise DriveRetryableError(f"drive quota/rate limited: {detail}")
             if status == 403 and code in _ITEM_REFUSAL_REASONS:
                 raise DriveSourceGone(
