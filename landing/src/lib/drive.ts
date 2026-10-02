@@ -145,22 +145,28 @@ export function driveConnectControl(
 /**
  * What a person should know BEFORE the browser leaves for Google.
  *
- * Until the Drive scope is verified (#333), Google puts its own "hasn't
- * verified this app" page in front of the consent screen, and the way on is
- * Advanced, then on to the app. The page is Google's, so nothing on it says
- * this is expected; said here, it is a step rather than an alarm.
+ * Until the Drive scope is verified (#333), Google may put its own "hasn't
+ * verified this app" page in front of the consent screen (an account added as
+ * a test user skips it, so the copy says "if"), and the way on is Advanced,
+ * then the link that page labels "Go to storydump (unsafe)": the consent
+ * screen's app name, as `documentation/operations/google-oauth-verification.md`
+ * records it. The page is Google's, so nothing on it says this is expected;
+ * said here, it is a step rather than an alarm. Once verification lands the
+ * sentence is false, and it goes.
  *
- * Wherever the grant is not live — before the first grant, and for an
- * expired or revoked one, since a reconnect goes back through Google's
- * consent. Not for a live grant: that person has been through it. "Read-only"
- * is the scope's own meaning: `drive.readonly`
+ * Shown wherever the card's main action leads to Google's consent: before the
+ * first grant, and for an expired or revoked one, which must reconnect to sync
+ * again. Not for a live grant: its Reconnect is an optional repair, the person
+ * has been through Google's page once already, and a permanent sentence on
+ * every connected workspace would cost more than it saves. "Read-only" is the
+ * scope's own meaning: `drive.readonly`
  * (`src/services/target/google_drive_oauth.py`).
  */
 export function driveConnectWarning(
   status: string | null | undefined,
 ): string | null {
   if (status === "active") return null;
-  return "Google will warn that it hasn't verified this app yet. To continue, choose Advanced, then go on to the app. Storydump asks for read-only access to your Drive.";
+  return "If Google says it hasn't verified this app, choose Advanced, then \"Go to storydump (unsafe)\". Storydump asks for read-only access to your Drive.";
 }
 
 /** The picker's second root — the folders shared TO the connected account. */

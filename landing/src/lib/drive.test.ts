@@ -95,13 +95,17 @@ describe("the workspace's Drive grant, said on screen", () => {
     ]) {
       expect(driveConnectWarning(status), String(status)).not.toBeNull();
     }
-    // A live grant has been through Google's page already.
+    // A live grant's Reconnect is an optional repair, and its person has been
+    // through Google's page once: the sentence is not shown on every
+    // connected workspace.
     expect(driveConnectWarning("active")).toBeNull();
   });
-  it("says what Google will show, the way past it, and what is asked for", () => {
+  it("says what Google may show, the way past it, and what is asked for", () => {
     const warning = driveConnectWarning("none") ?? "";
-    expect(warning).toMatch(/hasn't verified this app/);
+    // "If": an account added as a test user never sees Google's page.
+    expect(warning).toMatch(/^If Google says it hasn't verified this app/);
     expect(warning).toMatch(/Advanced/);
+    expect(warning).toContain('"Go to storydump (unsafe)"');
     expect(warning).toMatch(/read-only/);
   });
 });
