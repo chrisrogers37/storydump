@@ -2,7 +2,7 @@
  * The indexing rules, held together: canonicals, noindex, robots and the
  * sitemap must agree, or a search engine is told two things at once.
  *
- *   1. Every sitemap URL is a page that names itself as canonical. The
+ *   1. Every sitemap URL is a page that names itself as canonical and og:url. The
  *      marketing pages are imported and their metadata read, so this checks
  *      the value Next will render, not a string in the source.
  *   2. No page inherits "/" as its canonical: the root layout sets none, and
@@ -30,6 +30,7 @@ import sitemap from "@/app/sitemap"
 import { siteConfig } from "@/config/site"
 import { posts } from "@/lib/blog"
 import { blogPosting, breadcrumbList } from "@/lib/json-ld"
+import { homeSocial } from "@/lib/seo"
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const APP = path.join(SRC, "app")
@@ -92,6 +93,11 @@ describe("canonicals", () => {
   it.each(sitemapPaths)("%s names itself as canonical", async (urlPath) => {
     const metadata = await metadataFor(urlPath)
     expect(metadata.alternates?.canonical).toBe(urlPath)
+    expect(metadata.openGraph?.url).toBe(urlPath)
+  })
+
+  it("the default social card names no og:url for pages to inherit", () => {
+    expect(homeSocial.openGraph).not.toHaveProperty("url")
   })
 
   it("the root layout sets no canonical for pages to inherit", () => {

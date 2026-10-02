@@ -8,12 +8,14 @@ import { TrustRow } from "@/components/landing/trust-row"
 import { FAQ } from "@/components/landing/faq"
 import { FinalCTA } from "@/components/landing/final-cta"
 import { StructuredData } from "@/components/landing/structured-data"
+import { homeSocial } from "@/lib/seo"
 
 // The root layout's title, description and social card describe the home
-// page; this only names it as its own canonical. No other page may inherit
-// "/" (seo-contract.test.ts).
+// page; this names it as its own canonical and og:url. No other page may
+// inherit "/" (seo-contract.test.ts).
 export const metadata: Metadata = {
   alternates: { canonical: "/" },
+  openGraph: { ...homeSocial.openGraph, url: "/" },
 }
 
 export default function Home() {

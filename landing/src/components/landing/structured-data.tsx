@@ -1,6 +1,7 @@
 import { siteConfig } from "@/config/site"
 import { faqs } from "@/config/faqs"
 import { JsonLd } from "@/components/seo/json-ld"
+import { absoluteUrl } from "@/lib/seo"
 
 const softwareAppSchema = {
   "@context": "https://schema.org",
@@ -23,6 +24,7 @@ const organizationSchema = {
   "@type": "Organization",
   name: siteConfig.name,
   url: siteConfig.url,
+  logo: absoluteUrl("/icon-512.png"),
   contactPoint: {
     "@type": "ContactPoint",
     email: siteConfig.contact.email,

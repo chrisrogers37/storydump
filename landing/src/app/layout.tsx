@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import Script from "next/script"
 import { Geist, Geist_Mono } from "next/font/google"
 import { siteConfig } from "@/config/site"
+import { homeSocial } from "@/lib/seo"
 import "./globals.css"
 
 const plausibleDomain = process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN
@@ -38,28 +39,9 @@ export const metadata: Metadata = {
       "max-snippet": -1,
     },
   },
-  openGraph: {
-    title: siteConfig.name + " — Instagram Stories, on tap",
-    description: siteConfig.description,
-    url: siteConfig.url,
-    siteName: siteConfig.name,
-    type: "website",
-    locale: "en_US",
-    images: [
-      {
-        url: "/og-image.png",
-        width: 1200,
-        height: 630,
-        alt: siteConfig.name + " — Instagram Stories, on tap",
-      },
-    ],
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: siteConfig.name + " — Instagram Stories, on tap",
-    description: siteConfig.description,
-    images: ["/og-image.png"],
-  },
+  // The home page's card is every page's default; the home page adds its own
+  // og:url, so no other page claims to be the home page (seo-contract.test.ts).
+  ...homeSocial,
 }
 
 export default function RootLayout({
