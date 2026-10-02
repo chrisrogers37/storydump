@@ -60,6 +60,7 @@ import re
 import uuid
 from datetime import datetime
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy import text
 
@@ -1079,6 +1080,87 @@ async def reschedule_item(session, command: Command) -> CommandResult:
         tz=tz,
         local_at=local_at,
     )
+
+
+def _link_url(command: Command) -> Optional[str]:
+    """`link_url`: an `https://` address of at most `LINK_URL_MAX` characters
+    with no space, control character, user name or password in it, or `null`
+    to clear the link.
+    It reaches a card as a line of text and the web as an anchor, so only
+    https is taken; a missing key is refused, never read as a clear."""
+    if "link_url" not in command.args:
+        raise CommandRefused(
+            "invalid_args", "link_url is required: an https link, or null to clear it"
+        )
+    value = command.args["link_url"]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise CommandRefused(
+            "invalid_args", "link_url is an https link, or null to clear it"
+        )
+    link = value.strip()
+    if len(link) > vocabulary.LINK_URL_MAX:
+        raise CommandRefused(
+            "invalid_args",
+            f"link_url is longer than {vocabulary.LINK_URL_MAX} characters",
+        )
+    if any(ch.isspace() or not ch.isprintable() for ch in link):
+        raise CommandRefused(
+            "invalid_args", "link_url has a space or a control character in it"
+        )
+    try:
+        parts = urlsplit(link)
+    except ValueError:
+        raise CommandRefused("invalid_args", "link_url is not an https link") from None
+    if parts.scheme != "https" or not parts.hostname:
+        raise CommandRefused("invalid_args", "link_url is not an https link")
+    if "@" in parts.netloc:
+        # A user name or a password would sit on the card in the clear.
+        raise CommandRefused(
+            "invalid_args", "link_url has a user name or password in it"
+        )
+    return link
+
+
+async def set_item_link(session, command: Command) -> CommandResult:
+    """The link a story of this item asks a person to add by hand (#1413
+    phase 7, F10 (a)). A story published through the API cannot carry a
+    link sticker, so the card names the link instead. The link is the
+    item's: every story of it, planned or from the cadence, asks for the
+    same one. `null` clears it.
+
+    One UPDATE of the workspace's own item, with the tenant's policy as the
+    second fence, then an audit row naming the link set or cleared. A link
+    is not a state, so the row carries the item's own state on both sides."""
+    media_id = _id_arg(command, "media_item_id")
+    link = _link_url(command)
+    result = await session.execute(
+        text(
+            "UPDATE media_items SET link_url = :link"
+            " WHERE id = :item AND workspace_id = :ws"
+            " RETURNING state"
+        ),
+        {"link": link, "item": media_id, "ws": command.workspace_id},
+    )
+    row = result.mappings().first()
+    if row is None:
+        raise CommandRefused("not_found", f"item {media_id}", facts={"missing": "item"})
+    await audit.record(
+        session,
+        workspace_id=command.workspace_id,
+        entity_kind="media_item",
+        entity_id_sql="CAST(:item AS uuid)",
+        from_state=row["state"],
+        to_state=row["state"],
+        detail={
+            "v": 1,
+            "event": "link_set" if link else "link_cleared",
+            "link_url": link,
+        },
+        item=media_id,
+    )
+    return CommandResult("executed", {"media_item_id": media_id, "link_url": link})
 
 
 async def sync_now(session, command: Command) -> CommandResult:

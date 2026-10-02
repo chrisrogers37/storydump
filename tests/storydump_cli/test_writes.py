@@ -692,7 +692,9 @@ def test_every_verb_maps_to_a_port_command():
         "sync",
         "schedule",
         "reschedule",
+        "link",
     }
     assert writes.COMMAND_OF["posted"] == "mark_posted"
     assert writes.COMMAND_OF["resolve"] == "resolve_review"
     assert writes.COMMAND_OF["sync"] == "sync_now"
+    assert writes.COMMAND_OF["link"] == "set_item_link"

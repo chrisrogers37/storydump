@@ -50,7 +50,7 @@ the ledger — `post_intents`, `jobs`, `channel_outbox` and every other table
 
 It names what posts, destroys, or re-points the bot. It is not a complete
 read-only/read-write taxonomy: the other write verbs (`skip`, `reject`,
-`posted`, `pause`, `resume`, `sync`, `schedule`, `reschedule`) change the
+`posted`, `pause`, `resume`, `sync`, `schedule`, `reschedule`, `link`) change the
 ledger through the command port too — a skip or a reject is a terminal state
 for that story, and a scheduled story asks the workspace's chats to approve it
 at its time — and every one of them is a posting-related action under the STOP
@@ -250,15 +250,19 @@ client, never a database connection
    execution; a resolution's key carries the review episode, so a later review
    of the same story is new; `pause`, `resume` and `sync` mint a fresh key per
    invocation (their effects are idempotent — a retry is harmless, a later
-   action always executes), and so do `schedule` and `reschedule` (planning an
-   item again after a cancel, or moving a story back to a time it had, is a new
-   act; a duplicate schedule is the database's to refuse):
+   action always executes), and so do `schedule`, `reschedule` and `link`
+   (planning an item again after a cancel, moving a story back to a time it had,
+   or setting a link the item had before, is a new act; a duplicate schedule is
+   the database's to refuse):
    `storydump approve|skip|reject|posted|cancel <story>` ·
    `storydump resolve <story> retry|posted|cancel [--not-posted]` ·
    `storydump pause` / `storydump resume` · `storydump sync <source_id>` ·
    `storydump schedule <item> --account <handle|id> --at 'YYYY-MM-DD HH:MM'
    [--override-locks]` (the time is the account's own zone, else the
-   workspace's) · `storydump reschedule <story> --at 'YYYY-MM-DD HH:MM'`. A
+   workspace's) · `storydump reschedule <story> --at 'YYYY-MM-DD HH:MM'` ·
+   `storydump link <item> <https-url>` / `storydump link <item> --clear` (the
+   link an item's stories ask a person to add by hand, since an API-published
+   story cannot carry one). A
    refusal is an answer, not a failure: the reason's sentence, the fixing
    verb, exit 2. The Telegram adapter's words never appear in a terminal.
 6. The environment: `storydump health` (the API's three health surfaces,

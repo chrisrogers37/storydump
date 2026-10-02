@@ -16,7 +16,7 @@ The canonical list, with what each command does, is the safety block in
 `CLAUDE.md`; this copy is pinned to it by `tests/test_agent_docs.py`.
 
 Not on that list does not mean safe: `storydump skip`, `reject`, `posted`,
-`pause`, `resume`, `sync`, `schedule` and `reschedule` also write through the
+`pause`, `resume`, `sync`, `schedule`, `reschedule` and `link` also write through the
 command port — a skip or a reject is final for that story. Ask first.
 
 **SAFE commands** (read-only):
