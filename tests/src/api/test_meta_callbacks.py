@@ -21,10 +21,12 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.formparsers import MultiPartParser
 
 from src.api.app import create_app
 from src.config.settings import settings
 from src.services.target import meta_callbacks
+from tests.src.api.conftest import post_body
 
 SECRET = "test-app-secret-not-a-real-one"
 SUBJECT = "1234567890"
@@ -459,3 +461,88 @@ class TestTheLineNamesWhichSecretVerified:
     def test_a_refused_request_logs_no_verified_line(self, client, verified_lines):
         assert self._post(client, _wrong_secret()).status_code == 400
         assert verified_lines() == []
+
+
+#: Both write doors. Every bound below is asserted on each: the two have
+#: separate handlers and could regress independently.
+META_POSTS = ("/webhooks/meta/deauthorize", "/webhooks/meta/data-deletion")
+#: Meta's body type.
+FORM_TYPE = "application/x-www-form-urlencoded"
+
+
+class TestTheBodyIsBoundedBeforeItIsParsed:
+    """Both doors are anonymous until the signature verifies, so neither lets
+    the framework parse what arrives: only Meta's urlencoded form is read, only
+    up to `SIGNED_REQUEST_MAX_BYTES`, and only those bytes are parsed — then
+    verified exactly as before."""
+
+    @pytest.mark.parametrize("path", META_POSTS)
+    def test_a_multipart_body_is_refused_without_being_parsed(
+        self, client, monkeypatch, path
+    ):
+        """Correctly signed, so the refusal is the body's type and nothing else."""
+        parsed = []
+        parse = MultiPartParser.parse
+
+        async def spy(parser):
+            parsed.append(parser)
+            return await parse(parser)
+
+        monkeypatch.setattr(MultiPartParser, "parse", spy)
+        r = client.post(
+            path,
+            data={"signed_request": make_signed_request(valid_payload())},
+            files={"upload": ("upload.bin", b"\0" * 2048)},
+        )
+        assert r.status_code == 415, r.text
+        assert parsed == [], "the multipart parser ran on an unverified body"
+
+    @pytest.mark.parametrize("streamed", [False, True], ids=["declared", "streamed"])
+    @pytest.mark.parametrize("path", META_POSTS)
+    def test_a_form_just_over_the_cap_is_refused(self, client, path, streamed):
+        from src.api.routes import meta as meta_routes
+
+        prefix = b"signed_request="
+        filler = meta_routes.SIGNED_REQUEST_MAX_BYTES + 1 - len(prefix)
+        r = post_body(
+            client,
+            path,
+            prefix + b"a" * filler,
+            streamed=streamed,
+            content_type=FORM_TYPE,
+        )
+        assert r.status_code == 413, r.text
+
+    @pytest.mark.parametrize(
+        "body",
+        [b"", b"other=1", b"signed_request"],
+        ids=["empty", "no field", "malformed"],
+    )
+    @pytest.mark.parametrize("path", META_POSTS)
+    def test_a_form_without_a_readable_field_is_refused_as_before(
+        self, client, path, body
+    ):
+        """A missing `signed_request` reads as an empty one did: the one 400
+        every verification failure gets."""
+        r = post_body(client, path, body, content_type=FORM_TYPE)
+        assert r.status_code == 400
+        assert r.json() == {"detail": "invalid signed_request"}
+
+    @pytest.mark.parametrize("path", META_POSTS)
+    def test_a_signed_form_still_verifies(self, client, path):
+        """Meta's type with a parameter on it, as a client may send it, is read
+        and verified: deauthorize reaches the engine gate (`client` has no
+        engine, so 503), and data-deletion, which needs none, returns the
+        receipt."""
+        r = client.post(
+            path,
+            data={"signed_request": make_signed_request(valid_payload())},
+            headers={"Content-Type": f"{FORM_TYPE}; charset=UTF-8"},
+        )
+        if path == "/webhooks/meta/deauthorize":
+            assert r.status_code == 503, r.text
+        else:
+            assert r.status_code == 200, r.text
+            assert r.json()["confirmation_code"] == meta_callbacks.confirmation_code(
+                SUBJECT, SECRET
+            )

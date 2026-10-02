@@ -85,6 +85,25 @@ def cookie_value(resp: httpx.Response, name: str) -> str:
     return cookie_header(resp, name).split(";", 1)[0].split("=", 1)[1]
 
 
+def post_body(
+    client: httpx.Client,
+    path: str,
+    body: bytes,
+    *,
+    streamed: bool = False,
+    content_type: str | None = None,
+) -> httpx.Response:
+    """POST *body* to *path*, its length declared — or, *streamed*, sent as
+    two chunks with no Content-Length, which is checked so that case cannot
+    pass on the declared path."""
+    half = len(body) // 2
+    content = iter([body[:half], body[half:]]) if streamed else body
+    headers = {"Content-Type": content_type} if content_type else {}
+    request = client.build_request("POST", path, content=content, headers=headers)
+    assert ("content-length" in request.headers) is not streamed
+    return client.send(request)
+
+
 class FakeSession:
     """Refuses SQL. A test that trips this needs a patched seam, not a query."""
 
