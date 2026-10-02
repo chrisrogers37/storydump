@@ -328,6 +328,18 @@ class TestIngestOwnsTheOrder:
         assert gate == [] and executor == []
 
 
+class TestSetItemLinkIsInThePort:
+    """#1413 phase 7 (F10 (a), F11): a member gives an item the link its story
+    asks a person to add by hand, since a story published through the API
+    cannot carry one. The floor of `schedule_item`, with an executor."""
+
+    def test_named_at_the_member_floor_with_an_executor(self):
+        assert "set_item_link" in port.VOCABULARY
+        assert port.ROLE_FLOOR["set_item_link"] == "member"
+        assert port.REGISTRY["set_item_link"] is not None
+        assert "set_item_link" not in port.UNBUILT
+
+
 class TestDisableAccountIsInThePort:
     """`02`'s "active ↔ disabled (user command, audited)" edge finally has a
     name (owner decision 2026-09-04: the web's Remove). In the vocabulary, at
