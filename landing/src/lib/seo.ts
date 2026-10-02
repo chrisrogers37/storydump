@@ -18,7 +18,8 @@ export const indexablePages = [
   { path: "/setup", lastModified: "2026-09-21", changeFrequency: "monthly", priority: 0.8 },
   { path: "/setup/instagram", lastModified: "2026-09-21", changeFrequency: "monthly", priority: 0.7 },
   { path: "/setup/media-organize", lastModified: "2026-09-21", changeFrequency: "monthly", priority: 0.7 },
-  { path: "/privacy", lastModified: "2026-10-02", changeFrequency: "monthly", priority: 0.5 },
+  { path: "/setup/connect", lastModified: "2026-09-21", changeFrequency: "monthly", priority: 0.6 },
+  { path: "/privacy", lastModified: "2026-09-30", changeFrequency: "monthly", priority: 0.5 },
   { path: "/terms", lastModified: "2026-09-30", changeFrequency: "monthly", priority: 0.5 },
 ] as const
 
@@ -59,16 +60,27 @@ export const homeSocial = {
   },
 } satisfies Metadata
 
-/** A path on this site as a full URL ("/" gives "https://storydump.app/"). */
+/**
+ * A path on this site as a full URL. The home page is the bare origin, with no
+ * trailing slash, which is how Next renders its canonical.
+ */
 export function absoluteUrl(path: string): string {
-  return new URL(path, siteConfig.url).toString()
+  return path === "/" ? siteConfig.url : new URL(path, siteConfig.url).toString()
+}
+
+/** Shortens `text` to at most `max` characters at a word break, adding "…". */
+function truncateAtWord(text: string, max: number): string {
+  if (text.length <= max) return text
+  const cut = text.slice(0, max - 1)
+  const space = cut.lastIndexOf(" ")
+  return `${(space > 0 ? cut.slice(0, space) : cut).replace(/[\s,;:.—-]+$/, "")}…`
 }
 
 /** The per-page social card from the `/og-image.png` route. */
 export function ogImageUrl(title: string, subtitle: string): string {
   const url = new URL(absoluteUrl("/og-image.png"))
   url.searchParams.set("title", title)
-  url.searchParams.set("subtitle", subtitle.slice(0, 100))
+  url.searchParams.set("subtitle", truncateAtWord(subtitle, 100))
   return url.toString()
 }
 
