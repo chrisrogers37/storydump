@@ -71,6 +71,8 @@ TOKEN_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/workspaces/{ws}/tokens"),
         ("DELETE", "/api/v1/workspaces/{ws}/tokens/{token_id}"),
         ("POST", "/api/v1/workspaces/{ws}/commands/{command}"),
+        # the Queue read, for the CLI's `planned` (#1413 phase 5)
+        ("GET", "/api/v1/workspaces/{ws}/intents"),
         # phase 02: the read views (`src/api/routes/ops.py`)
         ("GET", "/api/v1/ops/workspaces/{ws}/story/{intent_id}"),
         ("GET", "/api/v1/ops/workspaces/{ws}/cards/{intent_id}"),
@@ -362,6 +364,20 @@ async def member_session(request: Request, workspace_id: str, principal: Princip
         await tenant_resolution.authorize_member(
             session, workspace_id, principal.user_id, minimum_role="member"
         )
+        yield session
+
+
+@asynccontextmanager
+async def reader_session(request: Request, workspace_id: str, principal: Principal):
+    """A read a token may make (`TOKEN_ROUTES`): a service identity reads its
+    own workspace with nothing to gate on; everyone else passes the member
+    gate (`member_session`)."""
+    if principal.is_service_identity:
+        require_own_workspace(principal, workspace_id)
+        async with open_tenant(request, workspace_id, principal) as session:
+            yield session
+        return
+    async with member_session(request, workspace_id, principal) as session:
         yield session
 
 
