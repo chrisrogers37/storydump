@@ -722,3 +722,76 @@ class TestTheReviewTaps:
         assert "Give up" in text and "Posted myself" not in text
         text, _ = telegram_dispatch.answer_for("manual_mode", action="post")
         assert "Posted myself" in text
+
+
+# ---------------------------------------------------------------------------
+# The identity link's Confirm / Cancel: a callback_query beside the cards'.
+# ---------------------------------------------------------------------------
+
+
+def link_tap_update(action="linkok", *, uid=4242, cid=4242, chat_type="private"):
+    from src.services.target import callback_tokens
+
+    return {
+        "update_id": 3,
+        "callback_query": {
+            "id": "q9",
+            "from": {"id": uid, "username": "ada"},
+            "data": callback_tokens.link_token(action, "St4te_x-", "4242"),
+            "message": {"message_id": 77, "chat": {"id": cid, "type": chat_type}},
+        },
+    }
+
+
+class TestTheLinkConfirmationTap:
+    @pytest.mark.asyncio
+    async def test_it_reaches_the_link_lane_not_the_command_port(
+        self, seams, monkeypatch
+    ):
+        from src.services.target import identity_link
+
+        seen = {}
+
+        async def handle_tap(conn, tap, **kw):
+            seen.update(tap=tap, **kw)
+            return identity_link.LinkTapOutcome("linked", "Linked.", edit_text="done")
+
+        monkeypatch.setattr(identity_link, "handle_tap", handle_tap)
+        r = await telegram_dispatch.TelegramDispatcher()(None, link_tap_update())
+        assert isinstance(r, telegram_dispatch.TapResult)
+        assert (r.outcome, r.answer_text, r.edit_text) == ("linked", "Linked.", "done")
+        assert (r.callback_query_id, r.chat_ref, r.message_ref) == ("q9", "4242", "77")
+        assert seen["tap"].state == "St4te_x-" and seen["tap"].action == "linkok"
+        assert (seen["from_user_id"], seen["chat_ref"], seen["chat_type"]) == (
+            "4242",
+            "4242",
+            "private",
+        )
+        assert seams["log"]["executed"] == [], "a link tap ran a command"
+        assert seams["log"]["debits"] == [] and seams["log"]["gucs"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_lane_crash_is_a_named_tap_failed(self, monkeypatch):
+        from src.services.target import identity_link
+
+        async def handle_tap(conn, tap, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(identity_link, "handle_tap", handle_tap)
+        r = await telegram_dispatch.TelegramDispatcher()(None, link_tap_update())
+        assert r.outcome == "tap_failed" and r.edit_text is None
+
+    @pytest.mark.asyncio
+    async def test_another_users_tap_is_refused_end_to_end(self, monkeypatch):
+        """Through the real lane: the button was offered to 4242."""
+        from src.services.target import identity_link
+
+        async def never(*a, **kw):
+            raise AssertionError("the state was touched for the wrong tapper")
+
+        monkeypatch.setattr(identity_link.oauth_states, "consume_state", never)
+        monkeypatch.setattr(identity_link.identity, "link_identity", never)
+        r = await telegram_dispatch.TelegramDispatcher()(
+            None, link_tap_update(uid=5555, cid=5555)
+        )
+        assert r.outcome == "tapper_mismatch" and r.show_alert is True
