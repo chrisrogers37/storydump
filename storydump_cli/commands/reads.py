@@ -164,6 +164,15 @@ def _run_view(
 # --- the options every view shares ----------------------------------------------
 
 
+def workspace_option(command: Callable[..., Any]) -> Callable[..., Any]:
+    """``--workspace``: one workspace, else every one this token can read."""
+    return click.option(
+        "--workspace",
+        metavar="ID|NAME",
+        help="One workspace, by id or exact name (default: every workspace this token can read).",
+    )(command)
+
+
 def view_options(command: Callable[..., Any]) -> Callable[..., Any]:
     """``--workspace``, ``--watch``, ``--every`` and the global two."""
     command = click.option(
@@ -179,11 +188,7 @@ def view_options(command: Callable[..., Any]) -> Callable[..., Any]:
         is_flag=True,
         help="Re-read on an interval and print only the rows that changed.",
     )(command)
-    command = click.option(
-        "--workspace",
-        metavar="ID|NAME",
-        help="One workspace, by id or exact name (default: every workspace this token can read).",
-    )(command)
+    command = workspace_option(command)
     return global_options(command)
 
 
@@ -469,11 +474,7 @@ def _as_view(answer: Any) -> dict[str, Any]:
 
 @click.command()
 @global_options
-@click.option(
-    "--workspace",
-    metavar="ID|NAME",
-    help="One workspace, by id or exact name (default: every workspace this token can read).",
-)
+@workspace_option
 @click.option(
     "--state",
     "states",

@@ -482,6 +482,12 @@ AT_FIX = (
 )
 
 
+def _at_option(command):
+    return click.option(
+        "--at", "local_at", required=True, metavar="WHEN", help=AT_HELP
+    )(command)
+
+
 def _time_refused(exc: ApiError) -> Optional[tuple[str, str]]:
     """A time the port refused, by the rule it broke (its `at_rule`)."""
     rule = exc.facts.get("at_rule")
@@ -588,7 +594,7 @@ def _account_id(client: Client, ws: str, key: str) -> str:
     metavar="HANDLE|ID",
     help="The Instagram account to post it on: its handle (the @ optional) or id.",
 )
-@click.option("--at", "local_at", required=True, metavar="WHEN", help=AT_HELP)
+@_at_option
 @click.option(
     "--override-locks",
     "override_locks",
@@ -645,7 +651,7 @@ def schedule(
 @_workspace_option
 @_key_option
 @click.argument("story", callback=uuid_argument)
-@click.option("--at", "local_at", required=True, metavar="WHEN", help=AT_HELP)
+@_at_option
 @click.pass_context
 def reschedule(
     ctx: click.Context,

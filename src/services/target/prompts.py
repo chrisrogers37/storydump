@@ -352,6 +352,14 @@ async def _still_due(session, row: dict) -> bool:
     )
 
 
+def _sweep_order(row: dict) -> tuple:
+    """The order both sweeps visit their rows in: the workspace, then the due
+    time, then the id, which makes it total. Each sweep locks a row as it
+    reaches it (`_still_due`, the miss leg's UPDATE), so one order keeps the
+    two sweeps from taking the same rows' locks in opposite orders."""
+    return (str(row["workspace_id"]), row["schedule_slot_at"], str(row["id"]))
+
+
 async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
     """`scheduled → prompt_pending` + one card per active push binding, in
     the CALLER's transaction — and the transition happens whether or not a
@@ -618,10 +626,7 @@ async def sweep_due_prompts(session, *, late_seconds: int, limit: int) -> dict:
     bindings_by_workspace: dict[str, list[str]] = {}  # same tx, same answer
     names: dict[str, str] = {}  # a scheduler's display name, once per sweep
     claims = unit_of_work.WorkspaceClaims(session)
-    for row in sorted(
-        due,
-        key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"], str(r["id"])),
-    ):
+    for row in sorted(due, key=_sweep_order):
         ws = str(row["workspace_id"])
         await claims.claim(ws)
         if not await _still_due(session, row):
@@ -806,10 +811,7 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
     surfaces: dict[str, list[str]] = {}  # same tx, same answer
     names: dict[str, str] = {}  # a scheduler's display name, once per sweep
     claims = unit_of_work.WorkspaceClaims(session)
-    for row in sorted(
-        rows,
-        key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"], str(r["id"])),
-    ):
+    for row in sorted(rows, key=_sweep_order):
         ws = str(row["workspace_id"])
         await claims.claim(ws)
         try:

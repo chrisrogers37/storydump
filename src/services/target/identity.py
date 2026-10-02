@@ -220,16 +220,17 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
     return None if row is None else str(row[0])
 
 
-def display_name_sql(user_id: str) -> str:
-    """The name a shared chat may see for the person *user_id* (a column or a
-    bind, never user input) as one SQL expression: the Telegram identity's
-    display name first (the group already sees it), else another identity's,
-    else "a teammate" — never an email, since an address in a group chat is a
-    disclosure (phase 1 of the 2026-09-09 tap plan, F3). A read that names
-    many people joins this instead of asking once per person."""
+def display_name_sql(user_id_sql: str) -> str:
+    """The name a shared chat may see for the person *user_id_sql* names (an
+    SQL operand: a column or a bind, never user input) as one SQL expression:
+    the Telegram identity's display name first (the group already sees it),
+    else another identity's, else "a teammate" — never an email, since an
+    address in a group chat is a disclosure (phase 1 of the 2026-09-09 tap
+    plan, F3). A read that names many people joins this instead of asking
+    once per person."""
     return (
         "COALESCE((SELECT ui.display_name FROM user_identities ui"
-        f" WHERE ui.user_id = {user_id}"
+        f" WHERE ui.user_id = {user_id_sql}"
         "   AND ui.display_name IS NOT NULL AND ui.display_name <> ''"
         " ORDER BY (ui.provider = 'telegram') DESC, ui.created_at LIMIT 1),"
         " 'a teammate')"
