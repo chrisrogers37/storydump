@@ -1925,3 +1925,34 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
             "k1": "available",
             "retired": "available",
         }
+
+    @pytest.mark.asyncio
+    async def test_a_listing_never_moves_the_stamp_backwards(self, lane_db, sync_conn):
+        """now() is a transaction's start: a writer through this upsert that
+        opened before a walk and lands after a page re-stamped the row would
+        write an older stamp. The stamp is monotonic, so the newer one stands
+        (astrid's review of #1548)."""
+        chain = seed_workspace_chain(sync_conn, "w6-monotonic")
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE media_items SET last_listed_at = now() + interval '1 hour'"
+                " WHERE workspace_id = %s AND content_hash = %s"
+                " RETURNING last_listed_at",
+                (chain["ws"], seeded["hash"]),
+            )
+            newer = cur.fetchone()[0]
+        sync_conn.commit()
+        same_file = _item(seeded["ref"], h=seeded["hash"])
+        await _walk(
+            lane_db, sync_conn, chain["src"], ScriptedDrive([([same_file], None)])
+        )
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT last_listed_at FROM media_items"
+                " WHERE workspace_id = %s AND content_hash = %s",
+                (chain["ws"], seeded["hash"]),
+            )
+            stamp = cur.fetchone()[0]
+        sync_conn.commit()
+        assert stamp == newer, "the newer stamp stands"
