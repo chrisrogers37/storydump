@@ -1,14 +1,12 @@
 import { siteConfig } from "@/config/site"
 import type { BlogPost } from "@/lib/blog"
-import { ogImageUrl } from "@/lib/seo"
+import { absoluteUrl, ogImageUrl } from "@/lib/seo"
 
 /**
  * schema.org builders for the JSON-LD the public pages carry. Every field is
  * read from the site's own config or content: none is invented, and there are
  * deliberately no ratings, reviews or counts, because the site has none.
  */
-
-const absolute = (path: string) => new URL(path, siteConfig.url).toString()
 
 /** A trail of `{ name, path }` crumbs, home first. */
 export function breadcrumbList(crumbs: { name: string; path: string }[]) {
@@ -19,13 +17,13 @@ export function breadcrumbList(crumbs: { name: string; path: string }[]) {
       "@type": "ListItem",
       position: i + 1,
       name: crumb.name,
-      item: absolute(crumb.path),
+      item: absoluteUrl(crumb.path),
     })),
   }
 }
 
 export function blogPosting(post: BlogPost) {
-  const url = absolute(`/blog/${post.slug}`)
+  const url = absoluteUrl(`/blog/${post.slug}`)
   return {
     "@context": "https://schema.org",
     "@type": "BlogPosting",

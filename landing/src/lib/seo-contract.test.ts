@@ -69,11 +69,9 @@ function sourcesFor(file: string): string[] {
 }
 
 const isNoindex = (file: string) =>
-  sourcesFor(file).some((src) => src.includes("noindexMetadata"))
+  sourcesFor(file).some((src) => src.includes("...noindexMetadata"))
 
-const sitemapPaths = sitemap().map((entry) =>
-  entry.url === siteConfig.url ? "/" : entry.url.slice(siteConfig.url.length)
-)
+const sitemapPaths = sitemap().map((entry) => entry.url.slice(siteConfig.url.length))
 
 /** The rendered metadata of the marketing page serving `urlPath`. */
 async function metadataFor(urlPath: string): Promise<Metadata> {

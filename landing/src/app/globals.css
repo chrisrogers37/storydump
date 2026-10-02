@@ -117,6 +117,15 @@
   }
 }
 
+/* The marketing sections' kicker and heading. */
+@utility kicker {
+  @apply font-mono text-xs font-medium tracking-[0.14em] uppercase;
+}
+
+@utility section-title {
+  @apply font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.035em] text-ink sm:text-5xl md:text-6xl;
+}
+
 /* The hero demo's Story progress bar. */
 @keyframes story-progress {
   from {

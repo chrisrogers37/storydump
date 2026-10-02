@@ -1,6 +1,6 @@
 import type { Metadata } from "next"
 import Script from "next/script"
-import { Bricolage_Grotesque, Geist, Geist_Mono } from "next/font/google"
+import { Geist, Geist_Mono } from "next/font/google"
 import { siteConfig } from "@/config/site"
 import "./globals.css"
 
@@ -14,14 +14,6 @@ const geistSans = Geist({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
-})
-
-// The marketing headlines. next/font downloads it at build time and serves it
-// from this site, so a visitor's browser never contacts Google.
-const bricolage = Bricolage_Grotesque({
-  variable: "--font-bricolage",
-  subsets: ["latin"],
-  weight: ["600", "800"],
 })
 
 export const metadata: Metadata = {
@@ -78,7 +70,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} ${bricolage.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         {children}
         {/* An invite link's path is the invitation token, a bearer credential

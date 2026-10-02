@@ -102,7 +102,7 @@ const ART: Record<ArtKind, React.ReactNode> = {
   ),
   monday: (
     <div className="absolute inset-0 flex items-center justify-center bg-[#ffd43b] p-[10%]">
-      <p className="text-center font-display text-[1em] font-extrabold leading-[0.95] text-[#15130f]">
+      <p className="text-center font-display text-[1em] font-extrabold leading-[0.95] text-ink">
         monday,
         <br />
         again.

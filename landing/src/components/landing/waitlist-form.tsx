@@ -61,7 +61,7 @@ export function WaitlistForm({
   className,
 }: WaitlistFormProps) {
   const [email, setEmail] = useState("")
-  const [submitted, setStatus] = useState<FormStatus>("idle")
+  const [status, setStatus] = useState<FormStatus>("idle")
   const [message, setMessage] = useState("")
   const registered = useSyncExternalStore(
     subscribeToStorage,
@@ -70,10 +70,9 @@ export function WaitlistForm({
   )
   // A browser that signed up before shows "already on the list" until this
   // visit submits something of its own.
-  const status: FormStatus =
-    submitted === "idle" && registered ? "duplicate" : submitted
-  const shownMessage =
-    submitted === "idle" && registered ? "You're already on the list!" : message
+  const seenBefore = status === "idle" && registered
+  const shownStatus: FormStatus = seenBefore ? "duplicate" : status
+  const shownMessage = seenBefore ? "You're already on the list!" : message
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -119,7 +118,7 @@ export function WaitlistForm({
     }
   }
 
-  if (status === "success" || status === "duplicate") {
+  if (shownStatus === "success" || shownStatus === "duplicate") {
     return (
       <div
         id="waitlist"

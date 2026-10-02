@@ -7,7 +7,7 @@ export function FinalCTA() {
       <div className="mx-auto max-w-4xl px-4 text-center">
         <h2
           id="closing-heading"
-          className="font-display text-4xl font-extrabold leading-[0.95] tracking-[-0.035em] text-ink sm:text-5xl md:text-6xl"
+          className="section-title"
         >
           Tomorrow’s Story is already in your library.
         </h2>

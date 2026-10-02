@@ -25,7 +25,7 @@ export function Chores() {
       <div className="mx-auto grid max-w-6xl gap-10 px-4 md:grid-cols-[1fr_1.15fr] md:gap-16">
         <h2
           id="chores-heading"
-          className="font-display text-4xl font-extrabold leading-[0.95] tracking-[-0.035em] text-ink sm:text-5xl md:text-6xl"
+          className="section-title"
         >
           Daily Stories, <br className="hidden md:inline" />
           minus the <br className="hidden md:inline" />
@@ -35,7 +35,7 @@ export function Chores() {
           <ul className="border-t border-ink">
             {chores.map(({ chore, answer }) => (
               <li key={chore} className="border-b border-ink/10 py-6">
-                <p className="font-display text-2xl font-semibold tracking-[-0.02em] text-ink/60 line-through decoration-tap decoration-[3px] sm:text-[1.7rem]">
+                <p className="text-2xl font-semibold tracking-[-0.02em] text-ink/60 line-through decoration-tap decoration-[3px] sm:text-[1.7rem]">
                   <span className="sr-only">No more: </span>
                   {chore}
                 </p>

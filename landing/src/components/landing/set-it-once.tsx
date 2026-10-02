@@ -6,12 +6,14 @@ const mix = [
   { name: "Memes", share: 20, color: "bg-[#ffd43b]" },
 ]
 
-const nextUp: { art: ArtKind; note: string; fresh: boolean }[] = [
-  { art: "plant", note: "Never posted", fresh: true },
-  { art: "stock", note: "Never posted", fresh: true },
-  { art: "sunset", note: "Last up 9 weeks ago", fresh: false },
-  { art: "quote", note: "Last up 8 weeks ago", fresh: false },
-  { art: "mug", note: "Last up 7 weeks ago", fresh: false },
+const NEW = "Never posted"
+
+const nextUp: { art: ArtKind; note: string }[] = [
+  { art: "plant", note: NEW },
+  { art: "stock", note: NEW },
+  { art: "sunset", note: "Last up 9 weeks ago" },
+  { art: "quote", note: "Last up 8 weeks ago" },
+  { art: "mug", note: "Last up 7 weeks ago" },
 ]
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -31,12 +33,12 @@ export function SetItOnce() {
       <div className="mx-auto max-w-6xl px-4">
         <div className="grid items-start gap-10 md:grid-cols-2">
           <div>
-            <p className="font-mono text-xs font-medium uppercase tracking-[0.14em] text-tap-ink">
+            <p className="kicker text-tap-ink">
               Set it once
             </p>
             <h2
               id="rhythm-heading"
-              className="mt-3 font-display text-4xl font-extrabold leading-[0.95] tracking-[-0.035em] text-ink sm:text-5xl md:text-6xl"
+              className="mt-3 section-title"
             >
               Your rhythm. <br />
               Your mix.
@@ -99,7 +101,7 @@ export function SetItOnce() {
 
         <div className="mt-12 grid items-center gap-8 rounded-3xl bg-ink p-7 md:grid-cols-[1fr_1.4fr] md:p-9">
           <div>
-            <h3 className="font-mono text-xs font-medium uppercase tracking-[0.14em] text-tap">
+            <h3 className="kicker text-tap">
               Every photo gets its turn
             </h3>
             <p className="mt-3 leading-relaxed text-white/85">
@@ -109,10 +111,10 @@ export function SetItOnce() {
             </p>
           </div>
           <ol aria-label="Next five in line" className="grid grid-cols-3 gap-3 sm:grid-cols-5">
-            {nextUp.map(({ art, note, fresh }, i) => (
+            {nextUp.map(({ art, note }, i) => (
               <li key={art}>
                 <StoryArt kind={art} className="aspect-[9/16] w-full rounded-xl text-[13px]" />
-                <p className={`mt-2 font-mono text-[11px] leading-tight ${fresh ? "text-tap" : "text-white/70"}`}>
+                <p className={`mt-2 font-mono text-[11px] leading-tight ${note === NEW ? "text-tap" : "text-white/70"}`}>
                   <span className="sr-only">{i + 1}: </span>
                   {note}
                 </p>

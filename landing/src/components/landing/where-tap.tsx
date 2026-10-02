@@ -1,18 +1,27 @@
-import { ApprovalCard } from "@/components/landing/approval-card"
+import {
+  ApprovalCard,
+  cardButtons,
+  type CardAction,
+} from "@/components/landing/approval-card"
 import { StoryArt } from "@/components/landing/story-art"
+import { ACTION_LABELS, actionsFor } from "@/lib/intents"
 
-const legend = [
-  {
-    label: "🚀 Post now",
-    text: "Publishes it to your Story through Instagram’s official API.",
-  },
-  {
-    label: "✅ Posted myself",
-    text: "Posted it by hand? One tap keeps the record straight.",
-  },
-  { label: "⏭️ Skip", text: "Not today. It goes back in the line-up for later." },
-  { label: "🚫 Reject", text: "Not ever. It won’t come up again." },
-]
+const explain: Partial<Record<CardAction, string>> = {
+  post: "Publishes it to your Story through Instagram’s official API.",
+  posted: "Posted it by hand? One tap keeps the record straight.",
+  skip: "Not today. It goes back in the line-up for later.",
+  reject: "Not ever. It won’t come up again.",
+}
+
+const legend = cardButtons.flatMap(({ action, label }) =>
+  explain[action] ? [{ label, text: explain[action] }] : []
+)
+
+// The web Queue's buttons for a story awaiting approval, as the dashboard
+// renders them, with Instagram API publishing on.
+const queueButtons = actionsFor("awaiting_approval", true).map(
+  (a) => ACTION_LABELS[a]
+)
 
 function PanelLabel({ name, tag }: { name: string; tag: string }) {
   return (
@@ -27,12 +36,12 @@ export function WhereTap() {
   return (
     <section aria-labelledby="where-heading" className="py-16 md:py-24">
       <div className="mx-auto max-w-6xl px-4">
-        <p className="font-mono text-xs font-medium uppercase tracking-[0.14em] text-tap-ink">
+        <p className="kicker text-tap-ink">
           Where the tap happens
         </p>
         <h2
           id="where-heading"
-          className="mt-3 max-w-3xl font-display text-4xl font-extrabold leading-[0.95] tracking-[-0.035em] text-ink sm:text-5xl md:text-6xl"
+          className="mt-3 max-w-3xl section-title"
         >
           In your team’s Telegram group. Or on the web.
         </h2>
@@ -79,21 +88,20 @@ export function WhereTap() {
                     awaiting approval
                   </span>
                   <div aria-hidden="true" className="mt-3 flex flex-wrap gap-1.5 text-xs font-medium">
-                    <span className="rounded-md bg-ink px-3 py-1.5 text-white">
-                      Approve
-                    </span>
-                    {["Posted myself", "Skip", "Reject"].map((b) => (
+                    {queueButtons.map((b, i) => (
                       <span
                         key={b}
-                        className="rounded-md border border-ink/15 bg-white px-3 py-1.5 text-ink"
+                        className={
+                          i === 0
+                            ? "rounded-md bg-ink px-3 py-1.5 text-white"
+                            : "rounded-md border border-ink/15 bg-white px-3 py-1.5 text-ink"
+                        }
                       >
                         {b}
                       </span>
                     ))}
                   </div>
-                  <p className="sr-only">
-                    Buttons: Approve, Posted myself, Skip, Reject.
-                  </p>
+                  <p className="sr-only">Buttons: {queueButtons.join(", ")}.</p>
                 </div>
               </div>
             </div>

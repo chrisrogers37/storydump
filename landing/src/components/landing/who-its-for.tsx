@@ -27,12 +27,12 @@ export function WhoItsFor() {
   return (
     <section aria-labelledby="who-heading" className="py-16 md:py-24">
       <div className="mx-auto max-w-6xl px-4">
-        <p className="font-mono text-xs font-medium uppercase tracking-[0.14em] text-tap-ink">
+        <p className="kicker text-tap-ink">
           Who it’s for
         </p>
         <h2
           id="who-heading"
-          className="mt-3 max-w-3xl font-display text-4xl font-extrabold leading-[0.95] tracking-[-0.035em] text-ink sm:text-5xl md:text-6xl"
+          className="mt-3 max-w-3xl section-title"
         >
           Made for small teams with a deep library.
         </h2>

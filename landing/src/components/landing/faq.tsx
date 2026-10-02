@@ -16,7 +16,7 @@ export function FAQ() {
       <div className="mx-auto grid max-w-6xl gap-8 px-4 md:grid-cols-[1fr_1.6fr] md:gap-16">
         <h2
           id="faq-heading"
-          className="font-display text-4xl font-extrabold tracking-[-0.035em] text-ink sm:text-5xl md:text-6xl"
+          className="section-title"
         >
           Questions
         </h2>

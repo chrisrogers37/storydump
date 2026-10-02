@@ -45,7 +45,7 @@ export function ApprovalCard({
   className,
 }: ApprovalCardProps) {
   const caption = (
-    <p className="text-[13px] leading-snug text-[#15130f]">
+    <p className="text-[13px] leading-snug text-ink">
       📸 @example.brand
       <br />
       Slot: {slot}
@@ -97,7 +97,7 @@ export function ApprovalCard({
               const style = cn(
                 "rounded-xl bg-white/80 py-2 text-center text-[13px] font-medium text-[#1f3b57]",
                 action === "open" && "col-span-2",
-                highlight === action && "ring-2 ring-[#15130f]/70"
+                highlight === action && "ring-2 ring-ink/70"
               )
               return onAction ? (
                 <button
@@ -106,7 +106,7 @@ export function ApprovalCard({
                   onClick={() => onAction(action)}
                   className={cn(
                     style,
-                    "cursor-pointer transition-colors hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#15130f]"
+                    "cursor-pointer transition-colors hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
                   )}
                 >
                   {label}

@@ -16,42 +16,56 @@ const SLOT = "2026-10-02 09:00 Europe/London"
 const PHOTOS: ArtKind[] = ["bottle", "plant", "stock", "sunset", "quote", "mug"]
 
 type Stage = "waiting" | "posting" | "story" | "settled"
+type Settling = Exclude<CardAction, "open">
 
-const OUTCOMES: Record<Exclude<CardAction, "post" | "open">, [string, string]> = {
-  posted: [
-    `✅ Posted by you · ${SLOT}`,
-    "Posted it by hand? One tap keeps the record straight.",
-  ],
-  skip: [
-    `⏭️ Skipped by you · ${SLOT}`,
-    "Skipped. It goes back in the line-up for later.",
-  ],
-  reject: [
-    `🚫 Rejected by you · ${SLOT}`,
-    "Rejected. It won’t come up again.",
-  ],
+/** What each tap settles the card as, and what the narration says then. */
+const SETTLED: Record<Settling, { outcome: string; said: string }> = {
+  post: {
+    outcome: `✅ Posted by you · ${SLOT}`,
+    said: "It’s on your Story. The next one turns up at 13:30.",
+  },
+  posted: {
+    outcome: `✅ Posted by you · ${SLOT}`,
+    said: "Posted it by hand? One tap keeps the record straight.",
+  },
+  skip: {
+    outcome: `⏭️ Skipped by you · ${SLOT}`,
+    said: "Skipped. It goes back in the line-up for later.",
+  },
+  reject: {
+    outcome: `🚫 Rejected by you · ${SLOT}`,
+    said: "Rejected. It won’t come up again.",
+  },
 }
 
 const WAITING = "This card is the whole job. Tap Post now."
 const POSTING = "Posting to your Story through Instagram’s official API…"
-const POSTED: [string, string] = [
-  `✅ Posted by you · ${SLOT}`,
-  "It’s on your Story. The next one turns up at 13:30.",
-]
 const OPEN =
   "In the real card, Open Instagram jumps to the app, for posting it by hand."
+
+function clearAll(timers: ReturnType<typeof setTimeout>[]) {
+  timers.forEach(clearTimeout)
+  timers.length = 0
+}
 
 export function TapDemo() {
   const [photo, setPhoto] = useState(0)
   const [stage, setStage] = useState<Stage>("waiting")
-  const [outcome, setOutcome] = useState<string>()
-  const [narration, setNarration] = useState(WAITING)
+  const [tapped, setTapped] = useState<CardAction>()
   const timers = useRef<ReturnType<typeof setTimeout>[]>([])
   const anotherRef = useRef<HTMLButtonElement>(null)
   // The tapped button disappears when the card settles, so keyboard focus
   // moves to "Show me another" rather than falling back to the page.
   const moveFocus = useRef(false)
   const art = PHOTOS[photo]
+
+  const settled = stage === "settled" && tapped && tapped !== "open"
+    ? SETTLED[tapped]
+    : undefined
+  const narration =
+    stage === "posting" || stage === "story"
+      ? POSTING
+      : settled?.said ?? (tapped === "open" ? OPEN : WAITING)
 
   useEffect(() => {
     if (stage === "settled" && moveFocus.current) {
@@ -60,45 +74,33 @@ export function TapDemo() {
     }
   }, [stage])
 
+  // The timer list is one array for the demo's life ("Show me another"
+  // empties it in place), so the cleanup clears whatever is pending at unmount.
   useEffect(() => {
     const pending = timers.current
-    return () => pending.forEach(clearTimeout)
+    return () => clearAll(pending)
   }, [])
 
-  function later(ms: number, fn: () => void) {
-    timers.current.push(setTimeout(fn, ms))
-  }
-
   function act(action: CardAction) {
-    if (action === "open") {
-      setNarration(OPEN)
-      return
-    }
+    setTapped(action)
+    if (action === "open") return
     moveFocus.current = true
     if (action === "post") {
       setStage("posting")
-      setNarration(POSTING)
-      later(900, () => setStage("story"))
-      later(3900, () => {
-        setStage("settled")
-        setOutcome(POSTED[0])
-        setNarration(POSTED[1])
-      })
+      timers.current.push(
+        setTimeout(() => setStage("story"), 900),
+        setTimeout(() => setStage("settled"), 3900)
+      )
       return
     }
-    const [line, said] = OUTCOMES[action]
     setStage("settled")
-    setOutcome(line)
-    setNarration(said)
   }
 
   function another() {
-    timers.current.forEach(clearTimeout)
-    timers.current = []
+    clearAll(timers.current)
     setPhoto((p) => (p + 1) % PHOTOS.length)
     setStage("waiting")
-    setOutcome(undefined)
-    setNarration(WAITING)
+    setTapped(undefined)
   }
 
   return (
@@ -160,7 +162,7 @@ export function TapDemo() {
                 key={photo}
                 art={art}
                 slot={SLOT}
-                outcome={outcome}
+                outcome={settled?.outcome}
                 busy={stage === "posting" ? "🚀 Posting…" : undefined}
                 onAction={stage === "waiting" ? act : undefined}
                 highlight={stage === "waiting" ? "post" : undefined}

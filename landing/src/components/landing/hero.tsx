@@ -7,7 +7,7 @@ export function Hero() {
     <section aria-labelledby="hero-heading" className="py-14 md:py-20">
       <div className="mx-auto grid max-w-6xl items-center gap-12 px-4 md:grid-cols-[1.1fr_1fr] md:gap-10">
         <div>
-          <p className="flex items-center gap-2 font-mono text-xs font-medium uppercase tracking-[0.14em] text-ink">
+          <p className="flex items-center gap-2 kicker text-ink">
             <span aria-hidden="true" className="size-2 rounded-full bg-tap" />
             Instagram Stories for small teams
           </p>

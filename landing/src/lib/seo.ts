@@ -33,9 +33,14 @@ export const noindexMetadata = {
   robots: { index: false, follow: false },
 } satisfies Metadata
 
+/** A path on this site as a full URL ("/" gives "https://storydump.app/"). */
+export function absoluteUrl(path: string): string {
+  return new URL(path, siteConfig.url).toString()
+}
+
 /** The per-page social card from the `/og-image.png` route. */
 export function ogImageUrl(title: string, subtitle: string): string {
-  const url = new URL("/og-image.png", siteConfig.url)
+  const url = new URL(absoluteUrl("/og-image.png"))
   url.searchParams.set("title", title)
   url.searchParams.set("subtitle", subtitle.slice(0, 100))
   return url.toString()
