@@ -1,5 +1,6 @@
 """The write verbs: ``approve``, ``skip``, ``reject``, ``posted``, ``cancel``,
-``resolve``, ``pause``, ``resume`` and ``sync`` (phase 03 of the v2 CLI).
+``resolve``, ``pause``, ``resume`` and ``sync`` (phase 03 of the v2 CLI), and
+``schedule`` and ``reschedule``, which plan a story (#1413 phase 5).
 
 Every one is ONE call to the command port — ``POST
 /workspaces/{ws}/commands/{command}`` with the bearer token — the same door
@@ -11,8 +12,11 @@ exit 0) rather than acting twice; ``<command>:<story>:<resolution>[:<verdict>]
 [:<episode>]`` for a resolution, so a later review of the same story is a new
 key; and a FRESH key per invocation for ``pause``, ``resume`` and ``sync`` (a
 submission id), whose effects are idempotent — a retry is harmless and a
-later action always executes. ``--idempotency-key`` is the deliberate second
-execution of a story verb.
+later action always executes. ``schedule`` and ``reschedule`` take a fresh key
+too: planning an item again after a cancel, or moving a story back to a time it
+had, is a new act, and a duplicate schedule is the database's to refuse (the
+item already waiting on that account). ``--idempotency-key`` is the deliberate
+second execution of a story verb.
 ``--workspace`` is required: a write goes to ONE workspace, and a name that
 names two is ambiguous.
 
@@ -28,17 +32,23 @@ from typing import Any, Callable, Mapping, Optional
 import click
 
 from src.services.target.vocabulary import (
+    AT_RULE_SENTENCES,
     EXIT_NOT_FOUND,
     EXIT_USAGE,
     IDEMPOTENCY_KEY_MAX,
+    IN_THE_WAY,
+    LIVE_ACCOUNT_STATES,
+    MISSING_SENTENCES,
     NOT_POSTED,
+    PLAN_HORIZON_DAYS,
     RESOLUTIONS,
     envelope,
+    exit_code_for,
 )
 from storydump_cli.client import ApiError, Client, Unreachable
-from storydump_cli.commands import begin, global_options, uuid_argument
+from storydump_cli.commands import as_uuid, begin, global_options, uuid_argument
 from storydump_cli.commands.auth import signed_in_client
-from storydump_cli.commands.reads import WORKSPACES_FIX, workspace_targets
+from storydump_cli.commands.reads import WORKSPACES_FIX, unwrap, workspace_targets
 from storydump_cli.output import Failure, emit
 
 SOURCES_FIX = (
@@ -57,6 +67,8 @@ COMMAND_OF: Mapping[str, str] = {
     "pause": "pause_workspace",
     "resume": "resume_workspace",
     "sync": "sync_now",
+    "schedule": "schedule_item",
+    "reschedule": "reschedule_item",
 }
 
 
@@ -86,14 +98,16 @@ def deterministic_key(
 
 
 def fresh_key(command: str, *, workspace_id: str, identity: str) -> str:
-    """The workspace verbs are keyed per ATTEMPT, as the web's submission id
-    is: a fresh identity per invocation, because an invocation IS an attempt
-    and a re-run is a new one by design — their effects are idempotent (pause
-    and resume set a flag; a sync coalesces with a pending one), so a retry
-    is harmless and a later action always executes. (A day or a minute bucket
-    answered "already done" to a second pause after a resume.) The next
-    entity-less verb follows the same rule; the identities both doors derive
-    are pinned in `tests/fixtures/idempotency_keys.json`."""
+    """The workspace verbs, and the two that plan a story, are keyed per
+    ATTEMPT, as the web's submission id is: a fresh identity per invocation,
+    because an invocation IS an attempt and a re-run is a new one by design —
+    pause and resume set a flag and a sync coalesces with a pending one, so a
+    retry is harmless and a later action always executes; a second schedule
+    of the same item is the database's to refuse, and planning it again after
+    a cancel, or moving a story back to a time it had, is a new act. (A day
+    or a minute bucket answered "already done" to a second pause after a
+    resume.) The next entity-less verb follows the same rule; the identities
+    both doors derive are pinned in `tests/fixtures/idempotency_keys.json`."""
     return f"{command}:{workspace_id}:{identity}"
 
 
@@ -165,6 +179,14 @@ def _episode_of(client: Client, ws: str, intent_id: str) -> str:
     return str(intent.get("entered_state_at") or "")
 
 
+#: A verb's own words for a refusal whose shared sentence would be wrong for
+#: it — ``(detail, fix)`` — or None, which leaves it to the shared sentence.
+#: The exit code stays the vocabulary's (`exit_code_for`), whichever words.
+Refused = Callable[[ApiError], Optional[tuple[str, str]]]
+#: Arguments only the workspace can resolve (a handle to an id).
+Resolve = Callable[[Client, str], dict[str, Any]]
+
+
 def _write(
     ctx: click.Context,
     verb: str,
@@ -173,25 +195,29 @@ def _write(
     idempotency_key: Optional[str],
     args: dict[str, Any],
     key_for: KeyFor,
+    resolve: Optional[Resolve] = None,
+    refused: Optional[Refused] = None,
 ) -> None:
     runtime = begin(ctx, verb)
     command = COMMAND_OF[verb]
     key = _check_key(idempotency_key)
     client = signed_in_client(runtime)
     ws = _one_workspace(client, workspace)
+    if resolve is not None:
+        args = {**args, **resolve(client, ws)}
     if key is None:
         key = key_for(runtime, client, ws)
     try:
         answer = client.command(ws, command, args, idempotency_key=key)
     except ApiError as exc:
-        if verb == "sync" and exc.reason == "not_found":
-            # the port's `not_found` names a media source here; the shared
-            # sentence would say "story"
+        words = refused(exc) if refused is not None else None
+        if words is not None:
+            detail, fix = words
             raise Failure(
-                code=EXIT_NOT_FOUND,
-                reason="not_found",
-                detail="no such media source in this workspace",
-                fix=SOURCES_FIX,
+                code=exit_code_for(exc.status, exc.reason),
+                reason=exc.reason or "refused",
+                detail=detail,
+                fix=fix,
             ) from None
         raise
     outcome = answer.get("outcome") if isinstance(answer, dict) else None
@@ -226,7 +252,8 @@ def _key_option(command):
         metavar="KEY",
         help=(
             "Send under a key of your own. A story verb's key is deterministic"
-            " (a re-run replays); pause, resume and sync mint a fresh one."
+            " (a re-run replays); schedule, reschedule, pause, resume and sync"
+            " mint a fresh one per run."
         ),
     )(command)
 
@@ -431,7 +458,246 @@ def sync(
         idempotency_key=idempotency_key,
         args={"source_id": source},
         key_for=_fresh_key("sync"),
+        refused=_sync_refused,
     )
 
 
-COMMANDS = (approve, skip, reject, posted, cancel, resolve, pause, resume, sync)
+def _sync_refused(exc: ApiError) -> Optional[tuple[str, str]]:
+    # the port's `not_found` names a media source here; the shared sentence
+    # would say "story"
+    if exc.reason == "not_found":
+        return "no such media source in this workspace", SOURCES_FIX
+    return None
+
+
+# --- planning a story (#1413 phase 5) -------------------------------------------
+
+AT_HELP = (
+    "When, as YYYY-MM-DD HH:MM in the account's own time zone (the workspace's"
+    " when the account has none), with no offset."
+)
+AT_FIX = (
+    "give --at as 'YYYY-MM-DD HH:MM' in the account's zone, after now and"
+    f" within {PLAN_HORIZON_DAYS} days"
+)
+#: Where to look for what the port could not find, by its `missing` fact
+#: (the keys of `MISSING_SENTENCES`).
+MISSING_FIXES = {
+    "account": "storydump account <handle> shows an account",
+    "item": "check the item's id: storydump story <story> shows a story's item as media",
+}
+
+
+def _at_option(command):
+    return click.option(
+        "--at", "local_at", required=True, metavar="WHEN", help=AT_HELP
+    )(command)
+
+
+def _time_refused(exc: ApiError) -> Optional[tuple[str, str]]:
+    """A time the port refused, by the rule it broke (its `at_rule`)."""
+    rule = exc.facts.get("at_rule")
+    if exc.reason == "invalid_args" and rule in AT_RULE_SENTENCES:
+        return AT_RULE_SENTENCES[rule], AT_FIX
+    return None
+
+
+def _schedule_refused(exc: ApiError) -> Optional[tuple[str, str]]:
+    if exc.reason == "locked":
+        in_the_way = "; ".join(
+            IN_THE_WAY.get(str(kind), str(kind))
+            for kind in exc.facts.get("in_the_way") or []
+        )
+        if exc.facts.get("overridable") is True:
+            return (
+                f"this item is held back: {in_the_way}",
+                "run it again with --override-locks to schedule it anyway",
+            )
+        return (
+            f"this item cannot be scheduled: {in_the_way}",
+            "pick another item — --override-locks does not get past this",
+        )
+    if exc.reason == "not_found" and exc.facts.get("missing") in MISSING_SENTENCES:
+        missing = exc.facts["missing"]
+        return MISSING_SENTENCES[missing], MISSING_FIXES[missing]
+    if exc.reason == "illegal_transition":
+        existing = exc.facts.get("existing")
+        if isinstance(existing, dict) and existing.get("intent_id"):
+            story = existing["intent_id"]
+            if existing.get("cancel_requested"):
+                return (
+                    f"that item's story on that account, {story}, is still being"
+                    " cancelled",
+                    f"run it again once the cancel has landed (storydump story"
+                    f" {story} shows it)",
+                )
+            if existing.get("origin") == "planned":
+                # a re-run after an answer that never arrived meets its own story
+                whose = "if you just ran this, it is the story you planned; otherwise "
+            else:
+                whose = "the cadence picked that item for that account; "
+            return (
+                f"that item already waits on that account: story {story}"
+                f" ({existing.get('origin')}, {existing.get('state')})",
+                f"storydump story {story} shows it: {whose}cancel it to plan the"
+                " item again",
+            )
+        return (
+            "that item is already waiting to post on that account",
+            "run it again, since the story in the way may have just ended; if it is"
+            " refused again, storydump account <handle> shows that account's stories",
+        )
+    return _time_refused(exc)
+
+
+def _reschedule_refused(exc: ApiError) -> Optional[tuple[str, str]]:
+    if exc.reason == "illegal_transition":
+        return (
+            "only a planned story still waiting for its time can move",
+            "storydump story <story> shows where the story is",
+        )
+    return _time_refused(exc)
+
+
+def _account_id(client: Client, ws: str, key: str) -> str:
+    """The account by id as given, or by handle through the account view —
+    the one LIVE account the handle names. A handle is not unique (a removed
+    or moved destination keeps it), so two live matches need the id."""
+    account_id = as_uuid(key)
+    if account_id is not None:
+        return account_id
+    rows = unwrap(client.ops_account(ws, key), ws)["rows"]
+    # A row with no `state` comes from an API older than this CLI: sent as it
+    # is, the API's own refusal is the answer, never a false "no live account".
+    live = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and ("state" not in row or row["state"] in LIVE_ACCOUNT_STATES)
+    ]
+    if not live:
+        raise Failure(
+            code=EXIT_NOT_FOUND,
+            reason="not_found",
+            detail=f"no live account {key!r} in this workspace",
+            fix="storydump account <handle> finds one; its id works too",
+        )
+    if len(live) > 1:
+        raise Failure(
+            code=EXIT_USAGE,
+            reason="usage",
+            detail=f"{key!r} names {len(live)} live accounts — pass the account id",
+            fix="storydump account <handle> lists them with their ids",
+        )
+    return str(live[0]["id"])
+
+
+@click.command()
+@global_options
+@_workspace_option
+@_key_option
+@click.argument("item", callback=uuid_argument)
+@click.option(
+    "--account",
+    required=True,
+    metavar="HANDLE|ID",
+    help="The Instagram account to post it on: its handle (the @ optional) or id.",
+)
+@_at_option
+@click.option(
+    "--override-locks",
+    "override_locks",
+    is_flag=True,
+    help=(
+        "Schedule it although it was skipped or posted recently. A rejection, a"
+        " hold, an item out of season or one that cannot post still refuses."
+    ),
+)
+@click.pass_context
+def schedule(
+    ctx: click.Context,
+    workspace: str,
+    idempotency_key: Optional[str],
+    item: str,
+    account: str,
+    local_at: str,
+    override_locks: bool,
+) -> None:
+    """Plan a story: this item, on this account, at this time. At its time the
+    workspace's chats are asked to approve it, as for any story — nothing
+    posts by itself — and a story that cannot be served then is ended and
+    said, never dropped.
+
+    Refused with `locked` when the item cannot be posted or a lock is in the
+    way (a skip or a recent post gives way to --override-locks), and with
+    `illegal_transition` when the item already waits on that account.
+
+    \b
+    Example:
+      storydump schedule 3c6e0b8a-9d7f-4a1e-b2c3-4d5e6f7a8b9c --account storydump.studio --at "2026-10-12 18:30" --workspace <id>
+    """
+    if not account.strip():
+        raise click.BadParameter(
+            "an account is a handle or an id", param_hint="--account"
+        )
+    args: dict[str, Any] = {"media_item_id": item, "local_at": local_at}
+    if override_locks:
+        args["override_locks"] = True
+    _write(
+        ctx,
+        "schedule",
+        workspace=workspace,
+        idempotency_key=idempotency_key,
+        args=args,
+        key_for=_fresh_key("schedule"),
+        resolve=lambda client, ws: {"ig_account_id": _account_id(client, ws, account)},
+        refused=_schedule_refused,
+    )
+
+
+@click.command()
+@global_options
+@_workspace_option
+@_key_option
+@click.argument("story", callback=uuid_argument)
+@_at_option
+@click.pass_context
+def reschedule(
+    ctx: click.Context,
+    workspace: str,
+    idempotency_key: Optional[str],
+    story: str,
+    local_at: str,
+) -> None:
+    """Move a planned story to another time, while it still waits for its
+    time. Its item and account stay: to change those, cancel it and schedule
+    again.
+
+    \b
+    Example:
+      storydump reschedule 4ddec0e0-1c2b-4f3a-8e9d-5b6a7c8d9e0f --at "2026-10-13 09:00" --workspace <id>
+    """
+    _write(
+        ctx,
+        "reschedule",
+        workspace=workspace,
+        idempotency_key=idempotency_key,
+        args={"intent_id": story, "local_at": local_at},
+        key_for=_fresh_key("reschedule"),
+        refused=_reschedule_refused,
+    )
+
+
+COMMANDS = (
+    approve,
+    skip,
+    reject,
+    posted,
+    cancel,
+    resolve,
+    pause,
+    resume,
+    sync,
+    schedule,
+    reschedule,
+)

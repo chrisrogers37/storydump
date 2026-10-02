@@ -395,8 +395,9 @@ def cli() -> None:
     with nothing mid-flight, both deploys SUCCESS) or on Ctrl-C, and 6 when
     a read shows the verb's failure condition. A write goes to ONE workspace
     (--workspace is required); a story verb's idempotency key is deterministic,
-    so a re-run replays, while pause, resume and sync mint a fresh one; a
-    refusal is an answer (exit 2), never a traceback.
+    so a re-run replays, while schedule, reschedule, pause, resume and sync
+    mint a fresh one per run; a refusal is an answer (exit 2), never a
+    traceback.
 
     \b
     Exit codes:
