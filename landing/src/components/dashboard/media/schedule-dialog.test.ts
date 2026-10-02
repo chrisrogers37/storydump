@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   accountChoiceLabel,
   scheduledOutcome,
+  scheduleStep,
   scheduleZone,
   zoneNote,
 } from "./schedule-dialog";
@@ -84,5 +85,44 @@ describe("scheduledOutcome — what the dialog may say once the port has planned
 
   it("claims no time it was not given", () => {
     expect(scheduledOutcome({ outcome: "executed" }).when).toBeNull();
+  });
+});
+
+describe("scheduleStep — where one answer from the port leaves the dialog", () => {
+  const overridable = {
+    ok: false as const,
+    error: "locked",
+    status: 409,
+    facts: { overridable: true, in_the_way: ["recent"] },
+  };
+
+  it("is done when the port planned it", () => {
+    expect(
+      scheduleStep({ ok: true, data: { outcome: "executed", warnings: [] } }, false),
+    ).toMatchObject({ kind: "done" });
+  });
+
+  it("asks before overriding a lock the port says can be overridden", () => {
+    expect(scheduleStep(overridable, false)).toEqual({
+      kind: "confirm",
+      copy: "It was posted on this account recently. Schedule it anyway?",
+    });
+  });
+
+  it("never offers the override for a blocker", () => {
+    expect(
+      scheduleStep(
+        { ok: false, error: "locked", status: 409, facts: { overridable: false, in_the_way: ["reject"] } },
+        false,
+      ).kind,
+    ).toBe("refused");
+  });
+
+  it("never offers it without the port's word that it can be overridden", () => {
+    expect(scheduleStep({ ok: false, error: "locked", status: 409 }, false).kind).toBe("refused");
+  });
+
+  it("does not ask twice: a refusal of the override itself is final", () => {
+    expect(scheduleStep(overridable, true).kind).toBe("refused");
   });
 });

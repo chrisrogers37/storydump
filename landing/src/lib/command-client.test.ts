@@ -35,6 +35,8 @@ import {
   removeMemberRefusalCopy,
   submitScheduleItem,
   scheduleRefusalCopy,
+  scheduleOverrideCopy,
+  PLAN_HORIZON_DAYS,
 } from "./command-client";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -421,6 +423,16 @@ describe("planning a story — schedule_item (#1413 phase 6)", () => {
       status: 409,
     });
   });
+
+  it("sends override_locks only when the person chose to override", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitScheduleItem(WS, { ...plan, overrideLocks: true });
+    await submitScheduleItem(WS, plan);
+    expect(sentBody(0).override_locks).toBe(true);
+    expect("override_locks" in sentBody(1)).toBe(false);
+    // The override is a second, deliberate submission, never a replay of the first.
+    expect(portKey(0, "schedule_item")).not.toBe(portKey(1, "schedule_item"));
+  });
 });
 
 describe("scheduleRefusalCopy", () => {
@@ -450,6 +462,64 @@ describe("scheduleRefusalCopy", () => {
 
   it("has a sentence for the unknown case that promises nothing", () => {
     expect(scheduleRefusalCopy("something_new")).toMatch(/nothing was scheduled/i);
+  });
+
+  // With the refusal's facts (`refusal-facts.ts`), each sentence can name its remedy.
+  it("says which rule a refused time broke", () => {
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "past" })).toMatch(/passed/i);
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "skipped" })).toMatch(/daylight/i);
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "horizon" })).toMatch(
+      new RegExp(`${PLAN_HORIZON_DAYS} days`),
+    );
+  });
+
+  it("says which of the two is gone", () => {
+    expect(scheduleRefusalCopy("not_found", 404, { missing: "account" })).toMatch(/account.*reload/i);
+    expect(scheduleRefusalCopy("not_found", 404, { missing: "item" })).toMatch(/item.*reload/i);
+  });
+
+  it("names what keeps a blocked item out", () => {
+    expect(
+      scheduleRefusalCopy("locked", 409, { in_the_way: ["reject"], overridable: false }),
+    ).toMatch(/rejected/);
+    expect(
+      scheduleRefusalCopy("locked", 409, { in_the_way: ["item_archived"], overridable: false }),
+    ).toMatch(/no longer available/);
+  });
+
+  it("tells a person whose earlier story was just cancelled to plan it again once it clears", () => {
+    expect(
+      scheduleRefusalCopy("illegal_transition", 409, {
+        existing: { state: "scheduled", origin: "planned", cancel_requested: true },
+      }),
+    ).toMatch(/cancelled.*again/i);
+  });
+
+  it("says whether the story already waiting was planned or is a regular slot", () => {
+    expect(
+      scheduleRefusalCopy("illegal_transition", 409, { existing: { origin: "planned" } }),
+    ).toMatch(/already scheduled/i);
+    expect(
+      scheduleRefusalCopy("illegal_transition", 409, { existing: { origin: "cadence" } }),
+    ).toMatch(/regular/i);
+  });
+
+  it("never reads a duplicate with no `existing` as no conflict", () => {
+    expect(scheduleRefusalCopy("illegal_transition", 409, {})).toMatch(/already/i);
+  });
+});
+
+describe("scheduleOverrideCopy", () => {
+  it("says what the override gets past, and asks", () => {
+    expect(scheduleOverrideCopy({ in_the_way: ["recent"], overridable: true })).toBe(
+      "It was posted on this account recently. Schedule it anyway?",
+    );
+  });
+
+  it("names both warnings when both are in the way", () => {
+    expect(scheduleOverrideCopy({ in_the_way: ["skip", "recent"], overridable: true })).toMatch(
+      /skipped recently and it was posted/,
+    );
   });
 });
 

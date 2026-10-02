@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, NO_PUSH_BINDING, RESOLUTIONS } from "./commands";
+import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, RESOLUTIONS } from "./commands";
+import { LOCK_CLAUSES, NO_PUSH_BINDING, PLAN_HORIZON_DAYS } from "./command-client";
 import {
   EXPIRY_DAYS_DEFAULT,
   EXPIRY_DAYS_MAX,
@@ -78,5 +79,14 @@ describe("the wire spellings are the vocabulary's", () => {
     // A drift here would not fail a request: the warning would simply stop
     // being shown, and a person would not be told that nothing is asked.
     expect(NO_PUSH_BINDING).toBe(scalar("NO_PUSH_BINDING"));
+  });
+  it("how far ahead a story may be planned", () => {
+    expect(PLAN_HORIZON_DAYS).toBe(scalar("PLAN_HORIZON_DAYS"));
+  });
+  it("the lock kinds a schedule refusal can name, each with its sentence", () => {
+    // A kind the port adds without one here would leave a refusal unnamed.
+    expect(Object.keys(LOCK_CLAUSES).sort()).toEqual(
+      [...tuple("BLOCKING_LOCKS"), ...tuple("WARNING_LOCKS")].sort(),
+    );
   });
 });
