@@ -13,7 +13,8 @@ PR body, never ridden.
 """
 
 import json
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -559,14 +560,16 @@ class _SweepResult:
 
 
 class _SweepSession:
-    """The prompt sweeper's session double: the three doors answer, the miss
-    leg's guarded UPDATE returns its id unless the intent is in *raced*,
-    every statement is recorded, a savepoint is offered and its rollback
+    """The prompt sweeper's session double: the three doors answer; the miss
+    leg's guarded UPDATE returns its id unless the intent is in *raced*; the
+    serve leg's locked re-read answers a due row as the door read it, but
+    for what *changed* (intent id → the columns changed since the door read
+    it); every statement is recorded, a savepoint is offered and its rollback
     counted."""
 
-    def __init__(self, *, due=(), pending=(), misses=(), raced=()):
+    def __init__(self, *, due=(), pending=(), misses=(), raced=(), changed=None):
         self.due, self.pending, self.misses = list(due), list(pending), list(misses)
-        self.raced = set(raced)
+        self.raced, self.changed = set(raced), dict(changed or {})
         self.statements = []
         self.savepoints = self.rolled_back = 0
 
@@ -595,6 +598,15 @@ class _SweepSession:
             return _SweepResult(self.misses)
         if sql.startswith("UPDATE post_intents") and params["id"] not in self.raced:
             return _SweepResult([], first=(params["id"],))
+        if sql.startswith("SELECT state, cancel_requested, schedule_slot_at"):
+            (read,) = [r for r in self.due if str(r["id"]) == params["id"]]
+            now = {
+                "state": read["state"],
+                "cancel_requested": False,
+                "schedule_slot_at": read["schedule_slot_at"],
+                **self.changed.get(params["id"], {}),
+            }
+            return _SweepResult([], first=now)
         return _SweepResult([])
 
 
@@ -858,9 +870,11 @@ class TestTheMissLeg:
             "state = 'scheduled'",
             "origin = 'planned'",
             "NOT cancel_requested",
+            "schedule_slot_at = :slot",
         ):
             assert guard in sql, guard
         assert params["ws"] == "ws-1"
+        assert params["slot"] == SLOT, "the time the door read"
         assert json.loads(params["e"]) == {
             "v": 1,
             "class": "planned_missed",
@@ -874,8 +888,6 @@ class TestTheMissLeg:
     async def test_one_rows_fault_is_logged_and_the_sweep_goes_on(
         self, monkeypatch, caplog
     ):
-        import logging
-
         async def say(session, row, *, reason, surface, by):
             if row["id"] == "i-1":
                 raise RuntimeError("a zone, a lost binding")
@@ -987,47 +999,141 @@ class TestSayRemovedBeforeServed:
         assert (looked_up, named) == (["ws-1"], ["u-1"])
 
 
+def _due_story(origin="planned", **over):
+    """A row as `fn_prompts_due` answers it."""
+    return {
+        "id": f"i-{origin}",
+        "state": "scheduled",
+        "workspace_id": "ws-1",
+        "schedule_slot_at": SLOT,
+        "file_name": "drop.jpg",
+        "media_kind": "image",
+        "tz": "UTC",
+        "api_publishing_enabled": True,
+        "origin": origin,
+        "scheduled_by_user_id": None,
+        **over,
+    }
+
+
+def _serving(monkeypatch) -> dict:
+    """The serve leg's seams, recorded: the stories it flipped, the cards it
+    queued."""
+    from src.services.target import intent_ledger, outbox
+
+    seen = {"served": [], "cards": []}
+
+    async def transition(s, intent_id, to_state):
+        seen["served"].append(intent_id)
+
+    async def bindings(s, ws):
+        return ["b-1"]
+
+    async def enqueue(s, **kw):
+        seen["cards"].append(kw["payload"])
+
+    monkeypatch.setattr(intent_ledger, "transition", transition)
+    monkeypatch.setattr(prompts, "push_bindings", bindings)
+    monkeypatch.setattr(outbox, "enqueue", enqueue)
+    return seen
+
+
 class TestTheServeLegNamesTheScheduler:
     async def test_the_window_rides_to_the_door_and_the_card_names_who_scheduled_it(
         self, monkeypatch
     ):
-        from src.services.target import identity, intent_ledger, outbox
+        from src.services.target import identity
 
-        planned = {
-            "id": "i-p",
-            "state": "scheduled",
-            "workspace_id": "ws-1",
-            "schedule_slot_at": SLOT,
-            "file_name": "drop.jpg",
-            "media_kind": "image",
-            "tz": "America/New_York",
-            "api_publishing_enabled": True,
-            "origin": "planned",
-            "scheduled_by_user_id": "u-1",
-        }
-        session = _SweepSession(due=[planned])
-
-        async def transition(s, intent_id, to_state):
-            pass
-
-        async def bindings(s, ws):
-            return ["b-1"]
-
-        cards = []
-
-        async def enqueue(s, **kw):
-            cards.append(kw["payload"])
+        seen = _serving(monkeypatch)
 
         async def display_name_for(s, *, user_id):
             assert user_id == "u-1"
             return "Dana"
 
-        monkeypatch.setattr(intent_ledger, "transition", transition)
-        monkeypatch.setattr(prompts, "push_bindings", bindings)
-        monkeypatch.setattr(outbox, "enqueue", enqueue)
         monkeypatch.setattr(identity, "display_name_for", display_name_for)
+        session = _SweepSession(
+            due=[_due_story(tz="America/New_York", scheduled_by_user_id="u-1")]
+        )
         await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
         door = next(p for s, p in session.statements if "fn_prompts_due" in s)
         assert door == {"lim": 5, "late": 900.0}
-        (card,) = cards
+        (card,) = seen["cards"]
         assert "🗓 Scheduled by Dana · 2026-10-01 14:00 America/New_York" in card["text"]
+
+
+class TestTheServeLegServesAStoryAsTheDoorReadIt:
+    """The door read takes no lock, and a story can change before the sweep
+    reaches it, so the serve leg locks the row and reads it again: its state,
+    its cancel flag and its time must be as the door read them. The race
+    itself, two transactions and a lock, is the gate's
+    (`test_schedule_verbs_gate.py::TestAWriteAtTheDueInstant`)."""
+
+    @pytest.mark.parametrize("origin", ["planned", "cadence"])
+    async def test_a_story_as_the_door_read_it_is_served(self, monkeypatch, origin):
+        seen = _serving(monkeypatch)
+        session = _SweepSession(due=[_due_story(origin)])
+        counts = await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        assert seen["served"] == [f"i-{origin}"] and counts["prompted"] == 1
+        ((sql, reread),) = [(s, p) for s, p in session.statements if "FOR UPDATE" in s]
+        # the tenant is the SQL's own: the gates run under the policies, which
+        # would hide another workspace's row whether or not the SQL says so
+        assert " WHERE id = :id AND workspace_id = :ws FOR UPDATE" in sql
+        assert reread == {"id": f"i-{origin}", "ws": "ws-1"}
+
+    @pytest.mark.parametrize("origin", ["planned", "cadence"])
+    @pytest.mark.parametrize(
+        "since",
+        [
+            {"schedule_slot_at": SLOT + timedelta(days=1)},
+            {"cancel_requested": True},
+            {"state": "prompt_pending"},
+        ],
+        ids=["moved", "flagged", "served_by_another_sweep"],
+    )
+    async def test_a_story_changed_since_the_door_read_it_waits_for_its_next(
+        self, monkeypatch, caplog, origin, since
+    ):
+        seen = _serving(monkeypatch)
+        caplog.set_level(logging.INFO, logger=prompts.logger.name)
+        session = _SweepSession(
+            due=[_due_story(origin)], changed={f"i-{origin}": since}
+        )
+        counts = await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        assert seen == {"served": [], "cards": []} and counts["prompted"] == 0
+        assert f"intent i-{origin} changed under the sweep" in caplog.text, (
+            "never silent"
+        )
+
+
+class TestBothSweepsTakeTheirRowsInOneOrder:
+    """Each sweep locks a row as it reaches it, so both take rows that tie on
+    workspace and due time in one total order, by id. The rows arrive here
+    in the opposite order, so a sort that kept their order would show."""
+
+    async def test_the_serve_leg_takes_tied_rows_by_id(self, monkeypatch):
+        seen = _serving(monkeypatch)
+        session = _SweepSession(due=[_due_story(id=i) for i in ("i-3", "i-2", "i-1")])
+        await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        locked = [p["id"] for s, p in session.statements if "FOR UPDATE" in s]
+        assert locked == ["i-1", "i-2", "i-3"]
+        assert seen["served"] == ["i-1", "i-2", "i-3"]
+
+    async def test_the_miss_leg_takes_tied_rows_by_id(self, monkeypatch):
+        async def say(session, row, *, reason, surface, by):
+            return 1
+
+        async def bindings(session, workspace_id):
+            return []
+
+        async def no_name(session, user_id, names=None):
+            return None
+
+        monkeypatch.setattr(prompts, "say_not_served", say)
+        monkeypatch.setattr(prompts, "push_bindings", bindings)
+        monkeypatch.setattr(prompts, "_scheduler_name", no_name)
+        session = _SweepSession(
+            misses=[_miss_row(i, "ws-1") for i in ("i-3", "i-2", "i-1")]
+        )
+        await prompts.sweep_planned_misses(session, limit=5, late_seconds=900)
+        ended = [p["id"] for s, p in session.statements if s.startswith("UPDATE")]
+        assert ended == ["i-1", "i-2", "i-3"]

@@ -32,6 +32,8 @@ COMMANDS: tuple[str, ...] = (
     "reject",
     "mark_posted",
     "cancel",
+    "schedule_item",
+    "reschedule_item",
     "autopost_now",
     "sync_now",
     "settings_change",
@@ -69,6 +71,7 @@ REASONS: tuple[str, ...] = (
     "not_connected",
     "nothing_to_confirm",
     "may_have_posted",
+    "locked",
 )
 
 #: `post_intents.state` (055 ``ck_intent_state``), in the migration's order.
@@ -87,6 +90,45 @@ INTENT_STATES: tuple[str, ...] = (
     "failed",
     "cancelled",
 )
+
+#: The states a story ends in, which no edge leaves (`trg_intent_guard`'s
+#: terminal set). One spelling: `intent_ledger.TERMINAL_STATES` names it for
+#: the services, and the CLI reads it here.
+TERMINAL_STATES: tuple[str, ...] = (
+    "posted",
+    "skipped",
+    "rejected",
+    "expired",
+    "failed",
+    "cancelled",
+)
+
+#: `post_intents.origin` (088 ``ck_intent_origin``): a ``cadence`` story is
+#: minted by the clock for a slot, a ``planned`` one by a person who chose the
+#: item, the account and the time (`schedule_item`).
+INTENT_ORIGINS: tuple[str, ...] = ("cadence", "planned")
+
+#: The `ig_accounts.state`s a story is served on (054 ``ck_ig_accounts_state`` less
+#: `disabled` and `moved`): a planned story is scheduled only on one of
+#: these, and served only while its account is still in one.
+LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required")
+
+#: How far ahead a story may be planned.
+PLAN_HORIZON_DAYS = 365
+
+#: `post_intents.last_error.class` on a planned story that ended unserved
+#: at its time (`prompts.sweep_planned_misses`); its `message` is the reason.
+PLANNED_MISSED = "planned_missed"
+
+#: What a scheduled story's answer may warn of, without refusing it.
+NO_PUSH_BINDING = "no_push_binding"
+
+#: `post_locks.kind` (054 ``ck_locks_kind``), split by the lock and item
+#: rule (#1413, F7). A blocking kind refuses a planned story, and at its
+#: time the serve door turns it into a miss; a warning kind refuses a
+#: schedule only until the person overrides it, and never causes a miss.
+BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")
+WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
 
 #: `post_intents.publish_step` (055 ``ck_intent_step``).
 PUBLISH_STEPS: tuple[str, ...] = (
@@ -315,6 +357,7 @@ REASON_SENTENCES: Mapping[str, str] = {
         "the last publish answer was lost — say whether the story is on Instagram:"
         " resolve <story> retry --not-posted, or resolve <story> posted"
     ),
+    "locked": "a lock, or the item itself, keeps it from being scheduled",
     "session_required": "this needs a signed-in web session, not a token",
     "readonly_token": "this token is read-only",
     "wrong_workspace": "this token belongs to another workspace",
@@ -344,6 +387,42 @@ OUTCOME_SENTENCES: Mapping[str, str] = {
     "answered": "nothing changed — the story had already answered",
 }
 
+#: What stands in the way of scheduling an item, in the CLI's words: the
+#: blockers and warnings a `locked` refusal names — the item's own state,
+#: then the lock kinds.
+IN_THE_WAY: Mapping[str, str] = {
+    "item_removed": "it was removed from the library",
+    "item_unsupported": "Instagram cannot post it",
+    "reject": "it was rejected",
+    "unsupported": "it is marked as one that cannot be posted",
+    "hold": "it is on hold",
+    "seasonal": "it is out of season",
+    "skip": "it was skipped recently",
+    "recent": "it was posted on this account recently",
+}
+
+#: Why a planned story's time was refused (`invalid_args` with an `at_rule`
+#: fact), in the CLI's words.
+AT_RULE_SENTENCES: Mapping[str, str] = {
+    "shape": "give the time as YYYY-MM-DD HH:MM, with no offset",
+    "not_a_date": "that is not a real date and time",
+    "skipped": "that time does not happen in the account's zone: the clocks skip it",
+    "past": "that time is not in the future",
+    "horizon": f"that time is more than {PLAN_HORIZON_DAYS} days ahead",
+}
+
+#: What a `not_found` from `schedule_item` could not find (its `missing`
+#: fact), in the CLI's words.
+MISSING_SENTENCES: Mapping[str, str] = {
+    "account": "no live account by that id in this workspace",
+    "item": "no such item in this workspace",
+}
+
+#: A write's warnings, in the CLI's words (the answer carries the codes).
+WARNING_SENTENCES: Mapping[str, str] = {
+    NO_PUSH_BINDING: "no chat is bound to this workspace: nothing is asked until one is",
+}
+
 #: Words that belong to the Telegram adapter and never to a terminal.
 TAP_WORDS: tuple[str, ...] = ("tap", "button", "card", "keyboard")
 
@@ -356,6 +435,8 @@ WRITE_SENTENCES: Mapping[tuple[str, str], str] = {
     ("reject", "executed"): "rejected",
     ("mark_posted", "executed"): "marked as posted by hand",
     ("cancel", "executed"): "cancel requested",
+    ("schedule_item", "executed"): "scheduled",
+    ("reschedule_item", "executed"): "rescheduled",
     ("resolve_review", "executed"): "resolved",
     ("resolve_review", "enqueued"): "resolved — posting again shortly",
     ("pause_workspace", "executed"): "posting paused for the workspace",
@@ -473,6 +554,10 @@ DEFAULT_WINDOW = "3h"
 #: the CLI's `--limit`); every other list is windowed by `since`.
 FLOATING_LIMIT = 100
 FLOATING_LIMIT_MAX = 500
+#: The Queue read's default page and its ceiling (`01` H5: every list is
+#: bounded) — the API's clamp and the CLI's `planned --limit`.
+LIST_LIMIT_DEFAULT = 50
+LIST_LIMIT_MAX = 200
 #: Two clocks judge one window — the CLI computes a span's start, the API
 #: measures it against its own now — so a start this close to a bound is
 #: clamped to the bound rather than refused (a `30d` from a client one second

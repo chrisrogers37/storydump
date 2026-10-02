@@ -208,6 +208,7 @@ _COMMAND_STATUS = {
     "cancelling": 409,
     "nothing_to_confirm": 409,
     "may_have_posted": 409,
+    "locked": 409,
 }
 
 #: `ProvisioningRefused.reason` → status (#1041).
@@ -297,7 +298,13 @@ def _command_body(exc, status: int) -> dict:
     # is the fixed `not_built` rather than the exception's message.
     if isinstance(exc, CommandNotBuilt):
         return {"command": exc.command, "detail": "not built", "reason": "not_built"}
-    return _reason_detail(exc, status)
+    # A refusal's facts ride beside its reason under their own key (`locked`:
+    # what is in the way, and whether an override gets past it), never inside
+    # the prose, and never able to overwrite `reason` or `detail`.
+    body = _reason_detail(exc, status)
+    if exc.facts:
+        body["facts"] = exc.facts
+    return body
 
 
 def _mapped(table: dict, content=_reason_detail, *, log: bool = True):
