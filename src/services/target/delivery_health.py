@@ -5,9 +5,10 @@ The read behind ``GET /health/delivery``, and its fourth health surface.
 ## The axis nothing watched
 
 `settle` (``outbox.py``) sorts every failed send by type: a 429 goes back to
-`pending`, a gone destination and a refused message end `failed`, anything else
-is `ambiguous`. Until migration 090 it then wrote the state and nothing else, so
-a burst of failures left no cause in the database. Production's 21 failed rows
+`pending`, a gone destination, a refused message and a dead credential end
+`failed`, anything else is `ambiguous`. Until migration 090 it then wrote the
+state and nothing else, so a burst of failures left no cause in the database.
+Production's 21 failed rows
 of 2026-09-12 (all card edits, 16 of them in one hour) cannot say today whether
 the chat was gone, the message refused or the token dead. Nothing counted
 failures either, so nothing could alert on them. 090 records the class, the

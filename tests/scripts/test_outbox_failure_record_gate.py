@@ -198,12 +198,12 @@ def _doors(dsn, window):
 
 
 class TestTheRecordIsWrittenInTheCAS:
-    def test_a_dead_token_is_recorded_and_the_row_stays_ambiguous(self, world):
+    def test_a_dead_token_is_recorded_and_fails_the_row(self, world):
         oid = _row(world, state="sending", attempts=1)
         result = _settle(world, oid, error=outbox.CredentialDead("401", code=401))
-        assert result["state"] == "ambiguous"
+        assert result["state"] == "failed"
         state, _, cls, code, age = _record(world, oid)
-        assert (state, cls, code) == ("ambiguous", "credential_dead", 401)
+        assert (state, cls, code) == ("failed", "credential_dead", 401)
         assert age is not None and age < 60
 
     def test_a_429_is_recorded_and_the_attempt_given_back(self, world):

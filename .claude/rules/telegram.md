@@ -128,6 +128,10 @@ and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
   too — the notice normally moves the binding first; this is the backstop for
   a send that reaches the old id before it has). It is a chat-level fact,
   never the credential's.
+- A dead credential (`CredentialDead`: Telegram's 401) fails the row outright
+  too, because every resend would meet the same answer until the token is
+  replaced (#1493). The binding stays — the chat is not gone — and the
+  transport is the loud surface: one log line, and `auth_failures` counting.
 - The transport (`src/channels/telegram_transport.py`) probes `getMe` at worker
   start: a dead token, or a token for a bot other than
   `TARGET_TELEGRAM_BOT_USERNAME`, parks `deliver_outbox` with the reason. The

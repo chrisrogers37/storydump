@@ -2610,7 +2610,7 @@ came back) and when (`last_failed_at`). They describe the last failure, not how 
 later success does not clear them. `settle` writes them in the same CAS as the state change, so a
 fenced writer records nothing. `credential_dead` is a dead token's 401, which the outbox had filed
 as a lost response; this section records it and moves no row differently (#1493 decides whether it
-should fail at once). The index is partial on the rows that have ever failed, for the door's one
+should fail at once, and does: `settle` fails it after its one attempt). The index is partial on the rows that have ever failed, for the door's one
 predicate.
 
 **The doors.** §24's shape: owned by `svc_maintenance`, EXECUTE for `svc_ingress` (the
