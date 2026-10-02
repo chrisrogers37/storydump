@@ -55,7 +55,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
 
-from src.services.target import bindings, intent_ledger, outbox, readers
+from src.services.target import bindings, intent_ledger, outbox, readers, vocabulary
 from src.services.target.callback_tokens import ACTIONS, token as _token
 from src.utils.datetime_utils import ensure_utc, utcnow
 
@@ -330,6 +330,36 @@ def render_card(
     return payload
 
 
+async def _still_due(session, row: dict) -> bool:
+    """Whether a story is still as the door read it: in its state, not
+    flagged for a cancel, at its time. The door read takes no lock, so the
+    row is locked here and read again before it is served: a reschedule, a
+    cancel or another sweep that got the row first changed it, and it waits
+    for the next reading; one that comes after waits on this lock. The miss
+    leg makes the same check in its UPDATE."""
+    found = await readers.row(
+        session,
+        "SELECT state, cancel_requested, schedule_slot_at FROM post_intents"
+        " WHERE id = :id AND workspace_id = :ws FOR UPDATE",
+        id=str(row["id"]),
+        ws=str(row["workspace_id"]),
+    )
+    return (
+        found is not None
+        and found["state"] == row["state"]
+        and not found["cancel_requested"]
+        and found["schedule_slot_at"] == row["schedule_slot_at"]
+    )
+
+
+def _sweep_order(row: dict) -> tuple:
+    """The order both sweeps visit their rows in: the workspace, then the due
+    time, then the id, which makes it total. Each sweep locks a row as it
+    reaches it (`_still_due`, the miss leg's UPDATE), so one order keeps the
+    two sweeps from taking the same rows' locks in opposite orders."""
+    return (str(row["workspace_id"]), row["schedule_slot_at"], str(row["id"]))
+
+
 async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
     """`scheduled → prompt_pending` + one card per active push binding, in
     the CALLER's transaction — and the transition happens whether or not a
@@ -596,11 +626,13 @@ async def sweep_due_prompts(session, *, late_seconds: int, limit: int) -> dict:
     bindings_by_workspace: dict[str, list[str]] = {}  # same tx, same answer
     names: dict[str, str] = {}  # a scheduler's display name, once per sweep
     claims = unit_of_work.WorkspaceClaims(session)
-    for row in sorted(
-        due, key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"])
-    ):
+    for row in sorted(due, key=_sweep_order):
         ws = str(row["workspace_id"])
         await claims.claim(ws)
+        if not await _still_due(session, row):
+            # its next reading decides: moved, flagged or served since the door read
+            logger.info("prompt sweep: intent %s changed under the sweep", row["id"])
+            continue
         if ws not in bindings_by_workspace:
             bindings_by_workspace[ws] = await push_bindings(session, ws)
         await prompt_intent(
@@ -779,9 +811,7 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
     surfaces: dict[str, list[str]] = {}  # same tx, same answer
     names: dict[str, str] = {}  # a scheduler's display name, once per sweep
     claims = unit_of_work.WorkspaceClaims(session)
-    for row in sorted(
-        rows, key=lambda r: (str(r["workspace_id"]), r["schedule_slot_at"])
-    ):
+    for row in sorted(rows, key=_sweep_order):
         ws = str(row["workspace_id"])
         await claims.claim(ws)
         try:
@@ -793,15 +823,17 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
                             " last_error = CAST(:e AS jsonb)"
                             " WHERE id = :id AND workspace_id = :ws"
                             "   AND state = 'scheduled' AND origin = 'planned'"
-                            "   AND NOT cancel_requested RETURNING id"
+                            "   AND NOT cancel_requested"
+                            "   AND schedule_slot_at = :slot RETURNING id"
                         ),
                         {
                             "id": str(row["id"]),
                             "ws": ws,
+                            "slot": row["schedule_slot_at"],
                             "e": json.dumps(
                                 {
                                     "v": 1,
-                                    "class": "planned_missed",
+                                    "class": vocabulary.PLANNED_MISSED,
                                     "message": row["reason"],
                                 }
                             ),
@@ -809,7 +841,7 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
                     )
                 ).first()
                 if ended is None:
-                    continue  # served, flagged or ended since the door read it
+                    continue  # served, flagged, moved or ended since the door read it
                 if ws not in surfaces:
                     surfaces[ws] = await push_bindings(session, ws)
                 told = await say_not_served(
