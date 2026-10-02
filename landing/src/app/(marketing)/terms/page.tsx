@@ -1,15 +1,16 @@
 import type { Metadata } from "next"
+import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
 const LAST_UPDATED = "October 1, 2026"
 
-export const metadata: Metadata = {
-  title: "Terms of Service — Storydump",
+export const metadata: Metadata = pageMetadata({
+  title: "Terms of Service",
   description:
     "The terms that govern your use of Storydump, the Instagram Story scheduler.",
-  alternates: { canonical: "/terms" },
-}
+  path: "/terms",
+})
 
 export default function TermsOfService() {
   const email = siteConfig.contact.email

@@ -6,10 +6,11 @@ import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-for
 import { SignOutButton } from "@/components/auth/sign-out-button";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { INVITE_COOKIE } from "@/lib/session";
-import { siteConfig } from "@/config/site";
+import { noindexMetadata } from "@/lib/seo";
 
 export const metadata = {
-  title: `Welcome — ${siteConfig.name}`,
+  title: "Welcome",
+  ...noindexMetadata,
 };
 
 /**

@@ -1,10 +1,11 @@
 import { getSession } from "@/lib/session";
 import { AcceptInvitation } from "@/components/workspace/accept-invitation";
 import { SignOutButton } from "@/components/auth/sign-out-button";
-import { siteConfig } from "@/config/site";
+import { noindexMetadata } from "@/lib/seo";
 
 export const metadata = {
-  title: `Join a workspace — ${siteConfig.name}`,
+  title: "Join a workspace",
+  ...noindexMetadata,
 };
 
 /**
