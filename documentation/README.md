@@ -137,7 +137,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 ### Scheduling-Outage and Posting-Outage Monitors
 **[operations/scheduling-monitor.md](operations/scheduling-monitor.md)** · **[operations/posting-monitor.md](operations/posting-monitor.md)**
-- `scripts/scheduling_monitor.py` polls `GET /health/scheduling` and alerts when the schedule cursor stops advancing; `scripts/posting_monitor.py` polls `GET /health/posting` and alerts when no post has landed
+- `scripts/scheduling_monitor.py` polls `GET /health/scheduling` and alerts when the schedule cursor stops advancing; `scripts/posting_monitor.py` polls `GET /health/posting` and alerts when no post has landed; the API reuses each surface's answer for 30 seconds
 - Why each runs outside the app, the verdicts, the thresholds, and how they are deployed
 
 ### Worker Recovery

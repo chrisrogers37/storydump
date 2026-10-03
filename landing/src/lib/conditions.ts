@@ -117,3 +117,74 @@ export function deriveConditions({
 
   return conditions;
 }
+
+/**
+ * The first setup step a workspace has not taken, for the overview to point
+ * at instead of an all-clear: a brand-new workspace has nothing that needs
+ * attention only because it has nothing at all, and "nothing needs your
+ * attention" would read as "you are done".
+ *
+ * Two steps, in the order the setup guide takes them: an Instagram account to
+ * post to (a destination exists only once one was connected), then a Drive
+ * folder to post from. A folder counts while it is CONNECTED — not removed,
+ * whatever its state; the API's own definition (`CONNECTED_SQL`).
+ *
+ * Both steps are an admin's (`connect_account`, the Drive connect), so a
+ * member is told who is doing it, with no button to a page that refuses them.
+ */
+export type SetupStep = {
+  /** 1-based, of `SETUP_STEP_COUNT`. */
+  number: number;
+  title: string;
+  detail: string;
+  /** Absent for a member, who waits on an admin. */
+  href?: string;
+  action?: string;
+};
+
+type SetupProgress = { accounts: unknown[]; sources: Pick<SourceRow, "removed">[] };
+
+const SETUP_STEPS: {
+  missing: (p: SetupProgress) => boolean;
+  step: Required<Omit<SetupStep, "number">>;
+  /** What a member sees instead: no button, and nothing they can't do. */
+  waiting: Pick<SetupStep, "title" | "detail">;
+}[] = [
+  {
+    missing: ({ accounts }) => accounts.length === 0,
+    step: {
+      title: "Connect your Instagram account to get started",
+      detail: "That's the account your Stories will be posted to.",
+      ...RESOLVED_IN.accounts,
+    },
+    waiting: {
+      title: "Waiting on an admin to connect Instagram",
+      detail: "That's the account your Stories will be posted to.",
+    },
+  },
+  {
+    missing: ({ sources }) => !sources.some((s) => !s.removed),
+    step: {
+      title: "Connect Google Drive and pick a folder",
+      detail: "Storydump picks each Story from the photos and videos in the folders you choose.",
+      ...RESOLVED_IN.integrations,
+    },
+    waiting: {
+      title: "Waiting on an admin to connect Google Drive",
+      detail: "Storydump picks each Story from the photos and videos in the folders an admin connects.",
+    },
+  },
+];
+
+export const SETUP_STEP_COUNT = SETUP_STEPS.length;
+
+export function nextSetupStep(
+  progress: SetupProgress,
+  { isAdmin = true }: { isAdmin?: boolean } = {},
+): SetupStep | null {
+  const index = SETUP_STEPS.findIndex(({ missing }) => missing(progress));
+  if (index < 0) return null;
+  const { step, waiting } = SETUP_STEPS[index];
+  const number = index + 1;
+  return { number, ...(isAdmin ? step : waiting) };
+}

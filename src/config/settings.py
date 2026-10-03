@@ -259,6 +259,11 @@ class Settings(BaseSettings):
     # by default and only a local http dev setup should turn it off.
     SESSION_COOKIE_DOMAIN: Optional[str] = None
     SESSION_COOKIE_SECURE: bool = True
+    # Sign-up while in beta (092, owner decision 2026-10-02): a NEW Google
+    # account creates its user only when `fn_signup_admitted` admits its
+    # verified email. True switches that ask off — a local stack's setting,
+    # never production's. An existing user signs in either way.
+    TARGET_SIGNUP_OPEN: bool = False
 
     # Which peers may set X-Forwarded-For / X-Forwarded-Proto on our behalf.
     #

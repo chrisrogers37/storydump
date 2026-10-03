@@ -56,7 +56,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from src.api.routes.auth import router as auth_router
-from src.api.routes.health import COMMIT_VAR, VERSION
+from src.api.routes.health import COMMIT_VAR, VERSION, AnswerCache
 from src.api.routes.health import router as health_router
 from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
@@ -243,6 +243,9 @@ _PROVISIONING_STATUS = {
     # The connected folders changed between the pick's check and its write
     # (two admins at once): a conflict to retry, not a typo.
     "sources_changed": 409,
+    # An admin who is not the person who connected Drive, at the folder
+    # browser or the pick (091): a floor, like `insufficient_role`.
+    "drive_not_yours": 403,
 }
 
 #: `InvitationRefused.reason` → status, total over `invitations.REASONS`.
@@ -599,6 +602,13 @@ def create_app(
     # The deployed commit, for `/health` (Railway sets it on a Git deploy).
     app.state.commit = (env.get(COMMIT_VAR) or "").strip()[:7] or None
     app.state.engine = engine if engine is not None else _engine_from_env(env)
+    if settings.TARGET_SIGNUP_OPEN:
+        # A local stack's switch (092): said at startup, so it is never on
+        # in production unnoticed.
+        logger.warning(
+            "TARGET_SIGNUP_OPEN is on: any Google account can create a user, "
+            "admitted or not"
+        )
     # Which database login this process holds, and whether it bypasses RLS
     # (#751, F.4). Sampled ONCE, in the background, after startup — the
     # operating details (`/api/v1/ops/health`) report the cached answer and
@@ -616,6 +626,10 @@ def create_app(
     # minute): the backlog and the last delivery error — the signal that tells
     # "Telegram is not delivering" from "our route is failing".
     app.state.webhook_live = None
+    # The last answer of `/health/scheduling` and `/health/posting`, reused for
+    # `HEALTH_CACHE_SECONDS` so polling two unauthenticated routes cannot drain
+    # the shared pool. One per app, so every app a test builds starts empty.
+    app.state.health_cache = AnswerCache()
 
     # The W4 ingress seam: the `/start` door (#1183) and the group join path
     # (#1242, on #854's resolver door `fn_resolve_binding` — `07` §14).
