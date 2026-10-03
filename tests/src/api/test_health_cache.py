@@ -151,19 +151,22 @@ def test_a_failure_is_reused_for_the_window_too(app, engine, clock, seams, monke
 
 def test_a_reused_failure_does_not_grow_its_traceback():
     """Re-raising the one cached exception would append each request's frames
-    to its traceback for the whole window, and every 500 logs it."""
+    to its traceback for the whole window, and every 500 logs it. Each reuse
+    starts again from where it failed, so the origin is kept."""
     cache = AnswerCache(clock=lambda: 0.0)
 
     async def broken():
         raise RuntimeError("database unreachable")
 
-    def depth():
+    def frames():
         try:
             asyncio.run(cache.answer("posting", broken))
         except RuntimeError as exc:
-            return len(traceback.extract_tb(exc.__traceback__))
+            return [f.name for f in traceback.extract_tb(exc.__traceback__)]
 
-    assert depth() == depth() == depth()
+    first = frames()
+    assert "broken" in first, "the failure keeps where it happened"
+    assert first == frames() == frames()
 
 
 def test_each_app_starts_with_an_empty_cache(seams):

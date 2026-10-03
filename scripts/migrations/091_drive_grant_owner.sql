@@ -11,9 +11,9 @@
 -- admit that person alone (`workspaces.may_browse_drive`). Every other admin still reads the
 -- grant's status, the connected folders and their sync.
 --
--- NULL for an `ig_login` credential. A `gdrive` grant made before this file takes its granter
--- from the audit trail (below); one the trail cannot name stays NULL, and a NULL-granter Drive
--- grant is browsable by the workspace's owner only, until a reconnect records a granter. ON DELETE SET NULL, so a deleted user's grant falls back to that rule
+-- NULL for an `ig_login` credential and for every `gdrive` grant made before this file. A
+-- NULL-granter Drive grant is browsable by the workspace's owner only, until a reconnect
+-- records a granter. ON DELETE SET NULL, so a deleted user's grant falls back to that rule
 -- rather than blocking the delete. The column rides the table's existing grants and policies
 -- (057, 058): the runtime roles already write the row, and svc_clock's column-level SELECT
 -- does not name it.
@@ -26,19 +26,3 @@
 
 ALTER TABLE oauth_credentials
   ADD COLUMN granted_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL;
-
--- Name the granter of every grant made before this file from the audit trail (055's
--- tg_audit_oauth_credentials, 085): the latest write a person made that left the grant active
--- is the connect or reconnect, by the person whose Google account it is. Refreshes and the
--- read door write as `system`, a disconnect leaves it `revoked`, and this UPDATE changes no
--- audited column, so it writes no audit row of its own. The audit trail outlives a deleted
--- user, so only an actor who still exists is named; a grant with no such row stays NULL.
-UPDATE oauth_credentials c
-   SET granted_by_user_id = (
-         SELECT e.actor_user_id FROM audit_events e
-          WHERE e.entity_kind = 'credential' AND e.entity_id = c.id
-            AND e.actor_kind = 'user' AND e.to_state = 'active'
-            AND EXISTS (SELECT 1 FROM users u WHERE u.id = e.actor_user_id)
-          ORDER BY e.id DESC
-          LIMIT 1)
- WHERE c.provider = 'gdrive' AND c.granted_by_user_id IS NULL;

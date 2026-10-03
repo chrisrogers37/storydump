@@ -13,9 +13,9 @@
 -- with one INSERT as the database owner, which owner-bypass lets through; RLS is on and the one
 -- policy is svc_membership's read, so the runtime roles, which hold no grant here, read nothing,
 -- and the door is the only reader. The CHECK keeps the stored address one lower-case word with
--- an @ and no whitespace anywhere (a tab, a newline or a no-break space pasted from a
--- spreadsheet included), so such an admission is refused at the INSERT rather than silently
--- never matching.
+-- an @ and no whitespace or invisible character anywhere (a tab, a newline, a no-break or
+-- zero-width space, or a CSV's byte-order mark included), so such an admission is refused at
+-- the INSERT rather than silently never matching.
 --
 -- fn_signup_admitted reads two tables svc_membership already reads or is granted here: this one
 -- and workspace_invitations (058's row-open p_member_invites). It answers one boolean about one
@@ -33,7 +33,7 @@
 CREATE TABLE signup_admissions (
   email       text PRIMARY KEY CONSTRAINT ck_signup_admissions_email CHECK (
                 email = lower(email) AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'
-                AND strpos(email, chr(160)) = 0),
+                AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
   admitted_at timestamptz NOT NULL DEFAULT now(),
   note        text
 );

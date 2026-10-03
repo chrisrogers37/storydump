@@ -147,7 +147,8 @@ type SetupProgress = { accounts: unknown[]; sources: Pick<SourceRow, "removed">[
 const SETUP_STEPS: {
   missing: (p: SetupProgress) => boolean;
   step: Required<Omit<SetupStep, "number">>;
-  waiting: string;
+  /** What a member sees instead: no button, and nothing they can't do. */
+  waiting: Pick<SetupStep, "title" | "detail">;
 }[] = [
   {
     missing: ({ accounts }) => accounts.length === 0,
@@ -156,7 +157,10 @@ const SETUP_STEPS: {
       detail: "That's the account your Stories will be posted to.",
       ...RESOLVED_IN.accounts,
     },
-    waiting: "Waiting on an admin to connect Instagram",
+    waiting: {
+      title: "Waiting on an admin to connect Instagram",
+      detail: "That's the account your Stories will be posted to.",
+    },
   },
   {
     missing: ({ sources }) => !sources.some((s) => !s.removed),
@@ -165,7 +169,10 @@ const SETUP_STEPS: {
       detail: "Storydump picks each Story from the photos and videos in the folders you choose.",
       ...RESOLVED_IN.integrations,
     },
-    waiting: "Waiting on an admin to connect Google Drive",
+    waiting: {
+      title: "Waiting on an admin to connect Google Drive",
+      detail: "Storydump picks each Story from the photos and videos in the folders an admin connects.",
+    },
   },
 ];
 
@@ -179,5 +186,5 @@ export function nextSetupStep(
   if (index < 0) return null;
   const { step, waiting } = SETUP_STEPS[index];
   const number = index + 1;
-  return isAdmin ? { number, ...step } : { number, title: waiting, detail: step.detail };
+  return { number, ...(isAdmin ? step : waiting) };
 }

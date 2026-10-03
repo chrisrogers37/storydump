@@ -338,11 +338,12 @@ async def may_browse_drive(executor, *, workspace_id: str, user_id: str) -> bool
     from it (091, `07` §34): the grant is the workspace's, but what it reads is
     the Drive of the person who granted it, so only they may walk it.
 
-    A grant with no recorded granter — every one made before 091 — is the
-    owner's to browse until a reconnect records one: the choice that keeps the
-    one person who could already see it seeing it, and nobody else. A granter
-    removed or demoted since fails the admin floor before this is asked, so
-    nobody browses until someone reconnects. False with no grant at all.
+    A grant with no recorded granter — every one made before 091, or one whose
+    granter's user was deleted (ON DELETE SET NULL) — is the owner's to browse
+    until a reconnect records one (the owner's decision, 2026-10-02: older
+    connections stay owner-only until reconnected). A granter removed or
+    demoted since fails the admin floor before this is asked, so nobody
+    browses until someone reconnects. False with no grant at all.
     """
     row = await readers.row(
         executor,

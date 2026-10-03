@@ -151,6 +151,9 @@ class TestTheAdmissionsTable:
             "pasted@example.com\t",
             "pasted@example.com\n",
             "pasted@example.com\u00a0",
+            "\ufeffbom@example.com",
+            "zero@example.com\u200b",
+            "narrow@example.com\u202f",
             "no-at-sign.example.com",
         ],
     )
@@ -165,6 +168,18 @@ class TestTheAdmissionsTable:
                 "INSERT INTO signup_admissions (email) VALUES (%s) RETURNING email",
                 (typed,),
             )
+
+    def test_an_accented_address_is_stored(self, world):
+        """The invisible-character ban stops short of letters: Latin-1's
+        accented letters start above the range it refuses."""
+        assert (
+            _one(
+                world["owner"],
+                "INSERT INTO signup_admissions (email) VALUES (%s) RETURNING email",
+                ("josé@example.com",),
+            )
+            == "josé@example.com"
+        )
 
 
 def _sign_in(world, sub, email):

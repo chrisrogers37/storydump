@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
+from types import TracebackType
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -67,8 +68,11 @@ class AnswerCache:
         self._ttl = ttl
         self._clock = clock
         self._locks: dict[str, asyncio.Lock] = {}
-        # key -> (expires_at, answer, error): exactly one of the last two is set.
-        self._entries: dict[str, tuple[float, dict | None, Exception | None]] = {}
+        # key -> (expires_at, answer, error, its traceback): the answer or the
+        # error is set, never both.
+        self._entries: dict[
+            str, tuple[float, dict | None, Exception | None, TracebackType | None]
+        ] = {}
 
     async def answer(self, key: str, compute):
         """Return `compute()`'s answer for `key`, from the cache while fresh."""
@@ -76,16 +80,18 @@ class AnswerCache:
             entry = self._entries.get(key)
             if entry is None or self._clock() >= entry[0]:
                 try:
-                    value, error = await compute(), None
+                    value, error, tb = await compute(), None, None
                 except Exception as exc:  # cached, then re-raised below
-                    value, error = None, exc
-                entry = (self._clock() + self._ttl, value, error)
+                    value, error, tb = None, exc, exc.__traceback__
+                entry = (self._clock() + self._ttl, value, error, tb)
                 self._entries[key] = entry
-        _, value, error = entry
+        _, value, error, tb = entry
         if error is not None:
-            # Without its traceback: re-raising the one cached object would
-            # append every request's frames to it for the whole window.
-            raise error.with_traceback(None)
+            # From the traceback it was caught with: re-raising the one cached
+            # object would otherwise append every request's frames to it for
+            # the whole window. Its type and origin stay, so a cached pool
+            # timeout is still the app's 503.
+            raise error.with_traceback(tb)
         return value
 
 

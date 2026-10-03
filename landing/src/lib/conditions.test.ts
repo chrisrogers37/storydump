@@ -229,9 +229,11 @@ describe("nextSetupStep — what an unset workspace is pointed at instead of an 
       title: "Waiting on an admin to connect Instagram",
       detail: "That's the account your Stories will be posted to.",
     });
-    expect(
-      nextSetupStep({ accounts: [ACCOUNT], sources: [] }, { isAdmin: false })?.title,
-    ).toBe("Waiting on an admin to connect Google Drive");
+    expect(nextSetupStep({ accounts: [ACCOUNT], sources: [] }, { isAdmin: false })).toEqual({
+      number: 2,
+      title: "Waiting on an admin to connect Google Drive",
+      detail: "Storydump picks each Story from the photos and videos in the folders an admin connects.",
+    });
   });
 
   it("an account and a connected folder: set up, nothing to point at", () => {
