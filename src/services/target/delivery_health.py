@@ -6,11 +6,11 @@ The read behind ``GET /health/delivery``, and its fourth health surface.
 
 `settle` (``outbox.py``) sorts every failed send by type: a 429 goes back to
 `pending`, a definitive answer ends `failed`, and a lost one is `ambiguous`.
-Until migration 091 it then wrote the state and nothing else, so a burst of
+Until migration 093 it then wrote the state and nothing else, so a burst of
 failures left no cause in the database. Production's 21 failed rows
 of 2026-09-12 (all card edits, 16 of them in one hour) cannot say today whether
 the chat was gone, the message refused or the token dead. Nothing counted
-failures either, so nothing could alert on them. 091 records the class, the
+failures either, so nothing could alert on them. 093 records the class, the
 provider's code and the time on the row. This module counts them.
 
 ## Its own surface, by `/health/posting`'s rule
@@ -48,7 +48,7 @@ WINDOW_SECONDS = 3600
 
 async def outbox_failures(executor) -> dict[str, Any]:
     """The last hour of delivery failures and deliveries, estate-wide, through
-    091's two doors.
+    093's two doors.
 
     ``by_class`` maps each failure class to ``{rows, alerting, codes}``, with
     ``codes`` keyed by the provider's code as a string (``"none"`` when no

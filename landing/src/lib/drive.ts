@@ -191,6 +191,9 @@ export function driveFoldersRefusalCopy(reason: unknown): string {
       return "Google refused the Drive access this workspace holds. Reconnect Google Drive to browse.";
     case "drive_unavailable":
       return "Google did not answer just now. Try again in a moment.";
+    case "drive_not_yours":
+      // The grant reads one person's whole Drive (migration 091): only they browse it.
+      return "Only the person who connected Google Drive can browse it. Ask them to add the folder. Reconnecting Drive with your own account moves every connected folder onto your Drive, and folders you can't see there stop syncing.";
     case "invalid_parent":
       return "That folder could not be opened.";
     case "unauthenticated":
@@ -260,6 +263,7 @@ export function addFolderRefusalCopy(reason: unknown): string {
     case "drive_reconnect_needed":
     case "drive_unavailable":
     case "drive_refused":
+    case "drive_not_yours":
       return driveFoldersRefusalCopy(reason);
     case "source_nested":
       return "That folder is inside, or contains, a folder that is already connected — everything inside a connected folder already syncs. Connect folders that don't contain each other. Nothing was added.";

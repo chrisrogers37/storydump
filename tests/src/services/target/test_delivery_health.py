@@ -1,6 +1,6 @@
 """`delivery_health.outbox_failures`: the read behind `/health/delivery` (#1482).
 
-The statements are the doors 091 creates, called with the hour as an
+The statements are the doors 093 creates, called with the hour as an
 explicitly typed parameter (asyncpg infers nothing from a bare `:w`). The
 aggregation is what the monitor reads: the alerting count sums only the rows
 that ended `failed` or sit `ambiguous`, and a code is a string key with `none`
@@ -14,7 +14,7 @@ from src.services.target import delivery_health
 
 
 class _Doors:
-    """Answers 091's two doors from scripted rows and refuses anything else."""
+    """Answers 093's two doors from scripted rows and refuses anything else."""
 
     def __init__(self, failures=(), sent=0):
         self.failures = [

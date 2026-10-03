@@ -229,7 +229,10 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 ## 6. Team Onboarding (5 minutes per person)
 
 - [ ] Each person signs in on the web with Google and links their Telegram
-  (Settings › Integrations → Link Telegram)
+  (Settings › Integrations → Link Telegram). Sign-up is gated (092): a new
+  account needs a pending invitation addressed to its email, or an admission
+  (`INSERT INTO signup_admissions (email) VALUES ('person@example.com');` as
+  the database owner)
 - [ ] Add them to the workspace's Telegram group. Anyone with a linked Telegram
   who posts in — or is added to — a bound group becomes a member of that
   workspace, at the member role
