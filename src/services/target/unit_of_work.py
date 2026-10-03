@@ -66,7 +66,7 @@ boundary" is obvious now and expensive to rediscover at L.6.
 from __future__ import annotations
 
 import contextvars
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -144,6 +144,18 @@ class TransactionDisciplineError(StorydumpError):
 def in_transaction() -> bool:
     """Whether this task currently holds an open UoW transaction."""
     return _IN_TRANSACTION.get()
+
+
+@contextmanager
+def transaction_discipline():
+    """Mark this task as holding an open transaction for the block, so the
+    egress floor refuses a provider call made inside it (`02` §5). The module
+    docstring has the rule, and why the flag is reset from its token."""
+    token = _IN_TRANSACTION.set(True)
+    try:
+        yield
+    finally:
+        _IN_TRANSACTION.reset(token)
 
 
 def async_database_url(database: Optional[str] = None) -> str:
@@ -326,19 +338,12 @@ class UnitOfWork:
 
     @asynccontextmanager
     async def begin(self):
-        """Open the transaction, apply the GUCs, and mark the discipline flag.
-
-        The flag is reset from its token in `finally` — see the module
-        docstring on why a bare reset is wrong here.
-        """
-        token = _IN_TRANSACTION.set(True)
-        try:
+        """Open the transaction, apply the GUCs, and mark the discipline flag."""
+        with transaction_discipline():
             async with self._session_factory() as session:
                 async with session.begin():
                     await self._apply_gucs(session)
                     yield session
-        finally:
-            _IN_TRANSACTION.reset(token)
 
 
 async def apply_gucs(
@@ -475,12 +480,10 @@ def make_session_for(engine):
         async def ctx():
             # The §5 discipline flag, as `UnitOfWork.begin` sets it (#1368).
             # Without it the tripwire covered no worker path at all, while two
-            # modules' docstrings said the floor enforced the rule here. Reset
-            # from the token in `finally`, never bare — see the module
-            # docstring. #1387 is what makes arming safe: the four executors
+            # modules' docstrings said the floor enforced the rule here. #1387
+            # is what makes arming safe: the four executors
             # that reach the floor now run with NO job session open.
-            token = _IN_TRANSACTION.set(True)
-            try:
+            with transaction_discipline():
                 async with maker() as session:
                     async with session.begin():
                         await apply_gucs(
@@ -489,8 +492,6 @@ def make_session_for(engine):
                             actor_kind="system",
                         )
                         yield session
-            finally:
-                _IN_TRANSACTION.reset(token)
 
         return ctx()
 
@@ -509,18 +510,15 @@ def poller_session_factory(engine, tenant_id: str):
 
     @asynccontextmanager
     async def factory():
-        # The §5 discipline flag (#1368), for the same reason and with the
-        # same token discipline as `make_session_for` above. The refresh
+        # The §5 discipline flag (#1368), for the same reason as
+        # `make_session_for` above. The refresh
         # executor's three phases each take one of these, and its "the
         # provider call, outside any transaction (floor-enforced)" is true
         # of the process only once this is set.
-        token = _IN_TRANSACTION.set(True)
-        try:
+        with transaction_discipline():
             async with maker() as session:
                 await apply_gucs(session, tenant_id=tenant_id, actor_kind="system")
                 yield session
-        finally:
-            _IN_TRANSACTION.reset(token)
 
     return factory
 

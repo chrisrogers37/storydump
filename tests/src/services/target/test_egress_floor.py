@@ -319,18 +319,15 @@ class TestTheHostAllowlist:
 class TestTransactionDisciplineIsEnforcedAtTheEgressPoint:
     @pytest.mark.asyncio
     async def test_a_provider_call_inside_an_open_transaction_fails(self):
-        """`02` §5. Driven through the real ContextVar the UoW sets."""
+        """`02` §5. Driven through the arm the unit of work and the webhook use."""
         from src.services.target import unit_of_work as uow_mod
 
-        token = uow_mod._IN_TRANSACTION.set(True)
-        try:
+        with uow_mod.transaction_discipline():
             async with httpx.AsyncClient(
                 transport=_transport(lambda r: httpx.Response(200))
             ) as client:
                 with pytest.raises(TransactionDisciplineError):
                     await request(client, "GET", ALLOWED, policy=EgressPolicy())
-        finally:
-            uow_mod._IN_TRANSACTION.reset(token)
 
     @pytest.mark.asyncio
     async def test_the_same_call_outside_a_transaction_succeeds(self):
