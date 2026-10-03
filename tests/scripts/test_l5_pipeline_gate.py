@@ -2750,14 +2750,12 @@ class TestTheFloatsSafetyNets:
 
     @staticmethod
     async def _park(conn, job):
-        """The spent job's park as the worker runs it: the flip, then the
-        courtesy it is owed (here in one transaction; the worker puts the
-        courtesy in a savepoint of its own)."""
-        from src.services.target import publish_pipeline
+        """The spent job's park as the worker runs it, minus the savepoint: the
+        state change, then the courtesy it is owed."""
+        from src.services.target import work_loop
 
-        parked = await publish_pipeline.flip_exhausted(conn, job)
-        if parked:
-            await publish_pipeline.tell_review(conn, **parked)
+        parked = await work_loop._settle_exhausted(conn, job)
+        await work_loop._notify_exhausted(conn, job, parked)
         return parked
 
     async def _as_worker(self, pipe_db, fn):

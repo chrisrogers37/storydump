@@ -1227,14 +1227,15 @@ class TestTheBudgetCeiling:
         )
 
     SRC = "5c0f2e8a-0b1d-4c3e-9f00-00000000c001"
+    INTENT = "5c0f2e8a-0b1d-4c3e-9f00-00000000c0a1"
 
     @staticmethod
-    def _rearms(calls):
+    def _statements(calls, needle):
         return [
             (sql, params)
             for session in calls["sessions"]
             for sql, params in session.statements
-            if "UPDATE media_sources" in sql
+            if needle in sql
         ]
 
     async def test_a_spent_sync_re_arms_its_source_for_tomorrow(self, monkeypatch):
@@ -1251,7 +1252,7 @@ class TestTheBudgetCeiling:
             self._job(attempts=5, payload={"v": 1, "source_id": self.SRC})
         )
         assert calls["finalized"] == ["failed"] and len(calls["notices"]) == 1
-        ((sql, params),) = self._rearms(calls)
+        ((sql, params),) = self._statements(calls, "UPDATE media_sources")
         assert "next_sync_at IS NULL" in sql and "state = 'active'" in sql
         assert params["s"] == self.SRC and params["ws"] == "ws-1"
         assert params["secs"] == work_loop.REARM_AFTER_SECONDS
@@ -1273,7 +1274,7 @@ class TestTheBudgetCeiling:
         loop, calls = self._loop(monkeypatch, executor=executor)
         await loop._run_job(self._job(attempts=5, payload=payload))
         assert calls["finalized"] == ["failed"]
-        assert self._rearms(calls) == []
+        assert self._statements(calls, "UPDATE media_sources") == []
 
     async def test_a_publish_job_the_loop_fails_parks_its_story_for_review(
         self, monkeypatch
@@ -1324,7 +1325,10 @@ class TestTheBudgetCeiling:
         async def executor(session, job):
             raise RuntimeError("the fifth untyped crash")
 
+        refused = []
+
         async def courtesy_fails(session, **kwargs):
+            refused.append(kwargs["intent_id"])
             raise RuntimeError("the outbox refused the card")
 
         loop, calls = self._loop(
@@ -1338,20 +1342,40 @@ class TestTheBudgetCeiling:
             self._job(
                 kind="publish_pipeline",
                 attempts=5,
-                payload={"v": 1, "intent_id": "it-1"},
+                payload={"v": 1, "intent_id": self.INTENT},
             )
         )
 
         assert calls["finalized"] == ["failed"] and loop.exhausted == 1
+        assert refused == [self.INTENT], "the courtesy fault never fired"
         flips = [
             params
-            for session in calls["sessions"]
-            for sql, params in session.statements
-            if "SET state = 'review_required'" in sql
+            for _, params in self._statements(calls, "SET state = 'review_required'")
         ]
-        assert flips == [{"intent": "it-1", "from_state": "publishing"}], (
+        assert flips == [{"intent": self.INTENT, "from_state": "publishing"}], (
             "the courtesy's rollback took the park's flip with it"
         )
+
+    async def test_a_dead_publish_job_with_a_malformed_intent_parks_nothing(
+        self, monkeypatch
+    ):
+        """A malformed `intent_id` is refused before the cast: the flip runs in
+        the finalize's own transaction, where a raise would abort the finalize."""
+
+        async def executor(session, job):
+            raise RuntimeError("the fifth untyped crash")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        loop._registry["publish_pipeline"] = executor
+        await loop._run_job(
+            self._job(
+                kind="publish_pipeline",
+                attempts=5,
+                payload={"v": 1, "intent_id": "not-a-uuid"},
+            )
+        )
+        assert calls["finalized"] == ["failed"] and loop.exhausted == 1
+        assert self._statements(calls, "post_intents") == []
 
     async def test_a_failed_notice_stops_neither_the_finalize_nor_the_re_arm(
         self, monkeypatch
@@ -1374,9 +1398,9 @@ class TestTheBudgetCeiling:
         )
         assert calls["finalized"] == ["failed"] and calls["notices"] == []
         assert loop.exhausted == 1
-        assert [params["s"] for _, params in self._rearms(calls)] == [self.SRC], (
-            "the re-arm went down with the notice"
-        )
+        assert [
+            params["s"] for _, params in self._statements(calls, "UPDATE media_sources")
+        ] == [self.SRC], "the re-arm went down with the notice"
 
     async def test_a_workspace_with_no_binding_gets_the_log_line_only(
         self, monkeypatch

@@ -88,6 +88,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -1911,13 +1912,12 @@ async def tell_review(
     intent_id: str,
     tz: str,
     notice: str,
-    at: Optional[datetime] = None,
 ) -> None:
     """The courtesy a story parked for review is owed: its card restated with
     the review keyboard, one notice per push binding, and the
     `customer_notified` latch when anyone heard — in the caller's
     transaction."""
-    at = at or datetime.now(timezone.utc)
+    at = datetime.now(timezone.utc)
     told = await _restate_and_notify(
         session,
         workspace_id=workspace_id,
@@ -1949,7 +1949,6 @@ async def park_for_review(
     from_state: str,
     tz: str,
     notice: str,
-    at: Optional[datetime] = None,
 ) -> bool:
     """`from_state → review_required` and the courtesy it is owed
     (`tell_review`), together in the caller's transaction. False when the row
@@ -1962,7 +1961,6 @@ async def park_for_review(
         intent_id=intent_id,
         tz=tz,
         notice=notice,
-        at=at,
     )
     return True
 
@@ -1971,14 +1969,23 @@ async def flip_exhausted(session, job: dict) -> Optional[dict]:
     """A `publish_pipeline` job whose budget is spent (five untyped crashes):
     the story it carried is flipped to review from wherever it stood —
     `publishing` mid-ladder or `approved` between attempts. Returns the
-    `tell_review` arguments for its courtesy, which the caller runs apart from
-    the flip, so that a failed courtesy cannot undo it; None when nothing was
-    parked (no story, or a story already settled)."""
+    `tell_review` arguments for its courtesy, or None when nothing was parked:
+    no story, a story already settled, or an `intent_id` that is not a uuid
+    (logged)."""
     payload = job.get("payload") or {}
     if isinstance(payload, str):
         payload = json.loads(payload)
     intent_id = payload.get("intent_id")
     if not intent_id:
+        return None
+    try:
+        uuid.UUID(str(intent_id))
+    except ValueError:
+        logger.warning(
+            "job %s: payload intent_id %r is not a uuid; no story parked",
+            job.get("id"),
+            intent_id,
+        )
         return None
     row = (
         (await session.execute(text(_INTENT_FOR_PARK), {"intent": str(intent_id)}))

@@ -770,7 +770,10 @@ async def _settle_exhausted(session, job) -> Optional[dict]:
     transaction and ahead of the notice's savepoint, so that a failed notice
     cannot roll it back: a sync's source re-armed for tomorrow, a publish
     job's story flipped to review. Returns the parked story's `tell_review`
-    arguments for the notice, or None."""
+    arguments for the notice, or None. Nothing here may raise on a malformed
+    payload: outside the savepoint a raise aborts the finalize, and the spent
+    job would be claimed again on every lease lapse, so each branch refuses a
+    malformed id with a log line instead."""
     kind = str(job.get("kind"))
     if kind in _SYNC_KINDS:
         await _rearm_source(session, job)
@@ -780,7 +783,7 @@ async def _settle_exhausted(session, job) -> Optional[dict]:
     return None
 
 
-async def _notify_exhausted(session, job, parked: Optional[dict] = None) -> None:
+async def _notify_exhausted(session, job, parked: Optional[dict]) -> None:
     """One `notification` outbox row per push binding when a tenant kind the
     sweeps do not re-mint has spent its budget. Nothing for system kinds and
     the re-minted kinds; a workspace with no binding gets nothing here (the
