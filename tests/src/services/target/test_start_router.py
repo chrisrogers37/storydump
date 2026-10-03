@@ -84,6 +84,11 @@ class TestTheRouterOwnsEveryRefusalString:
         with pytest.raises(ValueError, match="existence oracle"):
             StartResult(outcome="nope", handled=False, reply="no such invitation")
 
+    def test_a_keyboard_cannot_ride_without_success_copy(self):
+        """A refusal carries no text, so it carries no buttons either."""
+        with pytest.raises(ValueError, match="rides a reply"):
+            StartResult(outcome="nope", handled=False, reply_markup={"x": 1})
+
     @pytest.mark.asyncio
     async def test_every_refusal_reads_identically_whatever_happened(self):
         router = StartRouter()
