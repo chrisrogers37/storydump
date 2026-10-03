@@ -274,6 +274,7 @@ class WaitlistEntry(TargetBase):
         CheckConstraint(
             "email = lower(email) AND length(email) <= 254"
             " AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$'"
+            " AND email !~ '[[:cntrl:]]'"
             " AND " + _NO_INVISIBLE,
             name="ck_waitlist_entries_email",
         ),

@@ -22,6 +22,9 @@ from sqlalchemy.exc import DBAPIError
 from src.exceptions.base import StorydumpError
 from src.services.target._dbapi import constraint_violated
 
+#: The longest address the CHECK admits, refused before the statement so an
+#: oversized value never travels to the database.
+MAX_EMAIL_LENGTH = 254
 #: The campaign keys the site forwards (`landing/src/lib/analytics.ts`).
 UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign")
 #: Each campaign value is cut to this, so a public form cannot grow a row.
@@ -64,9 +67,11 @@ async def join(conn, email: object, utm: Optional[dict] = None) -> None:
     the CHECK refuses, under a savepoint so the caller's transaction carries
     on. Runs in the caller's transaction and does not commit."""
     address = email.strip().lower() if isinstance(email, str) else ""
-    if not _storable(address):
+    if len(address) > MAX_EMAIL_LENGTH or not _storable(address):
         raise InvalidWaitlistEmail("not a valid email address")
     try:
+        # ON CONFLICT names no column on purpose: `ON CONFLICT (email)` needs
+        # SELECT on it, which svc_ingress does not hold (permission denied).
         async with conn.begin_nested():
             await conn.execute(
                 text(

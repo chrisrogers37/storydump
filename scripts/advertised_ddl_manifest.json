@@ -377,9 +377,9 @@
       "ordinal": 35
     },
     {
-      "sha256": "c4fa2e84fb690433dde60c99d20f085637a4937ef3e5f146c07b5c05d3e19d87",
+      "sha256": "c6421d432342982f2cb3c54c6749cd9f692bc0dfc062fb9c3e035068e708db26",
       "class": "normative",
-      "label": "§43 the waitlist is written by the API, not by the site (100, owner decision 2026-10-03) — waitlist_entries (global, RLS on, svc_ingress may INSERT and nothing else under p_ingress_waitlist), the address rule of §35 with a dot in the domain, bounded at 254 octets, and a utm object bounded at 2 KB",
+      "label": "§43 the waitlist is written by the API, not by the site (100, owner decision 2026-10-03) — waitlist_entries (global, RLS on, svc_ingress may INSERT and nothing else under p_ingress_waitlist), the address rule of §35 with a dot in the domain and no control characters, at most 254 characters, and a utm object bounded at 2 KB",
       "doc": "07-security-model.md",
       "ordinal": 36
     }

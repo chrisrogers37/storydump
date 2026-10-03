@@ -5,13 +5,13 @@
 -- The landing site wrote its waitlist to the database through a credential of its own; the API
 -- now owns the write (`POST /public/waitlist`) and the site holds no database credential. A new
 -- name, not an adoption: production's hand-made, empty `waitlist_signups` and its
--- `waitlist_writer` login are left alone for the owner to drop by hand.
+-- NOLOGIN `waitlist_writer` role are left alone for the owner to drop by hand.
 --
 -- Global, not tenant-plane: a visitor joining the waitlist has no user and no workspace. RLS is on
 -- and the one policy is svc_ingress's INSERT, so the API can add an address and cannot read,
 -- change or remove one: the public endpoint is no oracle for who is on the list. The owner reads
 -- it as the database owner. The CHECK is the authority on an address: §35's rule plus a dot in
--- the domain and RFC 5321's 254 octets.
+-- the domain, no control characters, and at most 254 characters.
 --
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'waitlist_entries' AND c.relrowsecurity)
 -- runner:postcondition SELECT has_table_privilege('svc_ingress', 'waitlist_entries', 'INSERT')
@@ -21,6 +21,7 @@ CREATE TABLE waitlist_entries (
   email     text PRIMARY KEY CONSTRAINT ck_waitlist_entries_email CHECK (
               email = lower(email) AND length(email) <= 254
               AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
+              AND email !~ '[[:cntrl:]]'
               AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
   joined_at timestamptz NOT NULL DEFAULT now(),
   utm       jsonb CONSTRAINT ck_waitlist_entries_utm CHECK (

@@ -3099,15 +3099,15 @@ signup. The owner ruled "one system, one writer" (2026-10-03): the API owns the 
 site holds no database credential.
 
 **The table.** `waitlist_entries` is global, not tenant-plane: a visitor joining the waitlist has
-no user and no workspace. Its address rule is §35's, with a dot in the domain and RFC 5321's 254-octet bound, and `utm`
+no user and no workspace. Its address rule is §35's, with a dot in the domain, no control characters and at most 254 characters, and `utm`
 records the campaign the visitor came from, an object bounded at 2 KB. RLS is on and the one
 policy is `svc_ingress`'s INSERT, which is the route's only statement (`POST /public/waitlist`):
 the API can add an address and cannot read, change or remove one, so the public endpoint is no
 oracle for who is on the list. The owner reads the list as the database owner and admits people
 through `signup_admissions` (§35).
 
-**What it does not adopt.** A hand-made, empty `waitlist_signups` and an insert-only
-`waitlist_writer` login were created in production as a stopgap on 2026-10-02 and never served a
+**What it does not adopt.** A hand-made, empty `waitlist_signups` and the NOLOGIN
+`waitlist_writer` role were created in production as a stopgap on 2026-10-02 and never served a
 signup. The new name keeps this CREATE from meeting that table at the predeploy; the owner drops
 both by hand once the API serves the form.
 
@@ -3118,6 +3118,7 @@ CREATE TABLE waitlist_entries (
   email     text PRIMARY KEY CONSTRAINT ck_waitlist_entries_email CHECK (
               email = lower(email) AND length(email) <= 254
               AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
+              AND email !~ '[[:cntrl:]]'
               AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
   joined_at timestamptz NOT NULL DEFAULT now(),
   utm       jsonb CONSTRAINT ck_waitlist_entries_utm CHECK (

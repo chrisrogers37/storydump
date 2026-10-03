@@ -459,16 +459,22 @@ async def admin_session(request: Request, workspace_id: str, principal: Principa
         yield session
 
 
+def parse_json_object(raw: bytes) -> Optional[dict[str, Any]]:
+    """*raw* as a JSON object, or None when it is not one."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):  # deep nesting fits in a small body
+        return None
+    return body if isinstance(body, dict) else None
+
+
 async def json_object(request: Request) -> dict[str, Any]:
     """The body as a JSON object; an empty body is an empty object."""
     raw = await request.body()
     if not raw.strip():
         return {}
-    try:
-        body = json.loads(raw)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="body is not JSON")
-    if not isinstance(body, dict):
+    body = parse_json_object(raw)
+    if body is None:
         raise HTTPException(status_code=400, detail="body must be a JSON object")
     return body
 

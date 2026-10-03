@@ -16,7 +16,13 @@ import psycopg2
 import psycopg2.errors
 import pytest
 
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+
 from src.api.routes import public
+from src.services.target import waitlist
+from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -50,23 +56,26 @@ def _rows(dsn: str, sql: str, params=()):
         conn.close()
 
 
-def _post(world, *bodies):
-    """Each body to the real route as `svc_ingress`; the responses, in order."""
+def _send(world, *requests):
+    """Each `(content, headers)` to the real route as `svc_ingress`."""
 
     async def main():
         async with api_client(world["ingress"]) as (client, _):
-            # json.dumps escapes to ASCII, so a lone surrogate travels as
-            # `\\ud800` the way a browser's JSON would carry it.
             return [
-                await client.post(
-                    "/public/waitlist",
-                    content=json.dumps(b),
-                    headers={"content-type": "application/json"},
-                )
-                for b in bodies
+                await client.post("/public/waitlist", content=c, headers=h)
+                for c, h in requests
             ]
 
     return asyncio.run(main())
+
+
+JSON = {"content-type": "application/json"}
+
+
+def _post(world, *bodies):
+    """Each body as JSON. json.dumps escapes to ASCII, so a lone surrogate
+    travels as `\\ud800` the way a browser's JSON would carry it."""
+    return _send(world, *((json.dumps(b), JSON) for b in bodies))
 
 
 def _entry(world, email):
@@ -132,8 +141,9 @@ class TestTheRoute:
             "no-at-sign",
             "a@nodot",
             "two words@example.com",
-            "a" * 250 + "@ex.co",
+            "a" * 243 + "@example.com",
             "zero​width@example.com",
+            "esc\x1b[0mx@example.com",
             "nul\x00@example.com",
             "lone\ud800@example.com",
             42,
@@ -143,11 +153,38 @@ class TestTheRoute:
     def test_an_address_the_list_cannot_hold_is_a_400_and_stores_nothing(
         self, world, email
     ):
+        # Only an over-long address, the NUL and the lone surrogate are
+        # refused before the INSERT; every other case is the CHECK's refusal.
         before = _rows(world["owner"], "SELECT count(*) FROM waitlist_entries")
         (resp,) = _post(world, {"email": email})
         assert resp.status_code == 400
         assert resp.json()["reason"] == "invalid_email"
         assert _rows(world["owner"], "SELECT count(*) FROM waitlist_entries") == before
+
+    def test_the_400_is_the_checks_refusal_not_a_python_rule(self, world):
+        """The service keeps no copy of the address rule: an address it passes
+        through is refused by `ck_waitlist_entries_email`, and the refusal it
+        raises carries the database's error."""
+
+        async def main():
+            engine = create_async_engine(
+                asyncpg_url(world["ingress"]), poolclass=NullPool
+            )
+            try:
+                async with engine.begin() as conn:
+                    with pytest.raises(waitlist.InvalidWaitlistEmail) as caught:
+                        await waitlist.join(conn, "a@nodot")
+                    # The savepoint kept the transaction usable.
+                    await waitlist.join(conn, "after-refusal@example.com")
+            finally:
+                await engine.dispose()
+            return caught.value
+
+        refusal = asyncio.run(main())
+        assert isinstance(refusal.__cause__, DBAPIError)
+        assert _entry(world, "after-refusal@example.com") == [
+            ("after-refusal@example.com", None)
+        ]
 
     def test_the_limit_refuses_past_its_window(self, world, monkeypatch):
         monkeypatch.setattr(public, "WAITLIST_LIMIT", 2)
@@ -160,6 +197,57 @@ class TestTheRoute:
         )
         assert [r.status_code for r in responses] == [202, 202, 429]
         assert _entry(world, "limit3@example.com") == []
+
+
+class TestTheDoor:
+    """Only the site's server may call: no browser, no other body type, no
+    oversized body, and a burst cannot take the pool."""
+
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {**JSON, "origin": "https://elsewhere.example.com"},
+            {**JSON, "sec-fetch-site": "cross-site"},
+            {**JSON, "sec-fetch-site": "same-origin"},
+        ],
+    )
+    def test_a_request_a_browser_made_is_refused(self, world, headers):
+        body = json.dumps({"email": "browser@example.com"})
+        (resp,) = _send(world, (body, headers))
+        assert (resp.status_code, resp.json()["reason"]) == (403, "browser")
+        assert _entry(world, "browser@example.com") == []
+
+    def test_a_body_that_is_not_json_by_type_is_refused(self, world):
+        body = json.dumps({"email": "plain-text@example.com"})
+        (resp,) = _send(world, (body, {"content-type": "text/plain"}))
+        assert (resp.status_code, resp.json()["reason"]) == (415, "not_json")
+        assert _entry(world, "plain-text@example.com") == []
+
+    def test_an_oversized_body_is_a_413_declared_or_streamed(self, world):
+        big = json.dumps({"email": "big@example.com", "pad": "x" * 9000})
+
+        async def chunks():  # no Content-Length: the cap counts what arrives
+            yield big.encode()
+
+        declared, streamed = _send(world, (big, JSON), (chunks(), JSON))
+        assert (declared.status_code, declared.json()["reason"]) == (413, "too_large")
+        assert (streamed.status_code, streamed.json()["reason"]) == (413, "too_large")
+        assert _entry(world, "big@example.com") == []
+
+    def test_a_malformed_body_still_spends_the_counter(self, world, monkeypatch):
+        monkeypatch.setattr(public, "WAITLIST_LIMIT", 1)
+        monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-malformed:")
+        bad, good = _send(
+            world, ("[" * 2000, JSON), (json.dumps({"email": "m@example.com"}), JSON)
+        )
+        assert (bad.status_code, bad.json()["reason"]) == (400, "not_json")
+        assert good.status_code == 429
+
+    def test_a_burst_past_the_in_flight_cap_is_a_429(self, world, monkeypatch):
+        monkeypatch.setattr(public, "_in_flight", public.WAITLIST_MAX_IN_FLIGHT)
+        (resp,) = _post(world, {"email": "burst@example.com"})
+        assert (resp.status_code, resp.json()["reason"]) == (429, "busy")
+        assert _entry(world, "burst@example.com") == []
 
 
 class TestTheLogin:

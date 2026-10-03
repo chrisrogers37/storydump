@@ -40,7 +40,8 @@ describe("POST /api/waitlist", () => {
     expect(path).toBe("/waitlist")
     expect(token).toBeNull()
     expect(init).toMatchObject({ method: "POST", plane: "public" })
-    expect(body).toEqual({ email: "  New@Example.com " })
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+    expect(body).toEqual({ email: "New@Example.com" })
     expect(notifyAdmin).toHaveBeenCalledWith("new@example.com")
   })
 
@@ -55,6 +56,8 @@ describe("POST /api/waitlist", () => {
   it.each([
     [503, "target_router_unreachable"],
     [429, "http_429"],
+    // The site deployed before the API: the route is not there yet.
+    [404, "http_404"],
     [500, "http_500"],
   ])("logs a %s from the API and answers the generic 500", async (status, error) => {
     targetFetch.mockResolvedValue({ ok: false, status, error })
@@ -68,12 +71,30 @@ describe("POST /api/waitlist", () => {
     expect(notifyAdmin).not.toHaveBeenCalled()
   })
 
-  it("leaves what an address is to the API: it forwards one this route cannot judge", async () => {
+  it("leaves what an address is to the API, forwarding only a string", async () => {
     targetFetch.mockResolvedValue({ ok: false, status: 400, error: "invalid_email" })
-    for (const email of [1, {}, null, "no-at-sign", "a".repeat(300)]) {
+    for (const email of [1, {}, null, "no-at-sign"]) {
       expect((await POST(signup(email))).status).toBe(400)
     }
-    expect(targetFetch).toHaveBeenCalledTimes(5)
+    expect(targetFetch.mock.calls.map(([, , init]) => JSON.parse(init.body).email)).toEqual([
+      "",
+      "",
+      "",
+      "no-at-sign",
+    ])
+  })
+
+  it("refuses an address longer than 254 characters without asking the API", async () => {
+    targetFetch.mockResolvedValue({ ok: true, data: { status: "received" } })
+    const at254 = `${"é".repeat(254 - "@example.com".length)}@example.com`
+    expect((await POST(signup(at254))).status).toBe(200)
+    targetFetch.mockClear()
+    expect((await POST(signup(`  ${at254}\n`))).status).toBe(200)
+    targetFetch.mockClear()
+    const res = await POST(signup(`é${at254}`))
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual(INVALID)
+    expect(targetFetch).not.toHaveBeenCalled()
   })
 
   it("refuses a body that is not a JSON object without calling the API", async () => {
@@ -88,11 +109,12 @@ describe("POST /api/waitlist", () => {
     expect(targetFetch).not.toHaveBeenCalled()
   })
 
-  it("forwards the campaign keys and nothing else", async () => {
+  it("forwards the campaign keys as strings cut by whole characters, and nothing else", async () => {
     targetFetch.mockResolvedValue({ ok: true, data: { status: "received" } })
     const res = await POST(
       signup("utm@example.com", {
-        utm_source: "newsletter",
+        utm_source: "s".repeat(99) + "😀😀",
+        utm_medium: { nested: "x" },
         utm_campaign: "launch",
         other: "dropped",
       })
@@ -100,7 +122,7 @@ describe("POST /api/waitlist", () => {
     expect(res.status).toBe(200)
     expect(forwarded().body).toEqual({
       email: "utm@example.com",
-      utm_source: "newsletter",
+      utm_source: "s".repeat(99) + "😀",
       utm_campaign: "launch",
     })
   })

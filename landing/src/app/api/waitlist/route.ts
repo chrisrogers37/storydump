@@ -4,6 +4,12 @@ import { targetFetch } from "@/lib/target-api"
 import { notifyAdmin } from "@/lib/telegram"
 import { UTM_KEYS } from "@/lib/analytics"
 
+/** The API's bounds, in characters: an address, and each campaign value. */
+const MAX_EMAIL_CHARS = 254
+const MAX_UTM_CHARS = 100
+/** How long the form waits on the API before answering the generic error. */
+const API_TIMEOUT_MS = 8000
+
 const JOINED = { status: "success", message: "You're on the list!" }
 const INVALID = { status: "error", message: "Please enter a valid email address." }
 const FAILED = { status: "error", message: "Something went wrong. Please try again." }
@@ -27,19 +33,36 @@ export async function POST(req: NextRequest) {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return NextResponse.json(INVALID, { status: 400 })
   }
-  const forwarded: Record<string, unknown> = { email: body.email }
-  for (const key of UTM_KEYS) forwarded[key] = body[key]
+  // Only strings cross, each bounded by whole characters (a cut never splits
+  // an emoji into half a pair). What an address is stays the API's call; one
+  // longer than any address can be is refused here without asking.
+  // Trimmed here as the API trims, so pasted whitespace never counts.
+  const email = typeof body.email === "string" ? body.email.trim() : ""
+  if (email.length > MAX_EMAIL_CHARS && [...email].length > MAX_EMAIL_CHARS) {
+    return NextResponse.json(INVALID, { status: 400 })
+  }
+  const forwarded: Record<string, string> = { email }
+  for (const key of UTM_KEYS) {
+    const value = body[key]
+    if (typeof value !== "string") continue
+    // A UTF-16 length within the cap is within it in characters too.
+    forwarded[key] =
+      value.length <= MAX_UTM_CHARS ? value : [...value].slice(0, MAX_UTM_CHARS).join("")
+  }
 
   const result = await targetFetch("/waitlist", null, {
     method: "POST",
     plane: "public",
     body: JSON.stringify(forwarded),
+    // A hung API is the same generic error, not a wait until the host kills
+    // the function: targetFetch reports the abort as target_router_unreachable.
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
   })
 
   if (result.ok) {
     // Fire-and-forget Telegram notification. The API does not say whether the
     // address was new, so a repeat signup pings again.
-    notifyAdmin(String(body.email).trim().toLowerCase()).catch(console.error)
+    notifyAdmin(email.toLowerCase()).catch(console.error)
     return NextResponse.json(JOINED)
   }
   if (result.error === "invalid_email") {
