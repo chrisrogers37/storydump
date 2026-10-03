@@ -10,6 +10,11 @@ execute_plan_slot` draws a folder by these weights before it picks a file —
 through :func:`weights`, the ONE function that also feeds the card's
 "Posts about" column, so the two can never disagree.
 
+The draw's read lives here with its arithmetic: :func:`pool` is the folders a
+draw can land on and the files eligible in each (:data:`ELIGIBLE_SQL`, `06`
+§3's rule), and the Overview's days of content left (`content_runway`) counts
+the same read, so the figure and the draw cannot disagree either.
+
 D23: the table keeps its row shape (one row per source per effective period;
 `effective_to IS NULL` is the current row, `uq_case_mix_current_by_source`
 makes two current rows for a source impossible) and **sum-to-one is
@@ -28,12 +33,13 @@ folder name at save time — never a key. A row written before 071 carries no
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from sqlalchemy import text
 
 from src.exceptions.base import RefusalError
-from src.services.target import readers
+from src.services.target import intent_ledger, readers
 from src.services.target.workspaces import CONNECTED_SQL
 
 #: Sum-to-one tolerance: four decimal places per row, so a three-way split
@@ -45,6 +51,15 @@ MAX_SOURCES = 500
 #: The label a source row shows — its folder name, else its ref. Every query
 #: here aliases `media_sources` as `s`, as `CONNECTED_SQL` expects.
 _LABEL = "COALESCE(s.config->>'folder_name', s.config->>'folder_ref', 'folder')"
+
+#: A source's CURRENT mix row, `x`, joined after ``FROM media_sources s``: the
+#: row keyed on that source, in the source's own workspace, still in effect.
+#: :func:`pool_folders` and :func:`mix_view` both read the mix through it.
+_CURRENT_MIX_JOIN = (
+    "  LEFT JOIN category_post_case_mix x"
+    "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
+    "   AND x.effective_to IS NULL"
+)
 
 
 class MixInvalid(RefusalError):
@@ -145,6 +160,129 @@ def weights(rows: list[dict]) -> dict[str, float]:
     return out
 
 
+#: `02` §4's terminal intent states as a SQL list, spelled from their one home,
+#: `intent_ledger.TERMINAL_STATES`: an intent in one of them holds no file.
+_TERMINAL_STATES_SQL = ", ".join(
+    f"'{state}'" for state in intent_ledger.TERMINAL_STATES
+)
+
+#: `06` §3's rule in full, spliced after ``FROM media_items m``: available, not
+#: already live for this account (an intent of its own not yet terminal), minus
+#: the workspace-wide locks (skip/reject/hold/seasonal/unsupported) and minus
+#: THIS account's own `recent` locks — a live lock is one with no expiry or an
+#: expiry still ahead. It binds `:ws` and `:acct`, nothing else. The planner
+#: picks with it and the runway counts with it.
+ELIGIBLE_SQL = (
+    " WHERE m.workspace_id = :ws AND m.state = 'available'"
+    "   AND NOT EXISTS (SELECT 1 FROM post_intents p"
+    "                   WHERE p.workspace_id = m.workspace_id"
+    "                     AND p.media_item_id = m.id"
+    "                     AND p.ig_account_id = :acct"
+    f"                    AND p.state NOT IN ({_TERMINAL_STATES_SQL}))"
+    "   AND NOT EXISTS (SELECT 1 FROM post_locks l"
+    "                   WHERE l.workspace_id = m.workspace_id"
+    "                     AND l.media_item_id = m.id"
+    "                     AND (l.expires_at IS NULL OR l.expires_at > now())"
+    "                     AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct))"
+)
+
+
+@dataclass(frozen=True)
+class Pool:
+    """What one account can post from right now, folder by folder."""
+
+    #: :func:`weights` over the connected folders, in the order read.
+    weights: dict[str, float]
+    #: Eligible files per folder a draw can land on, and only those: a
+    #: connected folder with no ratio or a ratio above 0 (0 when nothing in it
+    #: is eligible). An Off folder is never counted (:func:`pool`), so it is
+    #: not here, whatever it holds.
+    counts: dict[str, int]
+
+    @property
+    def drawable(self) -> list[tuple[str, float]]:
+        """The folders the draw can land on, with their weights: Off folders,
+        and folders with nothing eligible, weigh 0 and are not among them."""
+        return [(sid, weight) for sid, weight in self.weights.items() if weight > 0]
+
+    @property
+    def eligible(self) -> int:
+        """Every file the planner could pick for this account now: every
+        count :attr:`counts` holds, since it holds only the folders a draw can
+        land on."""
+        return sum(self.counts.values())
+
+    @property
+    def eligible_after_a_mint(self) -> int:
+        """What a mint drawn from this pool leaves: one file fewer. A minted
+        file is live for the account, so :data:`ELIGIBLE_SQL` leaves it out;
+        the rest of the pool is as read, so long as nothing else in the
+        mint's transaction moved it."""
+        return self.eligible - 1
+
+
+async def pool_folders(executor, *, workspace_id: str) -> list[dict]:
+    """The folders a draw can land on, with their current ratios — `source_id`,
+    `ratio`. A folder in `error` or removed is not among them; the mix is keyed
+    on the source (a name is a label), so a mix row without a source_id (set
+    before 071) is not joined and shapes nothing. The same for every account
+    of the workspace, so a read over several accounts passes it to
+    :func:`pool` once."""
+    return await readers.rows(
+        executor,
+        "SELECT s.id AS source_id, x.ratio"
+        "  FROM media_sources s"
+        + _CURRENT_MIX_JOIN
+        + " WHERE s.workspace_id = :ws AND s.state <> 'error'"
+        "   AND " + CONNECTED_SQL,
+        ws=workspace_id,
+    )
+
+
+async def pool(
+    executor,
+    *,
+    workspace_id: str,
+    ig_account_id: str,
+    folders: Optional[list[dict]] = None,
+) -> Pool:
+    """The planner's pool for one account: the folders a draw can land on
+    (:func:`pool_folders`, read here unless *folders* hands that read in),
+    then the eligible files in each, weighed by :func:`weights`.
+    `scheduler.execute_plan_slot` draws from it and `content_runway` counts
+    it, so the files drawn from and the days left cannot disagree."""
+    if folders is None:
+        folders = await pool_folders(executor, workspace_id=workspace_id)
+    # Counted in the folders that can be drawn only, the one guard on an Off
+    # folder (ratio 0): it weighs 0 whatever it holds, so its files are never
+    # read and :attr:`Pool.counts` holds only these. With none of them the
+    # count still runs, bound to no folder, so the read is the same statement
+    # every time.
+    sources = [
+        str(row["source_id"])
+        for row in folders
+        if row["ratio"] is None or row["ratio"] > 0
+    ]
+    counts = await readers.rows(
+        executor,
+        "SELECT m.source_id, count(*) AS n FROM media_items m"
+        + ELIGIBLE_SQL
+        + "   AND m.source_id = ANY(CAST(:sources AS uuid[]))"
+        + " GROUP BY m.source_id",
+        ws=workspace_id,
+        acct=ig_account_id,
+        sources=sources,
+    )
+    have = {str(row["source_id"]): int(row["n"]) for row in counts}
+    # The folder rows as read, each with its count: :func:`weights` reads the
+    # source id and the ratio itself.
+    shaped = [{**row, "n": have.get(str(row["source_id"]), 0)} for row in folders]
+    return Pool(
+        weights=weights(shaped),
+        counts={source_id: have.get(source_id, 0) for source_id in sources},
+    )
+
+
 async def _connected(executor, *, workspace_id: str):
     """The workspace's connected folders — `id`, `label`."""
     return await readers.rows(
@@ -224,10 +362,8 @@ async def mix_view(executor, *, workspace_id: str) -> list[dict]:
         "           AND m.state = 'available') AS media_count,"
         "       x.ratio"
         "  FROM media_sources s"
-        "  LEFT JOIN category_post_case_mix x"
-        "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
-        "   AND x.effective_to IS NULL"
-        " WHERE s.workspace_id = :ws AND "
+        + _CURRENT_MIX_JOIN
+        + " WHERE s.workspace_id = :ws AND "
         + CONNECTED_SQL
         + " ORDER BY s.created_at, s.id",
         ws=str(workspace_id),
