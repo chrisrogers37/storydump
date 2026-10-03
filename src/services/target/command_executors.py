@@ -113,7 +113,7 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
         "SELECT i.id, i.workspace_id, i.state, i.media_item_id, i.ig_account_id,"
         "       i.provider_account_ref, i.cancel_requested, i.published_via,"
         "       i.publish_step, i.ig_container_id, i.attempts_by_step,"
-        "       i.origin, i.schedule_slot_at,"
+        "       i.origin, i.schedule_slot_at, i.transit_asset_ref,"
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
         "       w.dry_run_mode, w.is_paused,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
@@ -408,7 +408,8 @@ def _result(intent: dict[str, Any], state: str, **extra: Any) -> CommandResult:
 
 async def _mint_publish_job(session, intent: dict[str, Any], command: Command) -> None:
     """The `publish_pipeline` job for an intent entering the ladder — the one
-    mint `approve` and `resolve_review` both use.
+    mint `approve` and `resolve_review` both use. A give-up mints it too, for
+    an intent that has LEFT the ladder: see `_give_up`.
 
     It was written out in both (the tech-debt audit, 2026-09-20), and only
     `approve`'s copy carried the two reasons below, so a reader of the
@@ -741,12 +742,22 @@ async def _give_up(
     session, intent: dict[str, Any], command: Command, op: Optional[dict[str, Any]]
 ) -> CommandResult:
     """`review_required → cancelled`, the debit retained; the unresolved op
-    ends by verdict; the line reaches every card by ref, without buttons."""
+    ends by verdict; the line reaches every card by ref, without buttons.
+
+    A story that reached the transit upload carries a copy on Cloudinary,
+    and the API holds no transit credentials to destroy it. The give-up
+    mints a `publish_pipeline` job in its own transaction instead: the
+    worker meets the intent already `cancelled`, destroys the copy and
+    finalizes — the pipeline's terminal route, which never posts (the row
+    is frozen before the job is visible). Without one, the copy waited for
+    the backstop sweep, up to two days."""
     if not await publish_cap.resolve_cancel(session, intent_id=str(intent["id"])):
         raise CommandRefused("illegal_transition", _RESOLVED_BY_SOMEONE_ELSE)
     await _end_op_by_verdict(
         session, op, outcome="failed", verdict="given_up", command=command
     )
+    if intent.get("transit_asset_ref"):
+        await _mint_publish_job(session, intent, command)
     await _restate_outcome(session, intent, command, "cancelled")
     return _result(intent, "cancelled")
 
