@@ -301,6 +301,14 @@ class Settings(BaseSettings):
     # token of any role passes only if its person is listed here.
     OPS_USER_IDS: str = ""
 
+    # The secret the landing site's server sends with each waitlist signup
+    # (`POST /public/waitlist`, `07` §43), the same value as the site's
+    # WAITLIST_SITE_SECRET on Vercel. Set, the API refuses a call without it
+    # and limits each visitor the site names on their own counter; unset — the
+    # default — it keys the limit on the site's address, shared by everyone.
+    # Set it on the site first: until then the site sends nothing to match.
+    WAITLIST_SITE_SECRET: Optional[str] = None
+
     @property
     def web_app_origin(self) -> Optional[str]:
         """The front end's origin, normalized (no trailing slash), or None.

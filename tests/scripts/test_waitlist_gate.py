@@ -72,10 +72,12 @@ def _send(world, *requests):
 JSON = {"content-type": "application/json"}
 
 
-def _post(world, *bodies):
-    """Each body as JSON. json.dumps escapes to ASCII, so a lone surrogate
-    travels as `\\ud800` the way a browser's JSON would carry it."""
-    return _send(world, *((json.dumps(b), JSON) for b in bodies))
+def _post(world, *bodies, headers=None):
+    """Each body as JSON, with *headers* besides the content type. json.dumps
+    escapes to ASCII, so a lone surrogate travels as `\\ud800` the way a
+    browser's JSON would carry it."""
+    sent = {**JSON, **(headers or {})}
+    return _send(world, *((json.dumps(b), sent) for b in bodies))
 
 
 def _entry(world, email):
@@ -384,6 +386,83 @@ class TestTheSlots:
             return slots.free._value, slots.by_address
 
         assert asyncio.run(main()) == (public.WAITLIST_MAX_IN_FLIGHT, {})
+
+
+SECRET = "test-site-secret-not-real"
+
+
+def _from_site(visitor=None, secret=SECRET):
+    headers = {public.SITE_SECRET_HEADER: secret}
+    if visitor is not None:
+        headers[public.VISITOR_IP_HEADER] = visitor
+    return headers
+
+
+class TestTheSiteSecret:
+    """`WAITLIST_SITE_SECRET`: unset, the headers change nothing; set, a call
+    without it is refused and each visitor the site names has a limit of their
+    own."""
+
+    @pytest.fixture
+    def armed(self, monkeypatch):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", SECRET)
+        monkeypatch.setattr(public, "WAITLIST_VISITOR_LIMIT", 2)
+        monkeypatch.setattr(
+            public, "WAITLIST_VISITOR_KEY_PREFIX", "waitlist-visitor-test:"
+        )
+
+    def test_unset_the_headers_change_nothing(self, world, monkeypatch):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", None)
+        monkeypatch.setattr(public, "WAITLIST_LIMIT", 2)
+        monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-unset-test:")
+        responses = _post(
+            world,
+            {"email": "unset1@example.com"},
+            {"email": "unset2@example.com"},
+            {"email": "unset3@example.com"},
+            headers=_from_site("198.51.100.1", secret="anything"),
+        )
+        # The shared counter, though the call names a visitor.
+        assert [r.status_code for r in responses] == [202, 202, 429]
+
+    @pytest.mark.parametrize("headers", [{}, _from_site("198.51.100.2", "wrong")])
+    def test_set_a_call_without_it_is_refused_and_stores_nothing(
+        self, world, armed, headers
+    ):
+        (resp,) = _post(world, {"email": "no-secret@example.com"}, headers=headers)
+        assert resp.status_code == 403
+        assert resp.json()["reason"] == "not_site"
+        assert _entry(world, "no-secret@example.com") == []
+
+    def test_set_each_visitor_has_a_limit_of_their_own(self, world, armed):
+        first = _post(
+            world,
+            {"email": "visitor-a1@example.com"},
+            {"email": "visitor-a2@example.com"},
+            {"email": "visitor-a3@example.com"},
+            headers=_from_site("198.51.100.3"),
+        )
+        other = _post(
+            world,
+            {"email": "visitor-b1@example.com"},
+            headers=_from_site("198.51.100.4"),
+        )
+        assert [r.status_code for r in first] == [202, 202, 429]
+        assert [r.status_code for r in other] == [202]
+        assert _entry(world, "visitor-b1@example.com") != []
+
+    def test_set_without_a_usable_visitor_the_shared_counter_serves(
+        self, world, armed, monkeypatch
+    ):
+        monkeypatch.setattr(public, "WAITLIST_LIMIT", 1)
+        monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-novisitor-test:")
+        responses = _post(
+            world,
+            {"email": "novisitor1@example.com"},
+            {"email": "novisitor2@example.com"},
+            headers=_from_site("not-an-address"),
+        )
+        assert [r.status_code for r in responses] == [202, 429]
 
 
 class TestTheLogin:

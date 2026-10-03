@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { NextRequest } from "next/server"
 
 const targetFetch = vi.fn()
@@ -135,5 +135,49 @@ describe("POST /api/waitlist", () => {
     })
     expect((await POST(req)).status).toBe(403)
     expect(targetFetch).not.toHaveBeenCalled()
+  })
+  describe("the site's secret", () => {
+    afterEach(() => vi.unstubAllEnvs())
+
+    function from(headers: Record<string, string>) {
+      return new NextRequest("https://storydump.app/api/waitlist", {
+        method: "POST",
+        headers: { "content-type": "application/json", "sec-fetch-site": "same-origin", ...headers },
+        body: JSON.stringify({ email: "v@example.com" }),
+      })
+    }
+
+    async function sent(req: NextRequest) {
+      targetFetch.mockResolvedValue({ ok: true, data: { status: "received" } })
+      expect((await POST(req)).status).toBe(200)
+      return new Headers(forwarded().init.headers)
+    }
+
+    it("sends neither the secret nor the visitor while it is unset", async () => {
+      vi.stubEnv("WAITLIST_SITE_SECRET", "")
+      const headers = await sent(from({ "x-real-ip": "203.0.113.7" }))
+      expect(headers.has("x-waitlist-site-secret")).toBe(false)
+      expect(headers.has("x-waitlist-visitor-ip")).toBe(false)
+    })
+
+    it("sends the secret and the visitor Vercel reports", async () => {
+      vi.stubEnv("WAITLIST_SITE_SECRET", "test-secret-not-real")
+      const headers = await sent(from({ "x-real-ip": "203.0.113.7" }))
+      expect(headers.get("x-waitlist-site-secret")).toBe("test-secret-not-real")
+      expect(headers.get("x-waitlist-visitor-ip")).toBe("203.0.113.7")
+    })
+
+    it("takes the first x-forwarded-for entry when x-real-ip is absent", async () => {
+      vi.stubEnv("WAITLIST_SITE_SECRET", "test-secret-not-real")
+      const headers = await sent(from({ "x-forwarded-for": " 2001:db8::1 , 10.0.0.1" }))
+      expect(headers.get("x-waitlist-visitor-ip")).toBe("2001:db8::1")
+    })
+
+    it("sends the secret alone when no visitor address is known", async () => {
+      vi.stubEnv("WAITLIST_SITE_SECRET", "test-secret-not-real")
+      const headers = await sent(from({}))
+      expect(headers.get("x-waitlist-site-secret")).toBe("test-secret-not-real")
+      expect(headers.has("x-waitlist-visitor-ip")).toBe(false)
+    })
   })
 })
