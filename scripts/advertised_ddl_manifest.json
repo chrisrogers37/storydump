@@ -349,11 +349,25 @@
       "ordinal": 31
     },
     {
+      "sha256": "89557ca2c349312a68cbc1d0b62930a974a0987b58b0695a99f2f3b06bc5654b",
+      "class": "normative",
+      "label": "§34 the Drive grant records who granted it (091, readiness review 2026-10-02) — oauth_credentials.granted_by_user_id, written by the Drive connect callback, so only the granter browses the Drive and picks folders from it",
+      "doc": "07-security-model.md",
+      "ordinal": 32
+    },
+    {
+      "sha256": "0b6ed908a9da7dcf0bf09dd1ea640e299acd6e49ed489ccb9ac9c48ea1a5e6a6",
+      "class": "normative",
+      "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
+      "doc": "07-security-model.md",
+      "ordinal": 33
+    },
+    {
       "sha256": "c8ce578917f723455eb60fb23923551fb1889947f38f969514e2e5e7660913e0",
       "class": "normative",
       "label": "§35 the activation funnel door (092, #1481) — svc_maintenance's SELECT and a USING (true) policy on users and workspace_members, and fn_activation_funnel: five stage rows of reached and stalled counts for the active users created since p_since, owned by svc_maintenance, EXECUTE for svc_worker only",
       "doc": "07-security-model.md",
-      "ordinal": 33
+      "ordinal": 34
     }
   ],
   "policy_expansion": {

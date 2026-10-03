@@ -895,6 +895,7 @@ class TestDriveFolders:
             "raise": None,
             "asked": None,
             "status": "active",
+            "mine": True,
         }
 
         class _Adapter:
@@ -914,8 +915,13 @@ class TestDriveFolders:
         async def list_sources(session, *, workspace_id):
             return []
 
+        async def may_browse_drive(session, *, workspace_id, user_id):
+            holder["browser"] = (workspace_id, user_id)
+            return holder["mine"]
+
         monkeypatch.setattr(workspaces, "drive_status", drive_status)
         monkeypatch.setattr(workspaces, "list_sources", list_sources)
+        monkeypatch.setattr(workspaces, "may_browse_drive", may_browse_drive)
         return holder
 
     def test_lists_the_root_at_the_admin_floor(
@@ -993,6 +999,31 @@ class TestDriveFolders:
         browser["truncated"] = True
         assert client.get(self.URL).json()["truncated"] is True
 
+    def test_an_admin_who_did_not_grant_it_is_403_drive_not_yours(
+        self, client, signed_in, tenant, browser
+    ):
+        """091: the tree is the granter's Drive. Another admin passes the
+        admin floor and is refused by name — with `reason`, the web's one
+        code carrier — before any request reaches Google."""
+        browser["mine"] = False
+        resp = client.get(self.URL)
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["reason"] == "drive_not_yours"
+        assert browser["asked"] is None
+        assert browser["browser"] == (WS, PRINCIPAL.user_id)
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_dead_grant_says_reconnect_even_to_an_admin_who_did_not_grant_it(
+        self, client, signed_in, tenant, browser
+    ):
+        """Reconnecting is every admin's remedy, and it makes them the
+        granter, so the status refusal comes first."""
+        browser["mine"] = False
+        browser["status"] = "expired"
+        resp = client.get(self.URL)
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "drive_reconnect_needed"
+
 
 class TestDriveStatus:
     """`GET /workspaces/{ws}/drive` — the workspace's grant, projected as the
@@ -1024,7 +1055,7 @@ class TestSourcesUnderTheWorkspaceGrant:
 
     @pytest.fixture
     def grant(self, monkeypatch):
-        holder = {"status": "active"}
+        holder = {"status": "active", "mine": True}
 
         async def drive_status(session, *, workspace_id):
             return {"status": holder["status"], "connected_at": None}
@@ -1032,8 +1063,14 @@ class TestSourcesUnderTheWorkspaceGrant:
         async def list_sources(session, *, workspace_id):
             return []
 
+        async def may_browse_drive(session, *, workspace_id, user_id):
+            holder["browser"] = (workspace_id, user_id)
+            answers = holder.get("answers")
+            return answers.pop(0) if answers else holder["mine"]
+
         monkeypatch.setattr(workspaces, "drive_status", drive_status)
         monkeypatch.setattr(workspaces, "list_sources", list_sources)
+        monkeypatch.setattr(workspaces, "may_browse_drive", may_browse_drive)
         return holder
 
     @pytest.fixture
@@ -1080,6 +1117,29 @@ class TestSourcesUnderTheWorkspaceGrant:
         assert (
             resp.status_code == 409 and resp.json()["detail"] == "drive_not_connected"
         )
+        assert created == {}
+
+    def test_an_admin_who_did_not_grant_it_adds_nothing(
+        self, client, signed_in, tenant, grant, created
+    ):
+        """091: a pick reads the granter's Drive and adds a folder from it, so
+        it is the folder browser's rule — refused by name, nothing created."""
+        grant["mine"] = False
+        resp = client.post(self.URL, json={"folder_ref": "f1", "folder_name": "Trips"})
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["reason"] == "drive_not_yours"
+        assert grant["browser"] == (WS, PRINCIPAL.user_id)
+        assert created == {}
+
+    def test_a_reconnect_by_someone_else_mid_pick_is_403_drive_not_yours(
+        self, client, signed_in, tenant, grant, created
+    ):
+        """The browse check is asked again in the writing unit of work: a
+        reconnect between the two makes someone else the granter."""
+        grant["answers"] = [True, False]
+        resp = client.post(self.URL, json={"folder_ref": "f1", "folder_name": "Trips"})
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["reason"] == "drive_not_yours"
         assert created == {}
 
     @pytest.fixture

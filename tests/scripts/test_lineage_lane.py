@@ -407,6 +407,12 @@ class TestTheBoundaryIsDerivedAndLoud:
             # Telegram join door honours, and the service-token minter the
             # removal revokes by (readiness review, 2026-10-02).
             "090_member_removal_sticks.sql",
+            # 091 appends §34, the Drive grant records who granted it, so
+            # only they browse it (readiness review, 2026-10-02).
+            "091_drive_grant_owner.sql",
+            # 092 appends §35, a new account needs a way in: the owner's
+            # admissions and the door the sign-in upsert asks (2026-10-02).
+            "092_signup_admissions.sql",
             # 092 appends §35, the activation funnel door: onboarding counted
             # across every workspace, owned by svc_maintenance and executable
             # by svc_worker alone (#1481).
