@@ -6,6 +6,7 @@ import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
 import { UiTerm } from "@/components/setup/ui-term"
 import { siteConfig } from "@/config/site"
+import { SetupPager } from "@/components/setup/setup-pager"
 
 // Optional and reached from the dashboard, so kept out of search results; it
 // still names itself as canonical rather than inheriting another page's.
@@ -179,7 +180,7 @@ export default function ConnectTelegram() {
         </StepCard>
       </div>
 
-      <div className="mt-12 flex items-center justify-between">
+      <SetupPager>
         <Link
           href="/setup/media-organize"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -193,7 +194,7 @@ export default function ConnectTelegram() {
         >
           Back to Overview
         </Link>
-      </div>
+      </SetupPager>
     </div>
   )
 }

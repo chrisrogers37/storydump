@@ -32,7 +32,7 @@ export default function NotFound() {
             <li>
               <Link
                 href="/"
-                className={buttonVariants({ size: "lg", className: "h-11 px-5" })}
+                className={buttonVariants({ size: "xl" })}
               >
                 Go to the home page
               </Link>
@@ -40,7 +40,7 @@ export default function NotFound() {
             <li>
               <Link
                 href="/blog"
-                className={buttonVariants({ variant: "outline", size: "lg", className: "h-11 px-5" })}
+                className={buttonVariants({ variant: "outline", size: "xl" })}
               >
                 Read the blog
               </Link>
@@ -48,7 +48,7 @@ export default function NotFound() {
             <li>
               <Link
                 href="/setup"
-                className={buttonVariants({ variant: "outline", size: "lg", className: "h-11 px-5" })}
+                className={buttonVariants({ variant: "outline", size: "xl" })}
               >
                 See the setup guide
               </Link>

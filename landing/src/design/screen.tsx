@@ -19,7 +19,7 @@ export function Screen({
   return (
     <main
       className={cn(
-        "flex min-h-svh flex-col items-center bg-paper px-4 py-16",
+        "surface-app flex min-h-svh flex-col items-center px-4 py-16",
         align === "center" && "justify-center",
       )}
     >

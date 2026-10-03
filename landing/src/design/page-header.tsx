@@ -16,7 +16,7 @@ export function PageHeader({
     <div className={cn(align === "center" && "text-center")}>
       <h1 className={cn("page-title", size === "lg" ? "text-4xl" : "text-3xl")}>{title}</h1>
       {description && (
-        <p className={cn("text-muted-foreground", size === "lg" ? "mt-3" : "mt-1 text-sm")}>
+        <p className={cn("text-muted-foreground", size === "lg" ? "mt-3" : "mt-2 text-sm")}>
           {description}
         </p>
       )}

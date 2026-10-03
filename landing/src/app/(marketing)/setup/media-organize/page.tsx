@@ -6,6 +6,7 @@ import { StepCard } from "@/components/setup/step-card";
 import { Callout } from "@/components/setup/callout";
 import { UiTerm } from "@/components/setup/ui-term";
 import { buttonVariants } from "@/components/ui/button";
+import { SetupPager } from "@/components/setup/setup-pager"
 
 const description =
   "How to set up your Google Drive folders for Storydump. Each folder you connect gets its own share of your Instagram Stories, and you set the mix.";
@@ -134,7 +135,7 @@ export default function MediaOrganize() {
         </StepCard>
       </div>
 
-      <div className="mt-12 flex items-center justify-between">
+      <SetupPager>
         <Link
           href="/setup/instagram"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -149,7 +150,7 @@ export default function MediaOrganize() {
           Next: Connect Telegram (optional)
           <ArrowRight className="h-4 w-4" />
         </Link>
-      </div>
+      </SetupPager>
     </div>
   );
 }

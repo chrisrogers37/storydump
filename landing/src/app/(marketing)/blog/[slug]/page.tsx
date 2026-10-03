@@ -107,7 +107,7 @@ export default async function BlogPost({ params }: { params: Params }) {
         <TrackedLink
           href="/#waitlist"
           track={blogCta}
-          className={buttonVariants({ size: "lg", className: "mt-4 h-11" })}
+          className={buttonVariants({ size: "xl", className: "mt-4" })}
         >
           Join the waitlist
         </TrackedLink>

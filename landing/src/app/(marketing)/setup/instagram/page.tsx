@@ -7,6 +7,7 @@ import { Callout } from "@/components/setup/callout"
 import { Screenshot } from "@/components/setup/screenshot"
 import { UiTerm } from "@/components/setup/ui-term"
 import { buttonVariants } from "@/components/ui/button"
+import { SetupPager } from "@/components/setup/setup-pager"
 
 const description =
   "How to switch your Instagram account to Business or Creator, which Instagram requires before Storydump can post your Stories through its API."
@@ -109,7 +110,7 @@ export default function InstagramSetup() {
         </StepCard>
       </div>
 
-      <div className="mt-12 flex items-center justify-between">
+      <SetupPager>
         <Link
           href="/setup"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -124,7 +125,7 @@ export default function InstagramSetup() {
           Next: Organize Media
           <ArrowRight className="h-4 w-4" />
         </Link>
-      </div>
+      </SetupPager>
     </div>
   )
 }

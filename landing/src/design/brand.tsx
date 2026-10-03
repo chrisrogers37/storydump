@@ -19,7 +19,7 @@ function BrandMark({ className = "size-5" }: { className?: string }) {
  */
 export function Wordmark({ className, markClassName }: { className?: string; markClassName?: string }) {
   return (
-    <span className={cn("page-title flex items-center gap-2", className)}>
+    <span className={cn("page-title flex items-center gap-2 text-ink", className)}>
       <BrandMark className={markClassName} />
       {siteConfig.name}
     </span>

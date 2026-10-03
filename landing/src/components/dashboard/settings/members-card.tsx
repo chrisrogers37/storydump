@@ -12,11 +12,12 @@ import {
 } from "@/lib/command-client";
 import { memberOrigin, stillInTelegramGroupCopy } from "@/lib/members";
 import type { WorkspaceMember } from "@/lib/types";
+import { TONE_CLASS } from "@/components/dashboard/tone";
 
 const ROLE_CLASS: Record<string, string> = {
-  owner: "bg-purple-100 text-purple-900",
-  admin: "bg-blue-100 text-blue-900",
-  member: "bg-muted text-muted-foreground",
+  owner: "bg-ink text-white",
+  admin: "border-ink/10 bg-paper text-ink",
+  member: TONE_CLASS.inert,
 };
 
 /**

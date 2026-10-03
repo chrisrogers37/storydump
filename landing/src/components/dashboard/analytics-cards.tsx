@@ -1,4 +1,4 @@
-import { Card, CardContent, CardHeader, CardLabel, CardValue } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/card";
 import type { SummaryView } from "@/lib/dashboard-payloads";
 
 /**
@@ -78,19 +78,14 @@ export function AnalyticsCards({ summary }: { summary: SummaryView }) {
   ];
 
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
       {cards.map((card) => (
-        <Card key={card.title}>
-          <CardHeader className="pb-2">
-            <CardLabel>
-              {card.title}
-            </CardLabel>
-          </CardHeader>
-          <CardContent>
-            <CardValue>{card.value}</CardValue>
-            <p className="mt-1 text-xs text-muted-foreground">{card.detail}</p>
-          </CardContent>
-        </Card>
+        <StatCard
+          key={card.title}
+          label={card.title}
+          value={card.value}
+          detail={card.detail}
+        />
       ))}
     </div>
   );

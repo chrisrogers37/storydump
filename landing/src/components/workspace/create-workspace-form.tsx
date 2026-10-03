@@ -116,7 +116,7 @@ export function CreateWorkspaceForm({ autoFocus = false }: { autoFocus?: boolean
           placeholder="e.g. Northside Coffee"
           aria-invalid={tooLong || undefined}
           aria-describedby={error || tooLong ? "workspace-name-error" : undefined}
-          className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+          className="w-full rounded-md border bg-background px-3 py-2 text-sm focus-visible:outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring"
         />
         {(tooLong || error) && (
           <p id="workspace-name-error" role="alert" className="text-sm text-destructive">

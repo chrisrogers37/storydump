@@ -9,7 +9,7 @@ export default function MediaLayout({
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Media library"
+        title="Media"
         description="Browse and manage your content library."
       />
       <MediaTabs />

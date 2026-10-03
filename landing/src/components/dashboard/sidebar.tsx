@@ -46,6 +46,7 @@ const navItems = [
  */
 export function Sidebar({ mobile }: { mobile?: boolean }) {
   const pathname = usePathname();
+  const current = activeHref(pathname);
 
   return (
     // `lg`, matching the header trigger's `lg:hidden`, because the two are
@@ -62,12 +63,13 @@ export function Sidebar({ mobile }: { mobile?: boolean }) {
       </div>
       <nav className="space-y-1 p-3">
         {navItems.map((item) => {
-          const active = item.href === activeHref(pathname);
+          const active = item.href === current;
 
           return (
             <Link
               key={item.href}
               href={item.href}
+              aria-current={active ? "page" : undefined}
               className={cn(
                 "flex items-center gap-3 rounded-full px-3 py-2 text-sm font-medium transition-colors",
                 active
@@ -90,7 +92,7 @@ export function Sidebar({ mobile }: { mobile?: boolean }) {
  * (/dashboard/media/calendar) is not also the Media library, and Overview
  * (/dashboard) only on its own page.
  */
-function activeHref(pathname: string): string | undefined {
+export function activeHref(pathname: string): string | undefined {
   return navItems
     .map((item) => item.href)
     .filter((href) => pathname === href || (href !== "/dashboard" && pathname.startsWith(href + "/")))

@@ -1,20 +1,19 @@
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, StatCard } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function CalendarLoading() {
   return (
     <div className="space-y-6">
       {/* Summary cards */}
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
         {Array.from({ length: 3 }).map((_, i) => (
-          <Card key={i}>
-            <CardHeader className="pb-2">
-              <Skeleton className="h-4 w-24" />
-            </CardHeader>
-            <CardContent>
-              <Skeleton className="h-9 w-14" />
-            </CardContent>
-          </Card>
+          <StatCard
+            key={i}
+            label={<Skeleton className="h-4 w-24" />}
+            value={<Skeleton className="h-9 w-14" />}
+            // Posting Rate always has its interval line.
+            detail={i === 2 && <Skeleton className="my-0.5 h-3 w-20" />}
+          />
         ))}
       </div>
 
