@@ -1,0 +1,184 @@
+{
+ "console_errors": [
+  "Failed to load resource: the server responded with a status of 409 (Conflict)",
+  "Failed to load resource: the server responded with a status of 400 (Bad Request)",
+  "Failed to load resource: the server responded with a status of 400 (Bad Request)",
+  "Failed to load resource: the server responded with a status of 409 (Conflict)"
+ ],
+ "page_errors": [],
+ "failed_requests": [],
+ "schedule_requests": [
+  {
+   "local_at": "2026-10-05T10:30",
+   "override_locks": null,
+   "keys": [
+    "ig_account_id",
+    "local_at",
+    "media_item_id",
+    "submission_id"
+   ]
+  },
+  {
+   "local_at": "2026-10-05T10:30",
+   "override_locks": true,
+   "keys": [
+    "ig_account_id",
+    "local_at",
+    "media_item_id",
+    "override_locks",
+    "submission_id"
+   ]
+  },
+  {
+   "local_at": "2020-01-01T10:00",
+   "override_locks": null,
+   "keys": [
+    "ig_account_id",
+    "local_at",
+    "media_item_id",
+    "submission_id"
+   ]
+  },
+  {
+   "local_at": "2020-01-01T10:00",
+   "override_locks": null,
+   "keys": [
+    "ig_account_id",
+    "local_at",
+    "media_item_id",
+    "submission_id"
+   ]
+  },
+  {
+   "local_at": "2026-10-06T09:15",
+   "override_locks": null,
+   "keys": [
+    "ig_account_id",
+    "local_at",
+    "media_item_id",
+    "submission_id"
+   ]
+  },
+  {
+   "local_at": "2026-10-06T09:15",
+   "override_locks": true,
+   "keys": [
+    "ig_account_id",
+    "local_at",
+    "media_item_id",
+    "override_locks",
+    "submission_id"
+   ]
+  }
+ ],
+ "checks": {
+  "picker_starts_on_the_active_account": {
+   "ok": true,
+   "seen": "Demo Account"
+  },
+  "when_is_described_by_the_zone": {
+   "ok": true,
+   "seen": "In America/Los_Angeles, this account's time zone."
+  },
+  "picker_offers_only_plannable_accounts": {
+   "ok": true,
+   "seen": [
+    "second.demo \u2014 Reconnect needed",
+    "Demo Account"
+   ]
+  },
+  "question_takes_focus_described": {
+   "ok": true,
+   "seen": {
+    "tag": "button",
+    "name": "Schedule anyway",
+    "described": "It was posted on this account recently. Schedule it anyway?"
+   }
+  },
+  "result_takes_focus_described": {
+   "ok": true,
+   "seen": {
+    "tag": "button",
+    "name": "Done",
+    "described": "Planned for Demo Account. Approval is asked on Mon, Oct 5, 10:30 AM (America/Los_Angeles). No Telegram chat is linked to this workspace yet, so nothing is asked until one is. Link one in Settings."
+   }
+  },
+  "done_returns_focus_to_the_item": {
+   "ok": true,
+   "seen": {
+    "tag": "button",
+    "name": "Schedule demo-media-1.jpg",
+    "described": ""
+   }
+  },
+  "when_is_described_by_the_refusal": {
+   "ok": true,
+   "seen": "In America/Los_Angeles, this account's time zone. That time has already passed on the account's clock. Pick a later one."
+  },
+  "repeated_refusal_is_a_new_alert": {
+   "ok": true,
+   "seen": {
+    "renewed": true,
+    "mark": null
+   }
+  },
+  "escape_returns_focus_to_the_item": {
+   "ok": true,
+   "seen": {
+    "tag": "button",
+    "name": "Schedule demo-media-2.jpg",
+    "described": ""
+   }
+  },
+  "keyboard_question_focus": {
+   "ok": true,
+   "seen": {
+    "tag": "button",
+    "name": "Schedule anyway",
+    "described": "It was posted on this account recently. Schedule it anyway?"
+   }
+  },
+  "keyboard_result_focus": {
+   "ok": true,
+   "seen": {
+    "tag": "button",
+    "name": "Done",
+    "described": "Planned for Demo Account. Approval is asked on Tue, Oct 6, 9:15 AM (America/Los_Angeles). No Telegram chat is linked to this workspace yet, so nothing is asked until one is. Link one in Settings."
+   }
+  },
+  "keyboard_close_focus": {
+   "ok": true,
+   "seen": {
+    "tag": "button",
+    "name": "Schedule demo-media-3.jpg",
+    "described": ""
+   }
+  },
+  "override_only_from_the_question": {
+   "ok": true,
+   "seen": [
+    null,
+    true,
+    null,
+    null,
+    null,
+    true
+   ]
+  }
+ },
+ "states": {
+  "grid_schedule_buttons": 3,
+  "form": "Schedule demo-media-1.jpg\n\nAt the time you pick, it is sent for approval like any other story. Nothing posts until someone approves it.\n\nAccount\nDemo Account\nsecond.demo \u2014 Reconnect needed\nDemo Account\nWhen\n\nIn America/Los_Angeles, this account's time zone.\n\nCancel\nSchedule\nClose",
+  "picker": "second.demo \u2014 Reconnect needed\nDemo Account",
+  "confirm": "Schedule demo-media-1.jpg\n\nAt the time you pick, it is sent for approval like any other story. Nothing posts until someone approves it.\n\nIt was posted on this account recently. Schedule it anyway?\n\nBack\nSchedule anyway\nClose",
+  "done": "Scheduled\n\nAt the time you pick, it is sent for approval like any other story. Nothing posts until someone approves it.\n\nPlanned for Demo Account. Approval is asked on Mon, Oct 5, 10:30 AM (America/Los_Angeles).\n\nNo Telegram chat is linked to this workspace yet, so nothing is asked until one is. Link one in Settings.\n\nDone\nClose",
+  "refused_past": "Schedule demo-media-2.jpg\n\nAt the time you pick, it is sent for approval like any other story. Nothing posts until someone approves it.\n\nAccount\nDemo Account\nsecond.demo \u2014 Reconnect needed\nDemo Account\nWhen\n\nIn America/Los_Angeles, this account's time zone.\n\nThat time has already passed on the account's clock. Pick a later one.\n\nCancel\nSchedule\nClose",
+  "keyboard_open_focus": {
+   "tag": "button",
+   "name": "Demo Account",
+   "described": ""
+  },
+  "keyboard_submit": "Enter in the When field",
+  "mobile_form": "Schedule demo-media-1.jpg\n\nAt the time you pick, it is sent for approval like any other story. Nothing posts until someone approves it.\n\nAccount\nDemo Account\nsecond.demo \u2014 Reconnect needed\nDemo Account\nWhen\n\nIn America/Los_Angeles, this account's time zone.\n\nCancel\nSchedule\nClose"
+ }
+}
