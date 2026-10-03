@@ -10,6 +10,9 @@
  * `<a>`, as `GoogleLoginButton` does. (`/api` routes are fetched rather than
  * linked; `signout-never-a-link-contract.test.ts` holds the one that mutates.)
  *
+ * The site's own `next/link` wrappers (`TextLink`, `TrackedLink`,
+ * `MaybeTrackedLink`) prefetch the same way, so they count as `<Link>` here.
+ *
  * WHAT THIS CANNOT SEE: an href held in a variable (`href={item.href}`).
  * A template literal is read, with each `${…}` standing for one segment.
  *
@@ -49,10 +52,10 @@ function handlerPatterns(): RegExp[] {
     });
 }
 
-/** The literal hrefs of every `<Link>` in a source, `${…}` read as one segment. */
+/** The literal hrefs of every `<Link>` (or wrapper) in a source, `${…}` read as one segment. */
 function linkHrefs(source: string): string[] {
   const hrefs: string[] = [];
-  const link = /<Link\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*`([^`]*)`\s*\}|\{\s*"([^"]*)"\s*\})/g;
+  const link = /<(?:Link|TextLink|TrackedLink|MaybeTrackedLink)\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*`([^`]*)`\s*\}|\{\s*"([^"]*)"\s*\})/g;
   for (const m of source.matchAll(link)) {
     const href = m[1] ?? m[2] ?? m[4] ?? m[3].replace(/\$\{[^}]*\}/g, "x");
     hrefs.push(href.split(/[?#]/)[0]);
@@ -92,6 +95,8 @@ describe("no <Link> points at a route handler", () => {
     const patterns = handlerPatterns();
     expect(offenders("<Link\n  href={`/join/${encodeURIComponent(token)}/start`}\n>", patterns)).toHaveLength(1);
     expect(offenders('<Link href="/og-image.png">', patterns)).toHaveLength(1);
+    expect(offenders('<TrackedLink href="/og-image.png" track={t}>', patterns)).toHaveLength(1);
+    expect(offenders('<TextLink href="/og-image.png">', patterns)).toHaveLength(1);
     expect(offenders('<a href={`/join/${token}/start`}>', patterns)).toEqual([]);
     expect(offenders('<Link href="/join/abc">', patterns)).toEqual([]);
   });

@@ -5,10 +5,11 @@ import { listWorkspaces } from "@/lib/workspaces";
 import { WorkspaceList } from "@/components/workspace/workspace-list";
 import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-form";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
-import { siteConfig } from "@/config/site";
+import { noindexMetadata } from "@/lib/seo";
 
 export const metadata = {
-  title: `Workspaces — ${siteConfig.name}`,
+  title: "Workspaces",
+  ...noindexMetadata,
 };
 
 /**
