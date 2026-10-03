@@ -52,9 +52,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.requests import ClientDisconnect
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length
 from src.api.routes.auth import router as auth_router
 from src.api.routes.health import COMMIT_VAR, VERSION, AnswerCache
 from src.api.routes.health import router as health_router
@@ -158,6 +160,85 @@ class DropAmbiguousForwardedForMiddleware:
             scope["headers"] = [(k, v) for k, v in headers if k.lower() != self._XFF]
 
         await self.app(scope, receive, send)
+
+
+class BodySizeLimitMiddleware:
+    """Refuse a request body over *max_bytes* with 413, before a route reads it.
+
+    A declared Content-Length over the limit is refused before a byte is
+    read. A body without one is counted as it arrives: once the total passes
+    the limit the 413 goes out, the app is told the client disconnected — so
+    a route reading the body stops there — and nothing the app sends after
+    that reaches the client. Either way the connection is closed rather than
+    drained, so the rest of the body is never read.
+
+    The limit is the `API_REQUEST_BODY_MAX_BYTES` setting, which says why it
+    sits where it does; the Meta callbacks keep a tighter cap of their own
+    (`routes/meta.py`).
+    """
+
+    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        declared = declared_length(scope["headers"])
+        if declared is not None and declared > self.max_bytes:
+            await self._refuse(scope, receive, send, f"declared {declared}")
+            return
+
+        received = 0
+        started = False
+
+        async def bounded_receive() -> Message:
+            nonlocal received
+            if received > self.max_bytes:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    if not started:
+                        await self._refuse(scope, receive, send, "streamed")
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal started
+            if received > self.max_bytes:
+                return
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, bounded_receive, guarded_send)
+        except ClientDisconnect:
+            # The disconnect handed over above: the 413 is the answer.
+            if received <= self.max_bytes:
+                raise
+
+    async def _refuse(
+        self, scope: Scope, receive: Receive, send: Send, how: str
+    ) -> None:
+        client = scope.get("client")
+        logger.warning(
+            "refused %s %s from %s: request body over %d bytes (%s)",
+            scope.get("method"),
+            scope.get("path"),
+            client[0] if client else "unknown",
+            self.max_bytes,
+            how,
+        )
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": BODY_TOO_LARGE_DETAIL},
+            headers={"Connection": "close"},
+        )
+        await response(scope, receive, send)
 
 
 #: How often `_sample_webhook_live` re-reads what Telegram holds — the cadence
@@ -687,8 +768,13 @@ def create_app(
 
     # Middleware. Starlette prepends, so the LAST added runs FIRST on the
     # request path: CORS outermost, then the ambiguous-XFF drop (#765) ahead
-    # of the trusted-proxy walk (#726), then security headers innermost.
+    # of the trusted-proxy walk (#726), then the body limit — after the walk,
+    # so its refusal names the attributed client, and ahead of everything
+    # that could read a body — then security headers innermost.
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(
+        BodySizeLimitMiddleware, max_bytes=settings.API_REQUEST_BODY_MAX_BYTES
+    )
     app.add_middleware(
         ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts
     )

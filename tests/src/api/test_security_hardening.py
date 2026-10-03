@@ -4,11 +4,13 @@ tier's `ConfigValidator`, #1216)."""
 
 import pytest
 from fastapi import Depends
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from src.api.principal import COOKIE, current_principal
 from src.config.settings import settings
 from src.services.target import service_tokens, sessions
+from tests.src.api.conftest import post_body, post_messages
 
 
 # =============================================================================
@@ -301,6 +303,96 @@ class TestForwardedForAmbiguity:
             [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.CALLER
         )
         assert got == self.CALLER
+
+
+# =============================================================================
+# Request body limit
+# =============================================================================
+
+
+class TestBodySizeLimit:
+    """No route reads more of a request body than the API admits.
+
+    Driven through the real app, so these pin BodySizeLimitMiddleware as
+    `create_app` registers it rather than a copy of it. The limit is lowered
+    to LIMIT so the bodies stay small, and a probe route reads its whole body,
+    recording that it ran and then how much it read.
+    """
+
+    LIMIT = 1024
+
+    @pytest.fixture
+    def probe(self, monkeypatch):
+        from fastapi import Response
+        from fastapi.testclient import TestClient
+
+        from src.api.app import create_app
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "API_REQUEST_BODY_MAX_BYTES", self.LIMIT)
+        app = create_app(env={})
+        seen = []
+
+        async def read_it_all(request):
+            seen.append("ran")
+            seen.append(len(await request.body()))
+            return Response()
+
+        app.add_route("/probe", read_it_all, methods=["POST"])
+        return TestClient(app), seen
+
+    def test_a_declared_length_over_the_limit_never_reaches_the_route(self, probe):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * (self.LIMIT + 1))
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        assert resp.headers["connection"] == "close"
+        assert seen == [], "the route ran on a body the limit refused"
+
+    def test_an_undeclared_body_is_cut_off_once_it_passes_the_limit(self, probe):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * (self.LIMIT + 1), streamed=True)
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        # The route ran -- no length was declared to refuse on -- and the read
+        # it began never completed.
+        assert seen == ["ran"]
+
+    @pytest.mark.parametrize("streamed", [False, True], ids=["declared", "streamed"])
+    def test_a_body_at_the_limit_reaches_its_route(self, probe, streamed):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * self.LIMIT, streamed=streamed)
+        assert resp.status_code == 200, resp.text
+        assert seen == ["ran", self.LIMIT]
+
+    async def test_the_limit_is_on_the_total_across_messages(self, probe):
+        """Each message is under the limit and their total is over it: the
+        limit counts the whole body, not one message at a time."""
+        client, seen = probe
+        resp, received = await post_messages(client.app, "/probe", [b"x" * 600] * 2)
+        assert received == [600, 600]
+        assert max(received) <= self.LIMIT < sum(received)
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        # The route ran -- no length was declared to refuse on -- and the read
+        # it began never completed.
+        assert seen == ["ran"]
+
+
+class TestRoutesReadTheirOwnBodies:
+    def test_no_route_declares_a_body_parameter(self, app):
+        """A route reads its own body after its gate, so none declares a body
+        parameter for the framework to parse first; bounds on the body live in
+        the app's body size limit and in the routes themselves."""
+        routes = [route for route in app.routes if isinstance(route, APIRoute)]
+        assert routes, "no APIRoute to walk"
+        declared = sorted(
+            f"{method} {route.path}"
+            for route in routes
+            if route.body_field is not None
+            for method in route.methods
+        )
+        assert declared == [], declared
 
 
 # =============================================================================

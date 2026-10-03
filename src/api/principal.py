@@ -36,6 +36,7 @@ variable, never a silent fallback to the settings-built URL (#1010's class).
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -466,3 +467,21 @@ async def json_object(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
     return body
+
+
+#: The detail of every 413 that refuses a request body for its size.
+BODY_TOO_LARGE_DETAIL = "request body too large"
+
+
+def declared_length(raw_headers: Iterable[tuple[bytes, bytes]]) -> int | None:
+    """The declared ``Content-Length``, read from ASGI raw headers (names
+    lowercased, as the server hands them over): an int, or None when the
+    header is absent or not an integer. The first such header answers, as it
+    does for `Request.headers`."""
+    for name, value in raw_headers:
+        if name == b"content-length":
+            try:
+                return int(value.decode("latin-1"))
+            except ValueError:
+                return None
+    return None
