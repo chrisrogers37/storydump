@@ -807,6 +807,9 @@ class TestLaneSurvivesTransientClaimErrors:
         assert loop.consecutive_errors == 3
 
 
+ACTIVE_ROW = {"external_ref": "-777", "workspace_id": "ws-1", "state": "active"}
+
+
 class TestDeliverOutboxRetiresAGoneChat:
     """The deliverer's definitive "chat gone" ends the hold and retires the
     binding — or follows a group that became a supergroup (#1240 review)."""
@@ -856,24 +859,55 @@ class TestDeliverOutboxRetiresAGoneChat:
         return seen
 
     async def test_a_kicked_bot_revokes_the_binding(self, gone):
-        session = _FakeSession(
-            rows=[{"external_ref": "-100777", "workspace_id": "ws-1"}]
-        )
+        session = _FakeSession(rows=[{**ACTIVE_ROW, "external_ref": "-100777"}])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["revoked"] == ["b-1"] and gone["repointed"] == []
 
     async def test_a_supergroup_upgrade_follows_the_chat(self, gone):
         gone["migrate_to"] = "-1009999"
-        session = _FakeSession(rows=[{"external_ref": "-777", "workspace_id": "ws-1"}])
+        session = _FakeSession(rows=[ACTIVE_ROW])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["repointed"] == [("b-1", "-1009999")] and gone["revoked"] == []
 
     async def test_a_successor_another_workspace_holds_revokes_instead(self, gone):
         gone["migrate_to"] = "-1009999"
         gone["repoint_ok"] = False
-        session = _FakeSession(rows=[{"external_ref": "-777", "workspace_id": "ws-1"}])
+        session = _FakeSession(rows=[ACTIVE_ROW])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["revoked"] == ["b-1"]
+
+
+class TestDeliverOutboxSkipsARevokedBinding:
+    """A job minted before an admin removed the group (or the bot was kicked)
+    sends nothing: the hold ends before a poller is built (`07` §13), and
+    what is left of the binding's queue is retired."""
+
+    async def test_no_poller_runs_for_a_revoked_binding(self, monkeypatch):
+        from types import SimpleNamespace
+
+        built = []
+
+        class _Poller:
+            def __init__(self, *a, **kw):
+                built.append(kw)
+
+        monkeypatch.setattr(work_loop.outbox, "OutboxPoller", _Poller)
+        transport = SimpleNamespace(for_chat=lambda ref: lambda row: None)
+        registry = build_registry(full_deps(transport=transport))
+        session = _FakeSession(rows=[{**ACTIVE_ROW, "state": "revoked"}])
+        job = {
+            "id": "j-r",
+            "kind": "deliver_outbox",
+            "workspace_id": "ws-1",
+            "serialization_key": "binding:b-1",
+            "payload": {"binding_id": "b-1"},
+        }
+        assert await registry["deliver_outbox"](session, job) is None
+        assert built == [], "a revoked binding got a sender"
+        retire = [sql for sql, _ in session.statements if "superseded" in sql]
+        assert len(retire) == 1 and "'sending'" in retire[0], (
+            "the revoked binding's leftover queue was not retired"
+        )
 
 
 class TestWeightedCategorySelection:

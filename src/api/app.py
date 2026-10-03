@@ -66,7 +66,11 @@ from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
 from src.config.settings import parse_ops_user_ids, settings
-from src.exceptions.tenancy import TenantResolutionError, TokenRefused
+from src.exceptions.tenancy import (
+    CrossSiteRefused,
+    TenantResolutionError,
+    TokenRefused,
+)
 from src.services.target import oauth_states
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
@@ -196,6 +200,10 @@ _TOKEN_STATUS = {
     "not_ops": 403,
 }
 
+#: `CrossSiteRefused.reason` → 403 WITH the reason, so a refused browser
+#: post says why. Pinned total by the factory test.
+_CROSS_SITE_STATUS = {"cross_site": 403}
+
 #: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
 #: the factory test, so a new reason cannot ship without a row here.
 _COMMAND_STATUS = {
@@ -254,10 +262,9 @@ _INVITATION_STATUS = {
     "identity_mismatch": 403,
     # The CREATE half's refusals (#1172). All three are the caller's input
     # being wrong rather than a state or an authorization fact, so 400 — and
-    # `already_invited` is deliberately NOT 409: a pending invitation to that
-    # address is not a conflicting write to fix by retrying, it is a thing
-    # that already exists, and the remedy is to revoke or wait rather than to
-    # send again.
+    # `already_invited` stays 400 rather than 409 for the same reason. A send
+    # replaces the address's pending invitation (`invitations.create`, under a
+    # per-addressee lock), so it is a backstop no product path reaches today.
     "already_invited": 400,
     "email_required": 400,
     "invalid_channel": 400,
@@ -354,6 +361,10 @@ def _register_handlers(app: FastAPI) -> None:
     )
 
     app.add_exception_handler(TokenRefused, _mapped(_TOKEN_STATUS, _reason_detail))
+
+    app.add_exception_handler(
+        CrossSiteRefused, _mapped(_CROSS_SITE_STATUS, _reason_detail)
+    )
 
     @app.exception_handler(TokenArgsInvalid)
     async def _token_args(request: Request, exc: TokenArgsInvalid):

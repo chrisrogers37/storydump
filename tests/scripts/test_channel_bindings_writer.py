@@ -649,6 +649,137 @@ class TestRetiringAndFollowingAChat:
         assert _row(world, "-1009000000030") == (world["b"]["ws"], "active")
 
 
+class TestAnAdminRemovesAGroup:
+    """`bindings.revoke_for_workspace` — the route's half of `07` §13's
+    removal, as `svc_ingress` under the tenant's RLS: the binding is revoked,
+    its queued cards are superseded, another tenant can move neither, and a
+    fresh bind brings the group back with no backlog."""
+
+    def _queue(self, world, binding: str, *, ids=None) -> list[str]:
+        """Four rows, one per state the revoke must sort: two it retires and
+        two it leaves alone."""
+        ids = ids or world["a"]
+
+        async def enqueue(session):
+            return [
+                await outbox.enqueue(
+                    session,
+                    workspace_id=str(ids["ws"]),
+                    binding_id=binding,
+                    kind="notification",
+                    payload={"v": 1, "text": "queued"},
+                )
+                for _ in range(4)
+            ]
+
+        pending, ambiguous, sending, sent = run(world, enqueue, ids=ids)
+        for oid, state in (
+            (ambiguous, "ambiguous"),
+            (sending, "sending"),
+            (sent, "sent"),
+        ):
+            _migrate(
+                world,
+                "UPDATE channel_outbox SET state = %s WHERE id = %s",
+                (state, oid),
+            )
+        return [pending, ambiguous, sending, sent]
+
+    def _states(self, world, ids: list[str]) -> list[str]:
+        return [
+            fetch_one(
+                world["stream"], "SELECT state FROM channel_outbox WHERE id = %s", (i,)
+            )[0]
+            for i in ids
+        ]
+
+    def _remove(self, world, binding: str, *, ids=None) -> bool:
+        ids = ids or world["a"]
+        return run(
+            world,
+            lambda s: bindings.revoke_for_workspace(
+                s, workspace_id=str(ids["ws"]), binding_id=binding
+            ),
+            ids=ids,
+        )
+
+    def test_revokes_the_binding_and_supersedes_its_queue(self, world):
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        rows = self._queue(world, binding)
+        assert self._states(world, rows) == ["pending", "ambiguous", "sending", "sent"]
+
+        assert self._remove(world, binding) is True
+        assert _row(world, ref)[1] == "revoked"
+        assert self._states(world, rows) == [
+            "superseded",
+            "superseded",
+            "sending",  # the live sender's, settled by its own CAS
+            "sent",
+        ]
+        assert self._remove(world, binding) is False, "a second remove moves nothing"
+
+    def test_another_workspace_can_move_neither_the_binding_nor_its_queue(self, world):
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        rows = self._queue(world, binding)
+
+        assert self._remove(world, binding, ids=world["b"]) is False
+        assert _row(world, ref) == (world["a"]["ws"], "active")
+        assert self._states(world, rows)[:2] == ["pending", "ambiguous"]
+
+    def test_a_re_bind_re_activates_the_row_and_sends_no_backlog(self, world):
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        rows = self._queue(world, binding)
+        assert self._remove(world, binding) is True
+
+        assert _bind(world, ref) == REBOUND
+        assert _row(world, ref)[1] == "active"
+        assert str(_binding_id(world, ref)) == binding, "the same row, not a new one"
+        assert self._states(world, rows)[:2] == ["superseded", "superseded"]
+
+    def test_a_re_bind_retires_a_card_that_was_in_flight_at_the_removal(self, world):
+        """The card being sent when the group was removed is the live sender's
+        at the removal. Whatever it became after (here, back to `pending`
+        after a 429, or left `sending` by a dead sender), the re-bind retires
+        it before the group is active again, so it is never sent there."""
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        pending, _ambiguous, sending, sent = self._queue(world, binding)
+        assert self._remove(world, binding) is True
+        # After the removal, a 429 hands the in-flight card back to pending
+        # and a second one stays stranded in sending.
+        _migrate(
+            world,
+            "UPDATE channel_outbox SET state = 'pending' WHERE id = %s",
+            (pending,),
+        )
+        assert self._states(world, [pending, sending]) == ["pending", "sending"]
+
+        assert _bind(world, ref) == REBOUND
+        assert self._states(world, [pending, sending, sent]) == [
+            "superseded",
+            "superseded",
+            "sent",
+        ]
+
+    def test_re_binding_an_active_group_leaves_its_queue_alone(self, world):
+        """Tapping a fresh bind link for a group that is already bound is a
+        no-op for its cards: only a removed group's leftovers are retired."""
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        rows = self._queue(world, binding)
+
+        assert _bind(world, ref) == REBOUND
+        assert self._states(world, rows) == ["pending", "ambiguous", "sending", "sent"]
+
+
 class TestTheJoinPathThroughTheDoors:
     """`06`'s Telegram join path on postgres:15, driven as a bare `svc_ingress`
     connection with no GUCs (the door sets its own): a linked person speaking
