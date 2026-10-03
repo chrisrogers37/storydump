@@ -20,7 +20,7 @@ from typing import Optional
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import readers, vocabulary
+from src.services.target import oauth_states, readers, vocabulary
 
 PROVIDER_GOOGLE = vocabulary.PROVIDER_GOOGLE
 PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
@@ -364,7 +364,7 @@ async def link_identity(
     ).first()
     if mine is not None:
         # `uq_user_provider`. Replacing it would silently unlink the old
-        # account, which is an operator action with an audit trail, not a tap.
+        # account; the person unlinks it first (`unlink_telegram`, 094).
         raise IdentityAlreadyLinked("user_already_has_this_provider")
 
     await executor.execute(
@@ -376,3 +376,36 @@ async def link_identity(
         {"u": str(user_id), "p": provider, "sub": external_id, "dn": display_name},
     )
     return True
+
+
+#: `fn_identity_unlink`'s answers (094, `07` §37).
+UNLINK_OUTCOMES = ("unlinked", "not_linked", "last_identity")
+
+
+async def unlink_telegram(executor, *, user_id: str) -> str:
+    """Remove *user_id*'s own Telegram identity — the reverse of
+    :func:`link_identity`. Returns one of :data:`UNLINK_OUTCOMES`.
+
+    The delete is the `fn_identity_unlink` door's (094): no runtime role
+    deletes from `user_identities`, and the door keeps the user's other
+    identity, answering `last_identity` rather than leave an account with no
+    way to sign in. The caller proves the person — this is the session's user.
+
+    Memberships are untouched: a workspace joined from a Telegram group stays
+    joined. That Telegram account now resolves to nobody, so its taps answer
+    `unlinked` and its group messages join no one until the person links
+    again. In the same transaction the user's live `link` states are retired,
+    so a link minted before the unlink cannot re-attach an account the person
+    just removed.
+    """
+    outcome = (
+        await executor.execute(
+            text("SELECT fn_identity_unlink(CAST(:u AS uuid), :p)"),
+            {"u": str(user_id), "p": PROVIDER_TELEGRAM},
+        )
+    ).scalar_one()
+    if outcome != "last_identity":
+        await oauth_states.retire_live_states(
+            executor, provider=PROVIDER_TELEGRAM, purpose="link", user_id=user_id
+        )
+    return str(outcome)

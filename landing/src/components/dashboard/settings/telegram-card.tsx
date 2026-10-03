@@ -14,6 +14,8 @@ import {
   startCommandFor,
   telegramGroupLinkRefusalCopy,
   telegramLinkRefusalCopy,
+  telegramUnlinkRefusalCopy,
+  unlinkTelegram,
 } from "@/lib/telegram-link";
 import type { ChannelBinding } from "@/lib/types";
 
@@ -74,6 +76,11 @@ export function TelegramCard({
     expiresInSeconds: number;
   } | null>(null);
   const [linkingTelegram, setLinkingTelegram] = useState(false);
+  const [confirmingUnlink, setConfirmingUnlink] = useState(false);
+  const [unlinking, setUnlinking] = useState(false);
+  /** Set once an unlink lands, so the card shows the link control without
+   *  waiting for the session to be read again. */
+  const [unlinked, setUnlinked] = useState(false);
   const [groupLink, setGroupLink] = useState<{
     link: string;
     expiresInSeconds: number;
@@ -106,6 +113,27 @@ export function TelegramCard({
       link: result.link,
       expiresInSeconds: result.expiresInSeconds,
     });
+  }
+
+  /**
+   * Remove the person's own Telegram identity (094, `07` §37), after the
+   * confirm step has said what it costs. Memberships stay; the API keeps an
+   * identity that is the account's only one and says so.
+   */
+  async function unlinkOwnTelegram() {
+    onError(null);
+    onNotice(null);
+    setUnlinking(true);
+    const result = await unlinkTelegram();
+    setUnlinking(false);
+    setConfirmingUnlink(false);
+    if (!result.ok) {
+      onError(telegramUnlinkRefusalCopy(result.error));
+      return;
+    }
+    setUnlinked(true);
+    setTelegramLink(null);
+    onNotice("Telegram unlinked. Link it again here whenever you like.");
   }
 
   /** Mint the group-picker link (`07` §13) and SHOW it, like the identity link. */
@@ -148,17 +176,54 @@ export function TelegramCard({
         <CardTitle className="text-base">Telegram</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {telegramLinked ? (
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="bg-green-100 text-green-800">
-              Linked
-            </Badge>
-            <p className="text-sm text-muted-foreground">
-              {telegramDisplayName
-                ? `Telegram account "${telegramDisplayName}" is linked to your Storydump account.`
-                : "A Telegram account is linked to your Storydump account."}{" "}
-              If that is not you, contact us — there is no unlink control yet.
-            </p>
+        {telegramLinked && !unlinked ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="bg-green-100 text-green-800">
+                Linked
+              </Badge>
+              <p className="text-sm text-muted-foreground">
+                {telegramDisplayName
+                  ? `Telegram account "${telegramDisplayName}" is linked to your Storydump account.`
+                  : "A Telegram account is linked to your Storydump account."}{" "}
+                If that is not you, unlink it.
+              </p>
+            </div>
+            {confirmingUnlink ? (
+              <div className="space-y-2 rounded-md border p-3">
+                <p className="text-sm">
+                  Unlink this Telegram account? Your taps on approval cards and
+                  your messages in Telegram groups stop counting as you until
+                  you link again. Your workspaces stay as they are.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={unlinkOwnTelegram}
+                    disabled={unlinking}
+                  >
+                    {unlinking ? "Unlinking..." : "Unlink Telegram"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setConfirmingUnlink(false)}
+                    disabled={unlinking}
+                  >
+                    Keep it linked
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmingUnlink(true)}
+              >
+                Unlink
+              </Button>
+            )}
           </div>
         ) : (
           <>

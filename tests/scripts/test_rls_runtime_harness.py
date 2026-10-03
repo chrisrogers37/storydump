@@ -301,6 +301,13 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_membership",),
     ): "door:fn_signup_admitted",
+    # 094: a person's own Telegram unlink — the door's read and delete.
+    (
+        "p_member_identities",
+        "user_identities",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_identity_unlink",
 }
 
 #: The tenant-GUC tables (policies whose predicate reads app.tenant_id),
@@ -409,6 +416,13 @@ DOORS = {
     "fn_signup_admitted": (
         "svc_ingress",
         "SELECT fn_signup_admitted('nobody@example.com')",
+    ),
+    # 094 (`07` §37): a person unlinks their own Telegram identity. A uuid
+    # that names nobody answers not_linked, never a raise.
+    "fn_identity_unlink": (
+        "svc_ingress",
+        "SELECT fn_identity_unlink('00000000-4000-4000-8000-000000000094'::uuid,"
+        " 'telegram')",
     ),
     # The fleet-health doors (081, `07` §24, #751): the estate-wide reads behind
     # /health/posting and /health/scheduling, each the module's former query.
@@ -836,7 +850,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 66
+        assert len(POLICY_CENSUS) == 67
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -855,8 +869,8 @@ class TestRuntimeTenantIsolationMatrix:
         assert len(by_kind["matrix"]) == 16
         # 081: p_maint_accts; 082: the three maintenance reads; 086: the
         # reaper's source re-arm; 090: the removals record; 092: the sign-up
-        # admissions.
-        assert len(by_kind["door"]) == 36
+        # admissions; 094: the Telegram unlink.
+        assert len(by_kind["door"]) == 37
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():

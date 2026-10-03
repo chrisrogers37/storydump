@@ -17,6 +17,8 @@ import {
   telegramGroupLinkRefusalCopy,
   removeTelegramGroup,
   removeTelegramGroupRefusalCopy,
+  telegramUnlinkRefusalCopy,
+  unlinkTelegram,
 } from "./telegram-link";
 
 let captured: { url: string; init: RequestInit }[];
@@ -200,6 +202,24 @@ describe("removeTelegramGroup", () => {
   });
 });
 
+describe("unlinkTelegram", () => {
+  it("sends a DELETE to the person's own Telegram proxy", async () => {
+    stubFetch({ outcome: "unlinked" });
+    expect(await unlinkTelegram()).toEqual({ ok: true });
+    expect(captured[0].url).toBe("/api/me/telegram");
+    expect(captured[0].init.method).toBe("DELETE");
+  });
+
+  it("carries the proxy's refusal by name", async () => {
+    stubFetch({ error: "last_identity" }, 409);
+    expect(await unlinkTelegram()).toEqual({
+      ok: false,
+      error: "last_identity",
+      status: 409,
+    });
+  });
+});
+
 describe("removeTelegramGroupRefusalCopy", () => {
   it("names the admin floor on a role refusal, and that nothing changed", () => {
     for (const reason of ["insufficient_role", "http_403"]) {
@@ -212,5 +232,14 @@ describe("removeTelegramGroupRefusalCopy", () => {
   });
   it("falls back to a sentence that says nothing changed", () => {
     expect(removeTelegramGroupRefusalCopy("http_500")).toMatch(/nothing changed/i);
+  });
+});
+
+describe("telegramUnlinkRefusalCopy", () => {
+  it("says why the only identity stays linked", () => {
+    expect(telegramUnlinkRefusalCopy("last_identity")).toMatch(/stays linked/i);
+  });
+  it("says it is still linked on anything else", () => {
+    expect(telegramUnlinkRefusalCopy("http_500")).toMatch(/still linked/i);
   });
 });

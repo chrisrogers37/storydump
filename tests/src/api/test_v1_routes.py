@@ -847,6 +847,45 @@ class TestTelegramLink:
         }
 
 
+class TestTelegramUnlink:
+    """`DELETE /me/telegram` — the signed-in user removes their own Telegram
+    identity (094, `07` §37). Tenant-less; the door's outcome is the answer,
+    and `last_identity` is the one refusal."""
+
+    URL = "/api/v1/me/telegram"
+
+    @pytest.fixture
+    def unlink(self, monkeypatch):
+        seen = {"outcome": "unlinked"}
+
+        async def unlink_telegram(conn, *, user_id):
+            seen["user_id"] = user_id
+            return seen["outcome"]
+
+        monkeypatch.setattr(identity, "unlink_telegram", unlink_telegram)
+        return seen
+
+    def test_requires_a_session(self, client, unlink):
+        assert client.delete(self.URL).status_code == 401
+        assert "user_id" not in unlink
+
+    @pytest.mark.parametrize("outcome", ["unlinked", "not_linked"])
+    def test_unlinks_the_signed_in_users_own_identity(
+        self, client, signed_in, unlink, outcome
+    ):
+        unlink["outcome"] = outcome
+        resp = client.delete(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"outcome": outcome}
+        assert unlink["user_id"] == PRINCIPAL.user_id
+
+    def test_the_last_identity_is_refused_by_name(self, client, signed_in, unlink):
+        unlink["outcome"] = "last_identity"
+        resp = client.delete(self.URL)
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "last_identity"
+
+
 SRC = "33333333-3333-4333-8333-333333333333"
 
 

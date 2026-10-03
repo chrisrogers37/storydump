@@ -301,8 +301,9 @@ class TestAgainstTheRealDocs:
         # stories served on time or missed out loud (089, #1413) make it 44;
         # §33's removal that sticks (090) makes it 45; §34's Drive granter
         # (091) makes it 46; §35's sign-up admission (092) makes it 47; and
-        # §36's invitations admitting only while legitimate (093) make it 48.
-        assert classes.count("normative") == 48
+        # §36's invitations admitting only while legitimate (093) make it 48;
+        # and §37's Telegram unlink (094) makes it 49.
+        assert classes.count("normative") == 49
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

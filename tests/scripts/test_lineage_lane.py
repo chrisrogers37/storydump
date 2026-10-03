@@ -417,6 +417,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # legitimate: the sign-up door reads the inviter and workspace
             # live, and a removal revokes the removed member's invitations.
             "093_invitations_admit_while_legitimate.sql",
+            # 094 appends §37, a person can unlink their own Telegram
+            # identity: the door and svc_membership's delete behind it.
+            "094_identity_unlink.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

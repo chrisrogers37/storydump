@@ -87,6 +87,38 @@ export function telegramLinkRefusalCopy(reason: unknown): string {
   return "Could not start Telegram linking. Nothing changed — try again shortly.";
 }
 
+export type TelegramUnlinkResult =
+  | { ok: true }
+  | { ok: false; error: string; status: number };
+
+/**
+ * Remove the signed-in user's own Telegram identity (094, `07` §37). Nothing
+ * linked answers ok too: the account ends with no Telegram either way.
+ */
+export async function unlinkTelegram(): Promise<TelegramUnlinkResult> {
+  const result = await callBff("/api/me/telegram", { method: "DELETE" });
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
+  }
+  return { ok: true };
+}
+
+/** A sentence for an unlink refusal. Every branch says what happened. */
+export function telegramUnlinkRefusalCopy(reason: unknown): string {
+  switch (reason) {
+    case "last_identity":
+    case "http_409":
+      return "This Telegram account is the only way into your Storydump account, so it stays linked.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing changed");
+  }
+  return "Could not unlink Telegram. It is still linked — try again shortly.";
+}
+
 /**
  * The attached Telegram identity's display name, or null. Shown beside
  * "Linked" so a person can tell WHOSE Telegram is on their account — the one

@@ -2924,3 +2924,78 @@ COMMENT ON FUNCTION fn_member_remove(uuid, uuid, uuid) IS
 
 REVOKE CREATE ON SCHEMA public FROM svc_membership;
 ```
+
+### §37. A person can unlink their own Telegram identity (094)
+
+**Why:** a user links Telegram from Settings (§2's `link` state), and `uq_user_provider` then holds
+one Telegram identity per user. A person who linked the wrong Telegram account, or stopped using
+one, could neither replace nor remove it: no runtime role holds DELETE on `user_identities` (`02`
+§7's grant matrix), and linking refuses a second Telegram account by name.
+
+**The door.** `fn_identity_unlink(p_user, p_provider)` removes the user's Telegram identity, and
+only while the user keeps another identity, so an account is never left with no way to sign in.
+It refuses any provider but `telegram` by raising: the Google identity is the sign-in identity.
+Outcomes: `unlinked`, `not_linked` (nothing to remove) and `last_identity` (the Telegram identity
+is the user's only one; nothing is removed). The caller proves the person: `p_user` is the
+session's user, from `DELETE /api/v1/me/telegram`, which in the same transaction retires the
+user's live `link` states so an earlier link cannot re-attach an account the person just removed.
+`svc_membership` receives SELECT and DELETE on `user_identities` under a row-open policy, as §14
+gave it DELETE on `workspace_members` for `fn_member_remove`; EXECUTE is `svc_ingress`'s alone.
+The table carries no audit trigger, so the door sets no actor.
+
+**What unlinking does not touch.** Memberships stay. A workspace joined from a Telegram group
+stays joined: unlinking an identity is not leaving a workspace, and removal is
+`fn_member_remove`'s. What changes is that the Telegram account resolves to no Storydump user, so
+its card taps are refused as `unlinked` and its group messages join nobody until the person links
+again, which works as a first link does.
+
+```sql
+-- [§37 a person can unlink their own Telegram identity]
+
+GRANT SELECT, DELETE ON user_identities TO svc_membership;
+
+CREATE POLICY p_member_identities ON user_identities FOR ALL TO svc_membership
+  USING (true) WITH CHECK (true);
+
+GRANT CREATE ON SCHEMA public TO svc_membership;
+
+CREATE FUNCTION fn_identity_unlink(p_user uuid, p_provider text)
+RETURNS text
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  v_deleted int;
+BEGIN
+  IF p_provider IS DISTINCT FROM 'telegram' THEN
+    RAISE EXCEPTION 'only a telegram identity is unlinked here, not %', p_provider
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  DELETE FROM user_identities i
+   WHERE i.user_id = p_user AND i.provider = p_provider
+     AND EXISTS (SELECT 1 FROM user_identities o
+                  WHERE o.user_id = p_user AND o.provider <> p_provider);
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  IF v_deleted > 0 THEN
+    RETURN 'unlinked';
+  END IF;
+  IF EXISTS (SELECT 1 FROM user_identities i
+              WHERE i.user_id = p_user AND i.provider = p_provider) THEN
+    RETURN 'last_identity';
+  END IF;
+  RETURN 'not_linked';
+END $$;
+
+COMMENT ON FUNCTION fn_identity_unlink(uuid, text) IS
+  'A person unlinks their own Telegram identity (094). Removes the user''s telegram row in '
+  'user_identities only while the user keeps another identity; refuses any other provider by '
+  'raising. Memberships are untouched. p_user is the caller''s session user — the caller proves '
+  'the person, this door trusts it. Outcomes: unlinked, not_linked, last_identity. SECURITY '
+  'DEFINER owned by svc_membership with EXECUTE granted to svc_ingress.';
+
+ALTER FUNCTION fn_identity_unlink(uuid, text) OWNER TO svc_membership;
+
+REVOKE CREATE ON SCHEMA public FROM svc_membership;
+
+REVOKE ALL ON FUNCTION fn_identity_unlink(uuid, text) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_identity_unlink(uuid, text) TO svc_ingress;
+```

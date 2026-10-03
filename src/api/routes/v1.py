@@ -321,6 +321,26 @@ async def telegram_link(
     return {"link": link, "expires_in_seconds": STATE_TTL_SECONDS}
 
 
+@router.delete("/me/telegram")
+async def telegram_unlink(
+    request: Request, principal: Principal = Depends(require_session)
+):
+    """The signed-in user removes their own Telegram identity (094, `07`
+    §37). Tenant-less, like the link it reverses. Idempotent: with nothing
+    linked the answer is `not_linked`, still 200. The one refusal is
+    `last_identity` (409) — the Telegram identity is the account's only one,
+    and removing it would leave no way to sign in. Memberships stay; that
+    Telegram account's taps and group messages count for nobody until the
+    person links again.
+    """
+    engine = require_engine(request)
+    async with engine.begin() as conn:
+        outcome = await identity.unlink_telegram(conn, user_id=principal.user_id)
+    if outcome == "last_identity":
+        raise HTTPException(status_code=409, detail="last_identity")
+    return {"outcome": outcome}
+
+
 @router.post("/workspaces/{ws}/telegram/bind-link")
 async def telegram_group_bind_link(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)

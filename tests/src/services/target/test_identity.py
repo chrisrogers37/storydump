@@ -3,6 +3,10 @@ scripted executor: a subject seen before signs in untouched, a NEW one creates
 its user only when `fn_signup_admitted` admits its verified email, and
 `signup_open` skips the ask. The door's own answers are
 `tests/scripts/test_signup_gate.py`'s, as `svc_ingress` on the replayed schema.
+
+`identity.unlink_telegram` (094, `07` §37) likewise: it asks the
+`fn_identity_unlink` door and retires the user's live `link` states unless the
+door kept the identity; the door's answers are `test_identity_unlink_gate.py`'s.
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ class _Scripted:
         answer = self.results.pop(0)
 
         class _R:
+            rowcount = 0
+
             def first(self_inner):
                 return answer
 
@@ -120,3 +126,28 @@ class TestTheSignupGate:
         assert user == "user-new"
         assert not any("fn_signup_admitted" in s for s in ex.sql())
         assert any("INSERT INTO users" in s for s in ex.sql())
+
+
+class TestUnlinkTelegram:
+    @pytest.mark.parametrize("outcome", ["unlinked", "not_linked"])
+    async def test_asks_the_door_then_retires_the_users_live_links(self, outcome):
+        ex = _Scripted(outcome, None)
+
+        assert await identity.unlink_telegram(ex, user_id="user-1") == outcome
+
+        (door, door_params), (retire, retire_params) = ex.statements
+        assert "fn_identity_unlink" in door
+        assert door_params == {"u": "user-1", "p": "telegram"}
+        assert "UPDATE oauth_states SET consumed_at = now()" in retire
+        assert retire_params == {
+            "provider": "telegram",
+            "purpose": "link",
+            "uid": "user-1",
+        }
+
+    async def test_the_last_identity_is_kept_and_nothing_is_retired(self):
+        ex = _Scripted("last_identity")
+
+        assert await identity.unlink_telegram(ex, user_id="user-1") == "last_identity"
+
+        assert len(ex.statements) == 1
