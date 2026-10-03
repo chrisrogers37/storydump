@@ -66,6 +66,7 @@ from src.api.principal import (
     presented_token,
     require_deliverable_session,
     require_engine,
+    require_same_origin,
     set_session_cookie,
 )
 from src.config.settings import settings
@@ -324,10 +325,15 @@ async def signout(request: Request, everywhere: bool = False) -> Response:
     every browser and device they are signed in on, this one included
     (`sessions.revoke_all_for_user`). A dead presented session revokes
     nothing, so a stale cookie cannot reach its siblings.
+
+    A session carried by the COOKIE must come from an admitted origin
+    (`require_same_origin`): a forged post from a sibling host would
+    otherwise sign a person out of everything with one hidden form.
     """
     engine = require_engine(request)
     value = presented_token(request)
     if value is not None:
+        require_same_origin(request)
         digest = sessions.token_hash(value)
         async with engine.begin() as conn:
             if everywhere:

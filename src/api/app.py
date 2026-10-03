@@ -65,7 +65,11 @@ from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
 from src.config.settings import settings
-from src.exceptions.tenancy import TenantResolutionError, TokenRefused
+from src.exceptions.tenancy import (
+    CrossSiteRefused,
+    TenantResolutionError,
+    TokenRefused,
+)
 from src.services.target import oauth_states
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
@@ -193,6 +197,10 @@ _TOKEN_STATUS = {
     "readonly_token": 403,
     "wrong_workspace": 403,
 }
+
+#: `CrossSiteRefused.reason` → 403 WITH the reason, so a refused browser
+#: post says why. Pinned total by the factory test.
+_CROSS_SITE_STATUS = {"cross_site": 403}
 
 #: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
 #: the factory test, so a new reason cannot ship without a row here.
@@ -352,6 +360,10 @@ def _register_handlers(app: FastAPI) -> None:
     )
 
     app.add_exception_handler(TokenRefused, _mapped(_TOKEN_STATUS, _reason_detail))
+
+    app.add_exception_handler(
+        CrossSiteRefused, _mapped(_CROSS_SITE_STATUS, _reason_detail)
+    )
 
     @app.exception_handler(TokenArgsInvalid)
     async def _token_args(request: Request, exc: TokenArgsInvalid):

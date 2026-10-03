@@ -203,6 +203,13 @@ class TestRefusalMappingsAreTotal:
 
         assert set(module._TOKEN_STATUS) == set(TokenRefused.REASONS)
 
+    def test_cross_site_reasons(self):
+        """The cookie origin check's one reason answers 403 with its name."""
+        from src.api import app as module
+        from src.exceptions.tenancy import CrossSiteRefused
+
+        assert set(module._CROSS_SITE_STATUS) == set(CrossSiteRefused.REASONS)
+
     def test_tenant_reasons_are_a_subset_of_the_closed_vocabulary(self):
         from src.api import app as module
         from src.exceptions.tenancy import TenantResolutionError

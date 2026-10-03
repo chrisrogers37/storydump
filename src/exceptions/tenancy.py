@@ -73,3 +73,27 @@ class TokenRefused(RefusalError):
         if reason not in self.REASONS:
             raise ValueError(f"not a token refusal: {reason!r}")
         super().__init__(reason, detail)
+
+
+class CrossSiteRefused(RefusalError):
+    """A cookie-carried session on a state-changing request that a page of
+    neither the front end nor the API itself made (`07` §1).
+
+    ``SameSite=Lax`` keeps the cookie off a cross-SITE post, but a site is the
+    registrable domain, so a page on any sibling host of the product domain
+    would post with it attached. A bearer credential is not ambient — a page
+    cannot make a browser attach one — so only the cookie path is checked.
+
+    ``reason``: cross_site (the request's ``Origin``, else its ``Referer``'s
+    origin, is absent or is not one the API admits) — the same word the front
+    end's own route guard answers with (`landing/src/lib/route-guards.ts`).
+    """
+
+    _prefix = "cross-site request refused"
+
+    REASONS: tuple[str, ...] = ("cross_site",)
+
+    def __init__(self, reason: str, detail: str = ""):
+        if reason not in self.REASONS:
+            raise ValueError(f"not a cross-site refusal: {reason!r}")
+        super().__init__(reason, detail)

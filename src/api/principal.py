@@ -46,7 +46,11 @@ from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.config.settings import settings
-from src.exceptions.tenancy import TenantResolutionError, TokenRefused
+from src.exceptions.tenancy import (
+    CrossSiteRefused,
+    TenantResolutionError,
+    TokenRefused,
+)
 from src.services.target import service_tokens, sessions, tenant_resolution
 from src.services.target.unit_of_work import unit_of_work
 from src.services.target.vocabulary import DATABASE_URL_VAR
@@ -234,12 +238,55 @@ def presented_token(request: Request) -> Optional[str]:
     return presented_bearer(request) or request.cookies.get(COOKIE) or None
 
 
+#: The methods a cookie may carry from anywhere: they change nothing.
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _origin_of(url: str) -> Optional[str]:
+    """``scheme://host[:port]`` of *url*, lowercased, or None when it has
+    neither — the form a browser sends in ``Origin``."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+def require_same_origin(request: Request) -> None:
+    """Refuse a COOKIE-carried, state-changing request another site's page
+    made — ``CrossSiteRefused("cross_site")``, a 403 that names it.
+
+    A bearer passes untouched: it is not ambient, so a page cannot make a
+    browser attach one, and the CLI's tokens and the front end's server side
+    (which forwards the session as a bearer, `landing/src/lib/target-api.ts`)
+    never meet this check. Admitted: `settings.web_app_origin` and the API's
+    own origin. ``Origin`` decides; a browser that sends none on a post still
+    sends ``Referer``, whose origin stands in. Neither is a refusal rather
+    than a pass — a cookie with no provenance is exactly what a forged
+    request looks like when its page sets ``Referrer-Policy: no-referrer``.
+    """
+    if request.method in SAFE_METHODS or presented_bearer(request) is not None:
+        return
+    claimed = request.headers.get("origin")
+    if claimed is None:
+        claimed = _origin_of(request.headers.get("referer", ""))
+    admitted = {_origin_of(str(request.base_url))}
+    if settings.web_app_origin:
+        admitted.add(_origin_of(settings.web_app_origin))
+    if claimed is None or claimed.lower() not in admitted:
+        raise CrossSiteRefused(
+            "cross_site",
+            f"{request.method} {request.url.path} from {claimed or 'no origin'}",
+        )
+
+
 async def current_principal(request: Request) -> Principal:
     """FastAPI dependency: authenticate, slide or stamp, return the principal.
 
     A bearer value with the token prefix is a token and resolves through the
     token resolver; every other value — bearer or cookie — is a session and
-    takes the path it always took.
+    takes the path it always took. A COOKIE on a state-changing request must
+    also come from an admitted origin (`require_same_origin`), checked before
+    the lookup so a forged request does not even slide the session.
     """
     engine = require_engine(request)
     bearer = presented_bearer(request)
@@ -262,6 +309,7 @@ async def current_principal(request: Request) -> Principal:
     value = bearer or request.cookies.get(COOKIE) or None
     if value is None:
         raise TenantResolutionError("invalid_session", "no session presented")
+    require_same_origin(request)
     async with engine.begin() as conn:
         session = await sessions.resolve(conn, token_hash=sessions.token_hash(value))
     return Principal(session_id=session.id, user_id=session.user_id)
