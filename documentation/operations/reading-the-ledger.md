@@ -73,8 +73,8 @@ refusal is an answer: the reason in the CLI's words, the fixing verb, exit 2.
 `rate_counters` (no workspace column) and the system jobs (`workspace_id IS NULL`): both sit
 outside row-level security and are not a workspace's business. Every view carries its own
 `workspace_id` predicate and is proven twice: as the ingress role under the policies, which is
-production's posture since 2026-09-21 (`/health` read `db_role` `svc_ingress`, `bypassrls`
-false, on 2026-10-02), and as a role that bypasses them, such as the owner login that only the
+production's posture since 2026-09-21 (the API's `db_role` read `svc_ingress`, `bypassrls`
+false, on 2026-10-02; `storydump health --json` shows it), and as a role that bypasses them, such as the owner login that only the
 migration runner holds. So the rows are confined by the query, not by the policy alone.
 
 ## The escape hatch

@@ -382,7 +382,7 @@ SECURITY DEFINER doors, `fn_health_posting_freshness`,
 `fn_health_publish_attempts` and `fn_health_destinations` (`posting_health.py`),
 owned by `svc_maintenance` and executable by the API's login. So they see the
 whole estate under the API's own login, which is `svc_ingress` since 2026-09-21:
-`/health` read `db_role` `svc_ingress`, `bypassrls` false, on 2026-10-02 (#751).
+the API's `db_role` read `svc_ingress`, `bypassrls` false, on 2026-10-02 (#751; an operator reads it with `storydump health --json`).
 The direct reads they replaced worked only as the owner, which bypasses RLS.
 Under a role the policy covers, a tenant-less read returns zero rows, and zero
 rows here would read as *nothing has posted*. The API's first switch to
