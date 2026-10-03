@@ -15,7 +15,7 @@ describe("the sign-in page explains the sign-up gate", () => {
     const copy = loginError("not_admitted");
     expect(copy).toBe(LOGIN_ERRORS.not_admitted);
     expect(sentence(copy!)).toBe(
-      "Storydump is invite-only while in beta. Join the waitlist and we’ll email you when your spot is ready.",
+      "Storydump is invite-only while in beta. Join the waitlist and we’ll email you when your spot is ready. Invited by a teammate? Sign in with the Google account your invite went to.",
     );
     expect(copy!.link).toBe("Join the waitlist");
     expect(WAITLIST_HREF).toBe("/#waitlist");

@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import Link from "next/link";
+import { TrackedLink } from "@/components/analytics/tracked-link";
 import { ArrowLeft } from "lucide-react";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
 import { siteConfig } from "@/config/site";
@@ -70,12 +71,13 @@ export default function LoginPage() {
 
         <p className="text-center text-xs text-muted-foreground">
           {NEW_HERE.lead}
-          <Link
+          <TrackedLink
             href={WAITLIST_HREF}
+            track={{ event: "CTA Click", props: { location: "login" } }}
             className="underline underline-offset-4 transition-colors hover:text-foreground"
           >
             {NEW_HERE.link}
-          </Link>
+          </TrackedLink>
           {NEW_HERE.tail}
         </p>
       </div>

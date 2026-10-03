@@ -26,7 +26,8 @@ export const LOGIN_ERRORS = {
   not_admitted: {
     lead: `${siteConfig.name} is invite-only while in beta. `,
     link: "Join the waitlist",
-    tail: " and we’ll email you when your spot is ready.",
+    tail:
+      " and we’ll email you when your spot is ready. Invited by a teammate? Sign in with the Google account your invite went to.",
   },
 } satisfies Record<string, Linked>;
 

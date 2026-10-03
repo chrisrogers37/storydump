@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TrackedLink } from "@/components/analytics/tracked-link";
 import { useSearchParams } from "next/navigation";
 import { Notice } from "@/components/ui/notice";
 import { WAITLIST_HREF, loginError } from "./content";
@@ -16,12 +16,13 @@ export function LoginNotice() {
   return (
     <Notice>
       {copy.lead}
-      <Link
+      <TrackedLink
         href={WAITLIST_HREF}
+        track={{ event: "CTA Click", props: { location: "login" } }}
         className="font-medium underline underline-offset-4 hover:text-foreground"
       >
         {copy.link}
-      </Link>
+      </TrackedLink>
       {copy.tail}
     </Notice>
   );

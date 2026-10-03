@@ -100,7 +100,7 @@ describe("the events the site sends", () => {
   });
 
   it("take their locations and demo actions from fixed lists", () => {
-    expect(CTA_LOCATIONS).toEqual(["header", "blog_post", "use_case"]);
+    expect(CTA_LOCATIONS).toEqual(["header", "blog_post", "use_case", "login"]);
     expect(SIGN_IN_LOCATIONS).toEqual(["header", "hero", "closing", "footer"]);
     expect(DEMO_ACTIONS).toEqual([
       "post_now",

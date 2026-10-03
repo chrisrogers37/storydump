@@ -4,7 +4,7 @@ type UtmKey = (typeof UTM_KEYS)[number]
 type Variant = "hero" | "footer"
 
 /** Where a "Join the waitlist" link that isn't the form itself sits. */
-export const CTA_LOCATIONS = ["header", "blog_post", "use_case"] as const
+export const CTA_LOCATIONS = ["header", "blog_post", "use_case", "login"] as const
 /** Where a "Sign in" link sits. */
 export const SIGN_IN_LOCATIONS = ["header", "hero", "closing", "footer"] as const
 /** The home page demo's buttons. */
