@@ -72,8 +72,9 @@ tear-out (#1216, September 2026); its data survives as the
 The design is `svc_ingress` for the API and `svc_worker` for the worker, so that
 row-level security binds them; moving a deployment off the owner login is
 [`runtime-database-roles.md`](../operations/runtime-database-roles.md). Which
-login a service actually holds is reported, not assumed: `/health` carries
-`db_role`, and the worker logs `worker database role: …` at boot
+login a service actually holds is reported, not assumed: the API's operating
+details (`storydump health --json`, for `OPS_USER_IDS`) carry `db_role`, and
+the worker logs `worker database role: …` at boot
 (`src/worker.py:650-651`).
 
 ### Build the schema on a fresh database
@@ -173,9 +174,11 @@ commands.
   (`src/worker.py:860-861`) and Railway restarts it; `/health` answers 503 only
   for a clock that is alive and no longer advancing. It stops on SIGTERM and
   SIGINT (`src/worker.py:633-637`).
-- **API**: `GET /health` (`src/api/app.py:681`) reports whether a target engine
-  is configured, the connected role, the pool, and the webhook this process
-  registered at startup. It opens no connection, by design.
+- **API**: `GET /health` (`src/api/routes/health.py`) says ok, the version and
+  the commit, and nothing else; whether a target engine is configured, the
+  connected role, the pool and the webhook this process registered at startup
+  are `GET /api/v1/ops/health`, for `OPS_USER_IDS` alone. Neither opens a
+  connection, by design.
   `GET /health/scheduling` and `GET /health/posting` are the two surfaces the
   fleet monitors poll ([`monitoring.md`](../operations/monitoring.md)).
 
@@ -211,6 +214,7 @@ reads. Variables are per service on Railway.
 | `SESSION_COOKIE_DOMAIN` | The registrable domain the API and the front end share, so the front end's server side can read the session cookie | `example.com` |
 | `SESSION_COOKIE_SECURE` | Optional, default `true`: the session cookie is HTTPS-only. Only a plain-http laptop setup turns it off | `true` |
 | `TARGET_SIGNUP_OPEN` | Optional, default `false`: a new Google account signs up only when its email is admitted (`signup_admissions`) or invited (092). `true` lets any account sign up — a local stack's setting, never production's | `false` |
+| `OPS_USER_IDS` | Set after the first sign-in (Quick Start step 10); the user ids (comma-separated, the `user` line of `storydump whoami`) that may read the API's operating details at `GET /api/v1/ops/health` — usage counts, the database login, the pool, the webhook — and `GET /api/v1/ops/posture`, and so run `storydump health` and `storydump posture`. Unset, nobody can, and `storydump health` cannot exit 0: the webhook reads `not_checked`. Public `/health` says only ok, the version and the commit | a user id (a UUID) |
 | `TRUSTED_PROXY_HOSTS` | Optional; the proxies whose `X-Forwarded-For` the API believes (private ranges by default). **Never `*`** — it lets a caller choose its own IP and defeats every IP-keyed control (#726) | `10.0.0.0/8,…` |
 | `TARGET_TELEGRAM_WEBHOOK_URL` | Optional; the URL the API registers with Telegram. **The default is production's** `https://api.storydump.app/webhooks/telegram` (`src/services/target/vocabulary.py`), so a staging or preview API that registers a webhook — by hand with `storydump webhook register`, or by autoregistering — must set its own, and needs its own bot: one bot holds one webhook | `https://staging.example.com/webhooks/telegram` |
 | `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` | Optional; `0` stops the API registering the webhook at startup even where `RAILWAY_ENVIRONMENT_NAME` is `production` | `0` |
@@ -444,7 +448,7 @@ rate- or quota-limited.
 
 - [ ] All secrets stored as Railway environment variables (never in code)
 - [ ] `ENCRYPTION_KEY` generated and set on both services
-- [ ] `TARGET_DATABASE_URL` is a runtime login, not the owner (`/health` → `db_role`)
+- [ ] `TARGET_DATABASE_URL` is a runtime login, not the owner (`storydump health --json` → `data.api.db_role`)
 - [ ] `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` is long and random; the bot token is kept secret
 - [ ] `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` is not `1` anywhere that holds the production token outside production
 - [ ] The Meta app secret, the Google client secret and the Cloudinary API secret are kept secret
@@ -460,7 +464,7 @@ rate- or quota-limited.
 | Problem | Solution |
 |---------|----------|
 | The worker exits at boot with `FATAL: TARGET_DATABASE_URL is unset` | Set it on the `worker` service (`src/worker.py:800-810`). |
-| Every API data route answers 503 | `TARGET_DATABASE_URL` is unset on the `storydump` service; `/health` shows `target_database: false`. |
+| Every API data route answers 503 | `TARGET_DATABASE_URL` is unset on the `storydump` service; the operating details show `target_database: false`. |
 | A deploy fails in the pre-deploy step | A migration failed, or `DATABASE_URL` is missing or is not the owner. The old version keeps serving; fix forward with a new file ([`migration-runner.md`](../operations/migration-runner.md)). |
 | Database connection fails | Check `TARGET_DATABASE_URL` (the services) and `DATABASE_URL` (the migration runner); a Neon URL carries `?sslmode=require`. The `DB_*` components steer only the test harness and `make`. |
 | Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. |
@@ -484,8 +488,9 @@ rate- or quota-limited.
 5. [ ] Create the Telegram bot via BotFather; enable groups, disable privacy mode
 6. [ ] Configure the Meta app (the Instagram Login redirect URI)
 7. [ ] Configure the Google client (both redirect URIs)
-8. [ ] Deploy; `storydump health` and `storydump webhook status` are well
+8. [ ] Deploy; `storydump webhook status` is well, and `storydump health` reports `api`, `scheduling` and `posting` well (the webhook reads `not_checked` until step 10)
 9. [ ] Sign in on the web, create a workspace
-10. [ ] Settings › Integrations: link Telegram, add a Telegram group, connect Google Drive, add a folder, Sync Now
-11. [ ] Settings › Accounts: Connect Instagram
-12. [ ] Settings › General: set the schedule. **Instagram API** is off on a new workspace (cards offer **Posted myself**, not **Post now**); turn it on when the workspace should publish through the API. **Dry Run Mode** with it on runs the whole publish leg without calling Meta — and spends the media's rotation as a real post would (`src/services/target/publish_pipeline.py:318-327`)
+10. [ ] Mint an API token (Settings › API tokens), run `storydump login`, set `OPS_USER_IDS` on the API service to the `user` line of `storydump whoami`, let it redeploy; `storydump health` now exits 0
+11. [ ] Settings › Integrations: link Telegram, add a Telegram group, connect Google Drive, add a folder, Sync Now
+12. [ ] Settings › Accounts: Connect Instagram
+13. [ ] Settings › General: set the schedule. **Instagram API** is off on a new workspace (cards offer **Posted myself**, not **Post now**); turn it on when the workspace should publish through the API. **Dry Run Mode** with it on runs the whole publish leg without calling Meta — and spends the media's rotation as a real post would (`src/services/target/publish_pipeline.py:318-327`)

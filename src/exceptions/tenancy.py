@@ -62,7 +62,8 @@ class TokenRefused(RefusalError):
     only — minting, invitations, the OAuth legs) | readonly_token (a
     ``readonly`` token, or any workspace service identity, on a write) |
     wrong_workspace (a service identity addressing a workspace that is not
-    its own).
+    its own) | not_ops (a person outside `OPS_USER_IDS`, or a
+    service identity, at the API's operating details).
     """
 
     _prefix = "token refused"
