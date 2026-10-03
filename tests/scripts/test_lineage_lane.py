@@ -407,10 +407,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # Telegram join door honours, and the service-token minter the
             # removal revokes by (readiness review, 2026-10-02).
             "090_member_removal_sticks.sql",
-            # 091 appends §34, the activation funnel door: onboarding counted
+            # 092 appends §35, the activation funnel door: onboarding counted
             # across every workspace, owned by svc_maintenance and executable
             # by svc_worker alone (#1481).
-            "091_activation_funnel_door.sql",
+            "092_activation_funnel_door.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

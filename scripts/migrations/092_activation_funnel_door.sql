@@ -1,6 +1,6 @@
--- Migration 091: the activation funnel door — how far the people who signed up got through
+-- Migration 092: the activation funnel door — how far the people who signed up got through
 -- onboarding, counted across every workspace by a SECURITY DEFINER read owned by svc_maintenance
--- (#1481; `07` §34). Statements appended to the advertised stream.
+-- (#1481; `07` §35). Statements appended to the advertised stream.
 --
 -- THE QUESTION HAS NO TENANT. "Of the people who signed up since a date, how many created a
 -- workspace, connected Instagram, added a folder and approved a first story, and where did the rest
@@ -57,7 +57,7 @@
 -- runner:postcondition SELECT count(*) = 2 FROM pg_policies WHERE schemaname = 'public' AND ((tablename = 'users' AND policyname = 'p_maint_users') OR (tablename = 'workspace_members' AND policyname = 'p_maint_members'))
 -- runner:postcondition SELECT count(DISTINCT c.relname) = 2 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace, aclexplode(c.relacl) a JOIN pg_roles g ON g.oid = a.grantee WHERE n.nspname = 'public' AND c.relname IN ('users', 'workspace_members') AND a.privilege_type = 'SELECT' AND g.rolname = 'svc_maintenance'
 
--- [§34 the activation funnel door: how far the people who signed up got, counted across every workspace through svc_maintenance]
+-- [§35 the activation funnel door: how far the people who signed up got, counted across every workspace through svc_maintenance]
 -- How many people who signed up since p_since created a workspace, connected Instagram, added a
 -- folder and approved a first story, and how many stalled at each stage: a read across every
 -- workspace that no runtime login can make: the tenant-scoped tables it joins hide other tenants' rows.
@@ -134,7 +134,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
 $$;
 
 COMMENT ON FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval) IS
-  'The activation funnel across every workspace: one row per stage (signed in, workspace created, Instagram connected, folder added, first approval) with how many people who signed up since p_since reached it, each stage counted on its own, and how many stalled there: a later stage missing and nothing new from them in p_stall, counted against the stage before the missing one. A person who owns no active workspace but belongs to someone else''s counts as signed in and never as stalled. Counts only: no id, name or email leaves it. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_worker alone, the login the psql escape hatch connects as, and for no API principal until an operator principal exists (#1124) (091, #1481).';
+  'The activation funnel across every workspace: one row per stage (signed in, workspace created, Instagram connected, folder added, first approval) with how many people who signed up since p_since reached it, each stage counted on its own, and how many stalled there: a later stage missing and nothing new from them in p_stall, counted against the stage before the missing one. A person who owns no active workspace but belongs to someone else''s counts as signed in and never as stalled. Counts only: no id, name or email leaves it. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_worker alone, the login the psql escape hatch connects as, and for no API principal until an operator principal exists (#1124) (092, #1481).';
 
 ALTER FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval) OWNER TO svc_maintenance;
 

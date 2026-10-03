@@ -2731,7 +2731,7 @@ COMMENT ON FUNCTION fn_member_remove(uuid, uuid, uuid) IS
 REVOKE CREATE ON SCHEMA public FROM svc_membership;
 ```
 
-### §34. The activation funnel door (091, #1481)
+### §35. The activation funnel door (092, #1481)
 
 **Why:** "Of the people who signed up this month, how many created a workspace, connected Instagram,
 added a folder and approved a first story, and where did the rest stop?" is a question about every
@@ -2765,7 +2765,7 @@ the login the operator's `psql` escape hatch connects as. `svc_ingress` never ho
 route or CLI verb reaches the door until an operator principal exists to stand behind one (#1124).
 
 ```sql
--- [§34 the activation funnel door: how far the people who signed up got, counted across every workspace through svc_maintenance]
+-- [§35 the activation funnel door: how far the people who signed up got, counted across every workspace through svc_maintenance]
 -- How many people who signed up since p_since created a workspace, connected Instagram, added a
 -- folder and approved a first story, and how many stalled at each stage: a read across every
 -- workspace that no runtime login can make: the tenant-scoped tables it joins hide other tenants' rows.
@@ -2842,7 +2842,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
 $$;
 
 COMMENT ON FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval) IS
-  'The activation funnel across every workspace: one row per stage (signed in, workspace created, Instagram connected, folder added, first approval) with how many people who signed up since p_since reached it, each stage counted on its own, and how many stalled there: a later stage missing and nothing new from them in p_stall, counted against the stage before the missing one. A person who owns no active workspace but belongs to someone else''s counts as signed in and never as stalled. Counts only: no id, name or email leaves it. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_worker alone, the login the psql escape hatch connects as, and for no API principal until an operator principal exists (#1124) (091, #1481).';
+  'The activation funnel across every workspace: one row per stage (signed in, workspace created, Instagram connected, folder added, first approval) with how many people who signed up since p_since reached it, each stage counted on its own, and how many stalled there: a later stage missing and nothing new from them in p_stall, counted against the stage before the missing one. A person who owns no active workspace but belongs to someone else''s counts as signed in and never as stalled. Counts only: no id, name or email leaves it. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_worker alone, the login the psql escape hatch connects as, and for no API principal until an operator principal exists (#1124) (092, #1481).';
 
 ALTER FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval) OWNER TO svc_maintenance;
 

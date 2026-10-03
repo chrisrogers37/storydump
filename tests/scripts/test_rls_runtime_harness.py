@@ -158,7 +158,7 @@ POLICY_CENSUS = {
         "UPDATE",
         ("svc_maintenance",),
     ): "door:fn_reaper_sweep",
-    # 091: the two tables svc_maintenance lacked for the activation funnel.
+    # 092: the two tables svc_maintenance lacked for the activation funnel.
     (
         "p_maint_users",
         "users",
@@ -484,7 +484,7 @@ DOORS = {
         "svc_worker",
         "SELECT * FROM fn_planned_misses(50, interval '1 hour')",
     ),
-    # 091 (`07` §34, #1481): the activation funnel, counts only across every
+    # 092 (`07` §35, #1481): the activation funnel, counts only across every
     # workspace. The worker's login alone, the one the psql escape hatch
     # connects as; no API principal until an operator principal exists (#1124).
     "fn_activation_funnel": (
@@ -861,7 +861,7 @@ class TestRuntimeTenantIsolationMatrix:
         # Exact split, so a re-tagged disposition is a visible diff:
         assert len(by_kind["matrix"]) == 16
         # 081: p_maint_accts; 082: the three maintenance reads; 086: the
-        # reaper's source re-arm; 090: the removals record; 091: the activation
+        # reaper's source re-arm; 090: the removals record; 092: the activation
         # funnel's two reads.
         assert len(by_kind["door"]) == 37
         assert len(by_kind["auth"]) == 5

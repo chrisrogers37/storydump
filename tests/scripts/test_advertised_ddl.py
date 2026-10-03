@@ -299,8 +299,8 @@ class TestAgainstTheRealDocs:
         # cancels users asked for (087, #1235) makes it 42; §31's ledger
         # learning 'planned' (088, #1413) makes it 43; §32's planned stories
         # served on time or missed out loud (089, #1413) make it 44; §33's
-        # removal that sticks (090) makes it 45; and §34's activation funnel
-        # door (091, #1481) makes it 46.
+        # removal that sticks (090) makes it 45; and §35's activation funnel
+        # door (092, #1481) makes it 46.
         assert classes.count("normative") == 46
         assert classes.count("illustrative") == 4
 

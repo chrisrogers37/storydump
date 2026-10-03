@@ -1,4 +1,4 @@
-"""The activation funnel door counts onboarding across every workspace (091, #1481).
+"""The activation funnel door counts onboarding across every workspace (092, #1481).
 
 `fn_activation_funnel(p_since, p_stall)` answers how far the people who signed
 up since `p_since` got (signed in, workspace created, Instagram connected,

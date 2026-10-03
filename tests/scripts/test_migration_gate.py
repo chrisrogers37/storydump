@@ -423,11 +423,11 @@ class TestTheDerivedAdoptionProbesReadBothWays:
     # have: they read the catalogs by name rather than cast to `regclass`,
     # which would raise. 089 is here for the same reason: its key probe
     # names `post_intents`, and its door and grant probes name roles a
-    # database before the lineage lacks. 091 is here for its door, grant and
+    # database before the lineage lacks. 092 is here for its door, grant and
     # policy probes, which join the catalogs to roles by name: a database
     # before the lineage has none of them, while its `users` is the legacy
     # table of that name, whose grants the grant probe reads.
-    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89, 91])
+    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89, 92])
     def test_probes_read_false_without_raising_before_the_target_lineage(
         self, version, at49_db, owner_actor
     ):
