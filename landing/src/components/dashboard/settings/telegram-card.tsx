@@ -78,9 +78,6 @@ export function TelegramCard({
   const [linkingTelegram, setLinkingTelegram] = useState(false);
   const [confirmingUnlink, setConfirmingUnlink] = useState(false);
   const [unlinking, setUnlinking] = useState(false);
-  /** Set once an unlink lands, so the card shows the link control without
-   *  waiting for the session to be read again. */
-  const [unlinked, setUnlinked] = useState(false);
   const [groupLink, setGroupLink] = useState<{
     link: string;
     expiresInSeconds: number;
@@ -131,8 +128,8 @@ export function TelegramCard({
       onError(telegramUnlinkRefusalCopy(result.error));
       return;
     }
-    setUnlinked(true);
     onNotice("Telegram unlinked. Link it again here whenever you like.");
+    router.refresh();
   }
 
   /** Mint the group-picker link (`07` §13) and SHOW it, like the identity link. */
@@ -175,7 +172,7 @@ export function TelegramCard({
         <CardTitle className="text-base">Telegram</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {telegramLinked && !unlinked ? (
+        {telegramLinked ? (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <Badge variant="secondary" className="bg-green-100 text-green-800">
@@ -193,7 +190,10 @@ export function TelegramCard({
                 <p className="text-sm">
                   Unlink this Telegram account? Your taps on approval cards and
                   your messages in Telegram groups stop counting as you until
-                  you link again. Your workspaces stay as they are.
+                  you link again. Your workspaces stay as they are, and a
+                  workspace that sends cards to this Telegram account&apos;s
+                  private chat keeps sending them there until an admin removes
+                  it.
                 </p>
                 <div className="flex flex-wrap gap-2">
                   <Button
@@ -328,7 +328,8 @@ export function TelegramCard({
                         still waiting to be sent are dropped. Cards already
                         posted stay in the group&apos;s history, and the bot
                         stays in the group — remove it in Telegram if you want
-                        it gone. Adding the group again brings it back.
+                        it gone. Adding the group again brings it back to this
+                        workspace; it cannot then be added to another one.
                       </p>
                       <div className="flex flex-wrap gap-2">
                         <Button

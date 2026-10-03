@@ -557,6 +557,50 @@ class TestARevokedBindingIsNeverClaimed:
         )
         assert _state(outbox_db, outbox_id)[0] == "sending"
 
+    @pytest.mark.asyncio
+    async def test_a_revoked_bindings_leftover_queue_is_retired(self, outbox_db):
+        """What `deliver_outbox` runs on finding its binding revoked: a row a
+        429 put back to `pending`, one a dead sender left `sending` and one
+        `ambiguous` are all superseded, so a re-bind posts no stale card. A
+        `sent` row and another binding's row are untouched."""
+        from src.services.target.outbox import retire_revoked_queue
+
+        binding = _new_binding(outbox_db)
+        other = _new_binding(outbox_db)
+        rows = {
+            state: _enqueue(outbox_db, binding=binding)
+            for state in ("pending", "sending", "ambiguous", "sent")
+        }
+        for state in ("sending", "ambiguous", "sent"):
+            _owner_exec(
+                outbox_db,
+                "UPDATE channel_outbox SET state = %s,"
+                " external_message_ref = CASE WHEN %s = 'sent' THEN '1' END"
+                " WHERE id = %s",
+                (state, state, rows[state]),
+            )
+        bystander = _enqueue(outbox_db, binding=other)
+        _owner_exec(
+            outbox_db,
+            "UPDATE channel_bindings SET state = 'revoked' WHERE id = %s",
+            (binding,),
+        )
+        engine = _engine(outbox_db)
+        try:
+            async with engine.connect() as conn:
+                await _tenant(conn, outbox_db)
+                moved = await retire_revoked_queue(conn, binding_id=binding)
+                await conn.commit()
+        finally:
+            await engine.dispose()
+        assert moved == 3
+        for state in ("pending", "sending", "ambiguous"):
+            assert _state(outbox_db, rows[state])[0] == "superseded", state
+        assert _state(outbox_db, rows["sent"])[0] == "sent"
+        assert _state(outbox_db, bystander)[0] == "pending", (
+            "another binding's queue was touched"
+        )
+
 
 class TestStoppedSenderStrandsNothing:
     """The gate's first half, driven through the service."""

@@ -879,7 +879,8 @@ class TestDeliverOutboxRetiresAGoneChat:
 
 class TestDeliverOutboxSkipsARevokedBinding:
     """A job minted before an admin removed the group (or the bot was kicked)
-    sends nothing: the hold ends before a poller is built (`07` §13)."""
+    sends nothing: the hold ends before a poller is built (`07` §13), and
+    what is left of the binding's queue is retired."""
 
     async def test_no_poller_runs_for_a_revoked_binding(self, monkeypatch):
         from types import SimpleNamespace
@@ -903,6 +904,10 @@ class TestDeliverOutboxSkipsARevokedBinding:
         }
         assert await registry["deliver_outbox"](session, job) is None
         assert built == [], "a revoked binding got a sender"
+        retire = [sql for sql, _ in session.statements if "superseded" in sql]
+        assert len(retire) == 1 and "'sending'" in retire[0], (
+            "the revoked binding's leftover queue was not retired"
+        )
 
 
 class TestWeightedCategorySelection:
