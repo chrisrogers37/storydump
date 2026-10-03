@@ -340,6 +340,13 @@
       "label": "§32 planned stories are served on time or missed out loud (089, #1413) — the unconditional slot key dropped and the cadence-only key renamed to it (contract), fn_prompts_due re-created serving planned rows only while servable and in their late window and skipping every cancel-flagged row, fn_reaper_sweep replace whose slot expiry takes cadence rows only, and fn_planned_misses listing the planned rows that will not be served with their reason",
       "doc": "07-security-model.md",
       "ordinal": 30
+    },
+    {
+      "sha256": "2e03a0a1397abb61347fc4f9bcf9ccb24b43ee058a9d4d431c85e58d05160ca5",
+      "class": "normative",
+      "label": "§33 a removal sticks, and a removed admin's tokens go with them (090, readiness review 2026-10-02) — workspace_member_removals (tenant plane, written only by svc_membership), service_tokens.created_by_user_id, fn_group_member_seen refusing a removed non-member, and fn_member_remove recording the removal",
+      "doc": "07-security-model.md",
+      "ordinal": 31
     }
   ],
   "policy_expansion": {
