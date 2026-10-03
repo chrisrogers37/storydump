@@ -138,30 +138,33 @@ export type SetupStep = {
   action: string;
 };
 
-export const SETUP_STEP_COUNT = 2;
+type SetupProgress = { accounts: unknown[]; sources: Pick<SourceRow, "removed">[] };
 
-export function nextSetupStep({
-  accounts,
-  sources,
-}: {
-  accounts: unknown[];
-  sources: Pick<SourceRow, "removed">[];
-}): SetupStep | null {
-  if (accounts.length === 0) {
-    return {
-      number: 1,
+const SETUP_STEPS: {
+  missing: (p: SetupProgress) => boolean;
+  step: Omit<SetupStep, "number">;
+}[] = [
+  {
+    missing: ({ accounts }) => accounts.length === 0,
+    step: {
       title: "Connect your Instagram account to get started",
       detail: "That's the account your Stories will be posted to.",
       ...RESOLVED_IN.accounts,
-    };
-  }
-  if (!sources.some((s) => !s.removed)) {
-    return {
-      number: 2,
+    },
+  },
+  {
+    missing: ({ sources }) => !sources.some((s) => !s.removed),
+    step: {
       title: "Connect Google Drive and pick a folder",
       detail: "Storydump picks each Story from the photos and videos in the folders you choose.",
       ...RESOLVED_IN.integrations,
-    };
-  }
-  return null;
+    },
+  },
+];
+
+export const SETUP_STEP_COUNT = SETUP_STEPS.length;
+
+export function nextSetupStep(progress: SetupProgress): SetupStep | null {
+  const index = SETUP_STEPS.findIndex(({ missing }) => missing(progress));
+  return index < 0 ? null : { number: index + 1, ...SETUP_STEPS[index].step };
 }

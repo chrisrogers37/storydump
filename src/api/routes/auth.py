@@ -131,29 +131,20 @@ async def _preauth_guard(conn, request: Request) -> None:
         raise HTTPException(status_code=429, detail="too many sign-in attempts")
 
 
-def _refuse(path: str, params: dict) -> Response:
-    """A refusal on the front end's *path* — or, without a front end, JSON
-    400 carrying the same params, the first as `detail`."""
+def _refuse(path: str, key: str, reason: str, **extra: str) -> Response:
+    """A refusal on the front end's *path* as `?<key>=<reason>` — or, without
+    a front end, JSON 400 with the reason as `detail`."""
     origin = settings.web_app_origin
     if origin:
-        return RedirectResponse(f"{origin}{path}?{urlencode(params)}", status_code=302)
-    (_, reason), *rest = params.items()
-    return JSONResponse(status_code=400, content={"detail": reason, **dict(rest)})
+        query = urlencode({key: reason, **extra})
+        return RedirectResponse(f"{origin}{path}?{query}", status_code=302)
+    return JSONResponse(status_code=400, content={"detail": reason, **extra})
 
 
 def _fail(reason: str, *, flow: Optional[str] = None) -> Response:
     """The error page — or JSON 400 without a front end — with the leg named
     when it is not sign-in's."""
-    params = {"reason": reason}
-    if flow:
-        params["flow"] = flow
-    return _refuse("/auth/error", params)
-
-
-def _not_admitted() -> Response:
-    """Sign-up is gated (092): the sign-in page says so and points at the
-    waitlist — or JSON 400 without a front end, as `_fail`."""
-    return _refuse("/login", {"error": "not_admitted"})
+    return _refuse("/auth/error", "reason", reason, **({"flow": flow} if flow else {}))
 
 
 def _landing(path: str = "/welcome") -> str:
@@ -311,7 +302,8 @@ async def google_callback(
             )
         except identity.SignupNotAdmitted:
             logger.info("google sign-in: a new account was not admitted")
-            return _not_admitted()
+            # Sign-up is gated (092): /login says so and points at the waitlist.
+            return _refuse("/login", "error", "not_admitted")
         except identity.IdentityCollision:
             return _fail("identity_collision")
         value = await sessions.issue(conn, user_id=user_id)

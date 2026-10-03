@@ -8,6 +8,8 @@ with an injected clock and count the connections the routes open.
 
 from __future__ import annotations
 
+import asyncio
+import traceback
 from contextlib import asynccontextmanager
 
 import pytest
@@ -145,6 +147,23 @@ def test_a_failure_is_reused_for_the_window_too(app, engine, clock, seams, monke
     clock.now += HEALTH_CACHE_SECONDS
     assert client.get("/health/posting").status_code == 500
     assert (calls, engine.connects) == (2, 2)
+
+
+def test_a_reused_failure_does_not_grow_its_traceback():
+    """Re-raising the one cached exception would append each request's frames
+    to its traceback for the whole window, and every 500 logs it."""
+    cache = AnswerCache(clock=lambda: 0.0)
+
+    async def broken():
+        raise RuntimeError("database unreachable")
+
+    def depth():
+        try:
+            asyncio.run(cache.answer("posting", broken))
+        except RuntimeError as exc:
+            return len(traceback.extract_tb(exc.__traceback__))
+
+    assert depth() == depth() == depth()
 
 
 def test_each_app_starts_with_an_empty_cache(seams):

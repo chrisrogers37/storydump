@@ -49,12 +49,12 @@ describe("hasActiveTelegramGroup — whether a removed member may still be in a 
 describe("stillInTelegramGroupCopy — the reminder after a removal", () => {
   it("names the person by email and says to remove them in Telegram", () => {
     expect(stillInTelegramGroupCopy("sam@example.com")).toBe(
-      "sam@example.com is still in your Telegram group, so they'll keep seeing new Stories there. Remove them from the group in Telegram too.",
+      "If sam@example.com is in your Telegram group, they'll keep seeing new Stories there. Remove them from the group in Telegram too.",
     );
   });
   it("still reads as a sentence when there is no email on file", () => {
     expect(stillInTelegramGroupCopy(null)).toMatch(
-      /^This person is still in your Telegram group/,
+      /^If this person is in your Telegram group/,
     );
   });
 });

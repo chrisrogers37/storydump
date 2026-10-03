@@ -32,11 +32,12 @@ export function hasActiveTelegramGroup(
  * What the Members card says after a removal when a group is bound. Removing
  * a membership does not take anyone out of the Telegram group, and the bot
  * does not kick, so the person keeps seeing every card posted there until
- * someone removes them in Telegram.
+ * someone removes them in Telegram. Worded as an "if": we can't see who is
+ * in the group, and an email invitee may never have joined it.
  */
 export function stillInTelegramGroupCopy(email: string | null): string {
   return (
-    `${email ?? "This person"} is still in your Telegram group, so they'll ` +
-    "keep seeing new Stories there. Remove them from the group in Telegram too."
+    `If ${email ?? "this person"} is in your Telegram group, they'll keep ` +
+    "seeing new Stories there. Remove them from the group in Telegram too."
   );
 }

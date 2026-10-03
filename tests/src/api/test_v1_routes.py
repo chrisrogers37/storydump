@@ -1065,7 +1065,8 @@ class TestSourcesUnderTheWorkspaceGrant:
 
         async def may_browse_drive(session, *, workspace_id, user_id):
             holder["browser"] = (workspace_id, user_id)
-            return holder["mine"]
+            answers = holder.get("answers")
+            return answers.pop(0) if answers else holder["mine"]
 
         monkeypatch.setattr(workspaces, "drive_status", drive_status)
         monkeypatch.setattr(workspaces, "list_sources", list_sources)
@@ -1128,6 +1129,17 @@ class TestSourcesUnderTheWorkspaceGrant:
         assert resp.status_code == 403, resp.text
         assert resp.json()["reason"] == "drive_not_yours"
         assert grant["browser"] == (WS, PRINCIPAL.user_id)
+        assert created == {}
+
+    def test_a_reconnect_by_someone_else_mid_pick_is_403_drive_not_yours(
+        self, client, signed_in, tenant, grant, created
+    ):
+        """The browse check is asked again in the writing unit of work: a
+        reconnect between the two makes someone else the granter."""
+        grant["answers"] = [True, False]
+        resp = client.post(self.URL, json={"folder_ref": "f1", "folder_name": "Trips"})
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["reason"] == "drive_not_yours"
         assert created == {}
 
     @pytest.fixture

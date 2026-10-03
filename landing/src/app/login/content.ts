@@ -11,9 +11,6 @@ import { siteConfig } from "@/config/site";
  * simply not in yet — so it belongs next to the button and the waitlist.
  */
 
-/** The home page's waitlist form (`WaitlistLink`'s target off the home page). */
-export const WAITLIST_HREF = "/#waitlist";
-
 /** A sentence with one link in it: `lead`, then `link` (to the waitlist), then `tail`. */
 export type Linked = { lead: string; link: string; tail: string };
 

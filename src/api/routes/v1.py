@@ -684,7 +684,13 @@ async def create_source(
     async with principal_mod.admin_session(request, str(ws), principal) as session:
         # The check above ran outside this unit of work: under the workspace's
         # sources lock, a changed set of connected folders is refused
-        # (`sources_changed`, 409) and the person retries.
+        # (`sources_changed`, 409) and the person retries. The browse check
+        # is asked again for the same reason: a reconnect in between makes
+        # someone else the granter, and this pick read their Drive.
+        if not await workspaces.may_browse_drive(
+            session, workspace_id=str(ws), user_id=principal.user_id
+        ):
+            raise _drive_not_yours()
         await provisioning.assert_sources_unchanged(
             session, workspace_id=str(ws), expected=provisioning.connected_refs(sources)
         )

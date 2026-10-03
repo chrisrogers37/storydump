@@ -1,9 +1,9 @@
 "use client";
 
-import { TrackedLink } from "@/components/analytics/tracked-link";
+import { WaitlistLink } from "@/components/layout/waitlist-link";
 import { useSearchParams } from "next/navigation";
 import { Notice } from "@/components/ui/notice";
-import { WAITLIST_HREF, loginError } from "./content";
+import { loginError } from "./content";
 
 /**
  * The refusal `?error=` names, above the sign-in button. A client component
@@ -16,13 +16,12 @@ export function LoginNotice() {
   return (
     <Notice>
       {copy.lead}
-      <TrackedLink
-        href={WAITLIST_HREF}
-        track={{ event: "CTA Click", props: { location: "login" } }}
+      <WaitlistLink
+        location="login"
         className="font-medium underline underline-offset-4 hover:text-foreground"
       >
         {copy.link}
-      </TrackedLink>
+      </WaitlistLink>
       {copy.tail}
     </Notice>
   );

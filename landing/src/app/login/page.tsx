@@ -1,13 +1,13 @@
 import { Suspense } from "react";
 import Link from "next/link";
-import { TrackedLink } from "@/components/analytics/tracked-link";
 import { ArrowLeft } from "lucide-react";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
 import { siteConfig } from "@/config/site";
 import { noindexMetadata } from "@/lib/seo";
 import { bricolage } from "@/lib/fonts";
 import { BrandMark } from "@/components/layout/brand-mark";
-import { NEW_HERE, WAITLIST_HREF } from "./content";
+import { WaitlistLink } from "@/components/layout/waitlist-link";
+import { NEW_HERE } from "./content";
 import { LoginNotice } from "./login-notice";
 
 export const metadata = {
@@ -71,13 +71,12 @@ export default function LoginPage() {
 
         <p className="text-center text-xs text-muted-foreground">
           {NEW_HERE.lead}
-          <TrackedLink
-            href={WAITLIST_HREF}
-            track={{ event: "CTA Click", props: { location: "login" } }}
+          <WaitlistLink
+            location="login"
             className="underline underline-offset-4 transition-colors hover:text-foreground"
           >
             {NEW_HERE.link}
-          </TrackedLink>
+          </WaitlistLink>
           {NEW_HERE.tail}
         </p>
       </div>

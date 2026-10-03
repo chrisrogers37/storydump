@@ -119,7 +119,9 @@ describe("the events the site sends", () => {
       ...CTA_LOCATIONS.map((location) => ["CTA Click", location]),
     ];
     for (const [event, location] of pairs) {
-      expect(all).toMatch(new RegExp(`event: "${event}", props: \\{ location: "${location}" \\}`));
+      // A CTA location can also be `WaitlistLink`'s: a `location` prop, or its default.
+      const viaWaitlistLink = event === "CTA Click" ? `|location = "${location}"|location="${location}"` : "";
+      expect(all).toMatch(new RegExp(`event: "${event}", props: \\{ location: "${location}" \\}${viaWaitlistLink}`));
     }
   });
 });

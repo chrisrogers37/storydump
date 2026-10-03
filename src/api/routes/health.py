@@ -83,7 +83,9 @@ class AnswerCache:
                 self._entries[key] = entry
         _, value, error = entry
         if error is not None:
-            raise error
+            # Without its traceback: re-raising the one cached object would
+            # append every request's frames to it for the whole window.
+            raise error.with_traceback(None)
         return value
 
 
