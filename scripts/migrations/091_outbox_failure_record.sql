@@ -1,5 +1,5 @@
--- Migration 090: the outbox records why a delivery failed, and the estate's delivery failures get a
--- door (#1482; `07` §33). Statements appended to the advertised stream.
+-- Migration 091: the outbox records why a delivery failed, and the estate's delivery failures get a
+-- door (#1482; `07` §34). Statements appended to the advertised stream.
 --
 -- THE GAP. `settle` sorts a failed send by type: a 429 goes back to `pending`, a gone destination and
 -- a refused message end `failed`, anything else is `ambiguous`. Then it writes the state and nothing
@@ -66,7 +66,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 $$;
 
 COMMENT ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) IS
-  'Outbox rows whose last failure falls in the window, every tenant''s included, by class and code; o_alerting_rows ended failed or sit ambiguous. Counts only. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (090, #1482).';
+  'Outbox rows whose last failure falls in the window, every tenant''s included, by class and code; o_alerting_rows ended failed or sit ambiguous. Counts only. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (091, #1482).';
 
 ALTER FUNCTION fn_health_outbox_failures(p_window_seconds integer) OWNER TO svc_maintenance;
 
@@ -83,7 +83,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 $$;
 
 COMMENT ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) IS
-  'Outbox rows sent in the window, every tenant''s included: the traffic the failure count is read against. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (090, #1482).';
+  'Outbox rows sent in the window, every tenant''s included: the traffic the failure count is read against. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (091, #1482).';
 
 ALTER FUNCTION fn_health_outbox_sent(p_window_seconds integer) OWNER TO svc_maintenance;
 

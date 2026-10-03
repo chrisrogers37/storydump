@@ -3,6 +3,7 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
 import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, RESOLUTIONS } from "./commands";
+import { IN_THE_WAY_MAX } from "./refusal-facts";
 import {
   EXPIRY_DAYS_DEFAULT,
   EXPIRY_DAYS_MAX,
@@ -73,5 +74,11 @@ describe("the wire spellings are the vocabulary's", () => {
   it("the review resolutions and the one verdict", () => {
     expect([...RESOLUTIONS]).toEqual(tuple("RESOLUTIONS"));
     expect(NOT_POSTED).toBe(scalar("NOT_POSTED"));
+  });
+  it("room under the in_the_way cap for the longest list the port can name", () => {
+    // `schedule_item` names at most the item's own state, then each lock kind
+    // once, so the cap must never cut a list the port can actually send.
+    const longest = 1 + tuple("BLOCKING_LOCKS").length + tuple("WARNING_LOCKS").length;
+    expect(IN_THE_WAY_MAX).toBeGreaterThanOrEqual(longest);
   });
 });

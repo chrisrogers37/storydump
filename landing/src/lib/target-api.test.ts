@@ -169,7 +169,7 @@ describe("a command refusal's facts (#1413 phase 6)", () => {
     const result = await targetFetch("/workspaces/ws/commands/schedule_item", "tok", {
       method: "POST",
     });
-    expect(result).toEqual({ ok: false, status: 409, error: "locked" });
+    expect(result).toStrictEqual({ ok: false, status: 409, error: "locked" });
   });
 
   it("never change the reason readError derives, which is the value that reaches logs", async () => {
@@ -194,12 +194,12 @@ describe("a command refusal's facts (#1413 phase 6)", () => {
   it("are none when the body carries nothing the list admits", async () => {
     refuse({ detail: "x", reason: "locked", facts: { note: "free text" } });
     const result = await targetFetch("/x", "tok", { refusalFacts: true });
-    expect(result).toEqual({ ok: false, status: 409, error: "locked" });
+    expect(result).toStrictEqual({ ok: false, status: 409, error: "locked" });
   });
 
   it("are none when the body is not JSON", async () => {
     stubFetch(async () => new Response("<html>bad gateway</html>", { status: 502 }));
     const result = await targetFetch("/x", "tok", { refusalFacts: true });
-    expect(result).toEqual({ ok: false, status: 502, error: "http_502" });
+    expect(result).toStrictEqual({ ok: false, status: 502, error: "http_502" });
   });
 });

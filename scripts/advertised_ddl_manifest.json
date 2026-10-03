@@ -342,11 +342,18 @@
       "ordinal": 30
     },
     {
-      "sha256": "dccc67c5670e3b0c96041737a328e1dd56d5e9534a464e0e201aea6b3a3c7fa8",
+      "sha256": "2e03a0a1397abb61347fc4f9bcf9ccb24b43ee058a9d4d431c85e58d05160ca5",
       "class": "normative",
-      "label": "§33 the outbox records why a delivery failed (090, #1482) — channel_outbox gains last_failure_class (checked against the five classes), last_error_code and last_failed_at with a partial index on the time, and two svc_maintenance doors: fn_health_outbox_failures counting the window's failures by class and code with their alerting subset, and fn_health_outbox_sent counting the window's sends",
+      "label": "§33 a removal sticks, and a removed admin's tokens go with them (090, readiness review 2026-10-02) — workspace_member_removals (tenant plane, written only by svc_membership), service_tokens.created_by_user_id, fn_group_member_seen refusing a removed non-member, and fn_member_remove recording the removal",
       "doc": "07-security-model.md",
       "ordinal": 31
+    },
+    {
+      "sha256": "7f88f78eb30010b06b9ebdb8bceb389806a90f88075cd220dc9d01029458b282",
+      "class": "normative",
+      "label": "§34 the outbox records why a delivery failed (091, #1482) — channel_outbox gains last_failure_class (checked against the five classes), last_error_code and last_failed_at with a partial index on the time, and two svc_maintenance doors: fn_health_outbox_failures counting the window's failures by class and code with their alerting subset, and fn_health_outbox_sent counting the window's sends",
+      "doc": "07-security-model.md",
+      "ordinal": 32
     }
   ],
   "policy_expansion": {

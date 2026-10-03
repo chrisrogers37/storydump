@@ -9,7 +9,7 @@ export default function SetupLayout({
   children: React.ReactNode
 }) {
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8">
+    <div className="mx-auto max-w-6xl px-4 py-8">
       <Link
         href="/"
         className="inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -18,9 +18,9 @@ export default function SetupLayout({
         Back to home
       </Link>
 
-      {/* Mobile nav — scrollable horizontal tabs */}
-      <div className="mt-6 -mx-4 px-4 overflow-x-auto md:hidden">
-        <SetupNav className="flex-row gap-1 w-max" />
+      {/* Mobile nav: the tabs wrap, so none sits off-screen */}
+      <div className="mt-6 md:hidden">
+        <SetupNav className="flex-row flex-wrap gap-1" />
       </div>
 
       <div className="mt-8 flex gap-12">

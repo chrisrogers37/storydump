@@ -222,7 +222,7 @@ async def delivery_health_check(request: Request):
 
     The last hour's outbox rows whose last failure fell in it, by class and the
     provider's code, how many of them ended `failed` or sit `ambiguous`, and how
-    many rows were sent in the same hour (`delivery_health`, through 090's
+    many rows were sent in the same hour (`delivery_health`, through 091's
     doors). NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: the
     alert is `scripts/delivery_monitor.py`, run outside the app. Unauthenticated,
     so AGGREGATES ONLY: counts and codes, never a workspace, a chat or a message.
@@ -233,6 +233,6 @@ async def delivery_health_check(request: Request):
     if engine is None:
         raise HTTPException(status_code=503, detail="target database not configured")
     # A direct connection, as on `/health/posting`: the read is estate-wide and
-    # has no tenant, and its cross-tenant reach is 090's doors.
+    # has no tenant, and its cross-tenant reach is 091's doors.
     async with engine.connect() as conn:
         return await delivery_health.outbox_failures(conn)
