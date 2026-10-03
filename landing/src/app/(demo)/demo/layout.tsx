@@ -10,8 +10,7 @@ import { noindexMetadata } from "@/lib/seo";
  * here reaches the API: the stories are fixtures and every decision is made
  * in the browser (`demo-isolation-contract.test.ts`).
  *
- * NOT INDEXED, and it names no canonical of its own: the root layout's
- * canonical points at the home page, which a sample is not a copy of.
+ * NOT INDEXED, and with no canonical: the sample is a copy of no other page.
  */
 export const metadata: Metadata = {
   title: "Sample workspace",
