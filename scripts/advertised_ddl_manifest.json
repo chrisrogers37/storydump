@@ -342,11 +342,18 @@
       "ordinal": 30
     },
     {
+      "sha256": "2e03a0a1397abb61347fc4f9bcf9ccb24b43ee058a9d4d431c85e58d05160ca5",
+      "class": "normative",
+      "label": "§33 a removal sticks, and a removed admin's tokens go with them (090, readiness review 2026-10-02) — workspace_member_removals (tenant plane, written only by svc_membership), service_tokens.created_by_user_id, fn_group_member_seen refusing a removed non-member, and fn_member_remove recording the removal",
+      "doc": "07-security-model.md",
+      "ordinal": 31
+    },
+    {
       "sha256": "1f67348a1ca9a9548278aaba8ff3ac7b3beebc68adb9903f6fe019e0429cfafa",
       "class": "normative",
       "label": "§34 the activation funnel door (091, #1481) — svc_maintenance's SELECT and a USING (true) policy on users and workspace_members, and fn_activation_funnel: five stage rows of reached and stalled counts for the active users created since p_since, owned by svc_maintenance, EXECUTE for svc_worker only",
       "doc": "07-security-model.md",
-      "ordinal": 31
+      "ordinal": 32
     }
   ],
   "policy_expansion": {
