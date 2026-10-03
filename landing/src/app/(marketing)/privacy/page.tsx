@@ -3,7 +3,7 @@ import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
-const LAST_UPDATED = "October 1, 2026"
+const LAST_UPDATED = "October 3, 2026"
 
 export const metadata: Metadata = pageMetadata({
   title: "Privacy Policy",
@@ -61,8 +61,30 @@ export default function PrivacyPolicy() {
           <h2 className="text-xl font-semibold text-foreground">
             3. Information we collect
           </h2>
-          <p className="mt-3">We collect only what we need to operate the service:</p>
+          <p className="mt-3">
+            We collect only what we need to run the waitlist and operate the
+            service:
+          </p>
           <ul className="mt-3 list-disc space-y-2 pl-6">
+            <li>
+              <span className="font-medium text-foreground">Waitlist data</span>{" "}
+              — if you join the waitlist: the email address you enter, when you
+              joined, and any campaign tags (utm_source, utm_medium,
+              utm_campaign) in the web address of the page where you signed up.
+              We keep these in our database, and each signup also sends us a
+              Telegram message with the email address and the time. When we
+              invite you, we add your address and the date to the list of
+              addresses allowed to create an account. To leave the waitlist,
+              email{" "}
+              <a
+                href={`mailto:${email}`}
+                className="underline underline-offset-4 hover:text-foreground"
+              >
+                {email}
+              </a>{" "}
+              from the address you joined with, and we&apos;ll delete all of
+              this, including our Telegram messages about your signup.
+            </li>
             <li>
               <span className="font-medium text-foreground">Account data</span>{" "}
               — from Google when you sign in: your Google account identifier,
@@ -173,6 +195,12 @@ export default function PrivacyPolicy() {
           </h2>
           <ul className="mt-3 list-disc space-y-2 pl-6">
             <li>To operate the service — schedule and publish your Stories.</li>
+            <li>
+              To run the waitlist — tell us when someone joins, invite people
+              in small batches as spots open, email you when your spot is
+              ready, and learn from the campaign tags which links bring people
+              to it.
+            </li>
             <li>To authenticate you and keep your session secure.</li>
             <li>To send service-related notifications via Telegram.</li>
             <li>To debug, monitor reliability, and prevent abuse.</li>
@@ -194,8 +222,8 @@ export default function PrivacyPolicy() {
             </li>
             <li>
               <span className="font-medium text-foreground">Consent</span> —
-              connecting Google Drive and Instagram (you may withdraw at any
-              time).
+              joining the waitlist, and connecting Google Drive and Instagram
+              (you may withdraw at any time).
             </li>
             <li>
               <span className="font-medium text-foreground">
@@ -251,7 +279,8 @@ export default function PrivacyPolicy() {
                 <tr className="border-b">
                   <td className="py-2 pr-4">Telegram</td>
                   <td className="py-2 pr-4">
-                    Chat &amp; bot platform; with the bot linked, holding a copy
+                    Chat &amp; bot platform; delivering the message we get for
+                    each waitlist signup; with the bot linked, holding a copy
                     of each approval card&apos;s photo or video in your chat
                   </td>
                   <td className="py-2">Global</td>
