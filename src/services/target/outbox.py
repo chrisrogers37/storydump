@@ -320,6 +320,13 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
     verification belongs at S.1 scale — on a gate-sized table Postgres will
     seq-scan whatever the index says, so an EXPLAIN assertion here would prove
     nothing.
+
+    **Only a binding the push predicate still admits is claimed**
+    (`bindings.push_binding_where`). A `deliver_outbox` job minted before an
+    admin removed the group (`bindings.revoke_for_workspace`) or before the
+    bot was kicked would otherwise still drain the queue into a chat the
+    workspace let go of; the sweep stops minting for a revoked binding, and
+    this is the same rule at the sender.
     """
     row = (
         await session.execute(
@@ -327,6 +334,10 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
                 "UPDATE channel_outbox SET state = 'sending', attempts = attempts + 1"
                 " WHERE id = (SELECT id FROM channel_outbox"
                 "             WHERE binding_id = :b AND state = 'pending'"
+                "               AND EXISTS (SELECT 1 FROM channel_bindings b"
+                "                 WHERE b.id = :b"
+                "                   AND b.workspace_id = channel_outbox.workspace_id"
+                f"                  AND {bindings.push_binding_where('b')})"
                 "             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)"
                 "   AND state = 'pending'"
                 " RETURNING id, kind, payload, attempts, intent_id, workspace_id,"

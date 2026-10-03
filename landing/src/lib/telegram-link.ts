@@ -87,6 +87,38 @@ export function telegramLinkRefusalCopy(reason: unknown): string {
   return "Could not start Telegram linking. Nothing changed — try again shortly.";
 }
 
+export type TelegramUnlinkResult =
+  | { ok: true }
+  | { ok: false; error: string; status: number };
+
+/**
+ * Remove the signed-in user's own Telegram identity (099, `07` §42). Nothing
+ * linked answers ok too: the account ends with no Telegram either way.
+ */
+export async function unlinkTelegram(): Promise<TelegramUnlinkResult> {
+  const result = await callBff("/api/me/telegram", { method: "DELETE" });
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
+  }
+  return { ok: true };
+}
+
+/** A sentence for an unlink refusal. Every branch says what happened. */
+export function telegramUnlinkRefusalCopy(reason: unknown): string {
+  switch (reason) {
+    case "last_identity":
+    case "http_409":
+      return "This Telegram account is the only way into your Storydump account, so it stays linked.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing changed");
+  }
+  return "Could not unlink Telegram. It is still linked — try again shortly.";
+}
+
 /**
  * The attached Telegram identity's display name, or null. Shown beside
  * "Linked" so a person can tell WHOSE Telegram is on their account — the one
@@ -163,4 +195,47 @@ export function telegramGroupLinkRefusalCopy(reason: unknown): string {
       return "Telegram is not set up on this deployment yet. Nothing changed.";
   }
   return telegramLinkRefusalCopy(reason);
+}
+
+// --- Removing a Telegram group (`07` §13) ------------------------------------
+
+export type RemoveTelegramGroupResult =
+  | { ok: true }
+  | { ok: false; error: string; status: number };
+
+/**
+ * Remove a bound group from the workspace — a revoke on the API side, never a
+ * delete: cards still queued for it are dropped, and a fresh bind link brings
+ * it back.
+ */
+export async function removeTelegramGroup(
+  workspaceId: string,
+  bindingId: string,
+): Promise<RemoveTelegramGroupResult> {
+  const result = await callBff(
+    `/api/workspaces/${workspaceId}/bindings/${bindingId}`,
+    { method: "DELETE" },
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
+  }
+  return { ok: true };
+}
+
+export function removeTelegramGroupRefusalCopy(reason: unknown): string {
+  switch (reason) {
+    case "not found":
+    case "http_404":
+      return "That group is no longer bound here. Reload the page.";
+    case "insufficient_role":
+    case "http_403":
+      return "You need to be an admin of this workspace to remove a Telegram group. Nothing changed.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing changed");
+  }
+  return "Could not remove that group. Nothing changed — try again shortly.";
 }

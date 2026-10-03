@@ -1,7 +1,14 @@
-"""Tests for security hardening: headers and X-Forwarded-For attribution (the
-startup-secret check went with the legacy tier's `ConfigValidator`, #1216)."""
+"""Tests for security hardening: headers, X-Forwarded-For attribution, and the
+cookie session's origin check (the startup-secret check went with the legacy
+tier's `ConfigValidator`, #1216)."""
 
 import pytest
+from fastapi import Depends
+from fastapi.testclient import TestClient
+
+from src.api.principal import COOKIE, current_principal
+from src.config.settings import settings
+from src.services.target import service_tokens, sessions
 
 
 # =============================================================================
@@ -294,3 +301,146 @@ class TestForwardedForAmbiguity:
             [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.CALLER
         )
         assert got == self.CALLER
+
+
+# =============================================================================
+# CSRF: a cookie-carried session on a state-changing request (`07` §1)
+# =============================================================================
+
+FRONT_ORIGIN = "https://app.example.test"
+SELF_ORIGIN = "http://testserver"  # TestClient's base URL: the API's own origin
+FOREIGN_ORIGIN = "https://evil.example.test"
+
+
+@pytest.mark.unit
+class TestCookieOriginCheck:
+    """`SameSite=Lax` keeps the cookie off a cross-SITE post, not off a post
+    from a sibling host of the same registrable domain. So a cookie session
+    on a POST must come from `web_app_origin` or the API's own origin, by
+    ``Origin`` or else ``Referer``; a bearer (the CLI's `sdt_` token, the
+    front end's server side) is not ambient and is not checked."""
+
+    @pytest.fixture
+    def world(self, app, monkeypatch):
+        monkeypatch.setattr(settings, "WEB_APP_URL", FRONT_ORIGIN, raising=False)
+        seen = []
+
+        async def resolve(conn, *, token_hash):
+            seen.append(token_hash)
+            return sessions.Session(id="sess", user_id="user")
+
+        async def resolve_token(conn, *, token_hash):
+            seen.append(token_hash)
+            return service_tokens.TokenPrincipal(
+                token_id="tok",
+                name="cli",
+                role="operator",
+                user_id="user",
+                workspace_id=None,
+                expires_at=None,
+            )
+
+        monkeypatch.setattr(sessions, "resolve", resolve)
+        monkeypatch.setattr(service_tokens, "resolve", resolve_token)
+
+        # A probe on the real app: the real dependency and the real handlers.
+        async def probe(principal=Depends(current_principal)):
+            return {"kind": principal.kind}
+
+        app.add_api_route("/zz-probe", probe, methods=["GET", "POST"])
+        client = TestClient(app)
+        client.cookies.set(COOKIE, "opaque")
+        return client, seen
+
+    def _post(self, world, **headers):
+        client, seen = world
+        return client.post("/zz-probe", headers=headers), seen
+
+    def test_a_foreign_origin_is_refused_by_name(self, world):
+        resp, seen = self._post(world, Origin=FOREIGN_ORIGIN)
+        assert resp.status_code == 403
+        assert resp.json()["reason"] == "cross_site"
+        assert seen == [], "a forged request must not even slide the session"
+
+    def test_no_origin_and_no_referer_is_refused(self, world):
+        resp, seen = self._post(world)
+        assert resp.status_code == 403 and resp.json()["reason"] == "cross_site"
+        assert seen == []
+
+    def test_a_null_origin_is_refused(self, world):
+        resp, _ = self._post(world, Origin="null")
+        assert resp.status_code == 403
+
+    def test_a_foreign_referer_is_refused(self, world):
+        resp, _ = self._post(world, Referer=f"{FOREIGN_ORIGIN}/page")
+        assert resp.status_code == 403
+
+    def test_a_prefix_of_the_front_end_is_not_the_front_end(self, world):
+        resp, _ = self._post(world, Origin=f"{FRONT_ORIGIN}.evil.example.test")
+        assert resp.status_code == 403
+
+    @pytest.mark.parametrize("origin", [FRONT_ORIGIN, SELF_ORIGIN])
+    def test_an_admitted_origin_passes(self, world, origin):
+        resp, seen = self._post(world, Origin=origin)
+        assert resp.status_code == 200, resp.text
+        assert len(seen) == 1
+
+    def test_the_front_ends_referer_stands_in_for_a_missing_origin(self, world):
+        resp, _ = self._post(world, Referer=f"{FRONT_ORIGIN}/dashboard/settings")
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.parametrize("origin", [FOREIGN_ORIGIN, None])
+    def test_a_session_bearer_is_not_checked(self, world, origin):
+        """The front end's server side forwards the session as a bearer
+        (`landing/src/lib/target-api.ts`) and sends no browser Origin."""
+        headers = {"Authorization": "Bearer opaque"}
+        if origin:
+            headers["Origin"] = origin
+        resp, _ = self._post(world, **headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"kind": "session"}
+
+    @pytest.mark.parametrize("origin", [FOREIGN_ORIGIN, None])
+    def test_an_api_token_is_not_checked(self, world, origin):
+        headers = {"Authorization": "Bearer sdt_abc"}
+        if origin:
+            headers["Origin"] = origin
+        resp, _ = self._post(world, **headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"kind": "token"}
+
+    def test_a_cookie_get_is_not_checked(self, world):
+        client, seen = world
+        resp = client.get("/zz-probe", headers={"Origin": FOREIGN_ORIGIN})
+        assert resp.status_code == 200, resp.text
+        assert len(seen) == 1
+
+    def test_signout_by_cookie_from_a_foreign_origin_is_refused(
+        self, world, monkeypatch
+    ):
+        """`/auth/signout` takes no principal, so it checks for itself: a
+        hidden form on a sibling host must not sign a person out of
+        everything."""
+
+        async def never(conn, *, token_hash):
+            raise AssertionError("a forged sign-out must revoke nothing")
+
+        monkeypatch.setattr(sessions, "revoke", never)
+        monkeypatch.setattr(sessions, "revoke_all_for_user", never)
+        client, _ = world
+        resp = client.post(
+            "/auth/signout?everywhere=true", headers={"Origin": FOREIGN_ORIGIN}
+        )
+        assert resp.status_code == 403 and resp.json()["reason"] == "cross_site"
+
+    def test_signout_by_cookie_from_the_front_end_revokes(self, world, monkeypatch):
+        revoked = []
+
+        async def revoke(conn, *, token_hash):
+            revoked.append(token_hash)
+            return True
+
+        monkeypatch.setattr(sessions, "revoke", revoke)
+        client, _ = world
+        resp = client.post("/auth/signout", headers={"Origin": FRONT_ORIGIN})
+        assert resp.status_code == 200 and len(revoked) == 1
