@@ -92,6 +92,7 @@ def pipe_db(admin_conn, owner_actor):
                 "owner": dsn,
                 "ws": chain["ws"],
                 "iga": chain["iga"],
+                "user": chain["user"],
                 "engine": engine,
             }
         finally:
@@ -1656,6 +1657,137 @@ class TestRoutingAndCancel:
             fetch=True,
         )
         assert ("approved", "cancelled") in [tuple(e) for e in edges]
+
+
+class TestATerminalStoryLosesItsTransitCopy:
+    """FC-3.5 at every end, not only `posted` and the worker's cancel: a
+    FAILED story's copy goes after the fail commits, and a story GIVEN UP
+    from review — in the API, which holds no transit credentials — mints a
+    `publish_pipeline` job that meets the intent `cancelled`, destroys the
+    copy and finalizes, posting nothing. Before this the copy waited for the
+    48 h sweep (every 6 h): up to ~54 h on Cloudinary."""
+
+    def test_a_failed_story_s_copy_is_destroyed_after_the_fail_commits(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        transit = FakeTransit()
+        meta = StubMetaAdapter(publish_outcomes=["terminal"])
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit))) == (
+            FAILED
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "failed"
+        assert transit.destroy_calls == [row["transit_asset_ref"]]
+        assert row["transit_asset_ref"] == transit.upload_calls[0]["ref"]
+
+    def test_a_failed_destroy_leaves_the_story_failed(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        transit = FakeTransit(destroy_raises=True)
+        meta = StubMetaAdapter(publish_outcomes=["terminal"])
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit))) == (
+            FAILED
+        )
+        assert len(transit.destroy_calls) == 1, "attempted, and swallowed"
+        assert _intent_row(pipe_db, intent)["state"] == "failed"
+        assert _job_row(pipe_db, job["id"])["state"] == "failed"
+
+    def test_a_fetch_failure_has_no_copy_to_destroy(self, pipe_db):
+        from src.services.target.drive_adapter import DriveMediaTooLarge
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        transit = FakeTransit()
+
+        async def too_large(intent_row):
+            raise DriveMediaTooLarge("too large")
+
+        outcome = _run(
+            run_publish_pipeline(
+                job,
+                **_deps(pipe_db, StubMetaAdapter(), transit, media_fetch=too_large),
+            )
+        )
+        assert outcome == FAILED and transit.destroy_calls == []
+
+    def _give_up(self, pipe_db, intent):
+        from src.services.target import commands
+        from src.services.target.commands import Command
+        from src.services.target.unit_of_work import unit_of_work
+
+        async def go():
+            uow = unit_of_work(
+                pipe_db["engine"],
+                str(pipe_db["ws"]),
+                actor_kind="user",
+                actor_user_id=str(pipe_db["user"]),
+                channel="web",
+            )
+            async with uow.begin() as session:
+                return await commands.execute(
+                    session,
+                    Command(
+                        kind="resolve_review",
+                        workspace_id=str(pipe_db["ws"]),
+                        actor_user_id=str(pipe_db["user"]),
+                        channel="web",
+                        args={"intent_id": intent, "resolution": "cancel"},
+                    ),
+                )
+
+        return _run(go())
+
+    def _minted(self, pipe_db, intent):
+        return _exec(
+            pipe_db,
+            "SELECT id, serialization_key, state FROM jobs"
+            " WHERE kind = 'publish_pipeline' AND payload->>'intent_id' = %s",
+            (intent,),
+            fetch=True,
+        )
+
+    def test_a_give_up_mints_the_job_that_destroys_the_copy(self, pipe_db):
+        intent, ref = _new_intent(
+            pipe_db,
+            state="review_required",
+            publish_step="publish_called",
+            transit_ref="ws/x/given-up",
+        )
+        out = self._give_up(pipe_db, intent)
+        assert out.outcome == "executed" and out.data["state"] == "cancelled"
+        minted = self._minted(pipe_db, intent)
+        assert [(m[1], m[2]) for m in minted] == [(f"ig:{ref}", "ready")]
+
+        # The worker claims it (the claim's shape, as `_reclaim` writes it):
+        # the intent is already terminal, so the copy goes and nothing posts.
+        job = _reclaim(pipe_db, minted[0][0])
+        transit, meta = FakeTransit(), StubMetaAdapter()
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit))) == (
+            CANCELLED
+        )
+        assert transit.destroy_calls == ["ws/x/given-up"]
+        assert transit.upload_calls == [] and meta.create_calls == []
+        assert meta.publish_calls == []
+        assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "cancelled"
+        assert row["cap_refunded_at"] is None, "a give-up retains its debit"
+
+        # A second claim (a crash between the destroy and the finalize, a
+        # reaper re-ready) is the same idempotent route, never an error loop.
+        again = _reclaim(pipe_db, job["id"])
+        assert _run(run_publish_pipeline(again, **_deps(pipe_db, meta, transit))) == (
+            CANCELLED
+        )
+        assert transit.destroy_calls == ["ws/x/given-up"] * 2
+        assert meta.publish_calls == []
+
+    def test_a_give_up_without_a_copy_mints_nothing(self, pipe_db):
+        intent, _ = _new_intent(
+            pipe_db, state="review_required", publish_step="container_ready"
+        )
+        assert self._give_up(pipe_db, intent).data["state"] == "cancelled"
+        assert self._minted(pipe_db, intent) == []
 
 
 class TestThePrecheck:

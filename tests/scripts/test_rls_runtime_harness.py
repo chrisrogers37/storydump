@@ -301,6 +301,21 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_membership",),
     ): "door:fn_signup_admitted",
+    # 099: a person's own Telegram unlink — the door's read and delete.
+    (
+        "p_member_identities",
+        "user_identities",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_identity_unlink",
+    # 098: the doors read an inviter's account state — users' id and state
+    # only, by column grant.
+    (
+        "p_member_users",
+        "users",
+        "SELECT",
+        ("svc_membership",),
+    ): "door:fn_invitation_accept",
 }
 
 #: The tenant-GUC tables (policies whose predicate reads app.tenant_id),
@@ -409,6 +424,13 @@ DOORS = {
     "fn_signup_admitted": (
         "svc_ingress",
         "SELECT fn_signup_admitted('nobody@example.com')",
+    ),
+    # 099 (`07` §42): a person unlinks their own Telegram identity. A uuid
+    # that names nobody answers not_linked, never a raise.
+    "fn_identity_unlink": (
+        "svc_ingress",
+        "SELECT fn_identity_unlink('00000000-4000-4000-8000-000000000099'::uuid,"
+        " 'telegram')",
     ),
     # The fleet-health doors (081, `07` §24, #751): the estate-wide reads behind
     # /health/posting and /health/scheduling, each the module's former query.
@@ -526,10 +548,12 @@ def _seed_tenant(conn, name: str) -> dict:
     ids["invite_hash"] = hashlib.sha256(f"invite-{name}".encode()).hexdigest()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO workspace_invitations"
-            " (workspace_id, token_hash, delivery_channel, expires_at, role)"
-            " VALUES (%s, %s, 'telegram', now() + interval '7 days', 'member')",
-            (ws, ids["invite_hash"]),
+            # 098: an invitation admits only while its inviter is still an
+            # owner or admin there, so the seeded one is the owner's.
+            "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+            " delivery_channel, expires_at, role, invited_by_user_id)"
+            " VALUES (%s, %s, 'telegram', now() + interval '7 days', 'member', %s)",
+            (ws, ids["invite_hash"], ids["user"]),
         )
         cur.execute(
             "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
@@ -836,7 +860,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 66
+        assert len(POLICY_CENSUS) == 68
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -855,8 +879,8 @@ class TestRuntimeTenantIsolationMatrix:
         assert len(by_kind["matrix"]) == 16
         # 081: p_maint_accts; 082: the three maintenance reads; 086: the
         # reaper's source re-arm; 090: the removals record; 092: the sign-up
-        # admissions.
-        assert len(by_kind["door"]) == 36
+        # admissions; 098: the inviter's account state; 099: the Telegram unlink.
+        assert len(by_kind["door"]) == 38
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():

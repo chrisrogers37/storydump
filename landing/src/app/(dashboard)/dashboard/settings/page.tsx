@@ -303,7 +303,8 @@ export default async function SettingsPage({
           nothing left to gate: Connect, the folder picker, Sync Now, Remove
           and Disconnect all call routes that exist (069, #1165), and gating
           them would be the reads-without-writes harm inverted, hiding
-          controls that work.
+          controls that work. `isAdmin` gates one control only: removing a
+          Telegram group, which the API refuses below the admin floor.
         */}
         <TabsContent value="integrations">
           <IntegrationsTab
@@ -314,6 +315,7 @@ export default async function SettingsPage({
             workspaceId={workspaceId}
             telegramLinked={session.telegramLinked}
             telegramDisplayName={session.telegramDisplayName}
+            isAdmin={isAdmin}
           />
         </TabsContent>
 

@@ -50,6 +50,7 @@ export function IntegrationsTab({
   telegramLinked,
   bindings = [],
   telegramDisplayName,
+  isAdmin,
 }: {
   settings: SettingsView;
   /** The workspace's sources, unflattened — the Drive card renders them per row. */
@@ -64,6 +65,8 @@ export function IntegrationsTab({
   bindings?: ChannelBinding[] | null;
   /** Who that identity is, so a link tapped by the wrong person is visible. */
   telegramDisplayName: string | null;
+  /** Admin or owner — gates removing a Telegram group. */
+  isAdmin: boolean;
 }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -88,6 +91,7 @@ export function IntegrationsTab({
         telegramLinked={telegramLinked}
         telegramDisplayName={telegramDisplayName}
         bindings={bindings}
+        canRemoveGroups={isAdmin}
         onError={setError}
         onNotice={setNotice}
       />

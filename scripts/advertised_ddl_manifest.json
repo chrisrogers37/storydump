@@ -361,6 +361,20 @@
       "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
       "doc": "07-security-model.md",
       "ordinal": 33
+    },
+    {
+      "sha256": "84d51d445d574a8429a649ae6546f86c9dd952148d351fdf296af17ca083b6c8",
+      "class": "normative",
+      "label": "§41 an invitation admits only while it is legitimate (098, owner decision, PR #1560 and #1574 security reviews) — fn_signup_admitted and fn_invitation_accept counting an invitation only from an active workspace whose owner or admin, with an active account, still sent it, the accept door refusing a person removed after the invitation (read again after its membership insert), a one-time revoke of the pending invitations of removed inviters and of those addressed to a person removed after they were sent, and svc_membership's column read of users' id and state under p_member_users",
+      "doc": "07-security-model.md",
+      "ordinal": 34
+    },
+    {
+      "sha256": "2d460f16213a2bf80a29c4823616a6398a8e427ef1f374fd6ff17a3de0c2cbc1",
+      "class": "normative",
+      "label": "§42 a person can unlink their own Telegram identity (099) — fn_identity_unlink, owned by svc_membership and granted to svc_ingress, removing the user's telegram identity only while another identity remains, with svc_membership's SELECT and DELETE on user_identities under p_member_identities",
+      "doc": "07-security-model.md",
+      "ordinal": 35
     }
   ],
   "policy_expansion": {
