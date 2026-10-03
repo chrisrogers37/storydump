@@ -533,6 +533,11 @@ class TestTheSiteSecret:
         assert resp.status_code == 202, resp.text
         assert acquired == [key]
 
+    def test_a_blank_secret_is_unset(self, world, monkeypatch):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", " \n")
+        (resp,) = _post(world, {"email": "blank-secret@example.com"})
+        assert resp.status_code == 202, resp.text
+
     def test_set_the_secret_is_compared_without_surrounding_whitespace(
         self, world, armed, monkeypatch
     ):
@@ -556,17 +561,16 @@ class TestTheSiteSecret:
     def test_set_accepted_signups_share_one_ceiling(self, world, armed, monkeypatch):
         monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 2)
         monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-ceiling-test")
-        bodies = (
-            {"email": "not-an-email"},  # refused before the ceiling: spends none
-            {"email": "ceiling-0@example.com"},
-            {"email": "ceiling-1@example.com"},
-            {"email": "ceiling-2@example.com"},
+        # Refused before the ceiling, so they spend none of it.
+        refused = ("[]", '{"email": "not-an-email"}')
+        accepted = tuple(
+            json.dumps({"email": f"ceiling-{i}@example.com"}) for i in range(3)
         )
         responses = [
-            _post(world, body, headers=_from_site(f"198.51.100.{20 + i}"))[0]
-            for i, body in enumerate(bodies)
+            _send(world, (body, {**JSON, **_from_site(f"198.51.100.{20 + i}")}))[0]
+            for i, body in enumerate(refused + accepted)
         ]
-        assert [r.status_code for r in responses] == [400, 202, 202, 429]
+        assert [r.status_code for r in responses] == [400, 400, 202, 202, 429]
         assert _entry(world, "ceiling-1@example.com") != []
         assert _entry(world, "ceiling-2@example.com") == []
 

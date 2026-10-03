@@ -167,10 +167,21 @@ describe("POST /api/waitlist", () => {
       expect(headers.get("x-waitlist-visitor-ip")).toBe("203.0.113.7")
     })
 
+    // Read from the raw headers object: new Headers() would strip the same
+    // whitespace and hide a missing trim.
     it("sends the secret without surrounding whitespace", async () => {
       vi.stubEnv("WAITLIST_SITE_SECRET", " test-secret-not-real\n")
+      await sent(from({ "x-real-ip": "203.0.113.7" }))
+      expect(forwarded().init.headers).toMatchObject({
+        "X-Waitlist-Site-Secret": "test-secret-not-real",
+      })
+    })
+
+    it("treats a whitespace-only secret as unset", async () => {
+      vi.stubEnv("WAITLIST_SITE_SECRET", " \n")
       const headers = await sent(from({ "x-real-ip": "203.0.113.7" }))
-      expect(headers.get("x-waitlist-site-secret")).toBe("test-secret-not-real")
+      expect(headers.has("x-waitlist-site-secret")).toBe(false)
+      expect(headers.has("x-waitlist-visitor-ip")).toBe(false)
     })
 
     it("prefers x-real-ip when both headers are present", async () => {
