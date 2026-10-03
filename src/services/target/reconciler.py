@@ -174,8 +174,8 @@ async def checks_so_far(conn, *, intent_id) -> int:
     return int(row or 0)
 
 
-async def _record_no_surface(
-    conn, *, intent_id, retry_after_seconds: int
+async def record_no_surface(
+    conn, *, intent_id, workspace_id, retry_after_seconds: int
 ) -> Union[int, str]:
     """No push binding: record the ATTEMPT, and say so upward.
 
@@ -191,15 +191,26 @@ async def _record_no_surface(
     that says the customer WAS told, and nobody was. So the row stays due, and
     the notice lands the moment a surface exists.
 
+    **The sweep calls this once its beat is known to return, never from the
+    row.** The stamp says the condition reached the ledger, and it gets there
+    only as the job ending `review_required`; a beat that raises ends nothing.
+    Stamped inside its row's transaction, the attempt would commit before the
+    beat's outcome is known, and a beat that then failed would leave the
+    window reading as told while nobody was. It scopes its own write, as
+    :func:`notify_parked_customer` does and for the same reason.
+
     Returns `outbox.UNDELIVERABLE` on the beat that RECORDS the condition, and
     `0` on the beats inside the window that follow it. The distinction being
     drawn is between *a message was owed and could not be sent* and *nothing
     was owed on this beat*, which is the same distinction the whole change is
     about — not between "sent" and "not sent".
     """
-    from src.services.target import intent_ledger
+    from src.services.target import intent_ledger, unit_of_work
     from src.services.target.outbox import UNDELIVERABLE
 
+    await unit_of_work.apply_gucs(
+        conn, tenant_id=str(workspace_id), actor_kind="system"
+    )
     fresh = (
         await conn.execute(
             text(
@@ -241,14 +252,14 @@ async def notify_parked_customer(
     intent_id,
     workspace_id,
     web_app_origin: Optional[str] = None,
-    retry_after_seconds: int = 24 * 3600,
 ) -> Union[int, str]:
     """Tell the workspace a parked post needs attention.
 
     Returns the number of outbox rows written, or `outbox.UNDELIVERABLE`
     when the workspace has no surface to receive it — **never a bare `0` for
     both**, which is the shape that let two existing producers report a clean
-    run to nobody.
+    run to nobody. An unreachable workspace writes nothing here: the caller
+    records the attempt with :func:`record_no_surface`.
 
     `06` §5's `review_required` row: after `05`'s customer-notification window
     the workspace gets "one workspace notification (\"a post needs attention\",
@@ -306,9 +317,7 @@ async def notify_parked_customer(
     # outstanding condition — and the notice lands whenever a surface exists.
     bindings = await prompts.push_bindings(conn, str(workspace_id))
     if not bindings:
-        return await _record_no_surface(
-            conn, intent_id=intent_id, retry_after_seconds=retry_after_seconds
-        )
+        return outbox.UNDELIVERABLE
 
     claimed = (
         await conn.execute(
