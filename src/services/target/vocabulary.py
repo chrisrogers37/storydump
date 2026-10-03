@@ -167,8 +167,8 @@ TOKEN_ROLES: tuple[str, ...] = ("operator", "readonly")
 #: row's last send failed. `rate_limited` is a 429 (a deferral, never counted as
 #: a failure); `destination_gone`, `refused` and `credential_dead` (a dead
 #: token's 401) are the definitive answers, which fail the row; `ambiguous` is a
-#: send whose answer never came back (a timeout, a 5xx, a dead predecessor's
-#: stranded row).
+#: send whose outcome is unknown (no answer, a 5xx, a reply the transport does
+#: not classify, a dead predecessor's stranded row).
 OUTBOX_FAILURE_CLASSES: tuple[str, ...] = (
     "rate_limited",
     "destination_gone",

@@ -1,9 +1,8 @@
 """The Telegram outbox transport — deliver()'s injected seam, made loud (#942 W2).
 
 Contract (deliver()'s words): takes the claimed outbox row, returns the
-external message ref, raises to signal a lost or refused response — the
-caller marks the row ambiguous and the outbox's own resolution machinery
-takes it from there.
+external message ref, raises to signal a lost or refused response — and
+`outbox.settle` decides from what was raised what becomes of the row.
 
 **A dead credential is a named, observable state, not a quiet one.** The
 lesson is fresh and measured (shitpost-alpha, 2026-08-21: production outbound
@@ -555,7 +554,7 @@ class TelegramTransport:
         Only `TelegramRefused` is caught, and that is the whole point: a
         transport failure may have landed the card, so it propagates for the
         outbox's ambiguity policy. A gone chat and a dead token propagate too,
-        and the outbox fails the row on either: neither is a lost answer.
+        and `outbox.settle` decides what each means for the row.
         """
         content, filename, mime = fetched
         try:

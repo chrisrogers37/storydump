@@ -381,7 +381,7 @@ def compose(
 
 
 DEAD_CREDENTIAL_REASON = (
-    "credential rejected by Telegram at startup (getMe 401/403) — DEAD TOKEN;"
+    "credential rejected by Telegram at startup (getMe 401) — DEAD TOKEN;"
     " the channel is down until it is replaced, and every park of this job is"
     " this reminder"
 )

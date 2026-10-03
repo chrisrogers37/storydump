@@ -29,6 +29,7 @@ from src.channels.telegram_transport import (
     TelegramSendError,
     TelegramTransport,
     TelegramChatGone,
+    logger as transport_logger,
 )
 
 TOKEN = "8675309:AAtestSECRETtokenVALUExyz"
@@ -94,24 +95,12 @@ class TestSending:
 
 
 class TestFailureClassification:
-    async def test_unauthorized_raises_the_named_dead_credential_error(self):
-        def handler(request):
-            return httpx.Response(
-                401,
-                json={"ok": False, "error_code": 401, "description": "Unauthorized"},
-            )
-
-        t = _transport(handler)
-        with pytest.raises(TelegramAuthDead):
-            await t.for_chat("7")(ROW)
-        assert t.auth_failures == 1
-
     async def test_a_dead_token_is_logged_once_while_every_send_is_counted(
         self, caplog
     ):
-        """The latch: one ERROR line names the dead credential however many
-        rows meet it, and `auth_failures` (the worker's status line) counts
-        every one of them."""
+        """A 401 raises the named dead-credential error on every send. The
+        latch: one ERROR line names it however many rows meet it, and
+        `auth_failures` (the worker's status line) counts every one of them."""
 
         def handler(request):
             return httpx.Response(
@@ -120,26 +109,45 @@ class TestFailureClassification:
             )
 
         t = _transport(handler)
-        with caplog.at_level("ERROR", logger="channels.telegram"):
+        with caplog.at_level("ERROR", logger=transport_logger.name):
             for _ in range(3):
                 with pytest.raises(TelegramAuthDead):
                     await t.for_chat("7")(ROW)
-        logged = [r for r in caplog.records if r.name == "channels.telegram"]
+        logged = [r for r in caplog.records if r.name == transport_logger.name]
         assert [r.levelname for r in logged] == ["ERROR"]
         assert t.auth_failures == 3
 
-    async def test_other_api_refusals_raise_the_plain_send_error(self):
-        def handler(request):
-            return httpx.Response(
+    @pytest.mark.parametrize(
+        "status, reply",
+        [
+            pytest.param(
                 400,
-                json={
-                    "ok": False,
-                    "error_code": 400,
-                    "description": "Bad Request: chat not found",
+                {
+                    "json": {
+                        "ok": False,
+                        "error_code": 400,
+                        "description": "Bad Request: chat not found",
+                    }
                 },
-            )
-
-        t = _transport(handler)
+                id="a gone chat's 400",
+            ),
+            pytest.param(
+                404,
+                {"json": {"ok": False, "error_code": 404, "description": "Not Found"}},
+                id="a 404 with Telegram's error body",
+            ),
+            pytest.param(
+                401,
+                {"text": "<html>401 Authorization Required</html>"},
+                id="a 401 with no JSON",
+            ),
+        ],
+    )
+    async def test_other_api_refusals_raise_the_plain_send_error(self, status, reply):
+        """Only Telegram's own 401 names a dead credential. Anything else, a 404
+        with Telegram's error body and a 401 with none included, is a send
+        error that `auth_failures` does not count."""
+        t = _transport(lambda request: httpx.Response(status, **reply))
         with pytest.raises(TelegramSendError) as caught:
             await t.for_chat("7")(ROW)
         assert not isinstance(caught.value, TelegramAuthDead)
