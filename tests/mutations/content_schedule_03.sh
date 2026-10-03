@@ -66,10 +66,11 @@ DOC=documentation/planning/2026-08-02-consolidated-design-plan/07-security-model
 MANIFEST=scripts/advertised_ddl_manifest.json
 G=tests/scripts/test_planned_serve_gate.py
 C=tests/scripts/test_scheduler_clock_gate.py
+W=tests/scripts/test_w6_sync_gate.py
 # An interrupted check must not leave a mutant behind, least of all a §32 edit with a manifest
 # re-hashed to agree with it: every file a check mutates is restored from the committed tree. Not
 # under DRY=1, which mutates nothing: there the restore would only discard uncommitted work.
-[ -n "${DRY:-}" ] || trap 'cd "$ROOT" && git checkout HEAD -- "$DOC" "$MANIFEST" src/services/target/prompts.py src/worker.py src/services/target/provisioning.py src/services/target/work_loop.py scripts/migrations/089_planned_serve_and_misses.sql src/models/target/intent_ledger.py' EXIT INT TERM
+[ -n "${DRY:-}" ] || trap 'cd "$ROOT" && git checkout HEAD -- "$DOC" "$MANIFEST" src/services/target/prompts.py src/worker.py src/services/target/provisioning.py src/services/target/work_loop.py scripts/migrations/089_planned_serve_and_misses.sql src/models/target/intent_ledger.py src/services/target/media_sync.py' EXIT INT TERM
 
 # A §32 mutation changes the block's sha256, and the manifest ratchet then refuses to build the
 # stream ("1 unclassified, 1 orphaned"): every gate would ERROR in its fixture instead of the named
@@ -183,6 +184,17 @@ check "the removal tells about served stories too" src/services/target/provision
 check "the late window is not the owner's hour" src/services/target/work_loop.py "    planned_late_seconds: int = 3600" "    planned_late_seconds: int = 900" "tests/src/test_worker.py -k 'late_window_is_the_hour'"
 # The removal's notice reads the row the miss door's notice is written from.
 check "the removal's notice forgets the account" src/services/target/prompts.py '    "       m.file_name, a.handle, w.tz"' '    "       m.file_name, NULL AS handle, w.tz"' "$G -k 'RemovingADestination'"
+# The sync that writes what the miss door reads as `item_missing` (§40, in Python; the sync gate
+# judges it): the states a whole walk tombstones, a `missing` row adopted by a listing of the same
+# bytes, and the size a relisting that states none keeps.
+SYNC=src/services/target/media_sync.py
+TOMB="\"   AND state IN ('available', 'unsupported')\""
+ADOPT="\" WHERE media_items.state IN ('removed', 'missing')\""
+check "an over-cap file deleted from Drive stays unsupported" $SYNC "$TOMB" "\"   AND state IN ('available')\"" "$W -k 'over_cap_file_deleted'"
+check "a whole walk tombstones a retired row" $SYNC "$TOMB" "\"   AND state IN ('available', 'unsupported', 'removed')\"" "$W -k 'unlisted_retired_row'"
+check "a missing row is not adopted by its twin" $SYNC "$ADOPT" "\" WHERE media_items.state IN ('removed')\"" "$W -k 'deleted_twins_row'"
+check "a missing row is not adopted by the folder it moved to" $SYNC "$ADOPT" "\" WHERE media_items.state IN ('removed')\"" "$W -k 'moved_to_another_connected_folder'"
+check "a relisting that states no size erases the stored one" $SYNC '"       file_size = COALESCE(EXCLUDED.file_size, media_items.file_size),"' '"       file_size = EXCLUDED.file_size,"' "$W -k 'states_no_size_keeps'"
 # The file and the model are held to the stream. Parity compares uniqueness SEMANTICS, not index
 # names, so renaming the model's index would be an equivalent mutant; these mutate what it compares.
 check "the 089 file drifts from §32" scripts/migrations/089_planned_serve_and_misses.sql "LANGUAGE sql STABLE STRICT SECURITY DEFINER" "LANGUAGE sql STABLE SECURITY DEFINER" "tests/scripts/test_advertised_ddl.py -k 'wired_prefix_holds_against_the_real_stream'"

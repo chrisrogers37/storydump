@@ -1749,6 +1749,18 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         assert sizes["s2"] is None, "an adapter that states no size leaves it NULL"
 
     @pytest.mark.asyncio
+    async def test_a_relisting_that_states_no_size_keeps_the_stored_size(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-size-kept")
+        drive = ScriptedDrive([([_item("s1", size=1234)], None)])
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        drive = ScriptedDrive([([_item("s1")], None)])
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        rows = {r["ref"]: r for r in _media_rows(sync_conn, chain["ws"])}
+        assert (rows["s1"]["state"], rows["s1"]["size"]) == ("available", 1234)
+
+    @pytest.mark.asyncio
     async def test_a_file_over_the_publish_cap_lands_unsupported(
         self, lane_db, sync_conn
     ):
@@ -1806,6 +1818,47 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         }
 
     @pytest.mark.asyncio
+    async def test_an_over_cap_file_deleted_from_drive_ends_missing(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-tomb-over-cap")
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        drive = ScriptedDrive([([_item("big", size=_IMAGE_CAP + 1)], None)])
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"])["big"] == "unsupported"
+        drive = ScriptedDrive([([_item("t1")], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "missing",
+            "big": "missing",
+            "t1": "available",
+        }, "an over-cap file deleted from Drive is absent like any other"
+
+    @pytest.mark.asyncio
+    async def test_a_whole_walk_leaves_an_unlisted_retired_row_retired(
+        self, lane_db, sync_conn
+    ):
+        """The tombstone moves `available` and `unsupported` rows and nothing
+        else. A row found retired under a connected folder (the anomaly of a
+        reconcile racing a re-pick) that a whole walk does not list stays
+        `removed`, for a re-pick to revive, rather than turning `missing`."""
+        chain = seed_workspace_chain(sync_conn, "w6-tomb-retired")
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "UPDATE media_items SET state = 'removed' WHERE content_hash = %s",
+                (seeded["hash"],),
+            )
+        sync_conn.commit()
+        drive = ScriptedDrive([([_item("t1")], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "removed",
+            "t1": "available",
+        }
+
+    @pytest.mark.asyncio
     async def test_a_tombstoned_file_listed_again_comes_back(self, lane_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w6-back")
         [seeded] = _media_rows(sync_conn, chain["ws"])
@@ -1819,6 +1872,61 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
             seeded["ref"]: "available",
             "b1": "available",
         }, "restored in Drive and listed again: the same item, drawable again"
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_twins_row_is_adopted_by_the_twin_still_listed(
+        self, lane_db, sync_conn
+    ):
+        """Identical bytes twice in one folder are one row, under the reference
+        listed first. Deleting that file leaves the row `missing` for a walk;
+        the next walk adopts it under the twin."""
+        chain = seed_workspace_chain(sync_conn, "w6-twin")
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        twin_a = _item("twin-a", h="hash-twin")
+        twin_b = _item("twin-b", h="hash-twin")
+        drive = ScriptedDrive([([twin_a, twin_b], None)])
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "available",
+            "twin-a": "available",
+        }
+        # twin-a is deleted from Drive; twin-b stays.
+        drive = ScriptedDrive([([twin_b], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "missing",
+            "twin-a": "missing",
+        }
+        drive = ScriptedDrive([([twin_b], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"]) == {
+            seeded["ref"]: "missing",
+            "twin-b": "available",
+        }, "the same row, under the reference still in the folder"
+
+    @pytest.mark.asyncio
+    async def test_a_file_moved_to_another_connected_folder_is_adopted_there(
+        self, lane_db, sync_conn
+    ):
+        """A move keeps the Drive id: the old folder's whole walk tombstones
+        the row, and the new folder's walk adopts it."""
+        chain = seed_workspace_chain(sync_conn, "w6-moved")
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        other = _second_source(sync_conn, chain["ws"], "merch")
+        drive = ScriptedDrive([([_item("kept")], None)], final=_WHOLE)
+        await _walk(lane_db, sync_conn, chain["src"], drive)
+        assert _states(sync_conn, chain["ws"])[seeded["ref"]] == "missing"
+        moved = _item(seeded["ref"], h=seeded["hash"])
+        moved["category"], moved["folder_path"] = "merch", ""
+        await _walk(lane_db, sync_conn, other, ScriptedDrive([([moved], None)]))
+        rows = {r["hash"]: r for r in _media_rows(sync_conn, chain["ws"])}
+        adopted = rows[seeded["hash"]]
+        assert (adopted["source_id"], adopted["state"]) == (other, "available")
+        assert (adopted["ref"], adopted["category"], adopted["path"]) == (
+            seeded["ref"],
+            "merch",
+            "",
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
