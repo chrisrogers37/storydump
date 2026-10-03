@@ -800,11 +800,12 @@ async def remove_member(
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
         # The door recorded the removal, so the Telegram group cannot undo it
-        # (090); the service identities this person minted go with them.
+        # (090); the service identities this person minted go with them, and so
+        # do the pending invitations they sent or were sent.
         await service_tokens.revoke_minted_by(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
         )
-        await invitations.revoke_sent_by(
+        await invitations.revoke_on_removal(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
         )
         return str(row[1])

@@ -2,26 +2,33 @@
 as written on the replayed advertised stream as the schema owner.
 
 The two SQL blocks are read from the guide, so the guide cannot drift from what
-was proven. A member who was removed from their workspace is deleted, with the
-tokens they minted and the invitations they sent revoked. A person who approved
-a story that has since finished cannot be deleted (the finished story is
-frozen with the reference), and the erase block leaves a bare, disabled id with
-no email, identities, sessions or live tokens.
+was proven. A member or an admin is deleted, whether or not they were removed
+through the product first, with the tokens they minted and the invitations
+they sent or were sent revoked. An owner is refused while their workspace
+exists. A person who approved a story that has since finished cannot be
+deleted (the finished story is frozen with the reference), and the erase block
+leaves a bare, disabled id with no email, identities, sessions, live tokens or
+pending invitations.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
+import zlib
 from pathlib import Path
 
 import psycopg2
 import psycopg2.errors
 import pytest
-
+from src.services.target import workspaces
 from tests.scripts.conftest import (
     _scratch,
+    as_user,
+    in_tenant,
     replay_advertised_stream,
     seed_workspace_chain,
+    set_test_passwords,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -54,7 +61,9 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        yield {"owner": replay_advertised_stream(db, owner_actor, admin_conn)}
+        owner = replay_advertised_stream(db, owner_actor, admin_conn)
+        set_test_passwords(admin_conn)
+        yield {"owner": owner, "ingress": as_user(db, "svc_ingress")}
     finally:
         gen.close()
 
@@ -80,9 +89,12 @@ def _one(world, sql, params=()):
         conn.close()
 
 
-def _person(world, ws, email):
-    """A member with a Google identity, a session, a workspace token they
-    minted and a pending invitation they sent."""
+def _person(world, chain, email, role="admin"):
+    """A member with Google and Telegram identities, a session, a workspace
+    token they minted, a pending invitation they sent, and two pending
+    invitations to them from the owner (by email and by Telegram id)."""
+    ws = chain["ws"]
+    tg = zlib.crc32(email.encode())
     conn = psycopg2.connect(world["owner"])
     try:
         with conn.cursor() as cur:
@@ -93,13 +105,13 @@ def _person(world, ws, email):
             user = cur.fetchone()[0]
             cur.execute(
                 "INSERT INTO user_identities (user_id, provider, external_id)"
-                " VALUES (%s, 'google', %s)",
-                (user, f"sub-{email}"),
+                " VALUES (%s, 'google', %s), (%s, 'telegram', %s)",
+                (user, f"sub-{email}", user, str(tg)),
             )
             cur.execute(
                 "INSERT INTO workspace_members (workspace_id, user_id, role)"
-                " VALUES (%s, %s, 'admin')",
-                (ws, user),
+                " VALUES (%s, %s, %s)",
+                (ws, user, role),
             )
             cur.execute(
                 "INSERT INTO session_tokens (token_hash, user_id, expires_at)"
@@ -113,26 +125,76 @@ def _person(world, ws, email):
                 (f"token-{email}", ws, user),
             )
             token = cur.fetchone()[0]
-            cur.execute(
-                "INSERT INTO workspace_invitations (workspace_id, token_hash,"
-                " delivery_channel, email, expires_at, invited_by_user_id)"
-                " VALUES (%s, %s, 'email', %s, now() + interval '7 days', %s)"
-                " RETURNING id",
-                (ws, f"invite-{email}", f"friend-of-{email}", user),
-            )
-            invitation = cur.fetchone()[0]
+            invitations = []
+            for channel, address, tg_id, by in (
+                ("email", f"friend-of-{email}", None, user),
+                ("email", email.lower(), None, chain["user"]),
+                ("telegram", None, tg, chain["user"]),
+            ):
+                cur.execute(
+                    "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                    " delivery_channel, email, invited_tg_user_id, expires_at,"
+                    " invited_by_user_id)"
+                    " VALUES (%s, %s, %s, %s, %s, now() + interval '7 days', %s)"
+                    " RETURNING id",
+                    (
+                        ws,
+                        f"invite-{channel}-{address}-{email}",
+                        channel,
+                        address,
+                        tg_id,
+                        by,
+                    ),
+                )
+                invitations.append(cur.fetchone()[0])
         conn.commit()
-        return {"user": user, "token": token, "invitation": invitation}
+        return {"user": user, "token": token, "invitations": invitations}
     finally:
         conn.close()
 
 
-def test_a_member_is_deleted_and_what_they_minted_or_sent_is_revoked(world):
-    """The delete block for an admin who was never removed in the product: the
-    membership cascade needs the actor the block sets, and the token and
-    invitation the removal would have revoked are revoked in the block."""
-    chain = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-a")
-    who = _person(world, chain["ws"], "member@example.com")
+def _pending(world, who) -> int:
+    return _one(
+        world,
+        "SELECT count(*) FROM workspace_invitations"
+        " WHERE id = ANY(%s::uuid[]) AND state = 'pending'",
+        ([str(i) for i in who["invitations"]],),
+    )[0]
+
+
+def _remove(world, chain, user):
+    """Settings › Members → Remove: the service the command port calls, as
+    the production role in the tenant."""
+    return asyncio.run(
+        in_tenant(
+            world["ingress"],
+            chain["ws"],
+            chain["user"],
+            lambda s: workspaces.remove_member(
+                s,
+                workspace_id=str(chain["ws"]),
+                user_id=str(user),
+                by_user_id=str(chain["user"]),
+            ),
+        )
+    )
+
+
+@pytest.mark.parametrize("role", ["member", "admin"])
+@pytest.mark.parametrize("removed_first", [False, True], ids=["direct", "removed"])
+def test_a_member_is_deleted_and_their_tokens_and_invitations_are_revoked(
+    world, role, removed_first
+):
+    """The delete block for a member or an admin, whether or not the product
+    removed them first: the membership cascade needs the actor the block sets,
+    and the token they minted and the invitations they sent or were sent end
+    revoked."""
+    chain = seed_workspace_chain(
+        psycopg2.connect(world["owner"]), f"runbook-{role}-{removed_first}"
+    )
+    who = _person(world, chain, f"{role}-{removed_first}@example.com", role)
+    if removed_first:
+        assert _remove(world, chain, who["user"]) == role
     delete, _erase = _runbook_blocks()
 
     _run(world, _for(delete, who["user"]))
@@ -145,11 +207,21 @@ def test_a_member_is_deleted_and_what_they_minted_or_sent_is_revoked(world):
         "SELECT revoked_at IS NOT NULL FROM service_tokens WHERE id = %s",
         (who["token"],),
     ) == (True,)
+    assert _pending(world, who) == 0
+
+
+def test_an_owner_is_refused_while_their_workspace_exists(world):
+    """The delete block for a workspace's owner fails at commit and changes
+    nothing: the step the runbook says comes first."""
+    chain = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-owner")
+    delete, _erase = _runbook_blocks()
+
+    with pytest.raises(psycopg2.Error, match="owner"):
+        _run(world, _for(delete, chain["user"]))
+
     assert _one(
-        world,
-        "SELECT state FROM workspace_invitations WHERE id = %s",
-        (who["invitation"],),
-    ) == ("revoked",)
+        world, "SELECT count(*) FROM users WHERE id = %s", (chain["user"],)
+    ) == (1,)
 
 
 def test_a_person_with_a_finished_story_is_erased_instead(world):
@@ -157,7 +229,7 @@ def test_a_person_with_a_finished_story_is_erased_instead(world):
     posted; the erase block then leaves a bare, disabled id with nothing that
     signs in or identifies them, and the finished story untouched."""
     chain = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-b")
-    who = _person(world, chain["ws"], "approver@example.com")
+    who = _person(world, chain, "approver@example.com")
     # A story they approved that has since posted, born terminal the way only
     # the migration actor may write history.
     conn = psycopg2.connect(world["owner"])
@@ -207,6 +279,7 @@ def test_a_person_with_a_finished_story_is_erased_instead(world):
         "SELECT revoked_at IS NOT NULL FROM service_tokens WHERE id = %s",
         (who["token"],),
     ) == (True,)
+    assert _pending(world, who) == 0
     assert _one(
         world,
         "SELECT approved_by_user_id, state FROM post_intents WHERE id = %s",

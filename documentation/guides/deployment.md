@@ -255,15 +255,17 @@ Leaving the Telegram group removes nobody.
 **Deleting a user** (an erasure request, say) is hand-run SQL as the database
 owner; there is no product door for it. In order:
 
-- [ ] **An owner first.** A workspace's only owner cannot be deleted: the commit
-  fails (`ct_members_owner_exists`), and ownership cannot be handed over yet
+- [ ] **An owner first.** An owner cannot be deleted while their workspace
+  exists (each workspace has exactly one): the commit fails
+  (`ct_members_owner_exists`), and ownership cannot be handed over yet
   (`transfer_ownership` is not built). Delete that workspace first (Settings ›
   General) and let its grace window end, or keep the person.
 - [ ] **Remove them from every other workspace** they belong to (Settings ›
   Members → Remove). A removal revokes the workspace service tokens they
-  minted and the invitations they sent, and records the removal. A plain
-  delete does neither: `ON DELETE SET NULL` leaves those tokens working with no
-  minter recorded, and the invitations pending with no inviter.
+  minted and the pending invitations they sent or were sent, and records the
+  removal. A plain delete does neither: `ON DELETE SET NULL` leaves those tokens
+  working with no minter recorded, the invitations they sent pending with no
+  inviter, and an invitation to them able to bring them back.
 - [ ] **Their Google Drive**, when they connected a workspace's
   (`oauth_credentials.granted_by_user_id` names them, 091): disconnect it
   (Settings › Integrations → Google Drive → Disconnect). Otherwise `ON DELETE
@@ -273,8 +275,9 @@ owner; there is no product door for it. In order:
   included.
 - [ ] **The delete**, always with an actor set and in one transaction, revoking
   anything the removals missed on the way. The delete's cascades and `SET
-  NULL`s fire the governance trigger (on `workspace_members`, and on
-  `oauth_credentials` when they granted Drive), which refuses a write with no
+  NULL`s fire the governance trigger (on `workspace_members`, on
+  `oauth_credentials` when they granted Drive, and on `workspaces` when they
+  paused one), which refuses a write with no
   `app.actor_kind`; without it the delete fails and nothing is removed.
 
   ```sql
@@ -283,7 +286,11 @@ owner; there is no product door for it. In order:
   UPDATE service_tokens SET revoked_at = now()
    WHERE created_by_user_id = '…' AND revoked_at IS NULL;
   UPDATE workspace_invitations SET state = 'revoked'
-   WHERE invited_by_user_id = '…' AND state = 'pending';
+   WHERE state = 'pending'
+     AND (invited_by_user_id = '…'
+          OR email = (SELECT lower(primary_email) FROM users WHERE id = '…')
+          OR invited_tg_user_id::text IN (SELECT external_id FROM user_identities
+                                           WHERE user_id = '…' AND provider = 'telegram'));
   DELETE FROM users WHERE id = '…';
   COMMIT;
   ```
@@ -295,7 +302,9 @@ owner; there is no product door for it. In order:
   their sign-ins and tokens end, their identities (the Google and Telegram
   accounts and their display names) go, and the `users` row stays as a bare id
   with no email that cannot sign in. Audit rows keep that id, as they do after
-  a delete.
+  a delete. The invitations step runs before the email and identities go,
+  because it finds the invitations addressed to them by both; a revoked
+  invitation keeps the address it was sent to.
 
   ```sql
   BEGIN;
@@ -305,7 +314,11 @@ owner; there is no product door for it. In order:
   UPDATE service_tokens SET revoked_at = now()
    WHERE (user_id = '…' OR created_by_user_id = '…') AND revoked_at IS NULL;
   UPDATE workspace_invitations SET state = 'revoked'
-   WHERE invited_by_user_id = '…' AND state = 'pending';
+   WHERE state = 'pending'
+     AND (invited_by_user_id = '…'
+          OR email = (SELECT lower(primary_email) FROM users WHERE id = '…')
+          OR invited_tg_user_id::text IN (SELECT external_id FROM user_identities
+                                           WHERE user_id = '…' AND provider = 'telegram'));
   DELETE FROM user_identities WHERE user_id = '…';
   UPDATE users SET primary_email = NULL, state = 'disabled' WHERE id = '…';
   COMMIT;

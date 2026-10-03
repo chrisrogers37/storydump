@@ -303,11 +303,12 @@ class TestTheAcceptDoor:
 
     def test_a_removal_outranks_an_invitation_sent_before_it(self, world):
         """An invitation addressed to a member who is then removed does not
-        bring them back; a fresh invitation after the removal does."""
-        old, fresh = "removed-old@example.com", "removed-fresh@example.com"
+        bring them back; a fresh invitation to the same address after the
+        removal does."""
+        old = "removed-old@example.com"
         user = _existing_user(world, old)
 
-        def invite(email):
+        def invite(email, token):
             return (
                 "INSERT INTO workspace_invitations (workspace_id, token_hash,"
                 " delivery_channel, email, role, expires_at, invited_by_user_id)"
@@ -315,7 +316,7 @@ class TestTheAcceptDoor:
                 " %s)",
                 (
                     world["ws"],
-                    hashlib.sha256(email.encode()).hexdigest(),
+                    hashlib.sha256(token.encode()).hexdigest(),
                     email,
                     world["ws_owner"],
                 ),
@@ -323,7 +324,7 @@ class TestTheAcceptDoor:
 
         _as_owner(
             world,
-            invite(old),
+            invite(old, old),
             (
                 "INSERT INTO workspace_members (workspace_id, user_id, role)"
                 " VALUES (%s, %s, 'member')",
@@ -347,15 +348,25 @@ class TestTheAcceptDoor:
         with pytest.raises(psycopg2.errors.NoDataFound):
             _accept(world, old, user)
 
-        # Positive control: an invitation sent after the removal is the way
-        # back in. The verified email the door compares is the fresh one's.
-        _as_owner(world, invite(fresh))
+        # Positive control: an invitation to the same address sent after the
+        # removal is the way back in. The removal's service revokes the old
+        # one (`invitations.revoke_on_removal`, proven in
+        # test_member_removal_gate), which frees `uq_invite_live` for it.
+        _as_owner(
+            world,
+            (
+                "UPDATE workspace_invitations SET state = 'revoked'"
+                " WHERE workspace_id = %s AND email = %s AND state = 'pending'",
+                (world["ws"], old),
+            ),
+            invite(old, "re-invite"),
+        )
         assert (
             _one(
                 world["ingress"],
                 "SELECT o_granted_role FROM fn_invitation_accept(%s, %s, 'google',"
                 " %s, NULL, 'web')",
-                (hashlib.sha256(fresh.encode()).hexdigest(), user, fresh),
+                (hashlib.sha256(b"re-invite").hexdigest(), user, old),
             )
             == "admin"
         )

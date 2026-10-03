@@ -521,9 +521,12 @@ class TestRemoveMemberGoesThroughTheDoor:
         assert "created_by_user_id = :u" in revoke_sql
         assert "workspace_id = :ws" in revoke_sql
         assert revoke_params == {"ws": "ws", "u": "u2"}
-        # 098: so do the invitations they sent and nobody has used yet.
+        # 098: so do the pending invitations they sent or were sent.
         assert "UPDATE workspace_invitations SET state = 'revoked'" in invites_sql
         assert "invited_by_user_id = :u" in invites_sql
+        assert "SELECT lower(primary_email) FROM users" in invites_sql
+        assert "provider = 'telegram'" in invites_sql
+        assert "workspace_id = :ws" in invites_sql
         assert "state = 'pending'" in invites_sql
         assert invites_params == {"ws": "ws", "u": "u2"}
 

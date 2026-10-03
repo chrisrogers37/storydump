@@ -227,14 +227,67 @@ class TestTheCreateHalfMatchesTheAcceptor:
 
 
 class TestTheRefusalsAreNamedRatherThanConstraintNames:
-    async def test_a_second_live_invitation_to_one_address_is_refused(self, world):
+    async def test_re_inviting_an_address_replaces_its_pending_invitation(self, world):
+        """A second send to one address revokes the first: its link stops
+        working, the new one is the only live invitation, and it is the new
+        send's role that is granted. Without the revoke `uq_invite_live` would
+        refuse the send, and an invitation the accept door now refuses (098)
+        would keep refusing it until the reaper expired it."""
         r = _Round(world)
         try:
             addr = f"{uuid.uuid4().hex[:8]}@example.com"
-            await r.create(email=addr)
+            first, old_token = await r.create(email=addr, role="member")
+            second, new_token = await r.create(email=addr, role="admin")
+            assert second != first
+
             with pytest.raises(invitations.InvitationRefused) as exc:
-                await r.create(email=addr)
-            assert exc.value.reason == "already_invited"
+                await r.accept(old_token, email=addr)
+            assert exc.value.reason == "not_acceptable"
+            out = await r.accept(new_token, email=addr)
+            assert out["role"] == "admin"
+
+            async with r.engine.begin() as conn:
+                states = (
+                    await conn.execute(
+                        text(
+                            "SELECT id, state FROM workspace_invitations"
+                            " WHERE id IN (:a, :b)"
+                        ),
+                        {"a": first, "b": second},
+                    )
+                ).all()
+            assert dict((str(i), st) for i, st in states) == {
+                first: "revoked",
+                second: "accepted",
+            }
+        finally:
+            await r.close()
+
+    async def test_re_inviting_a_telegram_id_replaces_its_pending_invitation(
+        self, world
+    ):
+        """The addressee of a Telegram invitation is its Telegram id, so a
+        second send to that id revokes the first exactly as an email one does;
+        no index forces it, so without the revoke both would stay live."""
+        r = _Round(world)
+        try:
+            kw = {"delivery_channel": "telegram", "invited_tg_user_id": 555000111}
+            first, _ = await r.create(**kw)
+            second, _ = await r.create(**kw)
+            async with r.engine.begin() as conn:
+                states = (
+                    await conn.execute(
+                        text(
+                            "SELECT id, state FROM workspace_invitations"
+                            " WHERE id IN (:a, :b)"
+                        ),
+                        {"a": first, "b": second},
+                    )
+                ).all()
+            assert dict((str(i), st) for i, st in states) == {
+                first: "revoked",
+                second: "pending",
+            }
         finally:
             await r.close()
 

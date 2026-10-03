@@ -1,7 +1,25 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+
+/** What the button says after a sign-out that did not happen. */
+export const SIGNOUT_FAILED = "Couldn't sign out. Try again";
+
+/**
+ * Where a sign-out landed. `failed` means this browser is still signed in:
+ * the request never arrived (offline) or the route refused it (a 403 from the
+ * cross-site check, a 5xx), so its cookies were not cleared. `incomplete`
+ * means this browser is signed out but the API could not sign the other
+ * devices out; the route says so by redirecting to `/login?signout=incomplete`.
+ */
+export function signOutOutcome(
+  response: Pick<Response, "ok" | "redirected" | "url"> | null,
+): "done" | "incomplete" | "failed" {
+  if (!response || !response.ok || !response.redirected) return "failed";
+  const landed = new URL(response.url);
+  return landed.searchParams.get("signout") === "incomplete" ? "incomplete" : "done";
+}
 
 /**
  * Sign out.
@@ -47,17 +65,25 @@ export function SignOutButton({
   everywhere?: boolean;
 }) {
   const router = useRouter();
+  const [failed, setFailed] = useState(false);
 
   async function signOut() {
-    const response = await fetch(
-      everywhere ? "/api/auth/logout?everywhere=1" : "/api/auth/logout",
-      { method: "POST" },
-    );
-    // The route redirects to `/login?signout=incomplete` when it could not
-    // sign the other devices out; that page says so, so it is where to land.
-    const landed = response.redirected ? new URL(response.url) : null;
-    const incomplete = landed?.searchParams.get("signout") === "incomplete";
-    router.push(incomplete ? "/login?signout=incomplete" : redirectTo);
+    let response: Response | null = null;
+    try {
+      response = await fetch(
+        everywhere ? "/api/auth/logout?everywhere=1" : "/api/auth/logout",
+        { method: "POST" },
+      );
+    } catch {
+      // Offline, or the request was cut off: nothing was signed out.
+    }
+    const outcome = signOutOutcome(response);
+    // Stay put and say so: the session is still live, so landing on /login
+    // would read as a sign-out that did not happen.
+    setFailed(outcome === "failed");
+    if (outcome === "failed") return;
+    // `/login?signout=incomplete` says the other devices are still signed in.
+    router.push(outcome === "incomplete" ? "/login?signout=incomplete" : redirectTo);
     // Needed when `redirectTo` IS the current route, which is the invitation
     // page's case: a push to the URL already showing renders from the router
     // cache and would re-display the signed-in view of a session that no
@@ -66,8 +92,8 @@ export function SignOutButton({
   }
 
   return (
-    <button type="button" onClick={signOut} className={className}>
-      {children}
+    <button type="button" onClick={signOut} className={className} aria-live="polite">
+      {failed ? SIGNOUT_FAILED : children}
     </button>
   );
 }

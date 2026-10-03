@@ -262,10 +262,10 @@ _INVITATION_STATUS = {
     "identity_mismatch": 403,
     # The CREATE half's refusals (#1172). All three are the caller's input
     # being wrong rather than a state or an authorization fact, so 400 — and
-    # `already_invited` is deliberately NOT 409: a pending invitation to that
-    # address is not a conflicting write to fix by retrying, it is a thing
-    # that already exists, and the remedy is to revoke or wait rather than to
-    # send again.
+    # `already_invited` stays 400 rather than 409 for the same reason. A send
+    # replaces the address's pending invitation (`invitations.create`), so it
+    # fires only when a concurrent send to that address committed first; the
+    # invitation the person wanted exists, and sending again replaces it.
     "already_invited": 400,
     "email_required": 400,
     "invalid_channel": 400,

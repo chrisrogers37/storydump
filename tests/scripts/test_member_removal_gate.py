@@ -9,8 +9,8 @@ tokens a removed admin made kept reading the workspace.
 Both doors run here as the production role (`svc_ingress`) on the replayed
 advertised stream, and the removal runs through `workspaces.remove_member`, the
 service the command port calls, so the token half is proven in the same
-transaction the API uses. 098 adds the invitations the removed member sent: the
-service revokes the pending ones in that same transaction.
+transaction the API uses. 098 adds the invitations the removed member sent or
+was sent: the service revokes the pending ones in that same transaction.
 """
 
 from __future__ import annotations
@@ -22,11 +22,12 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from src.services.target import service_tokens, workspaces
+from src.services.target import invitations, service_tokens, workspaces
 from tests.scripts.conftest import (
     _scratch,
     as_user,
     async_url,
+    execute,
     fetch_one,
     replay_advertised_stream,
     seed_workspace_chain,
@@ -65,6 +66,7 @@ def world(admin_conn, owner_actor):
         finally:
             conn.close()
         yield {
+            "owner_dsn": owner_dsn,
             "ingress": as_user(db, "svc_ingress"),
             "ws": str(chain["ws"]),
             "owner": str(chain["user"]),
@@ -239,3 +241,83 @@ def test_the_removed_members_pending_invitations_are_revoked_with_them(world):
     }
     assert not _admitted(world, "theirs@example.com")
     assert _admitted(world, "owners@example.com")
+
+
+def test_the_invitations_addressed_to_the_removed_person_are_revoked_too(world):
+    """An invitation to the removed person, by email or by Telegram id, is
+    revoked with the removal: the accept door would refuse it anyway (098), and
+    a pending one would hold `uq_invite_live` against the fresh invitation that
+    is meant to bring them back. That fresh invitation, to the same address,
+    is sent and accepted."""
+    address, tg = "Removed.Admin@example.com", 424242
+    execute(
+        world["owner_dsn"],
+        "UPDATE users SET primary_email = %s WHERE id = %s",
+        (address, world["admin"]),
+    )
+    execute(
+        world["owner_dsn"],
+        "INSERT INTO user_identities (user_id, provider, external_id)"
+        " VALUES (%s, 'telegram', %s)",
+        (world["admin"], str(tg)),
+    )
+
+    async def invite(conn):
+        await conn.execute(
+            text(
+                "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                " delivery_channel, email, expires_at, invited_by_user_id)"
+                " VALUES (:ws, 'to-email', 'email', :e, now() + interval '7 days',"
+                " CAST(:by AS uuid))"
+            ),
+            {"ws": world["ws"], "e": address.lower(), "by": world["owner"]},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                " delivery_channel, invited_tg_user_id, expires_at,"
+                " invited_by_user_id)"
+                " VALUES (:ws, 'to-telegram', 'telegram', :tg,"
+                " now() + interval '7 days', CAST(:by AS uuid))"
+            ),
+            {"ws": world["ws"], "tg": tg, "by": world["owner"]},
+        )
+
+    asyncio.run(_in_tenant(world["ingress"], world["ws"], world["owner"], invite))
+    _remove(world, world["admin"])
+
+    async def states(conn):
+        rows = await conn.execute(
+            text(
+                "SELECT token_hash, state FROM workspace_invitations"
+                " WHERE workspace_id = :ws"
+            ),
+            {"ws": world["ws"]},
+        )
+        return dict(rows.all())
+
+    assert asyncio.run(
+        _in_tenant(world["ingress"], world["ws"], world["owner"], states)
+    ) == {"to-email": "revoked", "to-telegram": "revoked"}
+
+    async def reinvite(conn):
+        _, token = await invitations.create(
+            conn,
+            workspace_id=world["ws"],
+            invited_by_user_id=world["owner"],
+            email=address,
+        )
+        return token
+
+    token = asyncio.run(
+        _in_tenant(world["ingress"], world["ws"], world["owner"], reinvite)
+    )
+
+    async def accept(conn):
+        return await invitations.accept(
+            conn, token=token, user_id=world["admin"], channel="web"
+        )
+
+    out = asyncio.run(_in_tenant(world["ingress"], world["ws"], world["owner"], accept))
+    assert out["role"] == "member"
+    assert _is_member(world, world["admin"])

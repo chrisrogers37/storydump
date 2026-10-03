@@ -2858,8 +2858,9 @@ F10), so no live invitation lacks an inviter by design.
 removal from the workspace (§33's `workspace_member_removals`) is newer than the invitation, so
 an invitation sent before the removal cannot undo it; a fresh invitation after it still can.
 
-**A removal revokes the invitations the removed member sent.** `workspaces.remove_member` sets
-their pending invitations in that workspace to `revoked` (`invitations.revoke_sent_by`) in the
+**A removal revokes the invitations the removed member sent or was sent.** `workspaces.remove_member`
+sets the pending invitations in that workspace that they sent, or that are addressed to their
+email or Telegram identity, to `revoked` (`invitations.revoke_on_removal`) in the
 transaction that calls `fn_member_remove` (§33); `svc_ingress` holds UPDATE on
 `workspace_invitations` under the tenant policy, so the door's body is left as it is. Invitations
 sent by people removed before this section are revoked by it once: a pending invitation whose
