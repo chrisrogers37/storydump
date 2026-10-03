@@ -488,17 +488,17 @@ class TestTheSiteSecret:
         assert _entry(world, "visitor-b1@example.com") != []
 
     @pytest.mark.parametrize(
-        "secret, headers, key",
+        "n, secret, headers, key",
         [
             # Unset: the peer, whatever the site names.
-            (None, _from_site("198.51.100.5"), "127.0.0.1"),
+            (1, None, _from_site("198.51.100.5"), "127.0.0.1"),
             # Set and matched: the visitor, an IPv6 one by its /64.
-            (SECRET, _from_site("198.51.100.5"), "198.51.100.5"),
-            (SECRET, _from_site("2001:db8:9:9::5"), "2001:db8:9:9::/64"),
+            (2, SECRET, _from_site("198.51.100.5"), "198.51.100.5"),
+            (3, SECRET, _from_site("2001:db8:9:9::5"), "2001:db8:9:9::/64"),
         ],
     )
     def test_the_slot_share_is_keyed_like_the_counter(
-        self, world, monkeypatch, secret, headers, key
+        self, world, monkeypatch, n, secret, headers, key
     ):
         monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", secret)
         seen = []
@@ -509,9 +509,7 @@ class TestTheSiteSecret:
             return await acquire(slots, address)
 
         monkeypatch.setattr(public.WaitlistSlots, "acquire", spy)
-        (resp,) = _post(
-            world, {"email": f"slot-{len(key)}@example.com"}, headers=headers
-        )
+        (resp,) = _post(world, {"email": f"slot-{n}@example.com"}, headers=headers)
         assert resp.status_code == 202, resp.text
         assert seen == [key]
 
