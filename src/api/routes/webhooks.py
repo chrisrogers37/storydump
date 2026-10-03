@@ -136,9 +136,9 @@ class IngressRuntime:
 
 @dataclass
 class TapMetrics:
-    """Counters the operating details (`/api/v1/ops/health`) report: taps by outcome, and answers that did
-    not land (phase 1 step 12; the strip counter went with the route strip,
-    2026-09-12)."""
+    """Counters the operating details (`/api/v1/ops/health`) report: taps by
+    outcome, and answers that did not land (phase 1 step 12; the strip counter
+    went with the route strip, 2026-09-12)."""
 
     taps: dict[str, int] = field(default_factory=dict)
     answer_failed: int = 0

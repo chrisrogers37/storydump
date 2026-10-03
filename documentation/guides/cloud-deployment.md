@@ -213,7 +213,7 @@ reads. Variables are per service on Railway.
 | `FACEBOOK_APP_SECRET` | Optional. The second secret Meta's signed policy callbacks are verified against (`src/services/target/meta_callbacks.py:116`); set it only if those callbacks are registered under another Meta app | |
 | `SESSION_COOKIE_DOMAIN` | The registrable domain the API and the front end share, so the front end's server side can read the session cookie | `example.com` |
 | `SESSION_COOKIE_SECURE` | Optional, default `true`: the session cookie is HTTPS-only. Only a plain-http laptop setup turns it off | `true` |
-| `OPS_USER_IDS` | Optional; the user ids (comma-separated, the `user` line of `storydump whoami`) that may read the API's operating details at `GET /api/v1/ops/health` — usage counts, the database login, the pool, the webhook — and `GET /api/v1/ops/posture`, and so run `storydump health` and `storydump posture`. Unset, nobody can. Public `/health` says only ok, the version and the commit | a user id (a UUID) |
+| `OPS_USER_IDS` | Set after the first sign-in (Quick Start step 10); the user ids (comma-separated, the `user` line of `storydump whoami`) that may read the API's operating details at `GET /api/v1/ops/health` — usage counts, the database login, the pool, the webhook — and `GET /api/v1/ops/posture`, and so run `storydump health` and `storydump posture`. Unset, nobody can, and `storydump health` cannot exit 0: the webhook reads `not_checked`. Public `/health` says only ok, the version and the commit | a user id (a UUID) |
 | `TRUSTED_PROXY_HOSTS` | Optional; the proxies whose `X-Forwarded-For` the API believes (private ranges by default). **Never `*`** — it lets a caller choose its own IP and defeats every IP-keyed control (#726) | `10.0.0.0/8,…` |
 | `TARGET_TELEGRAM_WEBHOOK_URL` | Optional; the URL the API registers with Telegram. **The default is production's** `https://api.storydump.app/webhooks/telegram` (`src/services/target/vocabulary.py`), so a staging or preview API that registers a webhook — by hand with `storydump webhook register`, or by autoregistering — must set its own, and needs its own bot: one bot holds one webhook | `https://staging.example.com/webhooks/telegram` |
 | `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` | Optional; `0` stops the API registering the webhook at startup even where `RAILWAY_ENVIRONMENT_NAME` is `production` | `0` |
@@ -487,8 +487,9 @@ rate- or quota-limited.
 5. [ ] Create the Telegram bot via BotFather; enable groups, disable privacy mode
 6. [ ] Configure the Meta app (the Instagram Login redirect URI)
 7. [ ] Configure the Google client (both redirect URIs)
-8. [ ] Deploy; `storydump health` and `storydump webhook status` are well
+8. [ ] Deploy; `storydump webhook status` is well, and `storydump health` reports `api`, `scheduling` and `posting` well (the webhook reads `not_checked` until step 10)
 9. [ ] Sign in on the web, create a workspace
-10. [ ] Settings › Integrations: link Telegram, add a Telegram group, connect Google Drive, add a folder, Sync Now
-11. [ ] Settings › Accounts: Connect Instagram
-12. [ ] Settings › General: set the schedule. **Instagram API** is off on a new workspace (cards offer **Posted myself**, not **Post now**); turn it on when the workspace should publish through the API. **Dry Run Mode** with it on runs the whole publish leg without calling Meta — and spends the media's rotation as a real post would (`src/services/target/publish_pipeline.py:318-327`)
+10. [ ] Mint an API token (Settings › API tokens), run `storydump login`, set `OPS_USER_IDS` on the API service to the `user` line of `storydump whoami`, let it redeploy; `storydump health` now exits 0
+11. [ ] Settings › Integrations: link Telegram, add a Telegram group, connect Google Drive, add a folder, Sync Now
+12. [ ] Settings › Accounts: Connect Instagram
+13. [ ] Settings › General: set the schedule. **Instagram API** is off on a new workspace (cards offer **Posted myself**, not **Post now**); turn it on when the workspace should publish through the API. **Dry Run Mode** with it on runs the whole publish leg without calling Meta — and spends the media's rotation as a real post would (`src/services/target/publish_pipeline.py:318-327`)

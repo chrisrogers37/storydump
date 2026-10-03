@@ -118,11 +118,12 @@ def surface_verdict(name: str, payload: Any) -> tuple[bool, dict[str, str]]:
 
 
 def webhook_verdict(health: Any) -> tuple[bool, dict[str, str]]:
-    """The bot's webhook, judged from `/health`'s two reports: `webhook` is
-    the API's own registration at startup (`ok: false` with the reason is a
-    bot nobody delivers to), `webhook_live` is what Telegram holds right now
-    (a backlog behind a delivery error is our door failing). An API that
-    reports neither is not judged on it."""
+    """The bot's webhook, judged from the operating details' two reports
+    (`/api/v1/ops/health`): `webhook` is the API's own registration at
+    startup (`ok: false` with the reason is a bot nobody delivers to),
+    `webhook_live` is what Telegram holds right now (a backlog behind a
+    delivery error is our door failing). An API that reports neither is not
+    judged on it."""
     payload = health if isinstance(health, dict) else {}
     registration = payload.get("webhook")
     live = payload.get("webhook_live")
@@ -170,8 +171,8 @@ def _details(runtime: Any) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
     except StorageUnavailable as exc:
         return None, {
             "read": False,
-            "detail": f"no token store: {exc}",
-            "fix": FIXES["not_authorized"],
+            "detail": f"no token store: {exc.detail}",
+            "fix": exc.fix,
         }
     if not token:
         return None, {
@@ -181,6 +182,13 @@ def _details(runtime: Any) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
         }
     try:
         return runtime.client(token).health_details(), {"read": True}
+    except Unreachable as exc:
+        # first: `Unreachable` is an `ApiError`, and no answer is not an answer
+        return None, {
+            "read": False,
+            "detail": f"the details did not answer: {exc.detail}",
+            "fix": FIXES.get(exc.reason or "", UNREACHABLE_FIX),
+        }
     except ApiError as exc:
         if exc.status == 401:
             raise
@@ -191,30 +199,24 @@ def _details(runtime: Any) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
             "detail": f"the details answered {exc.status}: {exc.detail}",
             "fix": FIXES.get(reason, "see storydump doctor"),
         }
-    except Unreachable as exc:
-        return None, {
-            "read": False,
-            "detail": f"the details did not answer: {exc.detail}",
-            "fix": UNREACHABLE_FIX,
-        }
 
 
 @click.command()
 @global_options
 @click.pass_context
 def health(ctx: click.Context) -> int:
-    """The API's three health surfaces — liveness, scheduling, posting — as
-    the API reports them, judged by the fleet monitors' own verdicts (the same `classify` the
-    pollers run): not well when a monitor would page — a cursor
+    """The API's three health surfaces — liveness, scheduling, posting — as the
+    API reports them, judged by the fleet monitors' own verdicts (the same
+    `classify` the pollers run): not well when a monitor would page — a cursor
     stalled past 10 minutes, the worker down, 48 hours of silence, a first post
     overdue past its grace, or a surface unreachable — and the bot's webhook
     from the API's operating details: unregistered, or a backlog behind a
     delivery error. The details answer only a token whose person is in the
     API's `OPS_USER_IDS`; without them the webhook is `not_checked`, which is
     not well, and `details` says why and what fixes it. A token the API does
-    not accept is exit 3. Exit 0 when every surface is well, 4 otherwise — the report is still
-    printed with each verdict; a surface that answers 503 is reported as its
-    error.
+    not accept is exit 3. Exit 0 when every surface is well, 4 otherwise — the
+    report is still printed with each verdict; a surface that answers 503 is
+    reported as its error.
 
     Two bounds against the pollers: this is one reading, so there is no watch
     clock (the posting monitor's watched time is zero here), and one

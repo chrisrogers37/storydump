@@ -101,6 +101,7 @@ class TestThePublicProbeSaysLittle:
         [
             ("", "OPS_USER_IDS is empty"),
             ("00000000-0000-4000-8000-0000000000aa, tok_123", "entry 2 of 2"),
+            ("{00000000-0000-4000-8000-0000000000aa},tok_123,", "entry 2 of 2"),
         ],
     )
     def test_startup_says_why_ops_will_refuse_everyone(self, monkeypatch, value, says):
@@ -114,6 +115,25 @@ class TestThePublicProbeSaysLittle:
         text = " ".join(said)
         assert says in text
         assert "tok_123" not in text, "an entry is never echoed"
+
+    def test_a_pasted_id_in_another_spelling_still_names_the_person(self):
+        """Braced, hyphen-less and `urn:uuid:` pastes are the same id the
+        database returns; only a non-UUID admits nobody, and is the one the
+        startup warning names."""
+        from src.config.settings import parse_ops_user_ids
+
+        canonical = "00000000-0000-4000-8000-0000000000aa"
+        for spelling in (
+            canonical.upper(),
+            "{" + canonical + "}",
+            canonical.replace("-", ""),
+            "urn:uuid:" + canonical,
+        ):
+            assert parse_ops_user_ids(f" {spelling} , tok_123") == (
+                frozenset({canonical}),
+                [2],
+            ), spelling
+        assert parse_ops_user_ids("") == (frozenset(), [])
 
     @pytest.mark.parametrize(
         "env",

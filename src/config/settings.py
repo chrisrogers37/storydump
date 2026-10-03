@@ -1,6 +1,7 @@
 """Application settings and configuration management."""
 
 import re
+import uuid
 from typing import Container
 
 from pydantic import ValidationError
@@ -101,6 +102,22 @@ def _redact(exc: ValidationError) -> str:
         field = ".".join(str(part) for part in err.get("loc", ())) or "<root>"
         lines.append(f"  {field}: {err.get('type', 'invalid')}")
     return _PREFIX + "\n" + "\n".join(lines)
+
+
+def parse_ops_user_ids(raw: str) -> tuple[frozenset[str], list[int]]:
+    """`OPS_USER_IDS` (comma-separated) as ``(ids, refused)``: each entry
+    canonical the way the database spells a user id, so a braced, hyphen-less
+    or `urn:uuid:` paste still matches, and the 1-based positions of the
+    entries that are not a UUID at all and admit nobody. The one parser: the
+    API's startup warning reads ``refused`` from here."""
+    entries = [e.strip() for e in raw.split(",") if e.strip()]
+    ids, refused = set(), []
+    for position, entry in enumerate(entries, start=1):
+        try:
+            ids.add(str(uuid.UUID(entry)))
+        except ValueError:
+            refused.append(position)
+    return frozenset(ids), refused
 
 
 class Settings(BaseSettings):
@@ -287,11 +304,8 @@ class Settings(BaseSettings):
 
     @property
     def ops_user_ids(self) -> frozenset[str]:
-        """`OPS_USER_IDS` as a set, lowercased like the ids the
-        database returns."""
-        return frozenset(
-            u.strip().lower() for u in self.OPS_USER_IDS.split(",") if u.strip()
-        )
+        """`OPS_USER_IDS` as the canonical ids the database returns."""
+        return parse_ops_user_ids(self.OPS_USER_IDS)[0]
 
     # Google Drive OAuth: the client the workspace grant is minted and
     # refreshed with (the worker warns at boot without both).

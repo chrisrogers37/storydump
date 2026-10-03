@@ -108,9 +108,10 @@ async def register(
     expected_bot: Optional[str],
     max_connections: int,
 ) -> dict[str, Any]:
-    """Register the door on the bot *transport* speaks for, then read back
-    what Telegram holds. Returns a report `/api/v1/ops/health` can show — never the token
-    or the secret. Never raises: a failure is a report with ``ok: False``.
+    """Register the door on the bot *transport* speaks for, then read back what
+    Telegram holds. Returns a report `/api/v1/ops/health` can show — never the
+    token or the secret. Never raises: a failure is a report with
+    ``ok: False``.
 
     Order: `getMe` (the bot must be the configured one), `setWebhook` with the
     URL, the secret, the served update kinds and the connection cap, keeping
@@ -178,7 +179,8 @@ async def register_at_startup(
     env: Mapping[str, str], *, transport_factory: Callable[[Mapping[str, str]], Any]
 ) -> dict[str, Any]:
     """Register the bot's webhook on the API this process serves — idempotent,
-    on every deploy — and return the report the API caches for `/api/v1/ops/health`. Never raises.
+    on every deploy — and return the report the API caches for
+    `/api/v1/ops/health`. Never raises.
 
     A human step that must follow every deploy is a step that will be missed
     (the tap's first blocker was exactly that: a registration asking for

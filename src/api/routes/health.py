@@ -59,9 +59,9 @@ def _public(state) -> dict:
 
 
 def details(state) -> dict:
-    """What the API knows about itself, for the people in `OPS_USER_IDS` (`routes/ops.py`).
-    Read from `app.state`, so it opens no connection either; `target_database`
-    is configuration presence, not liveness."""
+    """What the API knows about itself, for the people in `OPS_USER_IDS`
+    (`routes/ops.py`). Read from `app.state`, so it opens no connection either;
+    `target_database` is configuration presence, not liveness."""
     return {
         **_public(state),
         "uptime_seconds": int(time.time() - _START_TIME),

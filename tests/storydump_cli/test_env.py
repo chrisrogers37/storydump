@@ -33,6 +33,8 @@ from src.services.target.vocabulary import (
     check_envelope,
 )
 from storydump_cli import railway
+from storydump_cli.commands import UNREACHABLE_FIX
+from storydump_cli.storage import StorageUnavailable
 from storydump_cli.config import Config, write_config
 from tests.storydump_cli.test_main import PERSON, Api, one_envelope, run, runtime
 
@@ -599,6 +601,28 @@ def test_health_whose_details_fail_reports_the_webhook_not_checked(tmp_path, ans
     data = one_envelope(result)["data"]
     assert data["verdicts"]["api"]["state"] == "ok", "public /health still answered"
     assert data["verdicts"]["webhook"]["state"] == "not_checked"
+    if isinstance(answer, Exception) or answer[0] >= 500:
+        assert data["details"]["detail"].startswith("the details did not answer")
+        assert data["details"]["fix"] == UNREACHABLE_FIX
+    else:
+        assert data["details"]["detail"].startswith("the details answered 404")
+
+
+def test_health_without_a_token_store_names_the_stores_own_fix(tmp_path):
+    rt = env_runtime(tmp_path, health_api())
+
+    def no_store():
+        raise StorageUnavailable("the keychain refused", "use --insecure-storage")
+
+    rt.token = no_store
+    result = run(rt, "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    details = one_envelope(result)["data"]["details"]
+    assert details == {
+        "read": False,
+        "detail": "no token store: the keychain refused",
+        "fix": "use --insecure-storage",
+    }
 
 
 def test_health_with_a_token_the_api_refuses_is_a_token_problem(tmp_path):

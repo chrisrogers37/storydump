@@ -280,8 +280,9 @@ non-zero — the worker does, when a supervised task dies — is restarted.
 ### From a laptop
 
 - `storydump health` — the API's `/health`, `/health/scheduling` and
-  `/health/posting`, and the bot's webhook, judged by the fleet monitors' own
-  verdicts; exit 4 when not well
+  `/health/posting`, and the bot's webhook from the operating details (for a
+  token whose person is in `OPS_USER_IDS`; otherwise `not_checked`), judged by
+  the fleet monitors' own verdicts; exit 4 when not well
 - `storydump deploys --watch --commit <sha>` — follows a deploy of both services
 
 ### The fleet monitors

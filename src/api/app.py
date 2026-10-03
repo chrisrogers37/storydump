@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import uuid
 from contextlib import asynccontextmanager
 from typing import Mapping, Optional
 
@@ -66,7 +65,7 @@ from src.api.routes.tokens import router as tokens_router
 from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
-from src.config.settings import settings
+from src.config.settings import parse_ops_user_ids, settings
 from src.exceptions.tenancy import TenantResolutionError, TokenRefused
 from src.services.target import oauth_states
 from src.services.target.commands import CommandNotBuilt, CommandRefused
@@ -425,10 +424,10 @@ def _ingress_workers(env: Mapping[str, str]) -> int:
 
 
 async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
-    """Cache the startup registration's report on `app.state.webhook` for
-    the operating details (`/api/v1/ops/health`) — `reg.register_at_startup` decides it and never raises, so this
-    is the whole of the API's part: hand it the bot transport this process
-    speaks with, and keep what it says."""
+    """Cache the startup registration's report on `app.state.webhook` for the
+    operating details (`/api/v1/ops/health`) — `reg.register_at_startup`
+    decides it and never raises, so this is the whole of the API's part: hand
+    it the bot transport this process speaks with, and keep what it says."""
     from src.channels import telegram_webhook_registration as reg
 
     app.state.webhook = await reg.register_at_startup(
@@ -438,9 +437,10 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
 
 async def _sample_webhook_live(app: FastAPI, env: Mapping[str, str]) -> None:
     """Cache each live webhook sample on `app.state.webhook_live` for the
-    operating details (`/api/v1/ops/health`). The loop, its cadence and its never-raise rule are `reg.live_samples`; this
-    task exists to hold the latest one where the probe can read it, and is
-    cancelled at shutdown like the other two."""
+    operating details (`/api/v1/ops/health`). The loop, its cadence and its
+    never-raise rule are `reg.live_samples`; this task exists to hold the
+    latest one where the probe can read it, and is cancelled at shutdown like
+    the other two."""
     from src.channels import telegram_webhook_registration as reg
 
     async for sample in reg.live_samples(
@@ -472,23 +472,20 @@ def _warn_about_ops_user_ids(raw: str) -> None:
     """Say at startup why the operating details and posture will refuse
     everyone, since the refusal itself cannot: `OPS_USER_IDS` empty, or an
     entry that is not a user id (named by position, never echoed)."""
-    entries = [e.strip() for e in raw.split(",") if e.strip()]
-    if not entries:
+    ids, refused = parse_ops_user_ids(raw)
+    if not ids and not refused:
         logger.warning(
             "OPS_USER_IDS is empty: /api/v1/ops/health and /api/v1/ops/posture"
             " refuse everyone. Set it to your user id (storydump whoami)."
         )
         return
-    for position, entry in enumerate(entries, start=1):
-        try:
-            uuid.UUID(entry)
-        except ValueError:
-            logger.warning(
-                "OPS_USER_IDS entry %d of %d is not a user id (a UUID, comma-"
-                "separated); it admits nobody",
-                position,
-                len(entries),
-            )
+    for position in refused:
+        logger.warning(
+            "OPS_USER_IDS entry %d of %d is not a user id (a UUID, comma-"
+            "separated); it admits nobody",
+            position,
+            sum(1 for e in raw.split(",") if e.strip()),
+        )
 
 
 def _require_key_ring() -> None:
@@ -604,11 +601,12 @@ def create_app(
     app.state.engine = engine if engine is not None else _engine_from_env(env)
     # Which database login this process holds, and whether it bypasses RLS
     # (#751, F.4). Sampled ONCE, in the background, after startup — the
-    # operating details (`/api/v1/ops/health`) report the cached answer and still opens no connection of its own, so a
-    # database blip cannot fail the probe. None means "not sampled", never
-    # "safe": production has connected as the owner role with BYPASSRLS, which
-    # makes every tenant policy inert, and this field is how the switch to the
-    # runtime login is verified after a deploy.
+    # operating details (`/api/v1/ops/health`) report the cached answer and
+    # still opens no connection of its own, so a database blip cannot fail the
+    # probe. None means "not sampled", never "safe": production has connected
+    # as the owner role with BYPASSRLS, which makes every tenant policy inert,
+    # and this field is how the switch to the runtime login is verified after a
+    # deploy.
     app.state.db_role = None
     # The webhook registration report (`_register_webhook`): None until the
     # startup task has run; then `ok`, what Telegram holds, or why it was
