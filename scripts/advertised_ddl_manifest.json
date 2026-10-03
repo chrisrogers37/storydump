@@ -361,6 +361,13 @@
       "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
       "doc": "07-security-model.md",
       "ordinal": 33
+    },
+    {
+      "sha256": "744f62b2afa818d176e57ec44a56b6ef4bf7683d66c6b8724bb35ecdc4ba016f",
+      "class": "normative",
+      "label": "§37 a removal holds (094) — the runtime logins' SELECT on workspace_member_removals revoked and p_tenant_read dropped (the membership doors alone read and write it), earlier removals backfilled from the governance audit trail keeping any record the door wrote, fn_group_member_seen's search_path pinned with pg_temp last (ALTER FUNCTION … SET), and fn_member_remove replace that checks the claimed tenant and the remover's owner-or-admin role first",
+      "doc": "07-security-model.md",
+      "ordinal": 34
     }
   ],
   "policy_expansion": {

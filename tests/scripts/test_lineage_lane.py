@@ -413,6 +413,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 092 appends §35, a new account needs a way in: the owner's
             # admissions and the door the sign-in upsert asks (2026-10-02).
             "092_signup_admissions.sql",
+            # 094 appends §37, a removal holds: the remove door checks its
+            # caller, the record is the membership doors' alone, earlier
+            # removals are backfilled, and the join door pins pg_temp last.
+            "094_member_removal_holds.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

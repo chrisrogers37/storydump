@@ -280,14 +280,8 @@ POLICY_CENSUS = {
     ("p_auth_ingress_states", "oauth_states", "ALL", ("svc_ingress",)): "auth",
     ("p_auth_sweep_states", "oauth_states", "ALL", ("svc_maintenance",)): "auth",
     ("p_auth_ingress_svctok", "service_tokens", "ALL", ("svc_ingress",)): "auth",
-    # 090: the removals record — read-only for the logins, written only by
-    # the membership doors.
-    (
-        "p_tenant_read",
-        "workspace_member_removals",
-        "SELECT",
-        T,
-    ): "matrix-read",
+    # 090: the removals record, the membership doors' alone (094 revoked the
+    # logins' read and dropped their policy).
     (
         "p_member_removals",
         "workspace_member_removals",
@@ -317,11 +311,8 @@ GUC_TABLES = sorted(
 )
 
 #: Tables whose ALL-policy rows the matrix WRITE leg drives (self-assign
-#: UPDATE). audit_events is INSERT/SELECT-only for the logins by grant, and
-#: workspace_member_removals SELECT-only (090: the doors write it).
-MATRIX_WRITE_TABLES = sorted(
-    set(GUC_TABLES) - {"audit_events", "workspace_member_removals"}
-)
+#: UPDATE). audit_events is INSERT/SELECT-only for the logins by grant.
+MATRIX_WRITE_TABLES = sorted(set(GUC_TABLES) - {"audit_events"})
 
 #: Governance tables (055's tg_audit_* attach list): mutations need actors.
 GOVERNANCE = {
@@ -393,7 +384,9 @@ DOORS = {
     # carries no arguments — the caller is app.actor_user_id, read inside the
     # body, and an unclaimed session reads zero rows rather than anyone's.
     # The thirteenth door (068, #1242): the revoke for every join edge. Three
-    # uuids that name nobody — the door answers not_found, never a raise.
+    # uuids that name nobody. Since 094 the door checks its caller first, so
+    # in an unclaimed session the body raises (by message); the call only runs
+    # as the denied login, whose missing EXECUTE refuses it before the body.
     "fn_member_remove": (
         "svc_ingress",
         "SELECT * FROM fn_member_remove('00000000-0000-4000-8000-000000000001'::uuid,"
@@ -555,7 +548,8 @@ def _seed_tenant(conn, name: str) -> dict:
             (ws, mi),
         )
         cur.execute(
-            # 090: a removed person, so the read matrix has a row per tenant.
+            # 090: a removed person per tenant — the rows the logins are
+            # denied (094), so that denial is not an empty table read.
             "INSERT INTO workspace_member_removals (workspace_id, user_id)"
             " VALUES (%s, %s)",
             (ws, ids["user"]),
@@ -836,7 +830,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 66
+        assert len(POLICY_CENSUS) == 65
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -1047,6 +1041,25 @@ class TestDoorsAreExercisedAndExclusive:
         )
         assert unclaimed == [], "an unclaimed session must read nothing"
 
+    def test_the_membership_doors_name_pg_temp_last_on_their_path(self, target):
+        """`07` §37: both membership doors run under `search_path = pg_catalog,
+        public, pg_temp` — the join door by 094's ALTER, the remove door by the
+        SET clause its CREATE OR REPLACE restates (a replace without one would
+        clear it). Read off `proconfig`, the setting each door runs under."""
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT p.proname, p.proconfig FROM pg_proc p"
+            " JOIN pg_namespace n ON n.oid = p.pronamespace"
+            " WHERE n.nspname = 'public'"
+            " AND p.proname IN ('fn_group_member_seen', 'fn_member_remove')",
+            fetch=True,
+        )
+        pinned = ["search_path=pg_catalog, public, pg_temp"]
+        assert dict(rows) == {
+            "fn_group_member_seen": pinned,
+            "fn_member_remove": pinned,
+        }
+
     @pytest.mark.parametrize("door", sorted(DOORS))
     def test_each_door_is_denied_to_the_other_login(self, target, door):
         """EXECUTE is per-signature, so the denial calls the real signature —
@@ -1125,6 +1138,49 @@ class TestDirectPathsAreShut:
                 params=(str(target["a"]["ws"]),),
                 tenant=target["a"]["ws"],
             )
+
+    def test_the_removal_record_is_the_membership_doors_alone(self, target):
+        """`07` §37: no login holds a grant on `workspace_member_removals`, so
+        only the svc_membership doors read or write it. Each login's denial is
+        live and paired with its own read of `workspace_members` under the same
+        claim, beside the records it is denied (one per tenant, seeded by the
+        owner); the grant catalog names svc_membership alone."""
+        assert (
+            _scalar(
+                target["owner_stream"], "SELECT count(*) FROM workspace_member_removals"
+            )
+            >= 2
+        )
+        for login in LOGINS:
+            dsn = _login_dsn(target, login)
+            assert (
+                _scalar(
+                    dsn,
+                    "SELECT count(*) FROM workspace_members",
+                    tenant=target["a"]["ws"],
+                )
+                >= 1
+            ), f"{login}: the positive control read no membership"
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _exec(
+                    dsn,
+                    "SELECT count(*) FROM workspace_member_removals",
+                    tenant=target["a"]["ws"],
+                )
+        grants = _exec(
+            target["owner_stream"],
+            "SELECT r.rolname, a.privilege_type"
+            "  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,"
+            "       aclexplode(c.relacl) a JOIN pg_roles r ON r.oid = a.grantee"
+            " WHERE n.nspname = 'public' AND c.relname = 'workspace_member_removals'"
+            "   AND a.grantee <> c.relowner",
+            fetch=True,
+        )
+        assert sorted(grants) == [
+            ("svc_membership", "INSERT"),
+            ("svc_membership", "SELECT"),
+            ("svc_membership", "UPDATE"),
+        ]
 
     def test_set_role_fails_for_every_service_role(self, target, owner_actor):
         for role in sorted(set(SERVICE_ROLES) - {"svc_worker"}):
