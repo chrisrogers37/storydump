@@ -413,6 +413,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 092 appends §35, a new account needs a way in: the owner's
             # admissions and the door the sign-in upsert asks (2026-10-02).
             "092_signup_admissions.sql",
+            # 095 appends §38: every SECURITY DEFINER function pins its
+            # search_path with pg_temp last, and a census holds the doors to it.
+            "095_definer_search_path_pinned.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

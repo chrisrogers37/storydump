@@ -361,6 +361,13 @@
       "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
       "doc": "07-security-model.md",
       "ordinal": 33
+    },
+    {
+      "sha256": "0a9c8e5783f817633e0cdcf84ee5955846eb23128d6a2d81128e25d7ddda1014",
+      "class": "normative",
+      "label": "§38 every SECURITY DEFINER function pins search_path = pg_catalog, public, pg_temp, with pg_temp last (095) — one ALTER FUNCTION ... SET search_path per door, the 29 definer functions in public written out by signature, no body restated",
+      "doc": "07-security-model.md",
+      "ordinal": 34
     }
   ],
   "policy_expansion": {
