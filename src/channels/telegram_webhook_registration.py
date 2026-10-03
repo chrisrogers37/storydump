@@ -47,7 +47,7 @@ from src.services.target.vocabulary import WEBHOOK_URL_VAR as URL_VAR  # noqa: E
 from src.services.target.vocabulary import (  # noqa: E402
     RAILWAY_ENVIRONMENT_VAR as ENVIRONMENT_VAR,
 )
-from src.services.target.vocabulary import PRODUCTION_ENVIRONMENT  # noqa: E402
+from src.services.target.vocabulary import PRODUCTION_ENVIRONMENT, is_production  # noqa: E402
 from src.services.target.vocabulary import TELEGRAM_BOT_VAR as BOT_VAR  # noqa: E402
 from src.services.target.vocabulary import TELEGRAM_SECRET_VAR as SECRET_VAR  # noqa: E402
 from src.services.target.vocabulary import TELEGRAM_TOKEN_VAR as TOKEN_VAR  # noqa: E402
@@ -97,7 +97,7 @@ def autoregister_enabled(raw: Optional[str], *, environment: Optional[str]) -> b
         return False
     if value in ON_WORDS:
         return True
-    return (environment or "").strip().lower() == PRODUCTION_ENVIRONMENT
+    return is_production({ENVIRONMENT_VAR: environment or ""})
 
 
 async def register(
@@ -109,7 +109,7 @@ async def register(
     max_connections: int,
 ) -> dict[str, Any]:
     """Register the door on the bot *transport* speaks for, then read back
-    what Telegram holds. Returns a report `/health` can show — never the token
+    what Telegram holds. Returns a report `/api/v1/ops/health` can show — never the token
     or the secret. Never raises: a failure is a report with ``ok: False``.
 
     Order: `getMe` (the bot must be the configured one), `setWebhook` with the
@@ -149,9 +149,11 @@ async def register(
         if not report["ok"]:
             report["error"] = "getWebhookInfo reports a different URL"
     except Exception as exc:  # noqa: BLE001 — a report, never a failed startup
-        # `/health` is unauthenticated: it gets the exception's TYPE only. The
-        # prose (Telegram's, or httpx's, which may embed the URL) goes to the
-        # log with the token AND the secret struck out.
+        # The report gets the exception's TYPE only: whoever reads it
+        # (`/api/v1/ops/health`, printed by `storydump health --json` into
+        # terminals and transcripts) must never see the prose. That prose
+        # (Telegram's, or httpx's, which may embed the URL carrying the bot
+        # token) goes to the log with the token AND the secret struck out.
         report["error"] = type(exc).__name__
         prose = transport.redact(str(exc))
         if secret:
@@ -176,7 +178,7 @@ async def register_at_startup(
     env: Mapping[str, str], *, transport_factory: Callable[[Mapping[str, str]], Any]
 ) -> dict[str, Any]:
     """Register the bot's webhook on the API this process serves — idempotent,
-    on every deploy — and return the report `/health` caches. Never raises.
+    on every deploy — and return the report the API caches for `/api/v1/ops/health`. Never raises.
 
     A human step that must follow every deploy is a step that will be missed
     (the tap's first blocker was exactly that: a registration asking for

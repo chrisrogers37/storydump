@@ -28,9 +28,12 @@ OPERATOR = Principal(session_id="s-op", user_id="00000000-0000-4000-8000-0000000
 def details(client: TestClient) -> dict:
     """The API's operating details, read as an operator."""
     client.app.dependency_overrides[current_principal] = lambda: OPERATOR
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(settings, "OPS_USER_IDS", OPERATOR.user_id)
-        return client.get("/api/v1/ops/health").json()
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(settings, "OPS_USER_IDS", OPERATOR.user_id)
+            return client.get("/api/v1/ops/health").json()
+    finally:
+        client.app.dependency_overrides.pop(current_principal, None)
 
 
 class TestEngineConfiguration:
@@ -73,16 +76,52 @@ class TestThePublicProbeSaysLittle:
         }
         assert details(TestClient(app))["commit"] == "c752736"
 
-    def test_production_publishes_no_docs_and_no_schema(self):
-        app = create_app(env={"RAILWAY_ENVIRONMENT_NAME": "production"})
-        client = TestClient(app)
-        for path in ("/docs", "/redoc", "/openapi.json"):
+    DOCS = ("/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json")
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {},
+            {"RAILWAY_ENVIRONMENT_NAME": "prod"},
+            {"RAILWAY_ENVIRONMENT_NAME": "production"},
+            {"RAILWAY_ENVIRONMENT_NAME": " Production ", "API_DOCS": "1"},
+            {"API_DOCS": "true"},
+        ],
+    )
+    def test_no_docs_and_no_schema_unless_asked_for_outside_production(self, env):
+        """Off unless `API_DOCS=1`, so a renamed environment or another host
+        fails closed; production refuses even the switch."""
+        client = TestClient(create_app(env=env))
+        for path in self.DOCS:
             assert client.get(path).status_code == 404, path
         assert client.get("/health").status_code == 200
 
-    def test_elsewhere_the_docs_stay(self):
-        client = TestClient(create_app(env={"RAILWAY_ENVIRONMENT_NAME": "staging"}))
-        for path in ("/docs", "/redoc", "/openapi.json"):
+    @pytest.mark.parametrize(
+        "value, says",
+        [
+            ("", "OPS_USER_IDS is empty"),
+            ("00000000-0000-4000-8000-0000000000aa, tok_123", "entry 2 of 2"),
+        ],
+    )
+    def test_startup_says_why_ops_will_refuse_everyone(self, monkeypatch, value, says):
+        from src.api import app as app_module
+
+        said = []
+        monkeypatch.setattr(
+            app_module.logger, "warning", lambda msg, *a: said.append(msg % a)
+        )
+        app_module._warn_about_ops_user_ids(value)
+        text = " ".join(said)
+        assert says in text
+        assert "tok_123" not in text, "an entry is never echoed"
+
+    @pytest.mark.parametrize(
+        "env",
+        [{"API_DOCS": "1"}, {"API_DOCS": "1", "RAILWAY_ENVIRONMENT_NAME": "staging"}],
+    )
+    def test_a_development_server_asks_for_the_docs(self, env):
+        client = TestClient(create_app(env=env))
+        for path in self.DOCS:
             assert client.get(path).status_code == 200, path
 
 
@@ -105,7 +144,7 @@ class TestTheVersionIsThePackages:
         `app.py` imports `VERSION` for `FastAPI(version=…)`, so this is one
         object in two places today — and this pins that, not just the value.
         """
-        app = create_app(env={})
+        app = create_app(env={"API_DOCS": "1"})
         client = TestClient(app)
         assert (
             client.get("/openapi.json").json()["info"]["version"]

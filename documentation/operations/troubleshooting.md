@@ -96,7 +96,7 @@ storydump account <handle>              # the cap, today's count, the next slot
 
 **Diagnosis**:
 ```bash
-storydump health                         # the webhook verdict from /health (unregistered, undelivered)
+storydump health                         # the webhook verdict from the operating details (needs OPS_USER_IDS)
 storydump webhook status                 # asks Telegram: the bot, the registered URL, the backlog, the API door
 storydump outbox --since 3h              # cards owed or failed, by binding
 railway logs --service storydump | grep -i telegram
@@ -173,7 +173,7 @@ railway logs --service storydump | grep -iE 'pool|connect'
 
 | Cause | Fix |
 |-------|-----|
-| `TARGET_DATABASE_URL` absent on the API | every data route answers 503 and `/health` reports `"target_database": false`; set it on the `storydump` service |
+| `TARGET_DATABASE_URL` absent on the API | every data route answers 503 and the operating details (`storydump health --json`, `OPS_USER_IDS`) report `"target_database": false`; set it on the `storydump` service |
 | Neon endpoint suspended | The first connection wakes it |
 | The pool saturated (a 503 naming `pool_saturated`, with `Retry-After: 1`) | Wait; a watch retries three times before giving up |
 | Wrong credentials | Check the database variables in the Railway dashboard |

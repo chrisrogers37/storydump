@@ -26,7 +26,9 @@ BOT_TOKEN = "4242:load-harness-fake-token"
 
 def operator_session(database_url: str) -> tuple[str, str]:
     """A user and a live session for it, so the harness can read the API's
-    operating details (`/api/v1/ops/health`): ``(user_id, session value)``."""
+    operating details (`/api/v1/ops/health`): ``(user_id, session value)``.
+    The INSERT is `sessions.issue`'s, spelled for psycopg2: keep the two in
+    step."""
     value = sessions.new_token()
     conn = psycopg2.connect(database_url)
     try:

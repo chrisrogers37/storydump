@@ -212,12 +212,10 @@ class Client:
         return self._request("GET", "/ops/health")
 
     def health(self) -> dict[str, Any]:
-        """The API's liveness and its two axes. The liveness must answer, as
-        the details where this token may read them (`OPS_USER_IDS`), else as
-        public `/health`; the two dependency-touching axes may not (a 503 with
-        no engine), and then the report carries that surface's error rather
-        than losing the rest."""
-        surfaces: dict[str, Any] = {"api": self._liveness()}
+        """The API's three public surfaces. `/health` must answer; the two
+        dependency-touching axes may not (a 503 with no engine), and then the
+        report carries that surface's error rather than losing the rest."""
+        surfaces: dict[str, Any] = {"api": self.health_api()}
         for name, path in (
             ("scheduling", "/health/scheduling"),
             ("posting", "/health/posting"),
@@ -231,17 +229,6 @@ class Client:
                     else exc.detail
                 }
         return surfaces
-
-    def _liveness(self) -> dict[str, Any]:
-        # the details need the token resolved, so the database: any failure
-        # there (refused, a blip, an API without the route) is no answer about
-        # liveness, which public `/health` gives without touching it
-        if self.token:
-            try:
-                return self.health_details()
-            except (ApiError, Unreachable):
-                pass
-        return self.health_api()
 
     def list_my_tokens(self) -> dict[str, Any]:
         return self._request("GET", "/me/tokens")

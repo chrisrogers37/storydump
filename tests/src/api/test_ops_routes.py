@@ -192,6 +192,7 @@ class TestTheOperatingDetails:
         resp = client.get("/api/v1/ops/health")
         assert resp.status_code == 200, resp.text
         body = resp.json()
+        assert "kind" not in body, "bare, not the envelope: the CLI judges it so"
         assert body["status"] == "ok"
         assert {"version", "db_role", "pool", "taps", "webhook"} <= set(body)
 

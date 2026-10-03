@@ -127,11 +127,13 @@ def verify_secret_token(presented: Optional[str], expected: Optional[str]) -> bo
     `hmac.compare_digest`, not `==`: a short-circuiting comparison leaks the
     length of the matching prefix through timing. An absent expected value is
     a misconfiguration and refuses everything rather than accepting everything
-    — the direction matters.
+    — the direction matters. Bytes, not str: `compare_digest` raises on a
+    non-ASCII str, and a header byte of 0x80 or above (Starlette decodes
+    headers as latin-1) must be a refusal, not a 500.
     """
     if not expected or not presented:
         return False
-    return hmac.compare_digest(presented, expected)
+    return hmac.compare_digest(presented.encode(), expected.encode())
 
 
 async def admit(

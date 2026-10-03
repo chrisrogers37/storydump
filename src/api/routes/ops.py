@@ -8,7 +8,9 @@ phase-01 envelope. The routes are admitted to tokens (`TOKEN_ROUTES`), read
 only, and bounded: `floating` by a clamped limit, the others by a window.
 `posture` (the catalogs and the runner's ledger) and `health` (the API's own
 operating details) are not tenant data, open no tenant, and answer the people
-`OPS_USER_IDS` names alone.
+`OPS_USER_IDS` names alone. `health` alone answers bare, not in the envelope:
+it is the payload public `/health` carried, and `storydump health` judges it
+as such (pinned in `test_ops_routes.py`).
 """
 
 from __future__ import annotations
@@ -146,10 +148,9 @@ async def burst(
 
 
 @router.get("/ops/posture")
-async def posture(request: Request, principal: Principal = Depends(current_principal)):
+async def posture(request: Request, principal: Principal = Depends(require_ops)):
     """Catalogs and the runner's ledger — the people in `OPS_USER_IDS`, no
     tenant: the RLS table, the doors and the ledger map the whole estate."""
-    require_ops(principal)
     engine = require_engine(request)
     async with engine.connect() as conn:
         data = await ops_views.posture(conn)
@@ -157,10 +158,7 @@ async def posture(request: Request, principal: Principal = Depends(current_princ
 
 
 @router.get("/ops/health")
-async def ops_health(
-    request: Request, principal: Principal = Depends(current_principal)
-):
+async def ops_health(request: Request, principal: Principal = Depends(require_ops)):
     """The details public `/health` no longer carries: usage counts, the
     database login, the pool and the bot's webhook. Operators only."""
-    require_ops(principal)
     return health.details(request.app.state)

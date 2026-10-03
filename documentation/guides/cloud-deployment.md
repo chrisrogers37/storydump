@@ -72,8 +72,9 @@ tear-out (#1216, September 2026); its data survives as the
 The design is `svc_ingress` for the API and `svc_worker` for the worker, so that
 row-level security binds them; moving a deployment off the owner login is
 [`runtime-database-roles.md`](../operations/runtime-database-roles.md). Which
-login a service actually holds is reported, not assumed: `/health` carries
-`db_role`, and the worker logs `worker database role: …` at boot
+login a service actually holds is reported, not assumed: the API's operating
+details (`storydump health --json`, for `OPS_USER_IDS`) carry `db_role`, and
+the worker logs `worker database role: …` at boot
 (`src/worker.py:650-651`).
 
 ### Build the schema on a fresh database
@@ -173,9 +174,11 @@ commands.
   (`src/worker.py:860-861`) and Railway restarts it; `/health` answers 503 only
   for a clock that is alive and no longer advancing. It stops on SIGTERM and
   SIGINT (`src/worker.py:633-637`).
-- **API**: `GET /health` (`src/api/app.py:681`) reports whether a target engine
-  is configured, the connected role, the pool, and the webhook this process
-  registered at startup. It opens no connection, by design.
+- **API**: `GET /health` (`src/api/routes/health.py`) says ok, the version and
+  the commit, and nothing else; whether a target engine is configured, the
+  connected role, the pool and the webhook this process registered at startup
+  are `GET /api/v1/ops/health`, for `OPS_USER_IDS` alone. Neither opens a
+  connection, by design.
   `GET /health/scheduling` and `GET /health/posting` are the two surfaces the
   fleet monitors poll ([`monitoring.md`](../operations/monitoring.md)).
 
@@ -444,7 +447,7 @@ rate- or quota-limited.
 
 - [ ] All secrets stored as Railway environment variables (never in code)
 - [ ] `ENCRYPTION_KEY` generated and set on both services
-- [ ] `TARGET_DATABASE_URL` is a runtime login, not the owner (`/health` → `db_role`)
+- [ ] `TARGET_DATABASE_URL` is a runtime login, not the owner (`storydump health --json` → `data.api.db_role`)
 - [ ] `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` is long and random; the bot token is kept secret
 - [ ] `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` is not `1` anywhere that holds the production token outside production
 - [ ] The Meta app secret, the Google client secret and the Cloudinary API secret are kept secret
@@ -460,7 +463,7 @@ rate- or quota-limited.
 | Problem | Solution |
 |---------|----------|
 | The worker exits at boot with `FATAL: TARGET_DATABASE_URL is unset` | Set it on the `worker` service (`src/worker.py:800-810`). |
-| Every API data route answers 503 | `TARGET_DATABASE_URL` is unset on the `storydump` service; `/health` shows `target_database: false`. |
+| Every API data route answers 503 | `TARGET_DATABASE_URL` is unset on the `storydump` service; the operating details show `target_database: false`. |
 | A deploy fails in the pre-deploy step | A migration failed, or `DATABASE_URL` is missing or is not the owner. The old version keeps serving; fix forward with a new file ([`migration-runner.md`](../operations/migration-runner.md)). |
 | Database connection fails | Check `TARGET_DATABASE_URL` (the services) and `DATABASE_URL` (the migration runner); a Neon URL carries `?sslmode=require`. The `DB_*` components steer only the test harness and `make`. |
 | Neon connection limit exceeded | The pool is pinned in code (10 per process, no overflow); no variable sizes it. Count the processes against the plan's connection limit. |

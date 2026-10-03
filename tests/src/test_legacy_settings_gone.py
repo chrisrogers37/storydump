@@ -503,6 +503,8 @@ ENV_READ_OUTSIDE_SETTINGS = {
     "EMAIL_FROM",
     "RAILWAY_ENVIRONMENT_NAME",
     "RAILWAY_GIT_COMMIT_SHA",
+    # the API's opt-in docs, for a development server
+    "API_DOCS",
     # the storydump CLI's own (a client; never a service's)
     "STORYDUMP_TOKEN",
     "STORYDUMP_API",

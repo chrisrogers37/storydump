@@ -729,7 +729,14 @@ def _render_health(console: Console, data: Any) -> None:
         " · ".join(
             part
             for part in (
-                _facts(api, "version", "db_role", "uptime_seconds", "ingress_workers"),
+                _facts(
+                    api,
+                    "version",
+                    "commit",
+                    "db_role",
+                    "uptime_seconds",
+                    "ingress_workers",
+                ),
                 _facts(pool, *POOL_FACTS),
                 _facts(api.get("taps"), *TAP_FACTS),
                 _tap_outcomes(api.get("taps")),
@@ -767,6 +774,12 @@ def _render_health(console: Console, data: Any) -> None:
         _facts(posting, *[k for k in posting if k != "status"]),
     )
     console.print(table)
+    read = health.get("details") if isinstance(health.get("details"), dict) else {}
+    if read.get("read") is False:
+        console.print(
+            f"operating details not read: {_text(read.get('detail'), '?')}"
+            f" — {_text(read.get('fix'), '')}"
+        )
 
 
 DEPLOY_COLUMNS: tuple[Column, ...] = (

@@ -77,7 +77,8 @@ psql "$DATABASE_URL" -c "\dt"               # the target tables, in `public`
   for the API and `svc_worker` for the worker, which step 0 created; giving
   them passwords and switching the services is
   [`runtime-database-roles.md`](../operations/runtime-database-roles.md).
-  `/health` reports the login a service actually holds (`db_role`).
+  The API's operating details report the login it actually holds (`db_role`,
+  `storydump health --json`, for `OPS_USER_IDS`).
 
 ### Connection Pool Sizing
 

@@ -267,7 +267,8 @@ client, never a database connection
    `scripts/scheduling_monitor.py` and `scripts/posting_monitor.py`, imported:
    not well when a monitor would page; plus the bot's webhook from the API's
    operating details, `GET /api/v1/ops/health`, which answers only the user ids
-   in the API's `OPS_USER_IDS` — `storydump whoami` prints yours;
+   in the API's `OPS_USER_IDS` — `storydump whoami` prints yours; without
+   them the webhook is `not_checked`, not well, and `data.details` says why;
    exit 4 then, the report and each verdict still printed. Two bounds against
    the pollers: one reading has no watch clock, and one unreachable reading
    is reported where the pollers wait for two) · `storydump deploys
@@ -330,8 +331,8 @@ The `Procfile` names the two deployed processes; both run the one tier.
   counts, the database login, the pool, the webhook — are
   `GET /api/v1/ops/health`, for `OPS_USER_IDS` alone; plus
   `/health/scheduling` and `/health/posting`, the surfaces the fleet monitors
-  poll), schema at `/openapi.json` (and `/docs`) outside production — Railway's
-  `production` environment publishes neither — the resource and command surface under
+  poll), schema at `/openapi.json` (and `/docs`) only when started with
+  `API_DOCS=1`, which Railway's `production` environment ignores — the resource and command surface under
   `/api/v1`, sign-in under `/auth`. Telegram's deliveries — `/start` links,
   group joins, a group's move to a supergroup, taps on a card — land here, on
   `POST /webhooks/telegram`. The API registers that webhook on the bot at

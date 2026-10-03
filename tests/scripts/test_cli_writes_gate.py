@@ -386,7 +386,15 @@ def test_health_through_the_real_cli_reports_the_three_surfaces(
             data = doc["data"]
             assert data["api"]["status"] == "ok"
             assert "db_role" in data["api"] and "taps" in data["api"]
-            assert set(data) == {"ok", "api", "scheduling", "posting", "verdicts"}
+            assert data["details"] == {"read": True}
+            assert set(data) == {
+                "ok",
+                "api",
+                "scheduling",
+                "posting",
+                "details",
+                "verdicts",
+            }
             assert set(data["verdicts"]) == {"api", "scheduling", "posting", "webhook"}
             # no worker heartbeat on a replayed database: the verdict is the
             # exit code, the report is still the answer
@@ -403,7 +411,11 @@ def test_health_outside_ops_user_ids_reports_the_public_liveness(
             bridge = LoopBridge(client._transport, asyncio.get_running_loop())
             rt = _runtime(people["operator"], bridge, tmp_path)
             code, doc = await _cli(rt, "health")
-            assert set(doc["data"]["api"]) == {"status", "version", "commit"}, doc
+            data = doc["data"]
+            assert set(data["api"]) == {"status", "version", "commit"}, doc
+            assert data["details"]["reason"] == "not_ops"
+            assert data["verdicts"]["webhook"]["state"] == "not_checked"
+            assert code == EXIT_API_UNREACHABLE, "never a green it did not check"
 
     _run(main())
 

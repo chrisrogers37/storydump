@@ -8,8 +8,10 @@ connection and no SQL here. Add `--json` to any of them for one envelope
 `{"v": 1, "kind", "data", "error"}`; a workspace read's `data` is
 `{"workspaces": [{"workspace_id", "rows"}]}`.
 
-Exit codes: 0 ok · 1 not found · 2 refused · 3 not authorized · 4 API
-unreachable or not well · 5 Railway unreachable · 64 usage.
+Exit codes: 0 ok · 1 not found · 2 refused · 3 not authorized (no usable
+token, or `not_ops` from `posture`: the token's person is not in the API's
+`OPS_USER_IDS`) · 4 API unreachable or not well · 5 Railway unreachable · 64
+usage.
 
 ## 0. Is there a token?
 
@@ -28,7 +30,11 @@ do not ask for the secret in the conversation.
 storydump health --json
 ```
 
-Needs no token. From `data.api`: `target_database` (false means every data
+`data.api` is the API's operating details only when `data.details.read` is
+true, which needs a token whose person is in the API's `OPS_USER_IDS`;
+otherwise it is public `/health` (`status`, `version`, `commit`) and
+`data.details` says why and what fixes it — report the fields below as not
+checked, never as fine. From `data.api`: `target_database` (false means every data
 route answers 503), `db_role` (the login the API holds, and whether it bypasses
 RLS), `pool` (`size`, `checked_out`, `checked_out_peak` — in the table's `api`
 facts and in the JSON). `data.verdicts` judges `api`,

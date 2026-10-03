@@ -160,18 +160,59 @@ def webhook_verdict(health: Any) -> tuple[bool, dict[str, str]]:
     return True, {"state": "registered", "detail": "registered at startup"}
 
 
+def _details(runtime: Any) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+    """The API's operating details and how the read went: ``(payload, read)``,
+    the payload None when it was not read and ``read`` naming why and the fix.
+    A token the API refuses outright (401) raises: that is the token's problem,
+    not the details'."""
+    try:
+        token = runtime.token()
+    except StorageUnavailable as exc:
+        return None, {
+            "read": False,
+            "detail": f"no token store: {exc}",
+            "fix": FIXES["not_authorized"],
+        }
+    if not token:
+        return None, {
+            "read": False,
+            "detail": "not signed in",
+            "fix": FIXES["not_authorized"],
+        }
+    try:
+        return runtime.client(token).health_details(), {"read": True}
+    except ApiError as exc:
+        if exc.status == 401:
+            raise
+        reason = exc.reason or ""
+        return None, {
+            "read": False,
+            "reason": reason or None,
+            "detail": f"the details answered {exc.status}: {exc.detail}",
+            "fix": FIXES.get(reason, "see storydump doctor"),
+        }
+    except Unreachable as exc:
+        return None, {
+            "read": False,
+            "detail": f"the details did not answer: {exc.detail}",
+            "fix": UNREACHABLE_FIX,
+        }
+
+
 @click.command()
 @global_options
 @click.pass_context
 def health(ctx: click.Context) -> int:
-    """The API's three health surfaces — liveness (the operating details
-    when the token's person is in the API's `OPS_USER_IDS`), scheduling,
-    posting — as the API reports them, judged by the fleet monitors' own verdicts (the same `classify` the
+    """The API's three health surfaces — liveness, scheduling, posting — as
+    the API reports them, judged by the fleet monitors' own verdicts (the same `classify` the
     pollers run): not well when a monitor would page — a cursor
     stalled past 10 minutes, the worker down, 48 hours of silence, a first post
     overdue past its grace, or a surface unreachable — and the bot's webhook
-    from the liveness report: unregistered, or a backlog behind a delivery
-    error. Exit 0 when every surface is well, 4 otherwise — the report is still
+    from the API's operating details: unregistered, or a backlog behind a
+    delivery error. The details answer only a token whose person is in the
+    API's `OPS_USER_IDS`; without them the webhook is `not_checked`, which is
+    not well, and `details` says why and what fixes it. A token the API does
+    not accept is exit 3. Exit 0 when every surface is well, 4 otherwise — the report is still
     printed with each verdict; a surface that answers 503 is reported as its
     error.
 
@@ -185,17 +226,29 @@ def health(ctx: click.Context) -> int:
       storydump health --json
     """
     runtime = begin(ctx, "health")
-    try:
-        token = runtime.token()
-    except StorageUnavailable:
-        token = None  # no keychain here: public liveness is still an answer
-    surfaces = runtime.client(token).health()
+    # the public surfaces go unsigned: they need no credential
+    surfaces = runtime.client(None).health()
+    details, read = _details(runtime)
+    if details is not None:
+        surfaces["api"] = details
     verdicts = {
         name: surface_verdict(name, payload) for name, payload in surfaces.items()
     }
-    verdicts["webhook"] = webhook_verdict(surfaces.get("api"))
+    verdicts["webhook"] = (
+        webhook_verdict(details)
+        if details is not None
+        else (
+            False,
+            {"state": "not_checked", "detail": f"{read['detail']}: {read['fix']}"},
+        )
+    )
     ok = all(well for well, _ in verdicts.values())
-    data = {"ok": ok, **surfaces, "verdicts": {k: v for k, (_, v) in verdicts.items()}}
+    data = {
+        "ok": ok,
+        **surfaces,
+        "details": read,
+        "verdicts": {k: v for k, (_, v) in verdicts.items()},
+    }
     emit(envelope("health", data), json_mode=runtime.json_mode)
     return EXIT_OK if ok else EXIT_API_UNREACHABLE
 
@@ -697,7 +750,11 @@ def _check_ledger(
         try:
             posture = runtime.client(token).ops_posture()
         except (ApiError, Unreachable) as exc:
-            checks["ledger"] = ("skipped", f"could not read posture: {exc.detail}", "")
+            checks["ledger"] = (
+                "skipped",
+                f"could not read posture: {exc.detail}",
+                FIXES.get(exc.reason or "", ""),
+            )
         else:
             data = posture.get("data") if isinstance(posture, dict) else None
             migrations = (

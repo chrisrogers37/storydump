@@ -136,7 +136,7 @@ class IngressRuntime:
 
 @dataclass
 class TapMetrics:
-    """Counters `/health` reports: taps by outcome, and answers that did
+    """Counters the operating details (`/api/v1/ops/health`) report: taps by outcome, and answers that did
     not land (phase 1 step 12; the strip counter went with the route strip,
     2026-09-12)."""
 

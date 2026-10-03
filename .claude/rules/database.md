@@ -86,7 +86,7 @@ pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
   fleet health surfaces read the tenant tables directly and went blind under
   the policies. 081 gives those reads doors; the switch is repeated after it
   (`documentation/operations/runtime-database-roles.md`). `storydump posture`
-  and `/health`'s `db_role` report the live answer. So every query names its
+  and the operating details' `db_role` (`storydump health --json`) report the live answer. So every query names its
   tenant: an explicit `workspace_id = :ws` predicate on each table it touches,
   as `ops_views.py` and `command_executors._intent_row` do — and an
   estate-wide read that has no tenant is a door (081's fleet-health doors,
