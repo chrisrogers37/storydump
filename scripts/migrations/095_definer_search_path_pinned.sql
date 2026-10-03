@@ -3,8 +3,9 @@
 -- THE INVARIANT. A SECURITY DEFINER function runs with its owner's rights, so every name it resolves
 -- must come from a schema it chose. The doors already pin `search_path`. From this file on, the pinned
 -- path is `pg_catalog, public, pg_temp`: pg_temp named, and LAST, as PostgreSQL's documentation asks of
--- definer functions ("Writing SECURITY DEFINER Functions Safely"). Before this file 28 of the 29 doors
--- pinned `pg_catalog, public`, 068's fn_member_remove pinned `public` alone, and none named pg_temp.
+-- definer functions ("Writing SECURITY DEFINER Functions Safely"). This file pins every SECURITY DEFINER
+-- function in `public` to that path. fn_member_remove already carries it from 090, so its ALTER here is
+-- a no-op, kept so that every door is pinned by an explicit statement.
 --
 -- THE FORM. One `ALTER FUNCTION ... SET search_path` per door, written out: the 29 SECURITY DEFINER
 -- functions in `public` (signatures by type). No body is restated, so a door that a later file
