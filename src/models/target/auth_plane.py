@@ -115,6 +115,9 @@ class ServiceToken(TargetBase):
     #: memberships; a workspace service identity reads its one workspace.
     user_id = fk("users.id", "CASCADE", nullable=True)
     workspace_id = fk("workspaces.id", "CASCADE", nullable=True)
+    #: Who minted a workspace service identity (090), so removing them can
+    #: revoke it. NULL for a person-bound token and for every older token.
+    created_by_user_id = fk("users.id", "SET NULL", nullable=True)
     expires_at = Column(TZ, nullable=True)
     revoked_at = Column(TZ, nullable=True)
     last_used_at = Column(TZ, nullable=True)
