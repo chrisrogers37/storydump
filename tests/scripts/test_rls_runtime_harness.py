@@ -484,6 +484,17 @@ DOORS = {
         "svc_worker",
         "SELECT * FROM fn_planned_misses(50, interval '1 hour')",
     ),
+    # 093 (`07` §36, #1482): the outbox's delivery failures and deliveries in
+    # a window, estate-wide, behind /health/delivery. Counts only, shared with
+    # the worker like the backpressure reads.
+    "fn_health_outbox_failures": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT * FROM fn_health_outbox_failures(3600)",
+    ),
+    "fn_health_outbox_sent": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT fn_health_outbox_sent(3600)",
+    ),
 }
 
 

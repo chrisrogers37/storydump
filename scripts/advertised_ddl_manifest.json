@@ -361,6 +361,13 @@
       "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
       "doc": "07-security-model.md",
       "ordinal": 33
+    },
+    {
+      "sha256": "9c327f8dee0e943858ce1258389a45316f45ad9ebbe9b98e261ca115df805179",
+      "class": "normative",
+      "label": "§36 the outbox records why a delivery failed (093, #1482) — channel_outbox gains last_failure_class (checked against the five classes), last_error_code and last_failed_at with a partial index on the time, and two svc_maintenance doors: fn_health_outbox_failures counting the window's failures by class and code with their alerting subset, and fn_health_outbox_sent counting the window's sends",
+      "doc": "07-security-model.md",
+      "ordinal": 34
     }
   ],
   "policy_expansion": {

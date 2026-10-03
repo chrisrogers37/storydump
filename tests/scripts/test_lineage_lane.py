@@ -413,6 +413,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 092 appends §35, a new account needs a way in: the owner's
             # admissions and the door the sign-in upsert asks (2026-10-02).
             "092_signup_admissions.sql",
+            # 093 appends §36, the outbox's failure record: three columns,
+            # their index and the two doors behind /health/delivery (#1482).
+            "093_outbox_failure_record.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
