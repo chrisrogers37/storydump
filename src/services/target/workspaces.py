@@ -81,6 +81,17 @@ NULLABLE_SETTINGS = frozenset(
     {"approval_ttl_minutes", "repost_ttl_days", "skip_ttl_days", "caption_style"}
 )
 
+#: The inclusive range each bounded setting accepts. The three TTL columns
+#: carry no CHECK; these are their bounds.
+SETTINGS_RANGES: dict[str, tuple[int, int]] = {
+    "approval_ttl_minutes": (
+        vocabulary.SETTINGS_TTL_MIN,
+        vocabulary.SETTINGS_APPROVAL_TTL_MINUTES_MAX,
+    ),
+    "repost_ttl_days": (vocabulary.SETTINGS_TTL_MIN, vocabulary.SETTINGS_TTL_DAYS_MAX),
+    "skip_ttl_days": (vocabulary.SETTINGS_TTL_MIN, vocabulary.SETTINGS_TTL_DAYS_MAX),
+}
+
 #: The per-account schedule overrides an `account_settings_change` may touch —
 #: `054`'s "per-account schedule overrides; NULL = inherit the workspace
 #: column" — with the Python type each accepts. Deliberately NOT the account's
@@ -683,8 +694,10 @@ def _validate_against(
     changes: Mapping[str, Any],
     columns: Mapping[str, type],
     nullable: frozenset[str],
+    ranges: Mapping[str, tuple[int, int]],
 ) -> dict[str, Any]:
-    """Keys and Python types only — the DB CHECKs decide the values.
+    """Keys, Python types, and the inclusive *ranges* — the DB CHECKs decide
+    every other value.
 
     `bool` is refused for int columns explicitly, because `True` IS an int in
     Python and would otherwise slip through as `posts_per_day = 1`.
@@ -710,19 +723,25 @@ def _validate_against(
             raise InvalidWorkspaceArgs(f"{key} must be an integer")
         elif not isinstance(value, expected):
             raise InvalidWorkspaceArgs(f"{key} must be {expected.__name__}")
+        elif key in ranges:
+            low, high = ranges[key]
+            if not low <= value <= high:
+                raise InvalidWorkspaceArgs(f"{key} must be {low} to {high}")
         cleaned[key] = value
     return cleaned
 
 
 def validate_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
     """The workspace's typed product configuration (`02` §1)."""
-    return _validate_against(changes, SETTINGS_COLUMNS, NULLABLE_SETTINGS)
+    return _validate_against(
+        changes, SETTINGS_COLUMNS, NULLABLE_SETTINGS, SETTINGS_RANGES
+    )
 
 
 def validate_account_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
     """One account's schedule overrides — same rules, narrower allowlist."""
     return _validate_against(
-        changes, ACCOUNT_SETTINGS_COLUMNS, ACCOUNT_NULLABLE_SETTINGS
+        changes, ACCOUNT_SETTINGS_COLUMNS, ACCOUNT_NULLABLE_SETTINGS, {}
     )
 
 
