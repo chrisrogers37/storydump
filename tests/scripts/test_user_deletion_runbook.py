@@ -288,6 +288,8 @@ def test_the_listing_names_every_live_unattributed_workspace_token(world):
         conn.close()
     listing, _delete, _erase = _runbook_blocks()
 
+    # The listing names no one: it takes no placeholder.
+    assert "'…'" not in listing
     (sql,) = _for(listing, who["user"])
     listed = {row[0] for row in _all(world, sql)}
 

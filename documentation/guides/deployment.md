@@ -261,10 +261,10 @@ owner; there is no product door for it. In order:
   (`transfer_ownership` is not built). Delete that workspace first (Settings ›
   General) and let its grace window end, or keep the person.
 - [ ] **Tokens nobody can attribute.** Workspace service tokens minted
-  before 090 record no minter, so neither a
-  removal nor the delete below can tell whether this person minted one, and
-  their current memberships don't say either: they may have minted one in a
-  workspace they have since left. List every live one:
+  before 090 record no minter, so neither a removal nor the delete below can
+  tell whether this person minted one, and their current memberships don't
+  say either: they may have minted one in a workspace they have since left.
+  List every live one:
 
   ```sql
   SELECT id, workspace_id, name, created_at FROM service_tokens
@@ -327,14 +327,13 @@ owner; there is no product door for it. In order:
   and finished stories are frozen with the reference to them, so the row
   cannot be deleted. Erase what identifies them instead, in one transaction:
   their sign-ins, tokens and unfinished sign-in or link attempts end, their
-  identities (the Google and Telegram accounts and their display names) and
-  the admission of their email and the bindings to their private chat go,
-  and the `users` row stays as a bare id
-  with no email that cannot sign in. Audit rows keep that id, as they do after
-  a delete. The invitations, admission and binding steps run before the
-  email and identities go, because they find what is addressed to them by
-  both; a revoked
-  invitation keeps the address it was sent to.
+  identities (the Google and Telegram accounts and their display names), the
+  admission of their email and the bindings to their private chat go, and
+  the `users` row stays as a bare id with no email that cannot sign in. Audit
+  rows keep that id, as they do after a delete. The invitations, admission
+  and binding steps run before the email and identities go, because they
+  find what is addressed to them by both; a revoked invitation keeps the
+  address it was sent to.
 
   ```sql
   BEGIN;

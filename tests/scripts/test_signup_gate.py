@@ -74,12 +74,23 @@ SENT_BY = {
 STANDING = {"from-admin@example.com"}
 
 
-def _invite(cur, ws, email, *, by, state="pending", expires="7 days"):
+def _invite(cur, ws, email, *, by, state="pending", expires="7 days", sent="0"):
+    """An email invitation; *sent* is how far from now it was created."""
     cur.execute(
         "INSERT INTO workspace_invitations (workspace_id, token_hash,"
-        " delivery_channel, email, state, expires_at, invited_by_user_id)"
-        " VALUES (%s, %s, 'email', %s, %s, now() + %s::interval, %s)",
-        (ws, hashlib.sha256(email.encode()).hexdigest(), email, state, expires, by),
+        " delivery_channel, email, state, expires_at, invited_by_user_id,"
+        " created_at)"
+        " VALUES (%s, %s, 'email', %s, %s, now() + %s::interval, %s,"
+        " now() + %s::interval)",
+        (
+            ws,
+            hashlib.sha256(email.encode()).hexdigest(),
+            email,
+            state,
+            expires,
+            by,
+            sent,
+        ),
     )
 
 
@@ -528,19 +539,12 @@ def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(w
             for email, (by, state) in rows.items():
                 _invite(cur, world["ws"], email, by=by, state=state)
             admin = world["inviters"]["admin"]
-            # Sent before the removal (an hour earlier), and after it.
-            _invite(cur, world["ws"], "removed-addressee@example.com", by=admin)
-            cur.execute(
-                "UPDATE workspace_invitations SET created_at = now() - interval '1 hour'"
-                " WHERE email = 'removed-addressee@example.com'"
-            )
-            cur.execute(
-                "INSERT INTO workspace_invitations (workspace_id, token_hash,"
-                " delivery_channel, email, expires_at, invited_by_user_id, created_at)"
-                " VALUES (%s, 'after-removal', 'email', 'REMOVED-ADDRESSEE@example.com',"
-                " now() + interval '7 days', %s, now() + interval '1 minute')",
-                (world["ws"], admin),
-            )
+            # Sent before the removal, and after it.
+            for email, sent in (
+                ("removed-addressee@example.com", "-1 hour"),
+                ("REMOVED-ADDRESSEE@example.com", "1 minute"),
+            ):
+                _invite(cur, world["ws"], email, by=admin, sent=sent)
             cur.execute(_backfill_sql())
             cur.execute(
                 "SELECT email, state FROM workspace_invitations WHERE email = ANY(%s)",
