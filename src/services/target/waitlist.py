@@ -30,16 +30,30 @@ MAX_UTM_LENGTH = 100
 _EMAIL_CHECK = "ck_waitlist_entries_email"
 
 
+def _storable(value: str) -> bool:
+    """Can PostgreSQL hold *value* in text and jsonb? Neither takes a NUL, and
+    a lone surrogate (which JSON can carry) is not UTF-8: refused before the
+    statement, where the driver would fail rather than a CHECK."""
+    if "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 class InvalidWaitlistEmail(StorydumpError):
     """The address is not one the waitlist can hold."""
 
 
 def campaign(fields: Mapping[str, object]) -> Optional[dict]:
-    """The UTM keys present as non-empty strings, each trimmed and capped."""
+    """The UTM keys present as non-empty, storable strings, each trimmed and
+    capped; a value the database cannot hold is dropped, not refused."""
     utm = {}
     for key in UTM_KEYS:
         value = fields.get(key)
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and value.strip() and _storable(value):
             utm[key] = value.strip()[:MAX_UTM_LENGTH]
     return utm or None
 
@@ -50,7 +64,7 @@ async def join(conn, email: object, utm: Optional[dict] = None) -> None:
     the CHECK refuses, under a savepoint so the caller's transaction carries
     on. Runs in the caller's transaction and does not commit."""
     address = email.strip().lower() if isinstance(email, str) else ""
-    if "\x00" in address:  # text cannot hold it, so the CHECK never sees it
+    if not _storable(address):
         raise InvalidWaitlistEmail("not a valid email address")
     try:
         async with conn.begin_nested():

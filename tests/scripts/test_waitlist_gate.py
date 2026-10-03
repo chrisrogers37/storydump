@@ -10,12 +10,12 @@ The list is read as the schema owner, the way the owner reads it.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import psycopg2
 import psycopg2.errors
 import pytest
 
-from src.api import principal
 from src.api.routes import public
 from tests.scripts.conftest import (
     _scratch,
@@ -55,7 +55,16 @@ def _post(world, *bodies):
 
     async def main():
         async with api_client(world["ingress"]) as (client, _):
-            return [await client.post("/public/waitlist", json=b) for b in bodies]
+            # json.dumps escapes to ASCII, so a lone surrogate travels as
+            # `\\ud800` the way a browser's JSON would carry it.
+            return [
+                await client.post(
+                    "/public/waitlist",
+                    content=json.dumps(b),
+                    headers={"content-type": "application/json"},
+                )
+                for b in bodies
+            ]
 
     return asyncio.run(main())
 
@@ -96,6 +105,21 @@ class TestTheRoute:
             ("twice@example.com", {"utm_campaign": "launch"})
         ]
 
+    def test_a_campaign_value_the_database_cannot_hold_is_dropped(self, world):
+        (resp,) = _post(
+            world,
+            {
+                "email": "odd-campaign@example.com",
+                "utm_source": "nul\x00here",
+                "utm_medium": "lone\ud800",
+                "utm_campaign": "kept",
+            },
+        )
+        assert resp.status_code == 202, resp.text
+        assert _entry(world, "odd-campaign@example.com") == [
+            ("odd-campaign@example.com", {"utm_campaign": "kept"})
+        ]
+
     def test_an_address_with_no_campaign_stores_none(self, world):
         (resp,) = _post(world, {"email": "plain@example.com"})
         assert resp.status_code == 202
@@ -111,6 +135,7 @@ class TestTheRoute:
             "a" * 250 + "@ex.co",
             "zero​width@example.com",
             "nul\x00@example.com",
+            "lone\ud800@example.com",
             42,
             None,
         ],
@@ -125,7 +150,7 @@ class TestTheRoute:
         assert _rows(world["owner"], "SELECT count(*) FROM waitlist_entries") == before
 
     def test_the_limit_refuses_past_its_window(self, world, monkeypatch):
-        monkeypatch.setattr(principal, "PREAUTH_LIMIT", 2)
+        monkeypatch.setattr(public, "WAITLIST_LIMIT", 2)
         monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-limit-test:")
         responses = _post(
             world,

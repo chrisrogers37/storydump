@@ -487,11 +487,16 @@ def client_ip(request: Request) -> str:
 
 
 async def preauth_guard(
-    conn, request: Request, *, detail: str, key_prefix: str = ""
+    conn,
+    request: Request,
+    *,
+    detail: str,
+    key_prefix: str = "",
+    limit: Optional[int] = None,
 ) -> None:
     """Spend one of the caller's pre-auth admissions in *conn*'s transaction;
     429 with *detail* past the limit. *key_prefix* gives a route its own
-    counter under the same scope and number."""
+    counter under the same scope; *limit* replaces `05`'s number for it."""
     count = await rate_counters.increment(
         conn,
         scope=PREAUTH_SCOPE,
@@ -499,7 +504,7 @@ async def preauth_guard(
         window_start=rate_counters.window_start(
             datetime.now(timezone.utc), PREAUTH_WINDOW_SECONDS
         ),
-        limit=PREAUTH_LIMIT,
+        limit=PREAUTH_LIMIT if limit is None else limit,
     )
     if count is None:
         raise HTTPException(status_code=429, detail=detail)

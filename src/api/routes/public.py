@@ -22,11 +22,15 @@ from src.utils.logger import logger
 
 router = APIRouter(tags=["public"])
 
-#: Keys the waitlist's pre-auth counter apart from sign-in's. The caller is
-#: usually the landing site's server, so the key is its egress address and the
-#: limit is shared by every visitor it forwards: the per-visitor limit is the
-#: site's firewall rule on `/api/waitlist`.
+#: Keys the waitlist's pre-auth counter apart from sign-in's.
 WAITLIST_KEY_PREFIX = "waitlist:"
+#: The caller is the landing site's server, so the counter's key is the site's
+#: egress address and its limit is shared by every visitor the site forwards.
+#: It is a ceiling on the table's growth, not a per-visitor limit, so it sits
+#: well above `05`'s 30: at 30, one person sending 30 a minute would refuse
+#: everyone. The per-visitor limit is the site's (a Vercel firewall rule on
+#: `/api/waitlist`), where the visitor's address is known.
+WAITLIST_LIMIT = 300
 
 
 @router.post("/waitlist", status_code=202)
@@ -42,6 +46,7 @@ async def join_waitlist(request: Request):
             request,
             detail="too many waitlist requests",
             key_prefix=WAITLIST_KEY_PREFIX,
+            limit=WAITLIST_LIMIT,
         )
         try:
             await waitlist.join(conn, body.get("email"), waitlist.campaign(body))
