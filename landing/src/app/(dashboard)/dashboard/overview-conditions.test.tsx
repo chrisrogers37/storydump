@@ -26,6 +26,7 @@ import DashboardPage from "./page";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
 import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
+import { RecentActivity } from "@/components/dashboard/recent-activity";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import type { Condition, SetupStep } from "@/lib/conditions";
 import type { FolderMix } from "@/lib/dashboard-payloads";
@@ -45,7 +46,7 @@ function* walk(node: ReactNode): Generator<ReactElement> {
 const ok = (data: unknown) => ({ ok: true, data });
 const DOWN = { ok: false, status: 503, error: "http_503" };
 
-type Read = "stats" | "intents" | "accounts" | "sources" | "category-mix";
+type Read = "stats" | "intents" | "accounts" | "sources" | "category-mix" | "config";
 
 const STATS = {
   intents_by_state: { review_required: 2, scheduled: 3 },
@@ -80,10 +81,12 @@ function answer(overrides: Partial<Record<Read, unknown>> = {}) {
       ],
     }),
     sources: ok({ sources: [] }),
+    config: ok({ tz: "America/New_York" }),
     ...overrides,
   };
   workspaceFetch.mockImplementation(async (path: string) => {
-    const read = path.split(/[?/]/)[0] as Read;
+    // The workspace's own config is its empty path.
+    const read = (path.split(/[?/]/)[0] || "config") as Read;
     if (!(read in table)) throw new Error(`unexpected read: ${path}`);
     return table[read];
   });
@@ -158,7 +161,7 @@ describe("the overview's condition panel", () => {
     expect((panel!.props as { setupStep: SetupStep | null }).setupStep).toBeNull();
   });
 
-  it.each<Read>(["accounts", "sources", "stats", "category-mix"])(
+  it.each<Read>(["accounts", "sources", "stats", "category-mix", "config"])(
     "a failed %s read is the unavailable state — never an all-clear",
     async (read) => {
       answer({ [read]: DOWN });
@@ -192,5 +195,23 @@ describe("the overview's mix card", () => {
     expect(workspaceFetch.mock.calls.map(([path]) => path)).toContain(
       "category-mix",
     );
+  });
+});
+
+describe("the overview's recent activity", () => {
+  const zoneOf = async () => {
+    const list = [...walk(await DashboardPage())].find((el) => el.type === RecentActivity);
+    expect(list, "the overview renders no recent activity").toBeDefined();
+    return (list!.props as { tz: string }).tz;
+  };
+
+  it("reads its times in the workspace's zone (#1511)", async () => {
+    answer();
+    expect(await zoneOf()).toBe("America/New_York");
+  });
+
+  it("reads them in UTC for a workspace with no zone set", async () => {
+    answer({ config: ok({ tz: null }) });
+    expect(await zoneOf()).toBe("UTC");
   });
 });
