@@ -157,7 +157,7 @@ export function WaitlistForm({
       onSubmit={handleSubmit}
       className={cn("w-full scroll-mt-20", className)}
     >
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:rounded-full sm:border sm:border-ink sm:bg-white sm:p-1.5 sm:pl-5">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:rounded-full sm:border sm:border-ink sm:bg-white sm:p-1.5 sm:pl-5 sm:has-[input:focus-visible]:ring-2 sm:has-[input:focus-visible]:ring-ring sm:has-[input:focus-visible]:ring-offset-2">
         <label htmlFor={`waitlist-email-${variant}`} className="sr-only">
           Email address
         </label>

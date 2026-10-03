@@ -1,5 +1,6 @@
 import { Card, CardContent, CardHeader, StatCard } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { PageHeaderSkeleton } from "@/design/page-header";
 
 function CardSkeleton() {
   return (
@@ -14,10 +15,7 @@ function CardSkeleton() {
 export default function DashboardLoading() {
   return (
     <div className="space-y-6">
-      <div>
-        <Skeleton className="h-9 w-32" />
-        <Skeleton className="h-4 w-56 mt-2" />
-      </div>
+      <PageHeaderSkeleton titleWidth="w-32" descriptionWidth="w-56" />
 
       {/* Condition panel — sized to its all-clear, the common case */}
       <Card className="py-4">

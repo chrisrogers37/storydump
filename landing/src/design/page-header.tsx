@@ -1,3 +1,4 @@
+import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/lib/utils"
 
 /** A page's H1 in the display face, with an optional line under it. */
@@ -20,6 +21,23 @@ export function PageHeader({
           {description}
         </p>
       )}
+    </div>
+  )
+}
+
+/** A md PageHeader's placeholder, the same height as the header it stands in
+ *  for (a 36px title, the 8px gap, a 20px line), so the page doesn't shift. */
+export function PageHeaderSkeleton({
+  titleWidth,
+  descriptionWidth,
+}: {
+  titleWidth: string
+  descriptionWidth: string
+}) {
+  return (
+    <div>
+      <Skeleton className={cn("h-9", titleWidth)} />
+      <Skeleton className={cn("mt-2 h-5", descriptionWidth)} />
     </div>
   )
 }
