@@ -403,6 +403,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # loud: the slot key's contract, the serve and miss doors and the
             # reaper's cadence-only slot expiry (#1413, phase 3).
             "089_planned_serve_and_misses.sql",
+            # 090 appends §33, a removal sticks: the removals record the
+            # Telegram join door honours, and the service-token minter the
+            # removal revokes by (readiness review, 2026-10-02).
+            "090_member_removal_sticks.sql",
             # 096 appends §39, the sync retiring what the publish can never
             # fetch: the `last_listed_at` stamp, `missing` in ck_media_state and
             # the miss door's `item_missing` (#1545).

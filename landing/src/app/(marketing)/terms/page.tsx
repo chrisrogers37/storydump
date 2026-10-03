@@ -1,15 +1,16 @@
 import type { Metadata } from "next"
+import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
-const LAST_UPDATED = "September 30, 2026"
+const LAST_UPDATED = "October 1, 2026"
 
-export const metadata: Metadata = {
-  title: "Terms of Service — Storydump",
+export const metadata: Metadata = pageMetadata({
+  title: "Terms of Service",
   description:
-    "The terms that govern your use of Storydump, the Instagram Story scheduler powered by Telegram.",
-  alternates: { canonical: "/terms" },
-}
+    "The terms that govern your use of Storydump, the Instagram Story scheduler.",
+  path: "/terms",
+})
 
 export default function TermsOfService() {
   const email = siteConfig.contact.email
@@ -52,8 +53,10 @@ export default function TermsOfService() {
           <p className="mt-3">
             Storydump is an Instagram Story scheduling and automation tool. It
             can post on your behalf through the Instagram Graph API, with
-            optional Google Drive integration for media sync. Operator
-            notifications and team interactions are handled through Telegram.
+            optional Google Drive integration for media sync. You can run it
+            entirely from the web dashboard; if you link the Storydump Telegram
+            bot, it also delivers stories for approval and notices to your
+            chat.
             Storydump is offered as a hosted service.
           </p>
         </section>

@@ -342,11 +342,18 @@
       "ordinal": 30
     },
     {
+      "sha256": "2e03a0a1397abb61347fc4f9bcf9ccb24b43ee058a9d4d431c85e58d05160ca5",
+      "class": "normative",
+      "label": "§33 a removal sticks, and a removed admin's tokens go with them (090, readiness review 2026-10-02) — workspace_member_removals (tenant plane, written only by svc_membership), service_tokens.created_by_user_id, fn_group_member_seen refusing a removed non-member, and fn_member_remove recording the removal",
+      "doc": "07-security-model.md",
+      "ordinal": 31
+    },
+    {
       "sha256": "4bd78e6e523c52bac371525304cf49b2f5d28bd89faf4122d2ac6b74a34587ad",
       "class": "normative",
       "label": "§39 the sync retires what the publish can never fetch (096, #1545) — media_items.last_listed_at, the stamp a walk leaves on every file it lists, missing added to ck_media_state for a file a walk that saw the whole tree no longer lists, and fn_planned_misses replaced to name it item_missing",
       "doc": "07-security-model.md",
-      "ordinal": 31
+      "ordinal": 32
     }
   ],
   "policy_expansion": {
