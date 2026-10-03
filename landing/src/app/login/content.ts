@@ -40,6 +40,11 @@ export function loginError(code: string | null | undefined): Linked | null {
     : null;
 }
 
+/** `?signout=incomplete`: "Sign out of all devices" ended this browser's
+ *  session but the API could not revoke the others. */
+export const SIGNOUT_INCOMPLETE =
+  "This browser is signed out, but we couldn't sign out your other devices. Sign in and try Sign out of all devices again.";
+
 /** The line under the card. */
 export const NEW_HERE: Linked = {
   lead: `New here? ${siteConfig.name} is invite-only for now. `,

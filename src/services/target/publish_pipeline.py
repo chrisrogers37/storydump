@@ -34,11 +34,13 @@ running the real ladder.
 Every checkpoint transaction re-CASes the lease (`assert_lease`, §6 step 3),
 so a fenced worker can neither advance the ladder nor record outcomes.
 
-**The transit copy goes when the story ends**, not when the sweep comes by:
-posted, failed, cancelled, or met terminal by a job — the job a review
-give-up mints exists for exactly this, since the API holds no transit
-credentials. Each is a best-effort destroy after the terminal commit
-(`_destroy_transit_best_effort`); the FC-3.6 sweep is the guarantee.
+**The transit copy goes when the story ends**, not when the sweep comes by,
+on the worker's paths: posted, failed, cancelled, or met terminal by a job —
+the job a review give-up mints exists for exactly this, since the API holds no
+transit credentials. Each is a best-effort destroy after the terminal commit
+(`_destroy_transit_best_effort`); the FC-3.6 sweep is the guarantee, and the
+only path for a retried story's old copy and for one resolved as posted from
+review.
 
 ## Ordering decisions that are derivations, not choices
 
@@ -309,7 +311,8 @@ async def run_publish_pipeline(
             # The whole of the job a give-up mints (`_give_up`): destroyed
             # before the finalize, so a crash between the two re-runs an
             # idempotent destroy rather than losing it. Never for
-            # `review_required` — a retry re-enters with the asset it carries.
+            # `review_required`, whose copy is the operator's call; a retry
+            # starts a fresh upload, and its old copy is the sweep's.
             await _destroy_transit_best_effort(ctx, transit)
         async with uow.begin() as session:
             await finalize_job(session, job["id"], job["lease_token"], "cancelled")

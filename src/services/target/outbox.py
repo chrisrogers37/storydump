@@ -1012,31 +1012,6 @@ async def recover_stranded(session, *, binding_id: str) -> list:
     return [str(r[0]) for r in rows]
 
 
-async def retire_revoked_queue(session, *, binding_id: str) -> int:
-    """Supersede every unsettled row of a binding that is no longer active.
-    Returns how many moved.
-
-    What `work_loop.deliver_outbox` runs when its binding was revoked after
-    the job was minted. :func:`bindings.revoke_for_workspace` supersedes the
-    `pending` and `ambiguous` rows at the revoke but leaves `sending` to a
-    live sender, and that row can still end up `pending` (a 429) or stranded
-    in `sending` (the sender died). The claim refuses a revoked binding, so
-    nothing would ever settle it, and a later re-bind would deliver it as a
-    stale card. Safe for the same reason as :func:`recover_stranded`: this
-    runs under the binding's only sender lease, and `_leave_sending` is
-    fenced against a row superseded in flight.
-    """
-    result = await session.execute(
-        text(
-            "UPDATE channel_outbox SET state = 'superseded'"
-            " WHERE binding_id = :b"
-            "   AND state IN ('pending', 'sending', 'ambiguous')"
-        ),
-        {"b": binding_id},
-    )
-    return result.rowcount
-
-
 async def deliver(
     session,
     *,

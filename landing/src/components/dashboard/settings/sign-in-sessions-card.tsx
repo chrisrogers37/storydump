@@ -26,6 +26,11 @@ export function SignInSessionsCard() {
           signs you out of Storydump on every device and browser, including
           this one. Each of them needs to sign in with Google again.
         </p>
+        <p className="text-sm text-muted-foreground">
+          It ends web sign-ins only. API tokens keep working until you revoke
+          them in the API tokens tab, and a linked Telegram account stays
+          linked until you unlink it in the Integrations tab.
+        </p>
         <SignOutButton everywhere className={buttonVariants({ variant: "outline" })}>
           Sign out of all devices
         </SignOutButton>

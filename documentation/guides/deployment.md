@@ -248,21 +248,64 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 
 Leaving the Telegram group removes nobody.
 
-**Deleting a user** (an erasure request, say) is a hand-run `DELETE FROM users`
-as the database owner; there is no product door for it. Two things first, when
-the user connected a workspace's Google Drive (`oauth_credentials.granted_by_user_id`
-names them, 091):
+**Deleting a user** (an erasure request, say) is hand-run SQL as the database
+owner; there is no product door for it. In order:
 
-- [ ] Disconnect that workspace's Drive first (Settings › Integrations → Google
-  Drive → Disconnect). Otherwise `ON DELETE SET NULL` clears the granter and
-  leaves the grant active, still holding the deleted person's Google token,
-  and a grant with no granter is browsable by the workspace's owner — the
-  whole of that person's Drive, Shared with me included.
-- [ ] Run the delete with an actor set, in one transaction:
-  `BEGIN; SET LOCAL app.actor_kind = 'operator'; DELETE FROM users WHERE id = '…'; COMMIT;`.
-  The `SET NULL` on `oauth_credentials` fires the governance trigger, which
-  refuses a write with no `app.actor_kind`, so without it the delete fails
-  and nothing is removed.
+- [ ] **An owner first.** A workspace's only owner cannot be deleted: the commit
+  fails (`ct_members_owner_exists`), and ownership cannot be handed over yet
+  (`transfer_ownership` is not built). Delete that workspace first (Settings ›
+  General) and let its grace window end, or keep the person.
+- [ ] **Remove them from every other workspace** they belong to (Settings ›
+  Members → Remove). A removal revokes the workspace service tokens they
+  minted and the invitations they sent, and records the removal. A plain
+  delete does neither: `ON DELETE SET NULL` leaves those tokens working with no
+  minter recorded, and the invitations pending with no inviter.
+- [ ] **Their Google Drive**, when they connected a workspace's
+  (`oauth_credentials.granted_by_user_id` names them, 091): disconnect it
+  (Settings › Integrations → Google Drive → Disconnect). Otherwise `ON DELETE
+  SET NULL` clears the granter and leaves the grant active, still holding the
+  deleted person's Google token, and a grant with no granter is browsable by
+  the workspace's owner — the whole of that person's Drive, Shared with me
+  included.
+- [ ] **The delete**, always with an actor set and in one transaction, revoking
+  anything the removals missed on the way. The delete's cascades and `SET
+  NULL`s fire the governance trigger (on `workspace_members`, and on
+  `oauth_credentials` when they granted Drive), which refuses a write with no
+  `app.actor_kind`; without it the delete fails and nothing is removed.
+
+  ```sql
+  BEGIN;
+  SET LOCAL app.actor_kind = 'operator';
+  UPDATE service_tokens SET revoked_at = now()
+   WHERE created_by_user_id = '…' AND revoked_at IS NULL;
+  UPDATE workspace_invitations SET state = 'revoked'
+   WHERE invited_by_user_id = '…' AND state = 'pending';
+  DELETE FROM users WHERE id = '…';
+  COMMIT;
+  ```
+
+- [ ] **If the delete is refused because a story "is terminal … and
+  immutable"**, the person approved or scheduled a story that has finished,
+  and finished stories are frozen with the reference to them, so the row
+  cannot be deleted. Erase what identifies them instead, in one transaction:
+  their sign-ins and tokens end, their identities (the Google and Telegram
+  accounts and their display names) go, and the `users` row stays as a bare id
+  with no email that cannot sign in. Audit rows keep that id, as they do after
+  a delete.
+
+  ```sql
+  BEGIN;
+  SET LOCAL app.actor_kind = 'operator';
+  UPDATE session_tokens SET revoked_at = now()
+   WHERE user_id = '…' AND revoked_at IS NULL;
+  UPDATE service_tokens SET revoked_at = now()
+   WHERE (user_id = '…' OR created_by_user_id = '…') AND revoked_at IS NULL;
+  UPDATE workspace_invitations SET state = 'revoked'
+   WHERE invited_by_user_id = '…' AND state = 'pending';
+  DELETE FROM user_identities WHERE user_id = '…';
+  UPDATE users SET primary_email = NULL, state = 'disabled' WHERE id = '…';
+  COMMIT;
+  ```
 
 ---
 

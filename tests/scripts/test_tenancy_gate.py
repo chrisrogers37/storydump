@@ -514,6 +514,22 @@ class TestExpectedTenancyDerivation:
             expected_tenancy(["CREATE SEQUENCE s START 1"])
 
 
+class TestADataUpdateIsInert:
+    """098 is the first migration on the target lineage to UPDATE rows (its
+    one-time revoke of a removed inviter's invitations). Rows are none of the
+    four facts, so the kind is allowlisted beside INSERT INTO, and this is the
+    control that proves the entry is reachable."""
+
+    def test_update_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                "UPDATE t SET id = NULL WHERE workspace_id IS NULL",
+            ]
+        )
+        assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
+
+
 class TestDroppingAnIndexIsInert:
     """069 (#1165) is the first migration to DROP an index. An index is none
     of the four facts, so the kind is allowlisted beside CREATE INDEX — and

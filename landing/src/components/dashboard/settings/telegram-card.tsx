@@ -148,8 +148,8 @@ export function TelegramCard({
     });
   }
 
-  /** Revoke one bound group, after the inline confirm (`07` §13). */
-  async function removeGroup(bindingId: string) {
+  /** Revoke one bound chat, after the inline confirm (`07` §13). */
+  async function removeGroup(bindingId: string, direct: boolean) {
     onError(null);
     onNotice(null);
     setRemovingId(bindingId);
@@ -161,7 +161,9 @@ export function TelegramCard({
       return;
     }
     onNotice(
-      "Group removed. New cards no longer go to it; the bot is still in the group until you remove it in Telegram.",
+      direct
+        ? "Direct chat removed. New cards no longer go to it."
+        : "Group removed. New cards no longer go to it; the bot is still in the group until you remove it in Telegram.",
     );
     router.refresh();
   }
@@ -320,25 +322,47 @@ export function TelegramCard({
                   </div>
                   {canRemoveGroups && confirmingId === b.id && (
                     <div className="space-y-2 rounded-md border border-red-200 bg-red-50 p-3">
-                      <p className="text-sm font-medium">
-                        Remove this group from the workspace?
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Approval cards and notices stop going to it, and any
-                        still waiting to be sent are dropped. Cards already
-                        posted stay in the group&apos;s history, and the bot
-                        stays in the group — remove it in Telegram if you want
-                        it gone. Adding the group again brings it back to this
-                        workspace; it cannot then be added to another one.
-                      </p>
+                      {b.channel === "telegram_dm" ? (
+                        <>
+                          <p className="text-sm font-medium">
+                            Remove this direct chat from the workspace?
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Approval cards and notices stop going to this
+                            private chat, and any still waiting to be sent are
+                            dropped. Cards already sent stay in the chat.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-sm font-medium">
+                            Remove this group from the workspace?
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Approval cards and notices stop going to it, and
+                            any still waiting to be sent are dropped. Cards
+                            already posted stay in the group&apos;s history,
+                            and the bot stays in the group — remove it in
+                            Telegram if you want it gone. Adding the group again
+                            brings it back to this workspace; it cannot then be
+                            added to another one.
+                          </p>
+                        </>
+                      )}
                       <div className="flex flex-wrap gap-2">
                         <Button
                           variant="destructive"
                           size="sm"
-                          onClick={() => removeGroup(b.id)}
+                          onClick={() =>
+                            removeGroup(b.id, b.channel === "telegram_dm")
+                          }
                           disabled={removingId !== null}
                         >
-                          {removingId === b.id ? "Removing..." : "Remove group"}
+                          {removingId === b.id
+                            ? "Removing..."
+                            : b.channel === "telegram_dm"
+                              ? "Remove chat"
+                              : "Remove group"}
                         </Button>
                         <Button
                           variant="outline"

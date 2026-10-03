@@ -558,6 +558,7 @@ class TestWhatTheCommentRuleChangedInTheStream:
         "CREATE FUNCTION trg_intent_guard",
         "CREATE FUNCTION trg_intent_insert_guard",
         "CREATE FUNCTION trg_intent_planned_person",
+        "CREATE OR REPLACE FUNCTION fn_invitation_accept",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",

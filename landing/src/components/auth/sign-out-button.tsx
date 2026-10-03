@@ -49,10 +49,15 @@ export function SignOutButton({
   const router = useRouter();
 
   async function signOut() {
-    await fetch(everywhere ? "/api/auth/logout?everywhere=1" : "/api/auth/logout", {
-      method: "POST",
-    });
-    router.push(redirectTo);
+    const response = await fetch(
+      everywhere ? "/api/auth/logout?everywhere=1" : "/api/auth/logout",
+      { method: "POST" },
+    );
+    // The route redirects to `/login?signout=incomplete` when it could not
+    // sign the other devices out; that page says so, so it is where to land.
+    const landed = response.redirected ? new URL(response.url) : null;
+    const incomplete = landed?.searchParams.get("signout") === "incomplete";
+    router.push(incomplete ? "/login?signout=incomplete" : redirectTo);
     // Needed when `redirectTo` IS the current route, which is the invitation
     // page's case: a push to the URL already showing renders from the router
     // cache and would re-display the signed-in view of a session that no

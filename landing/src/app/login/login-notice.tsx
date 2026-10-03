@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Notice } from "@/components/ui/notice";
-import { WAITLIST_HREF, loginError } from "./content";
+import { SIGNOUT_INCOMPLETE, WAITLIST_HREF, loginError } from "./content";
 
 /**
  * The refusal `?error=` names, above the sign-in button. A client component
@@ -11,7 +11,11 @@ import { WAITLIST_HREF, loginError } from "./content";
  * requires of a static page that reads the query.
  */
 export function LoginNotice() {
-  const copy = loginError(useSearchParams().get("error"));
+  const params = useSearchParams();
+  if (params.get("signout") === "incomplete") {
+    return <Notice>{SIGNOUT_INCOMPLETE}</Notice>;
+  }
+  const copy = loginError(params.get("error"));
   if (!copy) return null;
   return (
     <Notice>

@@ -30,7 +30,8 @@ import { targetFetch } from "@/lib/target-api";
  * `?everywhere=1` is "Sign out of all devices" (Settings › General): the API
  * revokes every live session of this person, this one included
  * (`POST /auth/signout?everywhere=true`). The local half is the same either
- * way: this browser's cookies go too.
+ * way: this browser's cookies go too. When the API could not revoke the other
+ * sessions, the browser lands on `/login?signout=incomplete`, which says so.
  */
 async function signOut(request: NextRequest) {
   const refused = refuseCrossSite(request);
@@ -39,14 +40,21 @@ async function signOut(request: NextRequest) {
   const token = await getSessionToken();
   const everywhere = request.nextUrl.searchParams.get("everywhere") === "1";
 
+  let incomplete = false;
   if (token) {
-    await targetFetch(everywhere ? "/signout?everywhere=true" : "/signout", token, {
-      method: "POST",
-      plane: "auth",
-    });
+    const result = await targetFetch(
+      everywhere ? "/signout?everywhere=true" : "/signout",
+      token,
+      { method: "POST", plane: "auth" },
+    );
+    // For "Sign out of all devices" the remote half IS the point: a person
+    // securing a lost phone must not be told it worked when it did not.
+    incomplete = everywhere && !result.ok;
   }
 
-  const response = NextResponse.redirect(new URL("/login", request.url));
+  const response = NextResponse.redirect(
+    new URL(incomplete ? "/login?signout=incomplete" : "/login", request.url),
+  );
   response.cookies.delete(SESSION_COOKIE);
   response.cookies.delete(WORKSPACE_COOKIE);
   return response;

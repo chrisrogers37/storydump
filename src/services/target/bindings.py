@@ -199,6 +199,21 @@ async def bind(session, *, workspace_id: str, chat_type: str, external_ref: str)
     read-then-write that another transaction could interleave.
     """
     channel, ref = _clean(chat_type, external_ref)
+    params = {"ws": str(workspace_id), "ch": channel, "ref": ref}
+    # A removed group coming back: its old queue is retired before it is
+    # active again, so nothing left over from before the removal is sent.
+    revoked = (
+        await session.execute(
+            text(
+                "SELECT id FROM channel_bindings"
+                " WHERE workspace_id = :ws AND channel = :ch AND external_ref = :ref"
+                "   AND state = 'revoked' FOR UPDATE"
+            ),
+            params,
+        )
+    ).first()
+    if revoked is not None:
+        await retire_unsettled(session, binding_id=str(revoked[0]))
     row = (
         await session.execute(
             text(
@@ -209,7 +224,7 @@ async def bind(session, *, workspace_id: str, chat_type: str, external_ref: str)
                 "  WHERE channel_bindings.workspace_id = EXCLUDED.workspace_id"
                 " RETURNING (xmax = 0) AS created"
             ),
-            {"ws": str(workspace_id), "ch": channel, "ref": ref},
+            params,
         )
     ).first()
     if row is None:
@@ -291,6 +306,30 @@ async def revoke_for_workspace(session, *, workspace_id: str, binding_id: str) -
         params,
     )
     return True
+
+
+async def retire_unsettled(session, *, binding_id: str) -> int:
+    """Supersede every unsettled card (`pending`, `sending`, `ambiguous`) of a
+    binding that is not active. Returns how many moved.
+
+    :func:`revoke_for_workspace` supersedes `pending` and `ambiguous` at the
+    removal but leaves `sending` to a live sender, and that row can still end
+    up `pending` (a 429), `ambiguous` (a lost answer) or stranded in `sending`
+    (the sender died). The claim refuses a revoked binding, so nothing settles
+    it; a re-bind would send it as a stale card. Run by :func:`bind` before a
+    revoked binding is re-activated, and by `work_loop.deliver_outbox` when
+    its binding is no longer active. Safe for a `sending` row:
+    `outbox._leave_sending` is fenced against a row superseded in flight.
+    """
+    result = await session.execute(
+        text(
+            "UPDATE channel_outbox SET state = 'superseded'"
+            " WHERE binding_id = :b"
+            "   AND state IN ('pending', 'sending', 'ambiguous')"
+        ),
+        {"b": str(binding_id)},
+    )
+    return result.rowcount
 
 
 async def _repoint(session, *, binding_id: str, external_ref: str) -> bool:

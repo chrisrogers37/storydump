@@ -691,6 +691,43 @@ class TestAnAdminRemovesAGroup:
         assert str(_binding_id(world, ref)) == binding, "the same row, not a new one"
         assert self._states(world, rows)[:2] == ["superseded", "superseded"]
 
+    def test_a_re_bind_retires_a_card_that_was_in_flight_at_the_removal(self, world):
+        """The card being sent when the group was removed is the live sender's
+        at the removal. Whatever it became after (here, back to `pending`
+        after a 429, or left `sending` by a dead sender), the re-bind retires
+        it before the group is active again, so it is never sent there."""
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        pending, _ambiguous, sending, sent = self._queue(world, binding)
+        assert self._remove(world, binding) is True
+        # After the removal, a 429 hands the in-flight card back to pending
+        # and a second one stays stranded in sending.
+        _migrate(
+            world,
+            "UPDATE channel_outbox SET state = 'pending' WHERE id = %s",
+            (pending,),
+        )
+        assert self._states(world, [pending, sending]) == ["pending", "sending"]
+
+        assert _bind(world, ref) == REBOUND
+        assert self._states(world, [pending, sending, sent]) == [
+            "superseded",
+            "superseded",
+            "sent",
+        ]
+
+    def test_re_binding_an_active_group_leaves_its_queue_alone(self, world):
+        """Tapping a fresh bind link for a group that is already bound is a
+        no-op for its cards: only a removed group's leftovers are retired."""
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        rows = self._queue(world, binding)
+
+        assert _bind(world, ref) == REBOUND
+        assert self._states(world, rows) == ["pending", "ambiguous", "sending", "sent"]
+
 
 class TestTheJoinPathThroughTheDoors:
     """`06`'s Telegram join path on postgres:15, driven as a bare `svc_ingress`

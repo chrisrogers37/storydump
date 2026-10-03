@@ -4,7 +4,7 @@ import re
 import uuid
 from typing import Container
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ALIASED ON PURPOSE, and the collision is not hypothetical: the class directly
@@ -265,7 +265,9 @@ class Settings(BaseSettings):
     # age it is refused as expired however recently it was used, and no slide
     # carries `expires_at` beyond `created_at` + this. 30 days: the cookie's
     # own Max-Age and the "30 days" the Privacy page states.
-    SESSION_MAX_AGE_SECONDS: int = 30 * 24 * 3600
+    # Bounded: 0 would end every session at once, and a huge value overflows
+    # the interval it builds.
+    SESSION_MAX_AGE_SECONDS: int = Field(30 * 24 * 3600, gt=0, le=365 * 24 * 3600)
     # Sign-up while in beta (092, owner decision 2026-10-02): a NEW Google
     # account creates its user only when `fn_signup_admitted` admits its
     # verified email. True switches that ask off — a local stack's setting,

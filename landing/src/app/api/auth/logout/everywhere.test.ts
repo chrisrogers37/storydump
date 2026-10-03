@@ -11,7 +11,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-const state: { token: string | null } = { token: "tok-test" };
+const state: { token: string | null; apiOk: boolean } = {
+  token: "tok-test",
+  apiOk: true,
+};
 const captured: Array<{ path: string; init?: Record<string, unknown> }> = [];
 
 vi.mock("@/lib/session", () => ({
@@ -27,7 +30,9 @@ vi.mock("@/lib/target-api", () => ({
     init?: Record<string, unknown>,
   ) => {
     captured.push({ path, init });
-    return { ok: true, data: { signed_out: true } };
+    return state.apiOk
+      ? { ok: true, data: { signed_out: true } }
+      : { ok: false, status: 503, error: "target_router_unreachable" };
   },
 }));
 
@@ -42,6 +47,7 @@ function post(query = "", headers: Record<string, string> = {}) {
 
 beforeEach(() => {
   state.token = "tok-test";
+  state.apiOk = true;
   captured.length = 0;
 });
 
@@ -52,6 +58,22 @@ describe("sign out of all devices", () => {
       { path: "/signout?everywhere=true", init: { method: "POST", plane: "auth" } },
     ]);
     expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe("https://storydump.app/login");
+  });
+
+  it("says so when the API could not sign the other devices out", async () => {
+    state.apiOk = false;
+    const response = await POST(post("?everywhere=1"));
+    expect(response.headers.get("location")).toBe(
+      "https://storydump.app/login?signout=incomplete",
+    );
+    // This browser is still signed out: the local half always happens.
+    expect(response.headers.getSetCookie().join("\n")).toMatch(/sd_session=;/);
+  });
+
+  it("lands a plain sign-out on /login even when the API fails", async () => {
+    state.apiOk = false;
+    const response = await POST(post());
     expect(response.headers.get("location")).toBe("https://storydump.app/login");
   });
 

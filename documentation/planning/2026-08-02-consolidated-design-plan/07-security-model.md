@@ -2837,32 +2837,52 @@ GRANT EXECUTE ON FUNCTION fn_signup_admitted(text) TO svc_ingress;
 
 ### §41. An invitation admits only while it is legitimate (098)
 
-**Why:** the owner's decision, "removed people stay removed", on the PR #1560
-security review's first finding. `fn_signup_admitted` (§35) counted any pending, unexpired
-invitation addressed to an email. An admin could mint an invitation for a second address of their
-own, be removed, and still sign up a brand-new account with it and accept it back into the
-workspace; a suspended workspace's invitations admitted too.
+**Why:** the owner's decision, "removed people stay removed", on the PR #1560 security review's
+first finding and the PR #1574 review's first, second and fourth. `fn_signup_admitted` (§35)
+counted any pending, unexpired invitation addressed to an email, and `fn_invitation_accept`
+(`02` §7-DDL) checked only the token, its state and expiry and the identity proof. An admin could
+mint an invitation for a second address of their own, be removed, and still bring that address
+back in, as an admin, on a new account or an existing one; a suspended workspace's invitations
+still let people in; and an invitation addressed to a member who was later removed brought them
+back.
 
-**The door reads the invitation's standing live.** An invitation counts only while its workspace is
-`active` and its inviter is still an owner or admin member of that workspace. A removed or demoted
-inviter, a suspended or offboarding workspace, and an invitation with no recorded inviter (a
-workspace service identity's, or one whose inviter's account was deleted) admit nobody new. The
-owner's admissions are untouched.
+**An invitation is legitimate** while its workspace is `active` and its inviter is still an owner
+or admin member of that workspace, with an active account. Both doors read that live:
+`fn_signup_admitted` counts only a legitimate invitation, and `fn_invitation_accept` refuses any
+other with the same `no_data_found` it answers for a used, revoked or expired one. A removed,
+demoted or disabled inviter, a suspended or offboarding workspace, and an invitation with no
+recorded inviter let nobody in. Workspace service identities never write in this release (§1,
+F10), so no live invitation lacks an inviter by design.
+
+**A removal outranks an earlier invitation.** `fn_invitation_accept` also refuses a person whose
+removal from the workspace (§33's `workspace_member_removals`) is newer than the invitation, so
+an invitation sent before the removal cannot undo it; a fresh invitation after it still can.
 
 **A removal revokes the invitations the removed member sent.** `workspaces.remove_member` sets
 their pending invitations in that workspace to `revoked` (`invitations.revoke_sent_by`) in the
-transaction that calls `fn_member_remove` (§33), so the accept door refuses them too; `svc_ingress`
-holds UPDATE on `workspace_invitations` under the tenant policy, so the door's body is left as it
-is. A demoted admin's invitations stay pending and an existing account can still accept them; they
-no longer admit a new account. `fn_invitation_accept` (`02` §7-DDL) is unchanged: a service
-identity's invitation records no inviter, so holding the accept door to a live inviter would
-refuse every one of them.
+transaction that calls `fn_member_remove` (§33); `svc_ingress` holds UPDATE on
+`workspace_invitations` under the tenant policy, so the door's body is left as it is. Invitations
+sent by people removed before this section are revoked by it once: a pending invitation whose
+inviter has a removal record in its workspace and is not a member there again.
+`workspace_invitations` carries no governance trigger, so that UPDATE needs no actor.
 
-The door is replaced in place inside the CREATE bracket, as §35's is; `svc_membership` already
-holds the reads it needs (`02` §7's grants and row-open policies). No data is written.
+`svc_membership` reads `users`' `id` and `state` (a column grant under a SELECT policy) to see an
+inviter's account state; the doors are replaced in place inside the CREATE bracket, as §33's and
+§35's are.
 
 ```sql
 -- [§41 an invitation admits only while it is legitimate]
+
+GRANT SELECT (id, state) ON users TO svc_membership;
+
+CREATE POLICY p_member_users ON users FOR SELECT TO svc_membership USING (true);
+
+UPDATE workspace_invitations i SET state = 'revoked'
+  FROM workspace_member_removals r
+ WHERE r.workspace_id = i.workspace_id AND r.user_id = i.invited_by_user_id
+   AND i.state = 'pending'
+   AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                    WHERE m.workspace_id = i.workspace_id AND m.user_id = i.invited_by_user_id);
 
 GRANT CREATE ON SCHEMA public TO svc_membership;
 
@@ -2875,6 +2895,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
                    JOIN workspace_members m ON m.workspace_id = i.workspace_id
                                            AND m.user_id = i.invited_by_user_id
                                            AND m.role IN ('owner', 'admin')
+                   JOIN users u ON u.id = i.invited_by_user_id AND u.state = 'active'
                   WHERE lower(i.email) = lower(p_email)
                     AND i.state = 'pending' AND i.expires_at > now())
 $$;
@@ -2882,9 +2903,90 @@ $$;
 COMMENT ON FUNCTION fn_signup_admitted(text) IS
   'May a new Google account with this verified email create its user (092)? True when the owner '
   'admitted the address (signup_admissions) or a pending, unexpired invitation is addressed to it '
-  'from an active workspace whose owner or admin it still was sent by (098); false for NULL. '
-  'Compares lower() on both sides. Answers one boolean, never which workspace invited the '
-  'address. SECURITY DEFINER owned by svc_membership with EXECUTE granted to svc_ingress.';
+  'from an active workspace by someone still its owner or an admin, with an active account (098); '
+  'false for NULL. Compares lower() on both sides. Answers one boolean, never which workspace '
+  'invited the address. SECURITY DEFINER owned by svc_membership with EXECUTE granted to '
+  'svc_ingress.';
+
+CREATE OR REPLACE FUNCTION fn_invitation_accept(p_token_hash text, p_user uuid, p_provider text,
+                                                p_verified_email text, p_tg_user_id bigint,
+                                                p_channel text)
+RETURNS TABLE (o_workspace_id uuid, o_granted_role text, o_matched boolean)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE inv record; m boolean; grant_role text; bind uuid;
+BEGIN
+  PERFORM set_config('app.actor_kind', 'user', true);
+  PERFORM set_config('app.actor_user_id', p_user::text, true);
+  PERFORM set_config('app.channel', COALESCE(p_channel, 'web'), true);
+  SELECT * INTO inv FROM workspace_invitations i
+   WHERE i.token_hash = p_token_hash AND i.state = 'pending' AND i.expires_at > now()
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'invitation not acceptable (used, revoked, expired, or unknown)'
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM workspaces w
+                     WHERE w.id = inv.workspace_id AND w.state = 'active')
+     OR NOT EXISTS (SELECT 1 FROM workspace_members a
+                      JOIN users u ON u.id = a.user_id AND u.state = 'active'
+                     WHERE a.workspace_id = inv.workspace_id
+                       AND a.user_id = inv.invited_by_user_id
+                       AND a.role IN ('owner', 'admin'))
+     OR EXISTS (SELECT 1 FROM workspace_member_removals r
+                 WHERE r.workspace_id = inv.workspace_id AND r.user_id = p_user
+                   AND r.removed_at >= inv.created_at) THEN
+    RAISE EXCEPTION 'invitation not acceptable (no longer legitimate)'
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  -- D33 per-provider acceptance constraint, evaluated in-body:
+  IF p_provider = 'google' THEN
+    IF inv.email IS NOT NULL THEN
+      IF lower(p_verified_email) IS DISTINCT FROM lower(inv.email) THEN
+        RAISE EXCEPTION 'identity proof mismatch' USING ERRCODE = 'check_violation';
+      END IF;
+      m := true;
+    ELSE m := false;                             -- no comparable proof: recorded skip
+    END IF;
+  ELSIF p_provider = 'telegram' THEN
+    IF inv.invited_tg_user_id IS NOT NULL THEN
+      IF p_tg_user_id IS DISTINCT FROM inv.invited_tg_user_id THEN
+        RAISE EXCEPTION 'identity proof mismatch' USING ERRCODE = 'check_violation';
+      END IF;
+      m := true;
+    ELSE m := false;                             -- hint-only or bare token: recorded skip (D36)
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'unknown acceptance provider %', p_provider;
+  END IF;
+  UPDATE workspace_invitations
+     SET state = 'accepted', accepted_by_user_id = p_user, accepted_email_matched = m
+   WHERE id = inv.id;
+  grant_role := CASE WHEN inv.role = 'admin' AND m THEN 'admin' ELSE 'member' END;
+  INSERT INTO workspace_members (workspace_id, user_id, role, added_by_user_id)
+  VALUES (inv.workspace_id, p_user, grant_role, inv.invited_by_user_id)
+  ON CONFLICT (workspace_id, user_id) DO NOTHING;  -- already a member: invite consumed, the
+                                                    -- existing role stands (role changes go
+                                                    -- through the 06 §2 gate)
+  IF inv.role = 'admin' AND NOT m THEN             -- D36 elevation-pending, same transaction
+    SELECT b.id INTO bind FROM channel_bindings b
+     WHERE b.workspace_id = inv.workspace_id AND b.state = 'active'
+     ORDER BY b.created_at LIMIT 1;
+    IF bind IS NOT NULL THEN
+      INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload)
+      VALUES (inv.workspace_id, bind, 'notification',
+              jsonb_build_object('v', 1, 'template', 'elevation_pending',
+                                 'invitation_id', inv.id, 'accepted_by', p_user));
+    END IF;                                        -- zero-binding workspace: the pending
+  END IF;                                          -- elevation is visible on the web surface
+  RETURN QUERY SELECT inv.workspace_id, grant_role, m;
+END $$;
+
+COMMENT ON FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) IS
+  'The pre-membership door (059): accept a pending, unexpired invitation by its token hash, with '
+  'the D33 identity proof computed here. Refuses (no_data_found) an invitation that is no longer '
+  'legitimate (098): its workspace is not active, its inviter is no longer an owner or admin '
+  'there with an active account, or the acceptor was removed from the workspace after it was '
+  'sent. SECURITY DEFINER owned by svc_membership with EXECUTE granted to svc_ingress.';
 
 REVOKE CREATE ON SCHEMA public FROM svc_membership;
 ```

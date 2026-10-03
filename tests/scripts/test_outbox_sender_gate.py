@@ -563,7 +563,7 @@ class TestARevokedBindingIsNeverClaimed:
         429 put back to `pending`, one a dead sender left `sending` and one
         `ambiguous` are all superseded, so a re-bind posts no stale card. A
         `sent` row and another binding's row are untouched."""
-        from src.services.target.outbox import retire_revoked_queue
+        from src.services.target.bindings import retire_unsettled
 
         binding = _new_binding(outbox_db)
         other = _new_binding(outbox_db)
@@ -589,7 +589,7 @@ class TestARevokedBindingIsNeverClaimed:
         try:
             async with engine.connect() as conn:
                 await _tenant(conn, outbox_db)
-                moved = await retire_revoked_queue(conn, binding_id=binding)
+                moved = await retire_unsettled(conn, binding_id=binding)
                 await conn.commit()
         finally:
             await engine.dispose()

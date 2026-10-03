@@ -480,9 +480,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             # workspace let go of, and retiring what is left of its queue
             # keeps a later re-bind from posting it as stale cards.
             async with short() as writer:
-                retired = await outbox.retire_revoked_queue(
-                    writer, binding_id=binding_id
-                )
+                retired = await bindings.retire_unsettled(writer, binding_id=binding_id)
             logger.info(
                 "deliver_outbox %s: binding %s is %s — nothing sent, %d retired",
                 job["id"],

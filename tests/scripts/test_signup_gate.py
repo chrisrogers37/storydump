@@ -65,6 +65,7 @@ SENT_BY = {
     "from-removed@example.com": "removed",
     "from-demoted@example.com": "demoted",
     "from-suspended@example.com": "suspended_owner",
+    "from-disabled@example.com": "disabled",
     "from-nobody@example.com": None,  # a service identity's: no inviter recorded
 }
 STANDING = {"from-admin@example.com"}
@@ -118,6 +119,7 @@ def world(admin_conn, owner_actor):
                     "admin": _user(cur, ws, "admin"),
                     "removed": _user(cur),
                     "demoted": _user(cur, ws, "member"),
+                    "disabled": _user(cur, ws, "admin"),
                     "suspended_owner": suspended["user"],
                     None: None,
                 }
@@ -128,10 +130,17 @@ def world(admin_conn, owner_actor):
                     "UPDATE workspaces SET state = 'suspended' WHERE id = %s",
                     (suspended["ws"],),
                 )
+                cur.execute(
+                    "UPDATE users SET state = 'disabled' WHERE id = %s",
+                    (inviters["disabled"],),
+                )
             conn.commit()
         finally:
             conn.close()
         yield {
+            "ws": ws,
+            "ws_owner": chain["user"],
+            "inviters": inviters,
             "owner": owner_dsn,
             "ingress": as_user(db, "svc_ingress"),
             "worker": as_user(db, "svc_worker"),
@@ -183,14 +192,235 @@ class TestTheDoor:
 
     @pytest.mark.parametrize("email", [e for e in SENT_BY if e not in STANDING])
     def test_an_invitation_that_lost_its_standing_lets_nobody_in(self, world, email):
-        """098: the inviter was removed or demoted, the workspace is suspended,
-        or nobody is recorded as the inviter — the invitation is pending and
-        unexpired, and still admits no new account."""
+        """098: the inviter was removed, demoted or disabled, the workspace is
+        suspended, or nobody is recorded as the inviter — the invitation is
+        pending and unexpired, and still admits no new account."""
         assert _admitted(world, email) is False
 
     def test_the_door_is_svc_ingress_alone(self, world):
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             _one(world["worker"], "SELECT fn_signup_admitted('friend@example.com')")
+
+
+def _as_owner(world, *statements):
+    """Run *statements* as the schema owner with an actor, committed, and
+    return the last one's first column."""
+    conn = psycopg2.connect(world["owner"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'operator'")
+            last = None
+            for sql, params in statements:
+                cur.execute(sql, params)
+                last = cur.fetchone()[0] if cur.description else None
+        conn.commit()
+        return last
+    finally:
+        conn.close()
+
+
+def _existing_user(world, email):
+    return _as_owner(
+        world,
+        (
+            "INSERT INTO users (primary_email) VALUES (%s) RETURNING id",
+            (email,),
+        ),
+    )
+
+
+def _accept(world, email, user):
+    """Accept the invitation addressed to *email* as *user*, the way
+    `invitations.accept` asks the door; returns the granted role."""
+    return _one(
+        world["ingress"],
+        "SELECT o_granted_role FROM fn_invitation_accept(%s, %s, 'google', %s,"
+        " NULL, 'web')",
+        (hashlib.sha256(email.encode()).hexdigest(), user, email),
+    )
+
+
+class TestTheAcceptDoor:
+    """098 holds `fn_invitation_accept` to the same standing as the sign-up
+    door, so an EXISTING account cannot come in through an invitation the
+    sign-up door refuses, and a removal outranks an invitation sent before it.
+    The refusal is the door's own `no_data_found`, the answer a used or
+    revoked invitation gets."""
+
+    @pytest.mark.parametrize(
+        "by", ["removed", "demoted", "disabled", "suspended_owner", None]
+    )
+    def test_an_invitation_that_lost_its_standing_admits_no_existing_account(
+        self, world, by
+    ):
+        email = f"accept-{by}@example.com"
+        home = (
+            _one(
+                world["owner"],
+                "SELECT workspace_id FROM workspace_members WHERE user_id = %s",
+                (world["inviters"][by],),
+            )
+            if by == "suspended_owner"
+            else world["ws"]
+        )
+        _as_owner(
+            world,
+            (
+                "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                " delivery_channel, email, role, expires_at, invited_by_user_id)"
+                " VALUES (%s, %s, 'email', %s, 'admin', now() + interval '7 days',"
+                " %s)",
+                (
+                    home,
+                    hashlib.sha256(email.encode()).hexdigest(),
+                    email,
+                    world["inviters"][by],
+                ),
+            ),
+        )
+        user = _existing_user(world, email)
+        with pytest.raises(psycopg2.errors.NoDataFound):
+            _accept(world, email, user)
+
+    def test_an_invitation_from_a_current_admin_is_accepted(self, world):
+        email = "accept-admin@example.com"
+        _as_owner(
+            world,
+            (
+                "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                " delivery_channel, email, role, expires_at, invited_by_user_id)"
+                " VALUES (%s, %s, 'email', %s, 'admin', now() + interval '7 days',"
+                " %s)",
+                (
+                    world["ws"],
+                    hashlib.sha256(email.encode()).hexdigest(),
+                    email,
+                    world["inviters"]["admin"],
+                ),
+            ),
+        )
+        assert _accept(world, email, _existing_user(world, email)) == "admin"
+
+    def test_a_removal_outranks_an_invitation_sent_before_it(self, world):
+        """An invitation addressed to a member who is then removed does not
+        bring them back; a fresh invitation after the removal does."""
+        old, fresh = "removed-old@example.com", "removed-fresh@example.com"
+        user = _existing_user(world, old)
+
+        def invite(email):
+            return (
+                "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                " delivery_channel, email, role, expires_at, invited_by_user_id)"
+                " VALUES (%s, %s, 'email', %s, 'admin', now() + interval '7 days',"
+                " %s)",
+                (
+                    world["ws"],
+                    hashlib.sha256(email.encode()).hexdigest(),
+                    email,
+                    world["ws_owner"],
+                ),
+            )
+
+        _as_owner(
+            world,
+            invite(old),
+            (
+                "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                " VALUES (%s, %s, 'member')",
+                (world["ws"], user),
+            ),
+        )
+        _as_owner(
+            world,
+            (
+                "DELETE FROM workspace_members WHERE workspace_id = %s"
+                " AND user_id = %s",
+                (world["ws"], user),
+            ),
+            (
+                "INSERT INTO workspace_member_removals"
+                " (workspace_id, user_id, removed_by_user_id)"
+                " VALUES (%s, %s, %s)",
+                (world["ws"], user, world["ws_owner"]),
+            ),
+        )
+        with pytest.raises(psycopg2.errors.NoDataFound):
+            _accept(world, old, user)
+
+        # Positive control: an invitation sent after the removal is the way
+        # back in. The verified email the door compares is the fresh one's.
+        _as_owner(world, invite(fresh))
+        assert (
+            _one(
+                world["ingress"],
+                "SELECT o_granted_role FROM fn_invitation_accept(%s, %s, 'google',"
+                " %s, NULL, 'web')",
+                (hashlib.sha256(fresh.encode()).hexdigest(), user, fresh),
+            )
+            == "admin"
+        )
+
+
+def _backfill_sql() -> str:
+    """098's one-time revoke, read from the file so the test runs the shipped
+    statement rather than a copy."""
+    from pathlib import Path
+
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "scripts/migrations/098_invitations_admit_while_legitimate.sql"
+    )
+    text_ = migration.read_text()
+    start = text_.index("UPDATE workspace_invitations i SET state = 'revoked'")
+    return text_[start : text_.index(";", start)]
+
+
+def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(world):
+    """098 revokes, once, the pending invitations of an inviter who has a
+    removal record and is not a member there again. A removed-then-re-invited
+    inviter's, an accepted one, and a current admin's are left as they were.
+    Run inside a transaction that is rolled back, so the world is untouched."""
+    gone = _existing_user(world, "gone-inviter@example.com")
+    back = _existing_user(world, "back-inviter@example.com")
+    rows = {
+        "by-gone@example.com": (gone, "pending"),
+        "by-gone-used@example.com": (gone, "accepted"),
+        "by-back@example.com": (back, "pending"),
+        "by-admin@example.com": (world["inviters"]["admin"], "pending"),
+    }
+    conn = psycopg2.connect(world["owner"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'operator'")
+            cur.execute(
+                "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                " VALUES (%s, %s, 'admin')",
+                (world["ws"], back),
+            )
+            for user in (gone, back):
+                cur.execute(
+                    "INSERT INTO workspace_member_removals"
+                    " (workspace_id, user_id, removed_by_user_id)"
+                    " VALUES (%s, %s, %s)",
+                    (world["ws"], user, world["ws_owner"]),
+                )
+            for email, (by, state) in rows.items():
+                _invite(cur, world["ws"], email, by=by, state=state)
+            cur.execute(_backfill_sql())
+            cur.execute(
+                "SELECT email, state FROM workspace_invitations WHERE email = ANY(%s)",
+                (list(rows),),
+            )
+            after = dict(cur.fetchall())
+    finally:
+        conn.rollback()
+        conn.close()
+    assert after == {
+        "by-gone@example.com": "revoked",
+        "by-gone-used@example.com": "accepted",
+        "by-back@example.com": "pending",
+        "by-admin@example.com": "pending",
+    }
 
 
 class TestTheAdmissionsTable:

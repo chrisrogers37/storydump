@@ -746,7 +746,7 @@ async def _give_up(
 
     A story that reached the transit upload carries a copy on Cloudinary,
     and the API holds no transit credentials to destroy it. The give-up
-    mints a `publish_pipeline` job in its own transaction instead: the
+    mints a `publish_pipeline` job in the same transaction instead: the
     worker meets the intent already `cancelled`, destroys the copy and
     finalizes — the pipeline's terminal route, which never posts (the row
     is frozen before the job is visible). Without one, the copy waited for
