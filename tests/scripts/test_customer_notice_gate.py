@@ -754,6 +754,25 @@ class TestTheRunwayNotice:
         assert len(_runway_told(notice_db)) == 2
         assert _latch(notice_db) == [NOTICE_EVENT, REARM_EVENT, NOTICE_EVENT]
 
+    async def test_an_edit_to_the_account_is_not_the_latch(self, notice_db):
+        """The latch is the newest of its OWN two rows. An admin's edit to the
+        account (its display name here) writes the account's governance audit
+        row after the notice; it must not re-arm it, or the next low mint is
+        told again."""
+        from src.services.target.content_runway import NOTICE_EVENT
+
+        _cadence(notice_db, 1)
+        _files(notice_db, 7)
+        await _mint(notice_db)  # 6 left: told
+        _sql(
+            notice_db,
+            "UPDATE ig_accounts SET display_name = 'Renamed by an admin' WHERE id = %s",
+            (notice_db["iga"],),
+        )
+        await _mint(notice_db)  # 5 left: still the same crossing
+        assert len(_runway_told(notice_db)) == 1, "an edit is not a re-arm"
+        assert _latch(notice_db) == [NOTICE_EVENT]
+
     async def test_the_workspace_cadence_divides_when_the_account_has_none(
         self, notice_db
     ):

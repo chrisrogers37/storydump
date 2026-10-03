@@ -73,7 +73,7 @@ describe("deriveRunway", () => {
       ],
     });
     expect(rows.map((row) => [row.headline, row.detail])).toEqual([
-      ["No content left", "0 files at 3 a day"],
+      ["No content left", "3 a day"],
       ["Not posting", "0 files ready"],
     ]);
   });

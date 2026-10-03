@@ -9,7 +9,6 @@ import { RunwayCard } from "./runway-card";
 import { EmptyState } from "./empty-state";
 import { TONE_CLASS } from "./tone";
 import { Badge } from "@/components/ui/badge";
-import { RESOLVED_IN } from "@/lib/conditions";
 import type { RunwayRow } from "@/lib/runway";
 
 /** Depth-first walk of a returned tree, children flattened. */
@@ -98,12 +97,15 @@ describe("RunwayCard", () => {
     expect(text).not.toContain("told once");
   });
 
-  it("links an empty card to Accounts, where an account is connected", () => {
+  it("leaves an empty card's call to action to the Overview's setup step", () => {
     const empty = [...walk(RunwayCard({ rows: [], belowDays: BELOW_DAYS }))].find(
       (el) => el.type === EmptyState,
     );
-    expect(empty?.props).toMatchObject({
-      action: { label: RESOLVED_IN.accounts.action, href: RESOLVED_IN.accounts.href },
-    });
+    expect(empty, "the empty card renders no EmptyState").toBeDefined();
+    const props = empty?.props as { action?: unknown; description?: string };
+    expect(props.action).toBeUndefined();
+    expect(props.description).toBe(
+      "Days of content left show here once an account is connected.",
+    );
   });
 });

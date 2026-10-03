@@ -67,16 +67,19 @@ export function runwayHeadline(daysLeft: number | null): string {
  * Drive folder is connected.
  */
 export function deriveRunway(runway: RunwayResponse): RunwayRow[] {
-  return runway.accounts.map((account) => ({
-    key: account.id,
-    name: destinationName(account),
-    headline:
-      account.posting && account.eligible === 0
-        ? "No content left"
-        : runwayHeadline(account.days_left),
-    detail: account.posting
-      ? `${files(account.eligible)} at ${account.posts_per_day} a day`
-      : `${files(account.eligible)} ready`,
-    low: account.low,
-  }));
+  return runway.accounts.map((account) => {
+    const empty = account.posting && account.eligible === 0;
+    return {
+      key: account.id,
+      name: destinationName(account),
+      headline: empty ? "No content left" : runwayHeadline(account.days_left),
+      // With no file, a count of them would only repeat the headline.
+      detail: empty
+        ? `${account.posts_per_day} a day`
+        : account.posting
+          ? `${files(account.eligible)} at ${account.posts_per_day} a day`
+          : `${files(account.eligible)} ready`,
+      low: account.low,
+    };
+  });
 }

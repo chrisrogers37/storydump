@@ -3,7 +3,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/dashboard/empty-state";
 import { TONE_CLASS } from "@/components/dashboard/tone";
-import { RESOLVED_IN } from "@/lib/conditions";
 import type { RunwayRow } from "@/lib/runway";
 
 /**
@@ -14,9 +13,10 @@ import type { RunwayRow } from "@/lib/runway";
  * list says who is told and when, so the mark is never the only place the
  * rule lives. It names this workspace's Telegram chats, where the notice goes,
  * rather than the reader: a workspace with none bound is told nothing. The
- * empty card has no list and so no sentence. The figure is a floor: a posted
- * file comes back once its repost window passes, which this does not count
- * ahead of time.
+ * empty card has no list and so no sentence, and no call to action: the
+ * Overview's setup step, which knows the reader's role, is the one. The
+ * figure is a floor: a posted file comes back once its repost window
+ * passes, which this does not count ahead of time.
  */
 export function RunwayCard({
   rows,
@@ -35,11 +35,7 @@ export function RunwayCard({
           <EmptyState
             icon={Hourglass}
             title="No Instagram account connected yet"
-            description="Connect one to see how many days of content it has left."
-            action={{
-              label: RESOLVED_IN.accounts.action,
-              href: RESOLVED_IN.accounts.href,
-            }}
+            description="Days of content left show here once an account is connected."
           />
         ) : (
           <>

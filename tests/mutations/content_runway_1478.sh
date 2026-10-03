@@ -118,6 +118,7 @@ check "the latch never re-arms" PYTEST $C '    if latched and days >= below_days
 check "the latch re-arms at the warning level" PYTEST $C '    if latched and days >= below_days + REARM_MARGIN_DAYS:' '    if latched and days >= below_days:' "$G -k 'hovering_at_the_line'"
 check "the re-arm does not move with the level" PYTEST $C '    if latched and days >= below_days + REARM_MARGIN_DAYS:' '    if latched and days >= 8:' "$U -k 'margin_over_the_warning_level'"
 check "the latch reads its oldest row" PYTEST $C '        "         ORDER BY e.id DESC LIMIT 1) AS latch"' '        "         ORDER BY e.id LIMIT 1) AS latch"' "$G -k 'refills_rearms'"
+check "the latch reads any audit row of the account" PYTEST $C $'        "           AND e.detail->>\'event\' IN (:told, :rearmed)"' $'        "           AND (e.detail->>\'event\' IN (:told, :rearmed) OR true)"' "$G -k 'edit_to_the_account_is_not_the_latch'"
 check "a notice that fails costs the mint" PYTEST $S '    except Exception:  # noqa: BLE001 — logged; the mint stands' '    except ZeroDivisionError:  # noqa: BLE001 — logged; the mint stands' "$WL -k 'never_costs_the_mint'"
 check "a minted slot reports an undeliverable notice" PYTEST $S '    return SlotOutcome(intent_id=str(row[0]))' '    return SlotOutcome(intent_id=str(row[0]), notice=outbox.UNDELIVERABLE)' "$WL -k 'nobody_receives'"
 check "the undeliverable attempt writes no latch" PYTEST $C $'    detail.update(below_days=below_days, told=len(bindings))\n    await _latch(session, workspace_id, ig_account_id, detail)\n' $'    detail.update(below_days=below_days, told=len(bindings))\n' "$G -k 'no_binding_still_mints_and_latches'"
@@ -127,7 +128,7 @@ check "a part-day is rounded up into a promise" PYTEST $C '    return eligible /
 check "no content left reads as less than a day" PYTEST $C '    if not eligible:' '    if False:' "$U -k 'no_content_is_not'"
 check "the card marks low at a level of its own" PYTEST $V '            below_days=WorkerConfig().low_runway_days,' '            below_days=WorkerConfig().low_runway_days + 1,' "$R -k 'runway'"
 check "the low mark is on the wrong accounts" VITEST $CARD '                    {row.low && (' '                    {!row.low && (' "src/components/dashboard/runway-card.test.tsx"
-check "an empty library reads as less than a day" VITEST $LIB '      account.posting && account.eligible === 0' '      account.posting && account.eligible < 0' "src/lib/runway.test.ts"
+check "an empty library reads as less than a day" VITEST $LIB '    const empty = account.posting && account.eligible === 0;' '    const empty = account.posting && account.eligible < 0;' "src/lib/runway.test.ts"
 check "a failed runway read does not stop the page" VITEST $PAGE $'    !statsResult.ok ||\n    !runwayResult.ok ||\n' $'    !statsResult.ok ||\n' "'src/app/(dashboard)/dashboard/overview-conditions.test.tsx'"
 
 echo "ran $RAN of $EXPECTED mutations${ONLY:+ (ONLY=$ONLY)}"
