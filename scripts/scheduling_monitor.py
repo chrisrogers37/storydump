@@ -154,6 +154,15 @@ DEFAULT_WORKER_OVERDUE_S = 900
 #: them without parsing text.
 EXIT_QUIET, EXIT_SPOKE, EXIT_NOTIFY_FAILED = 0, 10, 11
 
+#: What `classify` reads, and so all `/health/scheduling` publishes (a test
+#: holds the route to these): the cursor axis's counts and its lag, and the
+#: worker block's counts and ages.
+_COUNTS = ("stalled", "accounts_active")
+_LAG = "max_lag_seconds"
+_WORKER = "worker"
+_WORKER_COUNTS = ("succeeded_ever", "overdue_ready")
+_WORKER_AGES = ("last_success_age_seconds", "max_overdue_seconds")
+
 
 class Verdict:
     """What one reading means, before any history is applied."""
@@ -200,15 +209,15 @@ def _worker_state(data: dict, *, stale_s: int, overdue_s: int) -> tuple[str, str
     than this poller — and is not an instrument fault, so it is reported as its
     own value and the caller decides what it means alongside the other axis.
     """
-    if "worker" not in data:
+    if _WORKER not in data:
         return "absent", "the endpoint does not serve a worker block"
-    w = data.get("worker")
+    w = data.get(_WORKER)
     if not isinstance(w, dict):
         return "invalid", "worker was not an object"
-    for key in ("succeeded_ever", "overdue_ready"):
+    for key in _WORKER_COUNTS:
         if not _is_count(w.get(key)):
             return "invalid", f"worker.{key} missing or not an integer"
-    for key in ("last_success_age_seconds", "max_overdue_seconds"):
+    for key in _WORKER_AGES:
         if not _is_count_or_null(w.get(key, _ABSENT)):
             return "invalid", f"worker.{key} was neither null nor an integer"
     age = w.get("last_success_age_seconds")
@@ -257,7 +266,7 @@ def classify(
     if not isinstance(data, dict):
         return Verdict(UNREACHABLE, "response was not an object")
 
-    for key in ("stalled", "accounts_active"):
+    for key in _COUNTS:
         if not _is_count(data.get(key)):
             return Verdict(UNREACHABLE, f"{key} missing or not an integer")
     # `.get` WITHOUT the sentinel, deliberately: on this axis a missing key has
@@ -266,7 +275,7 @@ def classify(
     # unrelated PR. The worker axis below is stricter because it is new — the
     # endpoint always emits all four of its keys — so the asymmetry is a
     # decision rather than drift.
-    lag = data.get("max_lag_seconds")
+    lag = data.get(_LAG)
     if not _is_count_or_null(lag):
         return Verdict(UNREACHABLE, "max_lag_seconds was neither null nor an integer")
 

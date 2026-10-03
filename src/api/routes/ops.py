@@ -160,5 +160,6 @@ async def posture(request: Request, principal: Principal = Depends(require_ops))
 @router.get("/ops/health")
 async def ops_health(request: Request, principal: Principal = Depends(require_ops)):
     """The details public `/health` no longer carries: usage counts, the
-    database login, the pool and the bot's webhook. Operators only."""
-    return health.details(request.app.state)
+    database login, the pool and the bot's webhook, and the queue's
+    backpressure. Operators only."""
+    return await health.operating_details(request.app.state)
