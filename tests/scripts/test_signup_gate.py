@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
+import time
 from urllib.parse import parse_qs, urlsplit
 
 import psycopg2
@@ -425,23 +426,36 @@ class TestTheAcceptDoor:
 
             worker = threading.Thread(target=accept)
             worker.start()
-            worker.join(timeout=2)
-            assert worker.is_alive(), "the acceptance waits on the removal"
+            assert _blocks_another(removal), (
+                "the acceptance waits on the removal's member row"
+            )
             removal.commit()
             worker.join(timeout=30)
         finally:
             removal.close()
 
+        # The refusal is the proof: `_accept` never commits, so a member count
+        # afterwards would read 0 either way.
         assert isinstance(outcome.get("error"), psycopg2.errors.NoDataFound), outcome
-        assert (
-            _one(
-                world["owner"],
-                "SELECT count(*) FROM workspace_members WHERE workspace_id = %s"
-                " AND user_id = %s",
-                (world["ws"], user),
+
+
+def _blocks_another(conn, timeout: float = 10.0) -> bool:
+    """True once another backend waits on a lock *conn* holds
+    (`pg_blocking_pids`, which, unlike `pg_stat_activity`'s query column, a
+    non-superuser can read for any role's session); False after *timeout*."""
+    deadline = time.monotonic() + timeout
+    with conn.cursor() as cur:
+        while time.monotonic() < deadline:
+            # The activity view is snapshotted once per transaction: refresh it.
+            cur.execute("SELECT pg_stat_clear_snapshot()")
+            cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity a"
+                " WHERE pg_backend_pid() = ANY(pg_blocking_pids(a.pid)))"
             )
-            == 0
-        )
+            if cur.fetchone()[0]:
+                return True
+            time.sleep(0.05)
+    return False
 
 
 def _backfill_sql() -> str:
@@ -460,25 +474,9 @@ def _backfill_sql() -> str:
 
 def test_the_listing_shows_only_invitations_the_doors_would_honour(world):
     """`GET …/invitations` lists what the doors would still accept: not an
-    invitation from a removed, demoted or disabled sender or with none, and
-    not one addressed to someone removed after it was sent."""
-    gone = "removed-addressee@example.com"
-    user = _existing_user(world, gone)
-    _as_owner(
-        world,
-        (
-            "INSERT INTO workspace_invitations (workspace_id, token_hash,"
-            " delivery_channel, email, expires_at, invited_by_user_id)"
-            " VALUES (%s, %s, 'email', %s, now() + interval '7 days', %s)",
-            (world["ws"], "listing-" + gone, gone, world["ws_owner"]),
-        ),
-        (
-            "INSERT INTO workspace_member_removals"
-            " (workspace_id, user_id, removed_by_user_id) VALUES (%s, %s, %s)",
-            (world["ws"], user, world["ws_owner"]),
-        ),
-    )
-
+    invitation from a removed, demoted or disabled sender or with none. An
+    invitation to someone removed after it was sent is revoked by the removal
+    (or by 098's one-time revoke), so the state filter leaves it out."""
     listed = {
         row["email"]
         for row in asyncio.run(
@@ -493,16 +491,18 @@ def test_the_listing_shows_only_invitations_the_doors_would_honour(world):
 
     assert LIVE | STANDING <= listed
     assert not listed & (set(SENT_BY) - STANDING)
-    assert gone not in listed
 
 
 def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(world):
     """098 revokes, once, the pending invitations of an inviter who has a
-    removal record and is not a member there again. A removed-then-re-invited
-    inviter's, an accepted one, and a current admin's are left as they were.
-    Run inside a transaction that is rolled back, so the world is untouched."""
+    removal record and is not a member there again, and those addressed to a
+    person removed after they were sent. A removed-then-re-invited inviter's,
+    an accepted one, a current admin's and one sent to a removed person after
+    the removal are left as they were. Run inside a transaction that is rolled
+    back, so the world is untouched."""
     gone = _existing_user(world, "gone-inviter@example.com")
     back = _existing_user(world, "back-inviter@example.com")
+    addressee = _existing_user(world, "Removed-Addressee@example.com")
     rows = {
         "by-gone@example.com": (gone, "pending"),
         "by-gone-used@example.com": (gone, "accepted"),
@@ -518,7 +518,7 @@ def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(w
                 " VALUES (%s, %s, 'admin')",
                 (world["ws"], back),
             )
-            for user in (gone, back):
+            for user in (gone, back, addressee):
                 cur.execute(
                     "INSERT INTO workspace_member_removals"
                     " (workspace_id, user_id, removed_by_user_id)"
@@ -527,10 +527,30 @@ def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(w
                 )
             for email, (by, state) in rows.items():
                 _invite(cur, world["ws"], email, by=by, state=state)
+            admin = world["inviters"]["admin"]
+            # Sent before the removal (an hour earlier), and after it.
+            _invite(cur, world["ws"], "removed-addressee@example.com", by=admin)
+            cur.execute(
+                "UPDATE workspace_invitations SET created_at = now() - interval '1 hour'"
+                " WHERE email = 'removed-addressee@example.com'"
+            )
+            cur.execute(
+                "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                " delivery_channel, email, expires_at, invited_by_user_id, created_at)"
+                " VALUES (%s, 'after-removal', 'email', 'REMOVED-ADDRESSEE@example.com',"
+                " now() + interval '7 days', %s, now() + interval '1 minute')",
+                (world["ws"], admin),
+            )
             cur.execute(_backfill_sql())
             cur.execute(
                 "SELECT email, state FROM workspace_invitations WHERE email = ANY(%s)",
-                (list(rows),),
+                (
+                    [
+                        *rows,
+                        "removed-addressee@example.com",
+                        "REMOVED-ADDRESSEE@example.com",
+                    ],
+                ),
             )
             after = dict(cur.fetchall())
     finally:
@@ -541,6 +561,8 @@ def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(w
         "by-gone-used@example.com": "accepted",
         "by-back@example.com": "pending",
         "by-admin@example.com": "pending",
+        "removed-addressee@example.com": "revoked",
+        "REMOVED-ADDRESSEE@example.com": "pending",
     }
 
 

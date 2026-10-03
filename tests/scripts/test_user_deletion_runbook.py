@@ -2,15 +2,16 @@
 as written on the replayed advertised stream as the schema owner.
 
 The three SQL blocks are read from the guide, so the guide cannot drift from
-what was proven. The listing names the live workspace tokens with no recorded
-minter in the workspaces the person administers. A member or an admin is
-deleted, whether or not they were removed through the product first, with the
-tokens they minted and the invitations they sent or were sent revoked and the
-admission of their email dropped. An owner is refused while their workspace
-exists. A person who approved a story that has since finished cannot be
-deleted (the finished story is frozen with the reference), and the erase block
-leaves a bare, disabled id with no email, identities, sessions, live tokens,
-link attempts, admission or pending invitations.
+what was proven. The listing names every live workspace token with no recorded
+minter. A member or an admin is deleted, whether or not they were removed
+through the product first, with the tokens they minted and the invitations
+they sent or were sent revoked, the admission of their email dropped and the
+binding to their private chat ended. An owner is refused while their
+workspace exists. A person who approved a story that has since finished
+cannot be deleted (the finished story is frozen with the reference), and the
+erase block leaves a bare, disabled id with no email, identities, sessions,
+live tokens, link attempts, admission, private-chat binding or pending
+invitations.
 """
 
 from __future__ import annotations
@@ -105,8 +106,9 @@ def _all(world, sql, params=()):
 def _person(world, chain, email, role="admin"):
     """A member with Google and Telegram identities, a session, an unfinished
     Telegram link, the owner's admission of their email, a workspace token
-    they minted, a pending invitation they sent, and two pending invitations
-    to them from the owner (by email and by Telegram id)."""
+    they minted, the workspace's binding to their private chat, a pending
+    invitation they sent, and two pending invitations to them from the owner
+    (by email and by Telegram id)."""
     ws = chain["ws"]
     tg = zlib.crc32(email.encode())
     conn = psycopg2.connect(world["owner"])
@@ -148,6 +150,12 @@ def _person(world, chain, email, role="admin"):
                 (f"token-{email}", ws, user),
             )
             token = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+                " VALUES (%s, 'telegram_dm', %s) RETURNING id",
+                (ws, str(tg)),
+            )
+            dm = cur.fetchone()[0]
             invitations = []
             for channel, address, tg_id, by in (
                 ("email", f"friend-of-{email}", None, user),
@@ -175,6 +183,7 @@ def _person(world, chain, email, role="admin"):
             "user": user,
             "email": email.lower(),
             "token": token,
+            "dm": dm,
             "invitations": invitations,
         }
     finally:
@@ -195,6 +204,12 @@ def _admitted(world, who) -> int:
         world,
         "SELECT count(*) FROM signup_admissions WHERE email = %s",
         (who["email"],),
+    )[0]
+
+
+def _dm_state(world, who) -> str:
+    return _one(
+        world, "SELECT state FROM channel_bindings WHERE id = %s", (who["dm"],)
     )[0]
 
 
@@ -245,35 +260,27 @@ def test_a_member_is_deleted_and_their_tokens_and_invitations_are_revoked(
     ) == (True,)
     assert _pending(world, who) == 0
     assert _admitted(world, who) == 0
+    assert _dm_state(world, who) == "revoked"
 
 
-def test_the_listing_names_the_unattributed_tokens_of_their_workspaces(world):
-    """Before the removals, the listing finds the workspace tokens with no
-    recorded minter where the person is an admin, and not those of a
-    workspace where they are only a member, or ones already revoked."""
-    admin_of = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-l1")
-    member_of = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-l2")
-    who = _person(world, admin_of, "lister@example.com", "admin")
+def test_the_listing_names_every_live_unattributed_workspace_token(world):
+    """The listing finds the live workspace tokens with no recorded minter,
+    including one in a workspace the person was already removed from, and
+    not a revoked one or one whose minter is recorded."""
+    chain = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-l1")
+    who = _person(world, chain, "lister@example.com", "admin")
+    assert _remove(world, chain, who["user"]) == "admin"
     conn = psycopg2.connect(world["owner"])
     try:
         with conn.cursor() as cur:
             cur.execute("SET app.actor_kind = 'migration'")
-            cur.execute(
-                "INSERT INTO workspace_members (workspace_id, user_id, role)"
-                " VALUES (%s, %s, 'member')",
-                (member_of["ws"], who["user"]),
-            )
             tokens = {}
-            for label, ws, revoked in (
-                ("unattributed", admin_of["ws"], False),
-                ("revoked", admin_of["ws"], True),
-                ("elsewhere", member_of["ws"], False),
-            ):
+            for label, revoked in (("unattributed", False), ("revoked", True)):
                 cur.execute(
                     "INSERT INTO service_tokens (name, token_hash, role,"
                     " workspace_id, revoked_at) VALUES (%s, %s, 'operator', %s,"
                     " CASE WHEN %s THEN now() END) RETURNING id",
-                    (label, f"listing-{label}", ws, revoked),
+                    (label, f"listing-{label}", chain["ws"], revoked),
                 )
                 tokens[label] = cur.fetchone()[0]
         conn.commit()
@@ -282,8 +289,10 @@ def test_the_listing_names_the_unattributed_tokens_of_their_workspaces(world):
     listing, _delete, _erase = _runbook_blocks()
 
     (sql,) = _for(listing, who["user"])
+    listed = {row[0] for row in _all(world, sql)}
 
-    assert {row[0] for row in _all(world, sql)} == {tokens["unattributed"]}
+    assert tokens["unattributed"] in listed
+    assert not listed & {tokens["revoked"], who["token"]}
 
 
 def test_an_owner_is_refused_while_their_workspace_exists(world):
@@ -357,6 +366,7 @@ def test_a_person_with_a_finished_story_is_erased_instead(world):
     ) == (True,)
     assert _pending(world, who) == 0
     assert _admitted(world, who) == 0
+    assert _dm_state(world, who) == "revoked"
     assert _one(
         world, "SELECT count(*) FROM oauth_states WHERE user_id = %s", (who["user"],)
     ) == (0,)

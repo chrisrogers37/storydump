@@ -25,9 +25,11 @@
 --
 -- The removal also revokes the pending invitations the removed member sent or was sent, in the
 -- removal's transaction (`invitations.revoke_on_removal`, called by `workspaces.remove_member`), so
--- fn_member_remove's body is left as it is. Invitations sent by people removed before this file
--- are revoked here once: a pending invitation whose inviter has a removal record in its workspace
--- and is not a member there again. workspace_invitations carries no governance trigger (only
+-- fn_member_remove's body is left as it is. What removals before this file left pending is revoked
+-- here once: an invitation whose inviter has a removal record in its workspace and is not a member
+-- there again, and one addressed (by email or Telegram id) to a person removed from its workspace
+-- after it was sent. The doors refuse both anyway; revoking them lets the runtime's invitation
+-- listing filter on state alone, without reading the removal record. workspace_invitations carries no governance trigger (only
 -- 053's touch trigger), so the UPDATE needs no actor.
 --
 -- svc_membership, the doors' owner, reads users' id and state (a column grant under a SELECT
@@ -47,11 +49,19 @@ GRANT SELECT (id, state) ON users TO svc_membership;
 CREATE POLICY p_member_users ON users FOR SELECT TO svc_membership USING (true);
 
 UPDATE workspace_invitations i SET state = 'revoked'
-  FROM workspace_member_removals r
- WHERE r.workspace_id = i.workspace_id AND r.user_id = i.invited_by_user_id
-   AND i.state = 'pending'
-   AND NOT EXISTS (SELECT 1 FROM workspace_members m
-                    WHERE m.workspace_id = i.workspace_id AND m.user_id = i.invited_by_user_id);
+ WHERE i.state = 'pending'
+   AND (EXISTS (SELECT 1 FROM workspace_member_removals r
+                 WHERE r.workspace_id = i.workspace_id AND r.user_id = i.invited_by_user_id
+                   AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                                    WHERE m.workspace_id = i.workspace_id
+                                      AND m.user_id = i.invited_by_user_id))
+        OR EXISTS (SELECT 1 FROM workspace_member_removals r
+                     JOIN users u ON u.id = r.user_id
+                    WHERE r.workspace_id = i.workspace_id AND r.removed_at >= i.created_at
+                      AND (lower(u.primary_email) = lower(i.email)
+                           OR i.invited_tg_user_id::text IN
+                              (SELECT x.external_id FROM user_identities x
+                                WHERE x.user_id = r.user_id AND x.provider = 'telegram'))));
 
 GRANT CREATE ON SCHEMA public TO svc_membership;
 

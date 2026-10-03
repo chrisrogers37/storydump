@@ -260,18 +260,16 @@ owner; there is no product door for it. In order:
   (`ct_members_owner_exists`), and ownership cannot be handed over yet
   (`transfer_ownership` is not built). Delete that workspace first (Settings ›
   General) and let its grace window end, or keep the person.
-- [ ] **Tokens nobody can attribute**, in each workspace they administer.
-  Workspace service tokens minted before 090 record no minter, so neither a
-  removal nor the delete below can tell whether this person minted one. List
-  them before the removals, because the query reads their memberships:
+- [ ] **Tokens nobody can attribute.** Workspace service tokens minted
+  before 090 record no minter, so neither a
+  removal nor the delete below can tell whether this person minted one, and
+  their current memberships don't say either: they may have minted one in a
+  workspace they have since left. List every live one:
 
   ```sql
-  SELECT t.id, t.workspace_id, t.name, t.created_at
-    FROM service_tokens t
-   WHERE t.created_by_user_id IS NULL AND t.workspace_id IS NOT NULL
-     AND t.revoked_at IS NULL
-     AND t.workspace_id IN (SELECT workspace_id FROM workspace_members
-                             WHERE user_id = '…' AND role IN ('owner', 'admin'));
+  SELECT id, workspace_id, name, created_at FROM service_tokens
+   WHERE workspace_id IS NOT NULL AND created_by_user_id IS NULL
+     AND revoked_at IS NULL;
   ```
 
   Ask each workspace's owner which of these they minted themselves, and revoke
@@ -292,9 +290,12 @@ owner; there is no product door for it. In order:
   the workspace's owner — the whole of that person's Drive, Shared with me
   included.
 - [ ] **The delete**, always with an actor set and in one transaction, revoking
-  anything the removals missed on the way and dropping the owner's admission
+  anything the removals missed on the way, dropping the owner's admission
   of their email (`signup_admissions`), which would otherwise let a new
-  account with that address straight back in. The delete's cascades and `SET
+  account with that address straight back in, and ending every workspace's
+  Telegram binding to their private chat, which would otherwise keep
+  receiving that workspace's cards. (The bot does not remove anyone from a
+  group: an admin removes them in Telegram.) The delete's cascades and `SET
   NULL`s fire the governance trigger (on `workspace_members`, on
   `oauth_credentials` when they granted Drive, and on `workspaces` when they
   paused one), which refuses a write with no
@@ -313,6 +314,10 @@ owner; there is no product door for it. In order:
                                            WHERE user_id = '…' AND provider = 'telegram'));
   DELETE FROM signup_admissions
    WHERE email = (SELECT lower(primary_email) FROM users WHERE id = '…');
+  UPDATE channel_bindings SET state = 'revoked'
+   WHERE channel = 'telegram_dm' AND state = 'active'
+     AND external_ref IN (SELECT external_id FROM user_identities
+                           WHERE user_id = '…' AND provider = 'telegram');
   DELETE FROM users WHERE id = '…';
   COMMIT;
   ```
@@ -323,10 +328,12 @@ owner; there is no product door for it. In order:
   cannot be deleted. Erase what identifies them instead, in one transaction:
   their sign-ins, tokens and unfinished sign-in or link attempts end, their
   identities (the Google and Telegram accounts and their display names) and
-  the admission of their email go, and the `users` row stays as a bare id
+  the admission of their email and the bindings to their private chat go,
+  and the `users` row stays as a bare id
   with no email that cannot sign in. Audit rows keep that id, as they do after
-  a delete. The invitations and admission steps run before the email and
-  identities go, because they find what is addressed to them by both; a revoked
+  a delete. The invitations, admission and binding steps run before the
+  email and identities go, because they find what is addressed to them by
+  both; a revoked
   invitation keeps the address it was sent to.
 
   ```sql
@@ -344,6 +351,10 @@ owner; there is no product door for it. In order:
                                            WHERE user_id = '…' AND provider = 'telegram'));
   DELETE FROM signup_admissions
    WHERE email = (SELECT lower(primary_email) FROM users WHERE id = '…');
+  UPDATE channel_bindings SET state = 'revoked'
+   WHERE channel = 'telegram_dm' AND state = 'active'
+     AND external_ref IN (SELECT external_id FROM user_identities
+                           WHERE user_id = '…' AND provider = 'telegram');
   DELETE FROM oauth_states WHERE user_id = '…';
   DELETE FROM user_identities WHERE user_id = '…';
   UPDATE users SET primary_email = NULL, state = 'disabled' WHERE id = '…';

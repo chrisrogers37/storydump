@@ -403,14 +403,18 @@ async def list_bindings(executor, *, workspace_id: str) -> list[dict]:
 
 async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
     """Pending invitations the doors would still honour (098): the workspace
-    is active, the sender is still an owner or admin there with an active
-    account, and the addressee has not been removed since it was sent. The
-    others are dead links that age out with their expiry, so they are not
-    listed as pending. The predicate mirrors 098's two doors by hand (the
-    removal arm by addressee, where the door checks the accepting person), so
-    it belongs in the database with the next migration that touches them. The
-    token is never read back — only its hash is stored, and the row exposes
-    nothing a caller could present."""
+    is active and the sender is still an owner or admin there with an active
+    account. The others are dead links that age out with their expiry, so they
+    are not listed as pending. The predicate mirrors 098's two doors by hand,
+    so it belongs in the database with the next migration that touches them.
+
+    The doors' third check, a removal newer than the invitation, is not
+    repeated: the runtime cannot read the removal record (#1546 takes that
+    read away), and it needs none. A removal revokes the invitations addressed
+    to the person in its own transaction (`invitations.revoke_on_removal`),
+    and 098 revoked the ones older removals left pending, so the state filter
+    already leaves them out. The token is never read back — only its hash is
+    stored, and the row exposes nothing a caller could present."""
     return await readers.rows(
         executor,
         "SELECT i.id, i.delivery_channel, i.email, i.role, i.state, i.expires_at,"
@@ -423,15 +427,6 @@ async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
         "  JOIN users u ON u.id = i.invited_by_user_id AND u.state = 'active'"
         " WHERE i.workspace_id = :ws AND i.state = 'pending'"
         "   AND i.expires_at > now()"
-        "   AND NOT EXISTS ("
-        "       SELECT 1 FROM workspace_member_removals r"
-        "         JOIN users ru ON ru.id = r.user_id"
-        "        WHERE r.workspace_id = i.workspace_id"
-        "          AND r.removed_at >= i.created_at"
-        "          AND (lower(ru.primary_email) = lower(i.email)"
-        "               OR i.invited_tg_user_id::text IN"
-        "                  (SELECT external_id FROM user_identities"
-        "                    WHERE user_id = r.user_id AND provider = 'telegram')))"
         " ORDER BY i.created_at, i.id",
         ws=str(workspace_id),
     )

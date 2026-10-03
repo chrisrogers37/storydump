@@ -66,9 +66,13 @@ export function SignOutButton({
   everywhere?: boolean;
 }) {
   const router = useRouter();
-  const [failed, setFailed] = useState(false);
+  // `pending` disables the button while its request is in flight: a second
+  // click would present the session the first one just ended, and its answer
+  // ("already signed out") would land last and be wrong.
+  const [status, setStatus] = useState<"idle" | "pending" | "failed">("idle");
 
   async function signOut() {
+    setStatus("pending");
     let response: Response | null = null;
     try {
       response = await fetch(
@@ -81,8 +85,10 @@ export function SignOutButton({
     const outcome = signOutOutcome(response);
     // Stay put and say so: the session is still live, so landing on /login
     // would read as a sign-out that did not happen.
-    setFailed(outcome === "failed");
-    if (outcome === "failed") return;
+    if (outcome === "failed") {
+      setStatus("failed");
+      return;
+    }
     // A notice says what did not happen server-side; it outranks `redirectTo`.
     router.push(
       outcome === "done"
@@ -97,8 +103,15 @@ export function SignOutButton({
   }
 
   return (
-    <button type="button" onClick={signOut} className={className} aria-live="polite">
-      {failed ? SIGNOUT_FAILED : children}
+    <button
+      type="button"
+      onClick={signOut}
+      className={className}
+      disabled={status === "pending"}
+      aria-busy={status === "pending"}
+      aria-live="polite"
+    >
+      {status === "failed" ? SIGNOUT_FAILED : children}
     </button>
   );
 }

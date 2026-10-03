@@ -49,7 +49,7 @@ EXPECTED_WIDTH = {
     "case_mix:": "hashtextextended",
     "sources:": "hashtextextended",
     "media_source:": "hashtextextended",
-    # `invitations.create` serializes sends per workspace (#1574).
+    # `invitations.create` serializes sends per workspace and addressee (#1574).
     "invite:": "hashtextextended",
 }
 
