@@ -361,6 +361,13 @@
       "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
       "doc": "07-security-model.md",
       "ordinal": 33
+    },
+    {
+      "sha256": "cd5df6f99d44a8b71679fb5fdcc75095d923529773067cfe9376294332c179a5",
+      "class": "normative",
+      "label": "§36 an invitation admits only while it is legitimate (093, owner decision, PR #1560 security review finding 1) — fn_signup_admitted counting an invitation only from an active workspace whose owner or admin still sent it, and fn_member_remove revoking the removed member's pending invitations",
+      "doc": "07-security-model.md",
+      "ordinal": 34
     }
   ],
   "policy_expansion": {

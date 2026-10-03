@@ -230,8 +230,9 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 
 - [ ] Each person signs in on the web with Google and links their Telegram
   (Settings › Integrations → Link Telegram). Sign-up is gated (092): a new
-  account needs a pending invitation addressed to its email, or an admission
-  (`INSERT INTO signup_admissions (email) VALUES ('person@example.com');` as
+  account needs a pending invitation addressed to its email, sent from an
+  active workspace by someone still its owner or an admin (093), or an
+  admission (`INSERT INTO signup_admissions (email) VALUES ('person@example.com');` as
   the database owner)
 - [ ] Add them to the workspace's Telegram group. Anyone with a linked Telegram
   who posts in — or is added to — a bound group becomes a member of that
@@ -240,7 +241,8 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 - [ ] Or invite them from the Members card under Settings › General. Outbound
   email does not send yet (`AGENTS.md`, *What is deliberately not wired*), so
   an emailed invitation is created and not delivered
-- [ ] Removing a member is the Members card too. Changing a member's role is
+- [ ] Removing a member is the Members card too; it also revokes the pending
+  invitations that member sent (093). Changing a member's role is
   the `change_role` command — registered, not yet built
 
 Leaving the Telegram group removes nobody.

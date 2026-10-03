@@ -785,7 +785,8 @@ async def remove_member(
     non-member is `not_found`. The removal is recorded by the door, so the
     Telegram join path cannot re-add the person until they are invited back,
     and the workspace service identities they minted are revoked here, in the
-    same transaction (090)."""
+    same transaction (090). The door also revokes the pending invitations they
+    sent in the workspace (093)."""
     row = (
         await executor.execute(
             text(

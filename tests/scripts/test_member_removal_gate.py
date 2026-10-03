@@ -9,7 +9,8 @@ tokens a removed admin made kept reading the workspace.
 Both doors run here as the production role (`svc_ingress`) on the replayed
 advertised stream, and the removal runs through `workspaces.remove_member`, the
 service the command port calls, so the token half is proven in the same
-transaction the API uses.
+transaction the API uses. 093 adds the invitations the removed member sent: the
+door revokes the pending ones in that same transaction.
 """
 
 from __future__ import annotations
@@ -185,3 +186,61 @@ def test_the_removed_admins_service_tokens_are_revoked_with_the_membership(world
         _in_tenant(world["ingress"], world["ws"], world["owner"], states)
     )
     assert revoked == {theirs: True, owners: False}
+
+
+def _admitted(world, email: str) -> bool:
+    conn = psycopg2.connect(world["ingress"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT fn_signup_admitted(%s)", (email,))
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_the_removed_members_pending_invitations_are_revoked_with_them(world):
+    """093 (`07` §36): what the removed admin sent and nobody has used yet is
+    revoked in the removal's transaction, so it neither admits a new account
+    (`fn_signup_admitted`) nor can be accepted; the owner's invitation and the
+    removed admin's already-accepted one are left as they were."""
+    sent = {
+        "theirs@example.com": (world["admin"], "pending"),
+        "used@example.com": (world["admin"], "accepted"),
+        "owners@example.com": (world["owner"], "pending"),
+    }
+
+    async def invite(conn):
+        for email, (by, state) in sent.items():
+            await conn.execute(
+                text(
+                    "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                    " delivery_channel, email, state, expires_at, invited_by_user_id)"
+                    " VALUES (:ws, :h, 'email', :e, :s, now() + interval '7 days',"
+                    " CAST(:by AS uuid))"
+                ),
+                {"ws": world["ws"], "h": email, "e": email, "s": state, "by": by},
+            )
+
+    asyncio.run(_in_tenant(world["ingress"], world["ws"], world["owner"], invite))
+    assert _admitted(world, "theirs@example.com")
+
+    _remove(world, world["admin"])
+
+    async def states(conn):
+        rows = await conn.execute(
+            text(
+                "SELECT email, state FROM workspace_invitations WHERE workspace_id = :ws"
+            ),
+            {"ws": world["ws"]},
+        )
+        return dict(rows.all())
+
+    assert asyncio.run(
+        _in_tenant(world["ingress"], world["ws"], world["owner"], states)
+    ) == {
+        "theirs@example.com": "revoked",
+        "used@example.com": "accepted",
+        "owners@example.com": "pending",
+    }
+    assert not _admitted(world, "theirs@example.com")
+    assert _admitted(world, "owners@example.com")
