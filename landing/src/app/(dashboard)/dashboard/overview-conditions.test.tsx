@@ -9,10 +9,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement, ReactNode } from "react";
 
-const { workspaceFetch } = vi.hoisted(() => ({ workspaceFetch: vi.fn() }));
+const { workspaceFetch, viewer } = vi.hoisted(() => ({
+  workspaceFetch: vi.fn(),
+  viewer: { role: "admin" },
+}));
 
 vi.mock("@/lib/page-guards", () => ({
-  requireWorkspacePage: async () => ({ workspaceId: "ws-1" }),
+  requireWorkspacePage: async () => ({
+    workspaceId: "ws-1",
+    session: { workspaces: [{ id: "ws-1", name: "WS", role: viewer.role, state: "active" }] },
+  }),
 }));
 vi.mock("@/lib/workspaces", () => ({ workspaceFetch }));
 
@@ -22,7 +28,7 @@ import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
 import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
-import type { Condition } from "@/lib/conditions";
+import type { Condition, SetupStep } from "@/lib/conditions";
 import type { FolderMix } from "@/lib/dashboard-payloads";
 
 /** Depth-first walk of a returned tree, children flattened. */
@@ -112,6 +118,47 @@ describe("the overview's condition panel", () => {
     const paths = workspaceFetch.mock.calls.map(([path]) => path);
     expect(paths).toContain("accounts");
     expect(paths).toContain("sources");
+  });
+
+  it("hands the panel the first missing setup step from the same reads", async () => {
+    answer({ accounts: ok({ accounts: [] }), stats: ok({ ...STATS, intents_by_state: {} }) });
+    const panel = [...walk(await DashboardPage())].find(
+      (el) => el.type === ConditionsPanel,
+    );
+    const { conditions, setupStep } = panel!.props as {
+      conditions: Condition[];
+      setupStep: SetupStep | null;
+    };
+    expect(conditions).toEqual([]);
+    expect(setupStep?.number).toBe(1);
+    expect(setupStep?.href).toBeDefined();
+  });
+
+  it("a member's setup step waits on an admin, with no button", async () => {
+    viewer.role = "member";
+    try {
+      answer({ accounts: ok({ accounts: [] }), stats: ok({ ...STATS, intents_by_state: {} }) });
+      const panel = [...walk(await DashboardPage())].find(
+        (el) => el.type === ConditionsPanel,
+      );
+      const { setupStep } = panel!.props as { setupStep: SetupStep | null };
+      expect(setupStep?.title).toBe("Waiting on an admin to connect Instagram");
+      expect(setupStep?.href).toBeUndefined();
+    } finally {
+      viewer.role = "admin";
+    }
+  });
+
+  it("a set-up workspace hands it no setup step", async () => {
+    answer({
+      sources: ok({
+        sources: [{ id: "s1", provider: "gdrive", state: "active", folder_ref: "f1", folder_name: "memes", removed: false }],
+      }),
+    });
+    const panel = [...walk(await DashboardPage())].find(
+      (el) => el.type === ConditionsPanel,
+    );
+    expect((panel!.props as { setupStep: SetupStep | null }).setupStep).toBeNull();
   });
 
   it.each<Read>(["accounts", "sources", "stats", "category-mix", "config"])(
