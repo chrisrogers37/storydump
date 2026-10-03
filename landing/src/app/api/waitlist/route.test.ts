@@ -167,6 +167,20 @@ describe("POST /api/waitlist", () => {
       expect(headers.get("x-waitlist-visitor-ip")).toBe("203.0.113.7")
     })
 
+    it("sends the secret without surrounding whitespace", async () => {
+      vi.stubEnv("WAITLIST_SITE_SECRET", " test-secret-not-real\n")
+      const headers = await sent(from({ "x-real-ip": "203.0.113.7" }))
+      expect(headers.get("x-waitlist-site-secret")).toBe("test-secret-not-real")
+    })
+
+    it("prefers x-real-ip when both headers are present", async () => {
+      vi.stubEnv("WAITLIST_SITE_SECRET", "test-secret-not-real")
+      const headers = await sent(
+        from({ "x-real-ip": "203.0.113.7", "x-forwarded-for": "198.51.100.1, 10.0.0.1" })
+      )
+      expect(headers.get("x-waitlist-visitor-ip")).toBe("203.0.113.7")
+    })
+
     it("takes the first x-forwarded-for entry when x-real-ip is absent", async () => {
       vi.stubEnv("WAITLIST_SITE_SECRET", "test-secret-not-real")
       const headers = await sent(from({ "x-forwarded-for": " 2001:db8::1 , 10.0.0.1" }))

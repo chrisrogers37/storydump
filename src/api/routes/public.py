@@ -52,6 +52,12 @@ WAITLIST_VISITOR_KEY_PREFIX = "waitlist:visitor:"
 #: A visitor's own limit a minute: a person retrying a typo stays well under
 #: it, and a household or office behind one address has room.
 WAITLIST_VISITOR_LIMIT = 10
+#: With the secret matched, every visitor's signup also spends one counter
+#: shared by all of them, a ceiling on the table's growth however the visitor
+#: key is gamed (a leaked secret lets a caller name a fresh visitor each time).
+#: Well above a launch peak, well below a flood.
+WAITLIST_ALL_VISITORS_KEY = "all"
+WAITLIST_ALL_VISITORS_LIMIT = 600
 #: The largest body the route reads: an address and three campaign values fit
 #: many times over. Anything larger is a 413 before it is parsed.
 WAITLIST_MAX_BODY_BYTES = 8 * 1024
@@ -144,28 +150,38 @@ def _address(raw: Optional[str]) -> Optional[str]:
     return str(ipaddress.IPv6Network((ip.packed, 64), strict=False))
 
 
-def _client(request: Request) -> Optional[tuple[str, str, int]]:
-    """Whose waitlist counter and slot share this request spends, as ``(key
-    prefix, client, limit)``; None when the API holds the site's secret and
-    the request does not carry it.
+Counter = tuple[str, str, int]  # (key prefix, client, limit)
+
+
+def _client(request: Request) -> Optional[tuple[str, list[Counter]]]:
+    """Whose slot share this request takes and which counters it spends;
+    None when the API holds the site's secret and the request does not carry
+    it.
 
     No secret configured: the attributed peer and the shared ceiling, whatever
-    the headers say, so the API behaves the same before and after the site
-    starts sending them. Secret matched: the visitor the site names, at their
-    own limit; a missing or malformed visitor address falls back to the
-    peer and the shared ceiling rather than failing the signup."""
+    the headers say, so the API answers as before the site starts sending
+    them. Secret matched: the visitor the site names, at their own limit and
+    the all-visitors ceiling; a missing or malformed visitor address falls
+    back to the peer and the shared ceiling rather than failing the signup.
+    Both sides' secrets are compared without surrounding whitespace, so a
+    pasted newline cannot refuse every signup."""
     peer = client_ip(request)
-    shared = WAITLIST_KEY_PREFIX, _address(peer) or peer, WAITLIST_LIMIT
-    expected = settings.WAITLIST_SITE_SECRET
+    address = _address(peer) or peer
+    shared = address, [(WAITLIST_KEY_PREFIX, address, WAITLIST_LIMIT)]
+    expected = (settings.WAITLIST_SITE_SECRET or "").strip()
     if not expected:
         return shared
-    if not verify_secret_token(request.headers.get(SITE_SECRET_HEADER), expected):
+    presented = (request.headers.get(SITE_SECRET_HEADER) or "").strip()
+    if not verify_secret_token(presented, expected):
         return None
     visitor = _address(request.headers.get(VISITOR_IP_HEADER))
     if visitor is None:
         logger.warning("waitlist: the site sent no usable visitor address")
         return shared
-    return WAITLIST_VISITOR_KEY_PREFIX, visitor, WAITLIST_VISITOR_LIMIT
+    return visitor, [
+        (WAITLIST_VISITOR_KEY_PREFIX, visitor, WAITLIST_VISITOR_LIMIT),
+        (WAITLIST_KEY_PREFIX, WAITLIST_ALL_VISITORS_KEY, WAITLIST_ALL_VISITORS_LIMIT),
+    ]
 
 
 def _refusal(status: int, detail: str, reason: str) -> JSONResponse:
@@ -211,7 +227,7 @@ async def join_waitlist(request: Request):
         # Not logged here, where any caller could fill the log: the site logs
         # the refusal's reason when it is the caller.
         return _refusal(403, "the waitlist takes calls from the site only", "not_site")
-    key_prefix, address, limit = counted
+    address, counters = counted
     media_type = request.headers.get("content-type", "").split(";")[0]
     if media_type.strip().lower() != "application/json":
         return _refusal(415, "the body must be application/json", "not_json")
@@ -228,14 +244,15 @@ async def join_waitlist(request: Request):
         # The counter is spent before the body is judged, so a malformed or
         # refused request counts like any other.
         async with require_engine(request).begin() as conn:
-            await preauth_guard(
-                conn,
-                request,
-                detail="too many waitlist requests",
-                key_prefix=key_prefix,
-                limit=limit,
-                client=address,
-            )
+            for key_prefix, client, limit in counters:
+                await preauth_guard(
+                    conn,
+                    request,
+                    detail="too many waitlist requests",
+                    key_prefix=key_prefix,
+                    limit=limit,
+                    client=client,
+                )
             if body is None:
                 return _refusal(400, "the body must be a JSON object", "not_json")
             try:

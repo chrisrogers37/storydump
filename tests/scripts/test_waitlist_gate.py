@@ -513,6 +513,58 @@ class TestTheSiteSecret:
         assert resp.status_code == 202, resp.text
         assert seen == [key]
 
+    def test_set_the_secret_is_compared_without_surrounding_whitespace(
+        self, world, armed, monkeypatch
+    ):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", f" {SECRET}\n")
+        (resp,) = _post(
+            world, {"email": "trimmed@example.com"}, headers=_from_site("198.51.100.6")
+        )
+        assert resp.status_code == 202, resp.text
+
+    def test_set_a_refusal_reads_no_body(self, world, armed):
+        read = []
+
+        async def body():
+            read.append(True)
+            yield json.dumps({"email": "unread@example.com"}).encode()
+
+        (resp,) = _send(world, (body(), JSON))
+        assert (resp.status_code, resp.json()["reason"]) == (403, "not_site")
+        assert read == []
+
+    def test_set_all_visitors_share_one_ceiling(self, world, armed, monkeypatch):
+        monkeypatch.setattr(public, "WAITLIST_ALL_VISITORS_LIMIT", 2)
+        monkeypatch.setattr(public, "WAITLIST_ALL_VISITORS_KEY", "all-ceiling-test")
+        responses = [
+            _post(world, {"email": f"ceiling-{i}@example.com"}, headers=_from_site(ip))[
+                0
+            ]
+            for i, ip in enumerate(("198.51.100.7", "198.51.100.8", "198.51.100.9"))
+        ]
+        assert [r.status_code for r in responses] == [202, 202, 429]
+        assert _entry(world, "ceiling-2@example.com") == []
+
+    def test_a_direct_ipv6_caller_is_counted_by_its_64(self, world, monkeypatch):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", None)
+        monkeypatch.setattr(public, "client_ip", lambda request: "2001:db8:7:7::42")
+        seen = []
+        acquire = public.WaitlistSlots.acquire
+
+        async def spy(slots, address):
+            seen.append(address)
+            return await acquire(slots, address)
+
+        monkeypatch.setattr(public.WaitlistSlots, "acquire", spy)
+        (resp,) = _post(world, {"email": "direct-v6@example.com"})
+        assert resp.status_code == 202, resp.text
+        assert seen == ["2001:db8:7:7::/64"]
+        counted = _rows(
+            world["owner"],
+            "SELECT key FROM rate_counters WHERE key = 'waitlist:2001:db8:7:7::/64'",
+        )
+        assert counted != []
+
     def test_set_without_a_usable_visitor_the_shared_counter_serves(
         self, world, armed, monkeypatch
     ):

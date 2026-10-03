@@ -22,7 +22,8 @@ const FAILED = { status: "error", message: "Something went wrong. Please try aga
  * connecting address, so a visitor cannot choose it. Unset, nothing is sent.
  */
 function siteHeaders(req: NextRequest): Record<string, string> {
-  const secret = process.env.WAITLIST_SITE_SECRET
+  // Trimmed as the API trims, so a pasted newline cannot break the match.
+  const secret = process.env.WAITLIST_SITE_SECRET?.trim()
   if (!secret) return {}
   const visitor = (
     req.headers.get("x-real-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0]
