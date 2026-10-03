@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
@@ -5,6 +6,8 @@ import { siteConfig } from "@/config/site";
 import { noindexMetadata } from "@/lib/seo";
 import { bricolage } from "@/lib/fonts";
 import { BrandMark } from "@/components/layout/brand-mark";
+import { NEW_HERE, WAITLIST_HREF } from "./content";
+import { LoginNotice } from "./login-notice";
 
 export const metadata = {
   title: "Sign in",
@@ -57,12 +60,23 @@ export default function LoginPage() {
           </p>
         </div>
 
+        <Suspense fallback={null}>
+          <LoginNotice />
+        </Suspense>
+
         <div className="rounded-lg border bg-card p-6 shadow-sm">
           <GoogleLoginButton />
         </div>
 
         <p className="text-center text-xs text-muted-foreground">
-          New here? Signing in creates your account.
+          {NEW_HERE.lead}
+          <Link
+            href={WAITLIST_HREF}
+            className="underline underline-offset-4 transition-colors hover:text-foreground"
+          >
+            {NEW_HERE.link}
+          </Link>
+          {NEW_HERE.tail}
         </p>
       </div>
     </main>

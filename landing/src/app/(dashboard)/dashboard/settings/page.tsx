@@ -16,6 +16,7 @@ import { GeneralTab } from "@/components/dashboard/settings/general-tab";
 import { AccountsTab } from "@/components/dashboard/settings/accounts-tab";
 import type { BindingsResponse, MembersResponse } from "@/lib/types";
 import { MembersCard } from "@/components/dashboard/settings/members-card";
+import { hasActiveTelegramGroup } from "@/lib/members";
 import { CategoryWeightsCard } from "@/components/dashboard/settings/category-weights-card";
 import type { CategoryMixResponse } from "@/lib/category-mix";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
@@ -175,6 +176,11 @@ export default async function SettingsPage({
     drive,
   );
   const accounts = accountsResult.data.accounts ?? [];
+  // Read once for two cards: Integrations lists the bindings, and Members
+  // reminds that a removed person is still in a bound group. `null` = unread.
+  const bindings = bindingsResult.ok
+    ? (bindingsResult.data.bindings ?? [])
+    : null;
   // `tokenRowsFrom` is the same reshape the proxy applies, so the tab sees
   // one row shape whether a list came from this read or from the browser.
   // A list that is not a list is `null` — "could not be loaded" — not `[]`.
@@ -274,9 +280,8 @@ export default async function SettingsPage({
                   membersResult.ok ? (membersResult.data.members ?? []) : null
                 }
                 currentUserId={session.userId}
-                canRemove={
-                  membership?.role === "owner" || membership?.role === "admin"
-                }
+                canRemove={isAdmin}
+                telegramGroupLinked={hasActiveTelegramGroup(bindings)}
               />
             }
           />
@@ -305,9 +310,7 @@ export default async function SettingsPage({
             settings={settings}
             sources={sourcesResult.data.sources ?? []}
             drive={drive}
-            bindings={
-              bindingsResult.ok ? (bindingsResult.data.bindings ?? []) : null
-            }
+            bindings={bindings}
             workspaceId={workspaceId}
             telegramLinked={session.telegramLinked}
             telegramDisplayName={session.telegramDisplayName}
