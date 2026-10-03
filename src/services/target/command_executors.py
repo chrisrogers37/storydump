@@ -1426,9 +1426,10 @@ async def invite_member(session, command: Command) -> CommandResult:
     match and takes the recorded-skip path — landing as `member` with an
     elevation-pending notice. It would look like it worked. Two schema facts
     make the honest shape safe instead: `uq_invite_live` is
-    `(workspace_id, email)` and NULLs never collide there, so Telegram
-    invitations do not conflict with each other or with an email invite to the
-    same workspace; and a hint-only invitation carries no identity proof, so
+    `(workspace_id, email)` and NULLs never collide there, so a Telegram
+    invitation does not conflict with an email invite to the same workspace (a
+    second one to the same Telegram id replaces the first, `invitations.create`);
+    and a hint-only invitation carries no identity proof, so
     D33/D36 downgrades an admin invite on accept rather than elevating.
     (Raised by lane C rather than built around, which is what kept the
     broadcast shape out of the tier.)

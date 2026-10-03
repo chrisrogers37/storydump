@@ -116,8 +116,8 @@ async def revoke_on_removal(executor, *, workspace_id: str, user_id: str) -> int
             "UPDATE workspace_invitations SET state = 'revoked'"
             " WHERE workspace_id = :ws AND state = 'pending'"
             "   AND (invited_by_user_id = :u"
-            "        OR email = (SELECT lower(primary_email) FROM users"
-            "                     WHERE id = :u)"
+            "        OR lower(email) = (SELECT lower(primary_email) FROM users"
+            "                            WHERE id = :u)"
             "        OR invited_tg_user_id::text IN"
             "           (SELECT external_id FROM user_identities"
             "             WHERE user_id = :u AND provider = 'telegram'))"
@@ -201,12 +201,25 @@ async def create(
     # it. The old one may also be one the accept door now refuses (its sender
     # demoted or removed, or its addressee removed since, 098), which for an
     # email would otherwise hold `uq_invite_live` until the reaper expires it.
-    if address is not None or invited_tg_user_id is not None:
+    #
+    # Sends to one addressee are serialized for the rest of the transaction:
+    # `uq_invite_live` backs the email arm, but nothing indexes the Telegram
+    # id, so two concurrent sends to it would each miss the other's row. Keys
+    # are taken in a fixed order so a send naming both cannot deadlock.
+    addressees = [f"em:{address}"] if address is not None else []
+    if invited_tg_user_id is not None:
+        addressees.append(f"tg:{invited_tg_user_id}")
+    for addressee in addressees:
+        await executor.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"invite:{workspace_id}:{addressee}"},
+        )
+    if addressees:
         await executor.execute(
             text(
                 "UPDATE workspace_invitations SET state = 'revoked'"
                 " WHERE workspace_id = :ws AND state = 'pending'"
-                "   AND (email = :em OR invited_tg_user_id = :tg)"
+                "   AND (lower(email) = :em OR invited_tg_user_id = :tg)"
             ),
             {"ws": str(workspace_id), "em": address, "tg": invited_tg_user_id},
         )
@@ -237,9 +250,10 @@ async def create(
             )
         ).first()
     except DBAPIError as exc:
-        # `uq_invite_live` is PARTIAL on `state = 'pending'`, and the revoke
-        # above clears this address's live invitation, so this fires only when
-        # a concurrent send to the same address committed first.
+        # A backstop no product path reaches today: the lock and revoke above
+        # clear this address's live invitation before the INSERT, so
+        # `uq_invite_live` (PARTIAL on `state = 'pending'`) has nothing left to
+        # collide with unless a pending row appears outside `create`.
         if driver_error_is(exc, UniqueViolationError) is not None:
             raise InvitationRefused(
                 "already_invited",

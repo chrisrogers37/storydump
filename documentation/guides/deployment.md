@@ -288,7 +288,7 @@ owner; there is no product door for it. In order:
   UPDATE workspace_invitations SET state = 'revoked'
    WHERE state = 'pending'
      AND (invited_by_user_id = '…'
-          OR email = (SELECT lower(primary_email) FROM users WHERE id = '…')
+          OR lower(email) = (SELECT lower(primary_email) FROM users WHERE id = '…')
           OR invited_tg_user_id::text IN (SELECT external_id FROM user_identities
                                            WHERE user_id = '…' AND provider = 'telegram'));
   DELETE FROM users WHERE id = '…';
@@ -316,7 +316,7 @@ owner; there is no product door for it. In order:
   UPDATE workspace_invitations SET state = 'revoked'
    WHERE state = 'pending'
      AND (invited_by_user_id = '…'
-          OR email = (SELECT lower(primary_email) FROM users WHERE id = '…')
+          OR lower(email) = (SELECT lower(primary_email) FROM users WHERE id = '…')
           OR invited_tg_user_id::text IN (SELECT external_id FROM user_identities
                                            WHERE user_id = '…' AND provider = 'telegram'));
   DELETE FROM user_identities WHERE user_id = '…';

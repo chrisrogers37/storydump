@@ -216,7 +216,7 @@ def test_an_owner_is_refused_while_their_workspace_exists(world):
     chain = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-owner")
     delete, _erase = _runbook_blocks()
 
-    with pytest.raises(psycopg2.Error, match="owner"):
+    with pytest.raises(psycopg2.Error, match="has no owner at commit"):
         _run(world, _for(delete, chain["user"]))
 
     assert _one(

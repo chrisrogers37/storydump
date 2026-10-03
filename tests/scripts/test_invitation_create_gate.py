@@ -33,6 +33,7 @@ from tests.scripts.conftest import (
     _scratch,
     actor_lacks_createrole,
     async_url,
+    fetch_all,
     run_bootstrap,
     seed_workspace_chain,
 )
@@ -288,6 +289,37 @@ class TestTheRefusalsAreNamedRatherThanConstraintNames:
                 first: "revoked",
                 second: "pending",
             }
+        finally:
+            await r.close()
+
+    async def test_a_re_invite_leaves_another_workspaces_invitation_alone(self, world):
+        """The revoke is this workspace's: the same addressee's pending
+        invitation to another workspace stays live."""
+        conn = psycopg2.connect(world["dsn"])
+        try:
+            other = seed_workspace_chain(conn, f"invite-other-{uuid.uuid4().hex[:8]}")
+        finally:
+            conn.close()
+        r = _Round(world)
+        try:
+            addr = f"{uuid.uuid4().hex[:8]}@example.com"
+            tg = {"delivery_channel": "telegram", "invited_tg_user_id": 555000222}
+            theirs = [
+                (
+                    await r.create(
+                        **kw, workspace_id=other["ws"], invited_by_user_id=other["user"]
+                    )
+                )[0]
+                for kw in ({"email": addr}, tg)
+            ]
+            await r.create(email=addr)
+            await r.create(**tg)
+            states = fetch_all(
+                world["dsn"],
+                "SELECT state FROM workspace_invitations WHERE id IN (%s, %s)",
+                tuple(theirs),
+            )
+            assert [row["state"] for row in states] == ["pending", "pending"]
         finally:
             await r.close()
 

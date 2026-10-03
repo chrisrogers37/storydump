@@ -25,8 +25,9 @@ import pytest
 
 from src.api.principal import COOKIE
 from src.api.routes import auth
-from src.services.target import google_oidc, identity
+from src.services.target import google_oidc, identity, workspaces
 from tests.scripts.conftest import (
+    in_tenant,
     _scratch,
     as_user,
     in_user_plane,
@@ -384,6 +385,44 @@ def _backfill_sql() -> str:
     text_ = migration.read_text()
     start = text_.index("UPDATE workspace_invitations i SET state = 'revoked'")
     return text_[start : text_.index(";", start)]
+
+
+def test_the_listing_shows_only_invitations_the_doors_would_honour(world):
+    """`GET …/invitations` lists what the doors would still accept: not an
+    invitation from a removed, demoted or disabled sender or with none, and
+    not one addressed to someone removed after it was sent."""
+    gone = "removed-addressee@example.com"
+    user = _existing_user(world, gone)
+    _as_owner(
+        world,
+        (
+            "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+            " delivery_channel, email, expires_at, invited_by_user_id)"
+            " VALUES (%s, %s, 'email', %s, now() + interval '7 days', %s)",
+            (world["ws"], "listing-" + gone, gone, world["ws_owner"]),
+        ),
+        (
+            "INSERT INTO workspace_member_removals"
+            " (workspace_id, user_id, removed_by_user_id) VALUES (%s, %s, %s)",
+            (world["ws"], user, world["ws_owner"]),
+        ),
+    )
+
+    listed = {
+        row["email"]
+        for row in asyncio.run(
+            in_tenant(
+                world["ingress"],
+                world["ws"],
+                world["ws_owner"],
+                lambda s: workspaces.list_invitations(s, workspace_id=world["ws"]),
+            )
+        )
+    }
+
+    assert LIVE | STANDING <= listed
+    assert not listed & (set(SENT_BY) - STANDING)
+    assert gone not in listed
 
 
 def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(world):

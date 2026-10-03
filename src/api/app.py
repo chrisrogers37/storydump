@@ -263,9 +263,8 @@ _INVITATION_STATUS = {
     # The CREATE half's refusals (#1172). All three are the caller's input
     # being wrong rather than a state or an authorization fact, so 400 — and
     # `already_invited` stays 400 rather than 409 for the same reason. A send
-    # replaces the address's pending invitation (`invitations.create`), so it
-    # fires only when a concurrent send to that address committed first; the
-    # invitation the person wanted exists, and sending again replaces it.
+    # replaces the address's pending invitation (`invitations.create`, under a
+    # per-addressee lock), so it is a backstop no product path reaches today.
     "already_invited": 400,
     "email_required": 400,
     "invalid_channel": 400,

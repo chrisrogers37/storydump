@@ -21,8 +21,8 @@
 -- removal from the workspace (workspace_member_removals, 090) is newer than the invitation, so an
 -- invitation sent before the removal cannot undo it; a fresh invitation after it still can.
 --
--- The removal also revokes the pending invitations the removed member sent, in the removal's
--- transaction (`invitations.revoke_sent_by`, called by `workspaces.remove_member`), so
+-- The removal also revokes the pending invitations the removed member sent or was sent, in the
+-- removal's transaction (`invitations.revoke_on_removal`, called by `workspaces.remove_member`), so
 -- fn_member_remove's body is left as it is. Invitations sent by people removed before this file
 -- are revoked here once: a pending invitation whose inviter has a removal record in its workspace
 -- and is not a member there again. workspace_invitations carries no governance trigger (only

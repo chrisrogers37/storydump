@@ -284,6 +284,19 @@ def test_the_invitations_addressed_to_the_removed_person_are_revoked_too(world):
         )
 
     asyncio.run(_in_tenant(world["ingress"], world["ws"], world["owner"], invite))
+    # The same person's invitation to another workspace is not this removal's.
+    conn = psycopg2.connect(world["owner_dsn"])
+    try:
+        other = seed_workspace_chain(conn, "removal-other")
+    finally:
+        conn.close()
+    execute(
+        world["owner_dsn"],
+        "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+        " delivery_channel, email, expires_at, invited_by_user_id)"
+        " VALUES (%s, 'elsewhere', 'email', %s, now() + interval '7 days', %s)",
+        (other["ws"], address.lower(), other["user"]),
+    )
     _remove(world, world["admin"])
 
     async def states(conn):
@@ -299,6 +312,10 @@ def test_the_invitations_addressed_to_the_removed_person_are_revoked_too(world):
     assert asyncio.run(
         _in_tenant(world["ingress"], world["ws"], world["owner"], states)
     ) == {"to-email": "revoked", "to-telegram": "revoked"}
+    assert fetch_one(
+        world["owner_dsn"],
+        "SELECT state FROM workspace_invitations WHERE token_hash = 'elsewhere'",
+    ) == ("pending",)
 
     async def reinvite(conn):
         _, token = await invitations.create(

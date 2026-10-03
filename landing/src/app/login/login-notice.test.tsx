@@ -12,7 +12,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 const { LoginNotice } = await import("./login-notice");
-const { SIGNOUT_INCOMPLETE } = await import("./content");
+const { SIGNOUT_INCOMPLETE, LOGIN_ERRORS } = await import("./content");
 
 function notice() {
   return LoginNotice() as ReactElement<{ children: unknown }> | null;
@@ -26,6 +26,19 @@ describe("LoginNotice", () => {
 
   it("shows nothing on a plain visit", () => {
     query.value = "";
+    expect(notice()).toBeNull();
+  });
+
+  it("names a refusal from ?error=", () => {
+    const [code, copy] = Object.entries(LOGIN_ERRORS)[0];
+    query.value = `error=${code}`;
+    const children = notice()?.props.children as unknown[];
+    expect(children[0]).toBe(copy.lead);
+    expect(children[2]).toBe(copy.tail);
+  });
+
+  it("ignores an unknown error code", () => {
+    query.value = "error=whatever";
     expect(notice()).toBeNull();
   });
 
