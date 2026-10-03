@@ -146,7 +146,8 @@ Telegram delivers only the update kinds a registration asks for; the one
 spelling is `vocabulary.ALLOWED_UPDATES` (`message`, `callback_query`), with the
 variable names beside it (`vocabulary.py:384`-`:398`). The API registers itself
 at startup in Railway's production environment (`app.py:401`;
-`TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` overrides), and `/health` reports the
-registration and Telegram's live backlog. `storydump webhook status` checks the
+`TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` overrides), and the operating details
+(`/api/v1/ops/health`, for `OPS_USER_IDS`) report the registration and
+Telegram's live backlog. `storydump webhook status` checks the
 bot, the webhook and the door and changes nothing; `register` and `deregister`
 re-point the production bot and are in `CLAUDE.md`'s safety block.

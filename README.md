@@ -105,7 +105,7 @@ Production is past that point — the owner applied 079 and 080 by hand on
 The `Procfile` names the two processes.
 
 ```bash
-# The API (the Procfile's `web` line): GET /health, /openapi.json, /api/v1
+# The API (the Procfile's `web` line): GET /health, /api/v1 (and /openapi.json under API_DOCS=1, never in production)
 export TARGET_DATABASE_URL=postgresql://<user>@localhost:5432/<database>   # the value in your .env
 uvicorn src.api.app:app --port 8000
 

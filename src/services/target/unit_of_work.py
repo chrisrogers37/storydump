@@ -227,11 +227,12 @@ def create_engine(url: str, *, pool_timeout: float = POOL_TIMEOUT_SEAM) -> Async
 
 
 class PoolWatch:
-    """The pool's arithmetic and its high-water mark, for `/health` and the
-    startup log (phase 2 step 4): `size`, `overflow`, `timeout_s`,
-    `checked_out` now and `checked_out_peak` since attach. The peak is kept by
-    the pool's own checkout event, so it costs nothing on the request path
-    and misses no burst between two health probes."""
+    """The pool's arithmetic and its high-water mark, for the operating details
+    (`/api/v1/ops/health`) and the startup log (phase 2 step 4): `size`,
+    `overflow`, `timeout_s`, `checked_out` now and `checked_out_peak` since
+    attach. The peak is kept by the pool's own checkout event, so it costs
+    nothing on the request path and misses no burst between two health
+    probes."""
 
     def __init__(self, engine: AsyncEngine):
         self._engine = engine
