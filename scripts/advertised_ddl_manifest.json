@@ -361,6 +361,13 @@
       "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
       "doc": "07-security-model.md",
       "ordinal": 33
+    },
+    {
+      "sha256": "e7b0e0bf2789ecd7d0acd96328757616bcfd57a3ad7279967b2361c1a796ac23",
+      "class": "normative",
+      "label": "§40 the sync retires what the publish can never fetch (097, #1545) — media_items.last_listed_at, the stamp a walk leaves on every file it lists, missing added to ck_media_state for a file a walk that saw the whole tree no longer lists, and fn_planned_misses replaced to name it item_missing",
+      "doc": "07-security-model.md",
+      "ordinal": 34
     }
   ],
   "policy_expansion": {

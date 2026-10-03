@@ -52,7 +52,10 @@ from typing import Optional, Any
 from sqlalchemy import text
 
 from src.services.target import jobs, outbox, prompts, unit_of_work, vocabulary
-from src.services.target.drive_adapter import checkpoint_incomplete
+from src.services.target.drive_adapter import (
+    checkpoint_incomplete,
+    walk_saw_whole_tree,
+)
 from src.services.target.workspaces import CONNECTED_FLAG_SQL
 
 from src.exceptions.base import StorydumpError
@@ -73,6 +76,17 @@ JITTER_SECONDS = 45 * 60
 CHUNK_ITEM_BOUND = 200
 
 _ALLOWED_KINDS = frozenset({"image", "video"})
+
+
+def _listed_state(kind: str, size_bytes: Optional[int]) -> str:
+    """The state a listed file lands in: `unsupported` when its size is past
+    the publish's cap for its kind — the fetch refuses it by its metadata, so
+    no slot could ever post it (#1545) — and `available` otherwise. A listing
+    that states no size is not judged. A kind with no cap is a KeyError: every
+    kind the sync lands has one."""
+    if size_bytes is not None and size_bytes > vocabulary.PUBLISH_MAX_BYTES[kind]:
+        return "unsupported"
+    return "available"
 
 
 class DriveSourceGone(StorydumpError):
@@ -165,7 +179,9 @@ async def rearm_after_connect(
             {"s": str(source_id), "ws": str(workspace_id)},
         )
         # Its media comes back with it (owner ruling 2026-09-09): the rows
-        # Remove retired are available again before the walk even starts.
+        # Remove retired are available again before the walk even starts. A
+        # `missing` row is not Remove's to undo — its file left the folder —
+        # so it waits for a walk that lists the file again.
         await session.execute(
             text(
                 "UPDATE media_items SET state = 'available'"
@@ -373,6 +389,14 @@ async def _run_sync(deps, job, *, reason) -> str:
     if page is None:
         return "source-error"
     items, new_checkpoint = page
+    # The adapter's cursor carries the adapter's own keys. The walk's start is
+    # the sync's, so it goes back onto every cursor of the walk it began, and
+    # the walk's last page judges against it.
+    if "started_at" in start.checkpoint:
+        new_checkpoint = {
+            **new_checkpoint,
+            "started_at": start.checkpoint["started_at"],
+        }
 
     return await _land_page(
         factory,
@@ -418,8 +442,8 @@ async def _read_source(
             (
                 await s.execute(
                     text(
-                        "SELECT config, sync_checkpoint, state FROM media_sources"
-                        " WHERE id = :s AND workspace_id = :ws"
+                        "SELECT config, sync_checkpoint, state, now() AS db_now"
+                        " FROM media_sources WHERE id = :s AND workspace_id = :ws"
                     ),
                     {"s": source_id, "ws": workspace_id},
                 )
@@ -498,7 +522,15 @@ async def _read_source(
                 job["id"],
                 source_id,
             )
-        checkpoint = {"v": 2, "walk": uuid.uuid4().hex}
+        # The walk's start rides its cursor, read from the database's clock —
+        # the clock that writes `created_at` and `last_listed_at` — because a
+        # walk that saw the whole tree tombstones only what predates it
+        # (`_tombstone_unlisted`).
+        checkpoint = {
+            "v": 2,
+            "walk": uuid.uuid4().hex,
+            "started_at": row["db_now"].isoformat(),
+        }
         minted = True
     walk = checkpoint["walk"]
     if minted:
@@ -618,7 +650,7 @@ async def _land_page(
     reason,
 ) -> str:
     """Phase 3 — checkpoint CAS + upsert + chain-or-rearm, one transaction."""
-    kept = skipped_kind = refreshed = 0
+    kept = skipped_kind = refreshed = tombstoned = 0
     async with factory() as s:
         # The cursor advances by compare-and-swap against what THIS carrier
         # read. A re-pick that nulled it, a persistent failure that reset it,
@@ -666,19 +698,22 @@ async def _land_page(
                 text(
                     "INSERT INTO media_items (workspace_id, source_id,"
                     " content_hash, file_name, media_kind, mime_type,"
-                    " provider_file_ref, category, folder_path)"
+                    " provider_file_ref, category, folder_path, file_size, state,"
+                    " last_listed_at)"
                     " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref,"
-                    "  :category, :folder_path)"
+                    "  :category, :folder_path, :size, :state, now())"
                     # The row is the ITEM (owner ruling 2026-09-09): the dedup
                     # is per workspace by content hash (`uq_media_dedup`), and
                     # posting history and locks hang off the row, so it is
-                    # never re-created. A file that MOVED within its folder
-                    # changes its label and path; a RETIRED row (its folder
-                    # removed) is ADOPTED by whichever connected folder lists
-                    # the same bytes — new owner, reference, label and path,
-                    # available again. Two connected folders sharing bytes keep
-                    # the first owner: a different file with identical bytes
-                    # must not flap a live row.
+                    # never re-created. Every listing of the SAME file (this
+                    # folder, this reference) refreshes its row — label, path,
+                    # name, size — and stamps `last_listed_at`, which is how a
+                    # walk spanning chunks knows at its end what it listed. A
+                    # RETIRED or TOMBSTONED row is ADOPTED by whichever
+                    # connected folder lists the same bytes — new owner,
+                    # reference, label and path. Two connected folders sharing
+                    # bytes keep the first owner: a different file with
+                    # identical bytes must not flap a live row.
                     " ON CONFLICT ON CONSTRAINT uq_media_dedup DO UPDATE"
                     "   SET source_id = EXCLUDED.source_id,"
                     "       provider_file_ref = EXCLUDED.provider_file_ref,"
@@ -686,21 +721,28 @@ async def _land_page(
                     "       mime_type = COALESCE(EXCLUDED.mime_type, media_items.mime_type),"
                     "       category = EXCLUDED.category,"
                     "       folder_path = EXCLUDED.folder_path,"
-                    # Only a retired row comes back through adoption; an
-                    # `unsupported` row moving within its folder stays as it is.
-                    "       state = CASE WHEN media_items.state = 'removed'"
-                    "                    THEN 'available' ELSE media_items.state END"
+                    "       file_size = COALESCE(EXCLUDED.file_size, media_items.file_size),"
+                    # The listing judges the state each time it names the
+                    # file: `unsupported` past the publish's cap, else
+                    # `available` — so a retired or tombstoned row comes back,
+                    # and a raised cap brings an `unsupported` one back too.
+                    "       state = EXCLUDED.state,"
+                    # The stamp only moves forward. now() is a transaction's
+                    # START, so a writer that opened before a walk and lands
+                    # after a page re-stamped the row would otherwise move it
+                    # backwards, past the walk's start, and the walk's last
+                    # page would tombstone a file it listed.
+                    "       last_listed_at = GREATEST(media_items.last_listed_at,"
+                    "                                 EXCLUDED.last_listed_at)"
                     # A retired row is adopted by whichever CONNECTED folder
                     # lists its bytes — including its own, should it find one
                     # retired under itself (a re-pick's revive lost a race).
                     # A removed folder's carrier never lands its page (the
                     # cursor CAS above fails once the source is paused), so
                     # no guard on the source is needed here.
-                    " WHERE media_items.state = 'removed'"
+                    " WHERE media_items.state IN ('removed', 'missing')"
                     "    OR (media_items.source_id = EXCLUDED.source_id"
-                    "        AND media_items.provider_file_ref = EXCLUDED.provider_file_ref"
-                    "        AND (media_items.category IS DISTINCT FROM EXCLUDED.category"
-                    "             OR media_items.folder_path IS DISTINCT FROM EXCLUDED.folder_path))"
+                    "        AND media_items.provider_file_ref = EXCLUDED.provider_file_ref)"
                     " RETURNING (xmax = 0) AS inserted"
                 ),
                 {
@@ -709,6 +751,8 @@ async def _land_page(
                     "hash": item["content_hash"],
                     "name": item.get("name") or item["ref"],
                     "kind": item["kind"],
+                    "size": item.get("size_bytes"),
+                    "state": _listed_state(item["kind"], item.get("size_bytes")),
                     "category": item.get("category"),
                     # The folder's path under the connected folder ("" at its
                     # root); an adapter that has no notion of folders says
@@ -744,7 +788,11 @@ async def _land_page(
                 payload={"v": 2, "source_id": source_id, "walk": walk},
             )
         else:
-            # The last page: success stamps, probe recovery, baseline re-arm.
+            # The last page: what the walk no longer lists, then success
+            # stamps, probe recovery, baseline re-arm.
+            tombstoned = await _tombstone_unlisted(
+                s, new_checkpoint, source_id=source_id, workspace_id=workspace_id
+            )
             jitter = random.uniform(-JITTER_SECONDS, JITTER_SECONDS)
             await s.execute(
                 text(
@@ -762,7 +810,7 @@ async def _land_page(
         await s.commit()
     logger.info(
         "sync %s: source %s reason=%s walk=%s kept=%d refreshed=%d skipped_kind=%d"
-        " chained=%s folders_seen=%s truncated=%s",
+        " tombstoned=%d chained=%s folders_seen=%s truncated=%s partial=%s",
         job["id"],
         source_id,
         reason,
@@ -770,11 +818,43 @@ async def _land_page(
         kept,
         refreshed,
         skipped_kind,
+        tombstoned,
         checkpoint_incomplete(new_checkpoint),
         (new_checkpoint or {}).get("seen", 0),
         bool((new_checkpoint or {}).get("truncated")),
+        bool((new_checkpoint or {}).get("partial")),
     )
     return "chained" if checkpoint_incomplete(new_checkpoint) else "synced"
+
+
+async def _tombstone_unlisted(s, checkpoint, *, source_id, workspace_id) -> int:
+    """The last page of a walk that saw the whole tree: the source's rows it
+    did not list are no longer in the folder, so the draw must not take them
+    (#1545). They go `missing` — the file's own absence, which only a listing
+    undoes; a re-pick revives `removed` rows, never these.
+
+    Only what predates the walk is judged: a row created or listed since the
+    walk began waits for the next walk, since rows land outside any walk too
+    (a relay's drop). Only a walk the adapter says was whole is judged
+    (`walk_saw_whole_tree`): one that skipped part of the tree, or whose
+    adapter does not say, judges nothing, and nor does a walk with no start on
+    its cursor (one in flight at the deploy that added the start). Returns
+    the rows tombstoned."""
+    started = (checkpoint or {}).get("started_at")
+    if not started or not walk_saw_whole_tree(checkpoint):
+        return 0
+    result = await s.execute(
+        text(
+            "UPDATE media_items SET state = 'missing'"
+            " WHERE workspace_id = :ws AND source_id = :s"
+            "   AND state IN ('available', 'unsupported')"
+            # GREATEST skips a NULL: a row never stamped is judged by its birth.
+            "   AND GREATEST(created_at, last_listed_at)"
+            "       < CAST(CAST(:started AS text) AS timestamptz)"
+        ),
+        {"started": started, "ws": workspace_id, "s": source_id},
+    )
+    return int(result.rowcount or 0)
 
 
 def _payload_json(value) -> str:

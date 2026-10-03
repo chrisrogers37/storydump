@@ -422,8 +422,9 @@ INTENT_STATES: tuple[str, ...] = vocabulary.INTENT_STATES
 #: `ck_intent_origin`: the list filter's other closed set.
 INTENT_ORIGINS: tuple[str, ...] = vocabulary.INTENT_ORIGINS
 
-#: `ck_media_state`.
-MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed")
+#: `ck_media_state`, owned by the vocabulary module (pinned against the
+#: migration there).
+MEDIA_STATES: tuple[str, ...] = vocabulary.MEDIA_STATES
 
 #: The intent row plus the two joins the queue renders it with: the media it
 #: posts, and the account it posts to (`06` §3 — the handle is how a person
