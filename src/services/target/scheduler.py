@@ -73,6 +73,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import time
 
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -86,6 +87,7 @@ from src.services.target import (
     prompts,
     workspaces,
 )
+from src.services.target.unit_of_work import apply_gucs
 
 
 #: The advisory-lock key the clock elects on. A single fixed key, because there
@@ -541,25 +543,43 @@ async def execute_reap_expired(
     return int(swept or 0) + parked
 
 
-async def execute_retention_sweep(session, *, keep_seconds: int, batch: int) -> int:
+async def execute_retention_sweep(
+    engine, *, keep_seconds: int, batch: int, budget_seconds: float
+) -> int:
     """The `retention_sweep` executor. Returns rate-counter rows deleted.
 
     Runs ONE `05` retention class, `rate_counters`, through the 059 door
-    `fn_retention_batch` — one bounded batch per run (H5), the next run takes
-    the rest. The other classes the door knows stay unswept: each changes
-    something a reader relies on (the audit trail, the cap ledger's
-    `debited_total`, the M.3 snapshots), so each is its own decision (#1327).
+    `fn_retention_batch`. Each call deletes at most *batch* rows in a short
+    transaction of its own (H5); the run keeps calling until a call comes back
+    short or *budget_seconds* is spent, so a backlog drains within a run or
+    two instead of one batch an hour. The other classes the door knows stay
+    unswept: each changes something a reader relies on (the audit trail, the
+    cap ledger's `debited_total`, the M.3 snapshots), so each is its own
+    decision (#1327).
     """
-    deleted = (
-        await session.execute(
-            text(
-                "SELECT fn_retention_batch('rate_counters',"
-                " make_interval(secs => :keep), :batch)"
-            ),
-            {"keep": keep_seconds, "batch": batch},
-        )
-    ).scalar()
-    return int(deleted or 0)
+    stop_at = time.monotonic() + budget_seconds
+    total = 0
+    while True:
+        async with engine.begin() as conn:
+            await apply_gucs(conn, tenant_id="", actor_kind="system")
+            deleted = (
+                await conn.execute(
+                    text(
+                        "SELECT fn_retention_batch('rate_counters',"
+                        " make_interval(secs => :keep), :batch)"
+                    ),
+                    {"keep": keep_seconds, "batch": batch},
+                )
+            ).scalar()
+        total += deleted
+        if deleted < batch or time.monotonic() >= stop_at:
+            break
+    logger.info(
+        "retention_sweep: deleted %d rate_counters row(s) older than %ds",
+        total,
+        keep_seconds,
+    )
+    return total
 
 
 async def execute_reap_transit_assets(

@@ -990,3 +990,8 @@ def test_the_rate_counter_retention_is_the_documented_numbers():
     config = WorkerConfig()
     assert config.rate_counters_keep_seconds == days * 24 * 3600
     assert config.retention_batch == batch
+
+
+def test_the_clock_mints_the_retention_sweep_every_hour():
+    app = compose(engine=object(), config=WorkerConfig(), env={})
+    assert app.recurring["retention_sweep"] == 3600.0

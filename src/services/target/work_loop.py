@@ -107,6 +107,8 @@ class WorkerConfig:
     # past its window only holds the address it was keyed on); 5,000 per batch.
     rate_counters_keep_seconds: int = 7 * 24 * 3600
     retention_batch: int = 5000
+    #: Batches repeat within one run until one comes back short or this is spent.
+    retention_budget_seconds: float = 5.0
     # 05 §4: 1,440 min (24 h) when the workspace's approval_ttl_minutes is NULL.
     approval_ttl_seconds: int = 24 * 3600
     approved_ttl_seconds: int = 72 * 3600
@@ -409,11 +411,15 @@ def build_registry(deps: WorkerDeps) -> dict:
             limit=cfg.stranded_alert_limit,
         )
 
+    # `own_transactions`: no provider, but each batch commits on its own, so
+    # the run must not sit inside one job session. The payload is not read.
+    @own_transactions
     async def retention_sweep(session, job):
         await scheduler.execute_retention_sweep(
-            session,
+            deps.engine,
             keep_seconds=cfg.rate_counters_keep_seconds,
             batch=cfg.retention_batch,
+            budget_seconds=cfg.retention_budget_seconds,
         )
 
     async def reap_transit(session, job):

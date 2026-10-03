@@ -61,9 +61,9 @@ does.
   the loop paces on `asyncio.sleep`. Do not pass a host timestamp into a door.
 - The recurring kinds this worker asks for are `compose`'s (`worker.py:314`):
   `reap_expired` and `reconcile_ambiguous` every 60 s, `alert_stranded_sources`
-  every 6 h, `retention_sweep` every hour (one batch of 5,000), `reap_transit_assets`
-  every 6 h when a transit store exists. The
-  reaper's 60 s and its 500-row budget (`WorkerConfig.reap_limit`, the sweep's
+  every 6 h, `retention_sweep` every hour (5,000-row batches until one comes
+  back short or 5 s is spent), `reap_transit_assets` every 6 h when a transit
+  store exists. The reaper's 60 s and its 500-row budget (`WorkerConfig.reap_limit`, the sweep's
   total across every leg) are `05`'s, pinned by `tests/src/test_worker.py`:
   an expired lease holds its serialization key until the next sweep.
   The fleet monitor's worker-down threshold (`DEFAULT_WORKER_STALE_S` in
@@ -117,7 +117,8 @@ is eligible the slot lapses and the workspace is told at most once per 24 h
   workspace cannot own a lane.
 - An executor that waits on a provider is marked `own_transactions`
   (`work_loop.py:186`): it runs with no job session open and finalizes in a
-  short transaction afterwards.
+  short transaction afterwards. So is `retention_sweep`, whose batches each
+  commit on their own.
 - A new kind needs its name in `ck_jobs_kind` — and, for a system kind, in
   `ck_jobs_system_kinds`, which is a biconditional (065 is the precedent) — an
   entry in `build_registry` (`work_loop.py:232`), and, if the clock mints it,

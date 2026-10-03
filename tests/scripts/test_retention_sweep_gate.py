@@ -16,6 +16,8 @@ import uuid
 import psycopg2
 import pytest
 
+from src.services.target.work_loop import WorkerConfig
+
 from tests.scripts.conftest import (
     _scratch,
     fetch_all,
@@ -41,7 +43,7 @@ NEW = [
 ]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def sweep_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
@@ -99,19 +101,42 @@ def _counts(dsn) -> dict:
     }
 
 
-def test_the_sweep_deletes_only_rate_counter_rows_older_than_seven_days(sweep_db):
+def _survivors(dsn) -> list:
+    rows = fetch_all(dsn, "SELECT scope, key FROM rate_counters")
+    return sorted((r["scope"], r["key"]) for r in rows)
+
+
+#: A payload that names other classes, a zero keep and no batch. The executor
+#: reads none of it: what it deletes is the worker's configuration alone.
+HOSTILE = {"class": "audit_events", "p_class": "jobs_ok", "keep": 0, "batch": None}
+
+
+@pytest.mark.parametrize("payload", [None, HOSTILE], ids=["plain", "hostile_payload"])
+def test_the_sweep_deletes_only_rate_counter_rows_older_than_seven_days(
+    sweep_db, payload
+):
     before = _counts(sweep_db)
     assert before.pop("public.rate_counters") == len(OLD) + len(NEW)
 
-    asyncio.run(run_as_worker(sweep_db, "retention_sweep"))
+    asyncio.run(run_as_worker(sweep_db, "retention_sweep", payload=payload))
 
     after = _counts(sweep_db)
-    survivors = fetch_all(sweep_db, "SELECT scope, key FROM rate_counters")
     # Exactly the old rows went, every new one survived.
-    assert sorted((r["scope"], r["key"]) for r in survivors) == sorted(
-        (s, k) for s, k, _ in NEW
-    )
+    assert _survivors(sweep_db) == sorted((s, k) for s, k, _ in NEW)
     # And no other table moved: the aged cap-ledger day, the aged job and the
     # aged archive table the door's unbuilt classes would take are all there.
     after.pop("public.rate_counters")
     assert after == before
+
+
+def test_each_call_deletes_at_most_one_batch_and_a_run_drains_the_rest(sweep_db):
+    """With a batch of 2 and 3 aged rows: a run whose time budget is already
+    spent makes ONE call and leaves one aged row; a run with time left keeps
+    calling until a call comes back short, and leaves none."""
+    one_call = WorkerConfig(retention_batch=2, retention_budget_seconds=0)
+    asyncio.run(run_as_worker(sweep_db, "retention_sweep", config=one_call))
+    assert len(_survivors(sweep_db)) == len(NEW) + len(OLD) - 2
+
+    drain = WorkerConfig(retention_batch=2)
+    asyncio.run(run_as_worker(sweep_db, "retention_sweep", config=drain))
+    assert _survivors(sweep_db) == sorted((s, k) for s, k, _ in NEW)

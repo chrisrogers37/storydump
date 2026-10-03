@@ -23,6 +23,8 @@ from src.models.target.machinery import Job
 from src.services.target import work_loop
 from src.services.target.jobs import JobFenced
 from src.services.target.work_loop import (
+    _UNBUILT_REASON,
+    UNBUILT_KINDS,
     Parked,
     WorkerConfig,
     WorkerDeps,
@@ -90,6 +92,9 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         "first_ingest_chunk",  # the same _run_sync, one page at a time
     }
 
+    #: Marked for another reason: each of its batches commits on its own.
+    OWNS_ITS_BATCHES = {"retention_sweep"}
+
     def test_the_provider_facing_kinds_are_exactly_the_marked_ones(self):
         registry = build_registry(full_deps())
         marked = {
@@ -97,7 +102,7 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
             for kind, entry in registry.items()
             if getattr(entry, "owns_transactions", False)
         }
-        assert marked == self.PROVIDER_FACING, (
+        assert marked == self.PROVIDER_FACING | self.OWNS_ITS_BATCHES, (
             "an executor that reaches the egress floor must own its"
             " transactions, or the loop holds a pooled connection across the"
             " provider call — and arming the `_IN_TRANSACTION` tripwire would"
@@ -184,6 +189,15 @@ class TestRegistryCoversTheSchema:
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         for kind in unbuilt:
             assert isinstance(registry[kind], Parked), f"{kind} should have no executor"
+
+    def test_unbuilt_kinds_is_exactly_the_kinds_parked_for_having_no_executor(self):
+        registry = build_registry(full_deps())
+        parked_unbuilt = {
+            kind
+            for kind, entry in registry.items()
+            if isinstance(entry, Parked) and entry.reason == _UNBUILT_REASON
+        }
+        assert parked_unbuilt == set(UNBUILT_KINDS)
 
 
 class TestSeamAbsenceParksTheDependentKind:

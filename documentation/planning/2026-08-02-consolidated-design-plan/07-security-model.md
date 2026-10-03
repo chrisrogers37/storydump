@@ -2135,7 +2135,10 @@ singletons, its slot, refresh and reauth legs, the sender sweep's `deliver_outbo
 sync kinds, whose source it re-arms for tomorrow, as `work_loop._rearm_source` does, because a
 sync's mint disarms it. Nothing re-mints the others (`publish_pipeline`, `send_email`,
 `offboard_workspace`, `revoke_workspace_credentials`, `retention_sweep`, `reencrypt_credentials`),
-so ending one would unblock no successor and only lose its work; they are left as they were. For
+so ending one would unblock no successor and only lose its work; they are left as they were.
+(Since 2026-10-03 the clock mints `retention_sweep` hourly for the `rate_counters` class. The leg
+still leaves it, but a late one is still claimed, since `fn_claim_job` reads no deadline and only
+it holds its key, so it runs late rather than strands; listing it is a migration.) For
 the kinds it ends, the leg is the worker's spent-budget path without the tenant notice, which that
 path calls a courtesy, not the record.
 
