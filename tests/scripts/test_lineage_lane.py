@@ -403,6 +403,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # loud: the slot key's contract, the serve and miss doors and the
             # reaper's cadence-only slot expiry (#1413, phase 3).
             "089_planned_serve_and_misses.sql",
+            # 090 appends §33, a removal sticks: the removals record the
+            # Telegram join door honours, and the service-token minter the
+            # removal revokes by (readiness review, 2026-10-02).
+            "090_member_removal_sticks.sql",
             # 095 appends §38: every SECURITY DEFINER function pins its
             # search_path with pg_temp last, and a census holds the doors to it.
             "095_definer_search_path_pinned.sql",

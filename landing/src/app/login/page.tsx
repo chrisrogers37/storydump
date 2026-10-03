@@ -2,9 +2,14 @@ import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
 import { siteConfig } from "@/config/site";
+import { noindexMetadata } from "@/lib/seo";
+import { bricolage } from "@/lib/fonts";
+import { BrandMark } from "@/components/layout/brand-mark";
 
 export const metadata = {
-  title: `Sign in — ${siteConfig.name}`,
+  title: "Sign in",
+  description: `Sign in to ${siteConfig.name} with Google.`,
+  ...noindexMetadata,
 };
 
 /**
@@ -32,7 +37,7 @@ export const metadata = {
  */
 export default function LoginPage() {
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
+    <main className={`${bricolage.variable} flex min-h-svh flex-col items-center justify-center bg-background px-4 font-sans`}>
       <div className="w-full max-w-sm space-y-6">
         <Link
           href="/"
@@ -43,7 +48,8 @@ export default function LoginPage() {
         </Link>
 
         <div className="space-y-2 text-center">
-          <h1 className="text-2xl font-bold tracking-tight">
+          <h1 className="flex items-center justify-center gap-2 font-display text-3xl font-extrabold tracking-[-0.03em] text-ink">
+            <BrandMark className="size-7" />
             {siteConfig.name}
           </h1>
           <p className="text-muted-foreground text-sm">
@@ -59,6 +65,6 @@ export default function LoginPage() {
           New here? Signing in creates your account.
         </p>
       </div>
-    </div>
+    </main>
   );
 }

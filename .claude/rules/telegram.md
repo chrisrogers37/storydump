@@ -47,7 +47,10 @@ Served (`TelegramDispatcher.__call__`, `:332`): a `callback_query` (the tap);
 a group's migration notice — Telegram retired the group's chat id for a
 supergroup's, and the binding follows it (`chat_migration.follow`, #743);
 `/start <payload>` for the prefixes `build_router` registers (`:308`) — `link-`
-(link a Telegram identity) and `bind-` (a group joins a workspace); and a
+(link a Telegram identity: the `/start` only asks, naming the account by a
+masked email; the prompt's Confirm tap, `v1:linkok:<state>:<tg-user>` from
+`callback_tokens.link_token`, links — `identity_link.handle_tap` — and only for
+the Telegram user it was offered to) and `bind-` (a group joins a workspace); and a
 message in a bound group (the people it shows become workspace members through
 `fn_group_member_seen`). Chat-typed COMMANDS are not served (#854): such an
 update is the named outcome `not_a_start`, logged — not a silent drop, and not

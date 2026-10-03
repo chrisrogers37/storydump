@@ -85,7 +85,7 @@ describe("a refusal's facts", () => {
     state.upstream = { ok: false, status: 409, error: "illegal_transition" };
     const res = await post("approve", { intent_id: INTENT });
     expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: "illegal_transition" });
+    expect(await res.json()).toStrictEqual({ error: "illegal_transition" });
   });
 
   it("are not asked for when the route refuses before forwarding", async () => {

@@ -342,11 +342,18 @@
       "ordinal": 30
     },
     {
+      "sha256": "2e03a0a1397abb61347fc4f9bcf9ccb24b43ee058a9d4d431c85e58d05160ca5",
+      "class": "normative",
+      "label": "§33 a removal sticks, and a removed admin's tokens go with them (090, readiness review 2026-10-02) — workspace_member_removals (tenant plane, written only by svc_membership), service_tokens.created_by_user_id, fn_group_member_seen refusing a removed non-member, and fn_member_remove recording the removal",
+      "doc": "07-security-model.md",
+      "ordinal": 31
+    },
+    {
       "sha256": "0a9c8e5783f817633e0cdcf84ee5955846eb23128d6a2d81128e25d7ddda1014",
       "class": "normative",
       "label": "§38 every SECURITY DEFINER function pins search_path = pg_catalog, public, pg_temp, with pg_temp last (095) — one ALTER FUNCTION ... SET search_path per door, the 29 definer functions in public written out by signature, no body restated",
       "doc": "07-security-model.md",
-      "ordinal": 31
+      "ordinal": 32
     }
   ],
   "policy_expansion": {
