@@ -345,12 +345,18 @@ async def connect_purpose(conn, *, workspace_id) -> str:
     return "reconnect" if credentialed else "connect"
 
 
-async def store_credential(conn, *, workspace_id, grant: DriveGrant) -> str:
+async def store_credential(
+    conn, *, workspace_id, grant: DriveGrant, granted_by: str
+) -> str:
     """Write the WORKSPACE's `gdrive` credential — or replace the one it
     already holds, in place, on a reconnect (`uq_credential_per_workspace`
     admits one ownerless row per workspace and provider; same id, no gap, no
     second row). Returns the id. A `gdrive` credential names no owner column:
     the workspace is its owner (069, #1165).
+
+    *granted_by* is the person whose Google account the grant is (091, `07`
+    §34) — the only one who may browse it (`workspaces.may_browse_drive`). A
+    reconnect replaces it with the person who reconnected.
 
     On the CALLER's connection, inside the caller's transaction — the F4 (a)
     contract: the tenant and actor GUCs are the unit of work's, `p_tenant`
@@ -363,9 +369,9 @@ async def store_credential(conn, *, workspace_id, grant: DriveGrant) -> str:
         text(
             "INSERT INTO oauth_credentials"
             " (workspace_id, provider, encrypted_payload,"
-            "  expires_at, next_refresh_at, state)"
+            "  expires_at, next_refresh_at, state, granted_by_user_id)"
             # next_refresh_at NULL — the read door's header has the fence.
-            " VALUES (:ws, :provider, :payload, :exp, NULL, 'active')"
+            " VALUES (:ws, :provider, :payload, :exp, NULL, 'active', :by)"
             " ON CONFLICT (workspace_id, provider)"
             # The INDEX predicate, not :data:`WORKSPACE_GRANT_WHERE`: it
             # carries no workspace/provider because those are the conflict
@@ -374,7 +380,8 @@ async def store_credential(conn, *, workspace_id, grant: DriveGrant) -> str:
             " DO UPDATE SET encrypted_payload = EXCLUDED.encrypted_payload,"
             "               expires_at = EXCLUDED.expires_at,"
             "               next_refresh_at = NULL,"
-            "               state = 'active'"
+            "               state = 'active',"
+            "               granted_by_user_id = EXCLUDED.granted_by_user_id"
             " RETURNING id"
         ),
         {
@@ -382,6 +389,7 @@ async def store_credential(conn, *, workspace_id, grant: DriveGrant) -> str:
             "provider": PROVIDER,
             "payload": ring().encrypt(encode_payload(grant)),
             "exp": grant.expires_at,
+            "by": str(granted_by),
         },
     )
     return str(result.scalar_one())

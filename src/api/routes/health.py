@@ -11,6 +11,8 @@ Each handler reads `request.app.state.*` — the engine, the sampled database
 role, the pool watch, the tap counters and the two webhook reports — rather than
 the factory's closure, which is the whole reason they can live outside it. None
 of them opens a connection for `/health` itself: see its docstring.
+`/health/scheduling` and `/health/posting` do, so each reuses its last answer
+for `HEALTH_CACHE_SECONDS` (`AnswerCache`, one per app on `app.state`).
 
 The router carries no `tags=`: these three operations have never had one, and
 `/openapi.json` is a response body like any other.
@@ -18,8 +20,10 @@ The router carries no `tags=`: these three operations have never had one, and
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
+from types import TracebackType
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -38,7 +42,57 @@ from src.services.target.work_loop import WorkerConfig
 VERSION = __version__
 _START_TIME = time.time()
 
+#: How long `/health/scheduling` and `/health/posting` reuse their last answer.
+#: Both are unauthenticated and each answer takes a connection from the API's
+#: shared pool, so without this anyone could drain the pool the webhook needs
+#: by polling them. The fleet monitors poll far less often than this, and every
+#: number in the payloads is an age or a count that moves on a scale of minutes.
+HEALTH_CACHE_SECONDS = 30.0
+
 router = APIRouter()
+
+
+class AnswerCache:
+    """The last answer of each health surface, reused for `ttl` seconds.
+
+    One per app (`app.state.health_cache`, made by `create_app`), so each app
+    a test builds starts empty. A failure is cached like a success: a database
+    that raised is not asked again until the window passes, so an outage does
+    not turn every poll into a fresh connection attempt. The lock makes the
+    requests that arrive while one is computing wait for it rather than each
+    opening a connection of their own; each surface has its own, so a slow
+    read on one never holds up the other.
+    """
+
+    def __init__(self, ttl: float = HEALTH_CACHE_SECONDS, clock=time.monotonic):
+        self._ttl = ttl
+        self._clock = clock
+        self._locks: dict[str, asyncio.Lock] = {}
+        # key -> (expires_at, answer, error, its traceback): the answer or the
+        # error is set, never both.
+        self._entries: dict[
+            str, tuple[float, dict | None, Exception | None, TracebackType | None]
+        ] = {}
+
+    async def answer(self, key: str, compute):
+        """Return `compute()`'s answer for `key`, from the cache while fresh."""
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            entry = self._entries.get(key)
+            if entry is None or self._clock() >= entry[0]:
+                try:
+                    value, error, tb = await compute(), None, None
+                except Exception as exc:  # cached, then re-raised below
+                    value, error, tb = None, exc, exc.__traceback__
+                entry = (self._clock() + self._ttl, value, error, tb)
+                self._entries[key] = entry
+        _, value, error, tb = entry
+        if error is not None:
+            # From the traceback it was caught with: re-raising the one cached
+            # object would otherwise append every request's frames to it for
+            # the whole window. Its type and origin stay, so a cached pool
+            # timeout is still the app's 503.
+            raise error.with_traceback(tb)
+        return value
 
 
 @router.get("/health")
@@ -99,46 +153,50 @@ async def scheduling_health_check(request: Request):
     engine = request.app.state.engine
     if engine is None:
         raise HTTPException(status_code=503, detail="target database not configured")
-    # A DIRECT CONNECTION, not a unit of work, and the empty tenant string
-    # this replaced was not a near-miss — `UnitOfWork.__init__` refuses a
-    # blank tenant at CONSTRUCTION, so the route raised before touching the
-    # database and returned 500 to every caller it ever had.
-    #
-    # The guard is right and must not move. This aggregate is estate-wide
-    # and has no tenant; naming one that does not exist is a lie the guard
-    # correctly refused, and the remedy is the one its own message gives.
-    #
-    # The estate-wide reads answer through doors (081, `07` §24): each
-    # is a SECURITY DEFINER function owned by `svc_maintenance`, so the
-    # answer is the same under the owner login and under `svc_ingress`.
-    # The first switch to `svc_ingress` (2026-09-20, #751) is why: with
-    # the reads still direct, every policy-covered table read empty and
-    # this surface said `no-signal` for a live estate.
-    async with engine.connect() as conn:
-        # TWO AXES, ONE PAYLOAD (#1120). The cursor axis is empty whenever
-        # no destination is active, and `no-signal` is then the answer
-        # whether the worker is healthy or DEAD — so the one monitored axis
-        # covered nothing at all until the first tenant arrived. The worker
-        # axis reads system jobs, whose population is tenant-independent.
+
+    async def read():
+        # A DIRECT CONNECTION, not a unit of work, and the empty tenant string
+        # this replaced was not a near-miss — `UnitOfWork.__init__` refuses a
+        # blank tenant at CONSTRUCTION, so the route raised before touching the
+        # database and returned 500 to every caller it ever had.
         #
-        # Same endpoint rather than a sibling, deliberately: a second URL
-        # would need a second poller invocation enrolled on the fleet host,
-        # a unit change, to close a hole the existing poller can already
-        # reach. The cursor keys keep their names and meanings, so a poller
-        # predating this change reads the payload exactly as before.
-        lag = await scheduling_health.scheduling_lag(conn)
-        worker = await scheduling_health.worker_freshness(conn)
-        # The backpressure signal (phase 3a step 6): the same numbers the
-        # worker's status line prints, for the poller that watches this —
-        # without the waiting workspace's id (this route is public and
-        # promises nothing identifying; `identify` stays False).
-        pressure = await backpressure.snapshot(
-            conn,
-            now=datetime.now(timezone.utc),
-            global_limit=WorkerConfig().global_limit,
-            global_window_seconds=WorkerConfig().global_window_seconds,
-        )
-        return {**lag, "worker": worker, "backpressure": pressure}
+        # The guard is right and must not move. This aggregate is estate-wide
+        # and has no tenant; naming one that does not exist is a lie the guard
+        # correctly refused, and the remedy is the one its own message gives.
+        #
+        # The estate-wide reads answer through doors (081, `07` §24): each
+        # is a SECURITY DEFINER function owned by `svc_maintenance`, so the
+        # answer is the same under the owner login and under `svc_ingress`.
+        # The first switch to `svc_ingress` (2026-09-20, #751) is why: with
+        # the reads still direct, every policy-covered table read empty and
+        # this surface said `no-signal` for a live estate.
+        async with engine.connect() as conn:
+            # TWO AXES, ONE PAYLOAD (#1120). The cursor axis is empty whenever
+            # no destination is active, and `no-signal` is then the answer
+            # whether the worker is healthy or DEAD — so the one monitored axis
+            # covered nothing at all until the first tenant arrived. The worker
+            # axis reads system jobs, whose population is tenant-independent.
+            #
+            # Same endpoint rather than a sibling, deliberately: a second URL
+            # would need a second poller invocation enrolled on the fleet host,
+            # a unit change, to close a hole the existing poller can already
+            # reach. The cursor keys keep their names and meanings, so a poller
+            # predating this change reads the payload exactly as before.
+            lag = await scheduling_health.scheduling_lag(conn)
+            worker = await scheduling_health.worker_freshness(conn)
+            # The backpressure signal (phase 3a step 6): the same numbers the
+            # worker's status line prints, for the poller that watches this —
+            # without the waiting workspace's id (this route is public and
+            # promises nothing identifying; `identify` stays False).
+            pressure = await backpressure.snapshot(
+                conn,
+                now=datetime.now(timezone.utc),
+                global_limit=WorkerConfig().global_limit,
+                global_window_seconds=WorkerConfig().global_window_seconds,
+            )
+            return {**lag, "worker": worker, "backpressure": pressure}
+
+    return await request.app.state.health_cache.answer("scheduling", read)
 
 
 @router.get("/health/posting")
@@ -188,20 +246,24 @@ async def posting_health_check(request: Request):
     engine = request.app.state.engine
     if engine is None:
         raise HTTPException(status_code=503, detail="target database not configured")
-    # A DIRECT CONNECTION, not a unit of work, for the reason the route
-    # above records: `UnitOfWork.__init__` refuses a blank tenant at
-    # construction, and this aggregate is estate-wide and has no tenant.
-    # Its cross-tenant reach is 081's doors, the same footing as the route
-    # above.
-    async with engine.connect() as conn:
-        posting = await posting_health.posting_freshness(conn)
-        attempts = await posting_health.publish_attempts(conn)
-        # `accounts_active` is CONTEXT for the alert text and never a gate:
-        # a poller excused from speaking by a zero here would excuse an
-        # empty tier forever, which is the first half of the outage this
-        # endpoint exists for. The age beside it is the opposite — an
-        # anchor that can only make the poller speak sooner.
-        dests = await posting_health.destinations(conn)
-        # Every key spelled in the service that computes it, so a rename
-        # cannot leave the route publishing a name nothing produces.
-        return {**posting, **attempts, **dests}
+
+    async def read():
+        # A DIRECT CONNECTION, not a unit of work, for the reason the route
+        # above records: `UnitOfWork.__init__` refuses a blank tenant at
+        # construction, and this aggregate is estate-wide and has no tenant.
+        # Its cross-tenant reach is 081's doors, the same footing as the route
+        # above.
+        async with engine.connect() as conn:
+            posting = await posting_health.posting_freshness(conn)
+            attempts = await posting_health.publish_attempts(conn)
+            # `accounts_active` is CONTEXT for the alert text and never a gate:
+            # a poller excused from speaking by a zero here would excuse an
+            # empty tier forever, which is the first half of the outage this
+            # endpoint exists for. The age beside it is the opposite — an
+            # anchor that can only make the poller speak sooner.
+            dests = await posting_health.destinations(conn)
+            # Every key spelled in the service that computes it, so a rename
+            # cannot leave the route publishing a name nothing produces.
+            return {**posting, **attempts, **dests}
+
+    return await request.app.state.health_cache.answer("posting", read)
