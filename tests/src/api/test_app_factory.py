@@ -7,7 +7,9 @@ means a 503 that NAMES the variable (never the settings-built URL), and no
 
 from __future__ import annotations
 
+import asyncio
 import time
+from types import SimpleNamespace
 from contextlib import asynccontextmanager
 
 import pytest
@@ -16,8 +18,11 @@ from fastapi.testclient import TestClient
 from src import __version__
 from src.api.app import create_app
 from src.api.principal import Principal, current_principal
+from src.api.routes import health as health_routes
+from src.api.routes.health import AnswerCache
 from src.config.settings import settings
 from src.services.target import backpressure, posting_health, scheduling_health
+from tests.src.api.conftest import FakeEngine
 
 
 #: An operator, for the details `/health` used to publish (`/api/v1/ops/health`);
@@ -26,11 +31,17 @@ OPERATOR = Principal(session_id="s-op", user_id="00000000-0000-4000-8000-0000000
 
 
 def details(client: TestClient) -> dict:
-    """The API's operating details, read as an operator."""
+    """The API's operating details, read as an operator, the queue stubbed out:
+    the engines these tests pass (`_RoleEngine`) cannot answer its SQL."""
     client.app.dependency_overrides[current_principal] = lambda: OPERATOR
+
+    async def no_queue(state):
+        return None
+
     try:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(settings, "OPS_USER_IDS", OPERATOR.user_id)
+            mp.setattr(health_routes, "queue_pressure", no_queue)
             return client.get("/api/v1/ops/health").json()
     finally:
         client.app.dependency_overrides.pop(current_principal, None)
@@ -373,8 +384,8 @@ class TestRefusalMappingsAreTotal:
 
 
 async def _fake_snapshot(executor, **kwargs):
-    """The third seam on `/health/scheduling` (phase 3a): stubbed so a route
-    unit test never reaches SQL."""
+    """The queue's backpressure seam (phase 3a), now the operating details':
+    stubbed so a unit test never reaches SQL."""
     return {
         "lanes": {
             "interactive": {"ready": 0, "oldest_age_s": 0.0},
@@ -451,7 +462,6 @@ class TestSchedulingHealthIsASecondSurface:
 
         monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
         monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
-        monkeypatch.setattr(backpressure, "snapshot", _fake_snapshot)
         resp = client.get("/health/scheduling")
 
         assert resp.status_code == 200, resp.text
@@ -490,44 +500,107 @@ class TestSchedulingHealthIsASecondSurface:
 
         monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
         monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
-        monkeypatch.setattr(backpressure, "snapshot", _fake_snapshot)
         resp = client.get("/health/scheduling")
 
         assert resp.status_code == 200, resp.text
         payload = resp.json()
         # The cursor axis is unchanged — the poller's existing contract.
         assert payload["accounts_active"] == 0
-        # Phase 3a: the backpressure signal rides the same payload — a third
-        # seam, stubbed like the other two, and asserted present.
-        assert payload["backpressure"]["outbox_pending"] == 4
         assert payload["worker"]["succeeded_ever"] == 78
         assert payload["worker"]["last_success_age_seconds"] == 3600
 
-    def test_the_route_calls_the_snapshot_without_identification(
+    def test_the_public_payloads_are_exactly_what_the_fleet_monitors_read(
         self, client, monkeypatch
     ):
-        """The route is public and promises nothing identifying (`scheduling_health`,
-        `posting_health`): the snapshot must be asked WITHOUT `identify`, and the
-        payload must carry no workspace id at any depth."""
-        seen = {}
+        """Both axes are public because the fleet monitors poll them, so they
+        carry what `scripts/scheduling_monitor.py` and
+        `scripts/posting_monitor.py` read and nothing more. The monitors are
+        strict (a missing key is `unreachable`), so this is both directions: a
+        key dropped here pages someone, and a key added here is published to
+        anyone."""
+        from scripts import posting_monitor, scheduling_monitor as sm
 
         async def fake_lag(executor):
-            return {"stalled": 0, "accounts_active": 0, "max_lag_seconds": None}
+            return {"stalled": 0, "accounts_active": 1, "max_lag_seconds": 3}
 
         async def fake_worker(executor):
-            return {"succeeded_ever": 0, "last_success_age_seconds": None}
+            return {
+                "succeeded_ever": 1,
+                "last_success_age_seconds": 30,
+                "overdue_ready": 0,
+                "max_overdue_seconds": None,
+            }
+
+        async def fake_freshness(executor):
+            return {
+                "posted_ever": 1,
+                "last_post_age_seconds": 60,
+                "intents_ever": 2,
+                "oldest_intent_age_seconds": 600,
+            }
+
+        async def fake_attempts(executor):
+            return {"debited_total": 1, "ledger_days": 1}
+
+        async def fake_destinations(executor):
+            return {"accounts_active": 1, "oldest_active_destination_age_seconds": 9}
+
+        async def no_queue(executor, **kwargs):
+            raise AssertionError("the public axes no longer read the queue")
+
+        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
+        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
+        monkeypatch.setattr(backpressure, "snapshot", no_queue)
+        monkeypatch.setattr(posting_health, "posting_freshness", fake_freshness)
+        monkeypatch.setattr(posting_health, "publish_attempts", fake_attempts)
+        monkeypatch.setattr(posting_health, "destinations", fake_destinations)
+
+        scheduling = client.get("/health/scheduling").json()
+        assert set(scheduling) == {*sm._COUNTS, sm._LAG, sm._WORKER}
+        assert set(scheduling[sm._WORKER]) == {*sm._WORKER_COUNTS, *sm._WORKER_AGES}
+        posting = client.get("/health/posting").json()
+        assert set(posting) == set(posting_monitor._COUNTS + posting_monitor._AGES)
+
+
+class TestTheQueueMovedToTheDetails:
+    """The backpressure signal (the ready lanes, the pending outbox, the
+    Telegram pacing) rode public `/health/scheduling`, which no monitor ever
+    read; it is the operating details' now."""
+
+    @staticmethod
+    def state(engine):
+        return SimpleNamespace(engine=engine, health_cache=AnswerCache())
+
+    def test_the_details_carry_it_asked_without_identification(self, monkeypatch):
+        seen = {}
 
         async def fake_snapshot(executor, **kwargs):
             seen.update(kwargs)
             return await _fake_snapshot(executor, **kwargs)
 
-        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
-        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
         monkeypatch.setattr(backpressure, "snapshot", fake_snapshot)
-        resp = client.get("/health/scheduling")
-        assert resp.status_code == 200, resp.text
+        body = asyncio.run(health_routes.queue_pressure(self.state(FakeEngine())))
+        assert body["outbox_pending"] == 4
         assert not seen.get("identify"), seen
-        assert "workspace_id" not in resp.text
+        assert "workspace_id" not in str(body)
+
+    def test_no_engine_is_none_and_a_failed_read_is_named(self, monkeypatch):
+        async def broken(executor, **kwargs):
+            raise TimeoutError("pool")
+
+        monkeypatch.setattr(backpressure, "snapshot", broken)
+        assert asyncio.run(health_routes.queue_pressure(self.state(None))) is None
+        failed = asyncio.run(health_routes.queue_pressure(self.state(FakeEngine())))
+        assert failed == {"error": "TimeoutError"}
+
+    def test_a_database_that_stops_answering_is_named_not_waited_on(self, monkeypatch):
+        async def hangs(executor, **kwargs):
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(backpressure, "snapshot", hangs)
+        monkeypatch.setattr(health_routes, "QUEUE_READ_TIMEOUT_S", 0.01)
+        slow = asyncio.run(health_routes.queue_pressure(self.state(FakeEngine())))
+        assert slow == {"error": "TimeoutError"}
 
 
 class TestPostingHealthIsATHIRDSurface:

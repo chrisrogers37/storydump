@@ -1,6 +1,7 @@
 """The backpressure signal (phase 3a of the 2026-09-09 tap plan, step 6;
 `01-target-architecture.md:88`; #716): what the worker's status line and
-`/health/scheduling` say about the queue, from one read.
+the operating details (`/api/v1/ops/health`) say about the queue, from one
+read.
 
 - per lane: ready depth and the age of the oldest runnable job;
 - the outbox's pending rows;
@@ -15,7 +16,7 @@ Read-only, one connection, four statements; never a verdict.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -143,3 +144,18 @@ def render(snap: dict[str, Any]) -> str:
         f" tg_global_paced={tg['paced_windows_last_minute']}"
         f" hold={'y' if tg['hold_active'] else 'n'} {ws}"
     )
+
+
+async def read(engine, config, *, identify: bool = False) -> dict[str, Any]:
+    """`snapshot` on a connection of its own, now, under *config*'s global
+    limit (a `WorkerConfig`): the one read the worker's status line and the
+    operating details share. Raises what the read raises; each caller decides
+    what a failure reads as."""
+    async with engine.connect() as conn:
+        return await snapshot(
+            conn,
+            now=datetime.now(timezone.utc),
+            global_limit=config.global_limit,
+            global_window_seconds=config.global_window_seconds,
+            identify=identify,
+        )

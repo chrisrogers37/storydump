@@ -21,8 +21,8 @@ The router carries no `tags=`: these three operations have never had one, and
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from datetime import datetime, timezone
 from types import TracebackType
 
 from fastapi import APIRouter, HTTPException, Request
@@ -51,7 +51,13 @@ _START_TIME = time.time()
 #: number in the payloads is an age or a count that moves on a scale of minutes.
 HEALTH_CACHE_SECONDS = 30.0
 
+#: How long the operating details wait for the queue's read before naming it a
+#: `TimeoutError`: a database that stops answering hangs a connect for the
+#: driver's own minute, and the rest of the details need no database at all.
+QUEUE_READ_TIMEOUT_S = 3.0
+
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class AnswerCache:
@@ -134,6 +140,32 @@ def details(state) -> dict:
     }
 
 
+async def operating_details(state) -> dict:
+    """`details`, and the queue's backpressure (phase 3a step 6): the ready
+    lanes, the pending outbox and the Telegram pacing, without the waiting
+    workspace's id. The queue is the one part that opens a connection, so it
+    reuses its last answer like the public axes (`health_cache`), is None
+    without an engine, and names a failed or slow read (`QUEUE_READ_TIMEOUT_S`)
+    rather than failing or holding up the rest."""
+    return {**details(state), "backpressure": await queue_pressure(state)}
+
+
+async def queue_pressure(state) -> dict | None:
+    if state.engine is None:
+        return None
+
+    async def read():
+        try:
+            return await asyncio.wait_for(
+                backpressure.read(state.engine, WorkerConfig()), QUEUE_READ_TIMEOUT_S
+            )
+        except Exception as exc:  # noqa: BLE001 — a report, never a failed read
+            logger.warning("queue pressure not read: %s", type(exc).__name__)
+            return {"error": type(exc).__name__}
+
+    return await state.health_cache.answer("backpressure", read)
+
+
 @router.get("/health/scheduling")
 async def scheduling_health_check(request: Request):
     """Is scheduling still advancing? (#1090 F1) — a SECOND health surface,
@@ -198,17 +230,10 @@ async def scheduling_health_check(request: Request):
             # predating this change reads the payload exactly as before.
             lag = await scheduling_health.scheduling_lag(conn)
             worker = await scheduling_health.worker_freshness(conn)
-            # The backpressure signal (phase 3a step 6): the same numbers the
-            # worker's status line prints, for the poller that watches this —
-            # without the waiting workspace's id (this route is public and
-            # promises nothing identifying; `identify` stays False).
-            pressure = await backpressure.snapshot(
-                conn,
-                now=datetime.now(timezone.utc),
-                global_limit=WorkerConfig().global_limit,
-                global_window_seconds=WorkerConfig().global_window_seconds,
-            )
-            return {**lag, "worker": worker, "backpressure": pressure}
+            # Exactly what `scripts/scheduling_monitor.py` reads, and nothing
+            # else: the queue's backpressure moved to the operating details
+            # (`queue_pressure`), which no monitor has ever read.
+            return {**lag, "worker": worker}
 
     return await request.app.state.health_cache.answer("scheduling", read)
 
