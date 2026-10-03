@@ -50,6 +50,7 @@ from src.services.target import (
     workspaces,
 )
 from src.services.target.commands import Command, CommandRefused
+from src.utils.datetime_utils import parse_iso_timestamp
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -400,7 +401,7 @@ class TestScheduleItem:
         data = out.data
         assert data["state"] == "scheduled" and data["tz"] == "UTC"
         assert data["local_at"] == f"{local_at}:00"
-        assert datetime.fromisoformat(data["schedule_slot_at"]) == _instant(
+        assert parse_iso_timestamp(data["schedule_slot_at"]) == _instant(
             local_at, "UTC"
         )
         assert data["warnings"] == [] and data["overridden"] == []
@@ -421,7 +422,7 @@ class TestScheduleItem:
         local_at = f"{_local(days=2, hour=15)}:30"
         out = schedule(world, w, _item(world, w), local_at.replace(" ", "T"))
         assert out.data["local_at"] == local_at
-        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == _instant(
+        assert parse_iso_timestamp(out.data["schedule_slot_at"]) == _instant(
             local_at, "UTC"
         )
 
@@ -463,14 +464,14 @@ class TestScheduleItem:
         local_at = _local(days=5, hour=9, tz="America/New_York")
         out = schedule(world, w, _item(world, w), local_at)
         assert out.data["tz"] == "America/New_York"
-        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == _instant(
+        assert parse_iso_timestamp(out.data["schedule_slot_at"]) == _instant(
             local_at, "America/New_York"
         )
         tokyo = _account(world, w, tz="Asia/Tokyo")
         local_at = _local(days=5, hour=9, tz="Asia/Tokyo")
         out = schedule(world, w, _item(world, w), local_at, account=tokyo)
         assert out.data["tz"] == "Asia/Tokyo"
-        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == _instant(
+        assert parse_iso_timestamp(out.data["schedule_slot_at"]) == _instant(
             local_at, "Asia/Tokyo"
         )
 
@@ -478,7 +479,7 @@ class TestScheduleItem:
         tz, local_at, expected = _next_ambiguous_or_skipped("ambiguous")
         w = _workspace(world, "ambiguous", tz=tz)
         out = schedule(world, w, _item(world, w), local_at)
-        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == expected
+        assert parse_iso_timestamp(out.data["schedule_slot_at"]) == expected
 
     def test_a_skipped_wall_time_is_refused(self, world):
         tz, local_at, _ = _next_ambiguous_or_skipped("skipped")
@@ -745,17 +746,15 @@ class TestRescheduleItem:
             local_at=local_at,
         )
         assert out.outcome == "executed" and out.data["intent_id"] == intent
-        assert datetime.fromisoformat(out.data["schedule_slot_at"]) == _instant(
+        assert parse_iso_timestamp(out.data["schedule_slot_at"]) == _instant(
             local_at, "UTC"
         )
-        assert datetime.fromisoformat(
-            out.data["previous_slot_at"]
-        ) == datetime.fromisoformat(before)
+        assert parse_iso_timestamp(out.data["previous_slot_at"]) == parse_iso_timestamp(
+            before
+        )
         row = _row(world, intent)
         assert row["state"] == "scheduled"
-        assert datetime.fromisoformat(row["schedule_slot_at"]) == _instant(
-            local_at, "UTC"
-        )
+        assert parse_iso_timestamp(row["schedule_slot_at"]) == _instant(local_at, "UTC")
         ((actor, by, channel, from_state, to_state, detail),) = _audit(
             world, intent, "rescheduled"
         )
@@ -766,7 +765,7 @@ class TestRescheduleItem:
             "scheduled",
             "scheduled",
         )
-        assert datetime.fromisoformat(detail["from"]) == datetime.fromisoformat(before)
+        assert parse_iso_timestamp(detail["from"]) == parse_iso_timestamp(before)
         assert detail["to"] == out.data["schedule_slot_at"]
         assert detail["tz"] == "UTC" and detail["local_at"] == f"{local_at}:00"
 
@@ -1156,7 +1155,7 @@ class TestAWriteAtTheDueInstant:
         )
         row = _row(world, intent)
         assert row["state"] == "scheduled", "served at the time it no longer holds"
-        assert datetime.fromisoformat(row["schedule_slot_at"]) > datetime.now(UTC)
+        assert parse_iso_timestamp(row["schedule_slot_at"]) > datetime.now(UTC)
         assert _row(world, control)["state"] in SERVED
 
     def test_the_serve_sweep_leaves_a_story_flagged_under_it(self, world):

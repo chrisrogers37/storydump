@@ -4,11 +4,23 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* The marketing site's palette: the tap orange, its darker shade for text on
+   light backgrounds (4.5:1 on paper), warm paper and ink. */
+@theme {
+  --color-tap: #ff5a1f;
+  --color-tap-ink: #b23c0a;
+  --color-paper: #f4f1ea;
+  --color-ink: #15130f;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  /* The generic fallbacks keep a sans face if the font is late on a device
+     without the metric-matched fallback's Arial. */
+  --font-display: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
   --color-chart-5: var(--chart-5);
   --color-chart-4: var(--chart-4);
   --color-chart-3: var(--chart-3);
@@ -104,6 +116,31 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+/* The marketing sections' kicker and heading. */
+/* A right-edge fade on a box that scrolls sideways, so a phone reader can
+   see there is more. Used below md, where the content overflows. */
+@utility scroll-hint {
+  mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
+}
+
+@utility kicker {
+  @apply font-mono text-xs font-medium tracking-[0.14em] uppercase;
+}
+
+@utility section-title {
+  @apply font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.035em] text-ink sm:text-5xl md:text-[4.25rem];
+}
+
+/* The hero demo's Story progress bar. */
+@keyframes story-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
   }
 }
 

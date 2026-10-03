@@ -1,5 +1,7 @@
 import { siteConfig } from "@/config/site"
 import { faqs } from "@/config/faqs"
+import { JsonLd } from "@/components/seo/json-ld"
+import { absoluteUrl } from "@/lib/seo"
 
 const softwareAppSchema = {
   "@context": "https://schema.org",
@@ -22,7 +24,7 @@ const organizationSchema = {
   "@type": "Organization",
   name: siteConfig.name,
   url: siteConfig.url,
-  logo: `${siteConfig.url}/og-image.png`,
+  logo: absoluteUrl("/icon-512.png"),
   contactPoint: {
     "@type": "ContactPoint",
     email: siteConfig.contact.email,
@@ -46,18 +48,9 @@ const faqSchema = {
 export function StructuredData() {
   return (
     <>
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(softwareAppSchema) }}
-      />
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(organizationSchema) }}
-      />
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(faqSchema) }}
-      />
+      <JsonLd data={softwareAppSchema} />
+      <JsonLd data={organizationSchema} />
+      <JsonLd data={faqSchema} />
     </>
   )
 }
