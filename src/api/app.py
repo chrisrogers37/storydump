@@ -65,6 +65,7 @@ from src.api.routes.tokens import router as tokens_router
 from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
+from src.api.routes.public import router as public_router
 from src.config.settings import parse_ops_user_ids, settings
 from src.exceptions.tenancy import (
     CrossSiteRefused,
@@ -713,6 +714,10 @@ def create_app(
     # Meta's policy callbacks (#410). Under the same prefix as the other
     # provider-called doors; the URLs are not registered with Meta yet.
     app.include_router(meta_router, prefix="/webhooks/meta")
+    # What a visitor with no account reaches (`routes/public.py`): the
+    # marketing waitlist, outside `/api/v1` because every route there takes a
+    # principal.
+    app.include_router(public_router, prefix="/public")
     # The Mini App's URL is baked into buttons real users still hold; it
     # redirects rather than 404s (`routes/retired.py`).
     app.include_router(retired_router)

@@ -3089,3 +3089,44 @@ REVOKE ALL ON FUNCTION fn_identity_unlink(uuid, text) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_identity_unlink(uuid, text) TO svc_ingress;
 ```
+
+### §43. The waitlist is written by the API, not by the site (100)
+
+**Why:** the landing site's waitlist form inserted into a Drizzle-managed `waitlist_signups` table
+through its own `DATABASE_URL`, the one write in the system that did not go through the API, with
+a credential that reached every table. Production never had that table, so the form failed every
+signup. The owner ruled "one system, one writer" (2026-10-03): the API owns the write, and the
+site holds no database credential.
+
+**The table.** `waitlist_entries` is global, not tenant-plane: a visitor joining the waitlist has
+no user and no workspace. Its address rule is §35's, with RFC 5321's 254-octet bound, and `utm`
+records the campaign the visitor came from, an object bounded at 2 KB. RLS is on and the one
+policy is `svc_ingress`'s INSERT, which is the route's only statement (`POST /public/waitlist`):
+the API can add an address and cannot read, change or remove one, so the public endpoint is no
+oracle for who is on the list. The owner reads the list as the database owner and admits people
+through `signup_admissions` (§35).
+
+**What it does not adopt.** A hand-made, empty `waitlist_signups` and an insert-only
+`waitlist_writer` login were created in production as a stopgap on 2026-10-02 and never served a
+signup. The new name keeps this CREATE from meeting that table at the predeploy; the owner drops
+both by hand once the API serves the form.
+
+```sql
+-- [§43 the waitlist is written by the API, not by the site]
+
+CREATE TABLE waitlist_entries (
+  email     text PRIMARY KEY CONSTRAINT ck_waitlist_entries_email CHECK (
+              email = lower(email) AND length(email) <= 254
+              AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'
+              AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
+  joined_at timestamptz NOT NULL DEFAULT now(),
+  utm       jsonb CONSTRAINT ck_waitlist_entries_utm CHECK (
+              utm IS NULL OR (jsonb_typeof(utm) = 'object' AND length(utm::text) <= 2048))
+);
+
+ALTER TABLE waitlist_entries ENABLE ROW LEVEL SECURITY;
+
+GRANT INSERT ON waitlist_entries TO svc_ingress;
+
+CREATE POLICY p_ingress_waitlist ON waitlist_entries FOR INSERT TO svc_ingress WITH CHECK (true);
+```

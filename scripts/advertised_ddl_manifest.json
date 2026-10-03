@@ -375,6 +375,13 @@
       "label": "§42 a person can unlink their own Telegram identity (099) — fn_identity_unlink, owned by svc_membership and granted to svc_ingress, removing the user's telegram identity only while another identity remains, with svc_membership's SELECT and DELETE on user_identities under p_member_identities",
       "doc": "07-security-model.md",
       "ordinal": 35
+    },
+    {
+      "sha256": "784d51d8a23e11dfd7bef4241cc921ae129c0a12754cf43991430f2827f79161",
+      "class": "normative",
+      "label": "§43 the waitlist is written by the API, not by the site (100, owner decision 2026-10-03) — waitlist_entries (global, RLS on, svc_ingress may INSERT and nothing else under p_ingress_waitlist), the address rule of §35 bounded at 254 octets, and a utm object bounded at 2 KB",
+      "doc": "07-security-model.md",
+      "ordinal": 36
     }
   ],
   "policy_expansion": {
