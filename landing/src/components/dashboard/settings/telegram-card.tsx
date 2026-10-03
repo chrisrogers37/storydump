@@ -132,7 +132,6 @@ export function TelegramCard({
       return;
     }
     setUnlinked(true);
-    setTelegramLink(null);
     onNotice("Telegram unlinked. Link it again here whenever you like.");
   }
 

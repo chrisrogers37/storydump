@@ -27,6 +27,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     async_url,
+    fetch_one,
     replay_advertised_stream,
     seed_workspace_chain,
     set_test_passwords,
@@ -189,13 +190,7 @@ def test_the_removed_admins_service_tokens_are_revoked_with_the_membership(world
 
 
 def _admitted(world, email: str) -> bool:
-    conn = psycopg2.connect(world["ingress"])
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT fn_signup_admitted(%s)", (email,))
-            return cur.fetchone()[0]
-    finally:
-        conn.close()
+    return fetch_one(world["ingress"], "SELECT fn_signup_admitted(%s)", (email,))[0]
 
 
 def test_the_removed_members_pending_invitations_are_revoked_with_them(world):

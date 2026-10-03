@@ -378,13 +378,10 @@ async def link_identity(
     return True
 
 
-#: `fn_identity_unlink`'s answers (094, `07` §37).
-UNLINK_OUTCOMES = ("unlinked", "not_linked", "last_identity")
-
-
 async def unlink_telegram(executor, *, user_id: str) -> str:
     """Remove *user_id*'s own Telegram identity — the reverse of
-    :func:`link_identity`. Returns one of :data:`UNLINK_OUTCOMES`.
+    :func:`link_identity`. Returns the door's outcome: `unlinked`,
+    `not_linked` or `last_identity` (094, `07` §37).
 
     The delete is the `fn_identity_unlink` door's (094): no runtime role
     deletes from `user_identities`, and the door keeps the user's other
@@ -405,6 +402,7 @@ async def unlink_telegram(executor, *, user_id: str) -> str:
         )
     ).scalar_one()
     if outcome != "last_identity":
+        # "link" is `identity_link.PURPOSE`, which imports this module.
         await oauth_states.retire_live_states(
             executor, provider=PROVIDER_TELEGRAM, purpose="link", user_id=user_id
         )

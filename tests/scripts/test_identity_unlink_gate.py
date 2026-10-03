@@ -135,17 +135,6 @@ def providers(world, user_id) -> list:
     return list(row[0])
 
 
-def _one(dsn, sql, params=()):
-    conn = psycopg2.connect(dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            return cur.fetchone()
-    finally:
-        conn.rollback()
-        conn.close()
-
-
 class TestTheDoor:
     def test_unlinking_removes_telegram_and_keeps_google(self, world):
         user_id, uid = signed_up(world), telegram_user()
@@ -185,7 +174,7 @@ class TestTheDoor:
         user_id = signed_up(world)
         assert link(world, user_id, telegram_user()) == "linked"
         with pytest.raises(psycopg2.errors.InvalidParameterValue):
-            _one(
+            fetch_one(
                 world["ingress"], "SELECT fn_identity_unlink(%s, 'google')", (user_id,)
             )
         assert providers(world, user_id) == ["google", "telegram"]
@@ -193,7 +182,7 @@ class TestTheDoor:
     def test_svc_ingress_still_cannot_delete_an_identity_directly(self, world):
         user_id = signed_up(world)
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-            _one(
+            fetch_one(
                 world["ingress"],
                 "DELETE FROM user_identities WHERE user_id = %s RETURNING 1",
                 (user_id,),
@@ -201,7 +190,7 @@ class TestTheDoor:
 
     def test_the_door_is_svc_ingress_alone(self, world):
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-            _one(
+            fetch_one(
                 world["worker"],
                 "SELECT fn_identity_unlink(%s, 'telegram')",
                 (str(uuid.uuid4()),),
