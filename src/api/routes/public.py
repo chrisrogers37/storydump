@@ -13,12 +13,19 @@ break.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Request
+from starlette.requests import ClientDisconnect
 from fastapi.responses import JSONResponse
 
-from src.api.principal import parse_json_object, preauth_guard, require_engine
+from src.api.principal import (
+    client_ip,
+    parse_json_object,
+    preauth_guard,
+    require_engine,
+)
 from src.services.target import waitlist
 from src.utils.logger import logger
 
@@ -37,11 +44,76 @@ WAITLIST_LIMIT = 300
 #: many times over. Anything larger is a 413 before it is parsed.
 WAITLIST_MAX_BODY_BYTES = 8 * 1024
 #: Waitlist requests one process serves at once. Each holds a pooled
-#: connection and the counter row's lock, so a burst past this is a 429 before
-#: it takes a connection, and the rest of the API keeps its pool.
+#: connection and the counter row's lock, so a burst past this waits for a
+#: slot instead of taking a connection, and the rest of the API keeps its pool.
 WAITLIST_MAX_IN_FLIGHT = 4
+#: Slots one client address may hold, so no single caller can fill them all
+#: and turn the site's own requests away. Past this, its requests wait.
+WAITLIST_MAX_PER_ADDRESS = 2
+#: Requests one client address may have waiting or held at once; past this
+#: it is a 429 at once, so one caller cannot pile up waiters.
+WAITLIST_MAX_QUEUED_PER_ADDRESS = 10
+#: How long a request waits for a free slot before the 429.
+WAITLIST_SLOT_WAIT_SECONDS = 2.0
 
-_in_flight = 0
+
+class _Share:
+    """One address's part: its own slots, and how many of its requests hold
+    or wait for one."""
+
+    def __init__(self) -> None:
+        self.slots = asyncio.Semaphore(WAITLIST_MAX_PER_ADDRESS)
+        self.queued = 0
+
+
+class WaitlistSlots:
+    """The route's per-process concurrency: :data:`WAITLIST_MAX_IN_FLIGHT`
+    slots, at most :data:`WAITLIST_MAX_PER_ADDRESS` held per address, and a
+    FIFO wait of :data:`WAITLIST_SLOT_WAIT_SECONDS` for one. The site's server
+    is one address, so a burst of signups waits its turn rather than being
+    refused. ``create_app`` builds one per app, as ``app.state.waitlist_slots``."""
+
+    def __init__(self) -> None:
+        self.free = asyncio.Semaphore(WAITLIST_MAX_IN_FLIGHT)
+        self.by_address: dict[str, _Share] = {}
+
+    async def acquire(self, address: str) -> bool:
+        share = self.by_address.get(address)
+        if share is None:
+            share = self.by_address[address] = _Share()
+        if share.queued >= WAITLIST_MAX_QUEUED_PER_ADDRESS:
+            return False
+        share.queued += 1
+        held: list[asyncio.Semaphore] = []
+
+        async def take() -> None:
+            # No await between an acquire and its append, so a timeout or a
+            # cancel always finds in `held` exactly what was taken.
+            for semaphore in (share.slots, self.free):
+                await semaphore.acquire()
+                held.append(semaphore)
+
+        try:
+            await asyncio.wait_for(take(), WAITLIST_SLOT_WAIT_SECONDS)
+        except BaseException as exc:  # the timeout, or the request cancelled
+            for semaphore in held:
+                semaphore.release()
+            self._drop(address)
+            if isinstance(exc, asyncio.TimeoutError):
+                return False
+            raise
+        return True
+
+    def release(self, address: str) -> None:
+        self.free.release()
+        self.by_address[address].slots.release()
+        self._drop(address)
+
+    def _drop(self, address: str) -> None:
+        share = self.by_address[address]
+        share.queued -= 1
+        if not share.queued:
+            del self.by_address[address]
 
 
 def _refusal(status: int, detail: str, reason: str) -> JSONResponse:
@@ -58,10 +130,13 @@ async def _capped_body(request: Request) -> Optional[bytes]:
     if declared.isdigit() and int(declared) > WAITLIST_MAX_BODY_BYTES:
         return None
     body = bytearray()
-    async for chunk in request.stream():
-        body += chunk
-        if len(body) > WAITLIST_MAX_BODY_BYTES:
-            return None
+    try:
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > WAITLIST_MAX_BODY_BYTES:
+                return None
+    except ClientDisconnect:  # nobody is left to answer; no traceback for it
+        return None
     return bytes(body)
 
 
@@ -77,22 +152,20 @@ async def join_waitlist(request: Request):
     every fetch) and a server-side fetch says neither, so a request carrying
     either is a page posting here directly and is refused before anything is
     read."""
-    global _in_flight
     if "origin" in request.headers or "sec-fetch-site" in request.headers:
         return _refusal(403, "the waitlist takes no browser requests", "browser")
-    if request.headers.get("content-type", "").split(";")[0].strip() != (
-        "application/json"
-    ):
+    media_type = request.headers.get("content-type", "").split(";")[0]
+    if media_type.strip().lower() != "application/json":
         return _refusal(415, "the body must be application/json", "not_json")
     raw = await _capped_body(request)
     if raw is None:
         return _refusal(413, "the body is too large", "too_large")
     body = parse_json_object(raw)
     # A slot is taken only once the body is in hand, so a slow upload cannot
-    # hold one; there is no await between the check and the increment.
-    if _in_flight >= WAITLIST_MAX_IN_FLIGHT:
+    # hold one.
+    slots, address = request.app.state.waitlist_slots, client_ip(request)
+    if not await slots.acquire(address):
         return _refusal(429, "too many waitlist requests", "busy")
-    _in_flight += 1
     try:
         # The counter is spent before the body is judged, so a malformed or
         # refused request counts like any other.
@@ -111,6 +184,6 @@ async def join_waitlist(request: Request):
             except waitlist.InvalidWaitlistEmail:
                 return _refusal(400, "not a valid email address", "invalid_email")
     finally:
-        _in_flight -= 1
+        slots.release(address)
     logger.info("waitlist: an address was received")
     return {"status": "received"}

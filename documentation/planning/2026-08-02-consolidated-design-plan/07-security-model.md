@@ -3099,7 +3099,7 @@ signup. The owner ruled "one system, one writer" (2026-10-03): the API owns the 
 site holds no database credential.
 
 **The table.** `waitlist_entries` is global, not tenant-plane: a visitor joining the waitlist has
-no user and no workspace. Its address rule is §35's, with a dot in the domain, no control characters and at most 254 characters, and `utm`
+no user and no workspace. Its address rule is §35's, with a dot in the domain, no control, bidi-isolate, interlinear or tag characters, and at most 254 characters, and `utm`
 records the campaign the visitor came from, an object bounded at 2 KB. RLS is on and the one
 policy is `svc_ingress`'s INSERT, which is the route's only statement (`POST /public/waitlist`):
 the API can add an address and cannot read, change or remove one, so the public endpoint is no
@@ -3119,6 +3119,7 @@ CREATE TABLE waitlist_entries (
               email = lower(email) AND length(email) <= 254
               AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
               AND email !~ '[[:cntrl:]]'
+              AND email !~ '[\u061c\u2066-\u2069\ufff9-\ufffb\U000e0000-\U000e007f]'
               AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
   joined_at timestamptz NOT NULL DEFAULT now(),
   utm       jsonb CONSTRAINT ck_waitlist_entries_utm CHECK (

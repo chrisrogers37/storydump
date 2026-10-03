@@ -65,6 +65,7 @@ from src.api.routes.tokens import router as tokens_router
 from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
+from src.api.routes.public import WaitlistSlots
 from src.api.routes.public import router as public_router
 from src.config.settings import parse_ops_user_ids, settings
 from src.exceptions.tenancy import (
@@ -656,6 +657,8 @@ def create_app(
     # route's honest 503 into a 500 mid-delivery.
     bot = _telegram_transport(env)
     app.state.tap_metrics = webhooks.TapMetrics()
+    # The waitlist route's per-process slots (`routes/public.py`).
+    app.state.waitlist_slots = WaitlistSlots()
     app.state.ingress_workers = _ingress_workers(env)
     app.state.pool_watch = (
         PoolWatch(app.state.engine) if app.state.engine is not None else None

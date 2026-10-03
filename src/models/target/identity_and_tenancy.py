@@ -275,6 +275,7 @@ class WaitlistEntry(TargetBase):
             "email = lower(email) AND length(email) <= 254"
             " AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$'"
             " AND email !~ '[[:cntrl:]]'"
+            " AND email !~ '[\\u061c\\u2066-\\u2069\\ufff9-\\ufffb\\U000e0000-\\U000e007f]'"
             " AND " + _NO_INVISIBLE,
             name="ck_waitlist_entries_email",
         ),
