@@ -173,13 +173,10 @@ async def _consume_callback(
     Returns the consumed state row, or the failure response to send as-is.
 
     *require_presenter* is the connect legs' rule: **the state row is
-    necessary and not sufficient.** It pins the user who started the flow; it
-    does not prove the browser that returned is theirs. Without this check an
-    admin could mint a state, hand the authorization URL to someone else, and
-    end up holding THAT person's grant on their own workspace. So the returning
-    browser must carry the session cookie the API set at sign-in (it rides the
-    top-level return navigation under SameSite=Lax), resolving to the state's
-    user — refused before the code is spent."""
+    necessary and not sufficient.** It pins the user who started the flow, and
+    the returning browser must carry the session cookie the API set at sign-in
+    (it rides the top-level return navigation under SameSite=Lax), resolving
+    to that same user — refused before the code is spent."""
     engine = require_engine(request)
     if error:
         return _fail("denied", flow=flow)
@@ -338,9 +335,8 @@ async def google_drive_callback(
 ) -> Response:
     """The Drive connect leg's return: consume the state, check the returning
     browser is the one that started the flow, exchange the code, write the
-    credential. The Instagram leg's checks, for the same reason: without the
-    session check an admin could hand their authorization URL to someone else
-    and hold THAT person's Drive grant on their own workspace."""
+    credential. The Instagram leg's checks: the returning session must be the
+    state's user, and that user must still be an admin inside the write."""
     client_id, client_secret, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )

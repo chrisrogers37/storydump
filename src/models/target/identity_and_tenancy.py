@@ -217,11 +217,10 @@ class WorkspaceMember(TargetBase):
 
 
 class WorkspaceMemberRemoval(TargetBase):
-    """The record that an admin removed a person (090), so the Telegram join
-    path (`fn_group_member_seen`) does not undo the removal the next time the
-    person speaks in the bound group. Written only by `fn_member_remove`; an
-    invitation accepted later makes it inert, and a second removal stamps it
-    again."""
+    """The record that an admin removed a person (090). The Telegram join path
+    (`fn_group_member_seen`) honours it: a removed non-member is refused until
+    invited back. Written only by `fn_member_remove`; an invitation accepted
+    later makes it inert, and a second removal stamps it again."""
 
     __tablename__ = "workspace_member_removals"
 

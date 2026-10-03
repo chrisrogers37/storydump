@@ -782,10 +782,10 @@ async def remove_member(
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
-    non-member is `not_found`. The removal is recorded by the door, so the
-    Telegram join path cannot re-add the person until they are invited back,
-    and the workspace service identities they minted are revoked here, in the
-    same transaction (090)."""
+    non-member is `not_found`. The door records the removal, which the
+    Telegram join path honours until the person is invited back, and the
+    workspace service identities they minted are revoked here, in the same
+    transaction (090)."""
     row = (
         await executor.execute(
             text(
@@ -797,7 +797,7 @@ async def remove_member(
     ).first()
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
-        # The door recorded the removal, so the Telegram group cannot undo it
+        # The door recorded the removal, which the Telegram join path honours
         # (090); the service identities this person minted go with them.
         await service_tokens.revoke_minted_by(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
