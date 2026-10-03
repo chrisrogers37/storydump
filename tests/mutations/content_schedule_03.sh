@@ -8,7 +8,9 @@
 # server `AGENTS.md` › Testing starts; `STORYDUMP_PY` points at another venv's python.
 #
 # The behavioural SQL mutations edit `07` §32, not the 089 file: every gate here replays the
-# ADVERTISED stream, so §32 is the SQL they run. The one 089 mutation is caught by the prefix check
+# ADVERTISED stream, so §32 is the SQL they run. The miss door's checks edit §39 instead: §39 restates
+# fn_planned_misses after §32 and the stream replays it last, so §39's copy is the one the gates run.
+# The one 089 mutation is caught by the prefix check
 # that holds the file to the stream, and the model mutation by the lane's parity with `create_all`.
 # Every mutant changes behaviour: none rewrites a predicate the table's own CHECKs already decide.
 set -u
@@ -31,17 +33,19 @@ verdict() {
   elif ! grep -qE '^=+ .*[0-9]+ failed' /tmp/claude/mut.log; then echo "KILLED BY ERROR (check): $name  [$summary]"
   else echo "killed: $name  [$summary]"; fi
 }
-mutate() {
-  OLD="$2" NEW="$3" $PY - "$1" <<'PY'
+mutate() {  # file old new [later] — `later`: the second of exactly two matches, else the only one
+  OLD="$2" NEW="$3" LATER="${4-}" $PY - "$1" <<'PY'
 import os, sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text(); old = os.environ["OLD"]; new = os.environ["NEW"]
-if s.count(old) != 1:
+want = 2 if os.environ["LATER"] else 1
+if s.count(old) != want:
     print(f"MUTATION NOT APPLIED ({s.count(old)} matches)"); sys.exit(3)
-p.write_text(s.replace(old, new, 1))
+at = s.rfind(old)
+p.write_text(s[:at] + new + s[at + len(old):])
 PY
 }
-anchored() {  # file old — DRY=1 reports whether the mutation's anchor matches exactly once
-  OLD="$2" $PY -c 'import os,sys,pathlib; n = pathlib.Path(sys.argv[1]).read_text().count(os.environ["OLD"]); print(n); sys.exit(0 if n == 1 else 3)' "$1" > /dev/null
+anchored() {  # file old [later] — DRY=1 reports whether the anchor matches once (twice with `later`)
+  OLD="$2" LATER="${3-}" $PY -c 'import os,sys,pathlib; n = pathlib.Path(sys.argv[1]).read_text().count(os.environ["OLD"]); print(n); sys.exit(0 if n == (2 if os.environ["LATER"] else 1) else 3)' "$1" > /dev/null
 }
 check() {  # name file old new test-selector
   local name=$1 file=$2 old=$3 new=$4 sel=$5
@@ -71,28 +75,29 @@ C=tests/scripts/test_scheduler_clock_gate.py
 # stream ("1 unclassified, 1 orphaned"): every gate would ERROR in its fixture instead of the named
 # test deciding. So `check_doc` re-hashes §32's manifest entry after the edit — the stream builds
 # with the mutated SQL — and restores both files after the verdict.
-rehash() {
-  $PY - "$DOC" "$MANIFEST" <<'PY'
+rehash() {  # section — that section's block and manifest entry
+  $PY - "$DOC" "$MANIFEST" "$1" <<'PY'
 import json, sys
 from scripts.advertised_ddl import extract_blocks
-doc, path = sys.argv[1], sys.argv[2]
-(block,) = [b for b in extract_blocks(doc) if b.sql.startswith("-- [§32 ")]
+doc, path, sec = sys.argv[1], sys.argv[2], sys.argv[3]
+(block,) = [b for b in extract_blocks(doc) if b.sql.startswith(f"-- [{sec} ")]
 manifest = json.load(open(path))
-(entry,) = [e for e in manifest["blocks"] if e["label"].startswith("§32 ")]
+(entry,) = [e for e in manifest["blocks"] if e["label"].startswith(f"{sec} ")]
 entry["sha256"] = block.sha256
 open(path, "w").write(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
 PY
 }
-check_doc() {  # name old new test-selector — a mutation of §32, re-hashed
-  local name=$1 old=$2 new=$3 sel=$4
+check_doc() {  # name old new test-selector [section] — a mutation of §32 (or the section given), re-hashed
+  local name=$1 old=$2 new=$3 sel=$4 sec=${5:-§32} later=
+  [ "$sec" = "§32" ] || later=1
   if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return; fi
   RAN=$((RAN + 1))
-  if [ -n "${DRY:-}" ]; then anchored "$DOC" "$old" && echo "anchor ok: $name" || echo "ANCHOR NOT UNIQUE (bad): $name"; return; fi
+  if [ -n "${DRY:-}" ]; then anchored "$DOC" "$old" "$later" && echo "anchor ok: $name" || echo "ANCHOR NOT UNIQUE (bad): $name"; return; fi
   eval "$GATE_RUN $sel" > /tmp/claude/mut.log 2>&1; local base=$?
   if grep -qE '/ 0 selected|no tests ran' /tmp/claude/mut.log; then echo "NO TEST SELECTED (bad): $name"; return; fi
   if [ $base -ne 0 ]; then echo "BASELINE RED (bad): $name  [$(grep -E '^=+ .*(passed|failed|error)' /tmp/claude/mut.log | tail -1)]"; return; fi
-  if ! mutate "$DOC" "$old" "$new"; then echo "MUTATION NOT APPLIED: $name"; git checkout -- "$DOC"; return; fi
-  rehash
+  if ! mutate "$DOC" "$old" "$new" "$later"; then echo "MUTATION NOT APPLIED: $name"; git checkout -- "$DOC"; return; fi
+  rehash "$sec"
   eval "$GATE_RUN $sel" > /tmp/claude/mut.log 2>&1; local rc=$?
   verdict "$name" $rc
   cd "$ROOT" && git checkout -- "$DOC" "$MANIFEST"
@@ -121,12 +126,12 @@ check_doc "a suspended workspace's story is served" "     AND w.state = 'active'
      AND (i.origin = 'cadence'" "     AND NOT w.is_paused
      AND (i.origin = 'cadence'" "$G -k 'every_combination'"
 check_doc "the window's edge is served" "          OR (i.schedule_slot_at > now() - p_late" "          OR (i.schedule_slot_at >= now() - p_late" "$G -k 'window_edge'"
-# The miss door (§32's fn_planned_misses): the flag, each reason, their precedence, the window.
-check_doc "a cancelled story is missed out loud" "             AND i.schedule_slot_at <= now() AND NOT i.cancel_requested) d" "             AND i.schedule_slot_at <= now()) d" "$G -k 'cancelled_planned_story'"
-check_doc "a removed item is not a miss" "                   WHEN m.id IS NULL OR m.state = 'removed' THEN 'item_removed'" "                   WHEN m.id IS NULL THEN 'item_removed'" "$G -k 'media-removed'"
-check_doc "an unsupported item is not a miss" "                   WHEN m.state = 'unsupported' THEN 'item_unsupported'" "                   WHEN false THEN 'item_unsupported'" "$G -k 'media-unsupported'"
-check_doc "a hold lock is not a miss" "                                   AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')" "                                   AND l.kind IN ('reject', 'unsupported', 'seasonal')" "$G -k 'hold-lock'"
-check_doc "a removed account is not a miss" "                   WHEN a.state IS NULL OR a.state NOT IN ('active', 'reauth_required')" "                   WHEN a.state IS NULL" "$G -k 'account-disabled'"
+# The miss door (fn_planned_misses, as §39 restates it): the flag, each reason, their precedence, the window.
+check_doc "a cancelled story is missed out loud" "             AND i.schedule_slot_at <= now() AND NOT i.cancel_requested) d" "             AND i.schedule_slot_at <= now()) d" "$G -k 'cancelled_planned_story'" "§39"
+check_doc "a removed item is not a miss" "                   WHEN m.id IS NULL OR m.state = 'removed' THEN 'item_removed'" "                   WHEN m.id IS NULL THEN 'item_removed'" "$G -k 'media-removed'" "§39"
+check_doc "an unsupported item is not a miss" "                   WHEN m.state = 'unsupported' THEN 'item_unsupported'" "                   WHEN false THEN 'item_unsupported'" "$G -k 'media-unsupported'" "§39"
+check_doc "a hold lock is not a miss" "                                   AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')" "                                   AND l.kind IN ('reject', 'unsupported', 'seasonal')" "$G -k 'hold-lock'" "§39"
+check_doc "a removed account is not a miss" "                   WHEN a.state IS NULL OR a.state NOT IN ('active', 'reauth_required')" "                   WHEN a.state IS NULL" "$G -k 'account-disabled'" "§39"
 check_doc "the account outranks the lock" "                   WHEN EXISTS (SELECT 1 FROM post_locks l
                                  WHERE l.workspace_id = i.workspace_id
                                    AND l.ig_account_id IS NULL
@@ -143,13 +148,13 @@ check_doc "the account outranks the lock" "                   WHEN EXISTS (SELEC
                                    AND l.media_item_id = i.media_item_id
                                    AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')
                                    AND (l.expires_at IS NULL OR l.expires_at > now()))
-                     THEN 'item_locked'" "$G -k 'reasons_come_in_their_precedence'"
-check_doc "a paused workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN false THEN 'paused'" "$G -k 'paused_through_the_window'"
-check_doc "a story inside its window is missed during a pause" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN false THEN NULL" "$G -k 'waits_out_the_pause'"
-check_doc "the miss door counts an expired lock" "                                   AND (l.expires_at IS NULL OR l.expires_at > now()))" "                                   AND true)" "$G -k 'every_combination'"
-check_doc "a suspended workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN w.is_paused THEN 'paused'" "$G -k 'every_combination'"
-check_doc "the window's edge is not missed" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN i.schedule_slot_at >= now() - p_late THEN NULL" "$G -k 'window_edge'"
-check_doc "a NULL window misses everything" "LANGUAGE sql STABLE STRICT SECURITY DEFINER" "LANGUAGE sql STABLE SECURITY DEFINER" "$G -k 'null_window_lists_no_miss'"
+                     THEN 'item_locked'" "$G -k 'reasons_come_in_their_precedence'" "§39"
+check_doc "a paused workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN false THEN 'paused'" "$G -k 'paused_through_the_window'" "§39"
+check_doc "a story inside its window is missed during a pause" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN false THEN NULL" "$G -k 'waits_out_the_pause'" "§39"
+check_doc "the miss door counts an expired lock" "                                   AND (l.expires_at IS NULL OR l.expires_at > now()))" "                                   AND true)" "$G -k 'every_combination'" "§39"
+check_doc "a suspended workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN w.is_paused THEN 'paused'" "$G -k 'every_combination'" "§39"
+check_doc "the window's edge is not missed" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN i.schedule_slot_at >= now() - p_late THEN NULL" "$G -k 'window_edge'" "§39"
+check_doc "a NULL window misses everything" "LANGUAGE sql STABLE STRICT SECURITY DEFINER" "LANGUAGE sql STABLE SECURITY DEFINER" "$G -k 'null_window_lists_no_miss'" "§39"
 # The reaper's slot expiry (§32's fn_reaper_sweep) and the slot key's contract.
 check_doc "the reaper expires a planned story in silence" "                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
                    AND origin = 'cadence'" "                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()" "$G -k 'ReaperLeavesPlannedStories'"

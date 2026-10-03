@@ -2757,9 +2757,10 @@ nothing.
 **`missing` is not `removed`.** `removed` is the folder's retirement, which a re-pick undoes;
 `missing` is the file's own absence, which only a listing undoes: a walk that lists the file again,
 or a connected folder that lists the same bytes and adopts the row, as it adopts a retired one. The
-draw and `fn_prompts_due` take `available` items only, so neither changes. The miss door names the
-new state `item_missing`, after `item_unsupported` and before the locks. CREATE OR REPLACE keeps the
-door's owner and grant, and its `search_path` ends in `pg_temp`.
+draw takes `available` items only, and `fn_prompts_due` takes an `available` item only for a planned
+story (a cadence row is served whatever its media's state), so neither changes. The miss door names
+the new state `item_missing`, after `item_unsupported` and before the locks. CREATE OR REPLACE keeps
+the door's owner and grant, and its `search_path` ends in `pg_temp`.
 
 ```sql
 -- [§39 the sync retires what the publish can never fetch]

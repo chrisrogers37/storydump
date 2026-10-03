@@ -13,8 +13,9 @@
 -- `missing` is not `removed`. `removed` is the folder's retirement, which a re-pick undoes
 -- (`rearm_after_connect`); `missing` is the file's own absence, which only a listing undoes. So
 -- ck_media_state learns the value, and the miss door (fn_planned_misses, 089) names it
--- `item_missing`, after `item_unsupported` and before the locks; the serve door already serves an
--- `available` item only. CREATE OR REPLACE keeps the door's owner (svc_maintenance) and its EXECUTE
+-- `item_missing`, after `item_unsupported` and before the locks; the draw takes `available` items
+-- only, and the serve door does for a planned story (a cadence row is served whatever its media's
+-- state, as before). CREATE OR REPLACE keeps the door's owner (svc_maintenance) and its EXECUTE
 -- grant, and its search_path ends in pg_temp.
 --
 -- Adoption evidence (#997): the column, the CHECK naming the value and the door naming its reason,
