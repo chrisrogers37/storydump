@@ -491,6 +491,7 @@ class TestTheLogin:
             with conn.cursor() as cur:
                 for email, utm in (
                     ("Upper@example.com", None),
+                    ("a" * 244 + "@example.co", None),  # 255 characters
                     ("ok@example.com", '"a string"'),
                     ("big@example.com", '{"k": "' + "x" * 2100 + '"}'),
                 ):
