@@ -1,36 +1,35 @@
-import { siteConfig } from "@/config/site"
+import { TextLink } from "@/components/landing/text-link"
 import { WaitlistForm } from "@/components/landing/waitlist-form"
+import { cn } from "@/lib/utils"
 
-export function FinalCTA() {
+/** The closing signup: the home page's, and each use-case page's with its own heading. */
+export function FinalCTA({
+  heading = "Tomorrow’s Story is already in your library.",
+  headingClassName = "md:text-[5.75rem]",
+}: {
+  heading?: string
+  headingClassName?: string
+}) {
   return (
-    <section className="bg-muted/50 py-16 md:py-24">
-      <div className="mx-auto max-w-5xl px-4 text-center">
-        <h2 className="text-3xl font-bold tracking-tight">
-          Your content is sitting in a folder doing nothing.
+    <section aria-labelledby="closing-heading" className="bg-tap py-16 md:py-24">
+      <div className="mx-auto max-w-4xl px-4 text-center">
+        <h2
+          id="closing-heading"
+          className={cn("section-title", headingClassName)}
+        >
+          {heading}
         </h2>
-        <p className="mt-4 text-muted-foreground">
-          Put it to work. Join the beta and start posting in minutes.
+        <p className="mt-5 font-medium text-ink">
+          Free during beta · No credit card required.
         </p>
-        <div className="mt-8">
+        <div className="mx-auto mt-8 max-w-lg">
           <WaitlistForm variant="footer" />
         </div>
-        <p className="mt-8 text-sm text-muted-foreground">
-          Built by{" "}
-          <a
-            href={siteConfig.contact.portfolio}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline underline-offset-4 hover:text-foreground"
-          >
-            Chris
-          </a>
-          {" "}&middot;{" "}
-          <a
-            href={`mailto:${siteConfig.contact.email}`}
-            className="underline underline-offset-4 hover:text-foreground"
-          >
-            {siteConfig.contact.email}
-          </a>
+        <p className="mt-6 text-sm text-ink">
+          Already using Storydump?{" "}
+          <TextLink href="/login" track={{ event: "Sign In Click", props: { location: "closing" } }}>
+            Sign in
+          </TextLink>
         </p>
       </div>
     </section>

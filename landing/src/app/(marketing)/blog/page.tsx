@@ -2,22 +2,29 @@ import type { Metadata } from "next"
 import Link from "next/link"
 import { ArrowRight } from "lucide-react"
 import { posts } from "@/lib/blog"
-import { ogMeta } from "@/lib/og"
+import { pageMetadata } from "@/lib/seo"
+import { breadcrumbList } from "@/lib/json-ld"
+import { JsonLd } from "@/components/seo/json-ld"
 
 const description =
   "Practical guides on automating Instagram Stories — scheduling, Google Drive workflows, Telegram approvals, and the Instagram Graph API."
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: "Blog",
   description,
-  alternates: { canonical: "/blog" },
-  ...ogMeta("Storydump Blog", description),
-}
+  path: "/blog",
+})
 
 export default function BlogIndex() {
   return (
     <div className="mx-auto max-w-3xl px-4 py-16">
-      <h1 className="text-4xl font-bold tracking-tight">Blog</h1>
+      <JsonLd
+        data={breadcrumbList([
+          { name: "Home", path: "/" },
+          { name: "Blog", path: "/blog" },
+        ])}
+      />
+      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink md:text-5xl">Blog</h1>
       <p className="mt-4 text-lg text-muted-foreground">{description}</p>
 
       <div className="mt-12 space-y-10">
