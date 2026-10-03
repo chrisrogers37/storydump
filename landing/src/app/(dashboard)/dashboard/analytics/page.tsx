@@ -1,7 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export const metadata = {
-  title: "Analytics — Storydump",
+  title: "Analytics",
 };
 
 export default function AnalyticsPage() {

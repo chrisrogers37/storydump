@@ -8,7 +8,7 @@ tags: [plan, google-drive, oauth, api, web]
 links: []
 ---
 
-> Phase 02 of [`00_EPIC.md`](00_EPIC.md), ratified 2026-09-20 at the forge gate and folded after ironclad cycle 1 (2026-09-25), which split it into two PRs. Spec: [`2026-09-20-device-native-inbound-spec.md`](../2026-09-20-device-native-inbound-spec.md). The ledger is [`RUN_LOG.md`](RUN_LOG.md); its entry for this phase records where the build departs from this text.
+> Phase 02 of [`00_EPIC.md`](00_EPIC.md), ratified 2026-09-20 at the forge gate and folded after ironclad cycle 1 (2026-09-25), which split it into two PRs. **2026-10-01 ([the review](review-2026-10-01.md)):** F13, open, decides when the write scope is asked — at every connect, as Steps 2 and 9 say, or only when an admin turns drops on, which is the lean; Steps 2, 6, 7 and 9 change with it. Since #1497 the runbook already classes `drive.readonly` as Restricted and justifies it with "we never write", so Step 7 is rewritten against that text. 02a stands as written and ships once F14 says drops are coming. Spec: [`2026-09-20-device-native-inbound-spec.md`](../2026-09-20-device-native-inbound-spec.md). The ledger is [`RUN_LOG.md`](RUN_LOG.md); its entry for this phase records where the build departs from this text.
 
 ## Summary
 
@@ -29,7 +29,7 @@ The Drive connect leg asks for two scopes, the read-only one it asks for today a
 
 ### Dependencies
 
-None. (F4 ratified: the envelope carries the fact.) 02b merges only after `storydump deploys` shows both services running 02a.
+02a: F14. 02b: F13, and `storydump deploys` showing both services running 02a. (F4 ratified: the envelope carries the fact.)
 
 ### Blocks
 
@@ -39,18 +39,18 @@ Phase 03: the relay job refuses a drop when the grant is not writable, the folde
 
 **PR 02a — the reader.**
 
-1. **The envelope reader.** `google_drive_oauth.py`: `SCOPE_WRITE = ".../drive.file"`; `decode_payload` accepts `v == 1` (scopes `(SCOPE,)`) and `v == 2` (`{"v": 2, "access_token", "refresh_token", "scopes": [...]}`); `DrivePayload` gains `scopes` and a `writable` property (`SCOPE_WRITE in scopes`). `encode_payload` writes the version of the payload it is given, and `_store_refreshed` (`drive_credentials.py:247`) re-encodes in the version it read, with the stored scopes and never the refresh response's — so a v2 envelope survives a refresh by 02a code, and a rollback of 02b loses nothing. No behaviour changes.
+1. **The envelope reader.** `google_drive_oauth.py`: `SCOPE_WRITE = ".../drive.file"`; `decode_payload` accepts `v == 1` (scopes `(SCOPE,)`) and `v == 2` (`{"v": 2, "access_token", "refresh_token", "scopes": [...]}`, any other key accepted and kept through a re-encode, so a later field needs no reader change); `DrivePayload` gains `scopes` and a `writable` property (`SCOPE_WRITE in scopes`). `encode_payload` writes the version of the payload it is given, and `_store_refreshed` (`drive_credentials.py:247`) re-encodes in the version it read, with the stored scopes and never the refresh response's — so a v2 envelope survives a refresh by 02a code, and a rollback of 02b loses nothing. No behaviour changes.
 
 **PR 02b — the writer, after 02a is live on both services.**
 
-2. **Scopes.** `SCOPE_READ = ".../drive.readonly"`, `SCOPES = (SCOPE_READ, SCOPE_WRITE)`; keep `SCOPE = SCOPE_READ` as the name the docs and tests cite. `authorization_url` sends `" ".join(SCOPES)` and `include_granted_scopes=true` so a reconnect keeps what was granted before.
+2. **Scopes.** `SCOPE_READ = ".../drive.readonly"`, `SCOPES = (SCOPE_READ, SCOPE_WRITE)`; keep `SCOPE = SCOPE_READ` as the name the docs and tests cite. `authorization_url` sends `" ".join(SCOPES)` and `include_granted_scopes=true` so a reconnect keeps what was granted before. Under F13 (c), the connect leg keeps asking `drive.readonly` alone, and turning a group's "Accept drops" switch on (phase 03) runs a second consent for `drive.file` with `include_granted_scopes=true`, which also checks that the consenting account is the one that holds the grant.
 3. **The exchange.** `exchange_code` keeps refusing a grant without `SCOPE_READ` (`scope_not_granted`) and records `granted_scopes: tuple[str, ...]` on `DriveGrant` from the token response's `scope` field (split on spaces; absent → `(SCOPE_READ,)`, the only way an exchange got this far).
 4. **The envelope writer.** `PAYLOAD_VERSION = 2`; a new grant is stored as v2 with its scopes.
-5. **The status.** `drive_credentials.py`: `async def grant_scopes(session, *, workspace_id) -> Optional[tuple[str, ...]]` — reads and decodes the workspace row through the ring, `None` when no active row. The status route (`v1.py:759-760`) composes `{"drive": {**status, "writable": SCOPE_WRITE in scopes}}`: `writable: null` when there is no grant, and also when the decode fails, so a bad envelope never takes the Drive card down (`drive-card.tsx:178-182`). `workspaces.drive_status` stays SQL-only.
+5. **The status.** `drive_credentials.py`: `async def grant_scopes(session, *, workspace_id) -> Optional[tuple[str, ...]]` — reads and decodes the workspace row through the ring, `None` when no active row. The status route (`v1.py:759-760`) composes `{"drive": {**status, "writable": SCOPE_WRITE in scopes}}`: `writable: null` when there is no grant, and also when the decode fails, so a bad envelope never takes the Drive card down (`drive-card.tsx:178-182`). A key ring that cannot load is not a decode failure: `RingUnavailable` (`drive_credentials.py:97-104`) raises, and the relay retries it rather than reading the grant as not writable. `workspaces.drive_status` stays SQL-only.
 6. **The callback.** When the stored grant lacks the write scope, the redirect (`auth.py:377-379`) carries `drops=declined` beside `connected=gdrive`, for phase 03's banner. `DriveStatus` gains `writable: boolean | null` and `driveConnectControl` learns it; nothing new renders until phase 03.
-7. **The runbook.** Rewrite `documentation/operations/google-oauth-verification.md` for a write scope: the pre-submission checklist; the scope list (`:66-71`) with `drive.file` and its justification (the app writes only into the one "Telegram drops" folder it creates); the "read-only, no writes" gist of the justification copy (`:76-77`); the demo-video script, which must now show a drop landing in that folder; and a `drive.file` row in the scopes table, class Non-sensitive. Restate the #327 rationale in `google_drive_oauth.py:22-29` and `test_google_drive_oauth.py:48-52`: `drive.file` alone still cannot list a pre-existing folder, which is why both scopes are asked. Do not reclassify the `drive.readonly` row (the owner's side finding).
+7. **The runbook and the public pages.** Rewrite `documentation/operations/google-oauth-verification.md` against #1497's text: a `drive.file` row (Non-sensitive) and its justification (the app writes only into the one "Telegram drops" folder it creates); the `drive.readonly` justification's "no `files.create` … `drive.file` … rejected" sentences (`:78`), which a write leg makes false; and the demo script, which shows a drop only if F13 puts the scope in the submission. The privacy page (`landing/src/app/(marketing)/privacy/page.tsx:72-81`) gains the Drive writes, the relay from Telegram, and the members' names and captions written into each file's description; the blog post's "can never modify or delete" (`landing/src/app/(marketing)/blog/[slug]/_articles/google-drive-instagram-integration.tsx:69-76`) is corrected — coordinated with #1502 and #1504, which rewrite the same claims. Restate the #327 rationale in `google_drive_oauth.py:22-29` and `test_google_drive_oauth.py:48-52`: `drive.file` alone still cannot list a pre-existing folder, which is why both scopes are held.
 8. **The design record.** In `03-decision-record.md`, a post-ratification ruling amends the 2026-09-05 ruling's "same scope" clause (`:201`); in `07-security-model.md` §15 (`:905-914`), the prose that says the grant is exactly `drive.readonly` gains the write scope. Both cite the decision doc. Both edits are prose outside SQL fences, so the advertised-DDL pin is unaffected; the docs guard battery proves it.
-9. **CHANGELOG** in each PR; 02b's PR note says every workspace reconnects once to enable drops, and that nothing asks them to until phase 03 ships.
+9. **CHANGELOG** in each PR. Under F13 (a) or (b), 02b's PR note says every workspace reconnects once to enable drops, and that nothing asks them to until phase 03 ships; under (c), no workspace reconnects until an admin turns drops on.
 
 ## Test Plan
 
@@ -71,8 +71,8 @@ Phase 03: the relay job refuses a drop when the grant is not writable, the folde
 
 ## What NOT To Do
 
-Do not ask for the full `drive` scope or build the Picker. Do not refuse a grant that lacks `drive.file`. Do not add a column for the scopes (F4). Do not write a v2 envelope from a process that some deployed process cannot read. Do not reclassify `drive.readonly` in the runbook. Do not render the reconnect line in this phase.
+Do not ask for the full `drive` scope or build the Picker. Do not refuse a grant that lacks `drive.file`. Do not add a column for the scopes (F4). Do not write a v2 envelope from a process that some deployed process cannot read. Do not put `drive.file` in the verification submission before F13 is ruled. Do not render the reconnect line in this phase.
 
 ## Context
 
-Area: services (`google_drive_oauth`, `drive_credentials`), API, web types, runbook, design record · Effort: M across two PRs · Risk: medium (a consent change every workspace sees once, and a deploy-order constraint) · Priority: high.
+Area: services (`google_drive_oauth`, `drive_credentials`), API, web types, runbook, public pages, design record · Effort: M across two PRs · Risk: medium (a consent change every workspace sees once, and a deploy-order constraint) · Priority: high.
