@@ -18,6 +18,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import {
   ACTION_LABELS,
   accountLabel,
@@ -54,14 +55,6 @@ const STATE_LABELS: Partial<Record<IntentState, string>> = {
   awaiting_approval: "awaiting approval",
   publishing_ambiguous: "needs attention",
   review_required: "needs attention",
-};
-
-const STATE_TONE: Partial<Record<IntentState, string>> = {
-  awaiting_approval: "bg-amber-100 text-amber-900",
-  approved: "bg-blue-100 text-blue-900",
-  publishing: "bg-blue-100 text-blue-900",
-  publishing_ambiguous: "bg-red-100 text-red-900",
-  review_required: "bg-red-100 text-red-900",
 };
 
 const ACTION_VARIANT: Record<
@@ -160,8 +153,8 @@ export function QueueList({
     return (
       <EmptyState
         icon={ListChecks}
-        title="Nothing is waiting."
-        description="Posts appear here when their slot arrives."
+        title="Nothing is waiting"
+        description="Each Story shows up here when its slot arrives."
       />
     );
   }
@@ -200,9 +193,11 @@ export function QueueList({
                 <Badge
                   variant="secondary"
                   className={
-                    intent.published_via === "dry_run"
-                      ? "bg-purple-100 text-purple-900"
-                      : STATE_TONE[intent.state]
+                    TONE_CLASS[
+                      intent.published_via === "dry_run"
+                        ? "inert"
+                        : INTENT_STATE_TONE[intent.state]
+                    ]
                   }
                 >
                   {intent.published_via === "dry_run"
@@ -212,7 +207,7 @@ export function QueueList({
                 {intent.cancel_requested && (
                   <Badge
                     variant="secondary"
-                    className="bg-amber-100 text-amber-900"
+                    className={TONE_CLASS.attention}
                   >
                     Cancelling
                   </Badge>
