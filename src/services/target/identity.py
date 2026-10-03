@@ -30,6 +30,11 @@ class IdentityCollision(StorydumpError):
     """The verified email belongs to a different user. Refused, never merged."""
 
 
+class SignupNotAdmitted(StorydumpError):
+    """A new Google account whose verified email nobody admitted or invited
+    (092, `07` §35): no user is created. Sign-in maps it to `not_admitted`."""
+
+
 class IdentityAlreadyLinked(StorydumpError):
     """This provider identity, or this user's slot for it, is already taken.
 
@@ -46,7 +51,12 @@ class IdentityAlreadyLinked(StorydumpError):
 
 
 async def upsert_google_identity(
-    executor, *, sub: str, email: Optional[str], display_name: Optional[str]
+    executor,
+    *,
+    sub: str,
+    email: Optional[str],
+    display_name: Optional[str],
+    signup_open: bool = False,
 ) -> str:
     """Find-or-create the user for a verified Google subject. Returns user_id.
 
@@ -56,6 +66,12 @@ async def upsert_google_identity(
     `uq_identity_per_provider`). *email* is the VERIFIED claim or None —
     `google_oidc.verify_id_token` already drops an unverified one, so this
     function never sees a claim it must doubt.
+
+    A subject seen before signs in whatever *signup_open* says. A NEW one
+    creates its user only when `fn_signup_admitted` admits its email — an
+    owner admission or a live invitation addressed to it (092) — and is
+    refused with `SignupNotAdmitted` otherwise, a None email included.
+    *signup_open* (`TARGET_SIGNUP_OPEN`) skips that ask.
     """
     if not sub:
         raise ValueError("sub is required")
@@ -116,6 +132,8 @@ async def upsert_google_identity(
             await _fill_primary_email(executor, user_id=user_id, email=claim)
         return user_id
 
+    if not signup_open:
+        await _refuse_unless_admitted(executor, email=claim)
     if claim is not None:
         await _refuse_if_held_elsewhere(executor, email=claim, user_id=None)
     user_id = str(
@@ -135,6 +153,22 @@ async def upsert_google_identity(
         {"u": user_id, "p": PROVIDER_GOOGLE, "sub": sub, "dn": display_name},
     )
     return user_id
+
+
+async def _refuse_unless_admitted(executor, *, email: Optional[str]) -> None:
+    """The sign-up gate (092): the door answers for the owner's admissions and
+    every workspace's invitations, which this login cannot read itself. Asked
+    before the collision check, so a refused address learns nothing about
+    which accounts exist."""
+    if email is not None:
+        admitted = (
+            await executor.execute(text("SELECT fn_signup_admitted(:e)"), {"e": email})
+        ).scalar()
+        if admitted:
+            return
+    raise SignupNotAdmitted(
+        "a new account needs an admitted or invited email while sign-up is gated"
+    )
 
 
 async def _refuse_if_held_elsewhere(

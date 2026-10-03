@@ -64,9 +64,9 @@ Telegram.
 
 ## Key Database Tables
 
-Twenty-seven tables in `public`, every one under row-level security; twenty
-are keyed on the workspace, the rest are the user plane, the machinery counters
-and reference data (`.claude/rules/database.md` › Tenancy). The ones a
+Twenty-eight tables in `public`, every one under row-level security; twenty
+are keyed on the workspace, the rest are the user plane, the machinery counters,
+reference data and the owner's sign-up admissions (`.claude/rules/database.md` › Tenancy). The ones a
 conversation usually needs:
 
 | Table | Purpose |

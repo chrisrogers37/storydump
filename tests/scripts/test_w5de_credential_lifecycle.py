@@ -580,6 +580,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
                             refresh_token="1//revoke-me",
                             expires_at=None,
                         ),
+                        granted_by=chain["user"],
                     )
         finally:
             await engine.dispose()
