@@ -12,8 +12,11 @@ describe("where the sample sends a visitor", () => {
     expect(DEMO_SIGN_IN_HREF).toBe("/login");
   });
 
-  it("lands on an anchor the waitlist form actually carries", () => {
+  it("lands on the anchor the home page's hero form carries", () => {
     const form = readFileSync(path.join(SRC, "components", "landing", "waitlist-form.tsx"), "utf8");
-    expect(form).toContain(`id="${DEMO_WAITLIST_HREF.split("#")[1]}"`);
+    // The hero form takes `waitlist`; the closing section's form takes its own
+    // id, so the page has one of each. A form that drops the mapping fails here.
+    const hero = form.match(/variant\s*===\s*"hero"\s*\?\s*"([^"]+)"/)?.[1];
+    expect(hero).toBe(DEMO_WAITLIST_HREF.split("#")[1]);
   });
 });
