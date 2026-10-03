@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from urllib.parse import parse_qs, urlsplit
 
 import psycopg2
@@ -370,6 +371,76 @@ class TestTheAcceptDoor:
                 (hashlib.sha256(b"re-invite").hexdigest(), user, old),
             )
             == "admin"
+        )
+
+    def test_an_acceptance_in_flight_cannot_undo_a_removal(self, world):
+        """The door's first removal read takes no lock. An acceptance that
+        starts while the removal is uncommitted passes it, then waits on the
+        member row the removal deleted; when the removal commits, the door
+        reads the removal again and refuses instead of re-adding them."""
+        email = "in-flight@example.com"
+        user = _existing_user(world, email)
+        _as_owner(
+            world,
+            (
+                "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                " delivery_channel, email, role, expires_at, invited_by_user_id)"
+                " VALUES (%s, %s, 'email', %s, 'member', now() + interval '7 days',"
+                " %s)",
+                (
+                    world["ws"],
+                    hashlib.sha256(email.encode()).hexdigest(),
+                    email,
+                    world["ws_owner"],
+                ),
+            ),
+            (
+                "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                " VALUES (%s, %s, 'member')",
+                (world["ws"], user),
+            ),
+        )
+        removal = psycopg2.connect(world["owner"])
+        try:
+            with removal.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'operator'")
+                cur.execute(
+                    "DELETE FROM workspace_members WHERE workspace_id = %s"
+                    " AND user_id = %s",
+                    (world["ws"], user),
+                )
+                cur.execute(
+                    "INSERT INTO workspace_member_removals"
+                    " (workspace_id, user_id, removed_by_user_id)"
+                    " VALUES (%s, %s, %s)",
+                    (world["ws"], user, world["ws_owner"]),
+                )
+            outcome = {}
+
+            def accept():
+                try:
+                    outcome["role"] = _accept(world, email, user)
+                except psycopg2.Error as exc:
+                    outcome["error"] = exc
+
+            worker = threading.Thread(target=accept)
+            worker.start()
+            worker.join(timeout=2)
+            assert worker.is_alive(), "the acceptance waits on the removal"
+            removal.commit()
+            worker.join(timeout=30)
+        finally:
+            removal.close()
+
+        assert isinstance(outcome.get("error"), psycopg2.errors.NoDataFound), outcome
+        assert (
+            _one(
+                world["owner"],
+                "SELECT count(*) FROM workspace_members WHERE workspace_id = %s"
+                " AND user_id = %s",
+                (world["ws"], user),
+            )
+            == 0
         )
 
 

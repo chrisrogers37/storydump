@@ -1,14 +1,16 @@
 """The "Deleting a user" runbook (`documentation/guides/deployment.md`), run
 as written on the replayed advertised stream as the schema owner.
 
-The two SQL blocks are read from the guide, so the guide cannot drift from what
-was proven. A member or an admin is deleted, whether or not they were removed
-through the product first, with the tokens they minted and the invitations
-they sent or were sent revoked. An owner is refused while their workspace
+The three SQL blocks are read from the guide, so the guide cannot drift from
+what was proven. The listing names the live workspace tokens with no recorded
+minter in the workspaces the person administers. A member or an admin is
+deleted, whether or not they were removed through the product first, with the
+tokens they minted and the invitations they sent or were sent revoked and the
+admission of their email dropped. An owner is refused while their workspace
 exists. A person who approved a story that has since finished cannot be
 deleted (the finished story is frozen with the reference), and the erase block
-leaves a bare, disabled id with no email, identities, sessions, live tokens or
-pending invitations.
+leaves a bare, disabled id with no email, identities, sessions, live tokens,
+link attempts, admission or pending invitations.
 """
 
 from __future__ import annotations
@@ -36,13 +38,14 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 GUIDE = Path(__file__).resolve().parents[2] / "documentation/guides/deployment.md"
 
 
-def _runbook_blocks() -> tuple[str, str]:
-    """The guide's delete block and its erase block, in that order."""
+def _runbook_blocks() -> tuple[str, str, str]:
+    """The guide's unattributed-token listing, its delete block and its erase
+    block, in that order."""
     text = GUIDE.read_text()
     section = text[text.index("**Deleting a user**") : text.index("## 7. Backup")]
     blocks = re.findall(r"```sql\n(.*?)```", section, re.S)
-    assert len(blocks) == 2, "the runbook has a delete block and an erase block"
-    return blocks[0], blocks[1]
+    assert len(blocks) == 3, "the runbook has a listing, a delete and an erase block"
+    return tuple(blocks)
 
 
 def _for(block: str, user) -> list[str]:
@@ -89,10 +92,21 @@ def _one(world, sql, params=()):
         conn.close()
 
 
+def _all(world, sql, params=()):
+    conn = psycopg2.connect(world["owner"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
 def _person(world, chain, email, role="admin"):
-    """A member with Google and Telegram identities, a session, a workspace
-    token they minted, a pending invitation they sent, and two pending
-    invitations to them from the owner (by email and by Telegram id)."""
+    """A member with Google and Telegram identities, a session, an unfinished
+    Telegram link, the owner's admission of their email, a workspace token
+    they minted, a pending invitation they sent, and two pending invitations
+    to them from the owner (by email and by Telegram id)."""
     ws = chain["ws"]
     tg = zlib.crc32(email.encode())
     conn = psycopg2.connect(world["owner"])
@@ -112,6 +126,15 @@ def _person(world, chain, email, role="admin"):
                 "INSERT INTO workspace_members (workspace_id, user_id, role)"
                 " VALUES (%s, %s, %s)",
                 (ws, user, role),
+            )
+            cur.execute(
+                "INSERT INTO signup_admissions (email) VALUES (%s)", (email.lower(),)
+            )
+            cur.execute(
+                "INSERT INTO oauth_states (state, user_id, provider, purpose,"
+                " expires_at) VALUES (%s, %s, 'telegram', 'link',"
+                " now() + interval '15 minutes')",
+                (f"link-{email}", user),
             )
             cur.execute(
                 "INSERT INTO session_tokens (token_hash, user_id, expires_at)"
@@ -148,7 +171,12 @@ def _person(world, chain, email, role="admin"):
                 )
                 invitations.append(cur.fetchone()[0])
         conn.commit()
-        return {"user": user, "token": token, "invitations": invitations}
+        return {
+            "user": user,
+            "email": email.lower(),
+            "token": token,
+            "invitations": invitations,
+        }
     finally:
         conn.close()
 
@@ -159,6 +187,14 @@ def _pending(world, who) -> int:
         "SELECT count(*) FROM workspace_invitations"
         " WHERE id = ANY(%s::uuid[]) AND state = 'pending'",
         ([str(i) for i in who["invitations"]],),
+    )[0]
+
+
+def _admitted(world, who) -> int:
+    return _one(
+        world,
+        "SELECT count(*) FROM signup_admissions WHERE email = %s",
+        (who["email"],),
     )[0]
 
 
@@ -195,7 +231,7 @@ def test_a_member_is_deleted_and_their_tokens_and_invitations_are_revoked(
     who = _person(world, chain, f"{role}-{removed_first}@example.com", role)
     if removed_first:
         assert _remove(world, chain, who["user"]) == role
-    delete, _erase = _runbook_blocks()
+    _listing, delete, _erase = _runbook_blocks()
 
     _run(world, _for(delete, who["user"]))
 
@@ -208,13 +244,53 @@ def test_a_member_is_deleted_and_their_tokens_and_invitations_are_revoked(
         (who["token"],),
     ) == (True,)
     assert _pending(world, who) == 0
+    assert _admitted(world, who) == 0
+
+
+def test_the_listing_names_the_unattributed_tokens_of_their_workspaces(world):
+    """Before the removals, the listing finds the workspace tokens with no
+    recorded minter where the person is an admin, and not those of a
+    workspace where they are only a member, or ones already revoked."""
+    admin_of = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-l1")
+    member_of = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-l2")
+    who = _person(world, admin_of, "lister@example.com", "admin")
+    conn = psycopg2.connect(world["owner"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                " VALUES (%s, %s, 'member')",
+                (member_of["ws"], who["user"]),
+            )
+            tokens = {}
+            for label, ws, revoked in (
+                ("unattributed", admin_of["ws"], False),
+                ("revoked", admin_of["ws"], True),
+                ("elsewhere", member_of["ws"], False),
+            ):
+                cur.execute(
+                    "INSERT INTO service_tokens (name, token_hash, role,"
+                    " workspace_id, revoked_at) VALUES (%s, %s, 'operator', %s,"
+                    " CASE WHEN %s THEN now() END) RETURNING id",
+                    (label, f"listing-{label}", ws, revoked),
+                )
+                tokens[label] = cur.fetchone()[0]
+        conn.commit()
+    finally:
+        conn.close()
+    listing, _delete, _erase = _runbook_blocks()
+
+    (sql,) = _for(listing, who["user"])
+
+    assert {row[0] for row in _all(world, sql)} == {tokens["unattributed"]}
 
 
 def test_an_owner_is_refused_while_their_workspace_exists(world):
     """The delete block for a workspace's owner fails at commit and changes
     nothing: the step the runbook says comes first."""
     chain = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-owner")
-    delete, _erase = _runbook_blocks()
+    _listing, delete, _erase = _runbook_blocks()
 
     with pytest.raises(psycopg2.Error, match="has no owner at commit"):
         _run(world, _for(delete, chain["user"]))
@@ -256,7 +332,7 @@ def test_a_person_with_a_finished_story_is_erased_instead(world):
         conn.commit()
     finally:
         conn.close()
-    delete, erase = _runbook_blocks()
+    _listing, delete, erase = _runbook_blocks()
 
     with pytest.raises(psycopg2.Error, match="terminal"):
         _run(world, _for(delete, who["user"]))
@@ -280,6 +356,10 @@ def test_a_person_with_a_finished_story_is_erased_instead(world):
         (who["token"],),
     ) == (True,)
     assert _pending(world, who) == 0
+    assert _admitted(world, who) == 0
+    assert _one(
+        world, "SELECT count(*) FROM oauth_states WHERE user_id = %s", (who["user"],)
+    ) == (0,)
     assert _one(
         world,
         "SELECT approved_by_user_id, state FROM post_intents WHERE id = %s",

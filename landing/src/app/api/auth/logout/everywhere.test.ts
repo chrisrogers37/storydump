@@ -11,9 +11,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-const state: { token: string | null; apiOk: boolean } = {
+const state: { token: string | null; apiOk: boolean; revoked: number } = {
   token: "tok-test",
   apiOk: true,
+  revoked: 2,
 };
 const captured: Array<{ path: string; init?: Record<string, unknown> }> = [];
 
@@ -31,15 +32,19 @@ vi.mock("@/lib/target-api", () => ({
   ) => {
     captured.push({ path, init });
     return state.apiOk
-      ? { ok: true, data: { signed_out: true } }
+      ? { ok: true, data: { signed_out: true, revoked: state.revoked } }
       : { ok: false, status: 503, error: "target_router_unreachable" };
   },
 }));
 
 const { POST } = await import("./route");
 
-function post(query = "", headers: Record<string, string> = {}) {
-  return new NextRequest(`https://storydump.app/api/auth/logout${query}`, {
+function post(
+  query = "",
+  headers: Record<string, string> = {},
+  origin = "https://storydump.app",
+) {
+  return new NextRequest(`${origin}/api/auth/logout${query}`, {
     method: "POST",
     headers,
   });
@@ -48,6 +53,7 @@ function post(query = "", headers: Record<string, string> = {}) {
 beforeEach(() => {
   state.token = "tok-test";
   state.apiOk = true;
+  state.revoked = 2;
   captured.length = 0;
 });
 
@@ -71,10 +77,26 @@ describe("sign out of all devices", () => {
     expect(response.headers.getSetCookie().join("\n")).toMatch(/sd_session=;/);
   });
 
-  it("lands a plain sign-out on /login even when the API fails", async () => {
+  it("says a plain sign-out was not confirmed when the API fails", async () => {
     state.apiOk = false;
     const response = await POST(post());
+    expect(response.headers.get("location")).toBe(
+      "https://storydump.app/login?signout=unconfirmed",
+    );
+    expect(response.headers.getSetCookie().join("\n")).toMatch(/sd_session=;/);
+  });
+
+  it("lands a plain sign-out on /login when it worked", async () => {
+    const response = await POST(post());
     expect(response.headers.get("location")).toBe("https://storydump.app/login");
+  });
+
+  it("says nothing else was signed out when this session was already dead", async () => {
+    state.revoked = 0;
+    const response = await POST(post("?everywhere=1"));
+    expect(response.headers.get("location")).toBe(
+      "https://storydump.app/login?signout=stale",
+    );
   });
 
   it("revokes only this session without it", async () => {
@@ -95,11 +117,37 @@ describe("sign out of all devices", () => {
     expect(cleared).toMatch(/storydump_workspace=;/);
   });
 
-  it("still calls nothing when there is no session", async () => {
+  it("still calls nothing when there is no session, and says so", async () => {
     state.token = null;
-    const response = await POST(post("?everywhere=1"));
+    const everywhere = await POST(post("?everywhere=1"));
+    const plain = await POST(post());
     expect(captured).toEqual([]);
-    expect(response.headers.get("location")).toBe("https://storydump.app/login");
+    expect(everywhere.headers.get("location")).toBe(
+      "https://storydump.app/login?signout=stale",
+    );
+    expect(plain.headers.get("location")).toBe("https://storydump.app/login");
+  });
+
+  // The API sets the cookie with Domain=SESSION_COOKIE_DOMAIN, and a host-only
+  // expiry does not replace it: the browser kept sending the session.
+  it("expires the session cookie on this host and every parent domain", async () => {
+    const response = await POST(post("", {}, "https://www.storydump.app"));
+    const cleared = response.headers.getSetCookie();
+    for (const domain of ["www.storydump.app", "storydump.app"]) {
+      const cookie = cleared.find((c) => c.includes(`Domain=${domain};`));
+      expect(cookie).toMatch(/^sd_session=; /);
+      expect(cookie).toMatch(/Max-Age=0/);
+      expect(cookie).toMatch(/Path=\//);
+      expect(cookie).toMatch(/Secure/);
+    }
+    expect(cleared.some((c) => c.includes("Domain=app;"))).toBe(false);
+    // The host-only deletes still go out alongside.
+    expect(cleared.join("\n")).toMatch(/storydump_workspace=;/);
+  });
+
+  it("sets no Domain on localhost", async () => {
+    const response = await POST(post("", {}, "http://localhost:3000"));
+    expect(response.headers.getSetCookie().join("\n")).not.toMatch(/Domain=/);
   });
 
   it("refuses a cross-site post before it revokes anything", async () => {

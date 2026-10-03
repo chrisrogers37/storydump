@@ -19,7 +19,9 @@
 --
 -- A REMOVAL OUTRANKS AN EARLIER INVITATION. fn_invitation_accept also refuses a person whose
 -- removal from the workspace (workspace_member_removals, 090) is newer than the invitation, so an
--- invitation sent before the removal cannot undo it; a fresh invitation after it still can.
+-- invitation sent before the removal cannot undo it; a fresh invitation after it still can. The
+-- door reads the removal again after its membership INSERT, so an acceptance already in flight
+-- when the removal commits is refused too rather than re-adding the person.
 --
 -- The removal also revokes the pending invitations the removed member sent or was sent, in the
 -- removal's transaction (`invitations.revoke_on_removal`, called by `workspaces.remove_member`), so
@@ -134,6 +136,15 @@ BEGIN
   ON CONFLICT (workspace_id, user_id) DO NOTHING;  -- already a member: invite consumed, the
                                                     -- existing role stands (role changes go
                                                     -- through the 06 §2 gate)
+  -- The removal check above read without a lock: a removal that committed while this INSERT
+  -- waited on the member row it deleted would be undone. Under READ COMMITTED each statement
+  -- takes a fresh snapshot, so read it again now and refuse the whole acceptance if it landed.
+  IF EXISTS (SELECT 1 FROM workspace_member_removals r
+              WHERE r.workspace_id = inv.workspace_id AND r.user_id = p_user
+                AND r.removed_at >= inv.created_at) THEN
+    RAISE EXCEPTION 'invitation not acceptable (no longer legitimate)'
+      USING ERRCODE = 'no_data_found';
+  END IF;
   IF inv.role = 'admin' AND NOT m THEN             -- D36 elevation-pending, same transaction
     SELECT b.id INTO bind FROM channel_bindings b
      WHERE b.workspace_id = inv.workspace_id AND b.state = 'active'

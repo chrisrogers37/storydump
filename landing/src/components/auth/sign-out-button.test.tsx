@@ -49,10 +49,12 @@ describe("signOutOutcome", () => {
     expect(signOutOutcome(landed("https://storydump.app/login"))).toBe("done");
   });
 
-  it("reads the route's incomplete redirect as incomplete", () => {
-    expect(
-      signOutOutcome(landed("https://storydump.app/login?signout=incomplete")),
-    ).toBe("incomplete");
+  it("reads the route's notice redirect as that notice", () => {
+    for (const notice of ["incomplete", "unconfirmed", "stale"]) {
+      expect(
+        signOutOutcome(landed(`https://storydump.app/login?signout=${notice}`)),
+      ).toEqual({ notice });
+    }
   });
 
   it("reads a refusal, a server error or no answer as failed", () => {
@@ -74,6 +76,16 @@ describe("SignOutButton", () => {
       landed("https://storydump.app/login?signout=incomplete"),
     );
     expect(router.push).toHaveBeenCalledWith("/login?signout=incomplete");
+  });
+
+  it("lands on the route's notice even from a page with its own redirect", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => landed("https://storydump.app/login?signout=unconfirmed")),
+    );
+    const button = SignOutButton({ redirectTo: "/join/abc" }) as Button;
+    await button.props.onClick();
+    expect(router.push).toHaveBeenCalledWith("/login?signout=unconfirmed");
   });
 
   it("stays put and says so when the route refuses", async () => {

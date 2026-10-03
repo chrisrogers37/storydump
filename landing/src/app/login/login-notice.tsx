@@ -3,18 +3,18 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Notice } from "@/components/ui/notice";
-import { SIGNOUT_INCOMPLETE, WAITLIST_HREF, loginError } from "./content";
+import { WAITLIST_HREF, loginError, signoutNotice } from "./content";
 
 /**
- * The refusal `?error=` names, above the sign-in button. A client component
+ * What a sign-out that did not fully happen (`?signout=`) or a refusal
+ * (`?error=`) says, above the sign-in button. A client component
  * so the page stays prerendered; the page wraps it in Suspense, as Next
  * requires of a static page that reads the query.
  */
 export function LoginNotice() {
   const params = useSearchParams();
-  if (params.get("signout") === "incomplete") {
-    return <Notice>{SIGNOUT_INCOMPLETE}</Notice>;
-  }
+  const signedOut = signoutNotice(params.get("signout"));
+  if (signedOut) return <Notice>{signedOut}</Notice>;
   const copy = loginError(params.get("error"));
   if (!copy) return null;
   return (

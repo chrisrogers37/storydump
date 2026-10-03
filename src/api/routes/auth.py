@@ -324,7 +324,8 @@ async def signout(request: Request, everywhere: bool = False) -> Response:
     ``?everywhere=true`` revokes every live session of the presenting user —
     every browser and device they are signed in on, this one included
     (`sessions.revoke_all_for_user`). A dead presented session revokes
-    nothing, so a stale cookie cannot reach its siblings.
+    nothing, so a stale cookie cannot reach its siblings, and the answer's
+    ``revoked`` count says so: the front end shows 0 as not done.
 
     A session carried by the COOKIE must come from an admitted origin
     (`require_same_origin`): a forged post from a sibling host would
@@ -332,15 +333,19 @@ async def signout(request: Request, everywhere: bool = False) -> Response:
     """
     engine = require_engine(request)
     value = presented_token(request)
+    revoked = 0
     if value is not None:
         require_same_origin(request)
         digest = sessions.token_hash(value)
         async with engine.begin() as conn:
             if everywhere:
-                await sessions.revoke_all_for_user(conn, token_hash=digest)
+                revoked = await sessions.revoke_all_for_user(conn, token_hash=digest)
             else:
                 await sessions.revoke(conn, token_hash=digest)
-    response = JSONResponse({"signed_out": True})
+    body = {"signed_out": True}
+    if everywhere:
+        body["revoked"] = revoked
+    response = JSONResponse(body)
     clear_session_cookie(response)
     return response
 

@@ -26,11 +26,12 @@ def test_the_real_draw_is_256_bits_url_safe():
 
 class _Recorder:
     """Records each statement and its parameters; answers one row (or none)
-    and a rowcount — the shape `resolve` and `revoke_all_for_user` read."""
+    and a list of rows — the shapes `resolve` and `revoke_all_for_user` read —
+    and a rowcount for `oauth_states.retire_live_states`."""
 
-    def __init__(self, row=None, rowcount=0):
+    def __init__(self, row=None, rows=()):
         self.calls = []
-        self.row, self.rowcount = row, rowcount
+        self.row, self.rows, self.rowcount = row, list(rows), 0
 
     async def execute(self, stmt, params):
         self.calls.append((str(stmt), params))
@@ -38,6 +39,9 @@ class _Recorder:
 
     def first(self):
         return self.row
+
+    def all(self):
+        return self.rows
 
 
 LIVE_ROW = ("sess-1", "user-1", False, False, "active")
@@ -77,9 +81,16 @@ class TestTheAbsoluteLifetime:
 
 class TestRevokeAllForUser:
     async def test_it_keys_on_the_presented_live_session_and_counts(self):
-        ex = _Recorder(rowcount=3)
+        ex = _Recorder(rows=[("user-1",)] * 3)
         assert await sessions.revoke_all_for_user(ex, token_hash="h") == 3
-        sql, params = ex.calls[0]
+        (sql, params), (link_sql, link_params) = ex.calls
+        # The person's pending Telegram link states are retired with them.
+        assert "UPDATE oauth_states SET consumed_at = now()" in link_sql
+        assert link_params == {
+            "provider": "telegram",
+            "purpose": "link",
+            "uid": "user-1",
+        }
         assert params == {"h": "h", "max_age": settings.SESSION_MAX_AGE_SECONDS}
         # The user is named only through a LIVE presented session, and rows
         # already revoked keep their first instant.
@@ -90,3 +101,8 @@ class TestRevokeAllForUser:
             "t.user_id = p.user_id AND t.revoked_at IS NULL",
         ):
             assert clause in sql, clause
+
+    async def test_a_dead_presented_session_revokes_and_retires_nothing(self):
+        ex = _Recorder(rows=[])
+        assert await sessions.revoke_all_for_user(ex, token_hash="h") == 0
+        assert len(ex.calls) == 1, "no link states are touched for nobody"

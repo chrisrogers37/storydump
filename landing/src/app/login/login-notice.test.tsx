@@ -1,6 +1,6 @@
 /**
- * The sign-in page's notice: the incomplete sign-out says so, and a refusal
- * still names itself. Read as a returned element tree, without a DOM.
+ * The sign-in page's notice: a sign-out that did not fully happen says so, and
+ * a refusal still names itself. Read as a returned element tree, without a DOM.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -12,17 +12,20 @@ vi.mock("next/navigation", () => ({
 }));
 
 const { LoginNotice } = await import("./login-notice");
-const { SIGNOUT_INCOMPLETE, LOGIN_ERRORS } = await import("./content");
+const { SIGNOUT_NOTICES, LOGIN_ERRORS } = await import("./content");
 
 function notice() {
   return LoginNotice() as ReactElement<{ children: unknown }> | null;
 }
 
 describe("LoginNotice", () => {
-  it("says the other devices are still signed in", () => {
-    query.value = "signout=incomplete";
-    expect(notice()?.props.children).toBe(SIGNOUT_INCOMPLETE);
-  });
+  it.each(Object.entries(SIGNOUT_NOTICES))(
+    "says what a sign-out left undone (%s)",
+    (code, copy) => {
+      query.value = `signout=${code}`;
+      expect(notice()?.props.children).toBe(copy);
+    },
+  );
 
   it("shows nothing on a plain visit", () => {
     query.value = "";

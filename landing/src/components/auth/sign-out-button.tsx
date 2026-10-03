@@ -9,16 +9,17 @@ export const SIGNOUT_FAILED = "Couldn't sign out. Try again";
 /**
  * Where a sign-out landed. `failed` means this browser is still signed in:
  * the request never arrived (offline) or the route refused it (a 403 from the
- * cross-site check, a 5xx), so its cookies were not cleared. `incomplete`
- * means this browser is signed out but the API could not sign the other
- * devices out; the route says so by redirecting to `/login?signout=incomplete`.
+ * cross-site check, a 5xx), so its cookies were not cleared. A string is the
+ * route's `?signout=` notice: this browser is signed out but the server side
+ * did not fully happen (`SIGNOUT_NOTICES` in the login page's content says
+ * which). `done` is everything else.
  */
 export function signOutOutcome(
   response: Pick<Response, "ok" | "redirected" | "url"> | null,
-): "done" | "incomplete" | "failed" {
+): "done" | "failed" | { notice: string } {
   if (!response || !response.ok || !response.redirected) return "failed";
-  const landed = new URL(response.url);
-  return landed.searchParams.get("signout") === "incomplete" ? "incomplete" : "done";
+  const notice = new URL(response.url).searchParams.get("signout");
+  return notice ? { notice } : "done";
 }
 
 /**
@@ -82,8 +83,12 @@ export function SignOutButton({
     // would read as a sign-out that did not happen.
     setFailed(outcome === "failed");
     if (outcome === "failed") return;
-    // `/login?signout=incomplete` says the other devices are still signed in.
-    router.push(outcome === "incomplete" ? "/login?signout=incomplete" : redirectTo);
+    // A notice says what did not happen server-side; it outranks `redirectTo`.
+    router.push(
+      outcome === "done"
+        ? redirectTo
+        : `/login?signout=${encodeURIComponent(outcome.notice)}`,
+    );
     // Needed when `redirectTo` IS the current route, which is the invitation
     // page's case: a push to the URL already showing renders from the router
     // cache and would re-display the signed-in view of a session that no

@@ -29,7 +29,7 @@ from sqlalchemy import text
 
 from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
-from src.services.target import vocabulary
+from src.services.target import oauth_states, vocabulary
 
 #: `07` §1: "now() + 30 days (05 seam), sliding on use".
 SESSION_TTL_SECONDS = 30 * 24 * 3600
@@ -192,6 +192,10 @@ async def revoke_all_for_user(
     to name a user here is to hold one of their live sessions; another user's
     sessions are out of reach by construction. Already-dead rows keep their
     first `revoked_at`, as `revoke` keeps it.
+
+    The person's pending Telegram link states go too: one minted from a
+    stolen session would otherwise still attach the thief's Telegram account
+    for the rest of its TTL after the person signed out everywhere.
     """
     result = await executor.execute(
         text(
@@ -201,7 +205,13 @@ async def revoke_all_for_user(
             "   AND p.expires_at > now()"
             "   AND p.created_at + make_interval(secs => :max_age) > now()"
             "   AND t.user_id = p.user_id AND t.revoked_at IS NULL"
+            " RETURNING t.user_id"
         ),
         {"h": token_hash, "max_age": _max_age(max_age_seconds)},
     )
-    return result.rowcount
+    revoked = result.all()
+    if revoked:
+        await oauth_states.retire_live_states(
+            executor, provider="telegram", purpose="link", user_id=revoked[0][0]
+        )
+    return len(revoked)

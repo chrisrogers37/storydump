@@ -636,6 +636,15 @@ class TestTheSessionWriter:
         other = self._user(world, "everywhere-other")
         here, laptop, phone = (self._issue(world, me) for _ in range(3))
         theirs = self._issue(world, other)
+        # A pending Telegram link each: a stolen session could have minted
+        # mine, and it must not outlive the sign-out.
+        link = (
+            "INSERT INTO oauth_states (state, user_id, provider, purpose, expires_at)"
+            " VALUES (%s, %s, 'telegram', 'link', now() + interval '15 minutes')"
+            " RETURNING state"
+        )
+        owner(world, link, (f"link-{me}", me))
+        owner(world, link, (f"link-{other}", other))
         hp = sessions.token_hash(phone)
         assert user_plane(world, lambda c: sessions.revoke(c, token_hash=hp)) is True
         phone_kill = owner(
@@ -662,6 +671,9 @@ class TestTheSessionWriter:
             == phone_kill
         )
         assert self._resolve(world, theirs).user_id == other
+        consumed = "SELECT consumed_at IS NOT NULL FROM oauth_states WHERE state = %s"
+        assert owner(world, consumed, (f"link-{me}",)) == (True,)
+        assert owner(world, consumed, (f"link-{other}",)) == (False,)
 
         # Their own dead session (revoked above) cannot reach a new sibling.
         fresh = self._issue(world, me)

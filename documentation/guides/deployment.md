@@ -260,6 +260,24 @@ owner; there is no product door for it. In order:
   (`ct_members_owner_exists`), and ownership cannot be handed over yet
   (`transfer_ownership` is not built). Delete that workspace first (Settings ›
   General) and let its grace window end, or keep the person.
+- [ ] **Tokens nobody can attribute**, in each workspace they administer.
+  Workspace service tokens minted before 090 record no minter, so neither a
+  removal nor the delete below can tell whether this person minted one. List
+  them before the removals, because the query reads their memberships:
+
+  ```sql
+  SELECT t.id, t.workspace_id, t.name, t.created_at
+    FROM service_tokens t
+   WHERE t.created_by_user_id IS NULL AND t.workspace_id IS NOT NULL
+     AND t.revoked_at IS NULL
+     AND t.workspace_id IN (SELECT workspace_id FROM workspace_members
+                             WHERE user_id = '…' AND role IN ('owner', 'admin'));
+  ```
+
+  Ask each workspace's owner which of these they minted themselves, and revoke
+  the rest inside the delete's (or the erase's) transaction below:
+  `UPDATE service_tokens SET revoked_at = now() WHERE id = '<token id>';`.
+
 - [ ] **Remove them from every other workspace** they belong to (Settings ›
   Members → Remove). A removal revokes the workspace service tokens they
   minted and the pending invitations they sent or were sent, and records the
@@ -274,7 +292,9 @@ owner; there is no product door for it. In order:
   the workspace's owner — the whole of that person's Drive, Shared with me
   included.
 - [ ] **The delete**, always with an actor set and in one transaction, revoking
-  anything the removals missed on the way. The delete's cascades and `SET
+  anything the removals missed on the way and dropping the owner's admission
+  of their email (`signup_admissions`), which would otherwise let a new
+  account with that address straight back in. The delete's cascades and `SET
   NULL`s fire the governance trigger (on `workspace_members`, on
   `oauth_credentials` when they granted Drive, and on `workspaces` when they
   paused one), which refuses a write with no
@@ -291,6 +311,8 @@ owner; there is no product door for it. In order:
           OR lower(email) = (SELECT lower(primary_email) FROM users WHERE id = '…')
           OR invited_tg_user_id::text IN (SELECT external_id FROM user_identities
                                            WHERE user_id = '…' AND provider = 'telegram'));
+  DELETE FROM signup_admissions
+   WHERE email = (SELECT lower(primary_email) FROM users WHERE id = '…');
   DELETE FROM users WHERE id = '…';
   COMMIT;
   ```
@@ -299,11 +321,12 @@ owner; there is no product door for it. In order:
   immutable"**, the person approved or scheduled a story that has finished,
   and finished stories are frozen with the reference to them, so the row
   cannot be deleted. Erase what identifies them instead, in one transaction:
-  their sign-ins and tokens end, their identities (the Google and Telegram
-  accounts and their display names) go, and the `users` row stays as a bare id
+  their sign-ins, tokens and unfinished sign-in or link attempts end, their
+  identities (the Google and Telegram accounts and their display names) and
+  the admission of their email go, and the `users` row stays as a bare id
   with no email that cannot sign in. Audit rows keep that id, as they do after
-  a delete. The invitations step runs before the email and identities go,
-  because it finds the invitations addressed to them by both; a revoked
+  a delete. The invitations and admission steps run before the email and
+  identities go, because they find what is addressed to them by both; a revoked
   invitation keeps the address it was sent to.
 
   ```sql
@@ -319,6 +342,9 @@ owner; there is no product door for it. In order:
           OR lower(email) = (SELECT lower(primary_email) FROM users WHERE id = '…')
           OR invited_tg_user_id::text IN (SELECT external_id FROM user_identities
                                            WHERE user_id = '…' AND provider = 'telegram'));
+  DELETE FROM signup_admissions
+   WHERE email = (SELECT lower(primary_email) FROM users WHERE id = '…');
+  DELETE FROM oauth_states WHERE user_id = '…';
   DELETE FROM user_identities WHERE user_id = '…';
   UPDATE users SET primary_email = NULL, state = 'disabled' WHERE id = '…';
   COMMIT;
