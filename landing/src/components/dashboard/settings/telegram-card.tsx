@@ -192,10 +192,9 @@ export function TelegramCard({
                 <p className="text-sm">
                   Unlink this Telegram account? Your taps on approval cards and
                   your messages in Telegram groups stop counting as you until
-                  you link again. Your workspaces stay as they are, and a
-                  workspace that sends cards to this Telegram account&apos;s
-                  private chat keeps sending them there until an admin removes
-                  it.
+                  you link again, and a workspace that sends cards to this
+                  Telegram account&apos;s private chat stops sending them there
+                  until then. Your workspaces stay as they are.
                 </p>
                 <div className="flex flex-wrap gap-2">
                   <Button

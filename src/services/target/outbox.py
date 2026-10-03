@@ -321,12 +321,14 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
     seq-scan whatever the index says, so an EXPLAIN assertion here would prove
     nothing.
 
-    **Only a binding the push predicate still admits is claimed**
-    (`bindings.push_binding_where`). A `deliver_outbox` job minted before an
-    admin removed the group (`bindings.revoke_for_workspace`) or before the
-    bot was kicked would otherwise still drain the queue into a chat the
-    workspace let go of; the sweep stops minting for a revoked binding, and
-    this is the same rule at the sender.
+    **Only a binding the deliverable predicate still admits is claimed**
+    (`bindings.deliverable_binding_where`). A `deliver_outbox` job minted
+    before an admin removed the group (`bindings.revoke_for_workspace`) or
+    before the bot was kicked would otherwise still drain the queue into a
+    chat the workspace let go of, and a private chat's queue would reach a
+    person who no longer belongs to the workspace; the sweep stops minting
+    for a revoked binding, and this is the same rule at the sender, where the
+    membership is read.
     """
     row = (
         await session.execute(
@@ -337,7 +339,7 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
                 "               AND EXISTS (SELECT 1 FROM channel_bindings b"
                 "                 WHERE b.id = :b"
                 "                   AND b.workspace_id = channel_outbox.workspace_id"
-                f"                  AND {bindings.push_binding_where('b')})"
+                f"                  AND {bindings.deliverable_binding_where('b')})"
                 "             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)"
                 "   AND state = 'pending'"
                 " RETURNING id, kind, payload, attempts, intent_id, workspace_id,"
@@ -639,7 +641,7 @@ async def supersede_everywhere_touched(
             text(
                 "WITH b AS ("
                 "  SELECT id FROM channel_bindings"
-                f"   WHERE workspace_id = :ws AND {bindings.PUSH_BINDING_WHERE}"
+                f"   WHERE workspace_id = :ws AND {bindings.DELIVERABLE_BINDING_WHERE}"
                 "), sup AS ("
                 "  UPDATE channel_outbox o SET state = 'superseded',"
                 "     payload = CASE WHEN CAST(:o AS text) IS NULL THEN o.payload"
@@ -825,7 +827,7 @@ async def restate_everywhere_touched(
             text(
                 "WITH b AS ("
                 "  SELECT id FROM channel_bindings"
-                f"   WHERE workspace_id = :ws AND {bindings.PUSH_BINDING_WHERE}"
+                f"   WHERE workspace_id = :ws AND {bindings.DELIVERABLE_BINDING_WHERE}"
                 "), upd AS ("
                 "  UPDATE channel_outbox o"
                 "     SET payload = o.payload || jsonb_build_object('outcome_text', CAST(:o AS text))"

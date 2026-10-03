@@ -314,9 +314,9 @@ owner; there is no product door for it. In order:
   anything the removals missed on the way, dropping the owner's admission
   of their email (`signup_admissions`), which would otherwise let a new
   account with that address straight back in, and ending every workspace's
-  Telegram binding to their private chat, which would otherwise keep
-  receiving that workspace's cards; its queued cards are superseded first, as
-  Remove does. The bot does not remove anyone from a group: an admin removes
+  Telegram binding to their private chat, which no card reaches once they are
+  gone but which would otherwise stay active; its queued cards are superseded
+  first, as Remove does. The bot does not remove anyone from a group: an admin removes
   them in Telegram. The delete's cascades and `SET NULL`s fire the
   governance trigger (on `workspace_members`, on `oauth_credentials` when they
   granted Drive, and on `workspaces` when they paused one), which refuses a

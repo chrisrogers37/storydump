@@ -1625,6 +1625,15 @@ GRANT EXECUTE ON FUNCTION fn_stranded_sources(p_age numeric, p_limit int) TO svc
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 ```
 
+**The sender re-checks what the sweep cannot.** `fn_sender_sweep` mints on
+`bindings.push_binding_where`, the base predicate: its owner role reads no membership. Every
+statement that chooses, edits or claims a card routes on `bindings.deliverable_binding_where`,
+which adds that a card goes to a private chat (`telegram_dm`) only while the person whose chat it
+is, the linked Telegram identity with that chat's id, belongs to the binding's workspace. So a
+sender minted for a binding the deliverable predicate refuses claims nothing and retires that
+binding's queue (`work_loop.deliver_outbox`), and the sweep has nothing left to mint for. The
+door's body is unchanged.
+
 ### §26. The clock's five legs mint with a deadline (083, #1381; the SQL half of #1361)
 
 **Why:** `jobs.enqueue` has written `deadline_at` since #1288, and `budget_exhausted` ends a job on
@@ -3036,8 +3045,9 @@ The table carries no audit trigger, so the door sets no actor.
 **What unlinking does not touch.** Memberships stay. A workspace joined from a Telegram group
 stays joined: unlinking an identity is not leaving a workspace, and removal is
 `fn_member_remove`'s. What changes is that the Telegram account resolves to no Storydump user, so
-its card taps are refused as `unlinked` and its group messages join nobody until the person links
-again, which works as a first link does.
+its card taps are refused as `unlinked`, its group messages join nobody, and no workspace's card
+reaches its private chat (§25's deliverable predicate finds no linked member) until the person
+links again, which works as a first link does.
 
 ```sql
 -- [§42 a person can unlink their own Telegram identity]

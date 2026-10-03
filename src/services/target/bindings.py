@@ -95,14 +95,46 @@ def push_binding_where(alias: str = "") -> str:
 
 
 #: "Where can we say this": the bindings a push may go to. ONE owner for the
-#: predicate — the W3 sweep, the two one-statement outbox doors and
-#: `prompts.push_bindings` all route on it, and four spellings is how they
-#: drift apart the day a second push channel lands
-#: (`invitation_cards.py:126-131` names that exact risk). A fragment, not a
-#: bound parameter: it is SQL, and no user input reaches it.
+#: predicate — the W3 sweep, the two one-statement outbox doors,
+#: `outbox.claim_next` and `prompts.push_bindings` all route on this module's
+#: fragments, and five spellings is how they drift apart the day a second
+#: push channel lands (`invitation_cards.py:126-131` names that exact risk).
+#: A fragment, not a bound parameter: it is SQL, and no user input reaches it.
+#:
+#: This base form is the sender sweep's (`fn_sender_sweep`, 082), whose owner
+#: role reads no membership; every statement that chooses, edits or claims a
+#: card routes on :data:`DELIVERABLE_BINDING_WHERE`, so a sender the sweep
+#: mints for a binding that form refuses retires that binding's queue instead
+#: of sending it (`work_loop.deliver_outbox`).
 #:
 #: The unqualified form, for a statement with one `channel_bindings`.
 PUSH_BINDING_WHERE = push_binding_where()
+
+
+def deliverable_binding_where(alias: str = "") -> str:
+    """:func:`push_binding_where`, narrowed for a private chat: a card goes to
+    a `telegram_dm` binding only while the person whose chat it is — the
+    linked Telegram identity with that chat's id — belongs to the binding's
+    workspace. Checked at use time, by every statement that chooses, edits or
+    claims a card, so it holds however the binding or the membership came to
+    be. The member clause names its outer row (*alias*, or the table itself):
+    a bare ``workspace_id`` inside the subquery would bind to
+    ``workspace_members`` and test nothing."""
+    q = alias or "channel_bindings"
+    return (
+        f"{push_binding_where(alias)}"
+        f" AND ({q}.channel <> 'telegram_dm' OR EXISTS ("
+        "SELECT 1 FROM user_identities dm_ui"
+        " JOIN workspace_members dm_wm ON dm_wm.user_id = dm_ui.user_id"
+        " WHERE dm_ui.provider = 'telegram'"
+        f" AND dm_ui.external_id = {q}.external_ref"
+        f" AND dm_wm.workspace_id = {q}.workspace_id))"
+    )
+
+
+#: The unqualified deliverable form, for a statement with one
+#: `channel_bindings`.
+DELIVERABLE_BINDING_WHERE = deliverable_binding_where()
 
 #: A Telegram chat id as text — negative for groups and supergroups. Both
 #: members of :data:`CHANNELS` are Telegram, which is what makes this shape
@@ -310,7 +342,8 @@ async def revoke_for_workspace(session, *, workspace_id: str, binding_id: str) -
 
 async def retire_unsettled(session, *, binding_id: str) -> int:
     """Supersede every unsettled card (`pending`, `sending`, `ambiguous`) of a
-    binding that is not active. Returns how many moved.
+    binding a push may no longer reach: not active, or refused by
+    :func:`deliverable_binding_where`. Returns how many moved.
 
     :func:`revoke_for_workspace` supersedes `pending` and `ambiguous` at the
     removal but leaves `sending` to a live sender, and that row can still end
@@ -318,7 +351,7 @@ async def retire_unsettled(session, *, binding_id: str) -> int:
     (the sender died). The claim refuses a revoked binding, so nothing settles
     it; a re-bind would send it as a stale card. Run by :func:`bind` before a
     revoked binding is re-activated, and by `work_loop.deliver_outbox` when
-    its binding is no longer active. Safe for a `sending` row:
+    the deliverable predicate refuses its binding. Safe for a `sending` row:
     `outbox._leave_sending` is fenced against a row superseded in flight.
     """
     result = await session.execute(

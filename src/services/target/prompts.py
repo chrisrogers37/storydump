@@ -473,7 +473,7 @@ async def push_bindings(session, workspace_id: str) -> list[str]:
             await session.execute(
                 text(
                     "SELECT id FROM channel_bindings"
-                    f" WHERE workspace_id = :ws AND {bindings.PUSH_BINDING_WHERE}"
+                    f" WHERE workspace_id = :ws AND {bindings.DELIVERABLE_BINDING_WHERE}"
                 ),
                 {"ws": str(workspace_id)},
             )

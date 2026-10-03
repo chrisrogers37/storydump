@@ -807,7 +807,12 @@ class TestLaneSurvivesTransientClaimErrors:
         assert loop.consecutive_errors == 3
 
 
-ACTIVE_ROW = {"external_ref": "-777", "workspace_id": "ws-1", "state": "active"}
+ACTIVE_ROW = {
+    "external_ref": "-777",
+    "workspace_id": "ws-1",
+    "state": "active",
+    "deliverable": True,
+}
 
 
 class TestDeliverOutboxRetiresAGoneChat:
@@ -878,11 +883,13 @@ class TestDeliverOutboxRetiresAGoneChat:
 
 
 class TestDeliverOutboxSkipsARevokedBinding:
-    """A job minted before an admin removed the group (or the bot was kicked)
-    sends nothing: the hold ends before a poller is built (`07` §13), and
-    what is left of the binding's queue is retired."""
+    """A job whose binding a push may no longer reach sends nothing: one
+    minted before an admin removed the group (or the bot was kicked), or one
+    for a private chat whose person no longer belongs to the workspace. The
+    hold ends before a poller is built (`07` §13), and what is left of the
+    binding's queue is retired."""
 
-    async def test_no_poller_runs_for_a_revoked_binding(self, monkeypatch):
+    def _run(self, monkeypatch, row):
         from types import SimpleNamespace
 
         built = []
@@ -894,7 +901,7 @@ class TestDeliverOutboxSkipsARevokedBinding:
         monkeypatch.setattr(work_loop.outbox, "OutboxPoller", _Poller)
         transport = SimpleNamespace(for_chat=lambda ref: lambda row: None)
         registry = build_registry(full_deps(transport=transport))
-        session = _FakeSession(rows=[{**ACTIVE_ROW, "state": "revoked"}])
+        session = _FakeSession(rows=[row])
         job = {
             "id": "j-r",
             "kind": "deliver_outbox",
@@ -902,12 +909,38 @@ class TestDeliverOutboxSkipsARevokedBinding:
             "serialization_key": "binding:b-1",
             "payload": {"binding_id": "b-1"},
         }
-        assert await registry["deliver_outbox"](session, job) is None
+        return registry["deliver_outbox"](session, job), built, session
+
+    async def test_no_poller_runs_for_a_revoked_binding(self, monkeypatch):
+        run, built, session = self._run(
+            monkeypatch, {**ACTIVE_ROW, "state": "revoked", "deliverable": False}
+        )
+        assert await run is None
         assert built == [], "a revoked binding got a sender"
         retire = [sql for sql, _ in session.statements if "superseded" in sql]
         assert len(retire) == 1 and "'sending'" in retire[0], (
             "the revoked binding's leftover queue was not retired"
         )
+
+    async def test_no_poller_runs_for_an_active_binding_the_predicate_refuses(
+        self, monkeypatch
+    ):
+        """Active, but the push predicate answers no — a private chat whose
+        person is not a member. The answer is the binding read's own, so the
+        handler routes on the one predicate rather than re-spelling it."""
+        from src.services.target import bindings
+
+        run, built, session = self._run(
+            monkeypatch, {**ACTIVE_ROW, "external_ref": "777", "deliverable": False}
+        )
+        assert await run is None
+        assert built == [], "a chat the push predicate refuses got a sender"
+        retire = [sql for sql, _ in session.statements if "superseded" in sql]
+        assert len(retire) == 1 and "'sending'" in retire[0], (
+            "the refused chat's leftover queue was not retired"
+        )
+        read = [sql for sql, _ in session.statements if "AS deliverable" in sql]
+        assert len(read) == 1 and bindings.DELIVERABLE_BINDING_WHERE in read[0]
 
 
 class TestWeightedCategorySelection:
@@ -1830,7 +1863,9 @@ class TestTheSenderMintReadsItsOwners:
         assert session.calls[0][1]["lim"] == 7
 
     def test_the_four_push_statements_read_the_one_predicate(self):
-        """ "Where can we say this" is `bindings`' fragment at every site."""
+        """ "Where can we say this" is `bindings`' fragment at every site: the
+        sender sweep's door carries the base predicate, and every statement
+        that chooses, edits or claims a card carries the deliverable one."""
         import inspect
 
         from src.services.target import bindings, outbox, prompts
@@ -1841,6 +1876,9 @@ class TestTheSenderMintReadsItsOwners:
         # `push_binding_where('b')` verbatim, and the Python no longer spells it.
         # An applied file is immutable: a predicate change means a fix-forward
         # door (063's precedent), and this pin moves to the new file with it.
+        # The door keeps the BASE predicate: its owner role reads no
+        # membership, and the sender it mints refuses what the deliverable
+        # predicate does (the handler retires that queue).
         from scripts.migration_runner import MIGRATIONS_DIR
 
         ddl = (MIGRATIONS_DIR / "082_worker_doors.sql").read_text()
@@ -1851,7 +1889,7 @@ class TestTheSenderMintReadsItsOwners:
         )
         assert (
             inspect.getsource(prompts.push_bindings).count(
-                "bindings.PUSH_BINDING_WHERE"
+                "bindings.DELIVERABLE_BINDING_WHERE"
             )
             == 1
         )
@@ -1859,13 +1897,38 @@ class TestTheSenderMintReadsItsOwners:
             outbox.supersede_everywhere_touched,
             outbox.restate_everywhere_touched,
         ):
-            assert inspect.getsource(door).count("bindings.PUSH_BINDING_WHERE") == 1, (
-                door.__name__
+            assert (
+                inspect.getsource(door).count("bindings.DELIVERABLE_BINDING_WHERE") == 1
+            ), door.__name__
+        assert (
+            inspect.getsource(outbox.claim_next).count(
+                "bindings.deliverable_binding_where('b')"
             )
-        # And the fragment is what it always was.
+            == 1
+        )
+        assert "PUSH_BINDING_WHERE" not in inspect.getsource(outbox)
+        # And the fragments are what they say.
         assert bindings.PUSH_BINDING_WHERE == (
             "state = 'active' AND channel LIKE 'telegram%'"
         )
         assert bindings.push_binding_where("b") == (
             "b.state = 'active' AND b.channel LIKE 'telegram%'"
+        )
+        assert bindings.deliverable_binding_where("b") == (
+            "b.state = 'active' AND b.channel LIKE 'telegram%'"
+            " AND (b.channel <> 'telegram_dm' OR EXISTS ("
+            "SELECT 1 FROM user_identities dm_ui"
+            " JOIN workspace_members dm_wm ON dm_wm.user_id = dm_ui.user_id"
+            " WHERE dm_ui.provider = 'telegram'"
+            " AND dm_ui.external_id = b.external_ref"
+            " AND dm_wm.workspace_id = b.workspace_id))"
+        )
+        # Unqualified, the member clause still names its outer row: a bare
+        # `workspace_id` inside the subquery would bind to `workspace_members`.
+        assert bindings.DELIVERABLE_BINDING_WHERE.startswith(
+            bindings.PUSH_BINDING_WHERE + " AND (channel_bindings.channel <> "
+        )
+        assert "= channel_bindings.external_ref" in bindings.DELIVERABLE_BINDING_WHERE
+        assert "= channel_bindings.workspace_id))" in (
+            bindings.DELIVERABLE_BINDING_WHERE
         )
