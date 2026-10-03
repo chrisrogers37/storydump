@@ -514,10 +514,13 @@ class TestSchedulingHealthIsASecondSurface:
     ):
         """Both axes are public because the fleet monitors poll them, so they
         carry what `scripts/scheduling_monitor.py` and
-        `scripts/posting_monitor.py` read and nothing more. The monitors are
-        strict (a missing key is `unreachable`), so this is both directions: a
-        key dropped here pages someone, and a key added here is published to
-        anyone."""
+        `scripts/posting_monitor.py` read and nothing more. This is both
+        directions: a key added here is published to anyone, and a key dropped
+        here is lost to the monitor. Most missing keys read as `unreachable`
+        and page someone, but not all: the scheduling monitor reads a missing
+        `max_lag_seconds` as null and a missing `worker` block as absent
+        (healthy, or worker-unknown), so for those two this test is the only
+        guard."""
         from scripts import posting_monitor, scheduling_monitor as sm
 
         async def fake_lag(executor):

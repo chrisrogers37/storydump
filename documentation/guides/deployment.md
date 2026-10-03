@@ -193,7 +193,11 @@ storydump doctor            # this laptop: token, API, config, Railway, the ledg
 
 Everything here happens on the web front end, signed in with Google.
 
-- [ ] Sign in and create a workspace
+- [ ] Admit your own email first: sign-up is invite-only (092), and on a fresh
+  database nobody is admitted, the first account included. As the owner (the
+  `DATABASE_URL` login), in lower case:
+  `psql "$DATABASE_URL" -c "INSERT INTO signup_admissions (email) VALUES ('you@example.com');"`
+- [ ] Sign in with that Google account and create a workspace
 - [ ] **Settings › Integrations → Link Telegram** — attaches your Telegram
   account to your user (the link opens the bot with a `/start link-…` payload)
 - [ ] **Settings › Integrations → Add a Telegram group** — opens Telegram's

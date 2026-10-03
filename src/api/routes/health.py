@@ -10,9 +10,10 @@ field renamed here is a renderer and two pollers broken elsewhere.
 `details` reads `app.state.*` — the engine, the sampled database role, the pool
 watch, the tap counters and the two webhook reports — rather than the factory's
 closure, which is the whole reason these can live outside it. Neither it nor
-`/health` opens a connection: see `/health`'s docstring.
-`/health/scheduling` and `/health/posting` do, so each reuses its last answer
-for `HEALTH_CACHE_SECONDS` (`AnswerCache`, one per app on `app.state`).
+`/health` opens a connection: see `/health`'s docstring. `/health/scheduling`,
+`/health/posting` and the operating details' queue read (`queue_pressure`) do,
+so each reuses its last answer for `HEALTH_CACHE_SECONDS` (`AnswerCache`, one
+per app on `app.state`).
 
 The router carries no `tags=`: these three operations have never had one, and
 `/openapi.json` is a response body like any other.
@@ -26,6 +27,7 @@ import time
 from types import TracebackType
 
 from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy.exc import SQLAlchemyError
 
 from src import __version__
 from src.services.target import backpressure, posting_health, scheduling_health
@@ -44,8 +46,9 @@ VERSION = __version__
 COMMIT_VAR = "RAILWAY_GIT_COMMIT_SHA"
 _START_TIME = time.time()
 
-#: How long `/health/scheduling` and `/health/posting` reuse their last answer.
-#: Both are unauthenticated and each answer takes a connection from the API's
+#: How long `/health/scheduling`, `/health/posting` and the operating details'
+#: queue read reuse their last answer. The first two are unauthenticated and
+#: each answer takes a connection from the API's
 #: shared pool, so without this anyone could drain the pool the webhook needs
 #: by polling them. The fleet monitors poll far less often than this, and every
 #: number in the payloads is an age or a count that moves on a scale of minutes.
@@ -159,8 +162,10 @@ async def queue_pressure(state) -> dict | None:
             return await asyncio.wait_for(
                 backpressure.read(state.engine, WorkerConfig()), QUEUE_READ_TIMEOUT_S
             )
-        except Exception as exc:  # noqa: BLE001 — a report, never a failed read
-            logger.warning("queue pressure not read: %s", type(exc).__name__)
+        except (SQLAlchemyError, OSError, asyncio.TimeoutError, TimeoutError) as exc:
+            # a database that refused, failed or did not answer: a report,
+            # never a failed read; anything else is a bug and raises
+            logger.warning("queue pressure not read: %r", exc)
             return {"error": type(exc).__name__}
 
     return await state.health_cache.answer("backpressure", read)

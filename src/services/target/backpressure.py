@@ -35,9 +35,9 @@ async def snapshot(
     identify: bool = False,
 ) -> dict[str, Any]:
     """The signal. *identify* adds the waiting workspace's id to
-    `ws_oldest_wait` — for the worker's own log, never for a public surface
-    (`/health/scheduling` is unauthenticated and promises nothing identifying:
-    `scheduling_health.py`, `posting_health.py`).
+    `ws_oldest_wait` — for the worker's own log, never for the operating
+    details (`/api/v1/ops/health`), which name no workspace any more than the
+    public axes do.
 
     The three tenant-wide reads (the ready lanes, the pending outbox, the
     longest-waiting tenant) are doors owned by `svc_maintenance` (081) so the

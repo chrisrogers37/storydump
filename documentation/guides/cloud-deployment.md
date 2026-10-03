@@ -489,7 +489,7 @@ rate- or quota-limited.
 6. [ ] Configure the Meta app (the Instagram Login redirect URI)
 7. [ ] Configure the Google client (both redirect URIs)
 8. [ ] Deploy; `storydump webhook status` is well, and `storydump health` reports `api`, `scheduling` and `posting` well (the webhook reads `not_checked` until step 11)
-9. [ ] Admit your own email: sign-up is invite-only (092) and the first account is no exception, so as the database owner run `INSERT INTO signup_admissions (email) VALUES ('you@example.com');` (lowercase) in the SQL editor
+9. [ ] Admit your own email: sign-up is invite-only (092) and the first account is no exception, so as the owner (the `DATABASE_URL` login), in lower case: `psql "$DATABASE_URL" -c "INSERT INTO signup_admissions (email) VALUES ('you@example.com');"`
 10. [ ] Sign in on the web with that Google account, create a workspace
 11. [ ] Mint an API token (Settings › API tokens), run `storydump login`, set `OPS_USER_IDS` on the API service to the `user` line of `storydump whoami`, let it redeploy; `storydump health` now exits 0
 12. [ ] Settings › Integrations: link Telegram, add a Telegram group, connect Google Drive, add a folder, Sync Now
