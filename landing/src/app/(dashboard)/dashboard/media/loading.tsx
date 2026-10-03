@@ -98,6 +98,10 @@ export default function MediaLoading() {
                   <Skeleton className="h-3 w-12" />
                   <Skeleton className="h-3 w-20" />
                 </div>
+                {/* Schedule…: a `size="sm"` outline button (h-8) at the row's end. */}
+                <div className="flex justify-end">
+                  <Skeleton className="h-8 w-24 rounded-md" />
+                </div>
               </CardContent>
             </Card>
           ))}

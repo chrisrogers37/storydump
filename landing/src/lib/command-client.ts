@@ -174,6 +174,148 @@ export function disableAccountRefusalCopy(reason: unknown, status?: number): str
   return "Could not remove that destination. Nothing changed — try again shortly.";
 }
 
+/** The warning a planned story's answer carries when no chat is bound (the vocabulary's `NO_PUSH_BINDING`). */
+export const NO_PUSH_BINDING = "no_push_binding";
+
+/** How far ahead a story may be planned, in days (the vocabulary's `PLAN_HORIZON_DAYS`). */
+export const PLAN_HORIZON_DAYS = 365;
+
+export type SchedulePlan = {
+  accountId: string;
+  itemId: string;
+  /** The date and time a person picked, as typed: no offset; the port reads it in the account's zone. */
+  localAt: string;
+  /** Only when the person chose to override a lock the port said can be overridden. */
+  overrideLocks?: boolean;
+};
+
+/**
+ * Plan one item onto one account at a wall time (#1413 phase 6). The time
+ * rides as typed, because the port reads it in the account's zone, never the
+ * browser's.
+ */
+export function submitScheduleItem(workspaceId: string, plan: SchedulePlan) {
+  return submitCommand(workspaceId, "schedule_item", {
+    ig_account_id: plan.accountId,
+    media_item_id: plan.itemId,
+    local_at: plan.localAt,
+    ...(plan.overrideLocks ? { override_locks: true } : {}),
+  });
+}
+
+/**
+ * Each lock kind as the clause that finishes a refusal, keyed by the
+ * vocabulary's `BLOCKING_LOCKS` and `WARNING_LOCKS` (`wire-contract.test.ts`
+ * holds the keys equal). `skip` and `reject` are a person's answers to an
+ * approval card and `recent` is the repost lock an account gets when the item
+ * posts there. Nothing writes the other three today, so they say only what the
+ * item is marked.
+ */
+export const LOCK_CLAUSES: Record<string, string> = {
+  skip: "it was skipped recently",
+  recent: "it was posted on this account recently",
+  reject: "it was rejected",
+  unsupported: "it is marked unsupported",
+  hold: "it is on hold",
+  seasonal: "it is marked seasonal",
+};
+
+/** `item_<state>`: the item itself is what is in the way. */
+const ITEM_GONE_CLAUSE = "it is no longer available";
+
+/** Except an item Instagram cannot post, which is still in the library: the remedy is another item. */
+const ITEM_UNSUPPORTED_CLAUSE = "Instagram can't post it";
+
+/**
+ * A refused planned time, by the rule it broke (`facts.at_rule`), keyed by the
+ * vocabulary's `AT_RULE_SENTENCES` (`wire-contract.test.ts` holds the keys
+ * equal, so a rule the port adds cannot fall through to the sentence with none).
+ */
+export const AT_RULE_COPY: Record<string, string> = {
+  past: "That time has already passed on the account's clock. Pick a later one.",
+  skipped:
+    "That time does not happen on the account's clock: a daylight-saving change skips it. Pick another.",
+  horizon: `That is more than ${PLAN_HORIZON_DAYS} days ahead. Pick a sooner time.`,
+  shape: "Enter a date and a time.",
+  not_a_date: "Enter a date and a time.",
+};
+
+function lockClauses(inTheWay: readonly string[] | undefined): string[] {
+  const clauses: string[] = [];
+  for (const kind of inTheWay ?? []) {
+    if (kind === "item_unsupported") clauses.push(ITEM_UNSUPPORTED_CLAUSE);
+    else if (kind.startsWith("item_")) clauses.push(ITEM_GONE_CLAUSE);
+    else if (Object.hasOwn(LOCK_CLAUSES, kind)) clauses.push(LOCK_CLAUSES[kind]);
+  }
+  return clauses;
+}
+
+function capitalized(sentence: string): string {
+  return sentence.charAt(0).toUpperCase() + sentence.slice(1);
+}
+
+/** The question before an override: what it gets past, then whether to go ahead. */
+export function scheduleOverrideCopy(facts: RefusalFacts | undefined): string {
+  const clauses = lockClauses(facts?.in_the_way);
+  return clauses.length > 0
+    ? `${capitalized(clauses.join(" and "))}. Schedule it anyway?`
+    : "This item has a lock on it. Schedule it anyway?";
+}
+
+/**
+ * A sentence for a `schedule_item` refusal. With the refusal's facts each one
+ * names its remedy; without them each still says what kind of refusal it was.
+ */
+export function scheduleRefusalCopy(
+  reason: unknown,
+  status?: number,
+  facts?: RefusalFacts,
+): string {
+  if (status === 403 || reason === "insufficient_role") {
+    return "You need to be a member of this workspace to schedule a story.";
+  }
+  switch (reason) {
+    case "locked": {
+      const clauses = lockClauses(facts?.in_the_way);
+      return clauses.length > 0
+        ? `This item can't be scheduled: ${clauses.join(" and ")}.`
+        : "A lock, or the item itself, keeps it from being scheduled.";
+    }
+    case "illegal_transition": {
+      // A duplicate. Its `existing` may be absent when that story ended before
+      // it could be read, and absent never means there was no conflict.
+      const existing = facts?.existing;
+      if (existing?.cancel_requested) {
+        return "This item's story on that account was cancelled a moment ago. Plan it again once it has cleared.";
+      }
+      if (existing?.origin === "planned") return "This item is already scheduled on that account.";
+      if (existing?.origin === "cadence") {
+        return "This item is already waiting in that account's regular slots.";
+      }
+      return "This item is already waiting to post on that account.";
+    }
+    case "invalid_args": {
+      const rule = facts?.at_rule;
+      return rule && Object.hasOwn(AT_RULE_COPY, rule)
+        ? AT_RULE_COPY[rule]
+        : `That time can't be used. Pick one later than now and within ${PLAN_HORIZON_DAYS} days.`;
+    }
+    case "not_found":
+      if (facts?.missing === "account") return "That account is no longer here. Reload the page.";
+      if (facts?.missing === "item") return "That item is no longer in the library. Reload the page.";
+      return "That account or item is no longer here. Reload the page.";
+    case REPLAYED_ERROR:
+      return "That did not go through — the app sent it under a key the server had already seen. Reload and try again; report this if it repeats.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing was scheduled");
+  }
+  return "Could not schedule that. Nothing was scheduled — try again shortly.";
+}
+
 /**
  * A sentence for an offboarding or restore refusal. Its own vocabulary, like
  * `settingsRefusalCopy`: these reasons cannot arise from a settings write, and
