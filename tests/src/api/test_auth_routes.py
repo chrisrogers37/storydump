@@ -353,6 +353,41 @@ class TestSignout:
         monkeypatch.setattr(sessions, "revoke", revoke)
         assert client.post("/auth/signout").status_code == 200
 
+    def test_everywhere_revokes_every_session_of_the_presenting_user(
+        self, client, monkeypatch
+    ):
+        """`?everywhere=true` goes to `revoke_all_for_user` with the presented
+        hash, never to the one-row `revoke`; the cookie is cleared either way."""
+        seen = []
+
+        async def revoke(conn, *, token_hash):
+            raise AssertionError("everywhere must not revoke only this session")
+
+        async def revoke_all_for_user(conn, *, token_hash):
+            seen.append(token_hash)
+            return 3
+
+        monkeypatch.setattr(sessions, "revoke", revoke)
+        monkeypatch.setattr(sessions, "revoke_all_for_user", revoke_all_for_user)
+        resp = client.post(
+            "/auth/signout?everywhere=true",
+            headers={"Authorization": "Bearer opaque"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"signed_out": True, "revoked": 3}
+        assert seen == [hashlib.sha256(b"opaque").hexdigest()]
+        cookie = cookie_header(resp, COOKIE)
+        assert "Max-Age=0" in cookie or "expires=" in cookie.lower()
+
+    def test_everywhere_without_a_session_touches_nothing(self, client, monkeypatch):
+        async def revoke_all_for_user(conn, *, token_hash):
+            raise AssertionError("nothing to revoke")
+
+        monkeypatch.setattr(sessions, "revoke_all_for_user", revoke_all_for_user)
+        resp = client.post("/auth/signout?everywhere=true")
+        assert resp.status_code == 200
+        assert resp.json() == {"signed_out": True, "revoked": 0}
+
 
 class TestSessionDelivery:
     """#1117 — sign-in refuses rather than minting a session the front end can
