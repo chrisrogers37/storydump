@@ -114,6 +114,12 @@ def test_a_missing_header_is_refused(client, armed):
     assert _post(client, {"update_id": 1}, secret=None).status_code == 403
 
 
+def test_a_non_ascii_secret_is_refused_not_a_500(client, armed):
+    """A header byte of 0x80 or above reaches the check as a non-ASCII str,
+    which `compare_digest` refuses to compare as text."""
+    assert _post(client, {"update_id": 1}, secret=b"s\xe9cret").status_code == 403
+
+
 def test_the_secret_is_checked_before_the_body_is_parsed(client, armed):
     """A bad secret with an unparseable body must still be 403, not 400.
 

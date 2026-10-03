@@ -45,7 +45,8 @@ The three surfaces, by key (`storydump health --json` prints them verbatim):
 
 | Surface | Keys | Source |
 |---|---|---|
-| `/health` | `status`, `version`, `uptime_seconds`, `target_database` (the variable is set — presence, not liveness), `db_role`, `pool`, `ingress_workers`, `taps`, `webhook`, `webhook_live` | `src/api/app.py` |
+| `/health` | `status`, `version`, `commit` — public, nothing more | `src/api/routes/health.py` |
+| `/api/v1/ops/health` | `/health`'s three, plus `uptime_seconds`, `target_database` (the variable is set — presence, not liveness), `db_role`, `pool`, `ingress_workers`, `taps`, `webhook`, `webhook_live` — for `OPS_USER_IDS` alone | `src/api/routes/health.py::details` |
 | `/health/scheduling` | `stalled`, `accounts_active`, `max_lag_seconds`, `worker{succeeded_ever, last_success_age_seconds, overdue_ready, max_overdue_seconds}`, `backpressure` | `src/services/target/scheduling_health.py` |
 | `/health/posting` | `posted_ever`, `last_post_age_seconds`, `intents_ever`, `oldest_intent_age_seconds`, `debited_total`, `ledger_days`, `accounts_active`, `oldest_active_destination_age_seconds` | `src/services/target/posting_health.py` |
 
@@ -142,8 +143,9 @@ and page on the same verdicts `storydump health` prints:
 See `scheduling-monitor.md` and `posting-monitor.md` beside this page for the
 thresholds and the pollers' two extra rules (a watch clock; two unreachable
 readings before paging) that a single `storydump health` reading does not have.
-`storydump health` also judges the bot's webhook from `/health` (unregistered,
-or a backlog behind a delivery error); `storydump webhook status` asks Telegram
+`storydump health` also judges the bot's webhook from the operating details
+(unregistered, or a backlog behind a delivery error), and calls it
+`not_checked` — not well — when its token may not read them; `storydump webhook status` asks Telegram
 directly.
 
 ---
