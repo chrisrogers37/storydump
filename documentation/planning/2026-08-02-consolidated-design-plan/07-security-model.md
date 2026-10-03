@@ -2858,7 +2858,7 @@ still exists. A record the door already wrote is kept (`ON CONFLICT DO NOTHING`)
 **Outside the doors.** `remove_member` retires the removed person's live link states for the
 workspace (the `oauth_states` rows naming both the person and the workspace: the group bind and the
 Drive and Instagram connects) in the same unit of work as §33's token revoke, and the Members card
-says that a removed person stays in the Telegram group itself.
+says that the group does not add a removed person back unless they are invited again.
 
 ```sql
 -- [§37 a removal holds]
