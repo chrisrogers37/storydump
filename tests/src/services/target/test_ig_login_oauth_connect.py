@@ -301,6 +301,32 @@ class TestRetireLiveStates:
         assert "provider = :provider" in sql and "consumed_at IS NULL" in sql
         assert params == {"provider": "telegram", "uid": "u-1"}
 
+    async def test_the_selectors_given_are_anded(self):
+        """Every selector given narrows the one statement: its WHERE is the
+        conjunction of liveness and each selector, in a fixed order."""
+        conn = _RetireConn()
+        await oauth_states.retire_live_states(
+            conn,
+            provider="telegram",
+            purpose="bind",
+            user_id="u-1",
+            workspace_id="ws-1",
+            reconnect_target="acct-1",
+        )
+        ((sql, params),) = conn.statements
+        assert sql == (
+            "UPDATE oauth_states SET consumed_at = now() WHERE consumed_at IS NULL"
+            " AND provider = :provider AND purpose = :purpose AND user_id = :uid"
+            " AND workspace_id = :ws AND reconnect_target = :target"
+        )
+        assert params == {
+            "provider": "telegram",
+            "purpose": "bind",
+            "uid": "u-1",
+            "ws": "ws-1",
+            "target": "acct-1",
+        }
+
     async def test_a_removal_selects_by_user_and_workspace_across_providers(self):
         conn = _RetireConn()
         await oauth_states.retire_live_states(conn, user_id="u-1", workspace_id="ws-1")

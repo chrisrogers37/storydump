@@ -16,6 +16,7 @@ import uuid
 from datetime import timedelta
 
 import psycopg2
+import psycopg2.errors
 import pytest
 from asyncpg.exceptions import RaiseError
 from sqlalchemy import text
@@ -845,6 +846,32 @@ class TestTheJoinPathThroughTheDoors:
         assert self._role(world, world["a"]["ws"], person) == "member"
         assert not self._recorded(world, person)
 
+    def test_a_session_claiming_no_tenant_cannot_remove_even_as_the_owner(self, world):
+        """`07` §37: an unset claim is no tenant, and no workspace is the
+        caller's. A session whose actor is set, as a unit of work sets it, but
+        whose `app.tenant_id` is unset is refused, the workspace's own owner
+        included, by the door's message, and nothing is removed or recorded."""
+        person = self._person(world, role="member")
+        owner = str(world["a"]["user"])
+        with txn(world["ingress"], expect_user="svc_ingress") as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT set_config('app.actor_kind', 'user', true),"
+                    " set_config('app.actor_user_id', %s, true),"
+                    " set_config('app.channel', 'web', true)",
+                    (owner,),
+                )
+                with pytest.raises(
+                    psycopg2.errors.RaiseException,
+                    match="outside the caller's admin scope",
+                ):
+                    cur.execute(
+                        "SELECT * FROM fn_member_remove(%s, %s, %s)",
+                        (str(world["a"]["ws"]), str(person), owner),
+                    )
+        assert self._role(world, world["a"]["ws"], person) == "member"
+        assert not self._recorded(world, person)
+
     def test_a_removal_retires_the_persons_live_states_in_that_workspace(self, world):
         """`07` §37: the bind, Drive and Instagram states the removed person
         holds for the workspace are spent with the removal. Their state for
@@ -913,6 +940,7 @@ class TestTheRemovalBackfill:
                 "migrated",
                 "superseded",
                 "left",
+                "unnamed",
                 "elsewhere",
                 "orphaned",
                 "kept",
@@ -947,6 +975,9 @@ class TestTheRemovalBackfill:
             removal(people["superseded"], ago=1, actor_kind="migration", actor=None)
             removal(people["left"], ago=3)
             removal(people["left"], ago=1, actor=people["left"])
+            # A person's removal whose audit row names no remover is not the
+            # member's own, so it is recorded, with no remover named.
+            removal(people["unnamed"], ago=2, actor=None)
             removal(people["elsewhere"], ago=2, at=gone_ws)
             removal(people["orphaned"], ago=2, actor=gone_user)
             removal(gone_user, ago=2)
@@ -969,6 +1000,7 @@ class TestTheRemovalBackfill:
             recorded = {row[0]: row[1:] for row in cur.fetchall()}
         assert recorded == {
             people["twice"]: (owner, timedelta(days=1)),
+            people["unnamed"]: (None, timedelta(days=2)),
             people["orphaned"]: (None, timedelta(days=2)),
             people["kept"]: (None, timedelta(0)),
         }
