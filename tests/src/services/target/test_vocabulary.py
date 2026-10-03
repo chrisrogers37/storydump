@@ -63,6 +63,11 @@ class TestTheClosedSets:
                 "060_auth_plane_tables.sql",
                 "ck_service_token_role",
             ),
+            (
+                vocabulary.OUTBOX_FAILURE_CLASSES,
+                "093_outbox_failure_record.sql",
+                "ck_outbox_failure_class",
+            ),
         ],
     )
     def test_each_set_is_its_migrations_check_list_in_order(

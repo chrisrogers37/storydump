@@ -1,5 +1,5 @@
-"""The three health surfaces — Railway's probe, the scheduling axis and the
-posting axis (#1090 F1, #1268).
+"""The four health surfaces — Railway's probe, the scheduling axis, the
+posting axis (#1090 F1, #1268) and the delivery axis (#1482).
 
 They were the only routes in the app defined inline inside `create_app`; every
 other route in the API lives in a module here and is included as a router, and
@@ -11,10 +11,10 @@ Each handler reads `request.app.state.*` — the engine, the sampled database
 role, the pool watch, the tap counters and the two webhook reports — rather than
 the factory's closure, which is the whole reason they can live outside it. None
 of them opens a connection for `/health` itself: see its docstring.
-`/health/scheduling` and `/health/posting` do, so each reuses its last answer
-for `HEALTH_CACHE_SECONDS` (`AnswerCache`, one per app on `app.state`).
+`/health/scheduling`, `/health/posting` and `/health/delivery` do, so each
+reuses its last answer for `HEALTH_CACHE_SECONDS` (`AnswerCache`, one per app on `app.state`).
 
-The router carries no `tags=`: these three operations have never had one, and
+The router carries no `tags=`: these operations have never had one, and
 `/openapi.json` is a response body like any other.
 """
 
@@ -28,7 +28,12 @@ from types import TracebackType
 from fastapi import APIRouter, HTTPException, Request
 
 from src import __version__
-from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target import (
+    backpressure,
+    delivery_health,
+    posting_health,
+    scheduling_health,
+)
 from src.services.target.work_loop import WorkerConfig
 
 #: The one version string: the OpenAPI document's and `/health`'s. Read by
@@ -267,3 +272,33 @@ async def posting_health_check(request: Request):
             return {**posting, **attempts, **dests}
 
     return await request.app.state.health_cache.answer("posting", read)
+
+
+@router.get("/health/delivery")
+async def delivery_health_check(request: Request):
+    """Are the messages the product sends getting through? (#1482)
+
+    A FOURTH health surface, by `/health/posting`'s own rule. Deliveries failing
+    and posts not landing are independent causes, so folding this axis into
+    either payload would rank one against the other, and ranking is what masks.
+
+    The last hour's outbox rows whose last failure fell in it, by class and the
+    provider's code, how many of them ended `failed` or sit `ambiguous`, and how
+    many rows were sent in the same hour (`delivery_health`, through 093's
+    doors). NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: the
+    alert is `scripts/delivery_monitor.py`, run outside the app. Unauthenticated,
+    so AGGREGATES ONLY: counts and codes, never a workspace, a chat or a message.
+
+    503 when the engine is absent, never a reassuring zero.
+    """
+    engine = request.app.state.engine
+    if engine is None:
+        raise HTTPException(status_code=503, detail="target database not configured")
+
+    async def read():
+        # A direct connection, as on `/health/posting`: the read is estate-wide
+        # and has no tenant, and its cross-tenant reach is 093's doors.
+        async with engine.connect() as conn:
+            return await delivery_health.outbox_failures(conn)
+
+    return await request.app.state.health_cache.answer("delivery", read)
