@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { DemoProvider } from "@/components/demo/demo-provider";
 import { DemoShell } from "@/components/demo/demo-shell";
 import { sampleWorkspace } from "@/lib/demo/fixtures";
+import { noindexMetadata } from "@/lib/seo";
 
 /**
  * The sample workspace (#1480): the dashboard's Overview, Queue and Calendar
@@ -16,7 +17,7 @@ export const metadata: Metadata = {
   title: "Sample workspace",
   description:
     "Approve, skip and reject sample Stories in a made-up workspace. Nothing here is real, nothing is saved, nothing posts.",
-  robots: { index: false, follow: false },
+  ...noindexMetadata,
   alternates: { canonical: null },
 };
 
