@@ -15,6 +15,8 @@ import {
   isTelegramGroupLink,
   requestTelegramGroupLink,
   telegramGroupLinkRefusalCopy,
+  removeTelegramGroup,
+  removeTelegramGroupRefusalCopy,
 } from "./telegram-link";
 
 let captured: { url: string; init: RequestInit }[];
@@ -176,5 +178,39 @@ describe("telegramGroupLinkRefusalCopy", () => {
   });
   it("says the deployment is not set up on a 503", () => {
     expect(telegramGroupLinkRefusalCopy("http_503")).toMatch(/not set up/i);
+  });
+});
+
+describe("removeTelegramGroup", () => {
+  const WS = "11111111-1111-4111-8111-111111111111";
+  const BINDING = "44444444-4444-4444-8444-444444444444";
+  it("sends a DELETE to the workspace's binding route", async () => {
+    stubFetch({ bindingId: BINDING, state: "revoked" });
+    expect(await removeTelegramGroup(WS, BINDING)).toEqual({ ok: true });
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/bindings/${BINDING}`);
+    expect(captured[0].init.method).toBe("DELETE");
+  });
+  it("carries the proxy's refusal by name", async () => {
+    stubFetch({ error: "http_404" }, 404);
+    expect(await removeTelegramGroup(WS, BINDING)).toEqual({
+      ok: false,
+      error: "http_404",
+      status: 404,
+    });
+  });
+});
+
+describe("removeTelegramGroupRefusalCopy", () => {
+  it("names the admin floor on a role refusal, and that nothing changed", () => {
+    for (const reason of ["insufficient_role", "http_403"]) {
+      expect(removeTelegramGroupRefusalCopy(reason)).toMatch(/admin/i);
+      expect(removeTelegramGroupRefusalCopy(reason)).toMatch(/nothing changed/i);
+    }
+  });
+  it("sends a gone group back to a reload", () => {
+    expect(removeTelegramGroupRefusalCopy("http_404")).toMatch(/reload/i);
+  });
+  it("falls back to a sentence that says nothing changed", () => {
+    expect(removeTelegramGroupRefusalCopy("http_500")).toMatch(/nothing changed/i);
   });
 });

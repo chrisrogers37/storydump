@@ -14,6 +14,7 @@ import pytest
 
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
+    bindings,
     category_mix,
     channel_bind,
     commands,
@@ -707,6 +708,50 @@ class TestTelegramGroupBindLink:
             "workspace_id": WS,
             "bot_username": "storydump_app_bot",
         }
+
+
+class TestRemoveTelegramGroup:
+    """`DELETE /workspaces/{ws}/bindings/{binding_id}` — an admin removes a
+    group (`07` §13): a revoke, never a delete, at the admin floor like the
+    bind link."""
+
+    BINDING = "44444444-4444-4444-8444-444444444444"
+    URL = f"/api/v1/workspaces/{WS}/bindings/{BINDING}"
+
+    @pytest.fixture
+    def revoked(self, monkeypatch):
+        seen = {"moved": True}
+
+        async def revoke_for_workspace(session, *, workspace_id, binding_id):
+            seen["asked"] = (workspace_id, binding_id)
+            return seen["moved"]
+
+        monkeypatch.setattr(bindings, "revoke_for_workspace", revoke_for_workspace)
+        return seen
+
+    def test_requires_a_session(self, client, revoked):
+        assert client.delete(self.URL).status_code == 401
+        assert "asked" not in revoked
+
+    def test_revokes_at_the_admin_floor(self, client, signed_in, tenant, revoked):
+        resp = client.delete(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"binding_id": self.BINDING, "state": "revoked"}
+        assert revoked["asked"] == (WS, self.BINDING)
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_binding_that_is_not_here_or_already_revoked_is_404(
+        self, client, signed_in, tenant, revoked
+    ):
+        revoked["moved"] = False
+        assert client.delete(self.URL).status_code == 404
+
+    def test_a_binding_id_that_is_not_a_uuid_never_reaches_the_service(
+        self, client, signed_in, tenant, revoked
+    ):
+        resp = client.delete(f"/api/v1/workspaces/{WS}/bindings/nope")
+        assert resp.status_code == 422
+        assert "asked" not in revoked
 
 
 class TestTelegramLink:

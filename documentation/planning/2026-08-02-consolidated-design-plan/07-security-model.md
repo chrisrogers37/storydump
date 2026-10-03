@@ -725,6 +725,18 @@ the tenant claim with `system` as the actor — nobody commanded the move — an
 the same writer re-points the row, or revokes it when the new id is already
 another binding's (`uq_binding_external`).
 
+An admin can also remove a group from Settings (`DELETE
+/workspaces/{ws}/bindings/{binding_id}`, admin floor). It is a revoke, never a
+delete: `bindings.revoke_for_workspace` flips the workspace's own row to
+`revoked` under the tenant's RLS and, in the same transaction, supersedes the
+cards still queued for it (`pending` and `ambiguous`), so a later re-bind sends
+no backlog. The sender holds the same line: `outbox.claim_next` claims only for
+an active binding, so a sender job minted before the revoke sends nothing.
+Cards already posted stay in the group's history and the bot is not made to
+leave; a fresh bind link re-activates the same row. No migration —
+`ck_bindings_state` (053) and `ck_outbox_state` (056) already carry both
+states.
+
 ```sql
 -- The bind purpose (#1175 D-3, owner ruling 2026-09-05): an admin's one-shot
 -- `startgroup` link binds the group it is opened in to the pinned workspace.

@@ -57,6 +57,7 @@ from src.services.target.drive_adapter import (
     DriveTerminalError,
 )
 from src.services.target import (
+    bindings,
     category_mix,
     channel_bind,
     commands,
@@ -425,6 +426,27 @@ async def list_bindings(
     return await _collection(
         request, ws, principal, workspaces.list_bindings, "bindings"
     )
+
+
+@router.delete("/workspaces/{ws}/bindings/{binding_id}")
+async def remove_binding(
+    ws: uuid.UUID,
+    binding_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_session),
+):
+    """Remove a Telegram group from the workspace (`07` §13) — a REVOKE,
+    never a delete (`bindings.revoke_for_workspace`): the row is kept, the
+    cards still queued for it are superseded, and a fresh bind link brings the
+    group back. Cards already posted stay in the group, and the bot is not
+    made to leave it. Admin floor, like binding one."""
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
+        revoked = await bindings.revoke_for_workspace(
+            session, workspace_id=str(ws), binding_id=str(binding_id)
+        )
+    if not revoked:
+        raise principal_mod.not_found()
+    return {"binding_id": str(binding_id), "state": "revoked"}
 
 
 @router.get("/workspaces/{ws}/invitations")

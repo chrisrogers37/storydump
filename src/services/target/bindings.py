@@ -3,9 +3,10 @@
 ## What this is
 
 **The one writer of `channel_bindings`.** :func:`bind`, :func:`revoke`,
-:func:`revoke_by_id` and :func:`follow_or_retire` are the whole write
-surface, and `channel_bind.handle_bind` — the `bind-` lane of the `/start`
-door — is what calls :func:`bind` when a group's ``/start bind-<state>``
+:func:`revoke_by_id`, :func:`revoke_for_workspace` and
+:func:`follow_or_retire` are the whole write surface, and
+`channel_bind.handle_bind` — the `bind-` lane of the `/start` door — is what
+calls :func:`bind` when a group's ``/start bind-<state>``
 consumes its one-shot state. Routing every write through one module is what
 makes `uq_binding_external` (a chat binds once) and D13 (`0..n` per
 workspace) hold by construction rather than by review.
@@ -253,6 +254,43 @@ async def revoke_by_id(session, *, binding_id: str) -> bool:
         {"b": str(binding_id)},
     )
     return result.rowcount > 0
+
+
+async def revoke_for_workspace(session, *, workspace_id: str, binding_id: str) -> bool:
+    """An admin removes a group from the workspace (`07` §13): the binding is
+    revoked and every card still queued for it is superseded, in the caller's
+    transaction. Returns whether the binding moved; False means the workspace
+    holds no live binding by that id, which the route answers 404.
+
+    Same row-kept semantics as :func:`revoke` — a fresh bind link re-activates
+    the row (:data:`REBOUND`). The queue is retired here rather than left to
+    the sender because a `deliver_outbox` job minted before the revoke would
+    otherwise still find its rows: the claim refuses a revoked binding
+    (`outbox.claim_next`), and superseding the rows is what keeps a later
+    re-bind from posting a backlog of stale cards into the group. `pending`
+    and `ambiguous` only — a `sending` row is the live sender's, and its CAS
+    out of `sending` settles it; `ck_outbox_state` (056) admits `superseded`
+    and no trigger guards outbox transitions.
+    """
+    params = {"ws": str(workspace_id), "b": str(binding_id)}
+    result = await session.execute(
+        text(
+            "UPDATE channel_bindings SET state = 'revoked'"
+            " WHERE workspace_id = :ws AND id = :b AND state <> 'revoked'"
+        ),
+        params,
+    )
+    if result.rowcount == 0:
+        return False
+    await session.execute(
+        text(
+            "UPDATE channel_outbox SET state = 'superseded'"
+            " WHERE workspace_id = :ws AND binding_id = :b"
+            "   AND state IN ('pending', 'ambiguous')"
+        ),
+        params,
+    )
+    return True
 
 
 async def _repoint(session, *, binding_id: str, external_ref: str) -> bool:

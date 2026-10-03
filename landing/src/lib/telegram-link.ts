@@ -164,3 +164,46 @@ export function telegramGroupLinkRefusalCopy(reason: unknown): string {
   }
   return telegramLinkRefusalCopy(reason);
 }
+
+// --- Removing a Telegram group (`07` §13) ------------------------------------
+
+export type RemoveTelegramGroupResult =
+  | { ok: true }
+  | { ok: false; error: string; status: number };
+
+/**
+ * Remove a bound group from the workspace — a revoke on the API side, never a
+ * delete: cards still queued for it are dropped, and a fresh bind link brings
+ * it back.
+ */
+export async function removeTelegramGroup(
+  workspaceId: string,
+  bindingId: string,
+): Promise<RemoveTelegramGroupResult> {
+  const result = await callBff(
+    `/api/workspaces/${workspaceId}/bindings/${bindingId}`,
+    { method: "DELETE" },
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
+  }
+  return { ok: true };
+}
+
+export function removeTelegramGroupRefusalCopy(reason: unknown): string {
+  switch (reason) {
+    case "not found":
+    case "http_404":
+      return "That group is no longer bound here. Reload the page.";
+    case "insufficient_role":
+    case "http_403":
+      return "You need to be an admin of this workspace to remove a Telegram group. Nothing changed.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing changed");
+  }
+  return "Could not remove that group. Nothing changed — try again shortly.";
+}

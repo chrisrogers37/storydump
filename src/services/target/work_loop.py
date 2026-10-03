@@ -460,8 +460,8 @@ def build_registry(deps: WorkerDeps) -> dict:
                 (
                     await reader.execute(
                         text(
-                            "SELECT external_ref, workspace_id FROM channel_bindings"
-                            " WHERE id = :b"
+                            "SELECT external_ref, workspace_id, state"
+                            " FROM channel_bindings WHERE id = :b"
                         ),
                         {"b": binding_id},
                     )
@@ -473,6 +473,18 @@ def build_registry(deps: WorkerDeps) -> dict:
             raise RuntimeError(
                 f"deliver_outbox {job['id']}: binding {binding_id} has no row"
             )
+        if row["state"] != "active":
+            # Revoked after this job was minted — an admin removed the group
+            # or the bot was kicked. The claim refuses it anyway
+            # (`outbox.claim_next`); ending here spends no hold on a chat the
+            # workspace let go of.
+            logger.info(
+                "deliver_outbox %s: binding %s is %s — nothing sent",
+                job["id"],
+                binding_id,
+                row["state"],
+            )
+            return None
         poller = outbox.OutboxPoller(
             unit_of_work.poller_session_factory(deps.engine, str(row["workspace_id"])),
             binding_id=binding_id,

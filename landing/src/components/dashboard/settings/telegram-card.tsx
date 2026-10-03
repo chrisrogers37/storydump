@@ -1,11 +1,14 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   LINK_TTL_MINUTES_FALLBACK,
+  removeTelegramGroup,
+  removeTelegramGroupRefusalCopy,
   requestTelegramGroupLink,
   requestTelegramLink,
   startCommandFor,
@@ -34,12 +37,21 @@ import type { ChannelBinding } from "@/lib/types";
  * up front, before any link exists, and the group half states it inside the
  * explanation afterwards. Seven props is the duplication again with
  * indirection in front of it, so they are left as they read.
+ *
+ * ── Removing a group ─────────────────────────────────────────────────────
+ *
+ * An admin can remove a bound group (`07` §13). It asks first, inline under
+ * the row, because the one thing a person is likely to get wrong is what
+ * removal does NOT do: cards already posted stay in the group, and the bot is
+ * not made to leave it. The API revokes the binding and drops the cards still
+ * queued for it; adding the group again brings it back.
  */
 export function TelegramCard({
   workspaceId,
   telegramLinked,
   telegramDisplayName,
   bindings,
+  canRemoveGroups,
   onError,
   onNotice,
 }: {
@@ -51,6 +63,8 @@ export function TelegramCard({
   telegramDisplayName: string | null;
   /** The Telegram chats this WORKSPACE's cards go to (`07` §13); null = could not be loaded. */
   bindings: ChannelBinding[] | null;
+  /** Admin or owner: removing a group is an admin act, like binding one. */
+  canRemoveGroups: boolean;
   /** The tab owns the banner both cards speak through. */
   onError: (message: string | null) => void;
   onNotice: (message: string | null) => void;
@@ -66,6 +80,9 @@ export function TelegramCard({
   } | null>(null);
   const [mintingGroupLink, setMintingGroupLink] = useState(false);
   const [groupLinkError, setGroupLinkError] = useState<string | null>(null);
+  const router = useRouter();
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
   const boundGroups = (bindings ?? []).filter((b) => b.state === "active");
 
   /**
@@ -105,6 +122,24 @@ export function TelegramCard({
       link: result.link,
       expiresInSeconds: result.expiresInSeconds,
     });
+  }
+
+  /** Revoke one bound group, after the inline confirm (`07` §13). */
+  async function removeGroup(bindingId: string) {
+    onError(null);
+    onNotice(null);
+    setRemovingId(bindingId);
+    const result = await removeTelegramGroup(workspaceId, bindingId);
+    setRemovingId(null);
+    setConfirmingId(null);
+    if (!result.ok) {
+      onError(removeTelegramGroupRefusalCopy(result.error));
+      return;
+    }
+    onNotice(
+      "Group removed. New cards no longer go to it; the bot is still in the group until you remove it in Telegram.",
+    );
+    router.refresh();
   }
 
   return (
@@ -190,19 +225,67 @@ export function TelegramCard({
               Bound groups could not be loaded just now. Reload to try again.
             </p>
           ) : boundGroups.length > 0 ? (
-            <ul className="mt-2 space-y-1 text-sm">
+            <ul className="mt-2 space-y-2 text-sm">
               {boundGroups.map((b) => (
-                <li key={b.id} className="flex items-center gap-2">
-                  <Badge
-                    variant="secondary"
-                    className="bg-green-100 text-green-800"
-                  >
-                    Bound
-                  </Badge>
-                  <span className="text-muted-foreground">
-                    {b.channel === "telegram_dm" ? "Direct chat" : "Group chat"}{" "}
-                    · id {b.external_ref}
-                  </span>
+                <li key={b.id} className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge
+                      variant="secondary"
+                      className="bg-green-100 text-green-800"
+                    >
+                      Bound
+                    </Badge>
+                    <span className="min-w-0 break-all text-muted-foreground">
+                      {b.channel === "telegram_dm" ? "Direct chat" : "Group chat"}{" "}
+                      · id {b.external_ref}
+                    </span>
+                    {canRemoveGroups && confirmingId !== b.id && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="ml-auto"
+                        onClick={() => {
+                          onError(null);
+                          setConfirmingId(b.id);
+                        }}
+                        disabled={removingId !== null}
+                      >
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+                  {canRemoveGroups && confirmingId === b.id && (
+                    <div className="space-y-2 rounded-md border border-red-200 bg-red-50 p-3">
+                      <p className="text-sm font-medium">
+                        Remove this group from the workspace?
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Approval cards and notices stop going to it, and any
+                        still waiting to be sent are dropped. Cards already
+                        posted stay in the group&apos;s history, and the bot
+                        stays in the group — remove it in Telegram if you want
+                        it gone. Adding the group again brings it back.
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => removeGroup(b.id)}
+                          disabled={removingId !== null}
+                        >
+                          {removingId === b.id ? "Removing..." : "Remove group"}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setConfirmingId(null)}
+                          disabled={removingId !== null}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
