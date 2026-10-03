@@ -1889,21 +1889,9 @@ _INTENT_FOR_PARK = (
 )
 
 
-async def park_for_review(
-    session,
-    *,
-    workspace_id: str,
-    intent_id: str,
-    from_state: str,
-    tz: str,
-    notice: str,
-    at: Optional[datetime] = None,
-) -> bool:
-    """`from_state → review_required` (edges 055 and 076), the card restated
-    with the review keyboard, one notice per push binding, the
-    `customer_notified` latch when anyone heard — in the caller's
+async def flip_to_review(session, *, intent_id: str, from_state: str) -> bool:
+    """`from_state → review_required` (edges 055 and 076), in the caller's
     transaction. False when the row had already moved on."""
-    at = at or datetime.now(timezone.utc)
     moved = (
         await session.execute(
             text(
@@ -1913,8 +1901,23 @@ async def park_for_review(
             {"intent": intent_id, "from_state": from_state},
         )
     ).fetchone()
-    if moved is None:
-        return False
+    return moved is not None
+
+
+async def tell_review(
+    session,
+    *,
+    workspace_id: str,
+    intent_id: str,
+    tz: str,
+    notice: str,
+    at: Optional[datetime] = None,
+) -> None:
+    """The courtesy a story parked for review is owed: its card restated with
+    the review keyboard, one notice per push binding, and the
+    `customer_notified` latch when anyone heard — in the caller's
+    transaction."""
+    at = at or datetime.now(timezone.utc)
     told = await _restate_and_notify(
         session,
         workspace_id=workspace_id,
@@ -1936,42 +1939,71 @@ async def park_for_review(
             ),
             {"intent": intent_id},
         )
+
+
+async def park_for_review(
+    session,
+    *,
+    workspace_id: str,
+    intent_id: str,
+    from_state: str,
+    tz: str,
+    notice: str,
+    at: Optional[datetime] = None,
+) -> bool:
+    """`from_state → review_required` and the courtesy it is owed
+    (`tell_review`), together in the caller's transaction. False when the row
+    had already moved on."""
+    if not await flip_to_review(session, intent_id=intent_id, from_state=from_state):
+        return False
+    await tell_review(
+        session,
+        workspace_id=workspace_id,
+        intent_id=intent_id,
+        tz=tz,
+        notice=notice,
+        at=at,
+    )
     return True
 
 
-async def park_exhausted(session, job: dict) -> bool:
+async def flip_exhausted(session, job: dict) -> Optional[dict]:
     """A `publish_pipeline` job whose budget is spent (five untyped crashes):
-    the story it carried is parked for review from wherever it stood —
-    `publishing` mid-ladder or `approved` between attempts — with the line
-    that says what is known. A story already settled parks nothing."""
+    the story it carried is flipped to review from wherever it stood —
+    `publishing` mid-ladder or `approved` between attempts. Returns the
+    `tell_review` arguments for its courtesy, which the caller runs apart from
+    the flip, so that a failed courtesy cannot undo it; None when nothing was
+    parked (no story, or a story already settled)."""
     payload = job.get("payload") or {}
     if isinstance(payload, str):
         payload = json.loads(payload)
     intent_id = payload.get("intent_id")
     if not intent_id:
-        return False
+        return None
     row = (
         (await session.execute(text(_INTENT_FOR_PARK), {"intent": str(intent_id)}))
         .mappings()
         .first()
     )
     if row is None or row["state"] not in ("publishing", "approved"):
-        return False
+        return None
+    if not await flip_to_review(
+        session, intent_id=str(intent_id), from_state=row["state"]
+    ):
+        return None
     tries = (
         int(job.get("attempts") or job.get("max_attempts") or 0)
         or jobs.LANE_BUDGETS["bulk"][0]
     )
-    return await park_for_review(
-        session,
-        workspace_id=str(row["workspace_id"]),
-        intent_id=str(intent_id),
-        from_state=row["state"],
-        tz=str(row["tz"] or "UTC"),
-        notice=(
+    return {
+        "workspace_id": str(row["workspace_id"]),
+        "intent_id": str(intent_id),
+        "tz": str(row["tz"] or "UTC"),
+        "notice": (
             f"We hit a fault on our side {tries} times trying to post this story:"
             " choose on its card, or open the Queue on the web."
         ),
-    )
+    }
 
 
 async def park_stale_approved(session, *, older_than_seconds: int, limit: int) -> int:

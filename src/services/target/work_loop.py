@@ -765,7 +765,22 @@ _DEFAULT_NOTICE = (
 )
 
 
-async def _notify_exhausted(session, job) -> None:
+async def _settle_exhausted(session, job) -> Optional[dict]:
+    """The state a spent job leaves behind, written in the finalize's own
+    transaction and ahead of the notice's savepoint, so that a failed notice
+    cannot roll it back: a sync's source re-armed for tomorrow, a publish
+    job's story flipped to review. Returns the parked story's `tell_review`
+    arguments for the notice, or None."""
+    kind = str(job.get("kind"))
+    if kind in _SYNC_KINDS:
+        await _rearm_source(session, job)
+        return None
+    if kind == "publish_pipeline":
+        return await publish_pipeline.flip_exhausted(session, job)
+    return None
+
+
+async def _notify_exhausted(session, job, parked: Optional[dict] = None) -> None:
     """One `notification` outbox row per push binding when a tenant kind the
     sweeps do not re-mint has spent its budget. Nothing for system kinds and
     the re-minted kinds; a workspace with no binding gets nothing here (the
@@ -777,8 +792,10 @@ async def _notify_exhausted(session, job) -> None:
     if kind == "publish_pipeline":
         # Plan 03: the story a dead publish job carried is parked for the
         # workspace's review — the card with its buttons and one honest
-        # line — never left reading Approved behind a generic notice.
-        await publish_pipeline.park_exhausted(session, job)
+        # line — never left reading Approved behind a generic notice. The
+        # flip is `_settle_exhausted`'s; this is its courtesy.
+        if parked:
+            await publish_pipeline.tell_review(session, **parked)
         return
     bindings = await prompts.push_bindings(session, str(workspace_id))
     await outbox.fanout_notification(
@@ -1006,16 +1023,15 @@ class WorkLoop:
                 try:
                     async with self._session_for(job) as session:
                         # Ahead of the notice's savepoint, so a failed notice
-                        # cannot roll the re-arm back.
-                        if kind in _SYNC_KINDS:
-                            await _rearm_source(session, job)
+                        # cannot roll the spent job's state back.
+                        parked = await _settle_exhausted(session, job)
                         # The notice rides a savepoint: a failure writing it
                         # must not take the finalize down with it (the log
                         # already carries the failure; the notice is a
                         # courtesy, the terminal state is the record).
                         try:
                             async with session.begin_nested():
-                                await _notify_exhausted(session, job)
+                                await _notify_exhausted(session, job, parked)
                         except Exception:  # noqa: BLE001 — logged, finalize proceeds
                             logger.exception(
                                 "job %s (%s): the exhausted notice could not be"

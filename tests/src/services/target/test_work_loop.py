@@ -1285,22 +1285,31 @@ class TestTheBudgetCeiling:
         the generic exhausted notice is not the answer for a story."""
         from src.services.target import publish_pipeline
 
-        parked = []
+        flipped, told = [], []
 
-        async def park_exhausted(session, job):
-            parked.append(job["id"])
-            return True
+        async def flip_exhausted(session, job):
+            flipped.append(job["id"])
+            return {
+                "workspace_id": "ws-1",
+                "intent_id": "it-1",
+                "tz": "UTC",
+                "notice": "n",
+            }
+
+        async def tell_review(session, **parked):
+            told.append(parked["intent_id"])
 
         async def executor(session, job):
             raise RuntimeError("pool timeout")
 
-        monkeypatch.setattr(publish_pipeline, "park_exhausted", park_exhausted)
+        monkeypatch.setattr(publish_pipeline, "flip_exhausted", flip_exhausted)
+        monkeypatch.setattr(publish_pipeline, "tell_review", tell_review)
         loop, calls = self._loop(monkeypatch, executor=executor)
         loop._registry["publish_pipeline"] = executor
         job = self._job(kind="publish_pipeline", attempts=5)
         await loop._run_job(job)
         assert calls["finalized"] == ["failed"]
-        assert parked == [job["id"]] and calls["notices"] == []
+        assert flipped == [job["id"]] and told == ["it-1"] and calls["notices"] == []
 
     async def test_a_failed_courtesy_does_not_undo_a_dead_publish_job_s_park(
         self, monkeypatch
@@ -1795,23 +1804,25 @@ class TestADeadPublishJobParksItsStory:
     ):
         from src.services.target import publish_pipeline
 
-        parked, fanned = [], []
+        told, fanned = [], []
 
-        async def park_exhausted(session, job):
-            parked.append(job["id"])
+        async def tell_review(session, **parked):
+            told.append(parked)
 
         async def fanout_notification(*a, **k):  # pragma: no cover — must not run
             fanned.append(k)
 
-        monkeypatch.setattr(publish_pipeline, "park_exhausted", park_exhausted)
+        monkeypatch.setattr(publish_pipeline, "tell_review", tell_review)
         monkeypatch.setattr(
             work_loop.outbox, "fanout_notification", fanout_notification
         )
-        await work_loop._notify_exhausted(
-            _FakeSession(),
-            {"id": "j1", "kind": "publish_pipeline", "workspace_id": "ws"},
+        parked = {"workspace_id": "ws", "intent_id": "it", "tz": "UTC", "notice": "n"}
+        job = {"id": "j1", "kind": "publish_pipeline", "workspace_id": "ws"}
+        await work_loop._notify_exhausted(_FakeSession(), job, parked)
+        await work_loop._notify_exhausted(_FakeSession(), job, None)
+        assert told == [parked] and fanned == [], (
+            "a parked story gets its courtesy; nothing parked, no generic notice either"
         )
-        assert parked == ["j1"] and fanned == []
 
 
 class TestTheSenderMintReadsItsOwners:

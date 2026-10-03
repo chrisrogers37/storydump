@@ -2748,6 +2748,18 @@ class TestTheFloatsSafetyNets:
     reaper's safety net end on the review card with its three buttons and
     one honest line, never a story that reads Approved forever."""
 
+    @staticmethod
+    async def _park(conn, job):
+        """The spent job's park as the worker runs it: the flip, then the
+        courtesy it is owed (here in one transaction; the worker puts the
+        courtesy in a savepoint of its own)."""
+        from src.services.target import publish_pipeline
+
+        parked = await publish_pipeline.flip_exhausted(conn, job)
+        if parked:
+            await publish_pipeline.tell_review(conn, **parked)
+        return parked
+
     async def _as_worker(self, pipe_db, fn):
         from src.services.target.unit_of_work import apply_gucs
 
@@ -2759,18 +2771,13 @@ class TestTheFloatsSafetyNets:
                 return await fn(conn)
 
     def test_a_dead_job_parks_a_story_mid_ladder_for_review(self, pipe_db):
-        from src.services.target import publish_pipeline
 
         intent, ref = _new_intent(
             pipe_db, state="publishing", publish_step="transit_uploaded"
         )
         binding = _seed_card(pipe_db, intent)
         job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
-        _run(
-            self._as_worker(
-                pipe_db, lambda conn: publish_pipeline.park_exhausted(conn, job)
-            )
-        )
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
         row = _intent_row(pipe_db, intent)
         assert row["state"] == "review_required"
         assert row["cap_refunded_at"] is None, (
@@ -2784,7 +2791,6 @@ class TestTheFloatsSafetyNets:
 
     def test_a_dead_job_parks_a_waiting_story_for_review(self, pipe_db):
         """From a stepped-back `approved` row: the second edge of 076."""
-        from src.services.target import publish_pipeline
 
         intent, ref = _new_intent(pipe_db)
         binding = _seed_card(pipe_db, intent)
@@ -2796,26 +2802,17 @@ class TestTheFloatsSafetyNets:
         )
         assert _intent_row(pipe_db, intent)["state"] == "approved"
         dead = _reclaim(pipe_db, job["id"])
-        _run(
-            self._as_worker(
-                pipe_db, lambda conn: publish_pipeline.park_exhausted(conn, dead)
-            )
-        )
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, dead)))
         row = _intent_row(pipe_db, intent)
         assert row["state"] == "review_required" and row["cap_consumed_on"] is not None
         assert "Needs review" in _review_edit(pipe_db, intent, binding)["outcome_text"]
         assert len(_notices(pipe_db, intent, binding)) == 1
 
     def test_a_dead_job_on_a_settled_story_parks_nothing(self, pipe_db):
-        from src.services.target import publish_pipeline
 
         intent, ref = _new_intent(pipe_db, state="skipped")
         job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
-        _run(
-            self._as_worker(
-                pipe_db, lambda conn: publish_pipeline.park_exhausted(conn, job)
-            )
-        )
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
         assert _intent_row(pipe_db, intent)["state"] == "skipped"
 
     def test_a_dead_job_whose_courtesy_faults_still_parks_its_story(
