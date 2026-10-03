@@ -495,6 +495,9 @@ class _FakeSession:
             def scalar(self_inner):
                 return rows[0] if rows else None
 
+            def fetchone(self_inner):
+                return rows[0] if rows else None
+
         return _R()
 
 
@@ -1079,7 +1082,7 @@ class TestTheBudgetCeiling:
     `failed`, and a tenant kind the sweeps do not re-mint tells the workspace
     in its own words."""
 
-    def _loop(self, monkeypatch, *, executor, bindings=("b-1",)):
+    def _loop(self, monkeypatch, *, executor, bindings=("b-1",), rows=None):
         from datetime import datetime, timezone
 
         from src.services.target import outbox, prompts
@@ -1131,7 +1134,7 @@ class TestTheBudgetCeiling:
 
         @asynccontextmanager
         async def _ctx(job):
-            session = _FakeSession()
+            session = _FakeSession(rows)
             calls["sessions"].append(session)
             yield session
 
@@ -1298,6 +1301,48 @@ class TestTheBudgetCeiling:
         await loop._run_job(job)
         assert calls["finalized"] == ["failed"]
         assert parked == [job["id"]] and calls["notices"] == []
+
+    async def test_a_failed_courtesy_does_not_undo_a_dead_publish_job_s_park(
+        self, monkeypatch
+    ):
+        """A publish job that spends its budget parks its story for review. The
+        flip is the state change; the card restated and the notice are the
+        courtesy, which rides the savepoint. A courtesy that fails must not take
+        the flip with it: a story left `publishing` keeps its account's publish
+        slot, and nothing moves a plain `publishing` row once its job has ended."""
+        from src.services.target import publish_pipeline
+
+        async def executor(session, job):
+            raise RuntimeError("the fifth untyped crash")
+
+        async def courtesy_fails(session, **kwargs):
+            raise RuntimeError("the outbox refused the card")
+
+        loop, calls = self._loop(
+            monkeypatch,
+            executor=executor,
+            rows=[{"state": "publishing", "workspace_id": "ws-1", "tz": "UTC"}],
+        )
+        loop._registry["publish_pipeline"] = executor
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", courtesy_fails)
+        await loop._run_job(
+            self._job(
+                kind="publish_pipeline",
+                attempts=5,
+                payload={"v": 1, "intent_id": "it-1"},
+            )
+        )
+
+        assert calls["finalized"] == ["failed"] and loop.exhausted == 1
+        flips = [
+            params
+            for session in calls["sessions"]
+            for sql, params in session.statements
+            if "SET state = 'review_required'" in sql
+        ]
+        assert flips == [{"intent": "it-1", "from_state": "publishing"}], (
+            "the courtesy's rollback took the park's flip with it"
+        )
 
     async def test_a_failed_notice_stops_neither_the_finalize_nor_the_re_arm(
         self, monkeypatch
