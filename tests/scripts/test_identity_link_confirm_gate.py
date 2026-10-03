@@ -65,7 +65,11 @@ def minted(world):
     user_id = user_plane(
         world,
         lambda c: identity.upsert_google_identity(
-            c, sub=f"g-{uuid.uuid4()}", email=email, display_name=None
+            c,
+            sub=f"g-{uuid.uuid4()}",
+            email=email,
+            display_name=None,
+            signup_open=True,
         ),
     )
     link = user_plane(

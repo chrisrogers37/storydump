@@ -16,7 +16,9 @@ a command console.
 1. **Start at [storydump.app](https://storydump.app)** and read *Getting
    Started*. You need an Instagram Business or Creator account, a Google Drive
    folder with your media, and a Telegram account.
-2. **Sign in with Google** and create a workspace.
+2. **Sign in with Google** and create a workspace. Storydump is invite-only
+   while in beta: a new account signs up once its email has been let in from
+   the waitlist, or a workspace has invited it.
 3. **Connect, under Settings:**
    - **Accounts → Connect Instagram** — you authorize on Instagram's own
      screen; no Facebook Page is needed.
