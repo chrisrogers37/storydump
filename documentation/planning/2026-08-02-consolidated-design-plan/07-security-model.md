@@ -2731,7 +2731,99 @@ COMMENT ON FUNCTION fn_member_remove(uuid, uuid, uuid) IS
 REVOKE CREATE ON SCHEMA public FROM svc_membership;
 ```
 
-### §34. The outbox records why a delivery failed (091, #1482)
+### §34. The Drive grant records who granted it, and only they browse it (091)
+
+**Why:** the real-user readiness review (2026-10-02). The `gdrive` credential is the workspace's
+(§15), but what it carries is `drive.readonly` over the whole Drive of the person who connected it,
+Shared with me included. The folder browser and the folder pick sat at the admin floor, so every
+admin could walk that person's Drive and connect any folder in it.
+
+**The granter is recorded.** `oauth_credentials.granted_by_user_id` names the person whose Google
+account the grant is. The Drive connect callback writes it — the state's user, whom the callback has
+already checked is the returning browser — and a reconnect replaces it, so reconnecting with your own
+account is how another admin takes the browse over. The folder browser and the folder pick admit the
+granter alone and refuse everyone else by name (`drive_not_yours`); the grant's status, the connected
+folders and their sync stay at their floors. NULL for an `ig_login` credential and for every Drive
+grant made before this file: such a grant is browsable by the workspace's owner only, until a
+reconnect records a granter. `ON DELETE SET NULL` drops a deleted user's grant to that rule. A
+granter who is removed or demoted fails the admin floor first, so nobody browses until a reconnect.
+
+```sql
+-- [§34 the Drive grant records who granted it]
+
+ALTER TABLE oauth_credentials
+  ADD COLUMN granted_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL;
+```
+
+### §35. A new account needs a way in while in beta (092)
+
+**Why:** the owner's decision (2026-10-02): "Limit sign-in to emails you've let in from the
+waitlist." The sign-in callback's identity upsert (§1) created a `users` row for every verified
+Google subject it had not seen, and a user may create workspaces, so any Google account could sign
+up.
+
+**The gate.** A person who already has an identity signs in as before. A NEW subject creates its
+user only when `fn_signup_admitted` says its verified email may: the owner admitted the address (a
+`signup_admissions` row), or a pending, unexpired invitation is addressed to it, so an invitee can
+still sign up and accept. A refused subject creates nothing and lands on the sign-in page with a
+named refusal (`not_admitted`); so does a new subject with no verified email. The door is asked only
+on the new-user branch, before the `INSERT INTO users`, and `TARGET_SIGNUP_OPEN` switches the ask
+off for a local stack (default: gated).
+
+**Admitting someone** is one line as the database owner:
+`INSERT INTO signup_admissions (email) VALUES ('person@example.com');`. The table is global (no
+workspace): RLS is on, its one policy is `svc_membership`'s read, and the runtime roles hold no
+grant on it, so the door is its only reader and owner-bypass is how the owner writes it. The CHECK
+keeps the stored address one lower-case word with an @ and no whitespace or invisible character
+anywhere (a tab, a newline, a no-break or zero-width space, or a CSV's byte-order mark included), so
+such an admission is refused at the INSERT rather than silently never matching. The door compares `lower()` on both sides, as
+`fn_invitation_accept` does, and answers one boolean, never which workspace invited the address.
+
+```sql
+-- [§35 a new account needs a way in while in beta]
+
+CREATE TABLE signup_admissions (
+  email       text PRIMARY KEY CONSTRAINT ck_signup_admissions_email CHECK (
+                email = lower(email) AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'
+                AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
+  admitted_at timestamptz NOT NULL DEFAULT now(),
+  note        text
+);
+
+ALTER TABLE signup_admissions ENABLE ROW LEVEL SECURITY;
+
+GRANT SELECT ON signup_admissions TO svc_membership;
+
+CREATE POLICY p_member_admissions ON signup_admissions FOR SELECT TO svc_membership USING (true);
+
+GRANT CREATE ON SCHEMA public TO svc_membership;
+
+CREATE FUNCTION fn_signup_admitted(p_email text)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM signup_admissions a WHERE a.email = lower(p_email))
+      OR EXISTS (SELECT 1 FROM workspace_invitations i
+                  WHERE lower(i.email) = lower(p_email)
+                    AND i.state = 'pending' AND i.expires_at > now())
+$$;
+
+COMMENT ON FUNCTION fn_signup_admitted(text) IS
+  'May a new Google account with this verified email create its user (092)? True when the owner '
+  'admitted the address (signup_admissions) or a pending, unexpired invitation is addressed to it; '
+  'false for NULL. Compares lower() on both sides. Answers one boolean, never which workspace '
+  'invited the address. SECURITY DEFINER owned by svc_membership with EXECUTE granted to '
+  'svc_ingress.';
+
+ALTER FUNCTION fn_signup_admitted(text) OWNER TO svc_membership;
+
+REVOKE CREATE ON SCHEMA public FROM svc_membership;
+
+REVOKE ALL ON FUNCTION fn_signup_admitted(text) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_signup_admitted(text) TO svc_ingress;
+```
+
+### §36. The outbox records why a delivery failed (093, #1482)
 
 **Why:** `settle` sorts a failed send by type: a 429 goes back to `pending`, a gone destination and
 a refused message end `failed`, anything else is `ambiguous`. Then it writes the state and nothing
@@ -2757,7 +2849,7 @@ deferral and only context. `fn_health_outbox_sent` counts the rows sent in the s
 hour with no failures and no traffic cannot read as an hour that delivered.
 
 ```sql
--- [§34 the outbox records why a delivery failed]
+-- [§36 the outbox records why a delivery failed]
 
 ALTER TABLE channel_outbox ADD COLUMN last_failure_class TEXT NULL
   CONSTRAINT ck_outbox_failure_class
@@ -2782,7 +2874,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 $$;
 
 COMMENT ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) IS
-  'Outbox rows whose last failure falls in the window, every tenant''s included, by class and code; o_alerting_rows ended failed or sit ambiguous. Counts only. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (091, #1482).';
+  'Outbox rows whose last failure falls in the window, every tenant''s included, by class and code; o_alerting_rows ended failed or sit ambiguous. Counts only. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (093, #1482).';
 
 ALTER FUNCTION fn_health_outbox_failures(p_window_seconds integer) OWNER TO svc_maintenance;
 
@@ -2799,7 +2891,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 $$;
 
 COMMENT ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) IS
-  'Outbox rows sent in the window, every tenant''s included: the traffic the failure count is read against. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (091, #1482).';
+  'Outbox rows sent in the window, every tenant''s included: the traffic the failure count is read against. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (093, #1482).';
 
 ALTER FUNCTION fn_health_outbox_sent(p_window_seconds integer) OWNER TO svc_maintenance;
 

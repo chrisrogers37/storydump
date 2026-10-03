@@ -102,7 +102,7 @@ _UPLOAD_BUDGET_S = 120.0
 
 class TelegramSendError(ChannelSendError):
     """The transport could not produce an external ref for this row. Telegram's
-    own code, when it answered with one, rides as ``code`` (091, #1482)."""
+    own code, when it answered with one, rides as ``code`` (093, #1482)."""
 
 
 class TelegramChatGone(DestinationGone, TelegramSendError):
@@ -146,7 +146,7 @@ class MediaTransient(Exception):
 class TelegramAuthDead(CredentialDead, TelegramSendError):
     """Telegram rejected the credential itself (401; a 403 is the chat's,
     `_chat_gone`) — the loud class. For the outbox it is a `CredentialDead`,
-    recorded as `credential_dead` rather than as a lost response (091, #1482)."""
+    recorded as `credential_dead` rather than as a lost response (093, #1482)."""
 
 
 class SendReceipt(str):

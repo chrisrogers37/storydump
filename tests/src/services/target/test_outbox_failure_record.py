@@ -1,4 +1,4 @@
-"""Why a delivery failed, recorded on the outbox row (091, #1482).
+"""Why a delivery failed, recorded on the outbox row (093, #1482).
 
 `settle` maps what the transport raised to a class and the provider's code, and
 writes both, with the time, in the SAME CAS update that moves the row out of
@@ -172,7 +172,7 @@ class TestTheClassAndCodeRideTheOneCAS:
 
     async def test_a_dead_token_changes_no_state_until_1493_decides(self):
         """The record is new; the behaviour is not. A 401's row still takes
-        the ambiguous path, the one it took before 091."""
+        the ambiguous path, the one it took before 093."""
         error = await _raised_by(401, _refusal(401, "Unauthorized"))
         result = await outbox.settle(_Session(), ROW, error=error)
         assert result["state"] == "ambiguous"

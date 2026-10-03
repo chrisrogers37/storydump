@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Mutation battery for the outbox's failure record and the delivery health surface (091, #1482): each
+# Mutation battery for the outbox's failure record and the delivery health surface (093, #1482): each
 # behaviour has one named mutation that must make its named test FAIL ("killed"), and the test must PASS
 # on the clean tree first, or the verdict is BASELINE RED, not a kill; a selector that selects nothing
 # is NO TEST SELECTED, never a kill. Files are restored from the COMMITTED tree after each, so commit
@@ -39,7 +39,7 @@ PY
 }
 DOC=documentation/planning/2026-08-02-consolidated-design-plan/07-security-model.md
 MANIFEST=scripts/advertised_ddl_manifest.json
-remanifest() {  # the §34 block's sha follows the doc, as a real edit would (the ratchet otherwise refuses the replay)
+remanifest() {  # the §36 block's sha follows the doc, as a real edit would (the ratchet otherwise refuses the replay)
   $PY - <<'REMAN'
 import json, pathlib, sys
 sys.path.insert(0, ".")
@@ -47,7 +47,7 @@ from scripts.advertised_ddl import extract_blocks
 doc = pathlib.Path("documentation/planning/2026-08-02-consolidated-design-plan/07-security-model.md")
 last = extract_blocks(doc)[-1]
 p = pathlib.Path("scripts/advertised_ddl_manifest.json"); m = json.loads(p.read_text())
-[e for e in m["blocks"] if e["label"].startswith("§34")][0]["sha256"] = last.sha256
+[e for e in m["blocks"] if e["label"].startswith("§36")][0]["sha256"] = last.sha256
 p.write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n")
 REMAN
 }
@@ -103,7 +103,7 @@ check2 "the failures window is not clamped" "   WHERE last_failed_at >= now() - 
 check2 "the sent door counts failed rows as sent" "   WHERE state = 'sent'" "   WHERE state IN ('sent', 'failed')" "$GATE" "$DB -k sent_door_counts_the_window"
 check2 "PUBLIC keeps EXECUTE on the failures door" "REVOKE ALL ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) FROM PUBLIC;" "-- (PUBLIC keeps EXECUTE)" "$GATE" "tests/scripts/test_rls_runtime_harness.py -k catalog_agrees_on_every_door"
 # The file's own adoption probes: the runner refuses a file that does not leave what it claims.
-check "the worker loses EXECUTE on the failures door" scripts/migrations/091_outbox_failure_record.sql 'GRANT EXECUTE ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) TO svc_ingress, svc_worker;' 'GRANT EXECUTE ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) TO svc_ingress;' "$GATE" "$LANE"
+check "the worker loses EXECUTE on the failures door" scripts/migrations/093_outbox_failure_record.sql 'GRANT EXECUTE ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) TO svc_ingress, svc_worker;' 'GRANT EXECUTE ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) TO svc_ingress;' "$GATE" "$LANE"
 # What the route serves: the poller's wire contract and the alerting count.
 check "the body loses sent_in_window" $HEALTH '        "sent_in_window": int(sent),' '' "$UNIT" "tests/src/api/test_app_factory.py -k pollers_strictness"
 check "the alerting count sums the deferrals" $HEALTH '        "failed_or_ambiguous": sum(e["alerting"] for e in by_class.values()),' '        "failed_or_ambiguous": sum(e["rows"] for e in by_class.values()),' "$UNIT" "tests/src/services/target/test_delivery_health.py -k a_429_hour_alerts_on_nothing"

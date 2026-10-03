@@ -158,7 +158,7 @@ AUDIT_CHANNELS: tuple[str, ...] = ("telegram", "web", "cli", "system")
 #: `service_tokens.role` (060 ``ck_service_token_role``).
 TOKEN_ROLES: tuple[str, ...] = ("operator", "readonly")
 
-#: `channel_outbox.last_failure_class` (091 ``ck_outbox_failure_class``): why a
+#: `channel_outbox.last_failure_class` (093 ``ck_outbox_failure_class``): why a
 #: row's last send failed. `rate_limited` is a 429 (a deferral, never counted as
 #: a failure); `destination_gone` and `refused` are the definitive answers;
 #: `credential_dead` is a dead token's 401; `ambiguous` is a send whose answer
