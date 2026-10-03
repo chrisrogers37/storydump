@@ -26,6 +26,9 @@ FIXES: Mapping[str, str] = {
     "session_required": "do this signed in on the web; a token cannot",
     "readonly_token": "use a token minted with the operator role",
     "wrong_workspace": "use a token minted for that workspace, or a person-bound token",
+    "not_ops": (
+        "add your user id (storydump whoami) to OPS_USER_IDS on the API service"
+    ),
     "not_a_member": "check the workspace id, and this token's workspaces with storydump whoami",
     # the command port's refusals (phase 03): the fixing verb, named
     "manual_mode": "turn Instagram API posting on under Settings › General, or approve on the web",
