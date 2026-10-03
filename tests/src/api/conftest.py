@@ -257,7 +257,9 @@ async def sign_in(
     client: httpx.AsyncClient, monkeypatch, *, sub: str, email: str
 ) -> dict:
     """Drive the real sign-in with only the provider stubbed, assert it lands
-    on `/welcome`, and return the bearer header for the new session."""
+    on `/welcome`, and return the bearer header for the new session. Sign-up
+    is open here: the gate in front of a new user is `test_signup_gate.py`'s."""
+    monkeypatch.setattr(settings, "TARGET_SIGNUP_OPEN", True, raising=False)
     start = await client.get("/auth/google", follow_redirects=False)
     assert start.status_code == 302, start.text
     state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]

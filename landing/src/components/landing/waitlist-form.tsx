@@ -112,14 +112,9 @@ export function WaitlistForm({
       const data = await res.json()
 
       if (data.status === "success") {
-        if (data.alreadyRegistered) {
-          setStatus("duplicate")
-          setMessage(data.message)
-        } else {
-          setStatus("success")
-          setMessage(data.message)
-          trackEvent("Waitlist Signup", { variant, ...utm })
-        }
+        setStatus("success")
+        setMessage(data.message)
+        trackEvent("Waitlist Signup", { variant, ...utm })
         markRegistered()
       } else {
         setStatus("error")
