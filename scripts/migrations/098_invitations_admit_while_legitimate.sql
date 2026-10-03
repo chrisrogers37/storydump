@@ -29,8 +29,8 @@
 -- here once: an invitation whose inviter has a removal record in its workspace and is not a member
 -- there again, and one addressed (by email or Telegram id) to a person removed from its workspace
 -- after it was sent. The doors refuse both anyway; revoking them lets the runtime's invitation
--- listing filter on state alone, without reading the removal record. workspace_invitations carries no governance trigger (only
--- 053's touch trigger), so the UPDATE needs no actor.
+-- listing filter on state alone, without reading the removal record. workspace_invitations
+-- carries no governance trigger (only 053's touch trigger), so the UPDATE needs no actor.
 --
 -- svc_membership, the doors' owner, reads users' id and state (a column grant under a SELECT
 -- policy) to see an inviter's account state; it already holds the rest (057: workspaces,

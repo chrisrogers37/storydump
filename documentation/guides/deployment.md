@@ -247,7 +247,7 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
   email does not send yet (`AGENTS.md`, *What is deliberately not wired*), so
   an emailed invitation is created and not delivered
 - [ ] Removing a member is the Members card too; it also revokes the pending
-  invitations that member sent (098). Changing a member's role is
+  invitations that member sent or was sent. Changing a member's role is
   the `change_role` command — registered, not yet built
 
 Leaving the Telegram group removes nobody.
@@ -260,21 +260,42 @@ owner; there is no product door for it. In order:
   (`ct_members_owner_exists`), and ownership cannot be handed over yet
   (`transfer_ownership` is not built). Delete that workspace first (Settings ›
   General) and let its grace window end, or keep the person.
-- [ ] **Tokens nobody can attribute.** Workspace service tokens minted
-  before 090 record no minter, so neither a removal nor the delete below can
-  tell whether this person minted one, and their current memberships don't
-  say either: they may have minted one in a workspace they have since left.
-  List every live one:
+- [ ] **What nothing ties to them.** Two things can outlive the person
+  without a record naming them, so list both before the removals:
+  - Workspace service tokens minted before 090 record no minter, so neither a
+    removal nor the delete below can tell whether this person minted one,
+    even in a workspace they have since left. The first query lists every
+    live one, with `theirs` true in a workspace the person ever belonged to
+    (the audit trail's membership rows outlive the membership).
+  - A private-chat binding is found through the person's linked Telegram
+    account. If they unlinked it, the second query lists every active
+    private-chat binding no linked account holds; ask the person which
+    Telegram account was theirs.
 
   ```sql
-  SELECT id, workspace_id, name, created_at FROM service_tokens
-   WHERE workspace_id IS NOT NULL AND created_by_user_id IS NULL
-     AND revoked_at IS NULL;
+  SELECT t.id, t.workspace_id, t.name, t.created_at,
+         t.workspace_id IN (SELECT a.workspace_id FROM audit_events a
+                             WHERE a.entity_kind = 'member'
+                               AND a.entity_id = '…') AS theirs
+    FROM service_tokens t
+   WHERE t.workspace_id IS NOT NULL AND t.created_by_user_id IS NULL
+     AND t.revoked_at IS NULL;
+  SELECT b.id, b.workspace_id, b.external_ref, b.created_at
+    FROM channel_bindings b
+   WHERE b.channel = 'telegram_dm' AND b.state = 'active'
+     AND NOT EXISTS (SELECT 1 FROM user_identities x
+                      WHERE x.provider = 'telegram' AND x.external_id = b.external_ref);
   ```
 
-  Ask each workspace's owner which of these they minted themselves, and revoke
-  the rest inside the delete's (or the erase's) transaction below:
+  For a token where `theirs` is true, ask that workspace's owner whether they
+  minted it themselves; revoke the ones they didn't inside the delete's (or
+  the erase's) transaction below:
   `UPDATE service_tokens SET revoked_at = now() WHERE id = '<token id>';`.
+  Leave the other workspaces' tokens to their owners. End a private chat that
+  turns out to be theirs in the same transaction, its queue first:
+  `UPDATE channel_outbox SET state = 'superseded' WHERE binding_id =
+  '<binding id>' AND state IN ('pending', 'ambiguous');` then
+  `UPDATE channel_bindings SET state = 'revoked' WHERE id = '<binding id>';`.
 
 - [ ] **Remove them from every other workspace** they belong to (Settings ›
   Members → Remove). A removal revokes the workspace service tokens they
@@ -294,7 +315,8 @@ owner; there is no product door for it. In order:
   of their email (`signup_admissions`), which would otherwise let a new
   account with that address straight back in, and ending every workspace's
   Telegram binding to their private chat, which would otherwise keep
-  receiving that workspace's cards. (The bot does not remove anyone from a
+  receiving that workspace's cards (its queued cards are superseded first, as
+  Remove does, so they don't sit in the outbox backlog). (The bot does not remove anyone from a
   group: an admin removes them in Telegram.) The delete's cascades and `SET
   NULL`s fire the governance trigger (on `workspace_members`, on
   `oauth_credentials` when they granted Drive, and on `workspaces` when they
@@ -314,6 +336,12 @@ owner; there is no product door for it. In order:
                                            WHERE user_id = '…' AND provider = 'telegram'));
   DELETE FROM signup_admissions
    WHERE email = (SELECT lower(primary_email) FROM users WHERE id = '…');
+  UPDATE channel_outbox SET state = 'superseded'
+   WHERE state IN ('pending', 'ambiguous')
+     AND binding_id IN (SELECT id FROM channel_bindings
+                         WHERE channel = 'telegram_dm' AND state = 'active'
+                           AND external_ref IN (SELECT external_id FROM user_identities
+                                                 WHERE user_id = '…' AND provider = 'telegram'));
   UPDATE channel_bindings SET state = 'revoked'
    WHERE channel = 'telegram_dm' AND state = 'active'
      AND external_ref IN (SELECT external_id FROM user_identities
@@ -350,6 +378,12 @@ owner; there is no product door for it. In order:
                                            WHERE user_id = '…' AND provider = 'telegram'));
   DELETE FROM signup_admissions
    WHERE email = (SELECT lower(primary_email) FROM users WHERE id = '…');
+  UPDATE channel_outbox SET state = 'superseded'
+   WHERE state IN ('pending', 'ambiguous')
+     AND binding_id IN (SELECT id FROM channel_bindings
+                         WHERE channel = 'telegram_dm' AND state = 'active'
+                           AND external_ref IN (SELECT external_id FROM user_identities
+                                                 WHERE user_id = '…' AND provider = 'telegram'));
   UPDATE channel_bindings SET state = 'revoked'
    WHERE channel = 'telegram_dm' AND state = 'active'
      AND external_ref IN (SELECT external_id FROM user_identities

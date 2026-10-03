@@ -156,6 +156,35 @@ def _person(world, chain, email, role="admin"):
                 (ws, str(tg)),
             )
             dm = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload)"
+                " VALUES (%s, %s, 'notification', '{\"v\": 1}') RETURNING id",
+                (ws, dm),
+            )
+            queued = cur.fetchone()[0]
+            # Controls the blocks must not touch: the workspace's group, and
+            # another linked person's private chat.
+            cur.execute(
+                "INSERT INTO users (primary_email) VALUES (%s) RETURNING id",
+                (f"neighbour-of-{email}",),
+            )
+            neighbour = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO user_identities (user_id, provider, external_id)"
+                " VALUES (%s, 'telegram', %s)",
+                (neighbour, str(tg + 1)),
+            )
+            controls = []
+            for channel, ref in (
+                ("telegram_group", f"-100{tg}"),
+                ("telegram_dm", str(tg + 1)),
+            ):
+                cur.execute(
+                    "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+                    " VALUES (%s, %s, %s) RETURNING id",
+                    (ws, channel, ref),
+                )
+                controls.append(cur.fetchone()[0])
             invitations = []
             for channel, address, tg_id, by in (
                 ("email", f"friend-of-{email}", None, user),
@@ -184,6 +213,8 @@ def _person(world, chain, email, role="admin"):
             "email": email.lower(),
             "token": token,
             "dm": dm,
+            "queued": queued,
+            "controls": controls,
             "invitations": invitations,
         }
     finally:
@@ -207,10 +238,20 @@ def _admitted(world, who) -> int:
     )[0]
 
 
-def _dm_state(world, who) -> str:
-    return _one(
+def _assert_their_chat_ended(world, who):
+    """Their private chat's binding is revoked and its queue superseded; the
+    group and the neighbour's private chat are untouched."""
+    assert _one(
         world, "SELECT state FROM channel_bindings WHERE id = %s", (who["dm"],)
-    )[0]
+    ) == ("revoked",)
+    assert _one(
+        world, "SELECT state FROM channel_outbox WHERE id = %s", (who["queued"],)
+    ) == ("superseded",)
+    assert _all(
+        world,
+        "SELECT state FROM channel_bindings WHERE id = ANY(%s::uuid[])",
+        ([str(c) for c in who["controls"]],),
+    ) == [("active",), ("active",)]
 
 
 def _remove(world, chain, user):
@@ -260,14 +301,17 @@ def test_a_member_is_deleted_and_their_tokens_and_invitations_are_revoked(
     ) == (True,)
     assert _pending(world, who) == 0
     assert _admitted(world, who) == 0
-    assert _dm_state(world, who) == "revoked"
+    _assert_their_chat_ended(world, who)
 
 
-def test_the_listing_names_every_live_unattributed_workspace_token(world):
-    """The listing finds the live workspace tokens with no recorded minter,
-    including one in a workspace the person was already removed from, and
-    not a revoked one or one whose minter is recorded."""
+def test_the_listing_names_what_nothing_ties_to_them(world):
+    """The first query finds every live workspace token with no recorded
+    minter, marking the ones in a workspace the person ever belonged to
+    (here one they were already removed from) as theirs; not a revoked one or
+    one whose minter is recorded. The second finds the private chat of a
+    person who unlinked Telegram, and not a linked person's."""
     chain = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-l1")
+    elsewhere = seed_workspace_chain(psycopg2.connect(world["owner"]), "runbook-l2")
     who = _person(world, chain, "lister@example.com", "admin")
     assert _remove(world, chain, who["user"]) == "admin"
     conn = psycopg2.connect(world["owner"])
@@ -275,26 +319,37 @@ def test_the_listing_names_every_live_unattributed_workspace_token(world):
         with conn.cursor() as cur:
             cur.execute("SET app.actor_kind = 'migration'")
             tokens = {}
-            for label, revoked in (("unattributed", False), ("revoked", True)):
+            for label, ws, revoked in (
+                ("unattributed", chain["ws"], False),
+                ("revoked", chain["ws"], True),
+                ("elsewhere", elsewhere["ws"], False),
+            ):
                 cur.execute(
                     "INSERT INTO service_tokens (name, token_hash, role,"
                     " workspace_id, revoked_at) VALUES (%s, %s, 'operator', %s,"
                     " CASE WHEN %s THEN now() END) RETURNING id",
-                    (label, f"listing-{label}", chain["ws"], revoked),
+                    (label, f"listing-{label}", ws, revoked),
                 )
                 tokens[label] = cur.fetchone()[0]
+            # They unlinked Telegram: nothing ties their private chat to them.
+            cur.execute(
+                "DELETE FROM user_identities WHERE user_id = %s AND provider = 'telegram'",
+                (who["user"],),
+            )
         conn.commit()
     finally:
         conn.close()
     listing, _delete, _erase = _runbook_blocks()
 
-    # The listing names no one: it takes no placeholder.
-    assert "'…'" not in listing
-    (sql,) = _for(listing, who["user"])
-    listed = {row[0] for row in _all(world, sql)}
+    tokens_sql, chats_sql = _for(listing, who["user"])
+    listed = {row[0]: row[4] for row in _all(world, tokens_sql)}
+    chats = {row[0] for row in _all(world, chats_sql)}
 
-    assert tokens["unattributed"] in listed
-    assert not listed & {tokens["revoked"], who["token"]}
+    assert listed[tokens["unattributed"]] is True
+    assert listed[tokens["elsewhere"]] is False
+    assert not set(listed) & {tokens["revoked"], who["token"]}
+    assert who["dm"] in chats
+    assert not chats & set(who["controls"])
 
 
 def test_an_owner_is_refused_while_their_workspace_exists(world):
@@ -368,7 +423,7 @@ def test_a_person_with_a_finished_story_is_erased_instead(world):
     ) == (True,)
     assert _pending(world, who) == 0
     assert _admitted(world, who) == 0
-    assert _dm_state(world, who) == "revoked"
+    _assert_their_chat_ended(world, who)
     assert _one(
         world, "SELECT count(*) FROM oauth_states WHERE user_id = %s", (who["user"],)
     ) == (0,)

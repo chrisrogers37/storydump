@@ -365,7 +365,7 @@
     {
       "sha256": "84d51d445d574a8429a649ae6546f86c9dd952148d351fdf296af17ca083b6c8",
       "class": "normative",
-      "label": "§41 an invitation admits only while it is legitimate (098, owner decision, PR #1560 and #1574 security reviews) — fn_signup_admitted and fn_invitation_accept counting an invitation only from an active workspace whose owner or admin, with an active account, still sent it, the accept door refusing a person removed after the invitation (read again after its membership insert), a one-time revoke of removed inviters' pending invitations, and svc_membership's column read of users' id and state under p_member_users",
+      "label": "§41 an invitation admits only while it is legitimate (098, owner decision, PR #1560 and #1574 security reviews) — fn_signup_admitted and fn_invitation_accept counting an invitation only from an active workspace whose owner or admin, with an active account, still sent it, the accept door refusing a person removed after the invitation (read again after its membership insert), a one-time revoke of the pending invitations of removed inviters and of those addressed to a person removed after they were sent, and svc_membership's column read of users' id and state under p_member_users",
       "doc": "07-security-model.md",
       "ordinal": 34
     },
