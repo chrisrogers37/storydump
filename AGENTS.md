@@ -94,9 +94,9 @@ Each layer is isolated. Do not violate the boundaries:
   (`tests/storydump_cli/test_import_boundary.py` pins that in a fresh
   interpreter).
 - **UI** (`landing/`) → calls the API through its server-side client
-  (`landing/src/lib/target-api.ts`), never a service. The one table it owns
-  is the marketing waitlist (`landing/src/lib/schema.ts`, Drizzle), which no
-  Python migration manages.
+  (`landing/src/lib/target-api.ts`), never a service, and holds no database
+  credential: the waitlist form posts to the API's `POST /public/waitlist`
+  (migration 100).
 - **API** (`src/api/`) → authenticates a principal (`src/api/principal.py`:
   a web session or an API token), then calls a module under
   `src/services/target/`. Reads are resources; state changes are commands
