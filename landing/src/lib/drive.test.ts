@@ -165,7 +165,7 @@ describe("connected folders and nested picks", () => {
   });
   it("tells an admin who did not connect Drive who can browse it, at the browser and the pick", () => {
     const copy =
-      "Only the person who connected Google Drive can browse it. Ask them, or reconnect Drive with your own account.";
+      "Only the person who connected Google Drive can browse it. Ask them to add the folder. Reconnecting Drive with your own account moves every connected folder onto your Drive, and folders you can't see there stop syncing.";
     expect(driveFoldersRefusalCopy("drive_not_yours")).toBe(copy);
     expect(addFolderRefusalCopy("drive_not_yours")).toBe(copy);
   });

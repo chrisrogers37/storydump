@@ -223,6 +223,17 @@ describe("nextSetupStep — what an unset workspace is pointed at instead of an 
     ).toBe(2);
   });
 
+  it("a member is told an admin connects it, with no button", () => {
+    expect(nextSetupStep({ accounts: [], sources: [] }, { isAdmin: false })).toEqual({
+      number: 1,
+      title: "Waiting on an admin to connect Instagram",
+      detail: "That's the account your Stories will be posted to.",
+    });
+    expect(
+      nextSetupStep({ accounts: [ACCOUNT], sources: [] }, { isAdmin: false })?.title,
+    ).toBe("Waiting on an admin to connect Google Drive");
+  });
+
   it("an account and a connected folder: set up, nothing to point at", () => {
     expect(
       nextSetupStep({ accounts: [ACCOUNT], sources: [{ removed: true }, FOLDER] }),

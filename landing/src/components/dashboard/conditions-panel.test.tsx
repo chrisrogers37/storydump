@@ -107,6 +107,13 @@ describe("ConditionsPanel — a workspace that is not set up yet", () => {
     );
   });
 
+  it("gives a member the step with no button", () => {
+    const step = nextSetupStep({ accounts: [], sources: [] }, { isAdmin: false })!;
+    const tree = ConditionsPanel({ conditions: [], setupStep: step });
+    expect(textOf(tree)).toContain("Waiting on an admin to connect Instagram");
+    expect([...walk(tree)].find((el) => el.type === Link)).toBeUndefined();
+  });
+
   it("a condition still wins over a setup step", () => {
     const text = textOf(
       ConditionsPanel({ conditions: CONDITIONS, setupStep: NO_FOLDER }),

@@ -244,7 +244,9 @@ class SignupAdmission(TargetBase):
 
     __table_args__ = (
         CheckConstraint(
-            "email = lower(btrim(email))", name="ck_signup_admissions_lower"
+            "email = lower(email) AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'"
+            " AND strpos(email, chr(160)) = 0",
+            name="ck_signup_admissions_email",
         ),
     )
 

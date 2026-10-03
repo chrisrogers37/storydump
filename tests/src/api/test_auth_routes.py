@@ -983,3 +983,31 @@ class TestDriveCallback:
             == f"{FRONT}/auth/error?reason=state_refused&flow=drive"
         )
         assert not any(w[0] == "store" for w in writes)
+
+
+def test_an_open_sign_up_is_said_at_startup(monkeypatch):
+    """TARGET_SIGNUP_OPEN is a local stack's switch (092); a process that runs
+    with it says so, so production never has it on unnoticed. The app logger
+    does not propagate, so a handler on it records the lines."""
+    import logging
+
+    from src.api.app import create_app
+    from src.utils.logger import logger as app_logger
+    from tests.src.api.conftest import FakeEngine
+
+    lines: list[str] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = _Grab(level=logging.WARNING)
+    app_logger.addHandler(handler)
+    try:
+        create_app(engine=FakeEngine())
+        assert not [m for m in lines if "TARGET_SIGNUP_OPEN" in m]
+        monkeypatch.setattr(settings, "TARGET_SIGNUP_OPEN", True)
+        create_app(engine=FakeEngine())
+        assert [m for m in lines if "TARGET_SIGNUP_OPEN is on" in m]
+    finally:
+        app_logger.removeHandler(handler)

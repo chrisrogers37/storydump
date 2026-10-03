@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json()
-    const email = body.email?.trim().toLowerCase()
+    const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : ""
 
     if (!email || email.length > MAX_EMAIL_LENGTH || !EMAIL_REGEX.test(email)) {
       return NextResponse.json(

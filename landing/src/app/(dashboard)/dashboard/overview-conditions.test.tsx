@@ -9,10 +9,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement, ReactNode } from "react";
 
-const { workspaceFetch } = vi.hoisted(() => ({ workspaceFetch: vi.fn() }));
+const { workspaceFetch, viewer } = vi.hoisted(() => ({
+  workspaceFetch: vi.fn(),
+  viewer: { role: "admin" },
+}));
 
 vi.mock("@/lib/page-guards", () => ({
-  requireWorkspacePage: async () => ({ workspaceId: "ws-1" }),
+  requireWorkspacePage: async () => ({
+    workspaceId: "ws-1",
+    session: { workspaces: [{ id: "ws-1", name: "WS", role: viewer.role, state: "active" }] },
+  }),
 }));
 vi.mock("@/lib/workspaces", () => ({ workspaceFetch }));
 
@@ -122,6 +128,22 @@ describe("the overview's condition panel", () => {
     };
     expect(conditions).toEqual([]);
     expect(setupStep?.number).toBe(1);
+    expect(setupStep?.href).toBeDefined();
+  });
+
+  it("a member's setup step waits on an admin, with no button", async () => {
+    viewer.role = "member";
+    try {
+      answer({ accounts: ok({ accounts: [] }), stats: ok({ ...STATS, intents_by_state: {} }) });
+      const panel = [...walk(await DashboardPage())].find(
+        (el) => el.type === ConditionsPanel,
+      );
+      const { setupStep } = panel!.props as { setupStep: SetupStep | null };
+      expect(setupStep?.title).toBe("Waiting on an admin to connect Instagram");
+      expect(setupStep?.href).toBeUndefined();
+    } finally {
+      viewer.role = "admin";
+    }
   });
 
   it("a set-up workspace hands it no setup step", async () => {

@@ -72,6 +72,14 @@ describe("POST /api/waitlist", () => {
     expect(insertValues).not.toHaveBeenCalled()
   })
 
+  it("refuses a non-string email as invalid, not as a server error", async () => {
+    for (const email of [1, {}, null]) {
+      const res = await POST(signup(email as unknown as string))
+      expect(res.status).toBe(400)
+    }
+    expect(insertValues).not.toHaveBeenCalled()
+  })
+
   it("cuts each UTM value to 100 characters and ignores a non-string one", async () => {
     insertValues.mockResolvedValue(undefined)
     const res = await POST(

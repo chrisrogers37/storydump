@@ -128,21 +128,26 @@ export function deriveConditions({
  * post to (a destination exists only once one was connected), then a Drive
  * folder to post from. A folder counts while it is CONNECTED — not removed,
  * whatever its state; the API's own definition (`CONNECTED_SQL`).
+ *
+ * Both steps are an admin's (`connect_account`, the Drive connect), so a
+ * member is told who is doing it, with no button to a page that refuses them.
  */
 export type SetupStep = {
   /** 1-based, of `SETUP_STEP_COUNT`. */
   number: number;
   title: string;
   detail: string;
-  href: string;
-  action: string;
+  /** Absent for a member, who waits on an admin. */
+  href?: string;
+  action?: string;
 };
 
 type SetupProgress = { accounts: unknown[]; sources: Pick<SourceRow, "removed">[] };
 
 const SETUP_STEPS: {
   missing: (p: SetupProgress) => boolean;
-  step: Omit<SetupStep, "number">;
+  step: Required<Omit<SetupStep, "number">>;
+  waiting: string;
 }[] = [
   {
     missing: ({ accounts }) => accounts.length === 0,
@@ -151,6 +156,7 @@ const SETUP_STEPS: {
       detail: "That's the account your Stories will be posted to.",
       ...RESOLVED_IN.accounts,
     },
+    waiting: "Waiting on an admin to connect Instagram",
   },
   {
     missing: ({ sources }) => !sources.some((s) => !s.removed),
@@ -159,12 +165,19 @@ const SETUP_STEPS: {
       detail: "Storydump picks each Story from the photos and videos in the folders you choose.",
       ...RESOLVED_IN.integrations,
     },
+    waiting: "Waiting on an admin to connect Google Drive",
   },
 ];
 
 export const SETUP_STEP_COUNT = SETUP_STEPS.length;
 
-export function nextSetupStep(progress: SetupProgress): SetupStep | null {
+export function nextSetupStep(
+  progress: SetupProgress,
+  { isAdmin = true }: { isAdmin?: boolean } = {},
+): SetupStep | null {
   const index = SETUP_STEPS.findIndex(({ missing }) => missing(progress));
-  return index < 0 ? null : { number: index + 1, ...SETUP_STEPS[index].step };
+  if (index < 0) return null;
+  const { step, waiting } = SETUP_STEPS[index];
+  const number = index + 1;
+  return isAdmin ? { number, ...step } : { number, title: waiting, detail: step.detail };
 }

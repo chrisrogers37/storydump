@@ -2743,9 +2743,11 @@ account the grant is. The Drive connect callback writes it — the state's user,
 already checked is the returning browser — and a reconnect replaces it, so reconnecting with your own
 account is how another admin takes the browse over. The folder browser and the folder pick admit the
 granter alone and refuse everyone else by name (`drive_not_yours`); the grant's status, the connected
-folders and their sync stay at their floors. NULL for an `ig_login` credential and for every Drive
-grant made before this file: such a grant is browsable by the workspace's owner only, until a
-reconnect records a granter. `ON DELETE SET NULL` drops a deleted user's grant to that rule. A
+folders and their sync stay at their floors. NULL for an `ig_login` credential. A Drive grant made
+before this file takes its granter from the audit trail: the latest write a person made that left
+it active, which is the connect or reconnect (refreshes write as `system`). One the trail cannot
+name stays NULL and is browsable by the workspace's owner only, until a reconnect records a
+granter. `ON DELETE SET NULL` drops a deleted user's grant to that rule. A
 granter who is removed or demoted fails the admin floor first, so nobody browses until a reconnect.
 
 ```sql
@@ -2753,6 +2755,16 @@ granter who is removed or demoted fails the admin floor first, so nobody browses
 
 ALTER TABLE oauth_credentials
   ADD COLUMN granted_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL;
+
+UPDATE oauth_credentials c
+   SET granted_by_user_id = (
+         SELECT e.actor_user_id FROM audit_events e
+          WHERE e.entity_kind = 'credential' AND e.entity_id = c.id
+            AND e.actor_kind = 'user' AND e.to_state = 'active'
+            AND EXISTS (SELECT 1 FROM users u WHERE u.id = e.actor_user_id)
+          ORDER BY e.id DESC
+          LIMIT 1)
+ WHERE c.provider = 'gdrive' AND c.granted_by_user_id IS NULL;
 ```
 
 ### §35. A new account needs a way in while in beta (092)
@@ -2774,15 +2786,18 @@ off for a local stack (default: gated).
 `INSERT INTO signup_admissions (email) VALUES ('person@example.com');`. The table is global (no
 workspace): RLS is on, its one policy is `svc_membership`'s read, and the runtime roles hold no
 grant on it, so the door is its only reader and owner-bypass is how the owner writes it. The CHECK
-keeps the stored address lower case and trimmed, so an admission typed in capitals or pasted with a space is refused at the INSERT
-rather than silently never matching. The door compares `lower()` on both sides, as
+keeps the stored address one lower-case word with an @ and no whitespace anywhere (a tab, a newline
+or a no-break space pasted from a spreadsheet included), so such an admission is refused at the
+INSERT rather than silently never matching. The door compares `lower()` on both sides, as
 `fn_invitation_accept` does, and answers one boolean, never which workspace invited the address.
 
 ```sql
 -- [§35 a new account needs a way in while in beta]
 
 CREATE TABLE signup_admissions (
-  email       text PRIMARY KEY CONSTRAINT ck_signup_admissions_lower CHECK (email = lower(btrim(email))),
+  email       text PRIMARY KEY CONSTRAINT ck_signup_admissions_email CHECK (
+                email = lower(email) AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'
+                AND strpos(email, chr(160)) = 0),
   admitted_at timestamptz NOT NULL DEFAULT now(),
   note        text
 );
@@ -2800,7 +2815,7 @@ RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT EXISTS (SELECT 1 FROM signup_admissions a WHERE a.email = lower(p_email))
       OR EXISTS (SELECT 1 FROM workspace_invitations i
-                  WHERE i.email = lower(p_email)
+                  WHERE lower(i.email) = lower(p_email)
                     AND i.state = 'pending' AND i.expires_at > now())
 $$;
 

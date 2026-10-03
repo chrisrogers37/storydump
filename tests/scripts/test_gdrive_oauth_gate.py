@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import psycopg2
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -111,6 +112,11 @@ def _may_browse(world, tenant, user) -> bool:
             ),
         )
     )
+
+
+#: 091's UPDATE, as the file runs it.
+_MIGRATION_091 = Path("scripts/migrations/091_drive_grant_owner.sql").read_text()
+_BACKFILL_091 = _MIGRATION_091[_MIGRATION_091.index("UPDATE oauth_credentials") :]
 
 
 def _granter(world, workspace_id):
@@ -271,6 +277,13 @@ class TestTheCredentialRow:
             conn.commit()
             assert _may_browse(world, a, a["user"]) is True, "owner, NULL granter"
             assert _may_browse(world, a, admin) is False, "admin, NULL granter"
+
+            # 091's backfill names a pre-091 grant's granter from the audit
+            # trail: the latest person to leave it active, the admin here.
+            with conn.cursor() as cur:
+                cur.execute(_BACKFILL_091)
+            conn.commit()
+            assert str(_granter(world, a["ws"])) == str(admin)
         finally:
             conn.close()
         # Workspace B's grant is B's: A's granter browses nothing there.

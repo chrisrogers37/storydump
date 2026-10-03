@@ -559,6 +559,13 @@ def create_app(
         lifespan=_lifespan,
     )
     app.state.engine = engine if engine is not None else _engine_from_env(env)
+    if settings.TARGET_SIGNUP_OPEN:
+        # A local stack's switch (092): said at startup, so it is never on
+        # in production unnoticed.
+        logger.warning(
+            "TARGET_SIGNUP_OPEN is on: any Google account can create a user, "
+            "admitted or not"
+        )
     # Which database login this process holds, and whether it bypasses RLS
     # (#751, F.4). Sampled ONCE, in the background, after startup — `/health`
     # reports the cached answer and still opens no connection of its own, so a

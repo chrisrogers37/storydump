@@ -48,7 +48,10 @@ INVITATIONS = {
     "accepted@example.com": ("accepted", "7 days"),
     "lapsed@example.com": ("expired", "-1 day"),
     "unswept@example.com": ("pending", "-1 minute"),  # past expiry, not yet reaped
+    # Not as `invitations.create` writes it: the door lowers both sides.
+    "Mixed@Example.com": ("pending", "7 days"),
 }
+LIVE = {"live@example.com", "Mixed@Example.com"}
 
 
 @pytest.fixture(scope="module")
@@ -116,13 +119,15 @@ class TestTheDoor:
     def test_an_admitted_address_is_let_in_whatever_its_case(self, world, email):
         assert _admitted(world, email) is True
 
-    @pytest.mark.parametrize("email", ["live@example.com", "LIVE@example.com"])
+    @pytest.mark.parametrize(
+        "email", ["live@example.com", "LIVE@example.com", "mixed@example.com"]
+    )
     def test_a_live_invitation_lets_its_address_in(self, world, email):
         assert _admitted(world, email) is True
 
     @pytest.mark.parametrize(
         "email",
-        [e for e, (state, _) in INVITATIONS.items() if e != "live@example.com"],
+        [e for e in INVITATIONS if e not in LIVE],
     )
     def test_a_spent_or_lapsed_invitation_lets_nobody_in(self, world, email):
         assert _admitted(world, email) is False
@@ -138,15 +143,27 @@ class TestTheAdmissionsTable:
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             _one(world[login], "SELECT count(*) FROM signup_admissions")
 
-    @pytest.mark.parametrize("typed", ["Shout@Example.com", "pasted@example.com "])
-    def test_an_address_in_capitals_or_with_a_space_is_refused_at_the_insert(
+    @pytest.mark.parametrize(
+        "typed",
+        [
+            "Shout@Example.com",
+            "pasted@example.com ",
+            "pasted@example.com\t",
+            "pasted@example.com\n",
+            "pasted@example.com\u00a0",
+            "no-at-sign.example.com",
+        ],
+    )
+    def test_an_address_that_would_never_match_is_refused_at_the_insert(
         self, world, typed
     ):
+        """Capitals, any whitespace (a spreadsheet's tab or newline, an email
+        client's no-break space) and a missing @ are refused, not stored."""
         with pytest.raises(psycopg2.errors.CheckViolation):
             _one(
                 world["owner"],
-                f"INSERT INTO signup_admissions (email) VALUES ('{typed}')"
-                " RETURNING email",
+                "INSERT INTO signup_admissions (email) VALUES (%s) RETURNING email",
+                (typed,),
             )
 
 

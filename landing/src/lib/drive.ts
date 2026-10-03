@@ -193,7 +193,7 @@ export function driveFoldersRefusalCopy(reason: unknown): string {
       return "Google did not answer just now. Try again in a moment.";
     case "drive_not_yours":
       // The grant reads one person's whole Drive (migration 091): only they browse it.
-      return "Only the person who connected Google Drive can browse it. Ask them, or reconnect Drive with your own account.";
+      return "Only the person who connected Google Drive can browse it. Ask them to add the folder. Reconnecting Drive with your own account moves every connected folder onto your Drive, and folders you can't see there stop syncing.";
     case "invalid_parent":
       return "That folder could not be opened.";
     case "unauthenticated":

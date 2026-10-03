@@ -48,9 +48,11 @@ export function ConditionsPanel({
             </div>
           </div>
           {/* ml-8 lines it up under the text when it wraps on a phone. */}
-          <Button size="sm" className="ml-8" asChild>
-            <Link href={setupStep.href}>{setupStep.action}</Link>
-          </Button>
+          {setupStep.href && (
+            <Button size="sm" className="ml-8" asChild>
+              <Link href={setupStep.href}>{setupStep.action}</Link>
+            </Button>
+          )}
         </CardContent>
       </Card>
     );
