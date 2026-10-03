@@ -18,6 +18,7 @@ import base64
 import hashlib
 import hmac
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -133,6 +134,61 @@ class TestTheSignatureIsActuallyChecked:
         )
 
 
+@pytest.fixture
+def reads(monkeypatch):
+    """What the module decodes and parses, as it happens: every segment handed
+    to `_b64url_decode`, and every value handed to the `json.loads` it uses."""
+    seen = SimpleNamespace(decoded=[], parsed=[])
+    decode = meta_callbacks._b64url_decode
+
+    def spy_decode(segment):
+        seen.decoded.append(segment)
+        return decode(segment)
+
+    def spy_loads(raw):
+        seen.parsed.append(raw)
+        return json.loads(raw)
+
+    monkeypatch.setattr(meta_callbacks, "_b64url_decode", spy_decode)
+    monkeypatch.setattr(meta_callbacks, "json", SimpleNamespace(loads=spy_loads))
+    return seen
+
+
+class TestTheSignatureIsVerifiedBeforeThePayloadIsRead:
+    """The signature is checked against the payload segment exactly as
+    received, under each candidate secret in order. Nothing in the payload is
+    decoded or parsed until one of them verifies it."""
+
+    def test_a_wrong_signature_is_refused_before_the_payload_is_read(self, reads):
+        sig, _ = make_signed_request(valid_payload()).split(".")
+        with pytest.raises(meta_callbacks.SignedRequestInvalid) as refused:
+            meta_callbacks.verify_signed_request(
+                f"{sig}.{_b64url(b'not json')}", [SECRET, "other-secret"]
+            )
+        assert reads.parsed == [], "the payload is parsed only once it verifies"
+        assert reads.decoded == [sig], "the payload is decoded only once it verifies"
+        assert str(refused.value) == "signature mismatch"
+
+    def test_a_correctly_signed_payload_naming_another_algorithm_is_refused(self):
+        """Signed by the first candidate: the refusal is the algorithm's, and
+        no later candidate turns it into a mismatch."""
+        signed = make_signed_request(valid_payload(algorithm="HMAC-SHA1"))
+        with pytest.raises(
+            meta_callbacks.SignedRequestInvalid, match="unexpected algorithm"
+        ):
+            meta_callbacks.verify_signed_request(signed, [SECRET, "other-secret"])
+
+    def test_a_correctly_signed_valid_request_still_verifies(self, reads):
+        signed = make_signed_request(valid_payload())
+        assert meta_callbacks.verify_signed_request(signed, [SECRET]) == (
+            valid_payload(),
+            SECRET,
+        )
+        assert reads.parsed == [json.dumps(valid_payload()).encode()], (
+            "the verified payload is the one parsed"
+        )
+
+
 class TestItFailsClosed:
     """A deployment holding no secret must refuse EVERYTHING.
 
@@ -167,6 +223,13 @@ class TestItFailsClosed:
             ).status_code
             == 503
         )
+
+    def test_an_empty_secret_verifies_nothing(self):
+        """An empty value is not a secret, so it verifies no request — not even
+        one signed with an empty key."""
+        signed = make_signed_request(valid_payload(), secret="")
+        with pytest.raises(meta_callbacks.SignedRequestInvalid):
+            meta_callbacks.verify_signed_request(signed, [""])
 
 
 class TestTheConfirmationCode:
@@ -331,24 +394,17 @@ class TestTheGuardsMutationFoundUnpinned:
     here; the third was diagnosed INERT and is documented rather than chased.
 
     * Removing the single-secret `if not app_secret` guard survived, because
-      `verify_signed_request` filters falsy secrets before ever calling
-      `parse_signed_request` — so the route can no longer reach it. It is still
-      the primitive's own contract for direct callers, so it is pinned
-      DIRECTLY here rather than through a route.
+      no route could reach it. Refusing with no secret is still the
+      verifier's own contract for direct callers, so it is pinned DIRECTLY on
+      `verify_signed_request` here rather than through a route.
     * Dropping the workspace half of the revoke predicate survived, because no
       test executes SQL at all.
-    * Removing `if not secrets:` survived and CANNOT be killed: with the loop
-      not entered, `raise last` fires on the pre-seeded refusal, so the
-      fail-closed property is held twice over. An inert mutant is a redundant
-      guard, not a weak test, and the two diagnoses want opposite responses.
+    * Removing `if not candidates:` survives and CANNOT be killed by asserting
+      a refusal: with no candidate, no signature matches and the mismatch
+      refusal fires, so the fail-closed property is held twice over. An inert
+      mutant is a redundant guard, not a weak test, and the two diagnoses want
+      opposite responses.
     """
-
-    @pytest.mark.parametrize("secret", [None, ""])
-    def test_the_primitive_refuses_directly_when_it_has_no_secret(self, secret):
-        with pytest.raises(meta_callbacks.SignedRequestInvalid):
-            meta_callbacks.parse_signed_request(
-                make_signed_request(valid_payload()), secret
-            )
 
     def test_an_empty_candidate_list_refuses(self):
         with pytest.raises(meta_callbacks.SignedRequestInvalid):
