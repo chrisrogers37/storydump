@@ -1,13 +1,12 @@
 import { ImageResponse } from "next/og"
 import type { NextRequest } from "next/server"
+import { palette } from "@/design/palette"
 
 export const runtime = "edge"
 
-// Direction A's palette (globals.css: paper, ink, tap). The card is drawn with
-// next/og's bundled font, so it fetches nothing from another origin.
-const PAPER = "#f4f1ea"
-const INK = "#15130f"
-const TAP = "#ff5a1f"
+// The site's palette. The card is drawn with next/og's bundled font, so it
+// fetches nothing from another origin.
+const { paper: PAPER, ink: INK, tap: TAP } = palette
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl

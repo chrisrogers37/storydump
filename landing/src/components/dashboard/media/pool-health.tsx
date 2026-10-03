@@ -1,4 +1,4 @@
-import { Card, CardContent, CardHeader, CardLabel } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardLabel, CardValue } from "@/components/ui/card";
 import type { PoolHealthView } from "@/lib/dashboard-payloads";
 
 /**
@@ -34,7 +34,7 @@ export function PoolHealth({ health }: { health: PoolHealthView }) {
             </CardLabel>
           </CardHeader>
           <CardContent>
-            <div className="page-title text-3xl">{health.total_active}</div>
+            <CardValue>{health.total_active}</CardValue>
             <p className="mt-1 text-xs text-muted-foreground">
               {health.by_category.length} categories
             </p>
@@ -48,7 +48,7 @@ export function PoolHealth({ health }: { health: PoolHealthView }) {
             </CardLabel>
           </CardHeader>
           <CardContent>
-            <div className="page-title text-3xl">{health.never_posted}</div>
+            <CardValue>{health.never_posted}</CardValue>
             <p className="mt-1 text-xs text-muted-foreground">
               {Math.round((health.never_posted / total) * 100)}% untouched
             </p>

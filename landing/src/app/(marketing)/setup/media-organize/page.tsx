@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowRight } from "lucide-react";
 import { StepCard } from "@/components/setup/step-card";
 import { Callout } from "@/components/setup/callout";
 import { UiTerm } from "@/components/setup/ui-term";
+import { buttonVariants } from "@/components/ui/button";
 
 const description =
   "How to set up your Google Drive folders for Storydump. Each folder you connect gets its own share of your Instagram Stories, and you set the mix.";
@@ -143,7 +144,7 @@ export default function MediaOrganize() {
         </Link>
         <Link
           href="/setup/connect"
-          className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          className={buttonVariants()}
         >
           Next: Connect Telegram (optional)
           <ArrowRight className="h-4 w-4" />

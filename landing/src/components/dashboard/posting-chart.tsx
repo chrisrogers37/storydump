@@ -40,7 +40,7 @@ export function PostingChart({ data }: { data: DayCount[] }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Daily posting activity</CardTitle>
+        <CardTitle>Daily posting activity</CardTitle>
       </CardHeader>
       <CardContent>
         {formatted.length === 0 ? (
@@ -65,7 +65,7 @@ export function PostingChart({ data }: { data: DayCount[] }) {
                   name === "count" ? "posted" : "capacity",
                 ]}
               />
-              <Bar dataKey="count" fill="#ff5a1f" radius={[2, 2, 0, 0]} />
+              <Bar dataKey="count" fill="var(--color-tap)" radius={[2, 2, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         )}

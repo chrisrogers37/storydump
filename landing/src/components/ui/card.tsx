@@ -32,7 +32,7 @@ function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-title"
-      className={cn("font-display leading-tight font-extrabold tracking-[-0.02em]", className)}
+      className={cn("page-title text-base leading-tight", className)}
       {...props}
     />
   )
@@ -42,8 +42,19 @@ function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
 function CardLabel({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
-      data-slot="card-title"
+      data-slot="card-label"
       className={cn("kicker text-muted-foreground", className)}
+      {...props}
+    />
+  )
+}
+
+/** A stat card's number, in the display face. */
+function CardValue({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="card-value"
+      className={cn("page-title text-3xl", className)}
       {...props}
     />
   )
@@ -98,6 +109,7 @@ export {
   CardFooter,
   CardTitle,
   CardLabel,
+  CardValue,
   CardAction,
   CardDescription,
   CardContent,

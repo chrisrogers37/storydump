@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import Link from "next/link"
 import { Header } from "@/components/layout/header"
 import { Footer } from "@/components/layout/footer"
+import { buttonVariants } from "@/components/ui/button"
 
 export const metadata: Metadata = {
   title: "Page not found",
@@ -31,7 +32,7 @@ export default function NotFound() {
             <li>
               <Link
                 href="/"
-                className="inline-flex rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-ink/85"
+                className={buttonVariants({ size: "lg", className: "h-11 px-5" })}
               >
                 Go to the home page
               </Link>
@@ -39,7 +40,7 @@ export default function NotFound() {
             <li>
               <Link
                 href="/blog"
-                className="inline-flex rounded-full border border-ink/20 bg-white px-5 py-3 text-sm font-semibold text-ink transition-colors hover:border-ink/40"
+                className={buttonVariants({ variant: "outline", size: "lg", className: "h-11 px-5" })}
               >
                 Read the blog
               </Link>
@@ -47,7 +48,7 @@ export default function NotFound() {
             <li>
               <Link
                 href="/setup"
-                className="inline-flex rounded-full border border-ink/20 bg-white px-5 py-3 text-sm font-semibold text-ink transition-colors hover:border-ink/40"
+                className={buttonVariants({ variant: "outline", size: "lg", className: "h-11 px-5" })}
               >
                 See the setup guide
               </Link>

@@ -1,24 +1,11 @@
 import type { Metadata } from "next"
 import Script from "next/script"
-import { Geist, Geist_Mono } from "next/font/google"
 import { siteConfig } from "@/config/site"
-import { bricolage } from "@/lib/fonts"
+import { fontVariables } from "@/design/fonts"
 import { homeSocial } from "@/lib/seo"
 import "./globals.css"
 
 const plausibleDomain = process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-})
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-  // Small labels only: not worth a high-priority download ahead of the H1.
-  preload: false,
-})
 
 export const metadata: Metadata = {
   title: {
@@ -55,7 +42,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} ${bricolage.variable} antialiased`}
+        className={`${fontVariables} antialiased`}
       >
         {children}
         {/* An invite link's path is the invitation token, a bearer credential

@@ -138,7 +138,7 @@ export function ContentCalendar({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">{monthName}</CardTitle>
+        <CardTitle>{monthName}</CardTitle>
         <div className="flex gap-4 text-xs text-muted-foreground">
           <span className="flex items-center gap-1">
             <span className="h-2 w-2 rounded-full bg-green-500" /> Posted

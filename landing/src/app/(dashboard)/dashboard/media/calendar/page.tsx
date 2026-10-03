@@ -12,7 +12,7 @@ import type { Intent, IntentsResponse } from "@/lib/intents";
 import { postingIntervalMinutes } from "@/lib/schedule";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
-import { Card, CardContent, CardHeader, CardLabel } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardLabel, CardValue } from "@/components/ui/card";
 
 /** The calendar's lanes are all the intent ledger now, filtered by state. */
 const laneItem = (i: Intent) => ({
@@ -137,7 +137,7 @@ export default async function CalendarPage() {
             </CardLabel>
           </CardHeader>
           <CardContent>
-            <div className="page-title text-3xl">{postsToday}</div>
+            <CardValue>{postsToday}</CardValue>
           </CardContent>
         </Card>
         <Card>
@@ -147,7 +147,7 @@ export default async function CalendarPage() {
             </CardLabel>
           </CardHeader>
           <CardContent>
-            <div className="page-title text-3xl">{inFlight}</div>
+            <CardValue>{inFlight}</CardValue>
             {needsReview > 0 && (
               <p className="mt-1 text-xs text-muted-foreground">
                 {needsReview === 1
@@ -164,9 +164,9 @@ export default async function CalendarPage() {
             </CardLabel>
           </CardHeader>
           <CardContent>
-            <div className="page-title text-3xl">
+            <CardValue>
               {perDay === null ? "—" : `${perDay}/day`}
-            </div>
+            </CardValue>
             <p className="mt-1 text-xs text-muted-foreground">
               {intervalMinutes === null
                 ? "interval not set"

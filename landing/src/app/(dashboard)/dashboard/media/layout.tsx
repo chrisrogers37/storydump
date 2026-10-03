@@ -1,4 +1,5 @@
 import { MediaTabs } from "@/components/dashboard/media/media-tabs";
+import { PageHeader } from "@/design/page-header";
 
 export default function MediaLayout({
   children,
@@ -7,12 +8,10 @@ export default function MediaLayout({
 }) {
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="page-title text-3xl">Media library</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Browse and manage your content library.
-        </p>
-      </div>
+      <PageHeader
+        title="Media library"
+        description="Browse and manage your content library."
+      />
       <MediaTabs />
       {children}
     </div>

@@ -1,4 +1,4 @@
-import { Card, CardContent, CardHeader, CardLabel } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardLabel, CardValue } from "@/components/ui/card";
 import type { SummaryView } from "@/lib/dashboard-payloads";
 
 /**
@@ -87,7 +87,7 @@ export function AnalyticsCards({ summary }: { summary: SummaryView }) {
             </CardLabel>
           </CardHeader>
           <CardContent>
-            <p className="page-title text-3xl">{card.value}</p>
+            <CardValue>{card.value}</CardValue>
             <p className="mt-1 text-xs text-muted-foreground">{card.detail}</p>
           </CardContent>
         </Card>

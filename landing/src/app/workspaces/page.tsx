@@ -6,6 +6,8 @@ import { WorkspaceList } from "@/components/workspace/workspace-list";
 import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-form";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { noindexMetadata } from "@/lib/seo";
+import { PageHeader } from "@/design/page-header";
+import { Screen } from "@/design/screen";
 
 export const metadata = {
   title: "Workspaces",
@@ -56,12 +58,10 @@ export default async function WorkspacesPage() {
 
   return (
     <Shell>
-      <div className="space-y-2">
-        <h1 className="page-title text-3xl">Workspaces</h1>
-        <p className="text-sm text-muted-foreground">
-          Each workspace has its own media, schedule and connected accounts.
-        </p>
-      </div>
+      <PageHeader
+        title="Workspaces"
+        description="Each workspace has its own media, schedule and connected accounts."
+      />
 
       <WorkspaceList
         workspaces={workspaces.data}
@@ -88,8 +88,8 @@ export default async function WorkspacesPage() {
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-svh flex-col items-center bg-paper px-4 py-16">
-      <div className="w-full max-w-md space-y-6">{children}</div>
-    </div>
+    <Screen width="md" align="top">
+      {children}
+    </Screen>
   );
 }

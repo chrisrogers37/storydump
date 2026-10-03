@@ -37,7 +37,7 @@ export function RecentActivity({ items }: { items: ActivityItem[] }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Recent activity</CardTitle>
+        <CardTitle>Recent activity</CardTitle>
       </CardHeader>
       <CardContent>
         {items.length === 0 ? (

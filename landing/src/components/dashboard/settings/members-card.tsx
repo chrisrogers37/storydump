@@ -71,7 +71,7 @@ export function MembersCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Members</CardTitle>
+        <CardTitle>Members</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {error && (

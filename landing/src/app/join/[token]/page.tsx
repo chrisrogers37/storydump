@@ -2,6 +2,10 @@ import { getSession } from "@/lib/session";
 import { AcceptInvitation } from "@/components/workspace/accept-invitation";
 import { SignOutButton } from "@/components/auth/sign-out-button";
 import { noindexMetadata } from "@/lib/seo";
+import { buttonVariants } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { PageHeader } from "@/design/page-header";
+import { Screen } from "@/design/screen";
 
 export const metadata = {
   title: "Join a workspace",
@@ -40,46 +44,43 @@ export default async function JoinPage({
   const session = await getSession().catch(() => null);
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center bg-paper px-4 py-16">
-      <div className="w-full max-w-sm space-y-6">
-        <div className="space-y-2 text-center">
-          <h1 className="page-title text-3xl">
-            You have been invited.
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            {session
-              ? "Accept to join the workspace and start posting together."
-              : `Sign in to see the invitation and accept it.`}
-          </p>
-        </div>
+    <Screen>
+      <PageHeader
+        align="center"
+        title="You’re invited."
+        description={
+          session
+            ? "Accept to join the workspace and start posting together."
+            : "Sign in to see the invitation and accept it."
+        }
+      />
 
-        <div className="rounded-lg border bg-card p-6 shadow-sm">
-          {session ? (
-            <AcceptInvitation token={token} />
-          ) : (
-            // An anchor, not <Link>: `start` is a route handler, which a Link
-            // prefetch would run on every view of this page.
-            <a
-              href={`/join/${encodeURIComponent(token)}/start`}
-              className="inline-flex w-full items-center justify-center rounded-full bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
-            >
-              Sign in to continue
-            </a>
-          )}
-        </div>
-
-        {session && (
-          <p className="text-center text-xs text-muted-foreground">
-            Signed in as {session.displayName || session.email || "you"}.{" "}
-            <SignOutButton
-              className="underline underline-offset-2"
-              redirectTo={`/join/${encodeURIComponent(token)}`}
-            >
-              Use a different account
-            </SignOutButton>
-          </p>
+      <Card className="p-6">
+        {session ? (
+          <AcceptInvitation token={token} />
+        ) : (
+          // An anchor, not <Link>: `start` is a route handler, which a Link
+          // prefetch would run on every view of this page.
+          <a
+            href={`/join/${encodeURIComponent(token)}/start`}
+            className={buttonVariants({ size: "lg", className: "w-full" })}
+          >
+            Sign in to continue
+          </a>
         )}
-      </div>
-    </div>
+      </Card>
+
+      {session && (
+        <p className="text-center text-xs text-muted-foreground">
+          Signed in as {session.displayName || session.email || "you"}.{" "}
+          <SignOutButton
+            className="underline underline-offset-2"
+            redirectTo={`/join/${encodeURIComponent(token)}`}
+          >
+            Use a different account
+          </SignOutButton>
+        </p>
+      )}
+    </Screen>
   );
 }

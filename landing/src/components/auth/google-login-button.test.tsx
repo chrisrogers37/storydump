@@ -49,6 +49,7 @@ describe("GoogleLoginButton", () => {
   it("carries a visible focus ring", () => {
     // It is the only control on the sign-in page, so it is the only thing a
     // keyboard user can land on. A missing ring here is a dead end, not a nit.
-    expect(anchor().className).toContain("focus-visible:ring-2");
+    // The width comes from buttonVariants, so match any.
+    expect(anchor().className).toMatch(/focus-visible:ring-\[?\d/);
   });
 });
