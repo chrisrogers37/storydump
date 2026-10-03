@@ -231,6 +231,13 @@ class WorkspaceMemberRemoval(TargetBase):
     removed_at = Column(TZ, nullable=False, server_default=NOW)
 
 
+#: §35's invisible characters, which an address may not carry (092, 100).
+_NO_INVISIBLE = (
+    "email !~ '[\\u0080-\\u00a0\\u00ad\\u180e\\u2000-\\u200f\\u2028-\\u202f"
+    "\\u205f-\\u2064\\u3000\\ufeff]'"
+)
+
+
 class SignupAdmission(TargetBase):
     """An email the owner let in (092): a new Google account with this verified
     address may create its user. Global, not tenant-plane; read only through
@@ -245,9 +252,7 @@ class SignupAdmission(TargetBase):
     __table_args__ = (
         CheckConstraint(
             "email = lower(email) AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'"
-            " AND email !~ "
-            "'[\\u0080-\\u00a0\\u00ad\\u180e\\u2000-\\u200f\\u2028-\\u202f"
-            "\\u205f-\\u2064\\u3000\\ufeff]'",
+            " AND " + _NO_INVISIBLE,
             name="ck_signup_admissions_email",
         ),
     )
@@ -268,10 +273,8 @@ class WaitlistEntry(TargetBase):
     __table_args__ = (
         CheckConstraint(
             "email = lower(email) AND length(email) <= 254"
-            " AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'"
-            " AND email !~ "
-            "'[\\u0080-\\u00a0\\u00ad\\u180e\\u2000-\\u200f\\u2028-\\u202f"
-            "\\u205f-\\u2064\\u3000\\ufeff]'",
+            " AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$'"
+            " AND " + _NO_INVISIBLE,
             name="ck_waitlist_entries_email",
         ),
         CheckConstraint(

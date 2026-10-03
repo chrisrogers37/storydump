@@ -40,7 +40,7 @@ describe("POST /api/waitlist", () => {
     expect(path).toBe("/waitlist")
     expect(token).toBeNull()
     expect(init).toMatchObject({ method: "POST", plane: "public" })
-    expect(body).toEqual({ email: "new@example.com" })
+    expect(body).toEqual({ email: "  New@Example.com " })
     expect(notifyAdmin).toHaveBeenCalledWith("new@example.com")
   })
 
@@ -68,22 +68,15 @@ describe("POST /api/waitlist", () => {
     expect(notifyAdmin).not.toHaveBeenCalled()
   })
 
-  it("accepts a 254-character email and refuses a 255-character one without calling the API", async () => {
-    targetFetch.mockResolvedValue({ ok: true, data: { status: "received" } })
-    const at254 = `${"a".repeat(254 - "@example.com".length)}@example.com`
-    expect((await POST(signup(at254))).status).toBe(200)
-
-    targetFetch.mockClear()
-    const res = await POST(signup(`a${at254}`))
-    expect(res.status).toBe(400)
-    expect(await res.json()).toEqual(INVALID)
-    expect(targetFetch).not.toHaveBeenCalled()
-  })
-
-  it("refuses a non-string email, and a body that is not an object, as invalid", async () => {
-    for (const email of [1, {}, null]) {
+  it("leaves what an address is to the API: it forwards one this route cannot judge", async () => {
+    targetFetch.mockResolvedValue({ ok: false, status: 400, error: "invalid_email" })
+    for (const email of [1, {}, null, "no-at-sign", "a".repeat(300)]) {
       expect((await POST(signup(email))).status).toBe(400)
     }
+    expect(targetFetch).toHaveBeenCalledTimes(5)
+  })
+
+  it("refuses a body that is not a JSON object without calling the API", async () => {
     for (const raw of ["null", "[]", "not json"]) {
       const req = new NextRequest("https://storydump.app/api/waitlist", {
         method: "POST",
@@ -95,20 +88,20 @@ describe("POST /api/waitlist", () => {
     expect(targetFetch).not.toHaveBeenCalled()
   })
 
-  it("forwards each UTM value cut to 100 characters and drops a non-string one", async () => {
+  it("forwards the campaign keys and nothing else", async () => {
     targetFetch.mockResolvedValue({ ok: true, data: { status: "received" } })
     const res = await POST(
       signup("utm@example.com", {
-        utm_source: ` ${"s".repeat(150)} `,
-        utm_medium: "email",
-        utm_campaign: { nested: "x".repeat(500) },
+        utm_source: "newsletter",
+        utm_campaign: "launch",
+        other: "dropped",
       })
     )
     expect(res.status).toBe(200)
     expect(forwarded().body).toEqual({
       email: "utm@example.com",
-      utm_source: "s".repeat(100),
-      utm_medium: "email",
+      utm_source: "newsletter",
+      utm_campaign: "launch",
     })
   })
 

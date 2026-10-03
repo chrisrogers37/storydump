@@ -18,7 +18,12 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.principal import COOKIE, session_delivery_gap
+from src.api.principal import (
+    COOKIE,
+    PREAUTH_LIMIT,
+    PREAUTH_SCOPE,
+    session_delivery_gap,
+)
 from src.api.routes import auth
 from src.config.settings import settings
 from src.services.target import (
@@ -54,7 +59,7 @@ def counter(monkeypatch):
     log = {"keys": [], "value": 1}
 
     async def increment(conn, *, scope, key, window_start, limit):
-        assert scope == auth.PREAUTH_SCOPE and limit == auth.PREAUTH_LIMIT
+        assert scope == PREAUTH_SCOPE and limit == PREAUTH_LIMIT
         log["keys"].append(key)
         return log["value"]
 

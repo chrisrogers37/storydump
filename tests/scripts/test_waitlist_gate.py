@@ -15,6 +15,7 @@ import psycopg2
 import psycopg2.errors
 import pytest
 
+from src.api import principal
 from src.api.routes import public
 from tests.scripts.conftest import (
     _scratch,
@@ -109,6 +110,7 @@ class TestTheRoute:
             "two words@example.com",
             "a" * 250 + "@ex.co",
             "zero​width@example.com",
+            "nul\x00@example.com",
             42,
             None,
         ],
@@ -123,7 +125,7 @@ class TestTheRoute:
         assert _rows(world["owner"], "SELECT count(*) FROM waitlist_entries") == before
 
     def test_the_limit_refuses_past_its_window(self, world, monkeypatch):
-        monkeypatch.setattr(public, "WAITLIST_LIMIT", 2)
+        monkeypatch.setattr(principal, "PREAUTH_LIMIT", 2)
         monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-limit-test:")
         responses = _post(
             world,

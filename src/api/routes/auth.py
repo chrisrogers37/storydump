@@ -51,18 +51,18 @@ inside the write transaction.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from src.api import google_client, instagram_client
 from src.api import principal as principal_mod
 from src.api.principal import (
     clear_session_cookie,
+    preauth_guard,
     presented_token,
     require_deliverable_session,
     require_engine,
@@ -79,7 +79,6 @@ from src.services.target import (
     ig_login_oauth,
     media_sync,
     provisioning,
-    rate_counters,
     sessions,
     tenant_resolution,
 )
@@ -101,35 +100,13 @@ router = APIRouter(tags=["auth"])
 NONCE_COOKIE = "sd_oauth_nonce"
 NONCE_COOKIE_PATH = "/auth/google"
 
-#: `05`: pre-auth admission, 30/min per client IP, scope `preauth_ip`.
-PREAUTH_LIMIT = 30
-PREAUTH_WINDOW_SECONDS = 60
-PREAUTH_SCOPE = "preauth_ip"
+#: The pre-auth guard's 429 (`principal.preauth_guard`).
+SIGNIN_LIMITED = "too many sign-in attempts"
 
 #: The Drive leg's name on the error page (`flow=`); sign-in carries none.
 DRIVE_FLOW = "drive"
 #: The Instagram connect leg's (#1220 step 2).
 INSTAGRAM_FLOW = "instagram"
-
-
-def _client_ip(request: Request) -> str:
-    """The attributed peer — `request.client.host` AFTER ProxyHeadersMiddleware
-    has applied the trusted-proxy walk (#726/#765), which is the `02` §6
-    client-IP source rule. Never a header read here."""
-    return request.client.host if request.client else "unknown"
-
-
-async def _preauth_guard(conn, request: Request) -> None:
-    now = datetime.now(timezone.utc)
-    count = await rate_counters.increment(
-        conn,
-        scope=PREAUTH_SCOPE,
-        key=_client_ip(request),
-        window_start=rate_counters.window_start(now, PREAUTH_WINDOW_SECONDS),
-        limit=PREAUTH_LIMIT,
-    )
-    if count is None:
-        raise HTTPException(status_code=429, detail="too many sign-in attempts")
 
 
 def _refuse(path: str, key: str, reason: str, **extra: str) -> Response:
@@ -190,7 +167,7 @@ async def _consume_callback(
         flow, "google sign-in"
     )
     async with engine.begin() as conn:
-        await _preauth_guard(conn, request)
+        await preauth_guard(conn, request, detail=SIGNIN_LIMITED)
         try:
             row = await consume_state(
                 conn,
@@ -224,7 +201,7 @@ async def google_signin(request: Request) -> Response:
     engine = require_engine(request)
     cookie_nonce = new_state()
     async with engine.begin() as conn:
-        await _preauth_guard(conn, request)
+        await preauth_guard(conn, request, detail=SIGNIN_LIMITED)
         state = await issue_state(
             conn,
             purpose="signin",
