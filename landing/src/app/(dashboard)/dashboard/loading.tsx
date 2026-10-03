@@ -47,10 +47,11 @@ export default function DashboardLoading() {
           <Skeleton className="h-5 w-28" />
         </CardHeader>
         <CardContent>
-          <div className="flex justify-between">
+          <div className="flex justify-between py-2">
             <Skeleton className="h-4 w-32" />
             <Skeleton className="h-4 w-40" />
           </div>
+          <Skeleton className="mt-3 h-3 w-full max-w-md" />
         </CardContent>
       </Card>
 
