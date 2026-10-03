@@ -349,11 +349,25 @@
       "ordinal": 31
     },
     {
+      "sha256": "89557ca2c349312a68cbc1d0b62930a974a0987b58b0695a99f2f3b06bc5654b",
+      "class": "normative",
+      "label": "§34 the Drive grant records who granted it (091, readiness review 2026-10-02) — oauth_credentials.granted_by_user_id, written by the Drive connect callback, so only the granter browses the Drive and picks folders from it",
+      "doc": "07-security-model.md",
+      "ordinal": 32
+    },
+    {
+      "sha256": "0b6ed908a9da7dcf0bf09dd1ea640e299acd6e49ed489ccb9ac9c48ea1a5e6a6",
+      "class": "normative",
+      "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
+      "doc": "07-security-model.md",
+      "ordinal": 33
+    },
+    {
       "sha256": "0a9c8e5783f817633e0cdcf84ee5955846eb23128d6a2d81128e25d7ddda1014",
       "class": "normative",
       "label": "§38 every SECURITY DEFINER function pins search_path = pg_catalog, public, pg_temp, with pg_temp last (095) — one ALTER FUNCTION ... SET search_path per door, the 29 definer functions in public written out by signature, no body restated",
       "doc": "07-security-model.md",
-      "ordinal": 32
+      "ordinal": 34
     }
   ],
   "policy_expansion": {

@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from src.api.routes import auth as auth_routes
-from src.services.target import drive_credentials
+from src.services.target import drive_credentials, workspaces
 from src.services.target import google_drive_oauth as drive
 from src.services.target.oauth_states import (
     OAuthStateRefused,
@@ -80,18 +80,47 @@ def _error_page(reason: str) -> str:
     return f"{FRONT}/auth/error?reason={reason}&flow=drive"
 
 
-def _store(world, tenant, *, grant) -> str:
+def _store(world, tenant, *, grant, by=None) -> str:
     """`store_credential` as the callback runs it: one committed unit of work
-    under *tenant*, as its user. Returns the credential id. The grant is the
-    workspace's (069): no source is named."""
+    under *tenant*, as its user (the granter, unless *by* names another).
+    Returns the credential id. The grant is the workspace's (069): no source
+    is named."""
+    by = by or tenant["user"]
     return _run(
         in_tenant(
             world["ingress"],
             tenant["ws"],
-            tenant["user"],
-            lambda s: drive.store_credential(s, workspace_id=tenant["ws"], grant=grant),
+            by,
+            lambda s: drive.store_credential(
+                s, workspace_id=tenant["ws"], grant=grant, granted_by=str(by)
+            ),
         )
     )
+
+
+def _may_browse(world, tenant, user) -> bool:
+    """`workspaces.may_browse_drive` as the routes ask it: under RLS, as
+    `svc_ingress`, in *tenant*'s unit of work."""
+    return _run(
+        in_tenant(
+            world["ingress"],
+            tenant["ws"],
+            user,
+            lambda s: workspaces.may_browse_drive(
+                s, workspace_id=str(tenant["ws"]), user_id=str(user)
+            ),
+        )
+    )
+
+
+def _granter(world, workspace_id):
+    (by,) = fetch_one(
+        world["stream"],
+        "SELECT granted_by_user_id FROM oauth_credentials"
+        " WHERE workspace_id = %s AND provider = 'gdrive'",
+        (str(workspace_id),),
+    )
+    return by
 
 
 async def _token(dsn: str, workspace_id) -> str:
@@ -201,6 +230,53 @@ class TestTheCredentialRow:
         with pytest.raises(DriveCredentialDead, match="never connected"):
             _run(owner_read(b["ws"]))
         assert _run(owner_read(a["ws"])) == "ya29.second"
+
+    def test_only_the_granter_browses_and_a_reconnect_hands_it_over(self, world):
+        """091 (`07` §34), measured on the real row as `svc_ingress`: the
+        grant names who granted it, only they may browse, and a reconnect by
+        another admin makes that admin the granter. A grant with no recorded
+        granter — every one made before 091 — is the owner's alone."""
+        a = world["a"]
+        conn = psycopg2.connect(world["stream"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
+                (admin,) = cur.fetchone()
+                cur.execute(
+                    "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                    " VALUES (%s, %s, 'admin')",
+                    (str(a["ws"]), str(admin)),
+                )
+            conn.commit()
+
+            _store(world, a, grant=drive_grant(access_token="ya29.owner"))
+            assert str(_granter(world, a["ws"])) == str(a["user"])
+            assert _may_browse(world, a, a["user"]) is True
+            assert _may_browse(world, a, admin) is False
+
+            _store(world, a, grant=drive_grant(access_token="ya29.admin"), by=admin)
+            assert str(_granter(world, a["ws"])) == str(admin)
+            assert _may_browse(world, a, admin) is True
+            assert _may_browse(world, a, a["user"]) is False, (
+                "the owner's rank does not open another person's Drive"
+            )
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE oauth_credentials SET granted_by_user_id = NULL"
+                    " WHERE workspace_id = %s AND provider = 'gdrive'",
+                    (str(a["ws"]),),
+                )
+            conn.commit()
+            assert _may_browse(world, a, a["user"]) is True, "owner, NULL granter"
+            assert _may_browse(world, a, admin) is False, "admin, NULL granter"
+        finally:
+            conn.close()
+        # Workspace B's grant is B's: A's granter browses nothing there.
+        assert _may_browse(world, world["b"], admin) is False
+        # Leave A as the tests below found it: granted by its owner.
+        _store(world, a, grant=drive_grant(access_token="ya29.second"))
 
     def test_the_schema_refuses_a_per_source_gdrive_row(self, world):
         """069's CHECK, measured: the folder-first shape cannot come back by
@@ -447,6 +523,16 @@ class TestTheRoutePairAsSvcIngress:
                     == f"{FRONT}/dashboard/settings?connected=gdrive"
                 )
                 (row,) = _credential_rows(world, ws)
+                # 091: the state's user — the returning browser — is recorded
+                # as the granter.
+                assert fetch_one(
+                    world["stream"],
+                    "SELECT c.granted_by_user_id = m.user_id"
+                    "  FROM oauth_credentials c JOIN workspace_members m"
+                    "    ON m.workspace_id = c.workspace_id AND m.role = 'owner'"
+                    " WHERE c.workspace_id = %s AND c.provider = 'gdrive'",
+                    (ws,),
+                ) == (True,)
                 assert (
                     row["provider"],
                     row["media_source_id"],

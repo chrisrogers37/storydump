@@ -407,6 +407,12 @@ class TestTheBoundaryIsDerivedAndLoud:
             # Telegram join door honours, and the service-token minter the
             # removal revokes by (readiness review, 2026-10-02).
             "090_member_removal_sticks.sql",
+            # 091 appends §34, the Drive grant records who granted it, so
+            # only they browse it (readiness review, 2026-10-02).
+            "091_drive_grant_owner.sql",
+            # 092 appends §35, a new account needs a way in: the owner's
+            # admissions and the door the sign-in upsert asks (2026-10-02).
+            "092_signup_admissions.sql",
             # 095 appends §38: every SECURITY DEFINER function pins its
             # search_path with pg_temp last, and a census holds the doors to it.
             "095_definer_search_path_pinned.sql",
