@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import psycopg2
 import psycopg2.errors
@@ -20,6 +21,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from src.api import principal
 from src.api.routes import public
 from src.services.target import waitlist
 from src.services.target.unit_of_work import asyncpg_url
@@ -448,6 +450,18 @@ def acquired(monkeypatch):
     return seen
 
 
+@pytest.fixture(autouse=True)
+def one_window(monkeypatch):
+    """Every counter in one window, so a minute boundary cannot reset a count
+    between a test's posts."""
+    pinned = principal.rate_counters.window_start(
+        datetime.now(timezone.utc), principal.PREAUTH_WINDOW_SECONDS
+    )
+    monkeypatch.setattr(
+        principal.rate_counters, "window_start", lambda now, seconds: pinned
+    )
+
+
 class TestTheSiteSecret:
     """`WAITLIST_SITE_SECRET`: unset, the headers change nothing; set, a call
     without it is refused and each visitor the site names has a limit of their
@@ -556,6 +570,42 @@ class TestTheSiteSecret:
         assert _entry(world, "ceiling-1@example.com") != []
         assert _entry(world, "ceiling-2@example.com") == []
 
+    @pytest.mark.parametrize("visitor", [None, "not-an-address"])
+    def test_set_the_fallback_spends_the_ceiling_too(
+        self, world, armed, monkeypatch, visitor
+    ):
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 1)
+        monkeypatch.setattr(
+            public, "WAITLIST_ACCEPTED_KEY", f"accepted-fallback-test:{visitor}"
+        )
+        monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", f"fallback-test:{visitor}:")
+        tag = "none" if visitor is None else "bad"
+        responses = _post(
+            world,
+            {"email": f"fallback-{tag}-0@example.com"},
+            {"email": f"fallback-{tag}-1@example.com"},
+            headers=_from_site(visitor),
+        )
+        assert [r.status_code for r in responses] == [202, 429]
+        assert _entry(world, f"fallback-{tag}-1@example.com") == []
+
+    def test_set_a_full_ceiling_keeps_the_visitors_own_spend(
+        self, world, armed, monkeypatch
+    ):
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 1)
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-keep-test")
+        site = _from_site("198.51.100.30")
+        (first,) = _post(world, {"email": "keep-0@example.com"}, headers=site)
+        (full,) = _post(world, {"email": "keep-1@example.com"}, headers=site)
+        assert (first.status_code, full.status_code) == (202, 429)
+        assert _entry(world, "keep-1@example.com") == []
+        # With room in the ceiling again, the visitor has spent both of their
+        # two: the refused attempt still counted against them.
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 100)
+        (third,) = _post(world, {"email": "keep-2@example.com"}, headers=site)
+        assert third.status_code == 429
+        assert _entry(world, "keep-2@example.com") == []
+
     def test_a_direct_ipv6_caller_is_counted_by_its_64(
         self, world, monkeypatch, acquired
     ):
@@ -575,6 +625,7 @@ class TestTheSiteSecret:
     ):
         monkeypatch.setattr(public, "WAITLIST_LIMIT", 1)
         monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-novisitor-test:")
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-novisitor-test")
         responses = _post(
             world,
             {"email": "novisitor1@example.com"},

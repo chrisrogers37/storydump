@@ -17,7 +17,7 @@ import asyncio
 import ipaddress
 from typing import Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from starlette.requests import ClientDisconnect
 from fastapi.responses import JSONResponse
 
@@ -60,6 +60,7 @@ WAITLIST_VISITOR_LIMIT = 10
 #: commit that follows. Well above a launch peak, well below a flood.
 WAITLIST_ACCEPTED_KEY = "waitlist:accepted"
 WAITLIST_ACCEPTED_LIMIT = 600
+TOO_MANY = "too many waitlist requests"
 #: The largest body the route reads: an address and three campaign values fit
 #: many times over. Anything larger is a 413 before it is parsed.
 WAITLIST_MAX_BODY_BYTES = 8 * 1024
@@ -154,15 +155,16 @@ def _address(raw: Optional[str]) -> Optional[str]:
 
 def _client(request: Request) -> Optional[tuple[str, str, int, bool]]:
     """Whose slot share and counter this request spends, as ``(key prefix,
-    client, limit, capped)``, where *capped* says an accepted insert also
-    spends the all-visitors ceiling; None when the API holds the site's secret
+    client, limit, capped)``, where *capped* (the secret matched) says an
+    accepted insert also spends the all-visitors ceiling; None when the API holds the site's secret
     and the request does not carry it.
 
-    No secret configured: the attributed peer and the shared ceiling, whatever
+    No secret configured: the attributed peer and the shared counter, whatever
     the headers say, so the API answers as before the site starts sending
-    them. Secret matched: the visitor the site names, at their own limit and
-    under the ceiling; a missing or malformed visitor address falls back to
-    the peer and the shared ceiling rather than failing the signup."""
+    them. Secret matched: the visitor the site names, at their own limit; a
+    missing or malformed visitor address falls back to the peer and the shared
+    counter rather than failing the signup. Every matched request is capped,
+    the fallback too, or leaving out the visitor would skip the ceiling."""
     peer = client_ip(request)
     address = _address(peer) or peer
     expected = settings.waitlist_site_secret
@@ -173,7 +175,7 @@ def _client(request: Request) -> Optional[tuple[str, str, int, bool]]:
     visitor = _address(request.headers.get(VISITOR_IP_HEADER))
     if visitor is None:
         logger.warning("waitlist: the site sent no usable visitor address")
-        return WAITLIST_KEY_PREFIX, address, WAITLIST_LIMIT, False
+        return WAITLIST_KEY_PREFIX, address, WAITLIST_LIMIT, True
     return WAITLIST_VISITOR_KEY_PREFIX, visitor, WAITLIST_VISITOR_LIMIT, True
 
 
@@ -232,7 +234,7 @@ async def join_waitlist(request: Request):
     # hold one.
     slots = request.app.state.waitlist_slots
     if not await slots.acquire(address):
-        return _refusal(429, "too many waitlist requests", "busy")
+        return _refusal(429, TOO_MANY, "busy")
     try:
         # The counter is spent before the body is judged, so a malformed or
         # refused request counts like any other.
@@ -240,26 +242,36 @@ async def join_waitlist(request: Request):
             await preauth_guard(
                 conn,
                 request,
-                detail="too many waitlist requests",
+                detail=TOO_MANY,
                 key_prefix=key_prefix,
                 limit=limit,
                 client=address,
             )
             if body is None:
                 return _refusal(400, "the body must be a JSON object", "not_json")
+            # The insert and the ceiling's spend share a savepoint: past the
+            # ceiling the 429 undoes both and keeps the caller's own spend
+            # above, so one visitor's retries stay at their limit while the
+            # ceiling is full.
             try:
-                await waitlist.join(conn, body.get("email"), waitlist.campaign(body))
+                async with conn.begin_nested():
+                    await waitlist.join(
+                        conn, body.get("email"), waitlist.campaign(body)
+                    )
+                    if capped:
+                        await preauth_guard(
+                            conn,
+                            request,
+                            detail=TOO_MANY,
+                            key_prefix="",
+                            limit=WAITLIST_ACCEPTED_LIMIT,
+                            client=WAITLIST_ACCEPTED_KEY,
+                        )
             except waitlist.InvalidWaitlistEmail:
                 return _refusal(400, "not a valid email address", "invalid_email")
-            if capped:
-                # Past the ceiling the 429 rolls the insert back with it.
-                await preauth_guard(
-                    conn,
-                    request,
-                    detail="too many waitlist requests",
-                    key_prefix="",
-                    limit=WAITLIST_ACCEPTED_LIMIT,
-                    client=WAITLIST_ACCEPTED_KEY,
+            except HTTPException as full:  # only the ceiling raises here
+                return JSONResponse(
+                    status_code=full.status_code, content={"detail": full.detail}
                 )
     finally:
         slots.release(address)
