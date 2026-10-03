@@ -40,7 +40,7 @@ class TestTheClosedSets:
             ),
             (
                 vocabulary.MEDIA_STATES,
-                "096_media_item_missing_and_last_listed.sql",
+                "097_media_item_missing_and_last_listed.sql",
                 "ck_media_state",
             ),
             (

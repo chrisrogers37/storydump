@@ -8,8 +8,8 @@
 # server `AGENTS.md` › Testing starts; `STORYDUMP_PY` points at another venv's python.
 #
 # The behavioural SQL mutations edit `07` §32, not the 089 file: every gate here replays the
-# ADVERTISED stream, so §32 is the SQL they run. The miss door's checks edit §39 instead: §39 restates
-# fn_planned_misses after §32 and the stream replays it last, so §39's copy is the one the gates run.
+# ADVERTISED stream, so §32 is the SQL they run. The miss door's checks edit §40 instead: §40 restates
+# fn_planned_misses after §32 and the stream replays it last, so §40's copy is the one the gates run.
 # The one 089 mutation is caught by the prefix check
 # that holds the file to the stream, and the model mutation by the lane's parity with `create_all`.
 # Every mutant changes behaviour: none rewrites a predicate the table's own CHECKs already decide.
@@ -126,12 +126,12 @@ check_doc "a suspended workspace's story is served" "     AND w.state = 'active'
      AND (i.origin = 'cadence'" "     AND NOT w.is_paused
      AND (i.origin = 'cadence'" "$G -k 'every_combination'"
 check_doc "the window's edge is served" "          OR (i.schedule_slot_at > now() - p_late" "          OR (i.schedule_slot_at >= now() - p_late" "$G -k 'window_edge'"
-# The miss door (fn_planned_misses, as §39 restates it): the flag, each reason, their precedence, the window.
-check_doc "a cancelled story is missed out loud" "             AND i.schedule_slot_at <= now() AND NOT i.cancel_requested) d" "             AND i.schedule_slot_at <= now()) d" "$G -k 'cancelled_planned_story'" "§39"
-check_doc "a removed item is not a miss" "                   WHEN m.id IS NULL OR m.state = 'removed' THEN 'item_removed'" "                   WHEN m.id IS NULL THEN 'item_removed'" "$G -k 'media-removed'" "§39"
-check_doc "an unsupported item is not a miss" "                   WHEN m.state = 'unsupported' THEN 'item_unsupported'" "                   WHEN false THEN 'item_unsupported'" "$G -k 'media-unsupported'" "§39"
-check_doc "a hold lock is not a miss" "                                   AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')" "                                   AND l.kind IN ('reject', 'unsupported', 'seasonal')" "$G -k 'hold-lock'" "§39"
-check_doc "a removed account is not a miss" "                   WHEN a.state IS NULL OR a.state NOT IN ('active', 'reauth_required')" "                   WHEN a.state IS NULL" "$G -k 'account-disabled'" "§39"
+# The miss door (fn_planned_misses, as §40 restates it): the flag, each reason, their precedence, the window.
+check_doc "a cancelled story is missed out loud" "             AND i.schedule_slot_at <= now() AND NOT i.cancel_requested) d" "             AND i.schedule_slot_at <= now()) d" "$G -k 'cancelled_planned_story'" "§40"
+check_doc "a removed item is not a miss" "                   WHEN m.id IS NULL OR m.state = 'removed' THEN 'item_removed'" "                   WHEN m.id IS NULL THEN 'item_removed'" "$G -k 'media-removed'" "§40"
+check_doc "an unsupported item is not a miss" "                   WHEN m.state = 'unsupported' THEN 'item_unsupported'" "                   WHEN false THEN 'item_unsupported'" "$G -k 'media-unsupported'" "§40"
+check_doc "a hold lock is not a miss" "                                   AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')" "                                   AND l.kind IN ('reject', 'unsupported', 'seasonal')" "$G -k 'hold-lock'" "§40"
+check_doc "a removed account is not a miss" "                   WHEN a.state IS NULL OR a.state NOT IN ('active', 'reauth_required')" "                   WHEN a.state IS NULL" "$G -k 'account-disabled'" "§40"
 check_doc "the account outranks the lock" "                   WHEN EXISTS (SELECT 1 FROM post_locks l
                                  WHERE l.workspace_id = i.workspace_id
                                    AND l.ig_account_id IS NULL
@@ -148,13 +148,13 @@ check_doc "the account outranks the lock" "                   WHEN EXISTS (SELEC
                                    AND l.media_item_id = i.media_item_id
                                    AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')
                                    AND (l.expires_at IS NULL OR l.expires_at > now()))
-                     THEN 'item_locked'" "$G -k 'reasons_come_in_their_precedence'" "§39"
-check_doc "a paused workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN false THEN 'paused'" "$G -k 'paused_through_the_window'" "§39"
-check_doc "a story inside its window is missed during a pause" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN false THEN NULL" "$G -k 'waits_out_the_pause'" "§39"
-check_doc "the miss door counts an expired lock" "                                   AND (l.expires_at IS NULL OR l.expires_at > now()))" "                                   AND true)" "$G -k 'every_combination'" "§39"
-check_doc "a suspended workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN w.is_paused THEN 'paused'" "$G -k 'every_combination'" "§39"
-check_doc "the window's edge is not missed" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN i.schedule_slot_at >= now() - p_late THEN NULL" "$G -k 'window_edge'" "§39"
-check_doc "a NULL window misses everything" "LANGUAGE sql STABLE STRICT SECURITY DEFINER" "LANGUAGE sql STABLE SECURITY DEFINER" "$G -k 'null_window_lists_no_miss'" "§39"
+                     THEN 'item_locked'" "$G -k 'reasons_come_in_their_precedence'" "§40"
+check_doc "a paused workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN false THEN 'paused'" "$G -k 'paused_through_the_window'" "§40"
+check_doc "a story inside its window is missed during a pause" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN false THEN NULL" "$G -k 'waits_out_the_pause'" "§40"
+check_doc "the miss door counts an expired lock" "                                   AND (l.expires_at IS NULL OR l.expires_at > now()))" "                                   AND true)" "$G -k 'every_combination'" "§40"
+check_doc "a suspended workspace's miss says late" "                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'" "                   WHEN w.is_paused THEN 'paused'" "$G -k 'every_combination'" "§40"
+check_doc "the window's edge is not missed" "                   WHEN i.schedule_slot_at > now() - p_late THEN NULL" "                   WHEN i.schedule_slot_at >= now() - p_late THEN NULL" "$G -k 'window_edge'" "§40"
+check_doc "a NULL window misses everything" "LANGUAGE sql STABLE STRICT SECURITY DEFINER" "LANGUAGE sql STABLE SECURITY DEFINER" "$G -k 'null_window_lists_no_miss'" "§40"
 # The reaper's slot expiry (§32's fn_reaper_sweep) and the slot key's contract.
 check_doc "the reaper expires a planned story in silence" "                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()
                    AND origin = 'cadence'" "                 WHERE state IN ('scheduled','prompt_pending') AND schedule_slot_at < now()" "$G -k 'ReaperLeavesPlannedStories'"

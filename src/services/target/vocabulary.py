@@ -130,7 +130,7 @@ NO_PUSH_BINDING = "no_push_binding"
 BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")
 WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
 
-#: `media_items.state` (096 ``ck_media_state``). Only `available` is drawn.
+#: `media_items.state` (097 ``ck_media_state``). Only `available` is drawn.
 #: `unsupported` is the sync's judgment that the publish could never fetch the
 #: file (past its byte cap); `removed` is the folder's retirement, which a
 #: re-pick undoes; `missing` is the file's own absence from its folder, which

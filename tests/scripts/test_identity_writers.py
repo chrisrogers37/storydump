@@ -118,10 +118,12 @@ def tenant(world, ws, user, fn):
 
 
 def upsert(world, *, sub, email=None, display_name=None):
+    # Sign-up open: these pin the upsert itself; the gate in front of a new
+    # user is `test_signup_gate.py`'s.
     return user_plane(
         world,
         lambda c: identity.upsert_google_identity(
-            c, sub=sub, email=email, display_name=display_name
+            c, sub=sub, email=email, display_name=display_name, signup_open=True
         ),
     )
 
@@ -343,7 +345,7 @@ class TestTheIdentityWriter:
                 return await in_user_plane(
                     world["ingress"],
                     lambda c: identity.upsert_google_identity(
-                        c, sub=sub, email=None, display_name=name
+                        c, sub=sub, email=None, display_name=name, signup_open=True
                     ),
                 )
 
@@ -758,7 +760,11 @@ class TestTheThreeWritersCompose:
     def test_sign_up_then_sign_in_reaches_the_new_workspace(self, world):
         async def sign_in(conn):
             user_id = await identity.upsert_google_identity(
-                conn, sub="sub-e2e", email="e2e@example.com", display_name="E"
+                conn,
+                sub="sub-e2e",
+                email="e2e@example.com",
+                display_name="E",
+                signup_open=True,
             )
             return user_id, await sessions.issue(conn, user_id=user_id)
 

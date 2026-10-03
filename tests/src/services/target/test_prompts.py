@@ -748,7 +748,7 @@ def _notice(**over):
 def _door_body(name: str) -> str:
     """Door `name`'s body as it stands: the last migration that defines it. A
     door is re-created by a later file, never edited in place (089 created
-    `fn_planned_misses`; 096 re-created it with `item_missing`)."""
+    `fn_planned_misses`; 097 re-created it with `item_missing`)."""
     import re
 
     from scripts.migration_runner import MIGRATIONS_DIR

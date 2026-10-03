@@ -349,11 +349,25 @@
       "ordinal": 31
     },
     {
-      "sha256": "4bd78e6e523c52bac371525304cf49b2f5d28bd89faf4122d2ac6b74a34587ad",
+      "sha256": "89557ca2c349312a68cbc1d0b62930a974a0987b58b0695a99f2f3b06bc5654b",
       "class": "normative",
-      "label": "§39 the sync retires what the publish can never fetch (096, #1545) — media_items.last_listed_at, the stamp a walk leaves on every file it lists, missing added to ck_media_state for a file a walk that saw the whole tree no longer lists, and fn_planned_misses replaced to name it item_missing",
+      "label": "§34 the Drive grant records who granted it (091, readiness review 2026-10-02) — oauth_credentials.granted_by_user_id, written by the Drive connect callback, so only the granter browses the Drive and picks folders from it",
       "doc": "07-security-model.md",
       "ordinal": 32
+    },
+    {
+      "sha256": "0b6ed908a9da7dcf0bf09dd1ea640e299acd6e49ed489ccb9ac9c48ea1a5e6a6",
+      "class": "normative",
+      "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
+      "doc": "07-security-model.md",
+      "ordinal": 33
+    },
+    {
+      "sha256": "e7b0e0bf2789ecd7d0acd96328757616bcfd57a3ad7279967b2361c1a796ac23",
+      "class": "normative",
+      "label": "§40 the sync retires what the publish can never fetch (097, #1545) — media_items.last_listed_at, the stamp a walk leaves on every file it lists, missing added to ck_media_state for a file a walk that saw the whole tree no longer lists, and fn_planned_misses replaced to name it item_missing",
+      "doc": "07-security-model.md",
+      "ordinal": 34
     }
   ],
   "policy_expansion": {

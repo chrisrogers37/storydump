@@ -407,10 +407,16 @@ class TestTheBoundaryIsDerivedAndLoud:
             # Telegram join door honours, and the service-token minter the
             # removal revokes by (readiness review, 2026-10-02).
             "090_member_removal_sticks.sql",
-            # 096 appends §39, the sync retiring what the publish can never
+            # 091 appends §34, the Drive grant records who granted it, so
+            # only they browse it (readiness review, 2026-10-02).
+            "091_drive_grant_owner.sql",
+            # 092 appends §35, a new account needs a way in: the owner's
+            # admissions and the door the sign-in upsert asks (2026-10-02).
+            "092_signup_admissions.sql",
+            # 097 appends §40, the sync retiring what the publish can never
             # fetch: the `last_listed_at` stamp, `missing` in ck_media_state and
             # the miss door's `item_missing` (#1545).
-            "096_media_item_missing_and_last_listed.sql",
+            "097_media_item_missing_and_last_listed.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

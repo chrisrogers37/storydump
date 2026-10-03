@@ -1,5 +1,5 @@
--- 096: the sync retires what the publish can never fetch (07 §39; #1545).
--- Identical to the 07 §39 block; the advertised-DDL manifest pins the two together.
+-- 097: the sync retires what the publish can never fetch (07 §40; #1545).
+-- Identical to the 07 §40 block; the advertised-DDL manifest pins the two together.
 --
 -- A Drive file the publish can never fetch stalled the folder it lives in: one deleted from Drive
 -- after it synced, or one past the publish's byte cap (`vocabulary.PUBLISH_MAX_BYTES`). Every slot
@@ -70,4 +70,4 @@ LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, public
 $$;
 
 COMMENT ON FUNCTION fn_planned_misses(p_limit int, p_late interval) IS
-  'The planned stories that will not be served, across every workspace: each due, scheduled, unflagged planned intent that cannot be served (item_removed, item_unsupported, item_missing, item_locked, account_removed, in that precedence) or whose p_late window has passed (paused when its workspace was not taking posts, else late) — the complement of fn_prompts_due''s planned rows. The worker expires each with its reason and tells the bound chats in the same transaction, per workspace under that workspace''s tenant. STRICT: a NULL window lists nothing. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_worker (089, #1413; 096, #1545).';
+  'The planned stories that will not be served, across every workspace: each due, scheduled, unflagged planned intent that cannot be served (item_removed, item_unsupported, item_missing, item_locked, account_removed, in that precedence) or whose p_late window has passed (paused when its workspace was not taking posts, else late) — the complement of fn_prompts_due''s planned rows. The worker expires each with its reason and tells the bound chats in the same transaction, per workspace under that workspace''s tenant. STRICT: a NULL window lists nothing. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_worker (089, #1413; 097, #1545).';
