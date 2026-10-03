@@ -361,6 +361,13 @@
       "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
       "doc": "07-security-model.md",
       "ordinal": 33
+    },
+    {
+      "sha256": "b4cf7fd1b4f02130ab646b5ecd32389d46cec6839682d81cec8f4b9f5216ab79",
+      "class": "normative",
+      "label": "§39 the activation funnel door (096, #1481) — svc_maintenance's SELECT and a USING (true) policy on users and workspace_members, and fn_activation_funnel: five stage rows of reached and stalled counts for the active users created since p_since, owned by svc_maintenance, EXECUTE for svc_worker only",
+      "doc": "07-security-model.md",
+      "ordinal": 37
     }
   ],
   "policy_expansion": {
