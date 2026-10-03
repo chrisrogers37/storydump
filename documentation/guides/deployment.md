@@ -247,6 +247,22 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 
 Leaving the Telegram group removes nobody.
 
+**Deleting a user** (an erasure request, say) is a hand-run `DELETE FROM users`
+as the database owner; there is no product door for it. Two things first, when
+the user connected a workspace's Google Drive (`oauth_credentials.granted_by_user_id`
+names them, 091):
+
+- [ ] Disconnect that workspace's Drive first (Settings › Integrations → Google
+  Drive → Disconnect). Otherwise `ON DELETE SET NULL` clears the granter and
+  leaves the grant active, still holding the deleted person's Google token,
+  and a grant with no granter is browsable by the workspace's owner — the
+  whole of that person's Drive, Shared with me included.
+- [ ] Run the delete with an actor set, in one transaction:
+  `BEGIN; SET LOCAL app.actor_kind = 'operator'; DELETE FROM users WHERE id = '…'; COMMIT;`.
+  The `SET NULL` on `oauth_credentials` fires the governance trigger, which
+  refuses a write with no `app.actor_kind`, so without it the delete fails
+  and nothing is removed.
+
 ---
 
 ## 7. Backup Strategy (10 minutes)
