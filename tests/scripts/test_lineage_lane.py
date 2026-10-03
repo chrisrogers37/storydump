@@ -403,9 +403,13 @@ class TestTheBoundaryIsDerivedAndLoud:
             # loud: the slot key's contract, the serve and miss doors and the
             # reaper's cadence-only slot expiry (#1413, phase 3).
             "089_planned_serve_and_misses.sql",
-            # 090 appends §33, the outbox's failure record: three columns,
+            # 090 appends §33, a removal sticks: the removals record the
+            # Telegram join door honours, and the service-token minter the
+            # removal revokes by (readiness review, 2026-10-02).
+            "090_member_removal_sticks.sql",
+            # 091 appends §34, the outbox's failure record: three columns,
             # their index and the two doors behind /health/delivery (#1482).
-            "090_outbox_failure_record.sql",
+            "091_outbox_failure_record.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

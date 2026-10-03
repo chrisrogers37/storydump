@@ -102,7 +102,7 @@ _UPLOAD_BUDGET_S = 120.0
 
 class TelegramSendError(ChannelSendError):
     """The transport could not produce an external ref for this row. Telegram's
-    own code, when it answered with one, rides as ``code`` (090, #1482)."""
+    own code, when it answered with one, rides as ``code`` (091, #1482)."""
 
 
 class TelegramChatGone(DestinationGone, TelegramSendError):
@@ -146,7 +146,7 @@ class MediaTransient(Exception):
 class TelegramAuthDead(CredentialDead, TelegramSendError):
     """Telegram rejected the credential itself (401; a 403 is the chat's,
     `_chat_gone`) — the loud class. For the outbox it is a `CredentialDead`,
-    recorded as `credential_dead` rather than as a lost response (090, #1482)."""
+    recorded as `credential_dead` rather than as a lost response (091, #1482)."""
 
 
 class SendReceipt(str):
@@ -441,6 +441,20 @@ class TelegramTransport:
         if message_id is None:
             raise TelegramSendError("sendMessage: ok response without a message_id")
         return str(message_id)
+
+    async def edit_text(self, chat_id: str, message_id: str, text: str) -> None:
+        """One `editMessageText` that also removes the message's keyboard —
+        the identity link's prompt, rewritten to its outcome after a Confirm
+        or Cancel tap. Telegram's "message is not modified" is success."""
+        await self._edit(
+            "editMessageText",
+            {
+                "chat_id": chat_id,
+                "message_id": _message_id(message_id),
+                "text": text[:4096],
+                "reply_markup": _EMPTY_KEYBOARD,
+            },
+        )
 
     async def send_media(
         self,

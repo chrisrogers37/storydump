@@ -19,13 +19,13 @@ production's schemas are `archive`, `public` and `runner`. Nothing under
 
 ## The tables
 
-Twenty-six, in five model modules named after the migrations that create them
-(`src/models/target/__init__.py`; the count and the nineteen tenant-keyed are
-pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
+Twenty-seven, in five model modules named after the migrations that create them
+(`src/models/target/__init__.py`; the count and the twenty tenant-keyed are
+pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
 
 | Models (migration) | Tables |
 |---|---|
-| `identity_and_tenancy.py` (053) | `users`, `user_identities`, `workspaces`, `workspace_members`, `workspace_invitations`, `channel_bindings`, `onboarding_sessions` |
+| `identity_and_tenancy.py` (053, 090) | `users`, `user_identities`, `workspaces`, `workspace_members`, `workspace_member_removals` (090), `workspace_invitations`, `channel_bindings`, `onboarding_sessions` |
 | `accounts_sources_media.py` (054) | `ig_accounts`, `provider_quarantine`, `media_sources`, `oauth_credentials`, `media_items`, `post_locks` |
 | `intent_ledger.py` (055) | `post_intents`, `post_intent_transitions`, `audit_events`, `daily_post_counts`, `category_post_case_mix` |
 | `machinery.py` (056) | `jobs`, `channel_outbox`, `provider_operations`, `command_dedup`, `rate_counters` |

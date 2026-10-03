@@ -127,7 +127,7 @@ MAX_NOTIFICATION_RESENDS = 1
 class ChannelSendError(StorydumpError):
     """What a channel's transport raises instead of a receipt.
 
-    ``failure_class`` is what the outbox records the attempt as (090, #1482):
+    ``failure_class`` is what the outbox records the attempt as (091, #1482):
     each definitive answer below names its own, and anything else is a lost
     answer, ``ambiguous``. ``code`` is the provider's own code when it answered
     with one: an int or nothing, never invented."""
@@ -410,7 +410,7 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
     two independent statements (#890).
 
     ``failure=(class, code)`` records why the attempt failed in the SAME
-    statement (090, #1482): the record is written exactly when, and only if, the
+    statement (091, #1482): the record is written exactly when, and only if, the
     state change is, so a fenced writer records nothing.
     """
     sets = ["state = :s"]
@@ -1243,7 +1243,7 @@ async def settle(
     on the pacing rows (phase 3a step 2): the chat's row for the whole
     `retry_after` when the 429 is chat-scoped (with a short brake on the
     global row), the global row for up to a minute otherwise."""
-    # What a failed attempt is recorded as (090): the transport's own class and
+    # What a failed attempt is recorded as (091): the transport's own class and
     # code, or a lost answer with no code for anything else.
     failure = (
         (error.failure_class, error.code)
@@ -1286,7 +1286,7 @@ async def settle(
             )
         # The row goes back to `pending` with the attempt the claim consumed
         # restored: the provider's limit is not this row's failure. It is
-        # still RECORDED (a deferral, never counted as a failure — 090).
+        # still RECORDED (a deferral, never counted as a failure — 091).
         await _leave_sending(
             session,
             row["id"],

@@ -126,6 +126,12 @@ class IngressRuntime:
     #: separate unpaced strip any more. Best effort, after the commit (phase
     #: 1 of the 2026-09-09 tap plan, step 10). None = silent.
     answer_callback: Optional[Callable[[str, str, bool], Awaitable[bool]]] = None
+    #: Replace a tapped message's text and remove its buttons —
+    #: `(chat_id, message_id, text)`. Only the identity link's confirmation
+    #: prompt asks for it (`TapResult.edit_text`); a card's edit is the
+    #: outbox's, paced. Best effort, after the commit. None = the prompt keeps
+    #: its buttons, and a second tap is refused by the spent state.
+    edit: Optional[Callable[[str, str, str], Awaitable[Any]]] = None
 
 
 @dataclass
@@ -377,12 +383,28 @@ async def _answer_tap(
             answered = False
         if answered is False and metrics is not None:
             metrics.answer_failed += 1
+    answer_ms = int((time.monotonic() - started) * 1000)
+    edit_text = getattr(result, "edit_text", None)
+    if (
+        edit_text
+        and runtime.edit is not None
+        and result.chat_ref is not None
+        and result.message_ref is not None
+    ):
+        try:
+            await runtime.edit(result.chat_ref, result.message_ref, edit_text)
+        except Exception:  # noqa: BLE001 — best effort, and the delivery is committed
+            logger.warning(
+                "tap prompt not edited (update_id=%s, outcome=%s)",
+                payload.get("update_id"),
+                result.outcome,
+            )
     logger.info(
         "tap answered update_id=%s outcome=%s answered=%s answer_ms=%d",
         payload.get("update_id"),
         result.outcome,
         answered,
-        int((time.monotonic() - started) * 1000),
+        answer_ms,
     )
 
 
@@ -407,8 +429,12 @@ async def _acknowledge(
     chat_id = ((payload.get("message") or {}).get("chat") or {}).get("id")
     if chat_id is None:
         return
+    markup = getattr(result, "reply_markup", None)
     try:
-        await runtime.reply(str(chat_id), result.reply)
+        if markup:
+            await runtime.reply(str(chat_id), result.reply, reply_markup=markup)
+        else:
+            await runtime.reply(str(chat_id), result.reply)
     except Exception:  # noqa: BLE001 — best-effort, and the delivery is already committed
         logger.warning(
             "telegram webhook: acknowledgement not delivered (update_id=%s, outcome=%s)",

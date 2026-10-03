@@ -280,6 +280,20 @@ POLICY_CENSUS = {
     ("p_auth_ingress_states", "oauth_states", "ALL", ("svc_ingress",)): "auth",
     ("p_auth_sweep_states", "oauth_states", "ALL", ("svc_maintenance",)): "auth",
     ("p_auth_ingress_svctok", "service_tokens", "ALL", ("svc_ingress",)): "auth",
+    # 090: the removals record — read-only for the logins, written only by
+    # the membership doors.
+    (
+        "p_tenant_read",
+        "workspace_member_removals",
+        "SELECT",
+        T,
+    ): "matrix-read",
+    (
+        "p_member_removals",
+        "workspace_member_removals",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_member_remove",
 }
 
 #: The tenant-GUC tables (policies whose predicate reads app.tenant_id),
@@ -296,8 +310,11 @@ GUC_TABLES = sorted(
 )
 
 #: Tables whose ALL-policy rows the matrix WRITE leg drives (self-assign
-#: UPDATE). audit_events is INSERT/SELECT-only for the logins by grant.
-MATRIX_WRITE_TABLES = sorted(set(GUC_TABLES) - {"audit_events"})
+#: UPDATE). audit_events is INSERT/SELECT-only for the logins by grant, and
+#: workspace_member_removals SELECT-only (090: the doors write it).
+MATRIX_WRITE_TABLES = sorted(
+    set(GUC_TABLES) - {"audit_events", "workspace_member_removals"}
+)
 
 #: Governance tables (055's tg_audit_* attach list): mutations need actors.
 GOVERNANCE = {
@@ -454,7 +471,7 @@ DOORS = {
         "svc_worker",
         "SELECT * FROM fn_planned_misses(50, interval '1 hour')",
     ),
-    # 090 (`07` §33, #1482): the outbox's delivery failures and deliveries in
+    # 091 (`07` §34, #1482): the outbox's delivery failures and deliveries in
     # a window, estate-wide, behind /health/delivery. Counts only, shared with
     # the worker like the backpressure reads.
     "fn_health_outbox_failures": (
@@ -534,6 +551,12 @@ def _seed_tenant(conn, name: str) -> dict:
             "INSERT INTO post_locks (workspace_id, media_item_id, kind)"
             " VALUES (%s, %s, 'hold')",
             (ws, mi),
+        )
+        cur.execute(
+            # 090: a removed person, so the read matrix has a row per tenant.
+            "INSERT INTO workspace_member_removals (workspace_id, user_id)"
+            " VALUES (%s, %s)",
+            (ws, ids["user"]),
         )
         cur.execute(
             "INSERT INTO category_post_case_mix (workspace_id, category, ratio)"
@@ -811,7 +834,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 63
+        assert len(POLICY_CENSUS) == 65
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -829,8 +852,8 @@ class TestRuntimeTenantIsolationMatrix:
         # Exact split, so a re-tagged disposition is a visible diff:
         assert len(by_kind["matrix"]) == 16
         # 081: p_maint_accts; 082: the three maintenance reads; 086: the
-        # reaper's source re-arm.
-        assert len(by_kind["door"]) == 34
+        # reaper's source re-arm; 090: the removals record.
+        assert len(by_kind["door"]) == 35
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():

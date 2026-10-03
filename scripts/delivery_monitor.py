@@ -1,7 +1,7 @@
 """The check that alarms when the outbox's deliveries start failing (#1482).
 
 `/health/delivery` counts, estate-wide, the outbox rows whose last failure fell
-in the last hour, by class and the provider's code (migration 090). This polls
+in the last hour, by class and the provider's code (migration 091). This polls
 it and says so when the count is high, the way `posting_monitor.py` beside it
 polls `/health/posting`. It runs outside the app for the reason that one gives:
 an alert whose sending is done by the system it watches cannot fire when that

@@ -65,7 +65,7 @@ class TestTheClosedSets:
             ),
             (
                 vocabulary.OUTBOX_FAILURE_CLASSES,
-                "090_outbox_failure_record.sql",
+                "091_outbox_failure_record.sql",
                 "ck_outbox_failure_class",
             ),
         ],

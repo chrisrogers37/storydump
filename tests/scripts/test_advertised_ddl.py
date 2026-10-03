@@ -299,9 +299,10 @@ class TestAgainstTheRealDocs:
         # cancels users asked for (087, #1235) makes it 42; §31's ledger
         # learning 'planned' (088, #1413) makes it 43; §32's planned
         # stories served on time or missed out loud (089, #1413) make it 44;
-        # and §33's outbox failure record and its doors (090, #1482) make
-        # it 45.
-        assert classes.count("normative") == 45
+        # §33's removal that sticks (090) makes it 45;
+        # and §34's outbox failure record and its doors (091, #1482) make
+        # it 46.
+        assert classes.count("normative") == 46
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):

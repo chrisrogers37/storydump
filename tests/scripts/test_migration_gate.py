@@ -423,7 +423,7 @@ class TestTheDerivedAdoptionProbesReadBothWays:
     # have: they read the catalogs by name rather than cast to `regclass`,
     # which would raise. 089 is here for the same reason: its key probe
     # names `post_intents`, and its door and grant probes name roles a
-    # database before the lineage lacks. 090 likewise: its probes name
+    # database before the lineage lacks. 091 likewise: its probes name
     # `channel_outbox` and the service roles, read from the catalogs by
     # name.
     @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89, 90])
