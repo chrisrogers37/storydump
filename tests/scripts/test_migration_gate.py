@@ -426,7 +426,7 @@ class TestTheDerivedAdoptionProbesReadBothWays:
     # database before the lineage lacks. 091 likewise: its probes name
     # `channel_outbox` and the service roles, read from the catalogs by
     # name.
-    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89, 90])
+    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89, 91])
     def test_probes_read_false_without_raising_before_the_target_lineage(
         self, version, at49_db, owner_actor
     ):
