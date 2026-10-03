@@ -16,6 +16,8 @@ const nextConfig: NextConfig = {
     // app-wide, so a full load of a dashboard page carries the ~18 KB
     // (gzipped) stylesheet too; navigations inside the app don't.
     inlineCss: true,
+    // Off: a build on the deploy's restored .next/cache shipped the previous stylesheet (#1581).
+    turbopackFileSystemCacheForBuild: false,
   },
   async redirects() {
     return [
