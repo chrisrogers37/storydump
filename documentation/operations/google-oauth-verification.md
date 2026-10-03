@@ -10,8 +10,8 @@ Google requires verification for **sensitive and restricted scopes** before they
 
 | Scope | File | Class |
 |---|---|---|
-| `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:90` (`SCOPE`) | **Restricted** |
-| `https://www.googleapis.com/auth/userinfo.email` (with `openid` and `userinfo.profile`) | `src/services/target/google_oidc.py:54` (`SCOPE = "openid email profile"`) — Google sign-in, not the Drive flow; the Drive leg dropped the older `userinfo.email` scope because nothing in the target schema stores the granting account's email (`google_drive_oauth.py:28`) | Standard |
+| `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:91` (`SCOPE`) | **Restricted** |
+| `https://www.googleapis.com/auth/userinfo.email` (with `openid` and `userinfo.profile`) | `src/services/target/google_oidc.py:55` (`SCOPE = "openid email profile"`) — Google sign-in, not the Drive flow; the Drive leg dropped the older `userinfo.email` scope because nothing in the target schema stores the granting account's email (`google_drive_oauth.py:28`) | Standard |
 
 The `drive.readonly` scope is what triggers the warning. Issue [#327](https://github.com/chrisrogers37/storydump/issues/327) audited the alternatives (`drive.file`, `drive.metadata.readonly`) and concluded that `drive.readonly` is the minimum viable scope — `drive.file` would break folder browsing (user media predates the app), and `drive.metadata.readonly` blocks file downloads (which we need to upload to Instagram). With scope-narrowing off the table, **verification submission is the only path to clear the warning** for non-developer users.
 

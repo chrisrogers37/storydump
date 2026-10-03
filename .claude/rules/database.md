@@ -114,9 +114,15 @@ never as an ORM: no `session.query`, no relationship loading.
 - `unit_of_work(engine, tenant_id, actor_kind=…, actor_user_id=…, channel=…)`
   then `async with uow.begin() as session:`. It is unconstructible without a
   tenant (`TenantContextRequired`, `:298`) and applies the GUCs with
-  `apply_gucs` (`:340`) — the one spelling; `set_config(..., true)` so the value
+  `apply_gucs` (`:343`) — the one spelling; `set_config(..., true)` so the value
   dies with the transaction and a pooled connection cannot inherit a tenant.
   The audit triggers refuse a state change with no `app.actor_kind`.
+- **One block, one transaction.** The GUCs are set once, as the block opens,
+  and die with its transaction. So a statement after a commit inside the block
+  runs with no tenant and no actor: the policies match nothing for it, and the
+  audit triggers refuse its state changes. To commit and go on, close the block
+  and open another. The worker's per-job sessions and the outbox poller's
+  follow the same rule (`unit_of_work.py:460-524`).
 - **A transaction never spans a provider call**: write the checkpoint, commit,
   then call Meta, Telegram, Drive or Cloudinary. The egress floor raises
   `TransactionDisciplineError` for a floor-routed call made while
