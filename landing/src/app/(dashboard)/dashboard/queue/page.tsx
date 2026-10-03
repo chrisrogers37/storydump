@@ -44,7 +44,7 @@ export default async function QueuePage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="page-title text-2xl">Queue</h1>
+        <h1 className="page-title text-3xl">Queue</h1>
         <p className="text-sm text-muted-foreground mt-1">
           Every post that is not done yet, in slot order. Times are in {config.tz ?? "UTC"}.
         </p>

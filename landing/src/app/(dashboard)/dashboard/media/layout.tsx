@@ -8,7 +8,7 @@ export default function MediaLayout({
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="page-title text-2xl">Media Management</h1>
+        <h1 className="page-title text-3xl">Media library</h1>
         <p className="text-sm text-muted-foreground mt-1">
           Browse and manage your content library.
         </p>

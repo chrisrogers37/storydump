@@ -12,7 +12,7 @@ import type { Intent, IntentsResponse } from "@/lib/intents";
 import { postingIntervalMinutes } from "@/lib/schedule";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardLabel } from "@/components/ui/card";
 
 /** The calendar's lanes are all the intent ledger now, filtered by state. */
 const laneItem = (i: Intent) => ({
@@ -132,22 +132,22 @@ export default async function CalendarPage() {
       <div className="grid gap-4 sm:grid-cols-3">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
+            <CardLabel>
               Posts Today
-            </CardTitle>
+            </CardLabel>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{postsToday}</div>
+            <div className="page-title text-3xl">{postsToday}</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
+            <CardLabel>
               In Queue
-            </CardTitle>
+            </CardLabel>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{inFlight}</div>
+            <div className="page-title text-3xl">{inFlight}</div>
             {needsReview > 0 && (
               <p className="mt-1 text-xs text-muted-foreground">
                 {needsReview === 1
@@ -159,12 +159,12 @@ export default async function CalendarPage() {
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
+            <CardLabel>
               Posting Rate
-            </CardTitle>
+            </CardLabel>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">
+            <div className="page-title text-3xl">
               {perDay === null ? "—" : `${perDay}/day`}
             </div>
             <p className="mt-1 text-xs text-muted-foreground">

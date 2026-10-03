@@ -161,7 +161,7 @@ export function QueueList({
       <EmptyState
         icon={ListChecks}
         title="Nothing is waiting."
-        description="Posts appear here when their slot arrives."
+        description="Each Story shows up here when its slot arrives."
       />
     );
   }

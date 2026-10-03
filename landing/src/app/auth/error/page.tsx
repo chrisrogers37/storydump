@@ -48,14 +48,14 @@ export default async function AuthErrorPage({
   const content = resolveContent(resolveFlow(flow), reason);
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
+    <div className="flex min-h-svh flex-col items-center justify-center bg-paper px-4">
       <div className="w-full max-w-sm space-y-6 text-center">
-        <h1 className="page-title text-2xl">{content.heading}</h1>
+        <h1 className="page-title text-3xl">{content.heading}</h1>
         <p className="text-sm text-muted-foreground">{content.body}</p>
 
         <Link
           href={content.href}
-          className="inline-flex items-center justify-center rounded-md bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          className="inline-flex items-center justify-center rounded-full bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
         >
           {content.primary}
         </Link>

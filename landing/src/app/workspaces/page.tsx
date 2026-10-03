@@ -57,7 +57,7 @@ export default async function WorkspacesPage() {
   return (
     <Shell>
       <div className="space-y-2">
-        <h1 className="page-title text-2xl">Workspaces</h1>
+        <h1 className="page-title text-3xl">Workspaces</h1>
         <p className="text-sm text-muted-foreground">
           Each workspace has its own media, schedule and connected accounts.
         </p>
@@ -88,7 +88,7 @@ export default async function WorkspacesPage() {
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-svh flex-col items-center bg-background px-4 py-16">
+    <div className="flex min-h-svh flex-col items-center bg-paper px-4 py-16">
       <div className="w-full max-w-md space-y-6">{children}</div>
     </div>
   );

@@ -390,7 +390,7 @@ export function GeneralTab({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Posting Schedule</CardTitle>
+          <CardTitle className="text-base">Posting schedule</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-4">

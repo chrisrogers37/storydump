@@ -16,7 +16,7 @@ import { BrandMark } from "@/components/layout/brand-mark";
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/dashboard/queue", label: "Queue", icon: ListChecks },
-  { href: "/dashboard/media", label: "Media Library", icon: ImageIcon },
+  { href: "/dashboard/media", label: "Media library", icon: ImageIcon },
   { href: "/dashboard/media/calendar", label: "Calendar", icon: CalendarDays },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
@@ -35,7 +35,7 @@ const navItems = [
  * the screen it names.
  *
  * THE SAME RULE, APPLIED AGAIN (TD-D4). `/dashboard/analytics` was in this
- * list and its destination renders one card reading "Coming Soon … planned
+ * list and its destination renders one card reading "Coming soon … planned
  * for Phase 3". A nav item is a promise that a destination exists; a
  * destination that exists only to say it does not is the same broken promise
  * with a softer landing. The entry is gone.
@@ -74,9 +74,9 @@ export function Sidebar({ mobile }: { mobile?: boolean }) {
               key={item.href}
               href={item.href}
               className={cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                "flex items-center gap-3 rounded-full px-3 py-2 text-sm font-medium transition-colors",
                 active
-                  ? "bg-primary/10 text-primary"
+                  ? "bg-ink text-white"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground"
               )}
             >

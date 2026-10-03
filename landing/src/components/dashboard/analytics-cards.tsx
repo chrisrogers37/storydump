@@ -1,4 +1,4 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardLabel } from "@/components/ui/card";
 import type { SummaryView } from "@/lib/dashboard-payloads";
 
 /**
@@ -82,12 +82,12 @@ export function AnalyticsCards({ summary }: { summary: SummaryView }) {
       {cards.map((card) => (
         <Card key={card.title}>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
+            <CardLabel>
               {card.title}
-            </CardTitle>
+            </CardLabel>
           </CardHeader>
           <CardContent>
-            <p className="text-2xl font-semibold tracking-tight">{card.value}</p>
+            <p className="page-title text-3xl">{card.value}</p>
             <p className="mt-1 text-xs text-muted-foreground">{card.detail}</p>
           </CardContent>
         </Card>

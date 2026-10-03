@@ -39,7 +39,7 @@ export const metadata = {
  */
 export default function LoginPage() {
   return (
-    <main className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
+    <main className="flex min-h-svh flex-col items-center justify-center bg-paper px-4">
       <div className="w-full max-w-sm space-y-6">
         <Link
           href="/"

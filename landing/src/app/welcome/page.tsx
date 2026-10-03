@@ -46,7 +46,7 @@ export default async function WelcomePage() {
     // deploy in progress, most often). Sending someone to /login here is the
     // bounce that looked like a broken sign-in on 2026-09-04.
     return (
-      <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4 py-16">
+      <div className="flex min-h-svh flex-col items-center justify-center bg-paper px-4 py-16">
         <div className="w-full max-w-md">
           <RouterUnavailable
             what="Your account"
@@ -75,10 +75,10 @@ export default async function WelcomePage() {
   const name = session.displayName?.trim();
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4 py-16">
+    <div className="flex min-h-svh flex-col items-center justify-center bg-paper px-4 py-16">
       <div className="w-full max-w-md space-y-8">
         <div className="space-y-3">
-          <h1 className="page-title text-3xl">
+          <h1 className="page-title text-4xl">
             {name ? `Welcome, ${name}.` : "Welcome."}
           </h1>
           <p className="text-muted-foreground">

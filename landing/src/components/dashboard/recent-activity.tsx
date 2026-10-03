@@ -37,14 +37,14 @@ export function RecentActivity({ items }: { items: ActivityItem[] }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Recent Activity</CardTitle>
+        <CardTitle className="text-base">Recent activity</CardTitle>
       </CardHeader>
       <CardContent>
         {items.length === 0 ? (
           <EmptyState
             icon={Clock}
-            title="No activity yet"
-            description="Posts will appear here once your scheduler starts running."
+            title="Quiet so far"
+            description="Your Stories show up here once your schedule starts running."
             action={{ label: "Go to Settings", href: "/dashboard/settings" }}
           />
         ) : (

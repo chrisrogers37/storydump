@@ -68,7 +68,7 @@ export function CaptionStyleCard({ captionStyle, workspaceId, onError }: Props) 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Caption Style</CardTitle>
+        <CardTitle className="text-base">Caption style</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">

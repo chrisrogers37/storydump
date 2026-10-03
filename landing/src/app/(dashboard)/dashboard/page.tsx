@@ -87,7 +87,7 @@ export default async function DashboardPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="page-title text-2xl">Overview</h1>
+        <h1 className="page-title text-3xl">Overview</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Last 30 days of posting activity.
         </p>

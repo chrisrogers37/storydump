@@ -32,7 +32,18 @@ function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-title"
-      className={cn("leading-none font-semibold", className)}
+      className={cn("font-display leading-tight font-extrabold tracking-[-0.02em]", className)}
+      {...props}
+    />
+  )
+}
+
+/** A stat card's small label, set like the site's kickers. */
+function CardLabel({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="card-title"
+      className={cn("kicker text-muted-foreground", className)}
       {...props}
     />
   )
@@ -86,6 +97,7 @@ export {
   CardHeader,
   CardFooter,
   CardTitle,
+  CardLabel,
   CardAction,
   CardDescription,
   CardContent,
