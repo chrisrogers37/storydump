@@ -10,7 +10,7 @@ import {
   removeMemberRefusalCopy,
   submitRemoveMember,
 } from "@/lib/command-client";
-import { memberOrigin } from "@/lib/members";
+import { memberOrigin, stillInTelegramGroupCopy } from "@/lib/members";
 import type { WorkspaceMember } from "@/lib/types";
 
 const ROLE_CLASS: Record<string, string> = {
@@ -24,30 +24,43 @@ const ROLE_CLASS: Record<string, string> = {
  * admin removes membership explicitly"). A member who joined from a bound
  * Telegram group (`07` §14) is labelled as such: that grant outlives the
  * group, so the person who can undo it must be able to see it.
+ *
+ * Removing someone revokes their MEMBERSHIP only: they stay in any bound
+ * Telegram group, and the bot does not kick. So when a group is bound, a
+ * successful removal leaves a reminder to remove them in Telegram too.
  */
 export function MembersCard({
   workspaceId,
   members,
   currentUserId,
   canRemove,
+  telegramGroupLinked,
 }: {
   workspaceId: string;
   members: WorkspaceMember[] | null;
   currentUserId: string;
   canRemove: boolean;
+  /** An active Telegram group is bound here (`hasActiveTelegramGroup`). */
+  telegramGroupLinked: boolean;
 }) {
   const router = useRouter();
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Client state, so it outlives `router.refresh()` dropping the removed row.
+  const [stillInGroup, setStillInGroup] = useState<string | null>(null);
 
-  async function remove(userId: string) {
+  async function remove(member: WorkspaceMember) {
     setError(null);
-    setPending(userId);
+    setStillInGroup(null);
+    setPending(member.user_id);
     try {
-      const result = await submitRemoveMember(workspaceId, userId);
+      const result = await submitRemoveMember(workspaceId, member.user_id);
       if (!result.ok) {
         setError(removeMemberRefusalCopy(result.error, result.status));
         return;
+      }
+      if (telegramGroupLinked) {
+        setStillInGroup(stillInTelegramGroupCopy(member.primary_email));
       }
       router.refresh();
     } finally {
@@ -64,6 +77,7 @@ export function MembersCard({
         {error && (
           <Notice tone="error">{error}</Notice>
         )}
+        {stillInGroup && <Notice>{stillInGroup}</Notice>}
         {members === null ? (
           <p className="text-sm text-muted-foreground">
             Members could not be loaded just now. Reload to try again.
@@ -97,7 +111,7 @@ export function MembersCard({
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => remove(m.user_id)}
+                        onClick={() => remove(m)}
                         disabled={pending !== null}
                       >
                         {pending === m.user_id ? "Removing..." : "Remove"}

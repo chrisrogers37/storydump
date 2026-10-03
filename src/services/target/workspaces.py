@@ -334,6 +334,34 @@ async def drive_status(executor, *, workspace_id: str) -> dict:
     return {"status": row["status"], "connected_at": row["connected_at"]}
 
 
+async def may_browse_drive(executor, *, workspace_id: str, user_id: str) -> bool:
+    """Whether *user_id* may browse the workspace's Drive and pick a folder
+    from it (091, `07` §34): the grant is the workspace's, but what it reads is
+    the Drive of the person who granted it, so only they may walk it.
+
+    A grant with no recorded granter — every one made before 091, or one whose
+    granter's user was deleted (ON DELETE SET NULL) — is the owner's to browse
+    until a reconnect records one (the owner's decision, 2026-10-02: older
+    connections stay owner-only until reconnected). A granter removed or
+    demoted since fails the admin floor before this is asked, so nobody
+    browses until someone reconnects. False with no grant at all.
+    """
+    row = await readers.row(
+        executor,
+        "SELECT granted_by_user_id = :u"
+        "       OR (granted_by_user_id IS NULL AND EXISTS ("
+        "             SELECT 1 FROM workspace_members m"
+        "              WHERE m.workspace_id = :ws AND m.user_id = :u"
+        "                AND m.role = 'owner')) AS mine"
+        "  FROM oauth_credentials"
+        " WHERE " + google_drive_oauth.WORKSPACE_GRANT_WHERE,
+        ws=str(workspace_id),
+        u=str(user_id),
+        provider=GDRIVE_PROVIDER,
+    )
+    return bool(row and row["mine"])
+
+
 #: A `media_sources` row's `config.removed`, as a boolean — the flag Remove
 #: sets (#1233). Alias the table `s` wherever these are spliced.
 CONNECTED_FLAG_SQL = "COALESCE((s.config->>'removed')::boolean, false)"
