@@ -106,9 +106,11 @@ def _all(world, sql, params=()):
 def _person(world, chain, email, role="admin"):
     """A member with Google and Telegram identities, a session, an unfinished
     Telegram link, the owner's admission of their email, a workspace token
-    they minted, the workspace's binding to their private chat, a pending
-    invitation they sent, and two pending invitations to them from the owner
-    (by email and by Telegram id)."""
+    they minted, the workspace's binding to their private chat with a card
+    queued on it, a pending invitation they sent, and two pending invitations
+    to them from the owner (by email and by Telegram id). `controls` are the
+    workspace's group binding and a linked neighbour's private chat, which
+    no block may touch."""
     ws = chain["ws"]
     tg = zlib.crc32(email.encode())
     conn = psycopg2.connect(world["owner"])
@@ -342,7 +344,7 @@ def test_the_listing_names_what_nothing_ties_to_them(world):
     listing, _delete, _erase = _runbook_blocks()
 
     tokens_sql, chats_sql = _for(listing, who["user"])
-    listed = {row[0]: row[4] for row in _all(world, tokens_sql)}
+    listed = {row[0]: row[-1] for row in _all(world, tokens_sql)}  # -1: theirs
     chats = {row[0] for row in _all(world, chats_sql)}
 
     assert listed[tokens["unattributed"]] is True

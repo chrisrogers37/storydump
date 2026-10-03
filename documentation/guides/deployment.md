@@ -315,13 +315,13 @@ owner; there is no product door for it. In order:
   of their email (`signup_admissions`), which would otherwise let a new
   account with that address straight back in, and ending every workspace's
   Telegram binding to their private chat, which would otherwise keep
-  receiving that workspace's cards (its queued cards are superseded first, as
-  Remove does, so they don't sit in the outbox backlog). (The bot does not remove anyone from a
-  group: an admin removes them in Telegram.) The delete's cascades and `SET
-  NULL`s fire the governance trigger (on `workspace_members`, on
-  `oauth_credentials` when they granted Drive, and on `workspaces` when they
-  paused one), which refuses a write with no
-  `app.actor_kind`; without it the delete fails and nothing is removed.
+  receiving that workspace's cards; its queued cards are superseded first, as
+  Remove does. The bot does not remove anyone from a group: an admin removes
+  them in Telegram. The delete's cascades and `SET NULL`s fire the
+  governance trigger (on `workspace_members`, on `oauth_credentials` when they
+  granted Drive, and on `workspaces` when they paused one), which refuses a
+  write with no `app.actor_kind`; without it the delete fails and nothing is
+  removed.
 
   ```sql
   BEGIN;

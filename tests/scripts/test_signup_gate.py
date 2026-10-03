@@ -507,10 +507,10 @@ def test_the_listing_shows_only_invitations_the_doors_would_honour(world):
 def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(world):
     """098 revokes, once, the pending invitations of an inviter who has a
     removal record and is not a member there again, and those addressed (by
-    email or Telegram id) to a person removed after they were sent. A removed-then-re-invited inviter's,
-    an accepted one, a current admin's and one sent to a removed person after
-    the removal are left as they were. Run inside a transaction that is rolled
-    back, so the world is untouched."""
+    email or Telegram id) to a person removed after they were sent. A
+    removed-then-re-invited inviter's, an accepted one, a current admin's and
+    one sent to a removed person after the removal are left as they were. Run
+    inside a transaction that is rolled back, so the world is untouched."""
     gone = _existing_user(world, "gone-inviter@example.com")
     back = _existing_user(world, "back-inviter@example.com")
     addressee = _existing_user(world, "Removed-Addressee@example.com")
@@ -529,7 +529,14 @@ def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(w
                 " VALUES (%s, %s, 'admin')",
                 (world["ws"], back),
             )
-            for user in (gone, back, addressee):
+            # A Telegram-only person, removed like the others.
+            tg_person = _user(cur)
+            cur.execute(
+                "INSERT INTO user_identities (user_id, provider, external_id)"
+                " VALUES (%s, 'telegram', '770098')",
+                (tg_person,),
+            )
+            for user in (gone, back, addressee, tg_person):
                 cur.execute(
                     "INSERT INTO workspace_member_removals"
                     " (workspace_id, user_id, removed_by_user_id)"
@@ -545,20 +552,7 @@ def test_the_one_time_revoke_takes_only_a_removed_inviters_pending_invitations(w
                 ("REMOVED-ADDRESSEE@example.com", "1 minute"),
             ):
                 _invite(cur, world["ws"], email, by=admin, sent=sent)
-            # A Telegram-only person, removed, invited by Telegram id before
-            # the removal and after it.
-            cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
-            tg_person = cur.fetchone()[0]
-            cur.execute(
-                "INSERT INTO user_identities (user_id, provider, external_id)"
-                " VALUES (%s, 'telegram', '770098')",
-                (tg_person,),
-            )
-            cur.execute(
-                "INSERT INTO workspace_member_removals"
-                " (workspace_id, user_id, removed_by_user_id) VALUES (%s, %s, %s)",
-                (world["ws"], tg_person, world["ws_owner"]),
-            )
+            # Invited by Telegram id before the removal and after it.
             for token, sent in (("tg-before", "-1 hour"), ("tg-after", "1 minute")):
                 cur.execute(
                     "INSERT INTO workspace_invitations (workspace_id, token_hash,"
