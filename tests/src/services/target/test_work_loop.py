@@ -111,9 +111,9 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         its own HTTP)". Named here so the exclusion reads as a decision rather
         than an omission — it is the obvious candidate for someone to "fix".
 
-        `retention_sweep` and `reencrypt_credentials` are absent from the set
-        for a different reason: they are `UNBUILT_KINDS`, parked with no
-        executor at all, so there is nothing to reach a provider with.
+        `retention_sweep` is absent because it only deletes rows in the
+        database; `reencrypt_credentials` because it is `UNBUILT_KINDS`, parked
+        with no executor at all, so there is nothing to reach a provider with.
         """
         registry = build_registry(full_deps())
         assert "reap_transit_assets" in registry
@@ -156,6 +156,8 @@ class TestRegistryCoversTheSchema:
             # which `06` §1 already backstops with the FC-3.6 TTL sweep, so a
             # missing transit store must not park the whole workflow.
             "offboard_workspace",
+            # The `rate_counters` retention class only (05).
+            "retention_sweep",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -177,6 +179,7 @@ class TestRegistryCoversTheSchema:
             # supplies that seam like every other.
             "send_email",
             "offboard_workspace",  # #1090 H1
+            "retention_sweep",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         for kind in unbuilt:

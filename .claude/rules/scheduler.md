@@ -30,8 +30,9 @@ does.
   running them against a fake: no `TARGET_TELEGRAM_BOT_TOKEN` (or a dead or
   wrong-bot token at the startup probe, `:370`) parks `deliver_outbox`; no
   `CLOUDINARY_*` trio parks `publish_pipeline` and `reap_transit_assets`; no
-  email provider parks `send_email`; `retention_sweep` and
-  `reencrypt_credentials` have no executor at all (`work_loop.UNBUILT_KINDS`).
+  email provider parks `send_email`; `reencrypt_credentials` has no executor
+  at all (`work_loop.UNBUILT_KINDS`), and `retention_sweep` runs one `05`
+  retention class only, `rate_counters` (7 d, `scheduler.execute_retention_sweep`).
   A claimed job of a parked kind is rescheduled alive, attempt restored, every
   `park_seconds` (900 s) — never finalized dead (`work_loop.py:875`).
 - `run` (`:618`) binds the health endpoint before the first database connection,
@@ -60,7 +61,8 @@ does.
   the loop paces on `asyncio.sleep`. Do not pass a host timestamp into a door.
 - The recurring kinds this worker asks for are `compose`'s (`worker.py:314`):
   `reap_expired` and `reconcile_ambiguous` every 60 s, `alert_stranded_sources`
-  every 6 h, `reap_transit_assets` every 6 h when a transit store exists. The
+  every 6 h, `retention_sweep` every hour (one batch of 5,000), `reap_transit_assets`
+  every 6 h when a transit store exists. The
   reaper's 60 s and its 500-row budget (`WorkerConfig.reap_limit`, the sweep's
   total across every leg) are `05`'s, pinned by `tests/src/test_worker.py`:
   an expired lease holds its serialization key until the next sweep.

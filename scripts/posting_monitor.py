@@ -281,8 +281,8 @@ def _describe_estate(data: dict) -> str:
     # what tells "never tried" from "tried and gave it all back".
     #
     # It would NOT survive `059`'s retention purge, which deletes the row
-    # outright — but `retention_sweep` is parked in `work_loop.UNBUILT_KINDS`
-    # and has never run. If it is ever built, this distinction goes with it.
+    # outright — but `retention_sweep` runs only the `rate_counters` class,
+    # so it has never run. If that class is ever swept, this distinction goes.
     if debited == 0 and buckets == 0:
         return (
             f"{intents} intent(s) created against {active} active "

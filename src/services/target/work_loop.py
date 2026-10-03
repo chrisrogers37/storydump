@@ -103,6 +103,10 @@ class WorkerConfig:
     global_limit: int = 25  # 05: global sends per window
     global_window_seconds: int = 1
     reap_limit: int = 500  # 05: the reap's total per sweep; the card sweep reuses it
+    # 05 retention: `rate_counters` keeps 7 d (windows are minutes, so a row
+    # past its window only holds the address it was keyed on); 5,000 per batch.
+    rate_counters_keep_seconds: int = 7 * 24 * 3600
+    retention_batch: int = 5000
     # 05 §4: 1,440 min (24 h) when the workspace's approval_ttl_minutes is NULL.
     approval_ttl_seconds: int = 24 * 3600
     approved_ttl_seconds: int = 72 * 3600
@@ -232,10 +236,7 @@ _UNBUILT_REASON = (
 
 #: Kinds the tier has never carried an executor for. The registry parks them
 #: unconditionally; the schema-derived completeness test keeps this honest.
-UNBUILT_KINDS = (
-    "retention_sweep",
-    "reencrypt_credentials",
-)
+UNBUILT_KINDS = ("reencrypt_credentials",)
 
 
 def build_registry(deps: WorkerDeps) -> dict:
@@ -408,6 +409,13 @@ def build_registry(deps: WorkerDeps) -> dict:
             limit=cfg.stranded_alert_limit,
         )
 
+    async def retention_sweep(session, job):
+        await scheduler.execute_retention_sweep(
+            session,
+            keep_seconds=cfg.rate_counters_keep_seconds,
+            batch=cfg.retention_batch,
+        )
+
     async def reap_transit(session, job):
         await scheduler.execute_reap_transit_assets(
             session,
@@ -554,6 +562,8 @@ def build_registry(deps: WorkerDeps) -> dict:
     registry: dict = {kind: Parked(_UNBUILT_REASON) for kind in UNBUILT_KINDS}
     registry["plan_slot"] = plan_slot
     registry["reap_expired"] = reap_expired
+    # Only the `rate_counters` class so far: see `execute_retention_sweep`.
+    registry["retention_sweep"] = retention_sweep
     # No `deps.drive` gate: this path makes no provider call, and a fleet with
     # no adapter wired is exactly the one whose sources are stranded (#1061).
     registry["alert_stranded_sources"] = alert_stranded_sources

@@ -541,6 +541,27 @@ async def execute_reap_expired(
     return int(swept or 0) + parked
 
 
+async def execute_retention_sweep(session, *, keep_seconds: int, batch: int) -> int:
+    """The `retention_sweep` executor. Returns rate-counter rows deleted.
+
+    Runs ONE `05` retention class, `rate_counters`, through the 059 door
+    `fn_retention_batch` — one bounded batch per run (H5), the next run takes
+    the rest. The other classes the door knows stay unswept: each changes
+    something a reader relies on (the audit trail, the cap ledger's
+    `debited_total`, the M.3 snapshots), so each is its own decision (#1327).
+    """
+    deleted = (
+        await session.execute(
+            text(
+                "SELECT fn_retention_batch('rate_counters',"
+                " make_interval(secs => :keep), :batch)"
+            ),
+            {"keep": keep_seconds, "batch": batch},
+        )
+    ).scalar()
+    return int(deleted or 0)
+
+
 async def execute_reap_transit_assets(
     session, *, lister, deleter, older_than_seconds: int
 ) -> int:
