@@ -122,7 +122,7 @@ export function AccountsTab({ accounts, workspaceId }: AccountsTabProps) {
       )}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-4">
-          <CardTitle className="text-base">Instagram Accounts</CardTitle>
+          <CardTitle>Instagram accounts</CardTitle>
           {/*
             A destination is ADDED by connecting (owner ruling 2026-09-04).
             Nothing is typed: Instagram says which account signed in, and the

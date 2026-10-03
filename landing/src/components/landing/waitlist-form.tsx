@@ -186,7 +186,8 @@ export function WaitlistForm({
         <Button
           type="submit"
           disabled={status === "submitting"}
-          className="h-12 rounded-full bg-ink px-6 text-base font-semibold text-white hover:bg-ink/85 sm:h-11"
+          size="xl"
+          className="text-base max-sm:h-12"
         >
           {status === "submitting" ? "Joining…" : "Join the waitlist"}
         </Button>
@@ -194,7 +195,7 @@ export function WaitlistForm({
       {status === "error" && (
         <p
           id={`waitlist-error-${variant}`}
-          className="mt-2 text-sm font-medium text-[#9f1d1d]"
+          className="mt-2 text-sm font-medium text-alarm"
           role="alert"
         >
           {message}
