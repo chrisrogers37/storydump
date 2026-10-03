@@ -233,12 +233,14 @@ class Client:
         return surfaces
 
     def _liveness(self) -> dict[str, Any]:
+        # the details need the token resolved, so the database: any failure
+        # there (refused, a blip, an API without the route) is no answer about
+        # liveness, which public `/health` gives without touching it
         if self.token:
             try:
                 return self.health_details()
-            except ApiError as exc:
-                if exc.status not in (401, 403):
-                    raise
+            except (ApiError, Unreachable):
+                pass
         return self.health_api()
 
     def list_my_tokens(self) -> dict[str, Any]:

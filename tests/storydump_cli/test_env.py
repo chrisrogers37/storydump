@@ -549,6 +549,16 @@ def test_health_needs_no_token(tmp_path):
     assert verdicts["webhook"]["state"] == "unsampled"
 
 
+@pytest.mark.parametrize(
+    "answer", [(503, {"detail": "target database not configured"}), (404, {})]
+)
+def test_health_whose_details_fail_falls_back_to_public_liveness(tmp_path, answer):
+    api = health_api({("GET", DETAILS): answer})
+    result = run(env_runtime(tmp_path, api), "health")
+    assert result.exit_code == EXIT_OK, result.output
+    assert api.paths("GET")[:2] == [DETAILS, "/health"]
+
+
 def test_health_outside_ops_user_ids_reads_the_public_liveness(tmp_path):
     refused = {"detail": "token refused: not_ops", "reason": "not_ops"}
     api = health_api({("GET", DETAILS): (403, refused)})
@@ -558,7 +568,8 @@ def test_health_outside_ops_user_ids_reads_the_public_liveness(tmp_path):
 
 
 def test_an_api_that_does_not_answer_health_is_exit_4(tmp_path):
-    api = health_api({("GET", DETAILS): httpx.ConnectError("down")})
+    down = httpx.ConnectError("down")
+    api = health_api({("GET", DETAILS): down, ("GET", "/health"): down})
     result = run(env_runtime(tmp_path, api), "health")
     assert result.exit_code == EXIT_API_UNREACHABLE
 

@@ -185,7 +185,11 @@ def health(ctx: click.Context) -> int:
       storydump health --json
     """
     runtime = begin(ctx, "health")
-    surfaces = runtime.client(runtime.token()).health()
+    try:
+        token = runtime.token()
+    except StorageUnavailable:
+        token = None  # no keychain here: public liveness is still an answer
+    surfaces = runtime.client(token).health()
     verdicts = {
         name: surface_verdict(name, payload) for name, payload in surfaces.items()
     }
