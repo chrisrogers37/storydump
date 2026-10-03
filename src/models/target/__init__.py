@@ -62,6 +62,7 @@ from src.models.target.intent_ledger import (
 from src.models.target.identity_and_tenancy import (
     ChannelBinding,
     OnboardingSession,
+    SignupAdmission,
     User,
     UserIdentity,
     Workspace,
@@ -93,6 +94,7 @@ __all__ = [
     "RateCounter",
     "ServiceToken",
     "SessionToken",
+    "SignupAdmission",
     "User",
     "UserIdentity",
     "Workspace",
