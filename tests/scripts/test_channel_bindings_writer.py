@@ -13,15 +13,20 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import timedelta
 
 import psycopg2
 import pytest
+from asyncpg.exceptions import RaiseError
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from scripts.migration_runner import MIGRATIONS_DIR, split_statements
 from src.exceptions.tenancy import TenantResolutionError
-from src.services.target import bindings, outbox, prompts
+from src.services.target import bindings, oauth_states, outbox, prompts, workspaces
+from src.services.target._dbapi import driver_error_is
 from src.services.target.bindings import BOUND, REBOUND, TAKEN, BindingRefused
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
@@ -33,6 +38,7 @@ from tests.scripts.conftest import (
     seed_workspace_chain,
     set_test_passwords,
     sweep_as_worker,
+    txn,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -601,7 +607,9 @@ class TestRetiringAndFollowingAChat:
 class TestTheJoinPathThroughTheDoors:
     """`06`'s Telegram join path on postgres:15, driven as a bare `svc_ingress`
     connection with no GUCs (the door sets its own): a linked person speaking
-    in a bound group becomes a member; nothing else writes."""
+    in a bound group becomes a member; nothing else writes. Beside it the
+    revoke, `remove_member`, in a real unit of work: its door checks its caller,
+    and the removal spends the person's live link states (`07` §37)."""
 
     def _link(self, world, user_id, tg_user_id):
         _migrate(
@@ -760,36 +768,210 @@ class TestTheJoinPathThroughTheDoors:
                 (str(world["b"]["ws"]),),
             )
 
-    def test_an_admin_removes_a_telegram_joined_member_and_never_the_owner(self, world):
-        from src.services.target import workspaces
+    def _person(self, world, *, role=None):
+        """A fresh account, a member of workspace A at *role* when one is
+        given. The removal record is per (workspace, person), so a test that
+        removes someone removes someone of its own."""
+        person = str(uuid.uuid4())
+        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (person,))
+        if role is not None:
+            _migrate(
+                world,
+                "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                " VALUES (%s, %s, %s)",
+                (str(world["a"]["ws"]), person, role),
+            )
+        return person
 
+    def _remove(self, world, person, *, by=None, claim=None):
+        """`remove_member` in workspace A, as its owner unless *by* says who, in
+        a unit of work claiming A unless *claim* names the other workspace."""
+        return run(
+            world,
+            lambda s: workspaces.remove_member(
+                s,
+                workspace_id=str(world["a"]["ws"]),
+                user_id=str(person),
+                by_user_id=str(by or world["a"]["user"]),
+            ),
+            ids=claim,
+        )
+
+    def _recorded(self, world, person) -> bool:
+        return (
+            fetch_one(
+                world["stream"],
+                "SELECT 1 FROM workspace_member_removals"
+                " WHERE workspace_id = %s AND user_id = %s",
+                (str(world["a"]["ws"]), str(person)),
+            )
+            is not None
+        )
+
+    def test_an_admin_removes_a_telegram_joined_member_and_never_the_owner(self, world):
         _bind(world, "-1009000000108")
         joiner = world["b"]["user"]
         self._link(world, joiner, "tg-joiner-8")
         self._observe(world, external_ref="-1009000000108", tg_user_id="tg-joiner-8")
         assert self._role(world, world["a"]["ws"], joiner) == "member"
-        removed = run(
-            world,
-            lambda s: workspaces.remove_member(
-                s,
-                workspace_id=str(world["a"]["ws"]),
-                user_id=str(joiner),
-                by_user_id=str(world["a"]["user"]),
-            ),
-        )
-        assert removed == "member"
+        assert self._remove(world, joiner) == "member"
         assert self._role(world, world["a"]["ws"], joiner) is None
-        with pytest.raises(ValueError):
-            run(
-                world,
-                lambda s: workspaces.remove_member(
-                    s,
-                    workspace_id=str(world["a"]["ws"]),
-                    user_id=str(world["a"]["user"]),
-                    by_user_id=str(joiner),
-                ),
-            )
+        # An admin passes the door's caller check (`07` §37) and meets the
+        # owner refusal: the owner is never removed here.
+        admin = self._person(world, role="admin")
+        with pytest.raises(ValueError, match="owner"):
+            self._remove(world, world["a"]["user"], by=admin)
         assert self._role(world, world["a"]["ws"], world["a"]["user"]) == "owner"
+
+    def test_the_remove_door_refuses_another_workspace_and_a_non_admin(self, world):
+        """`07` §37: the door checks its caller itself. The workspace must be
+        the claimed tenant and the remover an owner or admin of it; each clause
+        refuses alone, as a RAISE known by its message (P0001, never the 42501
+        of a grant or a policy), and nothing is removed or recorded."""
+        person = self._person(world, role="member")
+        peer = self._person(world, role="member")
+        # A's own owner, but under B's claim: the tenant clause alone refuses.
+        with pytest.raises(
+            DBAPIError, match="outside the caller's admin scope"
+        ) as info:
+            self._remove(world, person, claim=world["b"])
+        assert driver_error_is(info.value, RaiseError) is not None
+        # A's claim, but a remover below admin: the role clause alone refuses.
+        with pytest.raises(
+            DBAPIError, match="outside the caller's admin scope"
+        ) as info:
+            self._remove(world, person, by=peer)
+        assert driver_error_is(info.value, RaiseError) is not None
+        assert self._role(world, world["a"]["ws"], person) == "member"
+        assert not self._recorded(world, person)
+
+    def test_a_removal_retires_the_persons_live_states_in_that_workspace(self, world):
+        """`07` §37: the bind, Drive and Instagram states the removed person
+        holds for the workspace are spent with the removal. Their state for
+        the other workspace, and another person's here, stay live."""
+        person = self._person(world, role="member")
+
+        def mint(user, ids, provider, purpose):
+            return run(
+                world,
+                lambda s: oauth_states.issue_state(
+                    s,
+                    purpose=purpose,
+                    user_id=str(user),
+                    workspace_id=str(ids["ws"]),
+                    provider=provider,
+                ),
+                ids=ids,
+            )
+
+        theirs_here = [
+            mint(person, world["a"], "telegram", "bind"),
+            mint(person, world["a"], "gdrive", "connect"),
+            mint(person, world["a"], "ig_login", "connect"),
+        ]
+        untouched = [
+            mint(person, world["b"], "gdrive", "connect"),
+            mint(world["a"]["user"], world["a"], "gdrive", "connect"),
+        ]
+        assert self._remove(world, person) == "member"
+        assert self._recorded(world, person)
+
+        def live(state):
+            return fetch_one(
+                world["stream"],
+                "SELECT consumed_at IS NULL FROM oauth_states WHERE state = %s",
+                (state,),
+            )[0]
+
+        assert [live(st) for st in theirs_here] == [False, False, False]
+        assert [live(st) for st in untouched] == [True, True]
+
+
+class TestTheRemovalBackfill:
+    """094's backfill, the file's own statement, run over a crafted audit trail
+    in a transaction that is rolled back: for whoever is not a member again,
+    the latest removal is recorded when another person made it, a record the
+    door already wrote is kept, and nothing else is recorded."""
+
+    def _backfill_sql(self):
+        sql = (MIGRATIONS_DIR / "094_member_removal_holds.sql").read_text()
+        return next(
+            st
+            for st in split_statements(sql)
+            if st.lstrip().startswith("INSERT INTO workspace_member_removals")
+        )
+
+    def test_the_latest_removal_is_recorded_when_another_person_made_it(self, world):
+        ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
+        gone_ws, gone_user = str(uuid.uuid4()), str(uuid.uuid4())
+        with txn(world["stream"]) as conn, conn.cursor() as cur:
+            cur.execute("SET LOCAL app.actor_kind = 'migration'")
+            people = {}
+            for name in (
+                "twice",
+                "back",
+                "migrated",
+                "superseded",
+                "left",
+                "elsewhere",
+                "orphaned",
+                "kept",
+            ):
+                cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id::text")
+                people[name] = cur.fetchone()[0]
+
+            def removal(person, *, ago, actor_kind="user", actor=owner, at=ws):
+                cur.execute(
+                    "INSERT INTO audit_events (workspace_id, entity_kind,"
+                    " entity_id, from_state, actor_kind, actor_user_id,"
+                    " channel, detail, created_at)"
+                    " VALUES (%s, 'member', %s, 'member', %s, %s, 'web',"
+                    " jsonb_build_object('v', 1, 'op', 'DELETE'),"
+                    " now() - %s * interval '1 day')",
+                    (at, person, actor_kind, actor, ago),
+                )
+
+            removal(people["twice"], ago=3)
+            removal(people["twice"], ago=1)
+            removal(people["back"], ago=2)
+            cur.execute(
+                "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                " VALUES (%s, %s, 'member')",
+                (ws, people["back"]),
+            )
+            removal(people["migrated"], ago=2, actor_kind="migration", actor=None)
+            # An admin's removal followed by a later one made by no person (a
+            # migration) or by the member themselves: the latest removal is
+            # not another person's, so neither person is recorded.
+            removal(people["superseded"], ago=3)
+            removal(people["superseded"], ago=1, actor_kind="migration", actor=None)
+            removal(people["left"], ago=3)
+            removal(people["left"], ago=1, actor=people["left"])
+            removal(people["elsewhere"], ago=2, at=gone_ws)
+            removal(people["orphaned"], ago=2, actor=gone_user)
+            removal(gone_user, ago=2)
+            # A removal the door has recorded already: the backfill keeps that
+            # record as it is, rather than the audit trail's older remover.
+            removal(people["kept"], ago=2)
+            cur.execute(
+                "INSERT INTO workspace_member_removals (workspace_id, user_id)"
+                " VALUES (%s, %s)",
+                (ws, people["kept"]),
+            )
+
+            cur.execute(self._backfill_sql())
+            cur.execute(
+                "SELECT user_id::text, removed_by_user_id::text, now() - removed_at"
+                "  FROM workspace_member_removals"
+                " WHERE workspace_id = %s AND user_id = ANY(%s::uuid[])",
+                (ws, list(people.values()) + [gone_user]),
+            )
+            recorded = {row[0]: row[1:] for row in cur.fetchall()}
+        assert recorded == {
+            people["twice"]: (owner, timedelta(days=1)),
+            people["orphaned"]: (None, timedelta(days=2)),
+            people["kept"]: (None, timedelta(0)),
+        }
 
 
 def _basic_group() -> str:

@@ -407,6 +407,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # Telegram join door honours, and the service-token minter the
             # removal revokes by (readiness review, 2026-10-02).
             "090_member_removal_sticks.sql",
+            # 094 appends §37, a removal holds: the remove door checks its
+            # caller, the record is the membership doors' alone, earlier
+            # removals are backfilled, and the join door pins pg_temp last.
+            "094_member_removal_holds.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

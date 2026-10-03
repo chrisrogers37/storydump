@@ -347,6 +347,13 @@
       "label": "§33 a removal sticks, and a removed admin's tokens go with them (090, readiness review 2026-10-02) — workspace_member_removals (tenant plane, written only by svc_membership), service_tokens.created_by_user_id, fn_group_member_seen refusing a removed non-member, and fn_member_remove recording the removal",
       "doc": "07-security-model.md",
       "ordinal": 31
+    },
+    {
+      "sha256": "744f62b2afa818d176e57ec44a56b6ef4bf7683d66c6b8724bb35ecdc4ba016f",
+      "class": "normative",
+      "label": "§37 a removal holds (094) — the runtime logins' SELECT on workspace_member_removals revoked and p_tenant_read dropped (the membership doors alone read and write it), earlier removals backfilled from the governance audit trail keeping any record the door wrote, fn_group_member_seen's search_path pinned with pg_temp last (ALTER FUNCTION … SET), and fn_member_remove replace that checks the claimed tenant and the remover's owner-or-admin role first",
+      "doc": "07-security-model.md",
+      "ordinal": 32
     }
   ],
   "policy_expansion": {

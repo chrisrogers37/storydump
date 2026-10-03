@@ -45,6 +45,7 @@ from src.services.target import vocabulary
 from src.services.target import (
     google_drive_oauth,
     identity,
+    oauth_states,
     offboarding,
     readers,
     service_tokens,
@@ -754,10 +755,13 @@ async def remove_member(
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
-    non-member is `not_found`. The removal is recorded by the door, so the
-    Telegram join path cannot re-add the person until they are invited back,
-    and the workspace service identities they minted are revoked here, in the
-    same transaction (090)."""
+    non-member is `not_found`. The door also checks its caller: the workspace
+    must be the claimed tenant and *by_user_id* an owner or admin of it, or it
+    raises (`07` §37). The removal is recorded by the door, so the Telegram
+    join path cannot re-add the person until they are invited back, and the
+    workspace service identities they minted are revoked here (090), with every
+    live link state they hold for this workspace (`07` §37), all in the same
+    transaction."""
     row = (
         await executor.execute(
             text(
@@ -770,9 +774,13 @@ async def remove_member(
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
         # The door recorded the removal, so the Telegram group cannot undo it
-        # (090); the service identities this person minted go with them.
+        # (090); the service identities this person minted go with them, and
+        # so does every bind or connect link they hold for this workspace.
         await service_tokens.revoke_minted_by(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
+        await oauth_states.retire_live_states(
+            executor, user_id=user_id, workspace_id=workspace_id
         )
         return str(row[1])
     if outcome == "not_found":

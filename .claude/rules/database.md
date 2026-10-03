@@ -74,7 +74,9 @@ pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
   unset GUC reads nothing. The exceptions are deliberate classes: `jobs` also
   exposes system rows (`workspace_id IS NULL`, `:159`), the user plane and the
   machinery counters are row-open to the runtime roles (`:169`-`:178`),
-  `post_intent_transitions` is read-only reference data (`:182`).
+  `post_intent_transitions` is read-only reference data (`:182`), and
+  `workspace_member_removals` grants the runtime roles nothing: only the
+  membership doors read or write it (094).
 - The runtime roles are `svc_ingress` (API) and `svc_worker`; cross-tenant work
   goes through `SECURITY DEFINER` doors owned by `svc_claim`, `svc_clock`,
   `svc_maintenance` and `svc_membership` (059 onward) — `fn_claim_job`,

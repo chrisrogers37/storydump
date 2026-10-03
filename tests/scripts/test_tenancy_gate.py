@@ -458,6 +458,24 @@ class TestExpectedTenancyDerivation:
         assert sig["t"]["policies"] == 2
         assert tenancy_violations(sig) == []
 
+    def test_a_plain_drop_policy_takes_one_policy_off_its_table(self):
+        """The plain form is read exactly, because a replay that got past it
+        dropped exactly one policy: the count falls by one. A drop naming a
+        table the prefix has not created records nothing, as a create does."""
+        sig = expected_tenancy(
+            [
+                f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )",
+                "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+                "CREATE POLICY p_one ON t FOR ALL TO svc_ingress USING (true)",
+                "CREATE POLICY p_two ON t FOR SELECT TO svc_ingress USING (true)",
+                "DROP POLICY p_two ON t",
+                "DROP POLICY p_any ON not_yet",
+            ]
+        )
+        assert sig == {
+            "t": _tenancy_entry(tenant_keyed=True, rls_enabled=True, policies=1)
+        }
+
     def test_statements_about_a_table_the_prefix_has_not_created_are_ignored(self):
         """A prefix can legitimately mention nothing about a later table. What it
         must never do is invent one — a phantom entry would diverge from the
@@ -470,7 +488,7 @@ class TestExpectedTenancyDerivation:
     @pytest.mark.parametrize(
         "reducing",
         [
-            "DROP POLICY p_one ON t",
+            "DROP POLICY IF EXISTS p_one ON t",
             "DROP TABLE t",
             f"ALTER TABLE t DROP COLUMN {TENANT_KEY}",
             "ALTER TABLE t RENAME TO t_old",
@@ -481,9 +499,11 @@ class TestExpectedTenancyDerivation:
     def test_a_state_reducing_statement_refuses_rather_than_deriving_a_wrong_state(
         self, reducing
     ):
-        """The derivation only ever ADDS. A statement that takes something away
-        would leave it claiming a table or policy is present that the replay has
-        since dropped — the quiet direction — so it refuses.
+        """A statement that takes something away, in any form the derivation
+        does not read exactly, would leave it claiming a table or policy is
+        present that the replay has since dropped — the quiet direction — so it
+        refuses. The one it reads is the plain DROP POLICY, above; `IF EXISTS`
+        may drop nothing, so that spelling is here.
 
         Parametrized deliberately: an earlier version named `DROP POLICY` and
         `DISABLE ROW LEVEL SECURITY` by regex and let every other reducing form
