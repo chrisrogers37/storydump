@@ -413,10 +413,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 092 appends §35, a new account needs a way in: the owner's
             # admissions and the door the sign-in upsert asks (2026-10-02).
             "092_signup_admissions.sql",
-            # 092 appends §35, the activation funnel door: onboarding counted
+            # 096 appends §39, the activation funnel door: onboarding counted
             # across every workspace, owned by svc_maintenance and executable
             # by svc_worker alone (#1481).
-            "092_activation_funnel_door.sql",
+            "096_activation_funnel_door.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

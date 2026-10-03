@@ -301,7 +301,7 @@ class TestAgainstTheRealDocs:
         # stories served on time or missed out loud (089, #1413) make it 44;
         # §33's removal that sticks (090) makes it 45; §34's Drive granter
         # (091) makes it 46; §35's sign-up admission (092) makes it 47; and
-        # §35's activation funnel door (092, #1481) makes it 48.
+        # §39's activation funnel door (096, #1481) makes it 48.
         assert classes.count("normative") == 48
         assert classes.count("illustrative") == 4
 
