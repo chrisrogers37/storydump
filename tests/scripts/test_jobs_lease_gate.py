@@ -725,7 +725,11 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
             "first_ingest_chunk",
         }
     )
-    #: Nothing re-mints these, so ending one would only lose its work.
+    #: Nothing re-mints these, so ending one would only lose its work. The
+    #: exception is `retention_sweep`, which the clock has minted hourly since
+    #: it gained an executor (2026-10-03) and 086's leg does not list: a late
+    #: one is still claimed (`fn_claim_job` reads no deadline, and only it holds
+    #: its key), so it runs late rather than strands. Listing it is a migration.
     KEPT = frozenset(
         {
             "publish_pipeline",
