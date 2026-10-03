@@ -865,9 +865,8 @@ class TestDriveCallback:
     def test_a_browser_without_a_session_is_refused_before_the_provider_is_called(
         self, client, configured, counter, drive_row, writes, monkeypatch
     ):
-        """The handed-off URL: someone else approves on Google's real screen.
-        Without the session check their Drive grant would land on the
-        minter's workspace. Refused before the code is spent."""
+        """The callback requires the state user's session; a return without
+        one is refused before the code is spent, and nothing is written."""
         called = []
 
         async def exchange_code(client_, **kw):

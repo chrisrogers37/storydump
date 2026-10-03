@@ -325,8 +325,8 @@ async def revoke(
 
 async def revoke_minted_by(executor, *, workspace_id: str, user_id: str) -> int:
     """Revoke every live service identity *user_id* minted for *workspace_id*
-    — the removal's other half (090): a token must not outlive the
-    membership that made it. Returns how many were revoked."""
+    — the removal's other half (090): a workspace token is revoked with the
+    membership of the person who minted it. Returns how many were revoked."""
     result = await executor.execute(
         text(
             "UPDATE service_tokens SET revoked_at = now()"
