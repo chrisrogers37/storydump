@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from src.api.app import create_app
 from src.api.routes.health import HEALTH_CACHE_SECONDS, AnswerCache
-from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target import posting_health, scheduling_health
 
 from .conftest import FakeEngine
 
@@ -67,9 +67,6 @@ def seams(monkeypatch):
     async def worker(executor):
         return {"succeeded_ever": 0, "last_success_age_seconds": None}
 
-    async def snapshot(executor, **kwargs):
-        return {"outbox_pending": 0}
-
     async def freshness(executor):
         reads["posting"] += 1
         return {"posted_ever": reads["posting"]}
@@ -82,7 +79,6 @@ def seams(monkeypatch):
 
     monkeypatch.setattr(scheduling_health, "scheduling_lag", lag)
     monkeypatch.setattr(scheduling_health, "worker_freshness", worker)
-    monkeypatch.setattr(backpressure, "snapshot", snapshot)
     monkeypatch.setattr(posting_health, "posting_freshness", freshness)
     monkeypatch.setattr(posting_health, "publish_attempts", attempts)
     monkeypatch.setattr(posting_health, "destinations", destinations)
