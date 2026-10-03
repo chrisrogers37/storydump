@@ -1,121 +1,107 @@
 import Link from "next/link"
+import { TrackedLink } from "@/components/analytics/tracked-link"
+import { blogCta } from "./shared"
 
 export function TelegramInstagramApproval() {
   return (
     <>
       <p>
-        Every content automation system needs an approval gate. Without one,
-        you&apos;re one bad auto-crop or outdated promo away from posting
-        something embarrassing. The question is: where should that gate
-        live?
+        Every content schedule needs an approval step. Without one,
+        you&apos;re one ended promo or half-finished design away from
+        posting something you&apos;d rather not. The question is where that
+        step should live.
       </p>
 
-      <h2>The usual suspects</h2>
-      <p>
-        Most teams default to whatever communication tool they already use:
-      </p>
+      <h2>Where approvals usually end up</h2>
       <ul>
         <li>
-          <strong>Slack</strong> — great for team chat, but content
-          approval messages drown in channels. The approve button is buried
-          under threads, reactions, and unread badges.
+          <strong>A busy team chat</strong>: the approval request scrolls
+          away under everything else.
         </li>
         <li>
-          <strong>Email</strong> — too slow for time-sensitive Story
-          approvals. By the time you check email, the posting window has
-          passed.
+          <strong>Email</strong>: fine for a weekly plan, slow for a Story
+          that is due this morning.
         </li>
         <li>
-          <strong>Web dashboards</strong> — requires opening a browser,
-          logging in, navigating to the queue. High friction for a 2-second
-          decision.
+          <strong>A separate app</strong>: one more login for a decision
+          that takes two seconds.
         </li>
       </ul>
       <p>
-        The ideal approval tool is fast, mobile-native, and low-friction.
-        You need to see the media, make a decision, and move on — ideally
-        from a phone notification.
+        A good approval step shows you the actual photo, lets you decide in
+        one tap, and tells everyone else it&apos;s handled.
       </p>
 
-      <h2>Why Telegram works</h2>
-      <p>
-        Telegram bots are uniquely suited for content approval:
-      </p>
+      <h2>Why a Telegram group works well</h2>
       <ul>
         <li>
-          <strong>Inline buttons</strong> — a Telegram bot can send a photo
-          with action buttons directly below it. One tap = decision made.
-          No loading screens, no navigation.
+          <strong>Buttons under the photo</strong>: a Telegram bot can send
+          the photo with its choices right below it. One tap and it&apos;s
+          decided.
         </li>
         <li>
-          <strong>Rich media preview</strong> — the photo renders at full
-          width in the chat. You see exactly what will be posted, at the
-          right aspect ratio.
+          <strong>The real photo</strong>: you see what will go out, not a
+          file name.
         </li>
         <li>
-          <strong>Push notifications</strong> — new content to review
-          triggers a phone notification. You approve during a coffee break,
-          not during a dedicated &ldquo;content review session.&rdquo;
+          <strong>Notifications</strong>: the card arrives on your phone when
+          the Story is due.
         </li>
         <li>
-          <strong>Bot API</strong> — Telegram&apos;s Bot API is free,
-          well-documented, and has no rate limit surprises. Creating a bot
-          takes 2 minutes via BotFather.
-        </li>
-        <li>
-          <strong>Group support</strong> — add the bot to a group chat and
-          the whole team can approve content. The bot tracks who approved
-          what, preventing duplicates.
+          <strong>The whole team</strong>: in a group, anyone can take it,
+          and everyone sees who did.
         </li>
       </ul>
 
       <h2>The approval flow</h2>
-      <p>
-        Here&apos;s what the Telegram-based approval looks like in
-        practice:
-      </p>
       <ol>
         <li>
-          The scheduler selects the next piece of media for posting.
+          On your schedule, Storydump picks the next Story from your Google
+          Drive library.
         </li>
         <li>
-          The Telegram bot sends the image to your chat with four buttons:
-          <strong> Auto Post</strong> (publish to Instagram immediately),
-          <strong> Posted</strong> (mark as manually posted),
-          <strong> Skip</strong> (save for later), and
-          <strong> Reject</strong> (remove from rotation permanently).
+          The card arrives in your team&apos;s Telegram group: the photo,
+          the account it&apos;s for, its time slot, and the buttons{" "}
+          <strong>Post now</strong>, <strong>Posted myself</strong>,{" "}
+          <strong>Skip</strong>, <strong>Reject</strong> and{" "}
+          <strong>Open Instagram</strong>.
         </li>
         <li>
-          You tap <strong>Auto Post</strong>. The bot uploads to Cloudinary,
-          calls the Instagram Graph API, and confirms with a checkmark and
-          the Story ID.
+          Someone taps. <strong>Post now</strong> publishes it to your Story
+          through Instagram&apos;s official API. <strong>Posted myself</strong>{" "}
+          records that you posted it by hand. <strong>Skip</strong> puts it
+          back for later, and <strong>Reject</strong> means it won&apos;t
+          come up again.
         </li>
         <li>
-          For content you&apos;ve approved before (returning media), the
-          system auto-posts without sending a notification. Only new content
-          requires your input.
+          The first tap settles it. The card loses its buttons and says what
+          happened, who tapped and when, so nobody posts it twice.
         </li>
       </ol>
+      <p>Nothing posts without a tap.</p>
 
-      <h2>Multi-account support</h2>
+      <h2>Several accounts</h2>
       <p>
-        If you manage multiple Instagram accounts, the bot shows which
-        account is active and lets you switch with one tap before posting.
-        Each account has its own OAuth token and posting history — no
-        cross-contamination.
+        Each card names the Instagram account it&apos;s for, and each
+        account has its own schedule and rotation.
       </p>
 
-      <h2>Why not build a web UI instead?</h2>
+      <h2>Not on Telegram?</h2>
       <p>
-        A web dashboard adds value for analytics, settings, and historical
-        data. But for the core approval action — see media, tap yes or no —
-        a Telegram bot is faster. No login, no page load, no navigation.
-        The bot meets you where you already are: your phone&apos;s
-        notification tray.
+        Telegram is optional. The same Story waits in your Queue on the web,
+        with the same choices, so a team can work from either or both. More
+        on the{" "}
+        <Link href="/use-cases/approve-instagram-stories-in-telegram">
+          Instagram Story approval in Telegram
+        </Link>
+        .
       </p>
       <p>
-        <Link href="/">Storydump</Link> uses Telegram for approvals and a
-        web dashboard for everything else. The best tool for each job.
+        <Link href="/">Storydump</Link> is in a free beta and invites people
+        in small batches; <TrackedLink href="/#waitlist" track={blogCta}>
+          join the waitlist
+        </TrackedLink> to
+        get a spot.
       </p>
     </>
   )

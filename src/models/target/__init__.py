@@ -67,6 +67,7 @@ from src.models.target.identity_and_tenancy import (
     Workspace,
     WorkspaceInvitation,
     WorkspaceMember,
+    WorkspaceMemberRemoval,
 )
 
 __all__ = [
@@ -97,4 +98,5 @@ __all__ = [
     "Workspace",
     "WorkspaceInvitation",
     "WorkspaceMember",
+    "WorkspaceMemberRemoval",
 ]

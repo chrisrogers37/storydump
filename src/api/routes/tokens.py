@@ -188,6 +188,7 @@ async def mint_service_identity(
             name=body.get("name"),
             role="readonly",
             workspace_id=str(ws),
+            created_by_user_id=principal.user_id,
             expires_in_days=_days(body),
         )
     return _created(_minted(row, secret, workspace=True))

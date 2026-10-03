@@ -1,24 +1,24 @@
 import type { Metadata } from "next";
+import { pageMetadata } from "@/lib/seo";
 import Link from "next/link";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { StepCard } from "@/components/setup/step-card";
 import { Callout } from "@/components/setup/callout";
-import { ogMeta } from "@/lib/og";
+import { UiTerm } from "@/components/setup/ui-term";
 
 const description =
-  "How to structure your Google Drive folders for Storydump. Folder layout determines content categories and posting mix for your Instagram Stories.";
+  "How to set up your Google Drive folders for Storydump. Each folder you connect gets its own share of your Instagram Stories, and you set the mix.";
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: "Organize Your Media",
   description,
-  alternates: { canonical: "/setup/media-organize" },
-  ...ogMeta("Organize Your Media", description),
-};
+  path: "/setup/media-organize",
+});
 
 export default function MediaOrganize() {
   return (
     <div>
-      <h1 className="text-3xl font-bold tracking-tight">
+      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
         Organizing Your Media
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">
@@ -35,7 +35,7 @@ export default function MediaOrganize() {
             folders — subfolders inside a connected folder are just structure.
             Rename folders freely; the weight follows the folder.
           </p>
-          <pre className="mt-3 overflow-x-auto rounded-lg bg-muted p-4 text-sm">
+          <pre className="mt-3 overflow-x-auto rounded-lg bg-muted p-4 text-xs max-md:scroll-hint sm:text-sm">
             {`My Instagram Stories/
 ├── memes/                     ← connect this folder  (group "memes", 70%)
 │   ├── 2025/
@@ -64,24 +64,35 @@ export default function MediaOrganize() {
             </li>
           </ul>
           <Callout type="tip" className="mt-3">
-            Don&apos;t worry about getting everything perfect. Storydump
-            validates each file and will tell you which ones need attention.
+            Storydump fits each file to 9:16 when it posts for you, so you
+            don&apos;t need to resize anything. Do trim long videos: a file
+            over the limit can&apos;t go out through Instagram.
           </Callout>
         </StepCard>
 
-        <StepCard number={3} title="Category mixing">
+        <StepCard number={3} title="Set your posting mix">
           <p>
-            Storydump distributes posts across your categories based on ratios
-            you define. For example:
+            On the web, open{" "}
+            <UiTerm>Settings &rarr; General &rarr; Posting mix</UiTerm>. Each connected folder gets one of three settings:
           </p>
           <ul className="mt-2 list-inside list-disc space-y-1">
-            <li>70% memes</li>
-            <li>20% products</li>
-            <li>10% announcements</li>
+            <li>
+              <UiTerm>Weight:</UiTerm> a
+              fixed share, like 70% memes and 30% merch. Weights add up to 100.
+            </li>
+            <li>
+              <UiTerm>Automatic:</UiTerm>{" "}
+              posts in proportion to how many files the folder holds.
+            </li>
+            <li>
+              <UiTerm>Off:</UiTerm> stays
+              synced but never posts.
+            </li>
           </ul>
           <p className="mt-2">
-            You can adjust these ratios anytime from Telegram using the settings
-            menu.
+            <UiTerm>Split evenly</UiTerm>{" "}
+            gives every folder the same share. Change the mix anytime; it
+            applies from the next posting slot. Workspace admins can edit it.
           </p>
         </StepCard>
 
@@ -97,24 +108,26 @@ export default function MediaOrganize() {
             </li>
           </ul>
           <p className="mt-2">
-            Storydump tracks what&apos;s been posted and cycles through your
-            library evenly — never-posted content always goes first.
+            Storydump tracks what&apos;s been posted. In each folder, files
+            that have never been posted go first, then whatever has waited
+            longest.
           </p>
         </StepCard>
 
         <StepCard number={5} title="Tips">
           <ul className="list-inside list-disc space-y-1">
             <li>
-              Keep filenames descriptive — they show up when reviewing posts in
-              Telegram
+              Keep filenames descriptive — they show up in your Queue on the web
             </li>
             <li>
               Remove content you&apos;d never want to post — Storydump will try
-              to post everything in the folder
+              to post everything in the folder. To keep a folder synced without
+              posting from it, set it to Off.
             </li>
             <li>
-              You can add or remove files anytime — Storydump syncs
-              automatically
+              You can add or remove files anytime — Storydump syncs on its own,
+              and <UiTerm>Sync Now</UiTerm>{" "}
+              in Settings &rarr; Integrations pulls changes in right away
             </li>
           </ul>
         </StepCard>
@@ -132,7 +145,7 @@ export default function MediaOrganize() {
           href="/setup/connect"
           className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
         >
-          Next: Connect Telegram
+          Next: Connect Telegram (optional)
           <ArrowRight className="h-4 w-4" />
         </Link>
       </div>

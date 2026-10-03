@@ -1,14 +1,15 @@
 import type { Metadata } from "next"
+import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
 const LAST_UPDATED = "October 1, 2026"
 
-export const metadata: Metadata = {
-  title: "Privacy Policy — Storydump",
+export const metadata: Metadata = pageMetadata({
+  title: "Privacy Policy",
   description: "How Storydump collects, uses, and protects your data.",
-  alternates: { canonical: "/privacy" },
-}
+  path: "/privacy",
+})
 
 export default function PrivacyPolicy() {
   const email = siteConfig.contact.email
@@ -296,8 +297,8 @@ export default function PrivacyPolicy() {
           <p className="mt-3">
             Storydump avoids non-essential tracking. The following are used:
           </p>
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full border-collapse text-left text-sm">
+          <div className="mt-4 overflow-x-auto max-md:scroll-hint">
+            <table className="w-full min-w-[36rem] border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b">
                   <th className="py-2 pr-4 font-medium text-foreground">Name</th>
