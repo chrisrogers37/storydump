@@ -26,15 +26,24 @@ import { targetFetch } from "@/lib/target-api";
  * shared machine because of an outage they cannot see. The local half always
  * happens; the durable half is attempted and its failure is not the user's to
  * resolve.
+ *
+ * `?everywhere=1` is "Sign out of all devices" (Settings › General): the API
+ * revokes every live session of this person, this one included
+ * (`POST /auth/signout?everywhere=true`). The local half is the same either
+ * way: this browser's cookies go too.
  */
 async function signOut(request: NextRequest) {
   const refused = refuseCrossSite(request);
   if (refused) return refused;
 
   const token = await getSessionToken();
+  const everywhere = request.nextUrl.searchParams.get("everywhere") === "1";
 
   if (token) {
-    await targetFetch("/signout", token, { method: "POST", plane: "auth" });
+    await targetFetch(everywhere ? "/signout?everywhere=true" : "/signout", token, {
+      method: "POST",
+      plane: "auth",
+    });
   }
 
   const response = NextResponse.redirect(new URL("/login", request.url));

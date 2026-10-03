@@ -5,9 +5,9 @@ the Drive connect leg's callback — the same shape with a different purpose.
 to Google; `GET /auth/google/callback` consumes that state one-shot, exchanges
 the code server-side, verifies the ID token, upserts the identity keyed on the
 subject, mints the opaque session and sets the cookie; `POST /auth/signout`
-revokes it. One verifier, one credential, and no secret anywhere that could
-mint a session for an arbitrary user — the reason this lives here and not on
-the front end.
+revokes it (``?everywhere=true``: every live session of that user). One
+verifier, one credential, and no secret anywhere that could mint a session
+for an arbitrary user — the reason this lives here and not on the front end.
 
 Two transactions bracket the provider call, never one around it (`02` §5):
 the state is consumed and COMMITTED before Google is contacted, so a failed
@@ -315,15 +315,25 @@ async def google_callback(
 
 
 @router.post("/signout")
-async def signout(request: Request) -> Response:
+async def signout(request: Request, everywhere: bool = False) -> Response:
     """Revocation is the logout (`session_tokens.revoked_at`); clearing the
     cookie is a courtesy. No principal required: an already-dead session is
-    signed out the same way, and nothing is disclosed either way."""
+    signed out the same way, and nothing is disclosed either way.
+
+    ``?everywhere=true`` revokes every live session of the presenting user —
+    every browser and device they are signed in on, this one included
+    (`sessions.revoke_all_for_user`). A dead presented session revokes
+    nothing, so a stale cookie cannot reach its siblings.
+    """
     engine = require_engine(request)
     value = presented_token(request)
     if value is not None:
+        digest = sessions.token_hash(value)
         async with engine.begin() as conn:
-            await sessions.revoke(conn, token_hash=sessions.token_hash(value))
+            if everywhere:
+                await sessions.revoke_all_for_user(conn, token_hash=digest)
+            else:
+                await sessions.revoke(conn, token_hash=digest)
     response = JSONResponse({"signed_out": True})
     clear_session_cookie(response)
     return response

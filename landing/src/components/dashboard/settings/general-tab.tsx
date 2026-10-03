@@ -27,6 +27,7 @@ import { slotLabels, timeZoneOptions } from "@/lib/schedule";
 import { WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
 import { DangerZoneCard } from "./danger-zone-card";
 import { RepostCadenceCard } from "./repost-cadence-card";
+import { SignInSessionsCard } from "./sign-in-sessions-card";
 
 /**
  * ── The writes here now reach the port ─────────────────────────────────
@@ -611,6 +612,8 @@ export function GeneralTab({
       </Card>
 
       {members}
+
+      <SignInSessionsCard />
 
       {/*
         Owner-only, and gated HERE rather than left to the port's 403: a delete

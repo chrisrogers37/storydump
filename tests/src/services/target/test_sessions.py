@@ -4,6 +4,7 @@ the token resolver and the session would fail every server-side call."""
 
 from __future__ import annotations
 
+from src.config.settings import Settings, settings
 from src.services.target import sessions, vocabulary
 
 
@@ -21,3 +22,71 @@ def test_an_ordinary_draw_is_returned_as_is(monkeypatch):
 def test_the_real_draw_is_256_bits_url_safe():
     value = sessions.new_token()
     assert len(value) == 43 and not value.startswith(vocabulary.TOKEN_PREFIX)
+
+
+class _Recorder:
+    """Records each statement and its parameters; answers one row (or none)
+    and a rowcount — the shape `resolve` and `revoke_all_for_user` read."""
+
+    def __init__(self, row=None, rowcount=0):
+        self.calls = []
+        self.row, self.rowcount = row, rowcount
+
+    async def execute(self, stmt, params):
+        self.calls.append((str(stmt), params))
+        return self
+
+    def first(self):
+        return self.row
+
+
+LIVE_ROW = ("sess-1", "user-1", False, False, "active")
+
+
+class TestTheAbsoluteLifetime:
+    """`created_at` + `SESSION_MAX_AGE_SECONDS` bounds a session however often
+    it is used. The DB gate (`test_identity_writers.py`) proves the statement
+    against PostgreSQL; this pins what it is handed."""
+
+    async def test_resolve_binds_the_setting_by_default(self, monkeypatch):
+        monkeypatch.setattr(settings, "SESSION_MAX_AGE_SECONDS", 1234)
+        ex = _Recorder(row=LIVE_ROW)
+        await sessions.resolve(ex, token_hash="h")
+        sql, params = ex.calls[0]
+        assert params == {
+            "h": "h",
+            "ttl": sessions.SESSION_TTL_SECONDS,
+            "max_age": 1234,
+            "throttle": sessions.RENEW_THROTTLE_SECONDS,
+        }
+        # Expired on either clock, and the slide is clamped to the cap.
+        assert "created_at + make_interval(secs => :max_age) <= now()" in sql
+        assert "LEAST(now() + make_interval(secs => :ttl)" in sql
+        assert "s.created_at + make_interval(secs => :max_age))" in sql
+
+    async def test_an_explicit_age_wins(self):
+        ex = _Recorder(row=LIVE_ROW)
+        await sessions.resolve(ex, token_hash="h", max_age_seconds=60)
+        assert ex.calls[0][1]["max_age"] == 60
+
+    def test_the_default_matches_the_cookie(self):
+        """30 days: the cookie's Max-Age and the Privacy page's "30 days"."""
+        default = Settings.model_fields["SESSION_MAX_AGE_SECONDS"].default
+        assert default == sessions.SESSION_TTL_SECONDS == 30 * 24 * 3600
+
+
+class TestRevokeAllForUser:
+    async def test_it_keys_on_the_presented_live_session_and_counts(self):
+        ex = _Recorder(rowcount=3)
+        assert await sessions.revoke_all_for_user(ex, token_hash="h") == 3
+        sql, params = ex.calls[0]
+        assert params == {"h": "h", "max_age": settings.SESSION_MAX_AGE_SECONDS}
+        # The user is named only through a LIVE presented session, and rows
+        # already revoked keep their first instant.
+        for clause in (
+            "p.token_hash = :h AND p.revoked_at IS NULL",
+            "p.expires_at > now()",
+            "p.created_at + make_interval(secs => :max_age) > now()",
+            "t.user_id = p.user_id AND t.revoked_at IS NULL",
+        ):
+            assert clause in sql, clause

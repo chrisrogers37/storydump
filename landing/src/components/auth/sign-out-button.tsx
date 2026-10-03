@@ -22,6 +22,7 @@ export function SignOutButton({
   className,
   children = "Sign out",
   redirectTo = "/login",
+  everywhere = false,
 }: {
   className?: string;
   /** The label. Defaults to "Sign out"; the invitation page offers the same
@@ -38,11 +39,19 @@ export function SignOutButton({
    * Returning to the invitation re-enters the flow that mints a fresh one.
    */
   redirectTo?: string;
+  /**
+   * Sign out of EVERY device, not only this browser: the API revokes every
+   * live session of this person (`?everywhere=1` on the route). Settings ›
+   * General offers it; the header's plain sign-out never does.
+   */
+  everywhere?: boolean;
 }) {
   const router = useRouter();
 
   async function signOut() {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await fetch(everywhere ? "/api/auth/logout?everywhere=1" : "/api/auth/logout", {
+      method: "POST",
+    });
     router.push(redirectTo);
     // Needed when `redirectTo` IS the current route, which is the invitation
     // page's case: a push to the URL already showing renders from the router

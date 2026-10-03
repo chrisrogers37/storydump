@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import text
 
+from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import vocabulary
 
@@ -44,15 +45,24 @@ RENEW_THROTTLE_SECONDS = 60
 #: whether or not the outer SELECT reads it, and its WHERE holds the whole
 #: liveness test plus the throttle, so a dead session is read and never
 #: touched. One round trip per authenticated request instead of two.
+#:
+#: Liveness has two clocks. `expires_at` is the sliding one; `created_at` +
+#: ``:max_age`` is the absolute one (`settings.SESSION_MAX_AGE_SECONDS`), so a
+#: session past its age is expired however recently it was used, and the
+#: slide is clamped with `LEAST` so it never carries `expires_at` past it.
 _RESOLVE = text(
     "WITH s AS ("
-    "  SELECT s.id, s.user_id, s.expires_at <= now() AS expired,"
-    "         s.revoked_at IS NOT NULL AS revoked, u.state"
+    "  SELECT s.id, s.user_id,"
+    "         s.expires_at <= now()"
+    "           OR s.created_at + make_interval(secs => :max_age) <= now()"
+    "           AS expired,"
+    "         s.created_at, s.revoked_at IS NOT NULL AS revoked, u.state"
     "    FROM session_tokens s JOIN users u ON u.id = s.user_id"
     "   WHERE s.token_hash = :h"
     "), slide AS ("
     "  UPDATE session_tokens t"
-    "     SET expires_at = now() + make_interval(secs => :ttl),"
+    "     SET expires_at = LEAST(now() + make_interval(secs => :ttl),"
+    "                            s.created_at + make_interval(secs => :max_age)),"
     "         last_seen_at = now()"
     "    FROM s"
     "   WHERE t.id = s.id AND NOT s.expired AND NOT s.revoked"
@@ -69,6 +79,14 @@ class Session:
 
     id: str
     user_id: str
+
+
+def _max_age(max_age_seconds: int | None) -> int:
+    """The absolute lifetime a call runs under: its argument, else the
+    deployment's `SESSION_MAX_AGE_SECONDS`."""
+    if max_age_seconds is None:
+        return settings.SESSION_MAX_AGE_SECONDS
+    return max_age_seconds
 
 
 def token_hash(value: str) -> str:
@@ -108,8 +126,14 @@ async def issue(executor, *, user_id: str) -> str:
     return value
 
 
-async def resolve(executor, *, token_hash: str) -> Session:
+async def resolve(
+    executor, *, token_hash: str, max_age_seconds: int | None = None
+) -> Session:
     """Authenticate a presented value (already hashed) and slide its expiry.
+
+    *max_age_seconds* is the absolute lifetime from sign-in; None reads
+    `settings.SESSION_MAX_AGE_SECONDS`. A session older than it is
+    ``expired_session`` — the same answer as a lapsed slide.
 
     Raises `TenantResolutionError` with the reason that names why, checked in
     the order that discloses least: an unknown hash reads exactly like a
@@ -124,6 +148,7 @@ async def resolve(executor, *, token_hash: str) -> Session:
             {
                 "h": token_hash,
                 "ttl": SESSION_TTL_SECONDS,
+                "max_age": _max_age(max_age_seconds),
                 "throttle": RENEW_THROTTLE_SECONDS,
             },
         )
@@ -152,3 +177,31 @@ async def revoke(executor, *, token_hash: str) -> bool:
         {"h": token_hash},
     )
     return result.rowcount == 1
+
+
+async def revoke_all_for_user(
+    executor, *, token_hash: str, max_age_seconds: int | None = None
+) -> int:
+    """Sign out everywhere: revoke every live session of the user who
+    presents *token_hash* (already hashed), that one included. Returns how
+    many rows were revoked — 0 when the presented value is unknown, or is
+    itself revoked or expired (either clock, as `resolve` reads them), so a
+    dead session cannot reach its siblings.
+
+    Keyed on the presented session rather than on a user id, so the only way
+    to name a user here is to hold one of their live sessions; another user's
+    sessions are out of reach by construction. Already-dead rows keep their
+    first `revoked_at`, as `revoke` keeps it.
+    """
+    result = await executor.execute(
+        text(
+            "UPDATE session_tokens t SET revoked_at = now()"
+            "  FROM session_tokens p"
+            " WHERE p.token_hash = :h AND p.revoked_at IS NULL"
+            "   AND p.expires_at > now()"
+            "   AND p.created_at + make_interval(secs => :max_age) > now()"
+            "   AND t.user_id = p.user_id AND t.revoked_at IS NULL"
+        ),
+        {"h": token_hash, "max_age": _max_age(max_age_seconds)},
+    )
+    return result.rowcount
