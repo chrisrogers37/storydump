@@ -7,6 +7,16 @@ const nextConfig: NextConfig = {
   // instructions, so a framework-written one would be instructions this
   // repository never wrote.
   agentRules: false,
+  experimental: {
+    // The stylesheet goes inside the HTML instead of a second request the
+    // browser must wait for before it paints. Most visits are one page from a
+    // search or a link, so the headline paints sooner (use-case page LCP 1.85
+    // -> 1.0 s, home 2.0 -> 1.2 s, Lighthouse with Slow 4G throttling). The
+    // CSP already allows inline styles (`src/lib/csp.ts`). The flag is
+    // app-wide, so a full load of a dashboard page carries the ~18 KB
+    // (gzipped) stylesheet too; navigations inside the app don't.
+    inlineCss: true,
+  },
   async redirects() {
     return [
       // Retired setup pages. Both walked the reader through registering their

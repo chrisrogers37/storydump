@@ -21,7 +21,6 @@ from fastapi.testclient import TestClient
 from src.api.principal import COOKIE, session_delivery_gap
 from src.api.routes import auth
 from src.config.settings import settings
-from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     google_drive_oauth,
     google_oidc,
@@ -84,6 +83,26 @@ def state_store(monkeypatch):
     monkeypatch.setattr(auth, "issue_state", issue_state)
     monkeypatch.setattr(auth, "consume_state", consume_state)
     return store
+
+
+@pytest.fixture
+def browser(client, monkeypatch):
+    """The returning browser carries the session cookie of `holder` (the
+    connect legs' callbacks require it to be the state's user)."""
+    holder = {"user_id": USER}
+
+    async def resolve(conn, *, token_hash):
+        if holder["user_id"] is None:
+            from src.exceptions.tenancy import TenantResolutionError
+
+            raise TenantResolutionError("invalid_session", "no such session")
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id="sess-1", user_id=holder["user_id"])
+
+    monkeypatch.setattr(sessions, "resolve", resolve)
+    client.cookies.set(COOKIE, "opaque-session-value")
+    return holder
 
 
 class TestSignin:
@@ -383,24 +402,6 @@ USER = "22222222-2222-2222-2222-222222222222"
 ACCOUNT = "55555555-5555-4555-8555-555555555555"
 
 
-@pytest.fixture
-def browser(client, monkeypatch):
-    """The returning browser carries the session cookie of `holder` — both
-    connect callbacks require it to be the state's user (`07` §2)."""
-    holder = {"user_id": USER}
-
-    async def resolve(conn, *, token_hash):
-        if holder["user_id"] is None:
-            raise TenantResolutionError("invalid_session", "no such session")
-        from types import SimpleNamespace
-
-        return SimpleNamespace(id="sess-1", user_id=holder["user_id"])
-
-    monkeypatch.setattr(sessions, "resolve", resolve)
-    client.cookies.set(COOKIE, "opaque-session-value")
-    return holder
-
-
 class TestInstagramCallback:
     """`GET /auth/instagram-login/callback` — the return half of the destination
     connect (#1220 step 2). The Drive callback's shape: the state row is
@@ -696,6 +697,8 @@ class TestInstagramCallback:
     def test_a_user_no_longer_admin_at_callback_time_is_refused(
         self, client, instagram, state_row, browser, writes, grant, monkeypatch
     ):
+        from src.exceptions.tenancy import TenantResolutionError
+
         async def authorize_member(
             session, workspace_id, user_id, minimum_role="member"
         ):
@@ -740,18 +743,13 @@ class TestInstagramCallback:
 class TestDriveCallback:
     """`GET /auth/google-drive/callback` — the return half of the WORKSPACE's
     Drive connect (069, `07` §15). The state row is trusted for what it pins,
-    which is now the workspace itself; the provider call sits between the two
-    transactions; the grant lands as the workspace's and every folder is
-    re-armed beside it."""
+    which is now the workspace itself; the returning browser must carry the
+    state user's session and that user must still be admin (the Instagram
+    leg's two checks); the provider call sits between the two transactions;
+    the grant lands as the workspace's and every folder is re-armed beside
+    it."""
 
     URL = "/auth/google-drive/callback"
-
-    def _return(self, client):
-        return client.get(
-            self.URL,
-            params={"state": "st-drive", "code": "c0de"},
-            follow_redirects=False,
-        )
 
     @pytest.fixture
     def drive_row(self, monkeypatch):
@@ -776,16 +774,12 @@ class TestDriveCallback:
 
     @pytest.fixture
     def exchanged(self, monkeypatch):
-        calls = []
-
         async def exchange_code(
             client, *, code, redirect_uri, client_id, client_secret
         ):
-            calls.append(code)
             return drive_grant()
 
         monkeypatch.setattr(google_drive_oauth, "exchange_code", exchange_code)
-        return calls
 
     @pytest.fixture
     def writes(self, monkeypatch):
@@ -832,7 +826,11 @@ class TestDriveCallback:
     def test_the_grant_lands_on_the_workspace_and_every_folder_is_rearmed(
         self, client, configured, counter, drive_row, browser, exchanged, writes
     ):
-        resp = self._return(client)
+        resp = client.get(
+            self.URL,
+            params={"state": "st-drive", "code": "c0de"},
+            follow_redirects=False,
+        )
         assert resp.status_code == 302, resp.text
         assert resp.headers["location"].endswith("/dashboard/settings?connected=gdrive")
         assert writes == [
@@ -847,36 +845,63 @@ class TestDriveCallback:
         self, client, configured, counter, drive_row, browser, exchanged, writes, target
     ):
         drive_row["reconnect_target"] = target
-        resp = self._return(client)
+        resp = client.get(
+            self.URL,
+            params={"state": "st-drive", "code": "c0de"},
+            follow_redirects=False,
+        )
         assert resp.status_code == 302
         assert "state_refused" in resp.headers["location"]
         assert "flow=drive" in resp.headers["location"]
         assert writes == []
 
-    def test_a_return_with_no_session_is_refused_before_the_code_is_spent(
-        self, client, configured, counter, drive_row, exchanged, writes
-    ):
-        """The state pins the user who started the flow, and only that user's
-        session may bring it back."""
-        resp = self._return(client)
-        assert resp.headers["location"].endswith("reason=state_refused&flow=drive")
-        assert exchanged == [] and writes == []
+    def _return(self, client):
+        return client.get(
+            self.URL,
+            params={"state": "st-drive", "code": "c0de"},
+            follow_redirects=False,
+        )
 
+    def test_a_browser_without_a_session_is_refused_before_the_provider_is_called(
+        self, client, configured, counter, drive_row, writes, monkeypatch
+    ):
+        """The handed-off URL: someone else approves on Google's real screen.
+        Without the session check their Drive grant would land on the
+        minter's workspace. Refused before the code is spent."""
+        called = []
+
+        async def exchange_code(client_, **kw):
+            called.append(True)
+
+        monkeypatch.setattr(google_drive_oauth, "exchange_code", exchange_code)
+        resp = self._return(client)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=drive"
+        )
+        assert called == [] and writes == []
+
+    @pytest.mark.parametrize(
+        "presented", ["99999999-9999-4999-8999-999999999999", None]
+    )
     def test_a_browser_signed_in_as_someone_else_is_refused(
-        self, client, configured, counter, drive_row, browser, exchanged, writes
+        self,
+        client,
+        configured,
+        counter,
+        drive_row,
+        browser,
+        exchanged,
+        writes,
+        presented,
     ):
-        browser["user_id"] = "99999999-9999-4999-8999-999999999999"
+        browser["user_id"] = presented
         resp = self._return(client)
-        assert resp.headers["location"].endswith("reason=state_refused&flow=drive")
-        assert exchanged == [] and writes == []
-
-    def test_a_session_that_does_not_resolve_is_refused_the_same_way(
-        self, client, configured, counter, drive_row, browser, exchanged, writes
-    ):
-        browser["user_id"] = None
-        resp = self._return(client)
-        assert resp.headers["location"].endswith("reason=state_refused&flow=drive")
-        assert exchanged == [] and writes == []
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=drive"
+        )
+        assert writes == []
 
     def test_a_user_no_longer_admin_at_callback_time_is_refused(
         self,
@@ -889,8 +914,7 @@ class TestDriveCallback:
         writes,
         monkeypatch,
     ):
-        """`07` §2: admin+ at issue AND at callback. A removed or demoted
-        admin's pending state must not land a grant."""
+        from src.exceptions.tenancy import TenantResolutionError
 
         async def authorize_member(
             session, workspace_id, user_id, minimum_role="member"
@@ -899,5 +923,8 @@ class TestDriveCallback:
 
         monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
         resp = self._return(client)
-        assert resp.headers["location"].endswith("reason=state_refused&flow=drive")
-        assert not any(w[0] in ("store", "rearm") for w in writes)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=drive"
+        )
+        assert not any(w[0] == "store" for w in writes)

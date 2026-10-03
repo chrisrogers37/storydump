@@ -20,13 +20,11 @@ from __future__ import annotations
 
 import logging
 
-from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     bindings,
     identity,
     oauth_states,
     readers,
-    tenant_resolution,
     unit_of_work,
 )
 from src.services.target.start_router import StartContext, StartResult
@@ -70,11 +68,10 @@ async def issue_bind_state(
 async def handle_bind(conn, ctx: StartContext) -> StartResult:
     """Consume a `bind-` payload and bind the chat it arrived in.
 
-    Three gates before anything is written, all silent on refusal (the
-    router's existence-oracle rule): the state must be live, the tapper must
-    BE the admin who minted it — the link is not a bearer of the workspace's
-    card stream (#1240 review) — and that admin must still be one when the
-    link is used (`07` §2: admin+ at issue AND at use). The tapper is known by their
+    Two gates before anything is written, both silent on refusal (the
+    router's existence-oracle rule): the state must be live, and the tapper
+    must BE the admin who minted it — the link is not a bearer of the
+    workspace's card stream (#1240 review). The tapper is known by their
     linked Telegram identity, so an admin links (clause 1) before they bind;
     the mint route refuses up front when they have not.
 
@@ -117,19 +114,6 @@ async def handle_bind(conn, ctx: StartContext) -> StartResult:
         actor_user_id=str(minter),
         channel="telegram",
     )
-    try:
-        # What can change between the mint and the tap is the membership:
-        # re-checked under the tenant just set, before anything is written.
-        await tenant_resolution.authorize_member(
-            conn,
-            str(workspace_id),
-            str(minter),
-            minimum_role="admin",
-            tenant_bound=True,
-        )
-    except TenantResolutionError as exc:
-        logger.warning("group bind: the minter is no longer an admin (%s)", exc.reason)
-        return StartResult(outcome=exc.reason, handled=False)
     if ctx.chat_type not in GROUP_CHAT_TYPES:
         # Spent either way — a link opened in a DM must not stay usable for a
         # group later. The admin is told, since it is them reading it.

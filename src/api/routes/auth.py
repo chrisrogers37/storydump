@@ -18,15 +18,13 @@ refused request leaves no debit behind. That first transaction is
 `_consume_callback`, written once for both callbacks.
 
 `GET /auth/google-drive/callback` is the other half of
-`POST /api/v1/workspaces/{ws}/drive/connect` (069: the grant is the
-workspace's). The state was minted for a signed-in admin and pins the
-workspace, as its own target, and the user. **The state row is necessary and
-not sufficient**: the returning browser's session must be the state's user,
-that user must still be an admin when the write runs, a state minted for
-another leg is refused by name at consume, and the credential is written
-inside a unit of work for THAT workspace as THAT user, so the audit trigger
-names the actor and `p_tenant` binds the row. Both legs' redirect URIs come
-from `google_client`.
+`POST /api/v1/workspaces/{ws}/sources/{id}/connect` (the gdrive epic, P3).
+The state was minted for a signed-in admin and pins the workspace and the
+user. A state minted for another leg is refused by name at consume; the
+returning browser must carry the session of the state's user, and that user
+must still be an admin, checked again inside the write; the credential is
+written inside a unit of work for THAT workspace as THAT user, so the audit
+trigger names the actor and `p_tenant` binds the row. Both legs' redirect URIs come from `google_client`.
 
 Failures redirect to the front end's `/auth/error` with a closed ``reason``
 (virgil's P3 already renders it) when `WEB_APP_URL` is set, and answer JSON
@@ -44,7 +42,8 @@ sign-in-shaped by default and needs to know which leg it renders for.
 `GET /auth/instagram-login/callback` is the other half of
 `POST /api/v1/workspaces/{ws}/accounts/{id}/connect` (#1220 step 2): the same
 shape as the Drive leg on the LEGACY flow's registered path, so the Meta app
-needs no console change, and it makes the same callback-time checks.
+needs no console change. The `07` §2 admin check runs again at the callback,
+inside the write transaction.
 """
 
 from __future__ import annotations
@@ -164,11 +163,21 @@ async def _consume_callback(
     expected_purpose,
     cookie_nonce: Optional[str] = None,
     flow: Optional[str] = None,
+    require_presenter: bool = False,
 ) -> dict | Response:
-    """The callback preamble both legs share: the provider's own error, the
+    """The callback preamble every leg shares: the provider's own error, the
     two required params, then the first transaction — the pre-auth debit and
     the one-shot consume, refusing BY NAME a state minted for another leg.
-    Returns the consumed state row, or the failure response to send as-is."""
+    Returns the consumed state row, or the failure response to send as-is.
+
+    *require_presenter* is the connect legs' rule: **the state row is
+    necessary and not sufficient.** It pins the user who started the flow; it
+    does not prove the browser that returned is theirs. Without this check an
+    admin could mint a state, hand the authorization URL to someone else, and
+    end up holding THAT person's grant on their own workspace. So the returning
+    browser must carry the session cookie the API set at sign-in (it rides the
+    top-level return navigation under SameSite=Lax), resolving to the state's
+    user — refused before the code is spent."""
     engine = require_engine(request)
     if error:
         return _fail("denied", flow=flow)
@@ -180,7 +189,7 @@ async def _consume_callback(
     async with engine.begin() as conn:
         await _preauth_guard(conn, request)
         try:
-            return await consume_state(
+            row = await consume_state(
                 conn,
                 state=state,
                 cookie_nonce=cookie_nonce,
@@ -190,6 +199,17 @@ async def _consume_callback(
         except OAuthStateRefused as exc:
             logger.warning("%s: state refused: %s", label, exc)
             return _fail("state_refused", flow=flow)
+    if require_presenter:
+        presenter = await _presenting_user(request)
+        if presenter is None or presenter != str(row["user_id"]):
+            logger.warning(
+                "%s: the returning browser's session is not the state's user"
+                " (presented=%s)",
+                label,
+                "none" if presenter is None else "other",
+            )
+            return _fail("state_refused", flow=flow)
+    return row
 
 
 @router.get("/google")
@@ -307,10 +327,10 @@ async def google_drive_callback(
     error: Optional[str] = None,
 ) -> Response:
     """The Drive connect leg's return: consume the state, check the returning
-    browser is the one that started the flow, exchange the code, and write the
-    credential as the workspace's, with the `07` §2 callback-time checks the
-    Instagram leg makes: the returning session must be the state's user, and
-    that user must still be an admin when the grant is written."""
+    browser is the one that started the flow, exchange the code, write the
+    credential. The Instagram leg's checks, for the same reason: without the
+    session check an admin could hand their authorization URL to someone else
+    and hold THAT person's Drive grant on their own workspace."""
     client_id, client_secret, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )
@@ -322,6 +342,7 @@ async def google_drive_callback(
         expected_provider=google_drive_oauth.PROVIDER,
         expected_purpose={"connect", "reconnect"},
         flow=DRIVE_FLOW,
+        require_presenter=True,
     )
     if isinstance(row, Response):
         return row
@@ -334,15 +355,6 @@ async def google_drive_callback(
         # not one this leg can act on.
         logger.warning(
             "drive connect: state does not pin its workspace as the grant's owner"
-        )
-        return _fail("state_refused", flow=DRIVE_FLOW)
-
-    presenter = await _presenting_user(request)
-    if presenter is None or presenter != str(row["user_id"]):
-        logger.warning(
-            "drive connect: the returning browser's session is not the"
-            " state's user (presented=%s)",
-            "none" if presenter is None else "other",
         )
         return _fail("state_refused", flow=DRIVE_FLOW)
 
@@ -379,8 +391,7 @@ async def google_drive_callback(
     )
     try:
         async with uow.begin() as session:
-            # `07` §2: admin+ checked at issue AND at callback. What can change
-            # between the two is the membership, and a removed or demoted
+            # Admin+ at issue AND at callback, as the Instagram leg: a demoted
             # admin's pending state must not land a grant.
             await tenant_resolution.authorize_member(
                 session,
@@ -418,18 +429,8 @@ async def instagram_login_callback(
     the code for a long-lived token and its owner, land that identity on a
     destination — the one the state pinned, or (untargeted: the workspace-
     level ADD, owner ruling 2026-09-04) the row this account already has
-    here or a new one — and write the credential. The Drive callback's shape,
-    with the same `07` §2 callback-time checks.
-
-    **The state row is necessary and not sufficient.** It pins the user who
-    started the flow; it does not prove the browser that returned is theirs.
-    Without the session check below, an admin could mint a state, hand the
-    authorization URL to someone else, and end up holding THAT person's
-    Instagram token on their own destination. So the callback also requires
-    the session cookie the API set at sign-in (it rides the top-level return
-    navigation under SameSite=Lax) and refuses unless it resolves to the
-    state's user — the same one-line rule as the admin re-check: what the
-    issue leg established, the callback re-establishes."""
+    here or a new one — and write the credential. The presenting-session
+    check is `_consume_callback`'s; the `07` §2 callback-time checks follow."""
     app_id, app_secret, redirect_uri = instagram_client.configured()
     row = await _consume_callback(
         request,
@@ -439,18 +440,10 @@ async def instagram_login_callback(
         expected_provider=ig_login_oauth.PROVIDER,
         expected_purpose={"connect", "reconnect"},
         flow=INSTAGRAM_FLOW,
+        require_presenter=True,
     )
     if isinstance(row, Response):
         return row
-
-    presenter = await _presenting_user(request)
-    if presenter is None or presenter != str(row["user_id"]):
-        logger.warning(
-            "instagram connect: the returning browser's session is not the"
-            " state's user (presented=%s)",
-            "none" if presenter is None else "other",
-        )
-        return _fail("state_refused", flow=INSTAGRAM_FLOW)
 
     # The provider calls sit between the two transactions, never inside one.
     try:
