@@ -6,8 +6,8 @@ that, the shitpost-alpha lesson as REQUIREMENTS (that fleet's outbound died
 silently for an unknown period because a dead token had no loud surface):
 
 - a DEAD CREDENTIAL is a distinct, named, observable state — `probe()` raises
-  `TelegramAuthDead` at composition time, a mid-run 401/403 raises it per
-  send and increments `auth_failures`, logged loudly ONCE rather than per row;
+  `TelegramAuthDead` at composition time, a mid-run 401 raises it per send
+  and increments `auth_failures`, logged loudly ONCE rather than per row;
 - the bot token NEVER appears in any exception text or log line, including
   errors that wrap the request URL (the URL embeds the token).
 
@@ -105,6 +105,28 @@ class TestFailureClassification:
         with pytest.raises(TelegramAuthDead):
             await t.for_chat("7")(ROW)
         assert t.auth_failures == 1
+
+    async def test_a_dead_token_is_logged_once_while_every_send_is_counted(
+        self, caplog
+    ):
+        """The latch: one ERROR line names the dead credential however many
+        rows meet it, and `auth_failures` (the worker's status line) counts
+        every one of them."""
+
+        def handler(request):
+            return httpx.Response(
+                401,
+                json={"ok": False, "error_code": 401, "description": "Unauthorized"},
+            )
+
+        t = _transport(handler)
+        with caplog.at_level("ERROR", logger="channels.telegram"):
+            for _ in range(3):
+                with pytest.raises(TelegramAuthDead):
+                    await t.for_chat("7")(ROW)
+        logged = [r for r in caplog.records if r.name == "channels.telegram"]
+        assert [r.levelname for r in logged] == ["ERROR"]
+        assert t.auth_failures == 3
 
     async def test_other_api_refusals_raise_the_plain_send_error(self):
         def handler(request):

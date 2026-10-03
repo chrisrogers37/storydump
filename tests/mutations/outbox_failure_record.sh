@@ -1,6 +1,6 @@
 #!/bin/zsh
-# Mutation battery for the outbox's failure record and the delivery health surface (101, #1482), and
-# for a dead token's row failing at once (#1493): each
+# Mutation battery for the outbox's failure record and the delivery health surface (101, #1482), for
+# a dead token's row failing at once (#1493), and for the transport's dead-credential rule (#1553): each
 # behaviour has one named mutation that must make its named test FAIL ("killed"), and the test must PASS
 # on the clean tree first, or the verdict is BASELINE RED, not a kill; a selector that selects nothing
 # is NO TEST SELECTED, never a kill. Files are restored from the COMMITTED tree after each, so commit
@@ -99,6 +99,17 @@ check "a foreign error's code is recorded as the provider's" $OUTBOX '        if
 # A dead token is definitive (#1493): its row fails after the one attempt, and nothing resends it.
 check "a dead token goes ambiguous again (unit)" $OUTBOX '    if isinstance(error, (ChannelRefused, CredentialDead)):' '    if isinstance(error, ChannelRefused):' "$UNIT" "$RECORD -k credential_dead"
 check "a dead token goes ambiguous again (gate)" $OUTBOX '    if isinstance(error, (ChannelRefused, CredentialDead)):' '    if isinstance(error, ChannelRefused):' "$GATE" "$DB -k dead_token_is_recorded_and_fails"
+check "a dead token goes ambiguous again (the binding test)" $OUTBOX '    if isinstance(error, (ChannelRefused, CredentialDead)):' '    if isinstance(error, ChannelRefused):' "$UNIT" "$RECORD -k keeps_the_binding"
+# The transport's side of that rule: only Telegram's own 401 is a dead token, so a 404 that carries
+# Telegram's error body and a 401 that carries none stay ambiguous; the token's death is logged once,
+# and every rejected send is counted.
+TRANSPORT=src/channels/telegram_transport.py
+SENDS=tests/src/channels/test_telegram_transport.py
+check "a 404 reads as a dead token" $TRANSPORT '        if code == 401:' '        if code in (401, 404):' "$UNIT" "$RECORD -k '404 and never'"
+check "a 401 with no JSON reads as a dead token" $TRANSPORT '        except json.JSONDecodeError:' $'        except json.JSONDecodeError:\n            if response.status_code == 401:\n                raise TelegramAuthDead("401 without JSON", code=401) from None' "$UNIT" "$RECORD -k '401 and never'"
+check "every rejected send logs the dead token" $TRANSPORT '            if not self._auth_dead_logged:' '            if True:' "$UNIT" "$SENDS -k logged_once"
+check "the dead token is never logged" $TRANSPORT '            if not self._auth_dead_logged:' '            if False:' "$UNIT" "$SENDS -k logged_once"
+check "only the first rejected send is counted" $TRANSPORT $'            self.auth_failures += 1\n            if not self._auth_dead_logged:\n                self._auth_dead_logged = True' $'            if not self._auth_dead_logged:\n                self.auth_failures += 1\n                self._auth_dead_logged = True' "$UNIT" "$SENDS -k logged_once"
 # The other writer, against the real table as svc_worker.
 check "a stranded row is recorded with no time" $OUTBOX '"       last_failed_at = now()"' '"       last_failed_at = NULL"' "$GATE" "$DB -k stranded_row_is_recorded"
 # The doors, mutated in the plan's replayed block and read as svc_ingress.

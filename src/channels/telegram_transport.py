@@ -10,13 +10,14 @@ lesson is fresh and measured (shitpost-alpha, 2026-08-21: production outbound
 dead for an unknown period because a rejected token had no loud surface —
 zero events drained, so nothing alarmed):
 
-- :meth:`TelegramTransport.probe` (`getMe`) runs at composition time; a 401/403
+- :meth:`TelegramTransport.probe` (`getMe`) runs at composition time; a 401
   raises :class:`TelegramAuthDead` and the worker starts WITHOUT the channel,
   parking `deliver_outbox` with the credential named in the reason — a
   recurring warning, not a one-time line.
-- A mid-run 401/403 raises :class:`TelegramAuthDead` per send, increments
+- A mid-run 401 raises :class:`TelegramAuthDead` per send, increments
   `auth_failures` (surfaced in the worker status line), and logs loudly ONCE —
-  a latch, so the log stays readable while the counter keeps counting.
+  a latch, so the log stays readable while the counter keeps counting. A 403
+  is the chat's (:class:`TelegramChatGone`), never the credential's.
 - The bot token never appears in any exception text or log line. The request
   URL embeds it, so every raise path out of the HTTP layer is re-raised with
   the token redacted.
@@ -553,7 +554,8 @@ class TelegramTransport:
 
         Only `TelegramRefused` is caught, and that is the whole point: a
         transport failure may have landed the card, so it propagates for the
-        outbox's ambiguity policy, as does a gone chat and a dead token.
+        outbox's ambiguity policy. A gone chat and a dead token propagate too,
+        and the outbox fails the row on either: neither is a lost answer.
         """
         content, filename, mime = fetched
         try:

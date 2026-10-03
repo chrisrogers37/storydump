@@ -165,9 +165,10 @@ TOKEN_ROLES: tuple[str, ...] = ("operator", "readonly")
 
 #: `channel_outbox.last_failure_class` (101 ``ck_outbox_failure_class``): why a
 #: row's last send failed. `rate_limited` is a 429 (a deferral, never counted as
-#: a failure); `destination_gone` and `refused` are the definitive answers;
-#: `credential_dead` is a dead token's 401; `ambiguous` is a send whose answer
-#: never came back (a timeout, a 5xx, a dead predecessor's stranded row).
+#: a failure); `destination_gone`, `refused` and `credential_dead` (a dead
+#: token's 401) are the definitive answers, which fail the row; `ambiguous` is a
+#: send whose answer never came back (a timeout, a 5xx, a dead predecessor's
+#: stranded row).
 OUTBOX_FAILURE_CLASSES: tuple[str, ...] = (
     "rate_limited",
     "destination_gone",
