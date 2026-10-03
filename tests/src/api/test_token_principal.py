@@ -272,6 +272,7 @@ class TestRequireSession:
             "session_required",
             "readonly_token",
             "wrong_workspace",
+            "not_ops",
         )
         assert tuple(vocabulary.TOKEN_REFUSALS) == tuple(TokenRefused.REASONS)
 

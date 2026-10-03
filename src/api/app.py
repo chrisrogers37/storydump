@@ -55,7 +55,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from src.api.routes.auth import router as auth_router
-from src.api.routes.health import VERSION
+from src.api.routes.health import COMMIT_VAR, VERSION
 from src.api.routes.health import router as health_router
 from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
@@ -79,7 +79,7 @@ from src.services.target.unit_of_work import (
     INGRESS_POOL_TIMEOUT_SEAM,
     PoolWatch,
 )
-from src.services.target.vocabulary import DATABASE_URL_VAR
+from src.services.target.vocabulary import DATABASE_URL_VAR, is_production
 from src.services.target.telegram_dispatch import TelegramDispatcher
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
@@ -192,6 +192,7 @@ _TOKEN_STATUS = {
     "session_required": 403,
     "readonly_token": 403,
     "wrong_workspace": 403,
+    "not_ops": 403,
 }
 
 #: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
@@ -549,12 +550,21 @@ def create_app(
                 if not task.done():
                     task.cancel()
 
+    # No interactive docs and no schema in production: they map every route
+    # for whoever asks, and nothing reads them there (the CLI and the web
+    # know their routes). Every other environment keeps all three.
+    production = is_production(env)
     app = FastAPI(
         title="Storydump API",
         description="Sign-in, reads and commands for the target tier",
         version=VERSION,
         lifespan=_lifespan,
+        docs_url=None if production else "/docs",
+        redoc_url=None if production else "/redoc",
+        openapi_url=None if production else "/openapi.json",
     )
+    # The deployed commit, for `/health` (Railway sets it on a Git deploy).
+    app.state.commit = (env.get(COMMIT_VAR) or "").strip()[:7] or None
     app.state.engine = engine if engine is not None else _engine_from_env(env)
     # Which database login this process holds, and whether it bypasses RLS
     # (#751, F.4). Sampled ONCE, in the background, after startup — `/health`

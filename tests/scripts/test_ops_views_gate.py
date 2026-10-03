@@ -328,6 +328,7 @@ def seeded(world):
                         sub=f"sub-ops-{who}",
                         email=f"ops-{who}@example.test",
                     )
+                    me = await client.get("/api/v1/me/principal", headers=owner)
                     created = await client.post(
                         "/api/v1/workspaces",
                         json={"name": f"Ops {who.upper()}", "tz": "America/New_York"},
@@ -352,6 +353,7 @@ def seeded(world):
                     )
                     state[who] = {
                         "ws": ws,
+                        "user": me.json()["user_id"],
                         "session": owner,
                         "token": minted.json()["secret"],
                         "readonly": readonly.json()["secret"],
@@ -382,6 +384,12 @@ def seeded(world):
     return state
 
 
+@pytest.fixture
+def operator_a(seeded, monkeypatch):
+    """`a`'s person is the deployment's operator: `posture` is theirs alone."""
+    monkeypatch.setattr(api_conftest.settings, "OPS_USER_IDS", seeded["a"]["user"])
+
+
 def _view(client, ws: str, view: str, headers: dict, suffix: str = ""):
     return client.get(f"/api/v1/ops/workspaces/{ws}/{view}{suffix}", headers=headers)
 
@@ -406,7 +414,7 @@ def _foreign(other: dict) -> set:
 
 
 def test_every_view_returns_only_this_workspaces_rows_as_svc_ingress(
-    world, google_configured, seeded
+    world, google_configured, seeded, operator_a
 ):
     a, b = seeded["a"], seeded["b"]
 
@@ -587,7 +595,7 @@ def test_every_view_returns_only_this_workspaces_rows_as_svc_ingress(
 
 
 def test_the_routes_admit_tokens_by_their_scope_and_refuse_strangers(
-    world, google_configured, seeded
+    world, google_configured, seeded, operator_a
 ):
     a, b = seeded["a"], seeded["b"]
 
@@ -619,7 +627,14 @@ def test_the_routes_admit_tokens_by_their_scope_and_refuse_strangers(
             svc_posture = await client.get(
                 "/api/v1/ops/posture", headers=_bearer(b["service"])
             )
-            assert svc_posture.status_code == 200
+            assert (svc_posture.status_code, svc_posture.json()["reason"]) == (
+                403,
+                "not_ops",
+            ), "a service identity has no person, so it is no operator"
+            not_operator = await client.get(
+                "/api/v1/ops/posture", headers=_bearer(b["token"])
+            )
+            assert not_operator.json()["reason"] == "not_ops"
 
             # the Queue read, the CLI's `planned`, admits tokens the same way
             queue = f"/api/v1/workspaces/{a['ws']}/intents"
@@ -715,7 +730,7 @@ def test_the_predicates_confine_rows_even_without_row_level_security(
 
 
 def test_posture_shows_rls_drift_and_every_ledger_state(
-    world, google_configured, seeded
+    world, google_configured, seeded, operator_a
 ):
     """`posture` exists for two facts: a tenant table whose RLS was dropped,
     and the runner's ledger under the runner's grant (F7). A replayed

@@ -164,9 +164,10 @@ def webhook_verdict(health: Any) -> tuple[bool, dict[str, str]]:
 @global_options
 @click.pass_context
 def health(ctx: click.Context) -> int:
-    """The API's three health surfaces — liveness, scheduling, posting — as
-    the API reports them, judged by the fleet monitors' own verdicts (the same
-    `classify` the pollers run): not well when a monitor would page — a cursor
+    """The API's three health surfaces — liveness (the operating details
+    when the token's person is in the API's `OPS_USER_IDS`), scheduling,
+    posting — as the API reports them, judged by the fleet monitors' own verdicts (the same `classify` the
+    pollers run): not well when a monitor would page — a cursor
     stalled past 10 minutes, the worker down, 48 hours of silence, a first post
     overdue past its grace, or a surface unreachable — and the bot's webhook
     from the liveness report: unregistered, or a backlog behind a delivery
@@ -184,7 +185,7 @@ def health(ctx: click.Context) -> int:
       storydump health --json
     """
     runtime = begin(ctx, "health")
-    surfaces = runtime.client(None).health()
+    surfaces = runtime.client(runtime.token()).health()
     verdicts = {
         name: surface_verdict(name, payload) for name, payload in surfaces.items()
     }
@@ -450,14 +451,6 @@ CHECK_CODES: Mapping[str, int] = {
 }
 
 
-def _role_text(role: Any) -> str:
-    """`/health.db_role`: a name, or `{user, bypassrls}` since phase 02."""
-    if isinstance(role, dict):
-        bypass = "bypasses RLS" if role.get("bypassrls") else "under RLS"
-        return f"{role.get('user')} ({bypass})"
-    return str(role) if role else "unknown"
-
-
 def _versions_in(directory: Path) -> Optional[set[int]]:
     """The migration versions in a checkout's ``scripts/migrations``, or None
     outside one."""
@@ -534,7 +527,7 @@ def _check_api(runtime: Any) -> tuple[Rows, bool]:
         checks["api"] = (
             "ok",
             f"{runtime.api_url} — version {health_payload.get('version')},"
-            f" role {_role_text(health_payload.get('db_role'))}",
+            f" commit {health_payload.get('commit') or 'unknown'}",
             "",
         )
     except Unreachable as exc:

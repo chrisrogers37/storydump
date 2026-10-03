@@ -206,11 +206,18 @@ class Client:
         """`/health` alone — liveness, unauthenticated, at the root."""
         return self._request("GET", "/health", root=True)
 
+    def health_details(self) -> dict[str, Any]:
+        """The API's operating details: the token's person must be listed in
+        the API's `OPS_USER_IDS`."""
+        return self._request("GET", "/ops/health")
+
     def health(self) -> dict[str, Any]:
-        """The API's three health surfaces. `/health` must answer; the two
-        dependency-touching surfaces may not (a 503 with no engine), and then
-        the report carries that surface's error rather than losing the rest."""
-        surfaces: dict[str, Any] = {"api": self.health_api()}
+        """The API's liveness and its two axes. The liveness must answer, as
+        the details where this token may read them (`OPS_USER_IDS`), else as
+        public `/health`; the two dependency-touching axes may not (a 503 with
+        no engine), and then the report carries that surface's error rather
+        than losing the rest."""
+        surfaces: dict[str, Any] = {"api": self._liveness()}
         for name, path in (
             ("scheduling", "/health/scheduling"),
             ("posting", "/health/posting"),
@@ -224,6 +231,15 @@ class Client:
                     else exc.detail
                 }
         return surfaces
+
+    def _liveness(self) -> dict[str, Any]:
+        if self.token:
+            try:
+                return self.health_details()
+            except ApiError as exc:
+                if exc.status not in (401, 403):
+                    raise
+        return self.health_api()
 
     def list_my_tokens(self) -> dict[str, Any]:
         return self._request("GET", "/me/tokens")

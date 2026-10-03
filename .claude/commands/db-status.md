@@ -41,6 +41,9 @@ when one is not well — the report is still printed, so read it.
 storydump posture --json
 ```
 
+It needs a token whose person is in the API's `OPS_USER_IDS`; anyone else
+gets `not_ops`.
+
 `data.ledger` is `present`, `absent` or `unreadable`; `data.migrations` is the
 runner's ledger (`version`, `status`, `applied_at`); `data.role` the connected
 login and `bypassrls`; `data.rls` every tenant table with `enabled`/`forced`;

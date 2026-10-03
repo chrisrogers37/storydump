@@ -3,14 +3,14 @@ posting axis (#1090 F1, #1268).
 
 They were the only routes in the app defined inline inside `create_app`; every
 other route in the API lives in a module here and is included as a router, and
-now so do these. Nothing about the payloads moved with them: `storydump health`
-renders these three and two fleet monitors poll them, so a field renamed here is
-a renderer and two pollers broken elsewhere.
+now so do these. `storydump health` renders the two axes and `details` (the
+`OPS_USER_IDS`-only `/api/v1/ops/health`), and two fleet monitors poll the axes, so a
+field renamed here is a renderer and two pollers broken elsewhere.
 
-Each handler reads `request.app.state.*` — the engine, the sampled database
-role, the pool watch, the tap counters and the two webhook reports — rather than
-the factory's closure, which is the whole reason they can live outside it. None
-of them opens a connection for `/health` itself: see its docstring.
+`details` reads `app.state.*` — the engine, the sampled database role, the pool
+watch, the tap counters and the two webhook reports — rather than the factory's
+closure, which is the whole reason these can live outside it. Neither it nor
+`/health` opens a connection: see `/health`'s docstring.
 
 The router carries no `tags=`: these three operations have never had one, and
 `/openapi.json` is a response body like any other.
@@ -36,6 +36,8 @@ from src.services.target.work_loop import WorkerConfig
 #: prints it — all reported a version the deployment had not been for months.
 #: A number that has to be remembered in two places is a number that drifts.
 VERSION = __version__
+#: The commit Railway deployed, which it sets on every Git-triggered deploy.
+COMMIT_VAR = "RAILWAY_GIT_COMMIT_SHA"
 _START_TIME = time.time()
 
 router = APIRouter()
@@ -43,13 +45,25 @@ router = APIRouter()
 
 @router.get("/health")
 async def health_check(request: Request):
-    """Railway's probe. No auth. `target_database` is configuration
-    presence, not liveness — a probe that opened a connection would take
-    the service down for a database blip no restart repairs."""
-    state = request.app.state
+    """Railway's probe. No auth, so it says ok, and which version and commit
+    answer (what a deploy is verified by), and nothing else. It opens no
+    connection — a probe that did would take the service down for a database
+    blip no restart repairs — and the operating details it used to carry
+    (usage counts, the database login, the pool, the bot's webhook) are
+    `details` below, behind `GET /api/v1/ops/health`."""
+    return _public(request.app.state)
+
+
+def _public(state) -> dict:
+    return {"status": "ok", "version": VERSION, "commit": state.commit}
+
+
+def details(state) -> dict:
+    """What the API knows about itself, for the people in `OPS_USER_IDS` (`routes/ops.py`).
+    Read from `app.state`, so it opens no connection either; `target_database`
+    is configuration presence, not liveness."""
     return {
-        "status": "ok",
-        "version": VERSION,
+        **_public(state),
         "uptime_seconds": int(time.time() - _START_TIME),
         "target_database": state.engine is not None,
         "db_role": state.db_role,

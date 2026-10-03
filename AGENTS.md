@@ -237,7 +237,8 @@ client, never a database connection
    bucket, recent outcomes) · `storydump jobs --since 3h` · `storydump outbox --since 3h` ·
    `storydump burst --since 2026-09-15T14:50:00Z` (taps, permits, float
    waits, siblings, review cards, outcomes) · `storydump posture` (the
-   migration ledger, the role, RLS, the doors) · `storydump planned [--state
+   migration ledger, the role, RLS, the doors; for `OPS_USER_IDS` only, like
+   `health`) · `storydump planned [--state
    scheduled,awaiting_approval] [--newest-first]` (the planned stories, soonest
    first: when each is due, its account and item, and who planned it; it takes
    no `--watch`). The guide:
@@ -264,7 +265,9 @@ client, never a database connection
 6. The environment: `storydump health` (the API's three health surfaces,
    judged by the fleet monitors' own verdicts — the `classify` of
    `scripts/scheduling_monitor.py` and `scripts/posting_monitor.py`, imported:
-   not well when a monitor would page; plus the bot's webhook from `/health`;
+   not well when a monitor would page; plus the bot's webhook from the API's
+   operating details, `GET /api/v1/ops/health`, which answers only the user ids
+   in the API's `OPS_USER_IDS` — `storydump whoami` prints yours;
    exit 4 then, the report and each verdict still printed. Two bounds against
    the pollers: one reading has no watch clock, and one unreachable reading
    is reported where the pollers wait for two) · `storydump deploys
@@ -322,9 +325,13 @@ The `Procfile` names the two deployed processes; both run the one tier.
   `TARGET_DATABASE_URL` from the process environment and exits 2 without it
   (`src/worker.py::main`); `make run` exports `.env`, a bare invocation does
   not read it. It receives nothing from Telegram: nothing in `src` polls.
-- **API:** `uvicorn src.api.app:app` → health at `GET /health` (plus
+- **API:** `uvicorn src.api.app:app` → health at `GET /health`, which says ok
+  and the version and commit that answer, nothing else (the details — usage
+  counts, the database login, the pool, the webhook — are
+  `GET /api/v1/ops/health`, for `OPS_USER_IDS` alone; plus
   `/health/scheduling` and `/health/posting`, the surfaces the fleet monitors
-  poll), schema at `/openapi.json`, the resource and command surface under
+  poll), schema at `/openapi.json` (and `/docs`) outside production — Railway's
+  `production` environment publishes neither — the resource and command surface under
   `/api/v1`, sign-in under `/auth`. Telegram's deliveries — `/start` links,
   group joins, a group's move to a supergroup, taps on a card — land here, on
   `POST /webhooks/telegram`. The API registers that webhook on the bot at
