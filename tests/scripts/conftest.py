@@ -317,11 +317,9 @@ async def run_as_worker(
         async with engine.begin() as conn:
             who = (await conn.execute(text("SELECT current_user"))).scalar()
             assert who == "svc_worker", who
-            if not getattr(executor, "owns_transactions", False):
-                await apply_gucs(conn, tenant_id="", actor_kind="system")
-                await executor(conn, job)
-                return
-        await executor(None, job)
+            await apply_gucs(conn, tenant_id="", actor_kind="system")
+            owns = getattr(executor, "owns_transactions", False)
+            await executor(None if owns else conn, job)
 
 
 async def reap_as_worker(owner_dsn: str) -> None:

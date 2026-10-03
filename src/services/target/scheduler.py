@@ -87,7 +87,6 @@ from src.services.target import (
     prompts,
     workspaces,
 )
-from src.services.target.unit_of_work import apply_gucs
 
 
 #: The advisory-lock key the clock elects on. A single fixed key, because there
@@ -544,15 +543,14 @@ async def execute_reap_expired(
 
 
 async def execute_retention_sweep(
-    engine, *, keep_seconds: int, batch: int, budget_seconds: float
+    session_factory, *, keep_seconds: int, batch: int, budget_seconds: float
 ) -> int:
     """The `retention_sweep` executor. Returns rate-counter rows deleted.
 
     Runs ONE `05` retention class, `rate_counters`, through the 059 door
     `fn_retention_batch`. Each call deletes at most *batch* rows in a short
-    transaction of its own (H5); the run keeps calling until a call comes back
-    short or *budget_seconds* is spent, so a backlog drains within a run or
-    two instead of one batch an hour. The other classes the door knows stay
+    transaction of its own from *session_factory* (H5), repeated until a call
+    comes back short or *budget_seconds* is spent. The other classes the door knows stay
     unswept: each changes something a reader relies on (the audit trail, the
     cap ledger's `debited_total`, the M.3 snapshots), so each is its own
     decision (#1327).
@@ -560,10 +558,9 @@ async def execute_retention_sweep(
     stop_at = time.monotonic() + budget_seconds
     total = 0
     while True:
-        async with engine.begin() as conn:
-            await apply_gucs(conn, tenant_id="", actor_kind="system")
+        async with session_factory() as session:
             deleted = (
-                await conn.execute(
+                await session.execute(
                     text(
                         "SELECT fn_retention_batch('rate_counters',"
                         " make_interval(secs => :keep), :batch)"

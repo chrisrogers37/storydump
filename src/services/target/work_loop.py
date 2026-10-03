@@ -416,7 +416,7 @@ def build_registry(deps: WorkerDeps) -> dict:
     @own_transactions
     async def retention_sweep(session, job):
         await scheduler.execute_retention_sweep(
-            deps.engine,
+            lambda: sessions(job),
             keep_seconds=cfg.rate_counters_keep_seconds,
             batch=cfg.retention_batch,
             budget_seconds=cfg.retention_budget_seconds,

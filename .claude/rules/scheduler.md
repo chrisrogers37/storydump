@@ -32,7 +32,8 @@ does.
   `CLOUDINARY_*` trio parks `publish_pipeline` and `reap_transit_assets`; no
   email provider parks `send_email`; `reencrypt_credentials` has no executor
   at all (`work_loop.UNBUILT_KINDS`), and `retention_sweep` runs one `05`
-  retention class only, `rate_counters` (7 d, `scheduler.execute_retention_sweep`).
+  retention class only, `rate_counters` (7 d,
+  `scheduler.execute_retention_sweep`).
   A claimed job of a parked kind is rescheduled alive, attempt restored, every
   `park_seconds` (900 s) — never finalized dead (`work_loop.py:875`).
 - `run` (`:618`) binds the health endpoint before the first database connection,

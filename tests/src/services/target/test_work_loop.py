@@ -23,7 +23,6 @@ from src.models.target.machinery import Job
 from src.services.target import work_loop
 from src.services.target.jobs import JobFenced
 from src.services.target.work_loop import (
-    _UNBUILT_REASON,
     UNBUILT_KINDS,
     Parked,
     WorkerConfig,
@@ -187,17 +186,9 @@ class TestRegistryCoversTheSchema:
             "retention_sweep",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
+        assert unbuilt == set(UNBUILT_KINDS)
         for kind in unbuilt:
             assert isinstance(registry[kind], Parked), f"{kind} should have no executor"
-
-    def test_unbuilt_kinds_is_exactly_the_kinds_parked_for_having_no_executor(self):
-        registry = build_registry(full_deps())
-        parked_unbuilt = {
-            kind
-            for kind, entry in registry.items()
-            if isinstance(entry, Parked) and entry.reason == _UNBUILT_REASON
-        }
-        assert parked_unbuilt == set(UNBUILT_KINDS)
 
 
 class TestSeamAbsenceParksTheDependentKind:

@@ -20,6 +20,7 @@ from src.services.target.work_loop import WorkerConfig
 
 from tests.scripts.conftest import (
     _scratch,
+    execute,
     fetch_all,
     fetch_one,
     replay_advertised_stream,
@@ -43,8 +44,8 @@ NEW = [
 ]
 
 
-@pytest.fixture()
-def sweep_db(admin_conn, owner_actor):
+@pytest.fixture(scope="module")
+def migrated_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
@@ -54,13 +55,6 @@ def sweep_db(admin_conn, owner_actor):
         try:
             chain = seed_workspace_chain(conn, "retention-gate")
             with conn.cursor() as cur:
-                for scope, key, age in OLD + NEW:
-                    cur.execute(
-                        "INSERT INTO rate_counters (scope, key, window_start, count)"
-                        " VALUES (%s, %s, date_trunc('minute', now())"
-                        " - %s::interval, 1)",
-                        (scope, key, age),
-                    )
                 # Rows the door's OTHER classes would take, at any keep.
                 cur.execute(
                     "INSERT INTO daily_post_counts"
@@ -84,6 +78,20 @@ def sweep_db(admin_conn, owner_actor):
         yield dsn
     finally:
         gen.close()
+
+
+@pytest.fixture()
+def sweep_db(migrated_db):
+    """The migrated database with `rate_counters` reset to `OLD + NEW`."""
+    execute(migrated_db, "DELETE FROM rate_counters")
+    for scope, key, age in OLD + NEW:
+        execute(
+            migrated_db,
+            "INSERT INTO rate_counters (scope, key, window_start, count)"
+            " VALUES (%s, %s, date_trunc('minute', now()) - %s::interval, 1)",
+            (scope, key, age),
+        )
+    return migrated_db
 
 
 def _counts(dsn) -> dict:
@@ -129,14 +137,16 @@ def test_the_sweep_deletes_only_rate_counter_rows_older_than_seven_days(
     assert after == before
 
 
-def test_each_call_deletes_at_most_one_batch_and_a_run_drains_the_rest(sweep_db):
-    """With a batch of 2 and 3 aged rows: a run whose time budget is already
-    spent makes ONE call and leaves one aged row; a run with time left keeps
-    calling until a call comes back short, and leaves none."""
+def test_one_call_deletes_at_most_one_batch(sweep_db):
+    """A batch of 2 against 3 aged rows, with the time budget already spent:
+    the run makes ONE call, so one aged row is left."""
     one_call = WorkerConfig(retention_batch=2, retention_budget_seconds=0)
     asyncio.run(run_as_worker(sweep_db, "retention_sweep", config=one_call))
     assert len(_survivors(sweep_db)) == len(NEW) + len(OLD) - 2
 
+
+def test_a_run_keeps_calling_until_a_call_comes_back_short(sweep_db):
+    """The same batch of 2 with time left: the run calls again and drains."""
     drain = WorkerConfig(retention_batch=2)
     asyncio.run(run_as_worker(sweep_db, "retention_sweep", config=drain))
     assert _survivors(sweep_db) == sorted((s, k) for s, k, _ in NEW)

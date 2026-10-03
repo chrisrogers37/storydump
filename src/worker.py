@@ -318,7 +318,6 @@ def compose(
         # that re-opens its mouth. Cadence is the clock's; the per-source
         # bound is `cfg.stranded_alert_after_seconds`.
         "alert_stranded_sources": 6 * 3600.0,
-        # 05 retention: each hourly run drains in bounded batches.
         "retention_sweep": 3600.0,
         # 05: "Reconciler cadence + budget | sweep every 60 s, LIMIT 50".
         # Nothing minted this kind before, so the door shipped in 059 was never
