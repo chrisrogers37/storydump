@@ -32,9 +32,32 @@ function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-title"
-      className={cn("leading-none font-semibold", className)}
+      className={cn("page-title text-base leading-tight", className)}
       {...props}
     />
+  )
+}
+
+/** A number with its kicker label above it and an optional line under it,
+ *  set like the site's stats. The loading skeletons pass Skeletons as the
+ *  three parts, so the placeholders sit where the figures will. */
+function StatCard({
+  label,
+  value,
+  detail,
+}: {
+  label: React.ReactNode
+  value: React.ReactNode
+  detail?: React.ReactNode
+}) {
+  return (
+    <Card data-slot="stat-card" className="gap-2 px-5 py-5">
+      <div className="kicker text-muted-foreground">{label}</div>
+      <div>
+        <div className="page-title text-3xl">{value}</div>
+        {detail && <div className="mt-1 text-xs text-muted-foreground">{detail}</div>}
+      </div>
+    </Card>
   )
 }
 
@@ -86,6 +109,7 @@ export {
   CardHeader,
   CardFooter,
   CardTitle,
+  StatCard,
   CardAction,
   CardDescription,
   CardContent,

@@ -361,7 +361,7 @@ export function GeneralTab({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Workspace</CardTitle>
+          <CardTitle>Workspace</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -390,7 +390,7 @@ export function GeneralTab({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Posting Schedule</CardTitle>
+          <CardTitle>Posting schedule</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-4">
@@ -550,7 +550,7 @@ export function GeneralTab({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Toggles</CardTitle>
+          <CardTitle>Toggles</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {TOGGLES.map((row, i) => {

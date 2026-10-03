@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { callBff, postJson } from "@/lib/bff";
+import { Button } from "@/components/ui/button";
 
 /**
  * The accept control.
@@ -37,15 +38,16 @@ export function AcceptInvitation({ token }: { token: string }) {
 
   return (
     <div className="space-y-3">
-      <button
+      <Button
         type="button"
+        size="lg"
+        className="w-full"
         onClick={accept}
         disabled={pending}
-        className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
       >
         {pending && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
         {pending ? "Joining…" : "Accept invitation"}
-      </button>
+      </Button>
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
