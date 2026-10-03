@@ -131,32 +131,29 @@ async def _preauth_guard(conn, request: Request) -> None:
         raise HTTPException(status_code=429, detail="too many sign-in attempts")
 
 
+def _refuse(path: str, params: dict) -> Response:
+    """A refusal on the front end's *path* — or, without a front end, JSON
+    400 carrying the same params, the first as `detail`."""
+    origin = settings.web_app_origin
+    if origin:
+        return RedirectResponse(f"{origin}{path}?{urlencode(params)}", status_code=302)
+    (_, reason), *rest = params.items()
+    return JSONResponse(status_code=400, content={"detail": reason, **dict(rest)})
+
+
 def _fail(reason: str, *, flow: Optional[str] = None) -> Response:
     """The error page — or JSON 400 without a front end — with the leg named
     when it is not sign-in's."""
     params = {"reason": reason}
     if flow:
         params["flow"] = flow
-    origin = settings.web_app_origin
-    if origin:
-        return RedirectResponse(
-            f"{origin}/auth/error?{urlencode(params)}", status_code=302
-        )
-    content = {"detail": reason}
-    if flow:
-        content["flow"] = flow
-    return JSONResponse(status_code=400, content=content)
+    return _refuse("/auth/error", params)
 
 
 def _not_admitted() -> Response:
     """Sign-up is gated (092): the sign-in page says so and points at the
     waitlist — or JSON 400 without a front end, as `_fail`."""
-    origin = settings.web_app_origin
-    if origin:
-        return RedirectResponse(
-            f"{origin}/login?{urlencode({'error': 'not_admitted'})}", status_code=302
-        )
-    return JSONResponse(status_code=400, content={"detail": "not_admitted"})
+    return _refuse("/login", {"error": "not_admitted"})
 
 
 def _landing(path: str = "/welcome") -> str:

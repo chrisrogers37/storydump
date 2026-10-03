@@ -2774,7 +2774,7 @@ off for a local stack (default: gated).
 `INSERT INTO signup_admissions (email) VALUES ('person@example.com');`. The table is global (no
 workspace): RLS is on, its one policy is `svc_membership`'s read, and the runtime roles hold no
 grant on it, so the door is its only reader and owner-bypass is how the owner writes it. The CHECK
-keeps the stored address lower case, so an admission typed in capitals is refused at the INSERT
+keeps the stored address lower case and trimmed, so an admission typed in capitals or pasted with a space is refused at the INSERT
 rather than silently never matching. The door compares `lower()` on both sides, as
 `fn_invitation_accept` does, and answers one boolean, never which workspace invited the address.
 
@@ -2782,7 +2782,7 @@ rather than silently never matching. The door compares `lower()` on both sides, 
 -- [§35 a new account needs a way in while in beta]
 
 CREATE TABLE signup_admissions (
-  email       text PRIMARY KEY CONSTRAINT ck_signup_admissions_lower CHECK (email = lower(email)),
+  email       text PRIMARY KEY CONSTRAINT ck_signup_admissions_lower CHECK (email = lower(btrim(email))),
   admitted_at timestamptz NOT NULL DEFAULT now(),
   note        text
 );
@@ -2800,7 +2800,7 @@ RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT EXISTS (SELECT 1 FROM signup_admissions a WHERE a.email = lower(p_email))
       OR EXISTS (SELECT 1 FROM workspace_invitations i
-                  WHERE lower(i.email) = lower(p_email)
+                  WHERE i.email = lower(p_email)
                     AND i.state = 'pending' AND i.expires_at > now())
 $$;
 

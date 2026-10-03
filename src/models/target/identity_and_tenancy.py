@@ -243,7 +243,7 @@ class SignupAdmission(TargetBase):
     note = Column(Text, nullable=True)
 
     __table_args__ = (
-        CheckConstraint("email = lower(email)", name="ck_signup_admissions_lower"),
+        CheckConstraint("email = lower(btrim(email))", name="ck_signup_admissions_lower"),
     )
 
 

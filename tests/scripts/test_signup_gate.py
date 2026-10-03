@@ -138,11 +138,14 @@ class TestTheAdmissionsTable:
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             _one(world[login], "SELECT count(*) FROM signup_admissions")
 
-    def test_an_address_in_capitals_is_refused_at_the_insert(self, world):
+    @pytest.mark.parametrize("typed", ["Shout@Example.com", "pasted@example.com "])
+    def test_an_address_in_capitals_or_with_a_space_is_refused_at_the_insert(
+        self, world, typed
+    ):
         with pytest.raises(psycopg2.errors.CheckViolation):
             _one(
                 world["owner"],
-                "INSERT INTO signup_admissions (email) VALUES ('Shout@Example.com')"
+                f"INSERT INTO signup_admissions (email) VALUES ('{typed}')"
                 " RETURNING email",
             )
 

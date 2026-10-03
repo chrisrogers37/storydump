@@ -356,7 +356,7 @@
       "ordinal": 32
     },
     {
-      "sha256": "02c76dbc60a8a018566c5da4ec02322428bbfb084204fe82c7c0e9cd2622a984",
+      "sha256": "44c90c532636d957df4fa50a4c762a39129cd0e2e23953952c4895527ba4b0a1",
       "class": "normative",
       "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
       "doc": "07-security-model.md",

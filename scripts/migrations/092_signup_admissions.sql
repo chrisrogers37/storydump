@@ -12,8 +12,9 @@
 -- signup_admissions is global, not tenant-plane: it has no workspace. The owner admits someone
 -- with one INSERT as the database owner, which owner-bypass lets through; RLS is on and the one
 -- policy is svc_membership's read, so the runtime roles, which hold no grant here, read nothing,
--- and the door is the only reader. The CHECK keeps the stored address lower case, so an admission
--- typed in capitals is refused at the INSERT rather than silently never matching.
+-- and the door is the only reader. The CHECK keeps the stored address lower case and trimmed, so
+-- an admission typed in capitals or pasted with a space is refused at the INSERT rather than
+-- silently never matching.
 --
 -- fn_signup_admitted reads two tables svc_membership already reads or is granted here: this one
 -- and workspace_invitations (058's row-open p_member_invites). It answers one boolean about one
@@ -29,7 +30,7 @@
 -- runner:postcondition SELECT has_table_privilege('svc_membership', 'signup_admissions', 'SELECT')
 
 CREATE TABLE signup_admissions (
-  email       text PRIMARY KEY CONSTRAINT ck_signup_admissions_lower CHECK (email = lower(email)),
+  email       text PRIMARY KEY CONSTRAINT ck_signup_admissions_lower CHECK (email = lower(btrim(email))),
   admitted_at timestamptz NOT NULL DEFAULT now(),
   note        text
 );
@@ -47,7 +48,7 @@ RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT EXISTS (SELECT 1 FROM signup_admissions a WHERE a.email = lower(p_email))
       OR EXISTS (SELECT 1 FROM workspace_invitations i
-                  WHERE lower(i.email) = lower(p_email)
+                  WHERE i.email = lower(p_email)
                     AND i.state = 'pending' AND i.expires_at > now())
 $$;
 
