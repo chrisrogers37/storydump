@@ -1,5 +1,5 @@
 /**
- * `DELETE /api/me/telegram` — the person's own Telegram unlink (094, `07` §37).
+ * `DELETE /api/me/telegram` — the person's own Telegram unlink (099, `07` §42).
  *
  * Pinned: no session reaches nothing; the call is a DELETE at `/me/telegram`;
  * only an outcome the API names is confirmed; a refusal (`last_identity`) is

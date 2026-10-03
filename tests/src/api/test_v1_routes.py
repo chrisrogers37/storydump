@@ -849,7 +849,7 @@ class TestTelegramLink:
 
 class TestTelegramUnlink:
     """`DELETE /me/telegram` — the signed-in user removes their own Telegram
-    identity (094, `07` §37). Tenant-less; the door's outcome is the answer,
+    identity (099, `07` §42). Tenant-less; the door's outcome is the answer,
     and `last_identity` is the one refusal."""
 
     URL = "/api/v1/me/telegram"

@@ -9,8 +9,8 @@ tokens a removed admin made kept reading the workspace.
 Both doors run here as the production role (`svc_ingress`) on the replayed
 advertised stream, and the removal runs through `workspaces.remove_member`, the
 service the command port calls, so the token half is proven in the same
-transaction the API uses. 093 adds the invitations the removed member sent: the
-door revokes the pending ones in that same transaction.
+transaction the API uses. 098 adds the invitations the removed member sent: the
+service revokes the pending ones in that same transaction.
 """
 
 from __future__ import annotations
@@ -194,7 +194,7 @@ def _admitted(world, email: str) -> bool:
 
 
 def test_the_removed_members_pending_invitations_are_revoked_with_them(world):
-    """093 (`07` §36): what the removed admin sent and nobody has used yet is
+    """098 (`07` §41): what the removed admin sent and nobody has used yet is
     revoked in the removal's transaction, so it neither admits a new account
     (`fn_signup_admitted`) nor can be accepted; the owner's invitation and the
     removed admin's already-accepted one are left as they were."""

@@ -100,6 +100,23 @@ async def accept(executor, *, token: str, user_id: str, channel: str) -> dict[st
     return {"workspace_id": str(row[0]), "role": row[1], "matched": bool(row[2])}
 
 
+async def revoke_sent_by(executor, *, workspace_id: str, user_id: str) -> int:
+    """Revoke the pending invitations *user_id* sent in *workspace_id* — what
+    a removal does to the invitations the removed member left behind
+    (`workspaces.remove_member`, in the removal's transaction). A revoked
+    invitation neither admits a new account (`fn_signup_admitted`) nor passes
+    the accept door. Returns how many moved."""
+    result = await executor.execute(
+        text(
+            "UPDATE workspace_invitations SET state = 'revoked'"
+            " WHERE workspace_id = :ws AND invited_by_user_id = :u"
+            "   AND state = 'pending'"
+        ),
+        {"ws": str(workspace_id), "u": str(user_id)},
+    )
+    return result.rowcount
+
+
 async def create(
     executor,
     *,

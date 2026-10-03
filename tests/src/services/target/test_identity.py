@@ -4,7 +4,7 @@ its user only when `fn_signup_admitted` admits its verified email, and
 `signup_open` skips the ask. The door's own answers are
 `tests/scripts/test_signup_gate.py`'s, as `svc_ingress` on the replayed schema.
 
-`identity.unlink_telegram` (094, `07` §37) likewise: it asks the
+`identity.unlink_telegram` (099, `07` §42) likewise: it asks the
 `fn_identity_unlink` door and retires the user's live `link` states unless the
 door kept the identity; the door's answers are `test_identity_unlink_gate.py`'s.
 """

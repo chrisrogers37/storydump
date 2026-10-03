@@ -92,7 +92,7 @@ export type TelegramUnlinkResult =
   | { ok: false; error: string; status: number };
 
 /**
- * Remove the signed-in user's own Telegram identity (094, `07` §37). Nothing
+ * Remove the signed-in user's own Telegram identity (099, `07` §42). Nothing
  * linked answers ok too: the account ends with no Telegram either way.
  */
 export async function unlinkTelegram(): Promise<TelegramUnlinkResult> {

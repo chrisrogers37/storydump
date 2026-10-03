@@ -1,5 +1,5 @@
--- Migration 094: a person can unlink their own Telegram identity. Appended to the advertised
--- stream as `07` §37.
+-- Migration 099: a person can unlink their own Telegram identity. Appended to the advertised
+-- stream as `07` §42.
 --
 -- THERE WAS NO WAY BACK FROM A LINK. A user links Telegram from Settings (the `link` state, `07`
 -- §2), and uq_user_provider then holds one Telegram identity per user, so a person who linked
@@ -63,7 +63,7 @@ BEGIN
 END $$;
 
 COMMENT ON FUNCTION fn_identity_unlink(uuid, text) IS
-  'A person unlinks their own Telegram identity (094). Removes the user''s telegram row in '
+  'A person unlinks their own Telegram identity (099). Removes the user''s telegram row in '
   'user_identities only while the user keeps another identity; refuses any other provider by '
   'raising. Memberships are untouched. p_user is the caller''s session user — the caller proves '
   'the person, this door trusts it. Outcomes: unlinked, not_linked, last_identity. SECURITY '

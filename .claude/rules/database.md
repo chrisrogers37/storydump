@@ -77,7 +77,7 @@ pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
   `post_intent_transitions` is read-only reference data (`:182`), and
   `signup_admissions` (092) is global and readable only through
   `fn_signup_admitted`: the runtime roles hold no grant on it. A
-  `user_identities` row is deleted only by `fn_identity_unlink` (094), a
+  `user_identities` row is deleted only by `fn_identity_unlink` (099), a
   person removing their own Telegram identity.
 - The runtime roles are `svc_ingress` (API) and `svc_worker`; cross-tenant work
   goes through `SECURITY DEFINER` doors owned by `svc_claim`, `svc_clock`,

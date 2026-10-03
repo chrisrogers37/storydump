@@ -70,7 +70,7 @@ async def upsert_google_identity(
     A subject seen before signs in whatever *signup_open* says. A NEW one
     creates its user only when `fn_signup_admitted` admits its email — an
     owner admission or a live invitation addressed to it (092) from an active
-    workspace whose owner or admin still sent it (093) — and is
+    workspace whose owner or admin still sent it (098) — and is
     refused with `SignupNotAdmitted` otherwise, a None email included.
     *signup_open* (`TARGET_SIGNUP_OPEN`) skips that ask.
     """
@@ -364,7 +364,7 @@ async def link_identity(
     ).first()
     if mine is not None:
         # `uq_user_provider`. Replacing it would silently unlink the old
-        # account; the person unlinks it first (`unlink_telegram`, 094).
+        # account; the person unlinks it first (`unlink_telegram`, 099).
         raise IdentityAlreadyLinked("user_already_has_this_provider")
 
     await executor.execute(
@@ -381,9 +381,9 @@ async def link_identity(
 async def unlink_telegram(executor, *, user_id: str) -> str:
     """Remove *user_id*'s own Telegram identity — the reverse of
     :func:`link_identity`. Returns the door's outcome: `unlinked`,
-    `not_linked` or `last_identity` (094, `07` §37).
+    `not_linked` or `last_identity` (099, `07` §42).
 
-    The delete is the `fn_identity_unlink` door's (094): no runtime role
+    The delete is the `fn_identity_unlink` door's (099): no runtime role
     deletes from `user_identities`, and the door keeps the user's other
     identity, answering `last_identity` rather than leave an account with no
     way to sign in. The caller proves the person — this is the session's user.

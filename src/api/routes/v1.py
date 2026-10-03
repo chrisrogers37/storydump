@@ -325,8 +325,8 @@ async def telegram_link(
 async def telegram_unlink(
     request: Request, principal: Principal = Depends(require_session)
 ):
-    """The signed-in user removes their own Telegram identity (094, `07`
-    §37). Tenant-less, like the link it reverses. Idempotent: with nothing
+    """The signed-in user removes their own Telegram identity (099, `07`
+    §42). Tenant-less, like the link it reverses. Idempotent: with nothing
     linked the answer is `not_linked`, still 200. The one refusal is
     `last_identity` (409) — the Telegram identity is the account's only one,
     and removing it would leave no way to sign in. Memberships stay; that

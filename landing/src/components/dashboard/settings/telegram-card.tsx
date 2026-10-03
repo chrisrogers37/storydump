@@ -113,7 +113,7 @@ export function TelegramCard({
   }
 
   /**
-   * Remove the person's own Telegram identity (094, `07` §37), after the
+   * Remove the person's own Telegram identity (099, `07` §42), after the
    * confirm step has said what it costs. Memberships stay; the API keeps an
    * identity that is the account's only one and says so.
    */

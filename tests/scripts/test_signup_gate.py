@@ -7,7 +7,7 @@ unexpired invitation is addressed to it. It runs here as the production role
 upsert that asks it, so the bound parameter's type is the real one too. The
 admissions are seeded as the schema owner, the way the owner admits someone.
 
-093 (`07` §36) holds the invitation branch to the invitation's standing, read
+098 (`07` §41) holds the invitation branch to the invitation's standing, read
 live: it counts only from an `active` workspace whose owner or admin still sent
 it, so a removed or demoted inviter, a suspended workspace and an invitation
 with no recorded inviter admit nobody new.
@@ -59,7 +59,7 @@ INVITATIONS = {
 LIVE = {"live@example.com", "Mixed@Example.com"}
 
 #: (address, who sent it) for each pending, unexpired invitation whose
-#: standing 093 judges. The owner sent every invitation above.
+#: standing 098 judges. The owner sent every invitation above.
 SENT_BY = {
     "from-admin@example.com": "admin",
     "from-removed@example.com": "removed",
@@ -183,7 +183,7 @@ class TestTheDoor:
 
     @pytest.mark.parametrize("email", [e for e in SENT_BY if e not in STANDING])
     def test_an_invitation_that_lost_its_standing_lets_nobody_in(self, world, email):
-        """093: the inviter was removed or demoted, the workspace is suspended,
+        """098: the inviter was removed or demoted, the workspace is suspended,
         or nobody is recorded as the inviter — the invitation is pending and
         unexpired, and still admits no new account."""
         assert _admitted(world, email) is False

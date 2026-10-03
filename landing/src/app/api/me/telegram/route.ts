@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { passThrough, refuseCrossSite, requireSessionToken } from "@/lib/route-guards";
 import { targetFetch } from "@/lib/target-api";
 
-/** The API's answers to an unlink (094, `07` §37); `last_identity` is a 409. */
+/** The API's answers to an unlink (099, `07` §42); `last_identity` is a 409. */
 const UNLINK_OUTCOMES = new Set(["unlinked", "not_linked"]);
 
 /**

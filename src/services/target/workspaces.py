@@ -45,6 +45,7 @@ from src.services.target import vocabulary
 from src.services.target import (
     google_drive_oauth,
     identity,
+    invitations,
     offboarding,
     readers,
     service_tokens,
@@ -785,8 +786,8 @@ async def remove_member(
     non-member is `not_found`. The removal is recorded by the door, so the
     Telegram join path cannot re-add the person until they are invited back,
     and the workspace service identities they minted are revoked here, in the
-    same transaction (090). The door also revokes the pending invitations they
-    sent in the workspace (093)."""
+    same transaction (090), as are the pending invitations they sent in the
+    workspace, so none of them lets anyone in."""
     row = (
         await executor.execute(
             text(
@@ -801,6 +802,9 @@ async def remove_member(
         # The door recorded the removal, so the Telegram group cannot undo it
         # (090); the service identities this person minted go with them.
         await service_tokens.revoke_minted_by(
+            executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
+        await invitations.revoke_sent_by(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
         )
         return str(row[1])

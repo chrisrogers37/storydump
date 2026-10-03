@@ -413,13 +413,13 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 092 appends §35, a new account needs a way in: the owner's
             # admissions and the door the sign-in upsert asks (2026-10-02).
             "092_signup_admissions.sql",
-            # 093 appends §36, an invitation admits only while it is
+            # 098 appends §41, an invitation admits only while it is
             # legitimate: the sign-up door reads the inviter and workspace
             # live, and a removal revokes the removed member's invitations.
-            "093_invitations_admit_while_legitimate.sql",
-            # 094 appends §37, a person can unlink their own Telegram
+            "098_invitations_admit_while_legitimate.sql",
+            # 099 appends §42, a person can unlink their own Telegram
             # identity: the door and svc_membership's delete behind it.
-            "094_identity_unlink.sql",
+            "099_identity_unlink.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
