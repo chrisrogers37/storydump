@@ -8,7 +8,6 @@ Set these in **Vercel → Project Settings → Environment Variables**:
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `DATABASE_URL` | Server | Neon connection string for the ONE table the landing app owns: the marketing waitlist (`landing/src/lib/schema.ts`, Drizzle; `landing/src/lib/db.ts`). No Python migration manages it |
 | `TARGET_API_URL` (or `BACKEND_URL`) | Server | The API's base URL, called by the server-side client (`landing/src/lib/target-api.ts:31`: `TARGET_API_URL` wins, then `BACKEND_URL`, then `http://localhost:8000`) |
 | `TELEGRAM_BOT_TOKEN` | Server | The bot that posts WAITLIST-SIGNUP notifications (`landing/src/lib/telegram.ts`). This is the landing app's own variable: the API and the worker read the product bot's token under another name, `TARGET_TELEGRAM_BOT_TOKEN` |
 | `ADMIN_TELEGRAM_CHAT_ID` | Server | The chat that receives those notifications |
@@ -21,10 +20,10 @@ nothing under `landing/src` reads `JWT_SECRET` or `NEXT_PUBLIC_SITE_URL` any mor
 `landing/.env.local.example` names neither (`tests/test_landing_env_example.py` keeps the example
 file and the reads in agreement both ways).
 
-The waitlist table is created by drizzle-kit, not by any Python migration: `npm run db:push`
-(or `db:generate` + `db:migrate`) in `landing/`, against the `DATABASE_URL` that
-`landing/drizzle.config.ts` reads; `scripts/migrations/NOTE_waitlist_table.md` says the same from
-the runner's side.
+The landing app holds no database credential. The waitlist form's server route
+(`landing/src/app/api/waitlist/route.ts`) hands the address to the API's `POST /public/waitlist`
+over `TARGET_API_URL`, and the API writes `waitlist_entries` (migration 100). A `DATABASE_URL`
+left over in the Vercel project is read by nothing and can be deleted.
 
 ### Client vs Server Variables
 
@@ -34,6 +33,7 @@ the runner's side.
 ### Common Issues
 
 - **Dashboard API calls fail**: `TARGET_API_URL` / `BACKEND_URL` is missing or wrong, or the Railway API service is down. On Vercel it must be the API's public origin (`https://api.storydump.app` in production); the example file's `http://localhost:8000` is the laptop value.
+- **The waitlist form answers "Something went wrong"**: the function log has a `waitlist signup failed:` line with the API's status and reason. `target_router_unreachable` means `TARGET_API_URL` is wrong or the API is down; `http_429` means the API's per-caller limit (30 a minute) was reached.
 - **A waitlist signup saves but no Telegram notification arrives**: `TELEGRAM_BOT_TOKEN` or `ADMIN_TELEGRAM_CHAT_ID` is missing — the notifier logs "Telegram notification skipped" and returns (`landing/src/lib/telegram.ts:5-10`) — or the bot is not a member of that chat.
 - **The site's Telegram links are missing**: `NEXT_PUBLIC_TELEGRAM_BOT_NAME` is unset (a client variable: set it, then rebuild).
   A rebuild is a dashboard **Redeploy** with **Use project's Ignore Build Step** unchecked (see **Ignored Build Step** below).

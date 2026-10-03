@@ -11,7 +11,9 @@ export async function notifyAdmin(email: string): Promise<void> {
 
   const message = `New waitlist signup!\n\nEmail: ${email}\nTime: ${new Date().toISOString()}`
 
-  await fetch(
+  // Plain text (no parse_mode), so a visitor's address cannot format the
+  // message, and no link preview for a URL-shaped one.
+  const response = await fetch(
     `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
     {
       method: "POST",
@@ -19,7 +21,13 @@ export async function notifyAdmin(email: string): Promise<void> {
       body: JSON.stringify({
         chat_id: ADMIN_CHAT_ID,
         text: message,
+        link_preview_options: { is_disabled: true },
       }),
     }
   )
+  if (!response.ok) {
+    // Telegram's refusal (a rate limit, a bad chat id) is logged by status
+    // alone: its body is not quoted and the token never reaches a log.
+    console.error("waitlist admin ping refused:", response.status)
+  }
 }
