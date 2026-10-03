@@ -78,7 +78,7 @@ export default async function WelcomePage() {
     <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4 py-16">
       <div className="w-full max-w-md space-y-8">
         <div className="space-y-3">
-          <h1 className="text-3xl font-bold tracking-tight">
+          <h1 className="page-title text-3xl">
             {name ? `Welcome, ${name}.` : "Welcome."}
           </h1>
           <p className="text-muted-foreground">

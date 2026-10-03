@@ -43,7 +43,7 @@ export default async function JoinPage({
     <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4 py-16">
       <div className="w-full max-w-sm space-y-6">
         <div className="space-y-2 text-center">
-          <h1 className="text-2xl font-bold tracking-tight">
+          <h1 className="page-title text-2xl">
             You have been invited.
           </h1>
           <p className="text-sm text-muted-foreground">

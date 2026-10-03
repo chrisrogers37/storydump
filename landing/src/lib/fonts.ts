@@ -1,21 +1,15 @@
 import { Bricolage_Grotesque } from "next/font/google"
 
-// The marketing headlines. next/font downloads it at build time and serves it
-// from this site, so a visitor's browser never contacts Google. Applied by the
-// marketing layout, the 404 page and sign-in, not the root layout, so the app
-// pages don't fetch it.
+// The site's headings. next/font downloads it at build time and serves it from
+// this site, so a visitor's browser never contacts Google. Applied by the root
+// layout, so the marketing site, sign-in and the app share it.
+//
+// One instance, "swap". There used to be an "optional" copy for the home H1
+// beside a "swap" copy for the 404 page (which gets no font preload, so
+// "optional" left its headline in the fallback). Both declare the same family
+// in the same global stylesheet, so the later "swap" rules won on every page
+// anyway; this states what the site was already doing.
 export const bricolage = Bricolage_Grotesque({
-  variable: "--font-bricolage",
-  subsets: ["latin"],
-  weight: "800",
-  // The H1 is the home page's largest paint. "optional" lets the metric-
-  // matched fallback stand if the font is late, rather than repainting it.
-  display: "optional",
-})
-
-// The 404 page gets no font preload from Next, so "optional" would leave its
-// headline in the fallback on a first visit; this copy swaps the font in.
-export const bricolageSwap = Bricolage_Grotesque({
   variable: "--font-bricolage",
   subsets: ["latin"],
   weight: "800",

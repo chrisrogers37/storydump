@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { siteConfig } from "@/config/site";
+import { BrandMark } from "@/components/layout/brand-mark";
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -56,7 +57,8 @@ export function Sidebar({ mobile }: { mobile?: boolean }) {
     // content; a drawer is the better affordance there (#1363).
     <aside className={mobile ? "w-56 bg-card" : "hidden w-56 shrink-0 border-r bg-card lg:block"}>
       <div className="flex h-14 items-center border-b px-4">
-        <Link href="/dashboard" className="text-lg font-semibold tracking-tight">
+        <Link href="/dashboard" className="page-title flex items-center gap-2 text-lg">
+          <BrandMark />
           {siteConfig.name}
         </Link>
       </div>

@@ -4,7 +4,6 @@ import { ArrowLeft } from "lucide-react";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
 import { siteConfig } from "@/config/site";
 import { noindexMetadata } from "@/lib/seo";
-import { bricolage } from "@/lib/fonts";
 import { BrandMark } from "@/components/layout/brand-mark";
 import { NEW_HERE, WAITLIST_HREF } from "./content";
 import { LoginNotice } from "./login-notice";
@@ -40,7 +39,7 @@ export const metadata = {
  */
 export default function LoginPage() {
   return (
-    <main className={`${bricolage.variable} flex min-h-svh flex-col items-center justify-center bg-background px-4 font-sans`}>
+    <main className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm space-y-6">
         <Link
           href="/"
@@ -51,7 +50,7 @@ export default function LoginPage() {
         </Link>
 
         <div className="space-y-2 text-center">
-          <h1 className="flex items-center justify-center gap-2 font-display text-3xl font-extrabold tracking-[-0.03em] text-ink">
+          <h1 className="flex items-center justify-center gap-2 page-title text-3xl text-ink">
             <BrandMark className="size-7" />
             {siteConfig.name}
           </h1>

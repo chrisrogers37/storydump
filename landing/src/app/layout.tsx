@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import Script from "next/script"
 import { Geist, Geist_Mono } from "next/font/google"
 import { siteConfig } from "@/config/site"
+import { bricolage } from "@/lib/fonts"
 import { homeSocial } from "@/lib/seo"
 import "./globals.css"
 
@@ -54,7 +55,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} ${bricolage.variable} antialiased`}
       >
         {children}
         {/* An invite link's path is the invitation token, a bearer credential

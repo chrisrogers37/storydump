@@ -17,7 +17,7 @@ export function Header() {
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4">
         <Link
           href="/"
-          className="flex shrink-0 items-center gap-2 pr-2 font-display text-lg font-extrabold tracking-[-0.03em] text-ink sm:pr-0 sm:text-xl"
+          className="flex shrink-0 items-center gap-2 pr-2 page-title text-lg text-ink sm:pr-0 sm:text-xl"
         >
           <BrandMark />
           {siteConfig.name}

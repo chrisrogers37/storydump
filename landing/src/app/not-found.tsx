@@ -2,7 +2,6 @@ import type { Metadata } from "next"
 import Link from "next/link"
 import { Header } from "@/components/layout/header"
 import { Footer } from "@/components/layout/footer"
-import { bricolageSwap as bricolage } from "@/lib/fonts"
 
 export const metadata: Metadata = {
   title: "Page not found",
@@ -18,7 +17,7 @@ export const metadata: Metadata = {
  */
 export default function NotFound() {
   return (
-    <div className={`${bricolage.variable} flex min-h-svh flex-col font-sans`}>
+    <div className="flex min-h-svh flex-col">
       <Header />
       <main id="main" className="flex-1 bg-paper">
         <div className="mx-auto max-w-3xl px-4 py-24 md:py-32">

@@ -57,7 +57,7 @@ export default async function WorkspacesPage() {
   return (
     <Shell>
       <div className="space-y-2">
-        <h1 className="text-2xl font-bold tracking-tight">Workspaces</h1>
+        <h1 className="page-title text-2xl">Workspaces</h1>
         <p className="text-sm text-muted-foreground">
           Each workspace has its own media, schedule and connected accounts.
         </p>

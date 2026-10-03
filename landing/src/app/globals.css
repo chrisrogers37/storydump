@@ -115,7 +115,7 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background font-sans text-foreground;
   }
 }
 
@@ -132,6 +132,12 @@
 
 @utility section-title {
   @apply font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.035em] text-ink sm:text-5xl md:text-[4.25rem];
+}
+
+/* The display face as the app's page headings use it; the size is set
+   where it is used. */
+@utility page-title {
+  @apply font-display font-extrabold tracking-[-0.03em];
 }
 
 /* The hero demo's Story progress bar. */
