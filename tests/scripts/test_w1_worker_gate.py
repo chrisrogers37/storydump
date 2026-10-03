@@ -634,7 +634,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
 
 class TestTheBackpressureSignalOnRealRows:
     """Phase 3a step 6: the four statements behind the status line and
-    `/health/scheduling`, run against seeded rows — the unit test only
+    the operating details (`/api/v1/ops/health`), run against seeded rows — the unit test only
     proves the shape."""
 
     async def test_depth_age_pending_hold_and_oldest_wait_read_true(

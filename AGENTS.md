@@ -328,7 +328,7 @@ The `Procfile` names the two deployed processes; both run the one tier.
   not read it. It receives nothing from Telegram: nothing in `src` polls.
 - **API:** `uvicorn src.api.app:app` → health at `GET /health`, which says ok
   and the version and commit that answer, nothing else (the details — usage
-  counts, the database login, the pool, the webhook — are
+  counts, the database login, the pool, the webhook, the queue — are
   `GET /api/v1/ops/health`, for `OPS_USER_IDS` alone; plus
   `/health/scheduling` and `/health/posting`, the surfaces the fleet monitors
   poll), schema at `/openapi.json` (and `/docs`) only when started with

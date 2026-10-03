@@ -10,9 +10,10 @@ field renamed here is a renderer and two pollers broken elsewhere.
 `details` reads `app.state.*` — the engine, the sampled database role, the pool
 watch, the tap counters and the two webhook reports — rather than the factory's
 closure, which is the whole reason these can live outside it. Neither it nor
-`/health` opens a connection: see `/health`'s docstring.
-`/health/scheduling` and `/health/posting` do, so each reuses its last answer
-for `HEALTH_CACHE_SECONDS` (`AnswerCache`, one per app on `app.state`).
+`/health` opens a connection: see `/health`'s docstring. `/health/scheduling`,
+`/health/posting` and the operating details' queue read (`queue_pressure`) do,
+so each reuses its last answer for `HEALTH_CACHE_SECONDS` (`AnswerCache`, one
+per app on `app.state`).
 
 The router carries no `tags=`: these three operations have never had one, and
 `/openapi.json` is a response body like any other.
@@ -21,11 +22,12 @@ The router carries no `tags=`: these three operations have never had one, and
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from datetime import datetime, timezone
 from types import TracebackType
 
 from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy.exc import SQLAlchemyError
 
 from src import __version__
 from src.services.target import backpressure, posting_health, scheduling_health
@@ -44,14 +46,21 @@ VERSION = __version__
 COMMIT_VAR = "RAILWAY_GIT_COMMIT_SHA"
 _START_TIME = time.time()
 
-#: How long `/health/scheduling` and `/health/posting` reuse their last answer.
-#: Both are unauthenticated and each answer takes a connection from the API's
+#: How long `/health/scheduling`, `/health/posting` and the operating details'
+#: queue read reuse their last answer. The first two are unauthenticated and
+#: each answer takes a connection from the API's
 #: shared pool, so without this anyone could drain the pool the webhook needs
 #: by polling them. The fleet monitors poll far less often than this, and every
 #: number in the payloads is an age or a count that moves on a scale of minutes.
 HEALTH_CACHE_SECONDS = 30.0
 
+#: How long the operating details wait for the queue's read before naming it a
+#: `TimeoutError`: a database that stops answering hangs a connect for the
+#: driver's own minute, and the rest of the details need no database at all.
+QUEUE_READ_TIMEOUT_S = 3.0
+
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class AnswerCache:
@@ -134,6 +143,34 @@ def details(state) -> dict:
     }
 
 
+async def operating_details(state) -> dict:
+    """`details`, and the queue's backpressure (phase 3a step 6): the ready
+    lanes, the pending outbox and the Telegram pacing, without the waiting
+    workspace's id. The queue is the one part that opens a connection, so it
+    reuses its last answer like the public axes (`health_cache`), is None
+    without an engine, and names a failed or slow read (`QUEUE_READ_TIMEOUT_S`)
+    rather than failing or holding up the rest."""
+    return {**details(state), "backpressure": await queue_pressure(state)}
+
+
+async def queue_pressure(state) -> dict | None:
+    if state.engine is None:
+        return None
+
+    async def read():
+        try:
+            return await asyncio.wait_for(
+                backpressure.read(state.engine, WorkerConfig()), QUEUE_READ_TIMEOUT_S
+            )
+        except (SQLAlchemyError, OSError, asyncio.TimeoutError, TimeoutError) as exc:
+            # a database that refused, failed or did not answer: a report,
+            # never a failed read; anything else is a bug and raises
+            logger.warning("queue pressure not read: %r", exc)
+            return {"error": type(exc).__name__}
+
+    return await state.health_cache.answer("backpressure", read)
+
+
 @router.get("/health/scheduling")
 async def scheduling_health_check(request: Request):
     """Is scheduling still advancing? (#1090 F1) — a SECOND health surface,
@@ -198,17 +235,10 @@ async def scheduling_health_check(request: Request):
             # predating this change reads the payload exactly as before.
             lag = await scheduling_health.scheduling_lag(conn)
             worker = await scheduling_health.worker_freshness(conn)
-            # The backpressure signal (phase 3a step 6): the same numbers the
-            # worker's status line prints, for the poller that watches this —
-            # without the waiting workspace's id (this route is public and
-            # promises nothing identifying; `identify` stays False).
-            pressure = await backpressure.snapshot(
-                conn,
-                now=datetime.now(timezone.utc),
-                global_limit=WorkerConfig().global_limit,
-                global_window_seconds=WorkerConfig().global_window_seconds,
-            )
-            return {**lag, "worker": worker, "backpressure": pressure}
+            # Exactly what `scripts/scheduling_monitor.py` reads, and nothing
+            # else: the queue's backpressure moved to the operating details
+            # (`queue_pressure`), which no monitor has ever read.
+            return {**lag, "worker": worker}
 
     return await request.app.state.health_cache.answer("scheduling", read)
 
