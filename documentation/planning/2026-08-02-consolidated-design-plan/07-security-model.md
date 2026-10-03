@@ -72,7 +72,7 @@ RLS class: `session_tokens`, `oauth_states`, and `service_tokens` are **auth-pla
 - **Issuance, by purpose.** `connect`/`reconnect`: only from an authenticated session whose user holds admin+ in `workspace_id` (checked at issue AND at callback — the row pins both, so a callback cannot be replayed into a different workspace). `link`: only from an authenticated session; the row pins the user, and the callback attaches the new identity to exactly that user (D35). `signin`: anonymous — that is its purpose; its guards are the next bullet plus the `preauth_ip` admission (§1). `bind` — an admin's session, at the admin floor of the pinned workspace, and only after that admin has linked their own Telegram (§13).
 - **Anonymous-state CSRF (`signin` — the replacement for session binding):** the issue response sets a short-TTL httpOnly cookie carrying a random nonce and stores its hash in `cookie_nonce_hash`; the callback requires the double-submit (cookie present, hash matches the row) — a cross-site victim's browser would carry no matching cookie for an attacker-supplied state. The id_token is additionally bound to the row via the OIDC `nonce` claim: the authorization request sends `nonce = SHA256(state)`, and verification requires the claim to equal the hash of the state the callback presented — a token minted for one state row cannot be replayed against another. Everything else — one-shot CAS consume, TTL, reaper — is the same machinery every purpose uses.
 - Callback consume is one-shot CAS (`… WHERE state = :s AND consumed_at IS NULL AND expires_at > now() RETURNING …`); a consumed/expired/unknown state is rejected cold. For session-bound purposes CSRF safety comes from the state being unguessable, single-use, and session-bound; for `signin` it comes from the cookie-nonce + OIDC-nonce pair above.
-- **The start-token door (one door, two named purposes — D33/D35):** the Telegram deep link `t.me/<bot>?start=<payload>` serves two flows, kept apart by a payload prefix that names the purpose. `inv-<token>` resolves **only** against `workspace_invitations.token_hash` (membership — `02` §1, `06` §2); `link-<state>` resolves **only** against `oauth_states` rows with `purpose='link', provider='telegram'` — the state value *is* the one-shot start token (unguessable, stored, CAS-consumed; a stateless signed token could not be one-shot). `/start` with a link token binds the tapping Telegram identity to the row's pinned user. An invite token cannot link identities and a link token cannot grant membership — enforced by disjoint lookup tables, not convention.
+- **The start-token door (one door, two named purposes — D33/D35):** the Telegram deep link `t.me/<bot>?start=<payload>` serves two flows, kept apart by a payload prefix that names the purpose. `inv-<token>` resolves **only** against `workspace_invitations.token_hash` (membership — `02` §1, `06` §2); `link-<state>` resolves **only** against `oauth_states` rows with `purpose='link', provider='telegram'` — the state value *is* the one-shot start token (unguessable, stored, CAS-consumed; a stateless signed token could not be one-shot). `/start` with a link token binds nothing: it shows the opener, in their private chat, whose account the link belongs to (a masked email) with Confirm and Cancel; a Confirm tap by the same Telegram user consumes the state and binds the identity to the row's pinned user (readiness review, 2026-10-02: a one-step link let anyone attach someone else's Telegram to their own account). An invite token cannot link identities and a link token cannot grant membership — enforced by disjoint lookup tables, not convention.
 - **Reconnect binding:** `purpose='reconnect'` pins the exact credential owner being replaced; the callback transaction swaps `encrypted_payload` in place (same row id — no window where the account has zero credentials) and flips `ig_accounts.state` `reauth_required → active`. **Concurrent reconnects — "last issued wins", made true of the schema (pass 3; R3 review §6.6: the pass-2 "last consumed wins" claim was false — independently issued state rows never consumed one another, so both callbacks could land):** issuing a reconnect state **invalidates prior live states for the same target in the issue transaction** — `UPDATE oauth_states SET consumed_at = now() WHERE purpose = 'reconnect' AND reconnect_target = :target AND consumed_at IS NULL` — so at most one live state exists per target at any commit; the callback CAS consumes it one-shot, and a superseded state's callback finds it consumed and shows "a newer reconnect superseded this one". Connect-vs-reconnect races on the same account still collapse on `uq_credential_per_account`.
 
 ## §3. Credential encryption and key rotation (review A §5.12; L.6 + a standing runbook)
@@ -2595,89 +2595,58 @@ GRANT EXECUTE ON FUNCTION fn_planned_misses(p_limit int, p_late interval) TO svc
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 ```
 
-### §37. A removal holds (094)
+### §33. A removal sticks, and a removed admin's tokens go with them (090)
 
-**Why:** `06` makes `remove_member` the revoke for every join edge, and the Telegram join path adds
-a person it sees in a bound group. The invariant this section states and the doors keep: a person
-an admin removed returns only through an invitation, and activity in a bound group does not add
-them back.
+**Why:** the real-user readiness review (2026-10-02) found two ways a removal did not hold.
+`fn_member_remove` (§14) deleted the membership row, and `fn_group_member_seen` (§14) inserted a
+member for any linked user seen in the bound group, so a person an admin removed who was still in
+the group was a member again the next time they spoke there. And a workspace service identity
+carried no minter, so the tokens a removed admin had made kept reading the workspace and nobody could
+tell whose they were.
 
-**The record.** `workspace_member_removals` holds one row per (workspace, person) an admin has
-removed. `fn_member_remove` writes it beside the delete, and a later removal of the same person
-updates its remover. It is never cleared: a membership row outranks it, so an accepted invitation (`fn_invitation_accept`, unchanged) makes the person a member
-again, and the record matters again only once they are removed again. The remover's key is
-`ON DELETE SET NULL`, so deleting the remover's account keeps the record; the workspace's and the
-person's cascade with them. RLS is on, and svc_membership, the doors' owner, is the one role with a
-grant and a policy: no login reads or writes it.
+**The removal is recorded.** `workspace_member_removals` holds one row per removed person and
+workspace. `fn_member_remove` writes it beside the delete; `fn_group_member_seen` refuses a removed
+non-member by name (`removed`). An invitation is the way back: the accept door is untouched, and
+once the person is a member again the row is inert, since the join door reads it only for a
+non-member and a second removal stamps it again. The table is tenant-plane (RLS on, a tenant read
+policy for the runtime roles, which never write it) and written only by `svc_membership`, the owner of both doors,
+under a row-open policy as §14 gave it on `workspace_members`. `fn_member_remove` takes `pg_temp`
+last on its `search_path`, as the join door already did.
 
-**The join door.** `fn_group_member_seen` answers a member `already_member` first, however they
-came back, and otherwise inserts only where no removal record exists for the workspace and the
-person. When it inserts nothing for a non-member, it answers `removed_by_admin` and writes
-nothing.
-
-**The remove door checks its own caller.** `fn_member_remove` refuses, before anything else, a
-workspace that is not the caller's claimed tenant (`app.tenant_id`) or a remover who is not an
-owner or admin of it. The command port already holds its caller to both; the door now checks them
-itself. The refusal is a `RAISE` known by its message, as `fn_offboard_finalize`'s are, so SQLSTATE
-42501 stays the grant and policy denials' alone. Both doors keep their signatures, owner and
-EXECUTE grant (CREATE OR REPLACE carries them), and both pin `search_path` to
-`pg_catalog, public, pg_temp`.
-
-**Earlier removals.** A removal made before 094 left only its governance audit row (`entity_kind`
-`member`, op `DELETE`, with the workspace and the person). The backfill records the latest removal
-made by a person (`actor_kind` `user`) for everyone who is not a member again and whose workspace
-and account still exist. A removal whose audit row retention has already deleted
-(`fn_retention_batch`) leaves nothing to read, so it stays unrecorded.
-
-**Outside the doors.** `remove_member` also retires the removed person's live link states for that
-workspace (the group bind, Drive and Instagram connects) in the same unit of work, and the Members
-card tells the admin that the person stays in the Telegram group itself, so they can remove them
-there too.
+**The minter is recorded.** `service_tokens.created_by_user_id` names the person who minted a
+workspace service identity (NULL for a person-bound token, whose `user_id` says it, and for every
+token minted earlier). The removal revokes the removed person's live workspace tokens in the same
+transaction.
 
 ```sql
--- [§37 a removal holds]
+-- [§33 a removal sticks, and a removed admin's tokens go with them]
+
 CREATE TABLE workspace_member_removals (
-  workspace_id       UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  user_id            UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  removed_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
-  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  workspace_id       uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id            uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  removed_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  removed_at         timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, user_id)
 );
 
-CREATE TRIGGER tg_touch_workspace_member_removals BEFORE UPDATE ON workspace_member_removals
-  FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
-
-COMMENT ON TABLE workspace_member_removals IS
-  'One row per (workspace, person) an admin removed, written by fn_member_remove; a later '
-  'removal updates its remover. fn_group_member_seen adds nobody it names, but a membership row '
-  'outranks it, so an accepted invitation re-admits the person. Never cleared.';
-
 ALTER TABLE workspace_member_removals ENABLE ROW LEVEL SECURITY;
 
+GRANT SELECT ON workspace_member_removals TO svc_ingress, svc_worker;
 GRANT SELECT, INSERT, UPDATE ON workspace_member_removals TO svc_membership;
 
+CREATE POLICY p_tenant_read ON workspace_member_removals FOR SELECT TO svc_ingress, svc_worker
+  USING (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 CREATE POLICY p_member_removals ON workspace_member_removals FOR ALL TO svc_membership
   USING (true) WITH CHECK (true);
 
-INSERT INTO workspace_member_removals
-  (workspace_id, user_id, removed_by_user_id, created_at, updated_at)
-SELECT DISTINCT ON (e.workspace_id, e.entity_id)
-       e.workspace_id, e.entity_id, u.id, e.created_at, e.created_at
-  FROM audit_events e
-  LEFT JOIN users u ON u.id = e.actor_user_id
- WHERE e.entity_kind = 'member'
-   AND e.detail ->> 'op' = 'DELETE'
-   AND e.actor_kind = 'user'
-   AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = e.workspace_id)
-   AND EXISTS (SELECT 1 FROM users p WHERE p.id = e.entity_id)
-   AND NOT EXISTS (SELECT 1 FROM workspace_members m
-                    WHERE m.workspace_id = e.workspace_id AND m.user_id = e.entity_id)
- ORDER BY e.workspace_id, e.entity_id, e.created_at DESC;
+ALTER TABLE service_tokens
+  ADD COLUMN created_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL;
+
+GRANT CREATE ON SCHEMA public TO svc_membership;
 
 CREATE OR REPLACE FUNCTION fn_group_member_seen(p_channel text, p_external_ref text, p_user uuid)
 RETURNS TABLE (o_workspace_id uuid, o_outcome text)
-LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE
   v_ws uuid;
   v_state text;
@@ -2697,40 +2666,34 @@ BEGIN
   IF v_ws_state IS DISTINCT FROM 'active' THEN
     RETURN QUERY SELECT v_ws, 'workspace_inactive'::text; RETURN;
   END IF;
-  IF EXISTS (SELECT 1 FROM workspace_members m
-              WHERE m.workspace_id = v_ws AND m.user_id = p_user) THEN
-    RETURN QUERY SELECT v_ws, 'already_member'::text; RETURN;
+  IF EXISTS (SELECT 1 FROM workspace_member_removals r
+              WHERE r.workspace_id = v_ws AND r.user_id = p_user)
+     AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                      WHERE m.workspace_id = v_ws AND m.user_id = p_user) THEN
+    RETURN QUERY SELECT v_ws, 'removed'::text; RETURN;
   END IF;
   PERFORM set_config('app.actor_kind', 'user', true);
   PERFORM set_config('app.actor_user_id', p_user::text, true);
   PERFORM set_config('app.channel', 'telegram', true);
   BEGIN
     INSERT INTO workspace_members (workspace_id, user_id, role)
-    SELECT v_ws, p_user, 'member'
-     WHERE NOT EXISTS (SELECT 1 FROM workspace_member_removals r
-                        WHERE r.workspace_id = v_ws AND r.user_id = p_user)
+    VALUES (v_ws, p_user, 'member')
     ON CONFLICT (workspace_id, user_id) DO NOTHING;
     GET DIAGNOSTICS v_inserted = ROW_COUNT;
   EXCEPTION WHEN foreign_key_violation THEN
     RETURN QUERY SELECT v_ws, 'unknown_user'::text; RETURN;
   END;
-  RETURN QUERY SELECT v_ws, CASE
-    WHEN v_inserted > 0 THEN 'joined'
-    WHEN EXISTS (SELECT 1 FROM workspace_members m
-                  WHERE m.workspace_id = v_ws AND m.user_id = p_user) THEN 'already_member'
-    ELSE 'removed_by_admin'
-  END;
+  RETURN QUERY SELECT v_ws, CASE WHEN v_inserted > 0 THEN 'joined' ELSE 'already_member' END;
 END $$;
 
 COMMENT ON FUNCTION fn_group_member_seen(text, text, uuid) IS
   'The 06 Telegram join path: a person seen in a bound, active group becomes a member (role '
-  'member; never a downgrade), unless an admin removed them and no invitation has made them a '
-  'member since (workspace_member_removals). p_user is the caller''s resolution of the sender''s '
-  'linked Telegram identity — the caller proves the person, this door trusts it. Sets the actor '
-  'GUCs transaction-locally, so it must be the last governance write in its transaction. '
-  'SECURITY DEFINER owned by svc_membership with EXECUTE granted to svc_ingress. Outcomes: '
-  'joined, already_member, removed_by_admin, unbound_chat, revoked_chat, workspace_inactive, '
-  'unknown_user.';
+  'member; never a downgrade), unless an admin removed them and they have not been invited back '
+  '(090). p_user is the caller''s resolution of the sender''s linked Telegram identity — the '
+  'caller proves the person, this door trusts it. Sets the actor GUCs transaction-locally, so it '
+  'must be the last governance write in its transaction. SECURITY DEFINER owned by '
+  'svc_membership with EXECUTE granted to svc_ingress. Outcomes: joined, already_member, '
+  'removed, unbound_chat, revoked_chat, workspace_inactive, unknown_user.';
 
 CREATE OR REPLACE FUNCTION fn_member_remove(p_workspace uuid, p_user uuid, p_by_user uuid)
 RETURNS TABLE (o_outcome text, o_role text)
@@ -2738,12 +2701,6 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp 
 DECLARE
   v_role text;
 BEGIN
-  IF p_workspace IS DISTINCT FROM NULLIF(current_setting('app.tenant_id', true), '')::uuid
-     OR NOT EXISTS (SELECT 1 FROM workspace_members a
-                     WHERE a.workspace_id = p_workspace AND a.user_id = p_by_user
-                       AND a.role IN ('owner', 'admin')) THEN
-    RAISE EXCEPTION 'member removal outside the caller''s admin scope';
-  END IF;
   IF p_user = p_by_user THEN
     RETURN QUERY SELECT 'self'::text, NULL::text; RETURN;
   END IF;
@@ -2759,16 +2716,17 @@ BEGIN
   INSERT INTO workspace_member_removals (workspace_id, user_id, removed_by_user_id)
   VALUES (p_workspace, p_user, p_by_user)
   ON CONFLICT (workspace_id, user_id)
-  DO UPDATE SET removed_by_user_id = EXCLUDED.removed_by_user_id;
+  DO UPDATE SET removed_by_user_id = EXCLUDED.removed_by_user_id, removed_at = now();
   RETURN QUERY SELECT 'removed'::text, v_role;
 END $$;
 
 COMMENT ON FUNCTION fn_member_remove(uuid, uuid, uuid) IS
-  'The revoke for every join edge (06): an admin removes a member explicitly, and the removal '
-  'holds against the join path until an invitation re-admits them (workspace_member_removals, '
-  'written here). The one DELETE on workspace_members in the system lives here (057: no login '
-  'role deletes). The command port holds its actor to the admin floor, and this door checks it '
-  'again: p_workspace must be the claimed tenant and p_by_user an owner or admin of it, or it '
-  'raises. Outcomes: removed, not_found, owner (never removable here), self (never through this '
-  'door). SECURITY DEFINER owned by svc_membership with EXECUTE granted to svc_ingress.';
+  'The revoke for every join edge (06): an admin removes a member explicitly, and the removal is '
+  'recorded so the Telegram join path cannot undo it (090). The one DELETE on workspace_members '
+  'in the system lives here (057: no login role deletes). p_by_user is the command port''s actor, '
+  'already held to the admin floor — the caller proves the admin. Outcomes: removed, not_found, '
+  'owner (never removable here), self (never through this door). SECURITY DEFINER owned by '
+  'svc_membership with EXECUTE granted to svc_ingress.';
+
+REVOKE CREATE ON SCHEMA public FROM svc_membership;
 ```

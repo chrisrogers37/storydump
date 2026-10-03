@@ -45,9 +45,9 @@ from src.services.target import vocabulary
 from src.services.target import (
     google_drive_oauth,
     identity,
-    oauth_states,
     offboarding,
     readers,
+    service_tokens,
 )
 from src.services.target._dbapi import driver_error_is
 from src.services.target.publish_cap import _SPENDS_CAP_SQL
@@ -754,11 +754,10 @@ async def remove_member(
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
-    non-member is `not_found`.
-
-    A removal holds (`07` §37): the door records it, so the join path adds the
-    person back only after an invitation, and this retires every live link
-    state the person holds for this workspace, in the same unit of work."""
+    non-member is `not_found`. The removal is recorded by the door, so the
+    Telegram join path cannot re-add the person until they are invited back,
+    and the workspace service identities they minted are revoked here, in the
+    same transaction (090)."""
     row = (
         await executor.execute(
             text(
@@ -770,8 +769,10 @@ async def remove_member(
     ).first()
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
-        await oauth_states.retire_live_states(
-            executor, user_id=user_id, workspace_id=workspace_id
+        # The door recorded the removal, so the Telegram group cannot undo it
+        # (090); the service identities this person minted go with them.
+        await service_tokens.revoke_minted_by(
+            executor, workspace_id=str(workspace_id), user_id=str(user_id)
         )
         return str(row[1])
     if outcome == "not_found":

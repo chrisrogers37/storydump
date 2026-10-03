@@ -16,6 +16,8 @@ links: []
 > **2026-09-25:** ironclad cycle 1 on that plan reopened three points as its open forks: §1's trigger and refusals (F11), §3's admit mechanism (F12), and whether §5's album ships at all (F10). The owner ruled all three on 2026-09-28: F11 (b), an admin "Accept drops" switch; F12 (b), a reserved share inside `weights()`; F10 (b), the album deferred until a named need. It also corrected parts of §1 in the plan's phases — GIFs are not drops, drops are capped at the story path's limits, the drop folder is found by workspace — and where this text and the folded phases differ, the phases win. The two junctions this spec builds on were weighed
 > and ratified in [`2026-09-20-device-native-inbound-decision.md`](2026-09-20-device-native-inbound-decision.md);
 > this spec inherits those picks and does not re-decide them.
+>
+> **2026-10-01:** a top-down review against `main` at `9be8daf6` ([`review-2026-10-01.md`](2026-09-20-device-native-inbound/review-2026-10-01.md)) re-cut the plan and opened five forks, F13–F17, tracked in #1430. Superseded here, where the phases win: §1's trigger and refusals (F11 (b)) and its compression hint (F17, open); §2's ask for both scopes at every connect and "every workspace reconnects once" (F13, open); §3's admit-time 20% that scales the explicit shares (F12 (b): a reservation inside `weights()`, nothing written at admit); and the album in §4–§5 and in §6–§7 (F10). Owner item 2, the runbook's class for `drive.readonly`, was resolved by #1497 on 2026-09-30.
 
 ## Summary
 

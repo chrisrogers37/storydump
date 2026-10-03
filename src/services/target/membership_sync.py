@@ -99,14 +99,4 @@ async def observe(
             row[0],
             external_ref,
         )
-    elif outcome == "removed_by_admin":
-        # `07` §37. At DEBUG like the dispatcher's other standing outcomes: it
-        # recurs on every message the removed person sends in the group.
-        logger.debug(
-            "membership sync: user %s was removed from workspace %s by an admin;"
-            " chat %s does not add them back",
-            user_id,
-            row[0],
-            external_ref,
-        )
     return StartResult(outcome=outcome, handled=outcome == "joined")

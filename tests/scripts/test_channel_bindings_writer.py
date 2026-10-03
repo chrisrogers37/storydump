@@ -13,25 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import timedelta
 
 import psycopg2
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from scripts.migration_runner import MIGRATIONS_DIR, split_statements
 from src.exceptions.tenancy import TenantResolutionError
-from src.services.target import (
-    bindings,
-    invitations,
-    oauth_states,
-    outbox,
-    prompts,
-    workspaces,
-)
+from src.services.target import bindings, outbox, prompts
 from src.services.target.bindings import BOUND, REBOUND, TAKEN, BindingRefused
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
@@ -43,7 +33,6 @@ from tests.scripts.conftest import (
     seed_workspace_chain,
     set_test_passwords,
     sweep_as_worker,
-    txn,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -612,8 +601,7 @@ class TestRetiringAndFollowingAChat:
 class TestTheJoinPathThroughTheDoors:
     """`06`'s Telegram join path on postgres:15, driven as a bare `svc_ingress`
     connection with no GUCs (the door sets its own): a linked person speaking
-    in a bound group becomes a member; nothing else writes. A person an admin
-    removed stays removed until an invitation makes them a member (`07` §37)."""
+    in a bound group becomes a member; nothing else writes."""
 
     def _link(self, world, user_id, tg_user_id):
         _migrate(
@@ -772,222 +760,36 @@ class TestTheJoinPathThroughTheDoors:
                 (str(world["b"]["ws"]),),
             )
 
-    def _person(self, world):
-        """A fresh account. The removal record is per (workspace, person), so a
-        test that removes someone removes someone of its own."""
-        person = str(uuid.uuid4())
-        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (person,))
-        return person
+    def test_an_admin_removes_a_telegram_joined_member_and_never_the_owner(self, world):
+        from src.services.target import workspaces
 
-    def _remove(self, world, person, *, by=None, claim=None):
-        """`remove_member` in workspace A, as its owner unless *by* says who, in
-        a unit of work claiming A unless *claim* names the other workspace."""
-        return run(
+        _bind(world, "-1009000000108")
+        joiner = world["b"]["user"]
+        self._link(world, joiner, "tg-joiner-8")
+        self._observe(world, external_ref="-1009000000108", tg_user_id="tg-joiner-8")
+        assert self._role(world, world["a"]["ws"], joiner) == "member"
+        removed = run(
             world,
             lambda s: workspaces.remove_member(
                 s,
                 workspace_id=str(world["a"]["ws"]),
-                user_id=str(person),
-                by_user_id=str(by or world["a"]["user"]),
+                user_id=str(joiner),
+                by_user_id=str(world["a"]["user"]),
             ),
-            ids=claim,
         )
-
-    def _removal(self, world, person):
-        return fetch_one(
-            world["stream"],
-            "SELECT removed_by_user_id::text, updated_at FROM workspace_member_removals"
-            " WHERE workspace_id = %s AND user_id = %s",
-            (str(world["a"]["ws"]), person),
-        )
-
-    def _invite_and_accept(self, world, person):
-        """A real invitation into workspace A, accepted through
-        `fn_invitation_accept` in the user plane, both as `svc_ingress`."""
-
-        async def mint(session):
-            _id, token = await invitations.create(
-                session,
-                workspace_id=str(world["a"]["ws"]),
-                invited_by_user_id=str(world["a"]["user"]),
-                delivery_channel="telegram",
-            )
-            return token
-
-        token = run(world, mint)
-        return asyncio.run(
-            in_user_plane(
-                world["ingress"],
-                lambda conn: invitations.accept(
-                    conn, token=token, user_id=person, channel="web"
-                ),
-            )
-        )
-
-    def test_the_owner_is_never_removed_even_by_an_admin(self, world):
-        admin = self._person(world)
-        _migrate(
-            world,
-            "INSERT INTO workspace_members (workspace_id, user_id, role)"
-            " VALUES (%s, %s, 'admin')",
-            (str(world["a"]["ws"]), admin),
-        )
+        assert removed == "member"
+        assert self._role(world, world["a"]["ws"], joiner) is None
         with pytest.raises(ValueError):
-            self._remove(world, world["a"]["user"], by=admin)
-        assert self._role(world, world["a"]["ws"], world["a"]["user"]) == "owner"
-
-    def test_a_removal_holds_until_an_invitation_and_again_after_the_next(self, world):
-        """`07` §37: removed, a person speaking in the bound group is added back
-        by nothing; an accepted invitation makes them a member again; removed
-        again, the group adds nothing again."""
-        _bind(world, "-1009000000109")
-        person = self._person(world)
-        self._link(world, person, "tg-joiner-9")
-
-        def seen():
-            return self._observe(
-                world, external_ref="-1009000000109", tg_user_id="tg-joiner-9"
-            )
-
-        assert seen().outcome == "joined"
-        assert self._remove(world, person) == "member"
-        after = seen()
-        assert after.outcome == "removed_by_admin" and not after.handled
-        assert self._role(world, world["a"]["ws"], person) is None
-        by, first = self._removal(world, person)
-        assert by == str(world["a"]["user"])
-
-        assert self._invite_and_accept(world, person)["role"] == "member"
-        assert self._role(world, world["a"]["ws"], person) == "member"
-        assert seen().outcome == "already_member", "a membership outranks the record"
-
-        assert self._remove(world, person) == "member"
-        assert seen().outcome == "removed_by_admin"
-        assert self._role(world, world["a"]["ws"], person) is None
-        _by, updated = self._removal(world, person)
-        assert updated > first, "a later removal updates the record"
-
-    def test_the_remove_door_refuses_another_workspace_and_a_non_admin(self, world):
-        """`07` §37: the door checks its caller itself. The workspace must be
-        the claimed tenant and the remover an owner or admin of it."""
-        _bind(world, "-1009000000110")
-        person, peer = self._person(world), self._person(world)
-        for who, tg in ((person, "tg-joiner-10"), (peer, "tg-joiner-11")):
-            self._link(world, who, tg)
-            self._observe(world, external_ref="-1009000000110", tg_user_id=tg)
-        # A's own owner, but under B's claim: the tenant clause alone refuses.
-        with pytest.raises(DBAPIError, match="outside the caller's admin scope"):
-            self._remove(world, person, claim=world["b"])
-        # A's claim, but a remover below admin: the role clause alone refuses.
-        with pytest.raises(DBAPIError, match="outside the caller's admin scope"):
-            self._remove(world, person, by=peer)
-        assert self._role(world, world["a"]["ws"], person) == "member"
-        assert self._removal(world, person) is None
-
-    def test_a_removal_retires_the_persons_live_states_in_that_workspace(self, world):
-        """`07` §37: the bind, Drive and Instagram states the removed person
-        holds for the workspace are spent with the removal. Their states for
-        another workspace, and other people's here, stay live."""
-        _bind(world, "-1009000000112")
-        person = self._person(world)
-        self._link(world, person, "tg-joiner-12")
-        self._observe(world, external_ref="-1009000000112", tg_user_id="tg-joiner-12")
-
-        def mint(user, ids, provider, purpose):
-            return run(
+            run(
                 world,
-                lambda s: oauth_states.issue_state(
+                lambda s: workspaces.remove_member(
                     s,
-                    purpose=purpose,
-                    user_id=str(user),
-                    workspace_id=str(ids["ws"]),
-                    provider=provider,
+                    workspace_id=str(world["a"]["ws"]),
+                    user_id=str(world["a"]["user"]),
+                    by_user_id=str(joiner),
                 ),
-                ids=ids,
             )
-
-        theirs_here = [
-            mint(person, world["a"], "telegram", "bind"),
-            mint(person, world["a"], "gdrive", "connect"),
-            mint(person, world["a"], "ig_login", "connect"),
-        ]
-        untouched = [
-            mint(person, world["b"], "gdrive", "connect"),
-            mint(world["a"]["user"], world["a"], "gdrive", "connect"),
-        ]
-        assert self._remove(world, person) == "member"
-
-        def live(state):
-            return fetch_one(
-                world["stream"],
-                "SELECT consumed_at IS NULL FROM oauth_states WHERE state = %s",
-                (state,),
-            )[0]
-
-        assert [live(st) for st in theirs_here] == [False, False, False]
-        assert [live(st) for st in untouched] == [True, True]
-
-
-class TestTheRemovalBackfill:
-    """`094`'s backfill, the file's own statement, run over a crafted audit
-    trail in a transaction that is rolled back: the latest removal a person
-    made is recorded for whoever is not a member again, and nothing else is."""
-
-    def _backfill_sql(self):
-        sql = (MIGRATIONS_DIR / "094_member_removal_record.sql").read_text()
-        return next(
-            st
-            for st in split_statements(sql)
-            if st.lstrip().startswith("INSERT INTO workspace_member_removals")
-        )
-
-    def test_the_latest_removal_by_a_person_is_recorded_and_nothing_else(self, world):
-        ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
-        gone_ws, gone_user = str(uuid.uuid4()), str(uuid.uuid4())
-        with txn(world["stream"]) as conn, conn.cursor() as cur:
-            cur.execute("SET app.actor_kind = 'migration'")
-            people = {}
-            for name in ("twice", "back", "migrated", "elsewhere", "orphaned"):
-                cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id::text")
-                people[name] = cur.fetchone()[0]
-
-            def removal(person, *, ago, actor_kind="user", actor=owner, at=ws):
-                cur.execute(
-                    "INSERT INTO audit_events (workspace_id, entity_kind,"
-                    " entity_id, from_state, actor_kind, actor_user_id,"
-                    " channel, detail, created_at)"
-                    " VALUES (%s, 'member', %s, 'member', %s, %s, 'web',"
-                    " jsonb_build_object('v', 1, 'op', 'DELETE'),"
-                    " now() - %s * interval '1 day')",
-                    (at, person, actor_kind, actor, ago),
-                )
-
-            removal(people["twice"], ago=3)
-            removal(people["twice"], ago=1)
-            removal(people["back"], ago=2)
-            cur.execute(
-                "INSERT INTO workspace_members (workspace_id, user_id, role)"
-                " VALUES (%s, %s, 'member')",
-                (ws, people["back"]),
-            )
-            removal(people["migrated"], ago=2, actor_kind="migration", actor=None)
-            removal(people["elsewhere"], ago=2, at=gone_ws)
-            removal(people["orphaned"], ago=2, actor=gone_user)
-            removal(gone_user, ago=2)
-
-            cur.execute("DELETE FROM workspace_member_removals")
-            cur.execute(self._backfill_sql())
-            cur.execute(
-                "SELECT user_id::text, removed_by_user_id::text, now() - updated_at"
-                "  FROM workspace_member_removals"
-                " WHERE workspace_id = %s AND user_id = ANY(%s::uuid[])",
-                (ws, list(people.values()) + [gone_user]),
-            )
-            recorded = {row[0]: row[1:] for row in cur.fetchall()}
-        assert recorded == {
-            people["twice"]: (owner, timedelta(days=1)),
-            people["orphaned"]: (None, timedelta(days=2)),
-        }
+        assert self._role(world, world["a"]["ws"], world["a"]["user"]) == "owner"
 
 
 def _basic_group() -> str:

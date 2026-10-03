@@ -91,8 +91,11 @@ real taps would be lost. `deregister` deletes the webhook.
 
 ## What a tap does today
 
-`/start link-…` attaches the tapping Telegram account to the user who minted
-the link; `/start bind-…` binds the group it was opened in (see *Groups*).
+`/start link-…` links nothing by itself: in the opener's private chat the bot
+names the Storydump account the link belongs to (a masked email, `a•••@example.com`)
+with **Confirm** and **Cancel**, and only a Confirm by that same Telegram user,
+within the link's 15 minutes, attaches their account to the user who minted it
+(`identity_link.handle_link` / `handle_tap`); Cancel spends the link. `/start bind-…` binds the group it was opened in (see *Groups*).
 Those are the two lanes served: `build_router` registers `link-` and `bind-`
 only (`src/services/target/telegram_dispatch.py:283-285`; the module docstring says
 the same), so an `inv-` payload reaches no

@@ -290,30 +290,15 @@ class _RetireConn:
 class TestRetireLiveStates:
     """ "Last issued wins" (`07` §2) is one rule with four writers — the link
     mint, the bind mint, `issue_state`'s own reconnect retire and
-    `disable_destination`'s — and a removal (`07` §37) is a fifth caller, by
-    user AND workspace. One statement per call, never an unselective one."""
+    `disable_destination`'s. One statement, one selector per caller."""
 
-    async def test_liveness_is_always_in_the_where_and_provider_when_given(self):
+    async def test_provider_and_liveness_are_always_in_the_where(self):
         conn = _RetireConn()
         await oauth_states.retire_live_states(conn, provider="telegram")
         ((sql, params),) = conn.statements
         assert sql.startswith("UPDATE oauth_states SET consumed_at = now() WHERE ")
         assert "provider = :provider" in sql and "consumed_at IS NULL" in sql
         assert params == {"provider": "telegram"}
-
-    async def test_a_removal_selects_by_user_and_workspace_across_providers(self):
-        conn = _RetireConn()
-        await oauth_states.retire_live_states(conn, user_id="u-1", workspace_id="ws-1")
-        ((sql, params),) = conn.statements
-        assert "consumed_at IS NULL" in sql and "provider" not in sql
-        assert "user_id = :uid" in sql and "workspace_id = :ws" in sql
-        assert params == {"uid": "u-1", "ws": "ws-1"}
-
-    async def test_a_call_with_no_selector_is_refused_before_any_statement(self):
-        conn = _RetireConn()
-        with pytest.raises(ValueError, match="at least one selector"):
-            await oauth_states.retire_live_states(conn)
-        assert conn.statements == []
 
     @pytest.mark.parametrize(
         "kwargs,fragment,params",

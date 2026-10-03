@@ -299,7 +299,7 @@ class TestAgainstTheRealDocs:
         # cancels users asked for (087, #1235) makes it 42; §31's ledger
         # learning 'planned' (088, #1413) makes it 43; §32's planned
         # stories served on time or missed out loud (089, #1413) make it 44;
-        # and §37's removal that holds against the join path (094) makes it 45.
+        # and §33's removal that sticks (090) makes it 45.
         assert classes.count("normative") == 45
         assert classes.count("illustrative") == 4
 
