@@ -52,12 +52,14 @@ WAITLIST_VISITOR_KEY_PREFIX = "waitlist:visitor:"
 #: A visitor's own limit a minute: a person retrying a typo stays well under
 #: it, and a household or office behind one address has room.
 WAITLIST_VISITOR_LIMIT = 10
-#: With the secret matched, every visitor's signup also spends one counter
-#: shared by all of them, a ceiling on the table's growth however the visitor
-#: key is gamed (a leaked secret lets a caller name a fresh visitor each time).
-#: Well above a launch peak, well below a flood.
-WAITLIST_ALL_VISITORS_KEY = "all"
-WAITLIST_ALL_VISITORS_LIMIT = 600
+#: With the secret matched, every insert the waitlist accepts also spends one
+#: counter shared by all visitors: a ceiling on the table's growth however the
+#: visitor key is gamed (a leaked secret lets a caller name a fresh visitor
+#: each time). Spent only once the insert has gone in, so refused or malformed
+#: requests cannot fill it, and last, so its one row is locked only until the
+#: commit that follows. Well above a launch peak, well below a flood.
+WAITLIST_ACCEPTED_KEY = "waitlist:accepted"
+WAITLIST_ACCEPTED_LIMIT = 600
 #: The largest body the route reads: an address and three campaign values fit
 #: many times over. Anything larger is a 413 before it is parsed.
 WAITLIST_MAX_BODY_BYTES = 8 * 1024
@@ -150,38 +152,29 @@ def _address(raw: Optional[str]) -> Optional[str]:
     return str(ipaddress.IPv6Network((ip.packed, 64), strict=False))
 
 
-Counter = tuple[str, str, int]  # (key prefix, client, limit)
-
-
-def _client(request: Request) -> Optional[tuple[str, list[Counter]]]:
-    """Whose slot share this request takes and which counters it spends;
-    None when the API holds the site's secret and the request does not carry
-    it.
+def _client(request: Request) -> Optional[tuple[str, str, int, bool]]:
+    """Whose slot share and counter this request spends, as ``(key prefix,
+    client, limit, capped)``, where *capped* says an accepted insert also
+    spends the all-visitors ceiling; None when the API holds the site's secret
+    and the request does not carry it.
 
     No secret configured: the attributed peer and the shared ceiling, whatever
     the headers say, so the API answers as before the site starts sending
     them. Secret matched: the visitor the site names, at their own limit and
-    the all-visitors ceiling; a missing or malformed visitor address falls
-    back to the peer and the shared ceiling rather than failing the signup.
-    Both sides' secrets are compared without surrounding whitespace, so a
-    pasted newline cannot refuse every signup."""
+    under the ceiling; a missing or malformed visitor address falls back to
+    the peer and the shared ceiling rather than failing the signup."""
     peer = client_ip(request)
     address = _address(peer) or peer
-    shared = address, [(WAITLIST_KEY_PREFIX, address, WAITLIST_LIMIT)]
-    expected = (settings.WAITLIST_SITE_SECRET or "").strip()
+    expected = settings.waitlist_site_secret
     if not expected:
-        return shared
-    presented = (request.headers.get(SITE_SECRET_HEADER) or "").strip()
-    if not verify_secret_token(presented, expected):
+        return WAITLIST_KEY_PREFIX, address, WAITLIST_LIMIT, False
+    if not verify_secret_token(request.headers.get(SITE_SECRET_HEADER), expected):
         return None
     visitor = _address(request.headers.get(VISITOR_IP_HEADER))
     if visitor is None:
         logger.warning("waitlist: the site sent no usable visitor address")
-        return shared
-    return visitor, [
-        (WAITLIST_VISITOR_KEY_PREFIX, visitor, WAITLIST_VISITOR_LIMIT),
-        (WAITLIST_KEY_PREFIX, WAITLIST_ALL_VISITORS_KEY, WAITLIST_ALL_VISITORS_LIMIT),
-    ]
+        return WAITLIST_KEY_PREFIX, address, WAITLIST_LIMIT, False
+    return WAITLIST_VISITOR_KEY_PREFIX, visitor, WAITLIST_VISITOR_LIMIT, True
 
 
 def _refusal(status: int, detail: str, reason: str) -> JSONResponse:
@@ -227,7 +220,7 @@ async def join_waitlist(request: Request):
         # Not logged here, where any caller could fill the log: the site logs
         # the refusal's reason when it is the caller.
         return _refusal(403, "the waitlist takes calls from the site only", "not_site")
-    address, counters = counted
+    key_prefix, address, limit, capped = counted
     media_type = request.headers.get("content-type", "").split(";")[0]
     if media_type.strip().lower() != "application/json":
         return _refusal(415, "the body must be application/json", "not_json")
@@ -244,21 +237,30 @@ async def join_waitlist(request: Request):
         # The counter is spent before the body is judged, so a malformed or
         # refused request counts like any other.
         async with require_engine(request).begin() as conn:
-            for key_prefix, client, limit in counters:
-                await preauth_guard(
-                    conn,
-                    request,
-                    detail="too many waitlist requests",
-                    key_prefix=key_prefix,
-                    limit=limit,
-                    client=client,
-                )
+            await preauth_guard(
+                conn,
+                request,
+                detail="too many waitlist requests",
+                key_prefix=key_prefix,
+                limit=limit,
+                client=address,
+            )
             if body is None:
                 return _refusal(400, "the body must be a JSON object", "not_json")
             try:
                 await waitlist.join(conn, body.get("email"), waitlist.campaign(body))
             except waitlist.InvalidWaitlistEmail:
                 return _refusal(400, "not a valid email address", "invalid_email")
+            if capped:
+                # Past the ceiling the 429 rolls the insert back with it.
+                await preauth_guard(
+                    conn,
+                    request,
+                    detail="too many waitlist requests",
+                    key_prefix="",
+                    limit=WAITLIST_ACCEPTED_LIMIT,
+                    client=WAITLIST_ACCEPTED_KEY,
+                )
     finally:
         slots.release(address)
     logger.info("waitlist: an address was received")

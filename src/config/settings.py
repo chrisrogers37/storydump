@@ -320,6 +320,13 @@ class Settings(BaseSettings):
         return self.WEB_APP_URL.rstrip("/") if self.WEB_APP_URL else None
 
     @property
+    def waitlist_site_secret(self) -> Optional[str]:
+        """`WAITLIST_SITE_SECRET` without surrounding whitespace (the site
+        trims its copy too, so a pasted newline cannot refuse every signup),
+        or None when unset or blank."""
+        return (self.WAITLIST_SITE_SECRET or "").strip() or None
+
+    @property
     def trusted_proxy_hosts(self) -> list[str]:
         """`TRUSTED_PROXY_HOSTS` as the list uvicorn's middleware expects."""
         return [h.strip() for h in self.TRUSTED_PROXY_HOSTS.split(",") if h.strip()]

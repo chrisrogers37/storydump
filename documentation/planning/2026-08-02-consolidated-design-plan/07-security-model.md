@@ -3112,8 +3112,10 @@ caller is one counter shared by every visitor, and one script spends it for ever
 Vercel reports it (Vercel overwrites `x-real-ip` and `x-forwarded-for`, so a visitor cannot choose
 it); the API compares the secret in constant time, refuses a call without it before reading the
 body, and keys the counter (10 a minute) and the per-address slot share on the visitor. Every
-matched signup also spends one counter shared by all visitors (600 a minute), so a leaked secret,
-which lets a caller name a fresh visitor each time, still meets a ceiling on the table's growth. The
+accepted signup through the site also spends one counter shared by all visitors (600 a minute,
+spent after the insert so a refused body costs nothing and a 429 rolls the row back), so a leaked
+secret, which lets a caller name a fresh visitor each time, still meets a ceiling on the table's
+growth. The
 waitlist counts every client, visitor or peer, by its IPv6 /64, never its single address. The
 visitor key holds only while Vercel is the first hop: off Vercel a client sets `x-real-ip` itself,
 and behind another CDN every visitor of one edge shares one key. Unset on

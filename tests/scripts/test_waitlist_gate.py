@@ -434,6 +434,20 @@ def _from_site(visitor=None, secret=SECRET):
     return headers
 
 
+@pytest.fixture
+def acquired(monkeypatch):
+    """The addresses the route's slots were acquired for, in order."""
+    seen = []
+    acquire = public.WaitlistSlots.acquire
+
+    async def spy(slots, address):
+        seen.append(address)
+        return await acquire(slots, address)
+
+    monkeypatch.setattr(public.WaitlistSlots, "acquire", spy)
+    return seen
+
+
 class TestTheSiteSecret:
     """`WAITLIST_SITE_SECRET`: unset, the headers change nothing; set, a call
     without it is refused and each visitor the site names has a limit of their
@@ -498,20 +512,12 @@ class TestTheSiteSecret:
         ],
     )
     def test_the_slot_share_is_keyed_like_the_counter(
-        self, world, monkeypatch, n, secret, headers, key
+        self, world, monkeypatch, acquired, n, secret, headers, key
     ):
         monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", secret)
-        seen = []
-        acquire = public.WaitlistSlots.acquire
-
-        async def spy(slots, address):
-            seen.append(address)
-            return await acquire(slots, address)
-
-        monkeypatch.setattr(public.WaitlistSlots, "acquire", spy)
         (resp,) = _post(world, {"email": f"slot-{n}@example.com"}, headers=headers)
         assert resp.status_code == 202, resp.text
-        assert seen == [key]
+        assert acquired == [key]
 
     def test_set_the_secret_is_compared_without_surrounding_whitespace(
         self, world, armed, monkeypatch
@@ -533,32 +539,31 @@ class TestTheSiteSecret:
         assert (resp.status_code, resp.json()["reason"]) == (403, "not_site")
         assert read == []
 
-    def test_set_all_visitors_share_one_ceiling(self, world, armed, monkeypatch):
-        monkeypatch.setattr(public, "WAITLIST_ALL_VISITORS_LIMIT", 2)
-        monkeypatch.setattr(public, "WAITLIST_ALL_VISITORS_KEY", "all-ceiling-test")
+    def test_set_accepted_signups_share_one_ceiling(self, world, armed, monkeypatch):
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 2)
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-ceiling-test")
+        bodies = (
+            {"email": "not-an-email"},  # refused before the ceiling: spends none
+            {"email": "ceiling-0@example.com"},
+            {"email": "ceiling-1@example.com"},
+            {"email": "ceiling-2@example.com"},
+        )
         responses = [
-            _post(world, {"email": f"ceiling-{i}@example.com"}, headers=_from_site(ip))[
-                0
-            ]
-            for i, ip in enumerate(("198.51.100.7", "198.51.100.8", "198.51.100.9"))
+            _post(world, body, headers=_from_site(f"198.51.100.{20 + i}"))[0]
+            for i, body in enumerate(bodies)
         ]
-        assert [r.status_code for r in responses] == [202, 202, 429]
+        assert [r.status_code for r in responses] == [400, 202, 202, 429]
+        assert _entry(world, "ceiling-1@example.com") != []
         assert _entry(world, "ceiling-2@example.com") == []
 
-    def test_a_direct_ipv6_caller_is_counted_by_its_64(self, world, monkeypatch):
+    def test_a_direct_ipv6_caller_is_counted_by_its_64(
+        self, world, monkeypatch, acquired
+    ):
         monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", None)
         monkeypatch.setattr(public, "client_ip", lambda request: "2001:db8:7:7::42")
-        seen = []
-        acquire = public.WaitlistSlots.acquire
-
-        async def spy(slots, address):
-            seen.append(address)
-            return await acquire(slots, address)
-
-        monkeypatch.setattr(public.WaitlistSlots, "acquire", spy)
         (resp,) = _post(world, {"email": "direct-v6@example.com"})
         assert resp.status_code == 202, resp.text
-        assert seen == ["2001:db8:7:7::/64"]
+        assert acquired == ["2001:db8:7:7::/64"]
         counted = _rows(
             world["owner"],
             "SELECT key FROM rate_counters WHERE key = 'waitlist:2001:db8:7:7::/64'",
