@@ -37,9 +37,9 @@ export default async function WorkspacesPage() {
   if (entry.kind === "signed_out") redirect("/login");
   if (entry.kind === "unavailable") {
     return (
-      <Shell>
+      <Screen width="md" align="top">
         <RouterUnavailable what="Your account" detail="Storydump is restarting or briefly unreachable — nothing was lost. Try again in a moment." retryHref="/workspaces" />
-      </Shell>
+      </Screen>
     );
   }
   const session = entry.session;
@@ -48,16 +48,16 @@ export default async function WorkspacesPage() {
 
   if (!workspaces.ok) {
     return (
-      <Shell>
+      <Screen width="md" align="top">
         <RouterUnavailable what="Your workspaces" />
-      </Shell>
+      </Screen>
     );
   }
 
   if (workspaces.data.length === 0) redirect("/welcome");
 
   return (
-    <Shell>
+    <Screen width="md" align="top">
       <PageHeader
         title="Workspaces"
         description="Each workspace has its own media, schedule and connected accounts."
@@ -82,14 +82,6 @@ export default async function WorkspacesPage() {
           <CreateWorkspaceForm />
         </div>
       </details>
-    </Shell>
-  );
-}
-
-function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <Screen width="md" align="top">
-      {children}
     </Screen>
   );
 }

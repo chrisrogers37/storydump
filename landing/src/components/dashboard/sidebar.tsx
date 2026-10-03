@@ -62,10 +62,7 @@ export function Sidebar({ mobile }: { mobile?: boolean }) {
       </div>
       <nav className="space-y-1 p-3">
         {navItems.map((item) => {
-          const active =
-            item.href === "/dashboard"
-              ? pathname === "/dashboard"
-              : pathname === item.href || pathname.startsWith(item.href + "/");
+          const active = item.href === activeHref(pathname);
 
           return (
             <Link
@@ -86,4 +83,16 @@ export function Sidebar({ mobile }: { mobile?: boolean }) {
       </nav>
     </aside>
   );
+}
+
+/**
+ * The nav item for a path: the longest href it sits under, so the Calendar
+ * (/dashboard/media/calendar) is not also the Media library, and Overview
+ * (/dashboard) only on its own page.
+ */
+function activeHref(pathname: string): string | undefined {
+  return navItems
+    .map((item) => item.href)
+    .filter((href) => pathname === href || (href !== "/dashboard" && pathname.startsWith(href + "/")))
+    .sort((a, b) => b.length - a.length)[0];
 }

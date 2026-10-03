@@ -12,7 +12,7 @@ export default function CalendarLoading() {
               <Skeleton className="h-4 w-24" />
             </CardHeader>
             <CardContent>
-              <Skeleton className="h-8 w-14" />
+              <Skeleton className="h-9 w-14" />
             </CardContent>
           </Card>
         ))}

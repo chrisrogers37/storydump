@@ -186,7 +186,8 @@ export function WaitlistForm({
         <Button
           type="submit"
           disabled={status === "submitting"}
-          className="h-12 px-6 text-base sm:h-11"
+          size="lg"
+          className="h-12 text-base sm:h-11"
         >
           {status === "submitting" ? "Joining…" : "Join the waitlist"}
         </Button>

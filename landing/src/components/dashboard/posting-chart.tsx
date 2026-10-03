@@ -65,7 +65,7 @@ export function PostingChart({ data }: { data: DayCount[] }) {
                   name === "count" ? "posted" : "capacity",
                 ]}
               />
-              <Bar dataKey="count" fill="var(--color-tap)" radius={[2, 2, 0, 0]} />
+              <Bar dataKey="count" fill="var(--chart-1)" radius={[2, 2, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         )}

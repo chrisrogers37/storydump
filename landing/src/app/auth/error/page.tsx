@@ -52,7 +52,7 @@ export default async function AuthErrorPage({
 
   return (
     <Screen className="text-center">
-      <PageHeader align="center" title={content.heading} description={content.body} />
+      <PageHeader title={content.heading} description={content.body} />
 
       <Link
         href={content.href}

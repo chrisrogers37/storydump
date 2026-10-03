@@ -4,9 +4,8 @@ import { palette } from "@/design/palette"
 
 export const runtime = "edge"
 
-// The site's palette. The card is drawn with next/og's bundled font, so it
-// fetches nothing from another origin.
-const { paper: PAPER, ink: INK, tap: TAP } = palette
+// The card is drawn with next/og's bundled font, so it fetches nothing from
+// another origin.
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl
@@ -28,8 +27,8 @@ export async function GET(request: NextRequest) {
           flexDirection: "column",
           justifyContent: "space-between",
           padding: "72px 80px",
-          backgroundColor: PAPER,
-          color: INK,
+          backgroundColor: palette.paper,
+          color: palette.ink,
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
@@ -38,7 +37,7 @@ export async function GET(request: NextRequest) {
               width: "44px",
               height: "44px",
               borderRadius: "9999px",
-              border: `8px solid ${TAP}`,
+              border: `8px solid ${palette.tap}`,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -49,7 +48,7 @@ export async function GET(request: NextRequest) {
                 width: "12px",
                 height: "12px",
                 borderRadius: "9999px",
-                backgroundColor: INK,
+                backgroundColor: palette.ink,
               }}
             />
           </div>
@@ -82,7 +81,7 @@ export async function GET(request: NextRequest) {
             {subtitle}
           </div>
         </div>
-        <div style={{ display: "flex", height: "12px", width: "160px", borderRadius: "9999px", backgroundColor: TAP }} />
+        <div style={{ display: "flex", height: "12px", width: "160px", borderRadius: "9999px", backgroundColor: palette.tap }} />
       </div>
     ),
     {

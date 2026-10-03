@@ -18,11 +18,8 @@ const geistMono = Geist_Mono({
   preload: false,
 })
 
-// One instance, "swap". There used to be an "optional" copy for the home H1
-// beside a "swap" copy for the 404 page (which gets no font preload, so
-// "optional" left its headline in the fallback). Both declared the same family
-// in the same global stylesheet, so the later "swap" rules won on every page
-// anyway; this states what the site was already doing.
+// "swap": the 404 page gets no font preload, so "optional" would leave its
+// headline in the fallback.
 const bricolage = Bricolage_Grotesque({
   variable: "--font-bricolage",
   subsets: ["latin"],

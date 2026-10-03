@@ -19,7 +19,7 @@ export const metadata: Metadata = pageMetadata({
 export default function MediaOrganize() {
   return (
     <div>
-      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
+      <h1 className="page-title text-4xl text-ink">
         Organizing Your Media
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">

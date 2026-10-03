@@ -50,7 +50,7 @@ export default function MediaLoading() {
                 <Skeleton className="h-4 w-28" />
               </CardHeader>
               <CardContent>
-                <Skeleton className="h-8 w-14" />
+                <Skeleton className="h-9 w-14" />
                 <Skeleton className="h-3 w-20 mt-2" />
               </CardContent>
             </Card>

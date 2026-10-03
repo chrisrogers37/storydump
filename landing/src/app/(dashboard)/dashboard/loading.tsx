@@ -8,7 +8,7 @@ function CardSkeleton() {
         <Skeleton className="h-4 w-24" />
       </CardHeader>
       <CardContent>
-        <Skeleton className="h-8 w-16" />
+        <Skeleton className="h-9 w-16" />
         <Skeleton className="h-3 w-20 mt-2" />
       </CardContent>
     </Card>
@@ -19,7 +19,7 @@ export default function DashboardLoading() {
   return (
     <div className="space-y-6">
       <div>
-        <Skeleton className="h-8 w-32" />
+        <Skeleton className="h-9 w-32" />
         <Skeleton className="h-4 w-56 mt-2" />
       </div>
 

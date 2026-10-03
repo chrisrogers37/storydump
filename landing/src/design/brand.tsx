@@ -2,7 +2,7 @@ import { siteConfig } from "@/config/site"
 import { cn } from "@/lib/utils"
 
 /** The wordmark's symbol: an orange ring around an ink dot, as in the site icon. */
-export function BrandMark({ className = "size-5" }: { className?: string }) {
+function BrandMark({ className = "size-5" }: { className?: string }) {
   return (
     <span
       aria-hidden="true"

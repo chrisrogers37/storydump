@@ -6,6 +6,7 @@ import { siteConfig } from "@/config/site";
 import { noindexMetadata } from "@/lib/seo";
 import { Wordmark } from "@/design/brand";
 import { Screen } from "@/design/screen";
+import { PageHeader } from "@/design/page-header";
 import { Card } from "@/components/ui/card";
 import { NEW_HERE, WAITLIST_HREF } from "./content";
 import { LoginNotice } from "./login-notice";
@@ -50,14 +51,11 @@ export default function LoginPage() {
         Back to {siteConfig.name}
       </Link>
 
-      <div className="space-y-2 text-center">
-        <h1>
-          <Wordmark className="justify-center text-3xl" markClassName="size-7" />
-        </h1>
-        <p className="text-muted-foreground text-sm">
-          Sign in to your Story queue.
-        </p>
-      </div>
+      <PageHeader
+        align="center"
+        title={<Wordmark className="justify-center" markClassName="size-7" />}
+        description="Sign in to your Story queue."
+      />
 
       <Suspense fallback={null}>
         <LoginNotice />

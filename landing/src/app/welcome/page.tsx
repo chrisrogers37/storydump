@@ -50,11 +50,11 @@ export default async function WelcomePage() {
     // bounce that looked like a broken sign-in on 2026-09-04.
     return (
       <Screen width="md">
-      <RouterUnavailable
-        what="Your account"
-        detail="Storydump is restarting or briefly unreachable — nothing was lost. Try again in a moment."
-        retryHref="/welcome"
-      />
+        <RouterUnavailable
+          what="Your account"
+          detail="Storydump is restarting or briefly unreachable — nothing was lost. Try again in a moment."
+          retryHref="/welcome"
+        />
       </Screen>
     );
   }
