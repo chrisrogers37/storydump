@@ -6,8 +6,7 @@ import { siteConfig } from "@/config/site";
 import { noindexMetadata } from "@/lib/seo";
 import { bricolage } from "@/lib/fonts";
 import { BrandMark } from "@/components/layout/brand-mark";
-import { WaitlistLink } from "@/components/layout/waitlist-link";
-import { NEW_HERE } from "./content";
+import { NEW_HERE, WAITLIST_HREF } from "./content";
 import { LoginNotice } from "./login-notice";
 
 export const metadata = {
@@ -71,12 +70,12 @@ export default function LoginPage() {
 
         <p className="text-center text-xs text-muted-foreground">
           {NEW_HERE.lead}
-          <WaitlistLink
-            location="login"
+          <Link
+            href={WAITLIST_HREF}
             className="underline underline-offset-4 transition-colors hover:text-foreground"
           >
             {NEW_HERE.link}
-          </WaitlistLink>
+          </Link>
           {NEW_HERE.tail}
         </p>
       </div>

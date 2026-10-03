@@ -1,9 +1,9 @@
 "use client";
 
-import { WaitlistLink } from "@/components/layout/waitlist-link";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Notice } from "@/components/ui/notice";
-import { loginError } from "./content";
+import { WAITLIST_HREF, loginError } from "./content";
 
 /**
  * The refusal `?error=` names, above the sign-in button. A client component
@@ -16,12 +16,12 @@ export function LoginNotice() {
   return (
     <Notice>
       {copy.lead}
-      <WaitlistLink
-        location="login"
+      <Link
+        href={WAITLIST_HREF}
         className="font-medium underline underline-offset-4 hover:text-foreground"
       >
         {copy.link}
-      </WaitlistLink>
+      </Link>
       {copy.tail}
     </Notice>
   );

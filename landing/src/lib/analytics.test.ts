@@ -100,7 +100,7 @@ describe("the events the site sends", () => {
   });
 
   it("take their locations and demo actions from fixed lists", () => {
-    expect(CTA_LOCATIONS).toEqual(["header", "blog_post", "use_case", "login"]);
+    expect(CTA_LOCATIONS).toEqual(["header", "blog_post", "use_case"]);
     expect(SIGN_IN_LOCATIONS).toEqual(["header", "hero", "closing", "footer"]);
     expect(DEMO_ACTIONS).toEqual([
       "post_now",
@@ -119,9 +119,7 @@ describe("the events the site sends", () => {
       ...CTA_LOCATIONS.map((location) => ["CTA Click", location]),
     ];
     for (const [event, location] of pairs) {
-      // A CTA location can also be `WaitlistLink`'s: a `location` prop, or its default.
-      const viaWaitlistLink = event === "CTA Click" ? `|location = "${location}"|location="${location}"` : "";
-      expect(all).toMatch(new RegExp(`event: "${event}", props: \\{ location: "${location}" \\}${viaWaitlistLink}`));
+      expect(all).toMatch(new RegExp(`event: "${event}", props: \\{ location: "${location}" \\}`));
     }
   });
 });

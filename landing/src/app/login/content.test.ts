@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LOGIN_ERRORS, NEW_HERE, loginError } from "./content";
+import { LOGIN_ERRORS, NEW_HERE, WAITLIST_HREF, loginError } from "./content";
 
 const sentence = (c: { lead: string; link: string; tail: string }) =>
   `${c.lead}${c.link}${c.tail}`;
@@ -18,6 +18,7 @@ describe("the sign-in page explains the sign-up gate", () => {
       "Storydump is invite-only while in beta. Join the waitlist and we’ll email you when your spot is ready. Invited by a teammate? Sign in with the Google account your invite went to.",
     );
     expect(copy!.link).toBe("Join the waitlist");
+    expect(WAITLIST_HREF).toBe("/#waitlist");
   });
 
   it("shows nothing without a code, or for one it does not know", () => {

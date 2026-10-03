@@ -3,26 +3,17 @@
 import { usePathname } from "next/navigation"
 import type { ReactNode } from "react"
 import { TrackedLink } from "@/components/analytics/tracked-link"
-import type { CTA_LOCATIONS } from "@/lib/analytics"
 
-// Pages that carry their own hero form (id "waitlist"): a waitlist link
+// Pages that carry their own hero form (id "waitlist"): the header's button
 // scrolls to it there, and goes to the home page's everywhere else.
 const hasForm = (pathname: string) => pathname === "/" || pathname === "/use-cases" || pathname.startsWith("/use-cases/")
 
-export function WaitlistLink({
-  className,
-  children,
-  location = "header",
-}: {
-  className?: string
-  children: ReactNode
-  location?: (typeof CTA_LOCATIONS)[number]
-}) {
+export function WaitlistLink({ className, children }: { className?: string; children: ReactNode }) {
   const pathname = usePathname()
   return (
     <TrackedLink
       href={hasForm(pathname) ? "#waitlist" : "/#waitlist"}
-      track={{ event: "CTA Click", props: { location } }}
+      track={{ event: "CTA Click", props: { location: "header" } }}
       className={className}
     >
       {children}
