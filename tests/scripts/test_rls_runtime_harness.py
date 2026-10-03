@@ -843,7 +843,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 65
+        assert len(POLICY_CENSUS) == 67
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
