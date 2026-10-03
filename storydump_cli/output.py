@@ -747,6 +747,9 @@ def _render_health(console: Console, data: Any) -> None:
                 f"live pending {_cell(live.get('pending_update_count'))}"
                 if live
                 else "",
+                f"backpressure {_cell(api.get('backpressure'))}"
+                if api.get("backpressure") is not None
+                else "",
             )
             if part
         ),
@@ -762,9 +765,6 @@ def _render_health(console: Console, data: Any) -> None:
             for part in (
                 _facts(scheduling, "stalled", "accounts_active", "max_lag_seconds"),
                 f"worker {_facts(worker, *sorted(worker))}" if worker else "",
-                f"backpressure {_cell(scheduling.get('backpressure'))}"
-                if "backpressure" in scheduling
-                else "",
             )
             if part
         ),
