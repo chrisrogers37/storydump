@@ -33,6 +33,8 @@ from src.services.target.vocabulary import (
     check_envelope,
 )
 from storydump_cli import railway
+from storydump_cli.commands import UNREACHABLE_FIX
+from storydump_cli.storage import StorageUnavailable
 from storydump_cli.config import Config, write_config
 from tests.storydump_cli.test_main import PERSON, Api, one_envelope, run, runtime
 
@@ -103,9 +105,17 @@ POSTURE = {
 }
 
 
+#: The API's operating details, which public `/health` no longer carries.
+DETAILS = "/api/v1/ops/health"
+
+
 def health_api(over=None) -> Api:
     routes = {
-        ("GET", "/health"): (200, HEALTH),
+        ("GET", "/health"): (
+            200,
+            {"status": "ok", "version": "2.1.0", "commit": "c752736"},
+        ),
+        ("GET", DETAILS): (200, HEALTH),
         ("GET", "/health/scheduling"): (200, SCHEDULING),
         ("GET", "/health/posting"): (200, POSTING),
         ("GET", "/api/v1/me/principal"): (200, PERSON),
@@ -207,7 +217,14 @@ def test_health_reads_the_three_surfaces_and_is_ok(tmp_path):
     api = health_api()
     result = run(env_runtime(tmp_path, api), "health")
     assert result.exit_code == EXIT_OK, result.output
-    assert api.paths("GET")[:3] == ["/health", "/health/scheduling", "/health/posting"]
+    assert api.paths("GET")[:4] == [
+        "/health",
+        "/health/scheduling",
+        "/health/posting",
+        DETAILS,
+    ]
+    signed = {r.url.path for r in api.calls if "Authorization" in r.headers}
+    assert signed == {DETAILS}, "the public surfaces need no credential"
     for word in (
         "health ok",
         "2.1.0",
@@ -230,6 +247,7 @@ def test_health_json_is_one_envelope_with_the_three_payloads(tmp_path):
         "api": HEALTH,
         "scheduling": SCHEDULING,
         "posting": POSTING,
+        "details": {"read": True},
         "verdicts": {
             "api": {"state": "ok", "detail": "/health says ok"},
             "scheduling": {
@@ -341,7 +359,7 @@ def test_health_reads_a_webhook_that_failed_to_register_as_not_well(tmp_path):
     """`/health.webhook` is the API's own registration report (a snapshot from
     startup): `ok: false` with the error is a bot nobody is delivering to."""
     broken = {**HEALTH, "webhook": {"ok": False, "error": "BotApiError"}}
-    api = health_api({("GET", "/health"): (200, broken)})
+    api = health_api({("GET", DETAILS): (200, broken)})
     result = run(env_runtime(tmp_path, api), "--json", "health")
     assert result.exit_code == EXIT_API_UNREACHABLE, result.output
     document = one_envelope(result)
@@ -357,7 +375,7 @@ def test_health_reads_a_webhook_that_failed_to_register_as_not_well(tmp_path):
             "skipped": "autoregister off (not the production environment)",
         },
     }
-    api = health_api({("GET", "/health"): (200, skipped)})
+    api = health_api({("GET", DETAILS): (200, skipped)})
     result = run(env_runtime(tmp_path, api), "--json", "health")
     assert result.exit_code == EXIT_OK, result.output
     # the live sample (healthy, in HEALTH) decides when there is one: registered
@@ -377,7 +395,7 @@ def test_health_reads_an_undelivered_backlog_as_not_well(tmp_path):
             "last_error_message": "Wrong response from the webhook: 500 Internal Server Error",
         },
     }
-    api = health_api({("GET", "/health"): (200, stuck)})
+    api = health_api({("GET", DETAILS): (200, stuck)})
     result = run(env_runtime(tmp_path, api), "--json", "health")
     assert result.exit_code == EXIT_API_UNREACHABLE, result.output
     verdict = one_envelope(result)["data"]["verdicts"]["webhook"]
@@ -393,11 +411,11 @@ def test_health_reads_an_undelivered_backlog_as_not_well(tmp_path):
             "last_error_message": "Wrong response from the webhook: 500 Internal Server Error",
         },
     }
-    api = health_api({("GET", "/health"): (200, drained)})
+    api = health_api({("GET", DETAILS): (200, drained)})
     assert run(env_runtime(tmp_path, api), "health").exit_code == EXIT_OK
     # an API too old to report the webhook at all is not judged on it
     silent = {k: v for k, v in HEALTH.items() if k not in ("webhook", "webhook_live")}
-    api = health_api({("GET", "/health"): (200, silent)})
+    api = health_api({("GET", DETAILS): (200, silent)})
     result = run(env_runtime(tmp_path, api), "--json", "health")
     assert result.exit_code == EXIT_OK, result.output
     assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "unsampled"
@@ -416,7 +434,7 @@ def test_a_skipped_registration_with_a_live_backlog_is_still_undelivered(tmp_pat
     }
     api = health_api(
         {
-            ("GET", "/health"): (
+            ("GET", DETAILS): (
                 200,
                 {**HEALTH, "webhook": skipped, "webhook_live": stuck},
             )
@@ -426,7 +444,7 @@ def test_a_skipped_registration_with_a_live_backlog_is_still_undelivered(tmp_pat
     assert result.exit_code == EXIT_API_UNREACHABLE, result.output
     assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "undelivered"
     quiet = {k: v for k, v in HEALTH.items() if k != "webhook_live"}
-    api = health_api({("GET", "/health"): (200, {**quiet, "webhook": skipped})})
+    api = health_api({("GET", DETAILS): (200, {**quiet, "webhook": skipped})})
     result = run(env_runtime(tmp_path, api), "--json", "health")
     assert result.exit_code == EXIT_OK, result.output
     assert one_envelope(result)["data"]["verdicts"]["webhook"]["state"] == "skipped"
@@ -482,7 +500,7 @@ def test_health_reports_a_surface_that_answers_503_and_exits_4(tmp_path):
 
 
 def test_health_reads_a_bad_api_status_as_not_well(tmp_path):
-    api = health_api({("GET", "/health"): (200, {**HEALTH, "status": "degraded"})})
+    api = health_api({("GET", DETAILS): (200, {**HEALTH, "status": "degraded"})})
     result = run(env_runtime(tmp_path, api), "--json", "health")
     assert result.exit_code == EXIT_API_UNREACHABLE, result.output
     assert one_envelope(result)["data"]["ok"] is False
@@ -529,11 +547,88 @@ def test_health_reads_a_briefly_due_cursor_as_well(tmp_path):
     assert run(env_runtime(tmp_path, api), "health").exit_code == EXIT_OK
 
 
-def test_health_needs_no_token(tmp_path):
+def test_health_without_a_token_reads_the_public_surfaces_and_not_the_webhook(
+    tmp_path,
+):
+    """Without a token nothing is sent signed, and the webhook is
+    `not_checked`, which is not well: no false green."""
     api = health_api()
-    result = run(env_runtime(tmp_path, api, token=None), "health")
-    assert result.exit_code == EXIT_OK, result.output
+    result = run(env_runtime(tmp_path, api, token=None), "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    assert DETAILS not in api.paths("GET")
     assert all("Authorization" not in r.headers for r in api.calls)
+    data = one_envelope(result)["data"]
+    assert data["api"]["status"] == "ok"
+    assert data["verdicts"]["api"]["state"] == "ok"
+    assert data["verdicts"]["webhook"]["state"] == "not_checked"
+    assert data["details"]["read"] is False
+    assert "storydump login" in data["details"]["fix"]
+
+
+def test_health_outside_ops_user_ids_says_why_the_webhook_was_not_checked(tmp_path):
+    refused = {"detail": "token refused: not_ops", "reason": "not_ops"}
+    api = health_api({("GET", DETAILS): (403, refused)})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    data = one_envelope(result)["data"]
+    assert data["details"]["reason"] == "not_ops"
+    assert "OPS_USER_IDS" in data["details"]["fix"]
+    webhook = data["verdicts"]["webhook"]
+    assert webhook["state"] == "not_checked" and "OPS_USER_IDS" in webhook["detail"]
+
+
+def test_health_outside_ops_user_ids_says_so_in_words(tmp_path):
+    refused = {"detail": "token refused: not_ops", "reason": "not_ops"}
+    api = health_api({("GET", DETAILS): (403, refused)})
+    result = run(env_runtime(tmp_path, api), "health")
+    assert "health NOT OK" in result.stdout
+    assert "operating details not read" in result.stdout
+    assert "OPS_USER_IDS" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (503, {"detail": "target database not configured"}),
+        (404, {"detail": "Not Found"}),
+        httpx.ConnectError("down"),
+    ],
+)
+def test_health_whose_details_fail_reports_the_webhook_not_checked(tmp_path, answer):
+    api = health_api({("GET", DETAILS): answer})
+    result = run(env_runtime(tmp_path, api), "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    data = one_envelope(result)["data"]
+    assert data["verdicts"]["api"]["state"] == "ok", "public /health still answered"
+    assert data["verdicts"]["webhook"]["state"] == "not_checked"
+    if isinstance(answer, Exception) or answer[0] >= 500:
+        assert data["details"]["detail"].startswith("the details did not answer")
+        assert data["details"]["fix"] == UNREACHABLE_FIX
+    else:
+        assert data["details"]["detail"].startswith("the details answered 404")
+
+
+def test_health_without_a_token_store_names_the_stores_own_fix(tmp_path):
+    rt = env_runtime(tmp_path, health_api())
+
+    def no_store():
+        raise StorageUnavailable("the keychain refused", "use --insecure-storage")
+
+    rt.token = no_store
+    result = run(rt, "--json", "health")
+    assert result.exit_code == EXIT_API_UNREACHABLE, result.output
+    details = one_envelope(result)["data"]["details"]
+    assert details == {
+        "read": False,
+        "detail": "no token store: the keychain refused",
+        "fix": "use --insecure-storage",
+    }
+
+
+def test_health_with_a_token_the_api_refuses_is_a_token_problem(tmp_path):
+    api = health_api({("GET", DETAILS): (401, {"detail": "authentication required"})})
+    result = run(env_runtime(tmp_path, api), "health")
+    assert result.exit_code == EXIT_NOT_AUTHORIZED, result.output
 
 
 def test_an_api_that_does_not_answer_health_is_exit_4(tmp_path):
@@ -863,7 +958,7 @@ def test_health_reads_a_failed_webhook_sampler_as_not_well(tmp_path):
         **HEALTH,
         "webhook_live": {"at": "2026-09-15T14:59:30+00:00", "error": "ConnectError"},
     }
-    api = health_api({("GET", "/health"): (200, blind)})
+    api = health_api({("GET", DETAILS): (200, blind)})
     result = run(env_runtime(tmp_path, api), "--json", "health")
     assert result.exit_code == EXIT_API_UNREACHABLE, result.output
     verdict = one_envelope(result)["data"]["verdicts"]["webhook"]
@@ -959,8 +1054,7 @@ def test_doctor_reports_every_check_ok_and_exits_0(tmp_path):
     assert all(c["state"] == "ok" for c in checks.values()), checks
     assert checks["token"]["value"].startswith("chris-mbp")
     assert "operator" in checks["token"]["value"]
-    assert "2.1.0" in checks["api"]["value"]
-    assert "svc_ingress" in checks["api"]["value"] and "{" not in checks["api"]["value"]
+    assert "2.1.0" in checks["api"]["value"] and "c752736" in checks["api"]["value"]
     assert "4.30.3" in checks["railway"]["value"]
     assert "@" not in checks["railway"]["value"], (
         "no account line in a value an agent pastes"

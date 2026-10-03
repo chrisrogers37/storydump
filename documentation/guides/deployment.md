@@ -77,7 +77,8 @@ psql "$DATABASE_URL" -c "\dt"               # the target tables, in `public`
   for the API and `svc_worker` for the worker, which step 0 created; giving
   them passwords and switching the services is
   [`runtime-database-roles.md`](../operations/runtime-database-roles.md).
-  `/health` reports the login a service actually holds (`db_role`).
+  The API's operating details report the login it actually holds (`db_role`,
+  `storydump health --json`, for `OPS_USER_IDS`).
 
 ### Connection Pool Sizing
 
@@ -300,8 +301,9 @@ non-zero — the worker does, when a supervised task dies — is restarted.
 ### From a laptop
 
 - `storydump health` — the API's `/health`, `/health/scheduling` and
-  `/health/posting`, and the bot's webhook, judged by the fleet monitors' own
-  verdicts; exit 4 when not well
+  `/health/posting`, and the bot's webhook from the operating details (for a
+  token whose person is in `OPS_USER_IDS`; otherwise `not_checked`), judged by
+  the fleet monitors' own verdicts; exit 4 when not well
 - `storydump deploys --watch --commit <sha>` — follows a deploy of both services
 
 ### The fleet monitors

@@ -15,8 +15,25 @@ from fastapi.testclient import TestClient
 
 from src import __version__
 from src.api.app import create_app
+from src.api.principal import Principal, current_principal
 from src.config.settings import settings
 from src.services.target import backpressure, posting_health, scheduling_health
+
+
+#: An operator, for the details `/health` used to publish (`/api/v1/ops/health`);
+#: who else is refused is `test_ops_routes.py`'s to pin.
+OPERATOR = Principal(session_id="s-op", user_id="00000000-0000-4000-8000-0000000000aa")
+
+
+def details(client: TestClient) -> dict:
+    """The API's operating details, read as an operator."""
+    client.app.dependency_overrides[current_principal] = lambda: OPERATOR
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(settings, "OPS_USER_IDS", OPERATOR.user_id)
+            return client.get("/api/v1/ops/health").json()
+    finally:
+        client.app.dependency_overrides.pop(current_principal, None)
 
 
 class TestEngineConfiguration:
@@ -24,8 +41,12 @@ class TestEngineConfiguration:
         app = create_app(env={})
         assert app.state.engine is None
         client = TestClient(app)
-        health = client.get("/health").json()
-        assert health["status"] == "ok" and health["target_database"] is False
+        assert client.get("/health").json() == {
+            "status": "ok",
+            "version": __version__,
+            "commit": None,
+        }
+        assert details(client)["target_database"] is False
         resp = client.get("/api/v1/me")
         assert resp.status_code == 503
         assert "TARGET_DATABASE_URL" in resp.json()["detail"]
@@ -38,7 +59,90 @@ class TestEngineConfiguration:
         )
         assert app.state.engine is not None
         assert app.state.engine.url.drivername == "postgresql+asyncpg"
-        assert TestClient(app).get("/health").json()["target_database"] is True
+        assert details(TestClient(app))["target_database"] is True
+
+
+class TestThePublicProbeSaysLittle:
+    """`/health` is unauthenticated: it says ok and which build answers, the
+    one thing a deploy is verified by, and nothing an attacker or a
+    competitor could use (the rest is `details`, the operators')."""
+
+    def test_it_names_the_deployed_commit(self):
+        app = create_app(env={"RAILWAY_GIT_COMMIT_SHA": "c752736aaaabbbbccccdddd"})
+        assert TestClient(app).get("/health").json() == {
+            "status": "ok",
+            "version": __version__,
+            "commit": "c752736",
+        }
+        assert details(TestClient(app))["commit"] == "c752736"
+
+    DOCS = ("/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json")
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {},
+            {"RAILWAY_ENVIRONMENT_NAME": "prod"},
+            {"RAILWAY_ENVIRONMENT_NAME": "production"},
+            {"RAILWAY_ENVIRONMENT_NAME": " Production ", "API_DOCS": "1"},
+            {"API_DOCS": "true"},
+        ],
+    )
+    def test_no_docs_and_no_schema_unless_asked_for_outside_production(self, env):
+        """Off unless `API_DOCS=1`, so a renamed environment or another host
+        fails closed; production refuses even the switch."""
+        client = TestClient(create_app(env=env))
+        for path in self.DOCS:
+            assert client.get(path).status_code == 404, path
+        assert client.get("/health").status_code == 200
+
+    @pytest.mark.parametrize(
+        "value, says",
+        [
+            ("", "OPS_USER_IDS is empty"),
+            ("00000000-0000-4000-8000-0000000000aa, tok_123", "entry 2 of 2"),
+            ("{00000000-0000-4000-8000-0000000000aa},tok_123,", "entry 2 of 2"),
+        ],
+    )
+    def test_startup_says_why_ops_will_refuse_everyone(self, monkeypatch, value, says):
+        from src.api import app as app_module
+
+        said = []
+        monkeypatch.setattr(
+            app_module.logger, "warning", lambda msg, *a: said.append(msg % a)
+        )
+        app_module._warn_about_ops_user_ids(value)
+        text = " ".join(said)
+        assert says in text
+        assert "tok_123" not in text, "an entry is never echoed"
+
+    def test_a_pasted_id_in_another_spelling_still_names_the_person(self):
+        """Braced, hyphen-less and `urn:uuid:` pastes are the same id the
+        database returns; only a non-UUID admits nobody, and is the one the
+        startup warning names."""
+        from src.config.settings import parse_ops_user_ids
+
+        canonical = "00000000-0000-4000-8000-0000000000aa"
+        for spelling in (
+            canonical.upper(),
+            "{" + canonical + "}",
+            canonical.replace("-", ""),
+            "urn:uuid:" + canonical,
+        ):
+            assert parse_ops_user_ids(f" {spelling} , tok_123") == (
+                frozenset({canonical}),
+                [2],
+            ), spelling
+        assert parse_ops_user_ids("") == (frozenset(), [])
+
+    @pytest.mark.parametrize(
+        "env",
+        [{"API_DOCS": "1"}, {"API_DOCS": "1", "RAILWAY_ENVIRONMENT_NAME": "staging"}],
+    )
+    def test_a_development_server_asks_for_the_docs(self, env):
+        client = TestClient(create_app(env=env))
+        for path in self.DOCS:
+            assert client.get(path).status_code == 200, path
 
 
 class TestTheVersionIsThePackages:
@@ -52,7 +156,7 @@ class TestTheVersionIsThePackages:
 
     def test_health_reports_the_package_version(self):
         app = create_app(env={})
-        assert TestClient(app).get("/health").json()["version"] == __version__
+        assert details(TestClient(app))["version"] == __version__
 
     def test_the_openapi_document_reports_the_same_one(self):
         """The two must not be able to drift apart again.
@@ -60,11 +164,11 @@ class TestTheVersionIsThePackages:
         `app.py` imports `VERSION` for `FastAPI(version=…)`, so this is one
         object in two places today — and this pins that, not just the value.
         """
-        app = create_app(env={})
+        app = create_app(env={"API_DOCS": "1"})
         client = TestClient(app)
         assert (
             client.get("/openapi.json").json()["info"]["version"]
-            == client.get("/health").json()["version"]
+            == details(client)["version"]
             == __version__
         )
 
@@ -601,11 +705,11 @@ def _wait_for_role(client, timeout=2.0):
     """The sample runs as a background task after startup; wait for it."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        role = client.get("/health").json()["db_role"]
+        role = details(client)["db_role"]
         if role is not None:
             return role
         time.sleep(0.02)
-    return client.get("/health").json()["db_role"]
+    return details(client)["db_role"]
 
 
 class TestHealthReportsTheDatabaseRole:
@@ -624,7 +728,7 @@ class TestHealthReportsTheDatabaseRole:
 
     def test_without_startup_the_role_is_unknown_not_invented(self):
         app = create_app(env={})
-        assert TestClient(app).get("/health").json()["db_role"] is None
+        assert details(TestClient(app))["db_role"] is None
 
     def test_it_reports_the_login_and_bypassrls_after_startup(self):
         engine = _RoleEngine(user="svc_ingress", bypassrls=False)
@@ -653,8 +757,9 @@ class TestHealthReportsTheDatabaseRole:
         app = create_app(engine=engine)
         with TestClient(app) as client:
             resp = client.get("/health")
+            role = details(client)["db_role"]
         assert resp.status_code == 200
-        assert resp.json()["db_role"] is None
+        assert role is None
 
 
 class TestTheApiRegistersItsOwnWebhook:
@@ -726,7 +831,7 @@ class TestTheApiRegistersItsOwnWebhook:
 
         deadline = _time.monotonic() + timeout
         while _time.monotonic() < deadline:
-            body = client.get("/health").json()
+            body = details(client)
             if body.get("webhook") is not None:
                 return body["webhook"]
             _time.sleep(0.05)
@@ -761,7 +866,7 @@ class TestTheApiRegistersItsOwnWebhook:
             deadline = _time.monotonic() + 3.0
             live = None
             while _time.monotonic() < deadline:
-                live = client.get("/health").json().get("webhook_live")
+                live = details(client).get("webhook_live")
                 if live is not None:
                     break
                 _time.sleep(0.05)
@@ -814,15 +919,13 @@ class TestHealthReportsThePoolArithmetic:
     def test_without_an_engine_the_pool_is_none_and_workers_default_to_one(self):
         from fastapi.testclient import TestClient
 
-        body = TestClient(create_app(env={})).get("/health").json()
+        body = details(TestClient(create_app(env={})))
         assert body["pool"] is None and body["ingress_workers"] == 1
 
     def test_web_concurrency_names_the_process_count(self):
         from fastapi.testclient import TestClient
 
-        body = (
-            TestClient(create_app(env={"WEB_CONCURRENCY": "2"})).get("/health").json()
-        )
+        body = details(TestClient(create_app(env={"WEB_CONCURRENCY": "2"})))
         assert body["ingress_workers"] == 2
 
     def test_with_an_engine_the_pool_snapshot_is_reported(self, monkeypatch):
@@ -837,7 +940,7 @@ class TestHealthReportsThePoolArithmetic:
         )
         monkeypatch.setattr(app_module, "_engine_from_env", lambda env: engine)
         try:
-            body = TestClient(create_app(env={})).get("/health").json()
+            body = details(TestClient(create_app(env={})))
             assert body["pool"] == {
                 "size": 10,
                 "overflow": 0,

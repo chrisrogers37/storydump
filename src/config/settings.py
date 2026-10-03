@@ -1,6 +1,7 @@
 """Application settings and configuration management."""
 
 import re
+import uuid
 from typing import Container
 
 from pydantic import ValidationError
@@ -101,6 +102,22 @@ def _redact(exc: ValidationError) -> str:
         field = ".".join(str(part) for part in err.get("loc", ())) or "<root>"
         lines.append(f"  {field}: {err.get('type', 'invalid')}")
     return _PREFIX + "\n" + "\n".join(lines)
+
+
+def parse_ops_user_ids(raw: str) -> tuple[frozenset[str], list[int]]:
+    """`OPS_USER_IDS` (comma-separated) as ``(ids, refused)``: each entry
+    canonical the way the database spells a user id, so a braced, hyphen-less
+    or `urn:uuid:` paste still matches, and the 1-based positions of the
+    entries that are not a UUID at all and admit nobody. The one parser: the
+    API's startup warning reads ``refused`` from here."""
+    entries = [e.strip() for e in raw.split(",") if e.strip()]
+    ids, refused = set(), []
+    for position, entry in enumerate(entries, start=1):
+        try:
+            ids.add(str(uuid.UUID(entry)))
+        except ValueError:
+            refused.append(position)
+    return frozenset(ids), refused
 
 
 class Settings(BaseSettings):
@@ -275,6 +292,13 @@ class Settings(BaseSettings):
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1,fd00::/8"
     )
 
+    # Who may read the API's operating details (`GET /api/v1/ops/health`):
+    # comma-separated user ids, the `user` line `storydump whoami` prints. Empty —
+    # the default — admits nobody, so the details stay closed until the
+    # deployment names them. Not the `operator` token role: a person-bound
+    # token of any role passes only if its person is listed here.
+    OPS_USER_IDS: str = ""
+
     @property
     def web_app_origin(self) -> Optional[str]:
         """The front end's origin, normalized (no trailing slash), or None.
@@ -289,6 +313,11 @@ class Settings(BaseSettings):
     def trusted_proxy_hosts(self) -> list[str]:
         """`TRUSTED_PROXY_HOSTS` as the list uvicorn's middleware expects."""
         return [h.strip() for h in self.TRUSTED_PROXY_HOSTS.split(",") if h.strip()]
+
+    @property
+    def ops_user_ids(self) -> frozenset[str]:
+        """`OPS_USER_IDS` as the canonical ids the database returns."""
+        return parse_ops_user_ids(self.OPS_USER_IDS)[0]
 
     # Google Drive OAuth: the client the workspace grant is minted and
     # refreshed with (the worker warns at boot without both).

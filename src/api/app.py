@@ -17,10 +17,11 @@ What it mounts, and why each lives where it does:
   delivery is refused), and is dispatched through `app.state.ingress`, which
   the factory wires whenever an engine exists.
   Chat-inbound COMMANDS remain #854 and are not dispatched.
-- ``/health`` — Railway's probe (`railway.toml`), which now also says whether
-  a target engine is configured, so a service that would 503 every data route
-  is visible from the probe instead of only from the first request; with
-  ``/health/scheduling`` and ``/health/posting``, see `routes/health.py`.
+- ``/health`` — Railway's probe (`railway.toml`): ok, the version and the
+  commit, nothing else; the operating details (whether a target engine is
+  configured, the login, the pool, the webhook) are ``/api/v1/ops/health``,
+  for `OPS_USER_IDS` alone. With ``/health/scheduling`` and
+  ``/health/posting``, see `routes/health.py`.
 
 What deliberately does not exist any more: the legacy ``/auth`` OAuth router,
 the ``/api/onboarding`` router and its Mini App (`/static`; the Mini App's
@@ -55,7 +56,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from src.api.routes.auth import router as auth_router
-from src.api.routes.health import VERSION, AnswerCache
+from src.api.routes.health import COMMIT_VAR, VERSION, AnswerCache
 from src.api.routes.health import router as health_router
 from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
@@ -64,7 +65,7 @@ from src.api.routes.tokens import router as tokens_router
 from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
-from src.config.settings import settings
+from src.config.settings import parse_ops_user_ids, settings
 from src.exceptions.tenancy import (
     CrossSiteRefused,
     TenantResolutionError,
@@ -83,7 +84,7 @@ from src.services.target.unit_of_work import (
     INGRESS_POOL_TIMEOUT_SEAM,
     PoolWatch,
 )
-from src.services.target.vocabulary import DATABASE_URL_VAR
+from src.services.target.vocabulary import DATABASE_URL_VAR, is_production
 from src.services.target.telegram_dispatch import TelegramDispatcher
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
@@ -196,6 +197,7 @@ _TOKEN_STATUS = {
     "session_required": 403,
     "readonly_token": 403,
     "wrong_workspace": 403,
+    "not_ops": 403,
 }
 
 #: `CrossSiteRefused.reason` → 403 WITH the reason, so a refused browser
@@ -437,10 +439,10 @@ def _ingress_workers(env: Mapping[str, str]) -> int:
 
 
 async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
-    """Cache the startup registration's report on `app.state.webhook` for
-    `/health` — `reg.register_at_startup` decides it and never raises, so this
-    is the whole of the API's part: hand it the bot transport this process
-    speaks with, and keep what it says."""
+    """Cache the startup registration's report on `app.state.webhook` for the
+    operating details (`/api/v1/ops/health`) — `reg.register_at_startup`
+    decides it and never raises, so this is the whole of the API's part: hand
+    it the bot transport this process speaks with, and keep what it says."""
     from src.channels import telegram_webhook_registration as reg
 
     app.state.webhook = await reg.register_at_startup(
@@ -449,10 +451,11 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
 
 
 async def _sample_webhook_live(app: FastAPI, env: Mapping[str, str]) -> None:
-    """Cache each live webhook sample on `app.state.webhook_live` for `/health`.
-    The loop, its cadence and its never-raise rule are `reg.live_samples`; this
-    task exists to hold the latest one where the probe can read it, and is
-    cancelled at shutdown like the other two."""
+    """Cache each live webhook sample on `app.state.webhook_live` for the
+    operating details (`/api/v1/ops/health`). The loop, its cadence and its
+    never-raise rule are `reg.live_samples`; this task exists to hold the
+    latest one where the probe can read it, and is cancelled at shutdown like
+    the other two."""
     from src.channels import telegram_webhook_registration as reg
 
     async for sample in reg.live_samples(
@@ -480,6 +483,26 @@ async def _sample_db_role(app: FastAPI) -> None:
         logger.warning("database role not sampled at startup: %s", exc)
 
 
+def _warn_about_ops_user_ids(raw: str) -> None:
+    """Say at startup why the operating details and posture will refuse
+    everyone, since the refusal itself cannot: `OPS_USER_IDS` empty, or an
+    entry that is not a user id (named by position, never echoed)."""
+    ids, refused = parse_ops_user_ids(raw)
+    if not ids and not refused:
+        logger.warning(
+            "OPS_USER_IDS is empty: /api/v1/ops/health and /api/v1/ops/posture"
+            " refuse everyone. Set it to your user id (storydump whoami)."
+        )
+        return
+    for position in refused:
+        logger.warning(
+            "OPS_USER_IDS entry %d of %d is not a user id (a UUID, comma-"
+            "separated); it admits nobody",
+            position,
+            sum(1 for e in raw.split(",") if e.strip()),
+        )
+
+
 def _require_key_ring() -> None:
     """Build the credential key ring, or refuse to start.
 
@@ -488,7 +511,7 @@ def _require_key_ring() -> None:
     (`oauth_states.ring`). Built lazily, a missing or malformed key passed
     Railway's health check and failed at those routes — a connect only after
     the person had granted access at Meta or Google. A missing engine is
-    answered per route instead (503, and `/health` says so); nothing on the
+    answered per route instead (503, and `/api/v1/ops/health` says so); nothing on the
     probe would say the key is missing. Raised from startup, the lifespan
     fails and uvicorn exits (one process: `WEB_CONCURRENCY` is unset in
     production), the deploy fails its check, and the previous deploy keeps
@@ -530,6 +553,15 @@ def _telegram_transport(env: Mapping[str, str]):
     return transport_from_env(token, env)
 
 
+#: `1` serves `/docs`, `/redoc` and `/openapi.json` — a development server's
+#: switch, ignored in production.
+API_DOCS_VAR = "API_DOCS"
+
+
+def _serves_docs(env: Mapping[str, str]) -> bool:
+    return (env.get(API_DOCS_VAR) or "").strip() == "1" and not is_production(env)
+
+
 def create_app(
     *, engine: Optional[AsyncEngine] = None, env: Optional[Mapping[str, str]] = None
 ) -> FastAPI:
@@ -548,6 +580,7 @@ def create_app(
         # First, so a process that cannot encrypt starts no task — in
         # particular it never re-registers the production bot's webhook.
         _require_key_ring()
+        _warn_about_ops_user_ids(settings.OPS_USER_IDS)
         # The role sample and the webhook registration run as background
         # tasks so startup never waits on the database or on Telegram (see
         # `app.state.db_role` / `app.state.webhook` below); a task still
@@ -564,12 +597,22 @@ def create_app(
                 if not task.done():
                     task.cancel()
 
+    # The interactive docs and the schema map every route for whoever asks,
+    # and nothing deployed reads them (the CLI and the web know their routes),
+    # so they are opt-in: `API_DOCS=1`, and never in production even then. A
+    # renamed environment or another host serves none.
+    docs = _serves_docs(env)
     app = FastAPI(
         title="Storydump API",
         description="Sign-in, reads and commands for the target tier",
         version=VERSION,
         lifespan=_lifespan,
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
     )
+    # The deployed commit, for `/health` (Railway sets it on a Git deploy).
+    app.state.commit = (env.get(COMMIT_VAR) or "").strip()[:7] or None
     app.state.engine = engine if engine is not None else _engine_from_env(env)
     if settings.TARGET_SIGNUP_OPEN:
         # A local stack's switch (092): said at startup, so it is never on
@@ -579,12 +622,13 @@ def create_app(
             "admitted or not"
         )
     # Which database login this process holds, and whether it bypasses RLS
-    # (#751, F.4). Sampled ONCE, in the background, after startup — `/health`
-    # reports the cached answer and still opens no connection of its own, so a
-    # database blip cannot fail the probe. None means "not sampled", never
-    # "safe": production has connected as the owner role with BYPASSRLS, which
-    # makes every tenant policy inert, and this field is how the switch to the
-    # runtime login is verified after a deploy.
+    # (#751, F.4). Sampled ONCE, in the background, after startup — the
+    # operating details (`/api/v1/ops/health`) report the cached answer and
+    # still opens no connection of its own, so a database blip cannot fail the
+    # probe. None means "not sampled", never "safe": production has connected
+    # as the owner role with BYPASSRLS, which makes every tenant policy inert,
+    # and this field is how the switch to the runtime login is verified after a
+    # deploy.
     app.state.db_role = None
     # The webhook registration report (`_register_webhook`): None until the
     # startup task has run; then `ok`, what Telegram holds, or why it was

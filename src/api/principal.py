@@ -86,6 +86,8 @@ TOKEN_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/ops/workspaces/{ws}/outbox"),
         ("GET", "/api/v1/ops/workspaces/{ws}/burst"),
         ("GET", "/api/v1/ops/posture"),
+        # the operating details `/health` used to publish (`require_ops`)
+        ("GET", "/api/v1/ops/health"),
     }
 )
 
@@ -313,6 +315,19 @@ async def current_principal(request: Request) -> Principal:
     async with engine.begin() as conn:
         session = await sessions.resolve(conn, token_hash=sessions.token_hash(value))
     return Principal(session_id=session.id, user_id=session.user_id)
+
+
+async def require_ops(
+    principal: Principal = Depends(current_principal),
+) -> Principal:
+    """FastAPI dependency for the estate-wide routes: a person named in
+    `OPS_USER_IDS`, on a session or a person-bound token. A service identity
+    has no person and is refused, and so is everyone while the setting is
+    empty. A dependency, not a call in the handler, so a route cannot forget
+    it (`TestTheAllowlist` holds every estate-wide token route to it)."""
+    if (principal.user_id or "").lower() not in settings.ops_user_ids:
+        raise TokenRefused("not_ops", "this route is for the people in OPS_USER_IDS")
+    return principal
 
 
 def require_own_workspace(principal: Principal, workspace_id: str) -> None:
