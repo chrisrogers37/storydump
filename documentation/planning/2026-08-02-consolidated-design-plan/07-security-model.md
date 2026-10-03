@@ -3111,9 +3111,9 @@ caller is one counter shared by every visitor, and one script spends it for ever
 `WAITLIST_SITE_SECRET` set on both tiers, the site sends the secret and the visitor's address as
 Vercel reports it (Vercel overwrites `x-real-ip` and `x-forwarded-for`, so a visitor cannot choose
 it); the API compares the secret in constant time, refuses a call without it before reading the
-body, and keys the counter on the visitor (an IPv6 address by its /64) at 10 a minute. Unset on
+body, and keys the counter (10 a minute) and the per-address slot share on the visitor. Every client, visitor or peer, is counted by its IPv6 /64, never its single address. Unset on
 the API it behaves as before whatever the site sends, which is what lets the owner set the site
-first. A matched call with no usable address falls back to the shared counter.
+first. A matched call with no usable address falls back to the peer and the shared counter.
 
 **What it does not adopt.** A hand-made, empty `waitlist_signups` and the NOLOGIN
 `waitlist_writer` role were created in production as a stopgap on 2026-10-02 and never served a

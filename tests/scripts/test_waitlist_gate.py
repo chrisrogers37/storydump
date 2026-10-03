@@ -332,13 +332,49 @@ class TestTheSlots:
                 for _ in range(public.WAITLIST_MAX_QUEUED_PER_ADDRESS)
             ]
             await asyncio.sleep(0.01)
-            over = await slots.acquire("10.0.0.7")
+            # Refused at once, not after the wait budget runs out.
+            over = await asyncio.wait_for(slots.acquire("10.0.0.7"), 0.5)
             for task in waiters:
                 task.cancel()
             await asyncio.gather(*waiters, return_exceptions=True)
             return over
 
         assert asyncio.run(main()) is False
+
+    def test_a_waiter_holds_its_own_share_not_a_global_slot(self, monkeypatch):
+        """The address's share is taken before a global slot, so a hot
+        address's extra requests leave the global slots to everyone else."""
+        monkeypatch.setattr(public, "WAITLIST_SLOT_WAIT_SECONDS", 1.0)
+
+        async def main():
+            slots = public.WaitlistSlots()
+            for _ in range(2):
+                assert await slots.acquire("10.0.0.5")
+            extra = asyncio.create_task(slots.acquire("10.0.0.5"))
+            await asyncio.sleep(0.01)
+            free = slots.free._value
+            other = await asyncio.wait_for(slots.acquire("10.0.0.6"), 0.1)
+            extra.cancel()
+            await asyncio.gather(extra, return_exceptions=True)
+            return free, other
+
+        assert asyncio.run(main()) == (2, True)
+
+    def test_a_timed_out_wait_gives_back_the_share_it_took(self, monkeypatch):
+        """A wait that took its address's share and then timed out on the
+        global slots returns the share: the address still has two."""
+        monkeypatch.setattr(public, "WAITLIST_SLOT_WAIT_SECONDS", 0.05)
+
+        async def main():
+            slots = public.WaitlistSlots()
+            assert await slots.acquire("site")
+            for other in ("x", "y", "z"):
+                assert await slots.acquire(other)
+            second = await slots.acquire("site")
+            slots.release("x")
+            return second, await slots.acquire("site")
+
+        assert asyncio.run(main()) == (False, True)
 
     def test_a_request_waits_for_a_slot_then_gets_it(self, monkeypatch):
         monkeypatch.setattr(public, "WAITLIST_SLOT_WAIT_SECONDS", 1.0)
@@ -450,6 +486,34 @@ class TestTheSiteSecret:
         assert [r.status_code for r in first] == [202, 202, 429]
         assert [r.status_code for r in other] == [202]
         assert _entry(world, "visitor-b1@example.com") != []
+
+    @pytest.mark.parametrize(
+        "secret, headers, key",
+        [
+            # Unset: the peer, whatever the site names.
+            (None, _from_site("198.51.100.5"), "127.0.0.1"),
+            # Set and matched: the visitor, an IPv6 one by its /64.
+            (SECRET, _from_site("198.51.100.5"), "198.51.100.5"),
+            (SECRET, _from_site("2001:db8:9:9::5"), "2001:db8:9:9::/64"),
+        ],
+    )
+    def test_the_slot_share_is_keyed_like_the_counter(
+        self, world, monkeypatch, secret, headers, key
+    ):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", secret)
+        seen = []
+        acquire = public.WaitlistSlots.acquire
+
+        async def spy(slots, address):
+            seen.append(address)
+            return await acquire(slots, address)
+
+        monkeypatch.setattr(public.WaitlistSlots, "acquire", spy)
+        (resp,) = _post(
+            world, {"email": f"slot-{len(key)}@example.com"}, headers=headers
+        )
+        assert resp.status_code == 202, resp.text
+        assert seen == [key]
 
     def test_set_without_a_usable_visitor_the_shared_counter_serves(
         self, world, armed, monkeypatch
