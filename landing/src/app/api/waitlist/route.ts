@@ -15,6 +15,24 @@ const INVALID = { status: "error", message: "Please enter a valid email address.
 const FAILED = { status: "error", message: "Something went wrong. Please try again." }
 
 /**
+ * With `WAITLIST_SITE_SECRET` set (the same value as the API's), the call says
+ * it comes from this site and names the visitor it forwards, so the API keeps
+ * a limit per visitor instead of one shared by everyone. The address is
+ * Vercel's: it sets `x-real-ip` and overwrites `x-forwarded-for` with the
+ * connecting address, so a visitor cannot choose it. Unset, nothing is sent.
+ */
+function siteHeaders(req: NextRequest): Record<string, string> {
+  const secret = process.env.WAITLIST_SITE_SECRET
+  if (!secret) return {}
+  const visitor = (
+    req.headers.get("x-real-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0]
+  )?.trim()
+  const headers: Record<string, string> = { "X-Waitlist-Site-Secret": secret }
+  if (visitor) headers["X-Waitlist-Visitor-IP"] = visitor
+  return headers
+}
+
+/**
  * The waitlist form's server side. It hands the address and the campaign to
  * the API (`POST /public/waitlist`), which owns the write and decides what an
  * address is: this tier holds no database credential. The API answers a new address and one already on the
@@ -53,6 +71,7 @@ export async function POST(req: NextRequest) {
   const result = await targetFetch("/waitlist", null, {
     method: "POST",
     plane: "public",
+    headers: siteHeaders(req),
     body: JSON.stringify(forwarded),
     // A hung API is the same generic error, not a wait until the host kills
     // the function: targetFetch reports the abort as target_router_unreachable.

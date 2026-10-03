@@ -488,7 +488,9 @@ PREAUTH_SCOPE = "preauth_ip"
 def client_ip(request: Request) -> str:
     """The attributed peer — `request.client.host` AFTER ProxyHeadersMiddleware
     has applied the trusted-proxy walk (#726/#765), which is the `02` §6
-    client-IP source rule. Never a header read here."""
+    client-IP source rule. Never a header read here; the one other address a
+    counter may key on is :func:`preauth_guard`'s *client*, which a caller
+    passes only after verifying who sent it."""
     return request.client.host if request.client else "unknown"
 
 
@@ -499,14 +501,17 @@ async def preauth_guard(
     detail: str,
     key_prefix: str = "",
     limit: Optional[int] = None,
+    client: Optional[str] = None,
 ) -> None:
     """Spend one of the caller's pre-auth admissions in *conn*'s transaction;
     429 with *detail* past the limit. *key_prefix* gives a route its own
-    counter under the same scope; *limit* replaces `05`'s number for it."""
+    counter under the same scope; *limit* replaces `05`'s number for it;
+    *client* replaces the attributed peer, for a caller that vouches for the
+    address it forwards."""
     count = await rate_counters.increment(
         conn,
         scope=PREAUTH_SCOPE,
-        key=key_prefix + client_ip(request),
+        key=key_prefix + (client or client_ip(request)),
         window_start=rate_counters.window_start(
             datetime.now(timezone.utc), PREAUTH_WINDOW_SECONDS
         ),

@@ -3106,6 +3106,15 @@ the API can add an address and cannot read, change or remove one, so the public 
 oracle for who is on the list. The owner reads the list as the database owner and admits people
 through `signup_admissions` (§35).
 
+**The site's secret.** The API sees only the site's server, so without more a limit keyed on the
+caller is one counter shared by every visitor, and one script spends it for everyone. With
+`WAITLIST_SITE_SECRET` set on both tiers, the site sends the secret and the visitor's address as
+Vercel reports it (Vercel overwrites `x-real-ip` and `x-forwarded-for`, so a visitor cannot choose
+it); the API compares the secret in constant time, refuses a call without it before reading the
+body, and keys the counter (10 a minute) and the per-address slot share on the visitor. The waitlist counts every client, visitor or peer, by its IPv6 /64, never its single address. Unset on
+the API it behaves as before whatever the site sends, which is what lets the owner set the site
+first. A matched call with no usable address falls back to the peer and the shared counter.
+
 **What it does not adopt.** A hand-made, empty `waitlist_signups` and the NOLOGIN
 `waitlist_writer` role were created in production as a stopgap on 2026-10-02 and never served a
 signup. The new name keeps this CREATE from meeting that table at the predeploy; the owner drops

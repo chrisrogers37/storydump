@@ -72,10 +72,12 @@ def _send(world, *requests):
 JSON = {"content-type": "application/json"}
 
 
-def _post(world, *bodies):
-    """Each body as JSON. json.dumps escapes to ASCII, so a lone surrogate
-    travels as `\\ud800` the way a browser's JSON would carry it."""
-    return _send(world, *((json.dumps(b), JSON) for b in bodies))
+def _post(world, *bodies, headers=None):
+    """Each body as JSON, with *headers* besides the content type. json.dumps
+    escapes to ASCII, so a lone surrogate travels as `\\ud800` the way a
+    browser's JSON would carry it."""
+    sent = {**JSON, **(headers or {})}
+    return _send(world, *((json.dumps(b), sent) for b in bodies))
 
 
 def _entry(world, email):
@@ -330,13 +332,49 @@ class TestTheSlots:
                 for _ in range(public.WAITLIST_MAX_QUEUED_PER_ADDRESS)
             ]
             await asyncio.sleep(0.01)
-            over = await slots.acquire("10.0.0.7")
+            # Refused at once, not after the wait budget runs out.
+            over = await asyncio.wait_for(slots.acquire("10.0.0.7"), 0.5)
             for task in waiters:
                 task.cancel()
             await asyncio.gather(*waiters, return_exceptions=True)
             return over
 
         assert asyncio.run(main()) is False
+
+    def test_a_waiter_holds_its_own_share_not_a_global_slot(self, monkeypatch):
+        """The address's share is taken before a global slot, so a hot
+        address's extra requests leave the global slots to everyone else."""
+        monkeypatch.setattr(public, "WAITLIST_SLOT_WAIT_SECONDS", 1.0)
+
+        async def main():
+            slots = public.WaitlistSlots()
+            for _ in range(2):
+                assert await slots.acquire("10.0.0.5")
+            extra = asyncio.create_task(slots.acquire("10.0.0.5"))
+            await asyncio.sleep(0.01)
+            free = slots.free._value
+            other = await asyncio.wait_for(slots.acquire("10.0.0.6"), 0.1)
+            extra.cancel()
+            await asyncio.gather(extra, return_exceptions=True)
+            return free, other
+
+        assert asyncio.run(main()) == (2, True)
+
+    def test_a_timed_out_wait_gives_back_the_share_it_took(self, monkeypatch):
+        """A wait that took its address's share and then timed out on the
+        global slots returns the share: the address still has two."""
+        monkeypatch.setattr(public, "WAITLIST_SLOT_WAIT_SECONDS", 0.05)
+
+        async def main():
+            slots = public.WaitlistSlots()
+            assert await slots.acquire("site")
+            for other in ("x", "y", "z"):
+                assert await slots.acquire(other)
+            second = await slots.acquire("site")
+            slots.release("x")
+            return second, await slots.acquire("site")
+
+        assert asyncio.run(main()) == (False, True)
 
     def test_a_request_waits_for_a_slot_then_gets_it(self, monkeypatch):
         monkeypatch.setattr(public, "WAITLIST_SLOT_WAIT_SECONDS", 1.0)
@@ -386,6 +424,109 @@ class TestTheSlots:
         assert asyncio.run(main()) == (public.WAITLIST_MAX_IN_FLIGHT, {})
 
 
+SECRET = "test-site-secret-not-real"
+
+
+def _from_site(visitor=None, secret=SECRET):
+    headers = {public.SITE_SECRET_HEADER: secret}
+    if visitor is not None:
+        headers[public.VISITOR_IP_HEADER] = visitor
+    return headers
+
+
+class TestTheSiteSecret:
+    """`WAITLIST_SITE_SECRET`: unset, the headers change nothing; set, a call
+    without it is refused and each visitor the site names has a limit of their
+    own."""
+
+    @pytest.fixture
+    def armed(self, monkeypatch):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", SECRET)
+        monkeypatch.setattr(public, "WAITLIST_VISITOR_LIMIT", 2)
+        monkeypatch.setattr(
+            public, "WAITLIST_VISITOR_KEY_PREFIX", "waitlist-visitor-test:"
+        )
+
+    def test_unset_the_headers_change_nothing(self, world, monkeypatch):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", None)
+        monkeypatch.setattr(public, "WAITLIST_LIMIT", 2)
+        monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-unset-test:")
+        responses = _post(
+            world,
+            {"email": "unset1@example.com"},
+            {"email": "unset2@example.com"},
+            {"email": "unset3@example.com"},
+            headers=_from_site("198.51.100.1", secret="anything"),
+        )
+        # The shared counter, though the call names a visitor.
+        assert [r.status_code for r in responses] == [202, 202, 429]
+
+    @pytest.mark.parametrize("headers", [{}, _from_site("198.51.100.2", "wrong")])
+    def test_set_a_call_without_it_is_refused_and_stores_nothing(
+        self, world, armed, headers
+    ):
+        (resp,) = _post(world, {"email": "no-secret@example.com"}, headers=headers)
+        assert resp.status_code == 403
+        assert resp.json()["reason"] == "not_site"
+        assert _entry(world, "no-secret@example.com") == []
+
+    def test_set_each_visitor_has_a_limit_of_their_own(self, world, armed):
+        first = _post(
+            world,
+            {"email": "visitor-a1@example.com"},
+            {"email": "visitor-a2@example.com"},
+            {"email": "visitor-a3@example.com"},
+            headers=_from_site("198.51.100.3"),
+        )
+        other = _post(
+            world,
+            {"email": "visitor-b1@example.com"},
+            headers=_from_site("198.51.100.4"),
+        )
+        assert [r.status_code for r in first] == [202, 202, 429]
+        assert [r.status_code for r in other] == [202]
+        assert _entry(world, "visitor-b1@example.com") != []
+
+    @pytest.mark.parametrize(
+        "n, secret, headers, key",
+        [
+            # Unset: the peer, whatever the site names.
+            (1, None, _from_site("198.51.100.5"), "127.0.0.1"),
+            # Set and matched: the visitor, an IPv6 one by its /64.
+            (2, SECRET, _from_site("198.51.100.5"), "198.51.100.5"),
+            (3, SECRET, _from_site("2001:db8:9:9::5"), "2001:db8:9:9::/64"),
+        ],
+    )
+    def test_the_slot_share_is_keyed_like_the_counter(
+        self, world, monkeypatch, n, secret, headers, key
+    ):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", secret)
+        seen = []
+        acquire = public.WaitlistSlots.acquire
+
+        async def spy(slots, address):
+            seen.append(address)
+            return await acquire(slots, address)
+
+        monkeypatch.setattr(public.WaitlistSlots, "acquire", spy)
+        (resp,) = _post(world, {"email": f"slot-{n}@example.com"}, headers=headers)
+        assert resp.status_code == 202, resp.text
+        assert seen == [key]
+
+    def test_set_without_a_usable_visitor_the_shared_counter_serves(
+        self, world, armed, monkeypatch
+    ):
+        monkeypatch.setattr(public, "WAITLIST_LIMIT", 1)
+        monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-novisitor-test:")
+        responses = _post(
+            world,
+            {"email": "novisitor1@example.com"},
+            {"email": "novisitor2@example.com"},
+            headers=_from_site("not-an-address"),
+        )
+        assert [r.status_code for r in responses] == [202, 429]
+
+
 class TestTheLogin:
     def test_ingress_can_add_and_cannot_read_change_or_remove(self, world):
         conn = psycopg2.connect(world["ingress"])
@@ -412,6 +553,7 @@ class TestTheLogin:
             with conn.cursor() as cur:
                 for email, utm in (
                     ("Upper@example.com", None),
+                    ("a" * 244 + "@example.co", None),  # 255 characters
                     ("ok@example.com", '"a string"'),
                     ("big@example.com", '{"k": "' + "x" * 2100 + '"}'),
                 ):
