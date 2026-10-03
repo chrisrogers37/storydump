@@ -53,7 +53,7 @@ railway logs --service storydump | tail -50
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `FATAL: TARGET_DATABASE_URL is unset … Refusing to boot` (the worker, exit 2) | the variable is missing or blank on the worker service (`src/worker.py:799-810`) | set it on the service. The API does not refuse to start without it: `/health` reports `"target_database": false` and every data route answers 503 |
+| `FATAL: TARGET_DATABASE_URL is unset … Refusing to boot` (the worker, exit 2) | the variable is missing or blank on the worker service (`src/worker.py:799-810`) | set it on the service. The API does not refuse to start without it: the operating details (`/api/v1/ops/health`, `storydump health --json`) report `"target_database": false` and every data route answers 503 |
 | `FATAL: the credential key ring cannot load. …` (the worker, exit 2) or `… Refusing to start` (the API; the deploy fails its health check) | `ENCRYPTION_KEY` is unset on that service or is not a Fernet key, or `ENCRYPTION_KEYS` — which overrides it — holds a bad entry; the message names which (`src/utils/encryption.py`, #1401) | set the key the stored credentials were encrypted with: the other service holds the same one. A newly generated key boots and then cannot read a single stored credential — generate one only on a first install |
 | `ValueError: … exceeds the pool of 10` (the worker) | the lane concurrency does not fit the pool (`src/services/target/work_loop.py:159-182`) | lower `TARGET_WORKER_INTERACTIVE_CONCURRENCY` / `TARGET_WORKER_BULK_CONCURRENCY` |
 | `background task <name> DIED` (the worker, exit 1) | a supervised task raised; the worker is fail-fast | `worker-recovery.md` |
@@ -96,7 +96,7 @@ storydump account <handle>              # the cap, today's count, the next slot
 
 **Diagnosis**:
 ```bash
-storydump health                         # the webhook verdict from /health (unregistered, undelivered)
+storydump health                         # the webhook verdict from the operating details (needs OPS_USER_IDS)
 storydump webhook status                 # asks Telegram: the bot, the registered URL, the backlog, the API door
 storydump outbox --since 3h              # cards owed or failed, by binding
 railway logs --service storydump | grep -i telegram
@@ -173,7 +173,7 @@ railway logs --service storydump | grep -iE 'pool|connect'
 
 | Cause | Fix |
 |-------|-----|
-| `TARGET_DATABASE_URL` absent on the API | every data route answers 503 and `/health` reports `"target_database": false`; set it on the `storydump` service |
+| `TARGET_DATABASE_URL` absent on the API | every data route answers 503 and the operating details (`storydump health --json`, `OPS_USER_IDS`) report `"target_database": false`; set it on the `storydump` service |
 | Neon endpoint suspended | The first connection wakes it |
 | The pool saturated (a 503 naming `pool_saturated`, with `Retry-After: 1`) | Wait; a watch retries three times before giving up |
 | Wrong credentials | Check the database variables in the Railway dashboard |

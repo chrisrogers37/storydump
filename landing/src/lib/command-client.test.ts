@@ -249,7 +249,8 @@ describe("a refusal's facts reach the caller through the same allow-list (#1413 
 
   it("adds no facts key to a refusal that has none", async () => {
     stubFetch({ error: "illegal_transition" }, 409);
-    expect(await submitCommand(WS, "approve", {})).toEqual({
+    // toStrictEqual: an undefined `facts` key is still a key.
+    expect(await submitCommand(WS, "approve", {})).toStrictEqual({
       ok: false,
       error: "illegal_transition",
       status: 409,

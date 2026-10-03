@@ -1,12 +1,10 @@
 "use client"
 
-import { useState } from "react"
-import Link from "next/link"
+import { useRef, useState, useSyncExternalStore } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { trackEvent, UTM_KEYS } from "@/lib/analytics"
-import { botUrl } from "@/lib/telegram-bot"
 
 interface WaitlistFormProps {
   variant?: "hero" | "footer"
@@ -29,18 +27,43 @@ function getUtmParams(): Record<string, string> {
   return utm
 }
 
-function getInitialStatus(): FormStatus {
-  if (typeof window !== "undefined" && localStorage.getItem(STORAGE_KEY)) {
-    return "duplicate"
+/**
+ * Whether this browser has signed up before. Read through
+ * useSyncExternalStore rather than a useState initialiser: the server cannot
+ * see localStorage and renders the form, so a client that rendered the
+ * "already on the list" state on its first pass would not match the server
+ * HTML (React error #418). The server snapshot is `false`, hydration matches,
+ * and the stored value takes over straight after.
+ */
+function readRegistered(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEY) !== null
+  } catch {
+    return false
   }
-  return "idle"
 }
 
-function getInitialMessage(): string {
-  if (typeof window !== "undefined" && localStorage.getItem(STORAGE_KEY)) {
-    return "You're already on the list!"
+// The browser's "storage" event reaches other tabs only, so a signup also
+// announces itself here: the page's other form (hero and closing section)
+// stops offering the input once either one succeeds.
+const REGISTERED_EVENT = "storydump-waitlist-registered"
+
+function subscribeToStorage(onChange: () => void): () => void {
+  window.addEventListener("storage", onChange)
+  window.addEventListener(REGISTERED_EVENT, onChange)
+  return () => {
+    window.removeEventListener("storage", onChange)
+    window.removeEventListener(REGISTERED_EVENT, onChange)
   }
-  return ""
+}
+
+function markRegistered() {
+  try {
+    localStorage.setItem(STORAGE_KEY, "true")
+  } catch {
+    // Storage blocked (private mode, a policy): the form still worked.
+  }
+  window.dispatchEvent(new Event(REGISTERED_EVENT))
 }
 
 export function WaitlistForm({
@@ -48,8 +71,23 @@ export function WaitlistForm({
   className,
 }: WaitlistFormProps) {
   const [email, setEmail] = useState("")
-  const [status, setStatus] = useState<FormStatus>(getInitialStatus)
-  const [message, setMessage] = useState(getInitialMessage)
+  const [status, setStatus] = useState<FormStatus>("idle")
+  const [message, setMessage] = useState("")
+  // "Waitlist Start" counts each form once per page view, on its first focus.
+  const started = useRef(false)
+  const registered = useSyncExternalStore(
+    subscribeToStorage,
+    readRegistered,
+    () => false
+  )
+  // A browser that signed up before shows "already on the list" until this
+  // visit submits something of its own.
+  const seenBefore = status === "idle" && registered
+  const shownStatus: FormStatus = seenBefore ? "duplicate" : status
+  const shownMessage = seenBefore ? "You're already on the list!" : message
+  // Header links and the blog's call to action point at #waitlist: the hero's
+  // form. The closing section's form takes its own id so the page has one.
+  const anchorId = variant === "hero" ? "waitlist" : "waitlist-footer"
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -74,15 +112,10 @@ export function WaitlistForm({
       const data = await res.json()
 
       if (data.status === "success") {
-        if (data.alreadyRegistered) {
-          setStatus("duplicate")
-          setMessage(data.message)
-        } else {
-          setStatus("success")
-          setMessage(data.message)
-          trackEvent("Waitlist Signup", { variant, ...utm })
-        }
-        localStorage.setItem(STORAGE_KEY, "true")
+        setStatus("success")
+        setMessage(data.message)
+        trackEvent("Waitlist Signup", { variant, ...utm })
+        markRegistered()
       } else {
         setStatus("error")
         setMessage(data.message || "Something went wrong. Please try again.")
@@ -95,86 +128,74 @@ export function WaitlistForm({
     }
   }
 
-  if (status === "success" || status === "duplicate") {
+  if (shownStatus === "success" || shownStatus === "duplicate") {
     return (
       <div
-        id="waitlist"
-        className={cn("text-center", className)}
+        id={anchorId}
+        className={cn(
+          "scroll-mt-20",
+          variant === "hero" ? "text-left" : "text-center",
+          className
+        )}
         role="status"
         aria-live="polite"
       >
-        <div className="space-y-3">
-          <p className="text-lg font-medium">{message}</p>
-          {status === "success" && (
-            <>
-              <p className="text-sm text-muted-foreground">
-                We&apos;re onboarding beta users in small batches. You&apos;ll
-                hear from us within a week with setup instructions.
-              </p>
-              <p className="text-sm text-muted-foreground">
-                While you wait, get your side ready: a Google Drive folder with
-                your story content, your Instagram switched to a{" "}
-                <Link
-                  href="/setup/instagram"
-                  className="underline underline-offset-4 hover:text-foreground transition-colors"
-                >
-                  Professional account
-                </Link>
-                , and Telegram. That&apos;s the whole list.
-              </p>
-            </>
-          )}
-          {botUrl() && (
-            <a
-              href={botUrl()!}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-block text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground transition-colors"
-            >
-              Join the Telegram community
-            </a>
-          )}
-        </div>
+        <p className="font-display text-2xl font-extrabold tracking-[-0.02em] text-ink">
+          {shownMessage.replace(/'/g, "’")}
+        </p>
+        <p className="mt-2 leading-relaxed text-ink/80">
+          We’re inviting people in small batches as spots open, and we’ll
+          email you when yours is ready.
+        </p>
       </div>
     )
   }
 
   return (
     <form
-      id="waitlist"
+      id={anchorId}
       onSubmit={handleSubmit}
-      className={cn(
-        "flex w-full gap-2",
-        variant === "hero"
-          ? "max-w-md mx-auto flex-col sm:flex-row sm:flex-wrap"
-          : "max-w-sm mx-auto flex-col sm:flex-row sm:flex-wrap",
-        className
-      )}
+      className={cn("w-full scroll-mt-20", className)}
     >
-      <label htmlFor={`waitlist-email-${variant}`} className="sr-only">
-        Email address
-      </label>
-      <Input
-        id={`waitlist-email-${variant}`}
-        type="email"
-        placeholder="you@example.com"
-        value={email}
-        onChange={(e) => {
-          setEmail(e.target.value)
-          if (status === "error") setStatus("idle")
-        }}
-        disabled={status === "submitting"}
-        className="flex-1"
-        required
-      />
-      <Button type="submit" disabled={status === "submitting"}>
-        {status === "submitting" ? "Submitting..." : "Get Early Access"}
-      </Button>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:rounded-full sm:border sm:border-ink sm:bg-white sm:p-1.5 sm:pl-5">
+        <label htmlFor={`waitlist-email-${variant}`} className="sr-only">
+          Email address
+        </label>
+        <Input
+          id={`waitlist-email-${variant}`}
+          type="email"
+          placeholder="you@example.com"
+          value={email}
+          onFocus={() => {
+            if (started.current) return
+            started.current = true
+            trackEvent("Waitlist Start", { variant })
+          }}
+          onChange={(e) => {
+            setEmail(e.target.value)
+            if (status === "error") setStatus("idle")
+          }}
+          disabled={status === "submitting"}
+          className="h-12 rounded-full sm:flex-1 border-ink bg-white px-5 text-base sm:h-10 sm:border-0 sm:px-0 sm:shadow-none sm:focus-visible:ring-0"
+          aria-invalid={status === "error" || undefined}
+          aria-describedby={
+            status === "error" ? `waitlist-error-${variant}` : undefined
+          }
+          required
+        />
+        <Button
+          type="submit"
+          disabled={status === "submitting"}
+          className="h-12 rounded-full bg-ink px-6 text-base font-semibold text-white hover:bg-ink/85 sm:h-11"
+        >
+          {status === "submitting" ? "Joining…" : "Join the waitlist"}
+        </Button>
+      </div>
       {status === "error" && (
         <p
-          className="basis-full text-sm text-destructive"
+          id={`waitlist-error-${variant}`}
+          className="mt-2 text-sm font-medium text-[#9f1d1d]"
           role="alert"
-          aria-live="assertive"
         >
           {message}
         </p>

@@ -19,13 +19,13 @@ production's schemas are `archive`, `public` and `runner`. Nothing under
 
 ## The tables
 
-Twenty-six, in five model modules named after the migrations that create them
-(`src/models/target/__init__.py`; the count and the nineteen tenant-keyed are
-pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
+Twenty-eight, in five model modules named after the migrations that create them
+(`src/models/target/__init__.py`; the count and the twenty tenant-keyed are
+pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
 
 | Models (migration) | Tables |
 |---|---|
-| `identity_and_tenancy.py` (053) | `users`, `user_identities`, `workspaces`, `workspace_members`, `workspace_invitations`, `channel_bindings`, `onboarding_sessions` |
+| `identity_and_tenancy.py` (053, 090, 092) | `users`, `user_identities`, `workspaces`, `workspace_members`, `workspace_member_removals` (090), `signup_admissions` (092), `workspace_invitations`, `channel_bindings`, `onboarding_sessions` |
 | `accounts_sources_media.py` (054) | `ig_accounts`, `provider_quarantine`, `media_sources`, `oauth_credentials`, `media_items`, `post_locks` |
 | `intent_ledger.py` (055) | `post_intents`, `post_intent_transitions`, `audit_events`, `daily_post_counts`, `category_post_case_mix` |
 | `machinery.py` (056) | `jobs`, `channel_outbox`, `provider_operations`, `command_dedup`, `rate_counters` |
@@ -74,7 +74,9 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
   unset GUC reads nothing. The exceptions are deliberate classes: `jobs` also
   exposes system rows (`workspace_id IS NULL`, `:159`), the user plane and the
   machinery counters are row-open to the runtime roles (`:169`-`:178`),
-  `post_intent_transitions` is read-only reference data (`:182`).
+  `post_intent_transitions` is read-only reference data (`:182`), and
+  `signup_admissions` (092) is global and readable only through
+  `fn_signup_admitted`: the runtime roles hold no grant on it.
 - The runtime roles are `svc_ingress` (API) and `svc_worker`; cross-tenant work
   goes through `SECURITY DEFINER` doors owned by `svc_claim`, `svc_clock`,
   `svc_maintenance` and `svc_membership` (059 onward) — `fn_claim_job`,
@@ -86,9 +88,9 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
   19:45 UTC that day. `neondb_owner`, which owns every table and bypasses RLS,
   is the migration runner's login alone
   (`documentation/operations/runtime-database-roles.md`; the worker logs its
-  login at boot). `/health`'s `db_role` and `storydump posture` report the live
-  answer: on 2026-10-02 `/health` read
-  `{"user": "svc_ingress", "bypassrls": false}`. The predicate is still the
+  login at boot). The operating details' `db_role` (`storydump health --json`)
+  and `storydump posture` report the live answer: on 2026-10-02 the API's
+  `db_role` read `{"user": "svc_ingress", "bypassrls": false}`. The predicate is still the
   first fence. Every query names its tenant with an explicit
   `workspace_id = :ws` predicate on each table it touches, as `ops_views.py`
   and `command_executors._intent_row` do, so a login that bypasses the

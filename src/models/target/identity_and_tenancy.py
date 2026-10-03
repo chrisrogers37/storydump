@@ -47,7 +47,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 
 from src.models.target.base import TargetBase
-from src.models.target.columns import TZ, fk, pk, timestamps
+from src.models.target.columns import NOW, TZ, fk, pk, timestamps
 
 
 class User(TargetBase):
@@ -212,6 +212,43 @@ class WorkspaceMember(TargetBase):
             "workspace_id",
             unique=True,
             postgresql_where=text("role = 'owner'"),
+        ),
+    )
+
+
+class WorkspaceMemberRemoval(TargetBase):
+    """The record that an admin removed a person (090), so the Telegram join
+    path (`fn_group_member_seen`) does not undo the removal the next time the
+    person speaks in the bound group. Written only by `fn_member_remove`; an
+    invitation accepted later makes it inert, and a second removal stamps it
+    again."""
+
+    __tablename__ = "workspace_member_removals"
+
+    workspace_id = fk("workspaces.id", "CASCADE", primary_key=True)
+    user_id = fk("users.id", "CASCADE", primary_key=True)
+    removed_by_user_id = fk("users.id", "SET NULL", nullable=True)
+    removed_at = Column(TZ, nullable=False, server_default=NOW)
+
+
+class SignupAdmission(TargetBase):
+    """An email the owner let in (092): a new Google account with this verified
+    address may create its user. Global, not tenant-plane; read only through
+    `fn_signup_admitted`, written by the owner as the database owner."""
+
+    __tablename__ = "signup_admissions"
+
+    email = Column(Text, primary_key=True)
+    admitted_at = Column(TZ, nullable=False, server_default=NOW)
+    note = Column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "email = lower(email) AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'"
+            " AND email !~ "
+            "'[\\u0080-\\u00a0\\u00ad\\u180e\\u2000-\\u200f\\u2028-\\u202f"
+            "\\u205f-\\u2064\\u3000\\ufeff]'",
+            name="ck_signup_admissions_email",
         ),
     )
 

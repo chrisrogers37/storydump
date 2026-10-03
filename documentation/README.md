@@ -36,7 +36,7 @@ documentation/
 - Position: Phases 0, F and L built · the M.3 window applied by hand; 3f ran as migration 078; 3g and the stand-down ran as the gated 079 and 080 in the owner's window on 2026-09-19 ([its record](archive/2026-09-16-legacy-tear-out/legacy-window-close.md)) · X.3 in progress (#1172) · S partly built
 
 ### Increment specs (live; each carries a status banner)
-- **[2026-09-20-device-native-inbound-spec.md](planning/2026-09-20-device-native-inbound-spec.md)** — device-native inbound: a Telegram drop relayed into the team's Drive, entering the posting mix at a reserved 20% — SPEC (kindle, 2026-09-20; the two junctions weighed and ratified in [2026-09-20-device-native-inbound-decision.md](planning/2026-09-20-device-native-inbound-decision.md)); plan: [2026-09-20-device-native-inbound/](planning/2026-09-20-device-native-inbound/00_EPIC.md), ratified 2026-09-20; ironclad cycle 1 folded 2026-09-25; F10–F12 ruled 2026-09-28 (the album deferred); cycle 2 pending (#1430)
+- **[2026-09-20-device-native-inbound-spec.md](planning/2026-09-20-device-native-inbound-spec.md)** — device-native inbound: a Telegram drop relayed into the team's Drive, entering the posting mix at a reserved 20% — SPEC (kindle, 2026-09-20; the two junctions weighed and ratified in [2026-09-20-device-native-inbound-decision.md](planning/2026-09-20-device-native-inbound-decision.md)); plan: [2026-09-20-device-native-inbound/](planning/2026-09-20-device-native-inbound/00_EPIC.md), ratified 2026-09-20; ironclad cycle 1 folded 2026-09-25; F10–F12 ruled 2026-09-28 (the album deferred); reviewed against main 2026-10-01 ([review](planning/2026-09-20-device-native-inbound/review-2026-10-01.md); re-cut, F13–F17 open for the owner); cycle 2 after #1505, #1507 and #1517 (tracking #1430)
 
 ### Archive
 **[archive/README.md](archive/README.md)** — index of completed, superseded and abandoned plans, moved out of `planning/` on 2026-09-02: the two 2026-07-29 design packages the consolidated plan adjudicated, the 2026-07 full-system review, the 2026-05/06 Instagram investigations, the pre-refactor product phases (Shopify, Printify, LLM, order email, dashboard) and roadmap, and the completed credential-refactor, session-isolation, web-app-migration and Meta-launch plans.
@@ -137,7 +137,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 ### Scheduling-Outage and Posting-Outage Monitors
 **[operations/scheduling-monitor.md](operations/scheduling-monitor.md)** · **[operations/posting-monitor.md](operations/posting-monitor.md)**
-- `scripts/scheduling_monitor.py` polls `GET /health/scheduling` and alerts when the schedule cursor stops advancing; `scripts/posting_monitor.py` polls `GET /health/posting` and alerts when no post has landed
+- `scripts/scheduling_monitor.py` polls `GET /health/scheduling` and alerts when the schedule cursor stops advancing; `scripts/posting_monitor.py` polls `GET /health/posting` and alerts when no post has landed; the API reuses each surface's answer for 30 seconds
 - Why each runs outside the app, the verdicts, the thresholds, and how they are deployed
 
 ### Worker Recovery
@@ -163,7 +163,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 ### Runtime Database Roles (F.4 rollout)
 **[operations/runtime-database-roles.md](operations/runtime-database-roles.md)**
 - Moving the API and worker off the owner login onto `svc_ingress` / `svc_worker`, one service at a time
-- Verified through `/health`'s `db_role` field and the worker's boot log line; rollback per step
+- Verified through the operating details' `db_role` field (`storydump health --json`) and the worker's boot log line; rollback per step
 
 ### Reading the Ledger
 **[operations/reading-the-ledger.md](operations/reading-the-ledger.md)**
@@ -216,7 +216,7 @@ The three notes of January 2026 — [bug fixes](archive/updates/2026-01-04-bugfi
 
 ## API Documentation
 
-The API describes itself: a running API serves its schema at `GET /openapi.json` (FastAPI builds it from the routes; `uvicorn src.api.app:app`). What it mounts (`src/api/app.py`):
+The API describes itself: an API started with `API_DOCS=1` serves its schema at `GET /openapi.json` and `/docs` (FastAPI builds it from the routes; `API_DOCS=1 uvicorn src.api.app:app`). Without it, and in Railway's `production` environment even with it, it serves neither. What it mounts (`src/api/app.py`):
 - `/auth` — sign-in with Google, sign-out, and the OAuth callbacks (Google Drive, Instagram Login)
 - `/api/v1` — reads as resources; state changes as the command port, `POST /api/v1/workspaces/{ws}/commands/{command}`; API tokens; the `/ops` read views the `storydump` CLI reads
 - `/webhooks/telegram` and `/webhooks/meta` — the providers' deliveries
@@ -312,7 +312,7 @@ When adding new documentation:
 | **Archive** | Historical | 56 Markdown files | Completed, superseded and abandoned plans and the legacy tier's pages, indexed in `archive/README.md` |
 | **Guides** | Live | 10 guides | Quick start, deployment, cloud deployment, testing, test coverage, Instagram Login, dev env, deployment options, CI/CD, landing deploy |
 | **Operations** | Live | 15 files | Monitoring, the two outage monitors, worker recovery, backup, the migration runner, the legacy window's close, the Telegram webhook, runtime database roles, reading the ledger, troubleshooting, Meta App Review + callbacks, Google OAuth verification, preview deployments |
-| **API Docs** | Served | — | `GET /openapi.json` on a running API |
+| **API Docs** | Served | — | `GET /openapi.json` on an API started with `API_DOCS=1`, never in production |
 
 Counted on 2026-09-18 (`find documentation/<area> -name '*.md'`).
 

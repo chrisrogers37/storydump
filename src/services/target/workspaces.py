@@ -42,7 +42,13 @@ from sqlalchemy.exc import DBAPIError
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
 from src.exceptions.base import StorydumpError
 from src.services.target import vocabulary
-from src.services.target import google_drive_oauth, identity, offboarding, readers
+from src.services.target import (
+    google_drive_oauth,
+    identity,
+    offboarding,
+    readers,
+    service_tokens,
+)
 from src.services.target._dbapi import driver_error_is
 from src.services.target.publish_cap import _SPENDS_CAP_SQL
 from src.services.target.unit_of_work import apply_gucs
@@ -325,6 +331,34 @@ async def drive_status(executor, *, workspace_id: str) -> dict:
     if row is None:
         return {"status": "none", "connected_at": None}
     return {"status": row["status"], "connected_at": row["connected_at"]}
+
+
+async def may_browse_drive(executor, *, workspace_id: str, user_id: str) -> bool:
+    """Whether *user_id* may browse the workspace's Drive and pick a folder
+    from it (091, `07` §34): the grant is the workspace's, but what it reads is
+    the Drive of the person who granted it, so only they may walk it.
+
+    A grant with no recorded granter — every one made before 091, or one whose
+    granter's user was deleted (ON DELETE SET NULL) — is the owner's to browse
+    until a reconnect records one (the owner's decision, 2026-10-02: older
+    connections stay owner-only until reconnected). A granter removed or
+    demoted since fails the admin floor before this is asked, so nobody
+    browses until someone reconnects. False with no grant at all.
+    """
+    row = await readers.row(
+        executor,
+        "SELECT granted_by_user_id = :u"
+        "       OR (granted_by_user_id IS NULL AND EXISTS ("
+        "             SELECT 1 FROM workspace_members m"
+        "              WHERE m.workspace_id = :ws AND m.user_id = :u"
+        "                AND m.role = 'owner')) AS mine"
+        "  FROM oauth_credentials"
+        " WHERE " + google_drive_oauth.WORKSPACE_GRANT_WHERE,
+        ws=str(workspace_id),
+        u=str(user_id),
+        provider=GDRIVE_PROVIDER,
+    )
+    return bool(row and row["mine"])
 
 
 #: A `media_sources` row's `config.removed`, as a boolean — the flag Remove
@@ -748,7 +782,10 @@ async def remove_member(
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
-    non-member is `not_found`."""
+    non-member is `not_found`. The removal is recorded by the door, so the
+    Telegram join path cannot re-add the person until they are invited back,
+    and the workspace service identities they minted are revoked here, in the
+    same transaction (090)."""
     row = (
         await executor.execute(
             text(
@@ -760,6 +797,11 @@ async def remove_member(
     ).first()
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
+        # The door recorded the removal, so the Telegram group cannot undo it
+        # (090); the service identities this person minted go with them.
+        await service_tokens.revoke_minted_by(
+            executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
         return str(row[1])
     if outcome == "not_found":
         raise LookupError("not_found")

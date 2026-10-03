@@ -77,7 +77,8 @@ psql "$DATABASE_URL" -c "\dt"               # the target tables, in `public`
   for the API and `svc_worker` for the worker, which step 0 created; giving
   them passwords and switching the services is
   [`runtime-database-roles.md`](../operations/runtime-database-roles.md).
-  `/health` reports the login a service actually holds (`db_role`).
+  The API's operating details report the login it actually holds (`db_role`,
+  `storydump health --json`, for `OPS_USER_IDS`).
 
 ### Connection Pool Sizing
 
@@ -229,7 +230,10 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 ## 6. Team Onboarding (5 minutes per person)
 
 - [ ] Each person signs in on the web with Google and links their Telegram
-  (Settings › Integrations → Link Telegram)
+  (Settings › Integrations → Link Telegram). Sign-up is gated (092): a new
+  account needs a pending invitation addressed to its email, or an admission
+  (`INSERT INTO signup_admissions (email) VALUES ('person@example.com');` as
+  the database owner)
 - [ ] Add them to the workspace's Telegram group. Anyone with a linked Telegram
   who posts in — or is added to — a bound group becomes a member of that
   workspace, at the member role
@@ -279,8 +283,9 @@ non-zero — the worker does, when a supervised task dies — is restarted.
 ### From a laptop
 
 - `storydump health` — the API's `/health`, `/health/scheduling` and
-  `/health/posting`, and the bot's webhook, judged by the fleet monitors' own
-  verdicts; exit 4 when not well
+  `/health/posting`, and the bot's webhook from the operating details (for a
+  token whose person is in `OPS_USER_IDS`; otherwise `not_checked`), judged by
+  the fleet monitors' own verdicts; exit 4 when not well
 - `storydump deploys --watch --commit <sha>` — follows a deploy of both services
 
 ### The fleet monitors
