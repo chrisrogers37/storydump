@@ -562,7 +562,6 @@ def build_registry(deps: WorkerDeps) -> dict:
     registry: dict = {kind: Parked(_UNBUILT_REASON) for kind in UNBUILT_KINDS}
     registry["plan_slot"] = plan_slot
     registry["reap_expired"] = reap_expired
-    # Only the `rate_counters` class so far: see `execute_retention_sweep`.
     registry["retention_sweep"] = retention_sweep
     # No `deps.drive` gate: this path makes no provider call, and a fleet with
     # no adapter wired is exactly the one whose sources are stranded (#1061).

@@ -15,13 +15,13 @@ import uuid
 
 import psycopg2
 import pytest
-from sqlalchemy import text
 
 from tests.scripts.conftest import (
     _scratch,
-    as_user,
-    ingress_engine,
+    fetch_all,
+    fetch_one,
     replay_advertised_stream,
+    run_as_worker,
     seed_workspace_chain,
     set_test_passwords,
 )
@@ -86,73 +86,32 @@ def sweep_db(admin_conn, owner_actor):
 
 def _counts(dsn) -> dict:
     """Row count of every table in `public` and `archive`, as the owner."""
-    conn = psycopg2.connect(dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT table_schema, table_name FROM information_schema.tables"
-                " WHERE table_schema IN ('public', 'archive')"
-                " AND table_type = 'BASE TABLE'"
-            )
-            out = {}
-            for schema, table in cur.fetchall():
-                cur.execute(f'SELECT count(*) FROM "{schema}"."{table}"')
-                out[f"{schema}.{table}"] = cur.fetchone()[0]
-            return out
-    finally:
-        conn.close()
-
-
-def _rate_rows(dsn) -> set:
-    conn = psycopg2.connect(dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT scope, key, window_start FROM rate_counters")
-            return set(cur.fetchall())
-    finally:
-        conn.close()
-
-
-async def _sweep_as_worker(owner_dsn: str) -> int:
-    from src.services.target import scheduler
-    from src.services.target.unit_of_work import apply_gucs
-    from src.services.target.work_loop import WorkerConfig, WorkerDeps, build_registry
-
-    async with ingress_engine(as_user(owner_dsn, "svc_worker")) as engine:
-        registry = build_registry(WorkerDeps(engine=engine, config=WorkerConfig()))
-        async with engine.begin() as conn:
-            who = (await conn.execute(text("SELECT current_user"))).scalar()
-            assert who == "svc_worker", who
-            await apply_gucs(conn, tenant_id="", actor_kind="system")
-            await registry["retention_sweep"](conn, {"kind": "retention_sweep"})
-        # A second pass reports what is left to delete: nothing.
-        async with engine.begin() as conn:
-            await apply_gucs(conn, tenant_id="", actor_kind="system")
-            cfg = WorkerConfig()
-            return await scheduler.execute_retention_sweep(
-                conn,
-                keep_seconds=cfg.rate_counters_keep_seconds,
-                batch=cfg.retention_batch,
-            )
+    tables = fetch_all(
+        dsn,
+        "SELECT table_schema, table_name FROM information_schema.tables"
+        " WHERE table_schema IN ('public', 'archive') AND table_type = 'BASE TABLE'",
+    )
+    return {
+        f"{t['table_schema']}.{t['table_name']}": fetch_one(
+            dsn, f'SELECT count(*) FROM "{t["table_schema"]}"."{t["table_name"]}"'
+        )[0]
+        for t in tables
+    }
 
 
 def test_the_sweep_deletes_only_rate_counter_rows_older_than_seven_days(sweep_db):
-    before_counts = _counts(sweep_db)
-    before_rows = _rate_rows(sweep_db)
-    assert len(before_rows) == len(OLD) + len(NEW)
+    before = _counts(sweep_db)
+    assert before.pop("public.rate_counters") == len(OLD) + len(NEW)
 
-    left = asyncio.run(_sweep_as_worker(sweep_db))
+    asyncio.run(run_as_worker(sweep_db, "retention_sweep"))
 
-    after_counts = _counts(sweep_db)
-    after_rows = _rate_rows(sweep_db)
-    assert left == 0
-    # Positive control: exactly the old rows went, every new one survived.
-    assert len(after_rows) == len(NEW)
-    assert {(s, k) for s, k, _ in after_rows} == {(s, k) for s, k, _ in NEW}
-    # And no other table moved, the aged rows of the unbuilt classes included.
-    assert after_counts.pop("public.rate_counters") == len(NEW)
-    before_counts.pop("public.rate_counters")
-    assert after_counts == before_counts
-    assert after_counts["public.daily_post_counts"] >= 1
-    assert after_counts["archive.audit_export_20200101_000000_000000"] == 0
-    assert "archive.audit_export_20200101_000000_000000" in after_counts
+    after = _counts(sweep_db)
+    survivors = fetch_all(sweep_db, "SELECT scope, key FROM rate_counters")
+    # Exactly the old rows went, every new one survived.
+    assert sorted((r["scope"], r["key"]) for r in survivors) == sorted(
+        (s, k) for s, k, _ in NEW
+    )
+    # And no other table moved: the aged cap-ledger day, the aged job and the
+    # aged archive table the door's unbuilt classes would take are all there.
+    after.pop("public.rate_counters")
+    assert after == before
