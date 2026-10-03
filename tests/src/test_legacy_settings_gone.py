@@ -495,13 +495,16 @@ ENV_READ_OUTSIDE_SETTINGS = {
     "CLOUDINARY_API_KEY",
     "CLOUDINARY_API_SECRET",
     "META_GRAPH_VERSION",
-    # the notification sender and Railway's own marker. The two Railway account
+    # the notification sender and Railway's own markers. The two Railway account
     # tokens left this set with the legacy tier's measurement instruments
     # (#1216 — the CHANGELOG names them), which held their only reader; the CLI
     # has never read one, it uses the `railway` login.
     "RESEND_API_KEY",
     "EMAIL_FROM",
     "RAILWAY_ENVIRONMENT_NAME",
+    "RAILWAY_GIT_COMMIT_SHA",
+    # the API's opt-in docs, for a development server
+    "API_DOCS",
     # the storydump CLI's own (a client; never a service's)
     "STORYDUMP_TOKEN",
     "STORYDUMP_API",

@@ -163,7 +163,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 ### Runtime Database Roles (F.4 rollout)
 **[operations/runtime-database-roles.md](operations/runtime-database-roles.md)**
 - Moving the API and worker off the owner login onto `svc_ingress` / `svc_worker`, one service at a time
-- Verified through `/health`'s `db_role` field and the worker's boot log line; rollback per step
+- Verified through the operating details' `db_role` field (`storydump health --json`) and the worker's boot log line; rollback per step
 
 ### Reading the Ledger
 **[operations/reading-the-ledger.md](operations/reading-the-ledger.md)**
@@ -216,7 +216,7 @@ The three notes of January 2026 — [bug fixes](archive/updates/2026-01-04-bugfi
 
 ## API Documentation
 
-The API describes itself: a running API serves its schema at `GET /openapi.json` (FastAPI builds it from the routes; `uvicorn src.api.app:app`). What it mounts (`src/api/app.py`):
+The API describes itself: an API started with `API_DOCS=1` serves its schema at `GET /openapi.json` and `/docs` (FastAPI builds it from the routes; `API_DOCS=1 uvicorn src.api.app:app`). Without it, and in Railway's `production` environment even with it, it serves neither. What it mounts (`src/api/app.py`):
 - `/auth` — sign-in with Google, sign-out, and the OAuth callbacks (Google Drive, Instagram Login)
 - `/api/v1` — reads as resources; state changes as the command port, `POST /api/v1/workspaces/{ws}/commands/{command}`; API tokens; the `/ops` read views the `storydump` CLI reads
 - `/webhooks/telegram` and `/webhooks/meta` — the providers' deliveries
@@ -312,7 +312,7 @@ When adding new documentation:
 | **Archive** | Historical | 56 Markdown files | Completed, superseded and abandoned plans and the legacy tier's pages, indexed in `archive/README.md` |
 | **Guides** | Live | 10 guides | Quick start, deployment, cloud deployment, testing, test coverage, Instagram Login, dev env, deployment options, CI/CD, landing deploy |
 | **Operations** | Live | 15 files | Monitoring, the two outage monitors, worker recovery, backup, the migration runner, the legacy window's close, the Telegram webhook, runtime database roles, reading the ledger, troubleshooting, Meta App Review + callbacks, Google OAuth verification, preview deployments |
-| **API Docs** | Served | — | `GET /openapi.json` on a running API |
+| **API Docs** | Served | — | `GET /openapi.json` on an API started with `API_DOCS=1`, never in production |
 
 Counted on 2026-09-18 (`find documentation/<area> -name '*.md'`).
 
