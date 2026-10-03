@@ -354,6 +354,13 @@
       "label": "§34 the Drive grant records who granted it (091, readiness review 2026-10-02) — oauth_credentials.granted_by_user_id, written by the Drive connect callback, so only the granter browses the Drive and picks folders from it",
       "doc": "07-security-model.md",
       "ordinal": 32
+    },
+    {
+      "sha256": "02c76dbc60a8a018566c5da4ec02322428bbfb084204fe82c7c0e9cd2622a984",
+      "class": "normative",
+      "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
+      "doc": "07-security-model.md",
+      "ordinal": 33
     }
   ],
   "policy_expansion": {

@@ -32,7 +32,10 @@ Failures redirect to the front end's `/auth/error` with a closed ``reason``
 ``missing_params`` · ``state_refused`` (unknown, expired, consumed, minted
 for another leg, or the nonce cookie did not match) · ``exchange_failed`` ·
 ``identity_collision`` (sign-in: the verified email belongs to another
-account — D35, never merged) · ``grant_incomplete`` (Drive: Google answered
+account — D35, never merged) · ``not_admitted`` (sign-in: a new account whose
+email nobody admitted or invited, 092 — the one refusal that lands on
+`/login?error=not_admitted`, beside the waitlist, rather than on this page) ·
+``grant_incomplete`` (Drive: Google answered
 with a grant the leg will not keep; `google_drive_oauth.REDIRECT_REASON` maps
 each refusal) · ``already_connected`` (Instagram: the real account is already
 another destination in this workspace). A Drive failure also carries
@@ -143,6 +146,17 @@ def _fail(reason: str, *, flow: Optional[str] = None) -> Response:
     if flow:
         content["flow"] = flow
     return JSONResponse(status_code=400, content=content)
+
+
+def _not_admitted() -> Response:
+    """Sign-up is gated (092): the sign-in page says so and points at the
+    waitlist — or JSON 400 without a front end, as `_fail`."""
+    origin = settings.web_app_origin
+    if origin:
+        return RedirectResponse(
+            f"{origin}/login?{urlencode({'error': 'not_admitted'})}", status_code=302
+        )
+    return JSONResponse(status_code=400, content={"detail": "not_admitted"})
 
 
 def _landing(path: str = "/welcome") -> str:
@@ -292,8 +306,15 @@ async def google_callback(
     async with engine.begin() as conn:
         try:
             user_id = await identity.upsert_google_identity(
-                conn, sub=who.sub, email=who.email, display_name=who.display_name
+                conn,
+                sub=who.sub,
+                email=who.email,
+                display_name=who.display_name,
+                signup_open=settings.TARGET_SIGNUP_OPEN,
             )
+        except identity.SignupNotAdmitted:
+            logger.info("google sign-in: a new account was not admitted")
+            return _not_admitted()
         except identity.IdentityCollision:
             return _fail("identity_collision")
         value = await sessions.issue(conn, user_id=user_id)

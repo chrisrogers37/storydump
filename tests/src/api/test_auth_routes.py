@@ -207,8 +207,9 @@ class TestCallback:
             seen["exchange"] = (code, redirect_uri, client_id)
             return unsigned_id_token(state)
 
-        async def upsert(conn, *, sub, email, display_name):
+        async def upsert(conn, *, sub, email, display_name, signup_open):
             seen["upsert"] = (sub, email, display_name)
+            seen["signup_open"] = signup_open
             return "user-uuid"
 
         async def issue(conn, *, user_id):
@@ -228,6 +229,7 @@ class TestCallback:
         assert resp.headers["location"] == f"{FRONT}/welcome"
         assert seen["exchange"] == ("c0de", f"{API}/auth/google/callback", "cid")
         assert seen["upsert"] == ("sub-1", "p@example.com", "P")
+        assert seen["signup_open"] is False, "sign-up is gated by default (092)"
         assert seen["issue"] == "user-uuid"
         cookie = cookie_header(resp, COOKIE)
         assert "opaque-value" in cookie
@@ -272,6 +274,57 @@ class TestCallback:
         assert (
             resp.headers["location"] == f"{FRONT}/auth/error?reason=identity_collision"
         )
+
+    def _refused_signup(self, client, monkeypatch):
+        state, nonce = self._signin(client)
+        seen = {}
+
+        async def exchange_code(client_, **kw):
+            return unsigned_id_token(state)
+
+        async def upsert(conn, **kw):
+            seen["signup_open"] = kw["signup_open"]
+            raise identity.SignupNotAdmitted("not admitted")
+
+        async def issue(conn, *, user_id):
+            raise AssertionError("a refused sign-up mints no session")
+
+        monkeypatch.setattr(google_oidc, "exchange_code", exchange_code)
+        monkeypatch.setattr(identity, "upsert_google_identity", upsert)
+        monkeypatch.setattr(sessions, "issue", issue)
+        resp = client.get(
+            f"/auth/google/callback?state={state}&code=c",
+            cookies={auth.NONCE_COOKIE: nonce},
+            follow_redirects=False,
+        )
+        return resp, seen
+
+    def test_a_new_account_nobody_admitted_lands_on_the_sign_in_page(
+        self, client, configured, counter, state_store, monkeypatch
+    ):
+        """092: the refusal is named, lands where the waitlist is, and sets no
+        session cookie."""
+        resp, _ = self._refused_signup(client, monkeypatch)
+        assert resp.status_code == 302
+        assert resp.headers["location"] == f"{FRONT}/login?error=not_admitted"
+        assert COOKIE not in resp.headers.get("set-cookie", "")
+
+    def test_without_a_front_end_the_refusal_is_a_named_400(
+        self, client, configured, counter, state_store, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "WEB_APP_URL", None, raising=False)
+        monkeypatch.setattr(settings, "SESSION_COOKIE_DOMAIN", None, raising=False)
+        resp, _ = self._refused_signup(client, monkeypatch)
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": "not_admitted"}
+
+    @pytest.mark.parametrize("value", [False, True])
+    def test_the_open_switch_reaches_the_upsert(
+        self, client, configured, counter, state_store, monkeypatch, value
+    ):
+        monkeypatch.setattr(settings, "TARGET_SIGNUP_OPEN", value, raising=False)
+        _, seen = self._refused_signup(client, monkeypatch)
+        assert seen["signup_open"] is value
 
 
 class TestSignout:

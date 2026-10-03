@@ -231,6 +231,22 @@ class WorkspaceMemberRemoval(TargetBase):
     removed_at = Column(TZ, nullable=False, server_default=NOW)
 
 
+class SignupAdmission(TargetBase):
+    """An email the owner let in (092): a new Google account with this verified
+    address may create its user. Global, not tenant-plane; read only through
+    `fn_signup_admitted`, written by the owner as the database owner."""
+
+    __tablename__ = "signup_admissions"
+
+    email = Column(Text, primary_key=True)
+    admitted_at = Column(TZ, nullable=False, server_default=NOW)
+    note = Column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("email = lower(email)", name="ck_signup_admissions_lower"),
+    )
+
+
 class WorkspaceInvitation(TargetBase):
     """The membership door for both surfaces (FC-6 / D33 / D36).
 
