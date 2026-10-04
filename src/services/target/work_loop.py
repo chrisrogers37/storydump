@@ -475,13 +475,12 @@ def build_registry(deps: WorkerDeps) -> dict:
                 f"deliver_outbox {job['id']}: binding {binding_id} has no row"
             )
         if not row["deliverable"]:
-            # Revoked after this job was minted — an admin removed the group
-            # or the bot was kicked — or a private chat whose person does not
-            # belong to the workspace (the sweep that minted this job reads no
-            # membership). The claim refuses it anyway (`outbox.claim_next`);
-            # ending here spends no hold on a chat a push may not reach, and
-            # retiring what is left of its queue keeps those cards from going
-            # out later and leaves the sweep nothing to mint for.
+            # Revoked after this job was minted (an admin removed the group,
+            # the bot was kicked), or a private chat whose person does not
+            # belong (`bindings.deliverable_binding_where`). The claim refuses
+            # it anyway; ending here spends no hold, and retiring its queue
+            # keeps a stale card from going out later and leaves the sweep
+            # nothing to mint for.
             async with short() as writer:
                 retired = await bindings.retire_unsettled(writer, binding_id=binding_id)
             logger.info(
@@ -1105,10 +1104,8 @@ async def ensure_sender_jobs(
     # because the sweep runs with no tenant and every table it reads is
     # policy-covered. The key prefix, the lane budget and the bound stay
     # spelled once here; the binding predicate is `bindings.push_binding_where`,
-    # pinned to the door's body by a test. The door reads no membership, so
-    # a sender it mints for a binding `bindings.deliverable_binding_where`
-    # refuses retires that binding's queue (`deliver_outbox`) and is not
-    # minted again.
+    # pinned to the door's body by a test — the live set, which
+    # `bindings.deliverable_binding_where` narrows at the sender.
     result = await session.execute(
         text("SELECT fn_sender_sweep(:prefix, :attempts, :deadline, :age, :lim)"),
         {

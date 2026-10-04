@@ -1626,11 +1626,12 @@ REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 ```
 
 **The sender re-checks what the sweep cannot.** `fn_sender_sweep` mints on
-`bindings.push_binding_where`, the base predicate: its owner role reads no membership. Every
-statement that chooses, edits or claims a card routes on `bindings.deliverable_binding_where`,
-which adds that a card goes to a private chat (`telegram_dm`) only while the person whose chat it
-is, the linked Telegram identity with that chat's id, belongs to the binding's workspace. So a
-sender minted for a binding the deliverable predicate refuses claims nothing and retires that
+`bindings.push_binding_where`, the live set: its owner role reads no membership. Every
+statement that queues or claims a card routes on `bindings.deliverable_binding_where`, which
+adds that a card goes to a private chat (`telegram_dm`) only while the person whose chat it is,
+the linked Telegram identity with that chat's id, belongs to the binding's workspace. An outcome
+still supersedes a card in every live binding, and queues its edit only where a card may go. So
+a sender minted for a binding the deliverable predicate refuses claims nothing and retires that
 binding's queue (`work_loop.deliver_outbox`), and the sweep has nothing left to mint for. The
 door's body is unchanged.
 
