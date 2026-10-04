@@ -1106,3 +1106,165 @@ class TestAGroupThatBecameASupergroupKeepsItsWorkspace:
             (binding,),
         )
         assert row == ("system", None, "telegram")
+
+
+def _tg() -> int:
+    """A Telegram user id nobody else in the module holds."""
+    return 7_000_000_000 + uuid.uuid4().int % 10**9
+
+
+class TestASenderThatIsNotAPersonTouchesNothing:
+    """A message whose `from` is a stand-in — one sent on behalf of a chat
+    (`sender_chat`), or a channel post Telegram forwarded into its discussion
+    group (`is_automatic_forward`) — names no person. Through the real
+    dispatcher, as a bare `svc_ingress` connection: its `/start link-…`
+    reaches no handler, so the state stays live and nobody is linked; and in a
+    bound group it makes nobody a member, whatever identity row its id has."""
+
+    def _mint(self, world) -> str:
+        """A live `link-` state for a fresh user, minted as the web route
+        mints it: the user plane, no tenant."""
+        from src.services.target import identity_link
+
+        user = str(uuid.uuid4())
+        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (user,))
+        link = asyncio.run(
+            in_user_plane(
+                world["ingress"],
+                lambda c: identity_link.issue_link_state(
+                    c, user_id=user, bot_username="storydump_app_bot"
+                ),
+            )
+        )
+        return link.rsplit("start=link-", 1)[1]
+
+    def _holder(self, world, tg: int):
+        row = fetch_one(
+            world["stream"],
+            "SELECT user_id FROM user_identities"
+            " WHERE provider = 'telegram' AND external_id = %s",
+            (str(tg),),
+        )
+        return None if row is None else str(row[0])
+
+    def _live(self, world, state: str) -> bool:
+        row = fetch_one(
+            world["stream"],
+            "SELECT consumed_at IS NULL AND expires_at > now()"
+            "  FROM oauth_states WHERE state = %s",
+            (state,),
+        )
+        assert row is not None, "the state row is gone"
+        return bool(row[0])
+
+    def _role(self, world, user: str):
+        row = fetch_one(
+            world["stream"],
+            "SELECT role FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+            (str(world["a"]["ws"]), user),
+        )
+        return None if row is None else row[0]
+
+    @pytest.mark.parametrize(
+        "fields, outcome",
+        [
+            ({}, "not_private"),
+            ({"is_automatic_forward": True}, "unattributable"),
+            ({"sender_chat": {"id": -1001, "type": "supergroup"}}, "unattributable"),
+        ],
+        ids=["group", "automatic_forward", "sender_chat"],
+    )
+    def test_a_tap_from_a_group_or_a_placeholder_sender_touches_nothing(
+        self, world, fields, outcome
+    ):
+        state = self._mint(world)
+        sender = _tg()
+        result = _dispatch(
+            world,
+            _message(
+                710001,
+                _chat(),
+                "supergroup",
+                sender=sender,
+                text=f"/start@storydump_app_bot link-{state}",
+                **fields,
+            ),
+        )
+        assert (result.outcome, result.handled) == (outcome, False)
+        assert self._holder(world, sender) is None, "a placeholder sender was linked"
+        assert self._live(world, state), "the refused tap spent the state"
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"is_automatic_forward": True},
+            {"sender_chat": {"id": -1002, "type": "channel"}},
+        ],
+        ids=["automatic_forward", "sender_chat"],
+    )
+    def test_a_placeholder_sender_in_a_bound_group_joins_nobody(self, world, fields):
+        """A stand-in sender is nobody: its message makes no one a member,
+        whatever identity row its id has. The same id speaking as itself does
+        join, so the refusal is the stand-in's and not the fixture's."""
+        ref = _chat()
+        _bind(world, ref)
+        holder, placeholder = str(uuid.uuid4()), _tg()
+        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (holder,))
+        _migrate(
+            world,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'telegram', %s, 'placeholder')",
+            (holder, str(placeholder)),
+        )
+
+        _dispatch(
+            world,
+            _message(
+                710011, ref, "supergroup", sender=placeholder, text="hi", **fields
+            ),
+        )
+        assert self._role(world, holder) is None, "a placeholder sender joined"
+
+        spoke = _dispatch(
+            world, _message(710012, ref, "supergroup", sender=placeholder, text="hi")
+        )
+        assert spoke.outcome == "joined", spoke.outcome
+        assert self._role(world, holder) == "member"
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"is_automatic_forward": True},
+            {"sender_chat": {"id": -1003, "type": "supergroup"}},
+        ],
+        ids=["automatic_forward", "sender_chat"],
+    )
+    def test_a_placeholder_sender_cannot_spend_a_bind_link(self, world, fields):
+        """Refused before routing, so the bind lane never sees it: the link
+        stays live and no chat is bound."""
+        from src.services.target import channel_bind
+
+        state = run(
+            world,
+            lambda s: channel_bind.issue_bind_state(
+                s,
+                user_id=str(world["a"]["user"]),
+                workspace_id=str(world["a"]["ws"]),
+                bot_username="storydump_app_bot",
+            ),
+        ).rsplit("bind-", 1)[1]
+        ref = _chat()
+        result = _dispatch(
+            world,
+            _message(
+                710021,
+                ref,
+                "supergroup",
+                sender=_tg(),
+                text=f"/start@storydump_app_bot bind-{state}",
+                **fields,
+            ),
+        )
+        assert (result.outcome, result.handled) == ("unattributable", False)
+        assert self._live(world, state), "a stand-in spent the bind link"
+        assert _row(world, ref) is None, "a stand-in bound the chat"
