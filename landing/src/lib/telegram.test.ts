@@ -19,7 +19,7 @@ describe("notifyAdmin", () => {
     vi.restoreAllMocks()
   })
 
-  /** Every log line, flattened, to show the token is in none of them. */
+  /** Every log line, flattened, to show the token and the chat id are in none of them. */
   const logged = () =>
     JSON.stringify([vi.mocked(console.error).mock.calls, vi.mocked(console.warn).mock.calls])
 
@@ -48,11 +48,16 @@ describe("notifyAdmin", () => {
       () => new Response("<html>bad gateway</html>", { status: 502 }),
       ["waitlist admin ping refused:", 502, "(no description)"],
     ],
+    [
+      "a long reason cut to 200 characters",
+      () => Response.json({ ok: false, description: "x".repeat(500) }, { status: 400 }),
+      ["waitlist admin ping refused:", 400, "x".repeat(200)],
+    ],
   ])("logs %s, never the token", async (_, response, logs) => {
     fetchMock.mockResolvedValue(response())
     await notifyAdmin("a@example.com")
     expect(console.error).toHaveBeenCalledWith(...logs)
-    expect(logged()).not.toContain("test-token")
+    expect(logged()).not.toMatch(/test-token|test-chat/)
   })
 
   it.each([
@@ -69,11 +74,12 @@ describe("notifyAdmin", () => {
       new DOMException("The operation was aborted due to timeout", "TimeoutError"),
       ["waitlist admin ping failed:", "TimeoutError"],
     ],
+    ["a rejection that is not an Error by its type", null, ["waitlist admin ping failed:", "object"]],
   ])("logs %s", async (_, error, logs) => {
     fetchMock.mockRejectedValue(error)
     await expect(notifyAdmin("a@example.com")).resolves.toBeUndefined()
     expect(console.error).toHaveBeenCalledWith(...logs)
-    expect(logged()).not.toContain("test-token")
+    expect(logged()).not.toMatch(/test-token|test-chat/)
   })
 
   it.each([

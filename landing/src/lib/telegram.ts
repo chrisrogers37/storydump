@@ -39,7 +39,7 @@ export async function notifyAdmin(email: string): Promise<void> {
     // The error's name and code only (TimeoutError, ENOTFOUND): a message
     // could quote the URL, which carries the token.
     const name = err instanceof Error ? err.name : typeof err
-    const code = (err as { cause?: { code?: unknown } }).cause?.code
+    const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code
     if (typeof code === "string") console.error("waitlist admin ping failed:", name, code)
     else console.error("waitlist admin ping failed:", name)
     return
