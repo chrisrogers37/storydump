@@ -59,16 +59,10 @@ describe("POST /api/waitlist", () => {
 
   it("hands the host the ping's promise, so the function lives until the send ends", async () => {
     targetFetch.mockResolvedValue({ ok: true, data: { status: "received" } })
-    let finish = () => {}
-    notifyAdmin.mockImplementationOnce(() => new Promise<void>((resolve) => (finish = resolve)))
+    const ping = new Promise<void>(() => {})
+    notifyAdmin.mockReturnValueOnce(ping)
     await POST(signup("a@example.com"))
-    let settled = false
-    const pending = Promise.resolve(afterTasks[0]()).then(() => (settled = true))
-    await Promise.resolve()
-    expect(settled).toBe(false)
-    finish()
-    await pending
-    expect(settled).toBe(true)
+    expect(afterTasks[0]()).toBe(ping)
   })
 
   it("passes on the API's invalid_email refusal as the form's own 400", async () => {

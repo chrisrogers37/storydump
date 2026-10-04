@@ -37,59 +37,55 @@ describe("notifyAdmin", () => {
     expect(console.error).not.toHaveBeenCalled()
   })
 
-  it("logs Telegram's refusal with its reason, never the token", async () => {
-    fetchMock.mockResolvedValue(
-      Response.json({ ok: false, description: "Bad Request: chat not found" }, { status: 400 })
-    )
+  it.each([
+    [
+      "Telegram's refusal with its reason",
+      () => Response.json({ ok: false, description: "Bad Request: chat not found" }, { status: 400 }),
+      ["waitlist admin ping refused:", 400, "Bad Request: chat not found"],
+    ],
+    [
+      "a refusal whose body is not Telegram's by status alone",
+      () => new Response("<html>bad gateway</html>", { status: 502 }),
+      ["waitlist admin ping refused:", 502, "(no description)"],
+    ],
+  ])("logs %s, never the token", async (_, response, logs) => {
+    fetchMock.mockResolvedValue(response())
     await notifyAdmin("a@example.com")
-    expect(console.error).toHaveBeenCalledWith(
-      "waitlist admin ping refused:",
-      400,
-      "Bad Request: chat not found"
-    )
+    expect(console.error).toHaveBeenCalledWith(...logs)
     expect(logged()).not.toContain("test-token")
-  })
-
-  it("logs a refusal whose body is not Telegram's by status alone", async () => {
-    fetchMock.mockResolvedValue(new Response("<html>bad gateway</html>", { status: 502 }))
-    await notifyAdmin("a@example.com")
-    expect(console.error).toHaveBeenCalledWith("waitlist admin ping refused:", 502, "(no description)")
-  })
-
-  it("logs a send that never got an answer by the error's name and code, never its message", async () => {
-    fetchMock.mockRejectedValue(
-      Object.assign(new TypeError("fetch failed: https://api.telegram.org/bottest-token/sendMessage"), {
-        cause: { code: "ENOTFOUND" },
-      })
-    )
-    await expect(notifyAdmin("a@example.com")).resolves.toBeUndefined()
-    expect(console.error).toHaveBeenCalledWith("waitlist admin ping failed:", "TypeError", "ENOTFOUND")
-    expect(logged()).not.toContain("test-token")
-  })
-
-  it("logs a timed-out send by name", async () => {
-    fetchMock.mockRejectedValue(new DOMException("The operation was aborted due to timeout", "TimeoutError"))
-    await notifyAdmin("a@example.com")
-    expect(console.error).toHaveBeenCalledWith("waitlist admin ping failed:", "TimeoutError")
   })
 
   it.each([
-    ["TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"],
-    ["ADMIN_TELEGRAM_CHAT_ID", "ADMIN_TELEGRAM_CHAT_ID"],
-  ])("names the missing setting %s and sends nothing", async (unset, named) => {
-    vi.stubEnv(unset, "")
+    [
+      "a send that never got an answer by the error's name and code, never its message",
+      Object.assign(
+        new TypeError("fetch failed: https://api.telegram.org/bottest-token/sendMessage"),
+        { cause: { code: "ENOTFOUND" } }
+      ),
+      ["waitlist admin ping failed:", "TypeError", "ENOTFOUND"],
+    ],
+    [
+      "a timed-out send by name",
+      new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      ["waitlist admin ping failed:", "TimeoutError"],
+    ],
+  ])("logs %s", async (_, error, logs) => {
+    fetchMock.mockRejectedValue(error)
+    await expect(notifyAdmin("a@example.com")).resolves.toBeUndefined()
+    expect(console.error).toHaveBeenCalledWith(...logs)
+    expect(logged()).not.toContain("test-token")
+  })
+
+  it.each([
+    [["TELEGRAM_BOT_TOKEN"], "TELEGRAM_BOT_TOKEN"],
+    [["ADMIN_TELEGRAM_CHAT_ID"], "ADMIN_TELEGRAM_CHAT_ID"],
+    [["TELEGRAM_BOT_TOKEN", "ADMIN_TELEGRAM_CHAT_ID"], "TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_CHAT_ID"],
+    // A blank pasted value counts as not set.
+    [["TELEGRAM_BOT_TOKEN"], "TELEGRAM_BOT_TOKEN", " \n"],
+  ])("names the missing setting %j and sends nothing", async (unset, named, value = "") => {
+    for (const name of unset) vi.stubEnv(name, value)
     await notifyAdmin("a@example.com")
     expect(fetchMock).not.toHaveBeenCalled()
     expect(console.warn).toHaveBeenCalledWith("waitlist admin ping skipped: not set:", named)
-  })
-
-  it("names both settings when neither is set", async () => {
-    vi.stubEnv("TELEGRAM_BOT_TOKEN", "")
-    vi.stubEnv("ADMIN_TELEGRAM_CHAT_ID", "")
-    await notifyAdmin("a@example.com")
-    expect(console.warn).toHaveBeenCalledWith(
-      "waitlist admin ping skipped: not set:",
-      "TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_CHAT_ID"
-    )
   })
 })

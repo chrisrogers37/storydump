@@ -7,9 +7,9 @@ const SEND_TIMEOUT_MS = 5000
  * explained in the deployment's function log. The token never reaches a log.
  */
 export async function notifyAdmin(email: string): Promise<void> {
-  // Read per call, not at import, so the function always sees the deployment's values.
-  const token = process.env.TELEGRAM_BOT_TOKEN
-  const chatId = process.env.ADMIN_TELEGRAM_CHAT_ID
+  // Read per call, not at import, and trimmed so a pasted newline cannot break the URL.
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim()
+  const chatId = process.env.ADMIN_TELEGRAM_CHAT_ID?.trim()
   const missing = [
     !token && "TELEGRAM_BOT_TOKEN",
     !chatId && "ADMIN_TELEGRAM_CHAT_ID",
@@ -38,12 +38,10 @@ export async function notifyAdmin(email: string): Promise<void> {
   } catch (err) {
     // The error's name and code only (TimeoutError, ENOTFOUND): a message
     // could quote the URL, which carries the token.
-    const cause = (err as { cause?: { code?: unknown } })?.cause?.code
-    console.error(
-      "waitlist admin ping failed:",
-      err instanceof Error ? err.name : typeof err,
-      ...(typeof cause === "string" ? [cause] : [])
-    )
+    const name = err instanceof Error ? err.name : typeof err
+    const code = (err as { cause?: { code?: unknown } }).cause?.code
+    if (typeof code === "string") console.error("waitlist admin ping failed:", name, code)
+    else console.error("waitlist admin ping failed:", name)
     return
   }
   if (!response.ok) {
