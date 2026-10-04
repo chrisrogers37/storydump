@@ -51,7 +51,7 @@ export default function UseCasesIndex() {
                 className="group flex h-full flex-col rounded-2xl border border-ink/10 bg-white p-6 transition-colors hover:border-tap-ink md:p-8"
               >
                 <p className="kicker text-tap-ink">{useCase.navLabel}</p>
-                <h2 className="mt-3 font-display text-2xl font-extrabold tracking-[-0.03em] text-ink md:text-3xl">
+                <h2 className="mt-3 page-title text-2xl text-ink md:text-3xl">
                   {useCase.title}
                 </h2>
                 <p className="mt-3 flex-1 leading-relaxed text-ink/80">{useCase.description}</p>

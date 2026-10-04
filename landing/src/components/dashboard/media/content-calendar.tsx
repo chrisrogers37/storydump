@@ -8,6 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { TONE_CLASS, TONE_DOT, type BadgeTone } from "@/components/dashboard/tone";
 
 interface HistoryItem {
   posted_at: string;
@@ -109,11 +110,11 @@ function buildCalendarDays(
   return days;
 }
 
-const typeColors = {
-  past: "bg-green-500/20 text-green-700 dark:text-green-400",
-  queued: "bg-blue-500/20 text-blue-700 dark:text-blue-400",
-  predicted: "bg-muted text-muted-foreground",
-};
+const typeTone = {
+  past: "active",
+  queued: "progress",
+  predicted: "inert",
+} as const satisfies Record<string, BadgeTone>;
 
 export function ContentCalendar({
   history,
@@ -138,16 +139,16 @@ export function ContentCalendar({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">{monthName}</CardTitle>
+        <CardTitle>{monthName}</CardTitle>
         <div className="flex gap-4 text-xs text-muted-foreground">
           <span className="flex items-center gap-1">
-            <span className="h-2 w-2 rounded-full bg-green-500" /> Posted
+            <span className={cn("h-2 w-2 rounded-full", TONE_DOT[typeTone.past])} /> Posted
           </span>
           <span className="flex items-center gap-1">
-            <span className="h-2 w-2 rounded-full bg-blue-500" /> In Queue
+            <span className={cn("h-2 w-2 rounded-full", TONE_DOT[typeTone.queued])} /> In Queue
           </span>
           <span className="flex items-center gap-1">
-            <span className="h-2 w-2 rounded-full bg-muted-foreground" /> Predicted
+            <span className={cn("h-2 w-2 rounded-full", TONE_DOT[typeTone.predicted])} /> Predicted
           </span>
         </div>
       </CardHeader>
@@ -189,7 +190,7 @@ export function ContentCalendar({
                     key={i}
                     className={cn(
                       "truncate rounded px-1 py-0.5 text-[10px]",
-                      typeColors[post.type]
+                      TONE_CLASS[typeTone[post.type]]
                     )}
                     title={post.label}
                   >

@@ -301,6 +301,13 @@ POLICY_CENSUS = {
         "SELECT",
         ("svc_membership",),
     ): "door:fn_signup_admitted",
+    # 100: the marketing waitlist — the API may add an address, nothing else.
+    (
+        "p_ingress_waitlist",
+        "waitlist_entries",
+        "INSERT",
+        ("svc_ingress",),
+    ): "machinery",
     # 099: a person's own Telegram unlink — the door's read and delete.
     (
         "p_member_identities",
@@ -812,7 +819,8 @@ class TestRuntimeTenantIsolationMatrix:
         """The `true`-predicate login policies, driven at their grants:
         user-plane reads as both logins; rate_counters as both; command_dedup
         as ingress only — svc_worker holds no grant there, which is asserted
-        as the denial it is."""
+        as the denial it is. waitlist_entries (100) is ingress's to add to and
+        no one's to read: the INSERT lands and a read back is refused."""
         for login in LOGINS:
             dsn = _login_dsn(target, login)
             assert _scalar(dsn, "SELECT count(*) FROM users") >= 2
@@ -842,6 +850,19 @@ class TestRuntimeTenantIsolationMatrix:
                 " (channel, principal, external_ref, fingerprint)"
                 " VALUES ('web', 'f4-worker', 'x', 'fp')",
             )
+        assert (
+            _exec(
+                target["ingress"],
+                "INSERT INTO waitlist_entries (email) VALUES (%s)",
+                params=(f"f4-{uuid.uuid4().hex[:8]}@example.com",),
+            )
+            == 1
+        )
+        for login in LOGINS:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _scalar(
+                    _login_dsn(target, login), "SELECT count(*) FROM waitlist_entries"
+                )
 
     def test_the_census_matches_the_catalog_exactly(self, target):
         """THE completeness gate, at (policy, table, cmd, roles) grain — a
@@ -860,7 +881,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 68
+        assert len(POLICY_CENSUS) == 69
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}

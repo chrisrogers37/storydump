@@ -82,6 +82,12 @@ class TestTheEngineConfigAssertsTheSeam:
         engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
         assert engine.pool._recycle == POOL_RECYCLE_SEAM
 
+    def test_a_logged_statement_error_carries_no_bound_values(self):
+        """Bound values are addresses, campaigns and token hashes; a failed
+        statement's error (which uvicorn logs) names the SQL only."""
+        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert engine.sync_engine.hide_parameters is True
+
     def test_pool_size_is_pinned_too_so_the_invariant_cannot_be_overridden(self):
         """Half a pinned inequality is not pinned. With `pool_size` read from
         settings, a production `DB_POOL_SIZE` override breaks
