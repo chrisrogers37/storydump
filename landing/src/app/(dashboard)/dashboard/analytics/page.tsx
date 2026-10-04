@@ -1,4 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/design/page-header";
 
 export const metadata = {
   title: "Analytics",
@@ -7,15 +8,13 @@ export const metadata = {
 export default function AnalyticsPage() {
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Analytics</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Detailed analytics and insights.
-        </p>
-      </div>
+      <PageHeader
+        title="Analytics"
+        description="Detailed analytics and insights."
+      />
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Coming Soon</CardTitle>
+          <CardTitle>Coming soon</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">

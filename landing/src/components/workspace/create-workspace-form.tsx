@@ -7,6 +7,7 @@ import { Loader2 } from "lucide-react";
 import { callBff, postJson } from "@/lib/bff";
 import { createWorkspaceRefusalCopy } from "@/lib/refusal-copy";
 import { WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
+import { Button } from "@/components/ui/button";
 
 /**
  * Name a workspace and create it.
@@ -115,7 +116,7 @@ export function CreateWorkspaceForm({ autoFocus = false }: { autoFocus?: boolean
           placeholder="e.g. Northside Coffee"
           aria-invalid={tooLong || undefined}
           aria-describedby={error || tooLong ? "workspace-name-error" : undefined}
-          className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+          className="w-full rounded-md border bg-background px-3 py-2 text-sm focus-visible:outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring"
         />
         {(tooLong || error) && (
           <p id="workspace-name-error" role="alert" className="text-sm text-destructive">
@@ -126,14 +127,10 @@ export function CreateWorkspaceForm({ autoFocus = false }: { autoFocus?: boolean
         )}
       </div>
 
-      <button
-        type="submit"
-        disabled={!canSubmit}
-        className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
-      >
+      <Button type="submit" size="lg" className="w-full" disabled={!canSubmit}>
         {pending && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
         {pending ? "Creating…" : "Create workspace"}
-      </button>
+      </Button>
     </form>
   );
 }

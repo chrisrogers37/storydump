@@ -4,7 +4,7 @@ import re
 import uuid
 from typing import Container
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ALIASED ON PURPOSE, and the collision is not hypothetical: the class directly
@@ -259,6 +259,15 @@ class Settings(BaseSettings):
     # by default and only a local http dev setup should turn it off.
     SESSION_COOKIE_DOMAIN: Optional[str] = None
     SESSION_COOKIE_SECURE: bool = True
+    # A web session's ABSOLUTE lifetime, counted from sign-in
+    # (`session_tokens.created_at`). Use slides `expires_at` 30 days out, and
+    # without a cap a session used once a month would never end; past this
+    # age it is refused as expired however recently it was used, and no slide
+    # carries `expires_at` beyond `created_at` + this. 30 days: the cookie's
+    # own Max-Age and the "30 days" the Privacy page states.
+    # Bounded: 0 would end every session at once, and a huge value overflows
+    # the interval it builds.
+    SESSION_MAX_AGE_SECONDS: int = Field(30 * 24 * 3600, gt=0, le=365 * 24 * 3600)
     # Sign-up while in beta (092, owner decision 2026-10-02): a NEW Google
     # account creates its user only when `fn_signup_admitted` admits its
     # verified email. True switches that ask off — a local stack's setting,
@@ -285,12 +294,27 @@ class Settings(BaseSettings):
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1,fd00::/8"
     )
 
+    # The largest request body the API reads, in bytes; over it is 413
+    # (`app.py::BodySizeLimitMiddleware`). No route takes an upload: the
+    # largest body anything reads is one Telegram update, and every other is
+    # a small JSON object or a Meta callback form, so 1 MiB is far above
+    # every legitimate request.
+    API_REQUEST_BODY_MAX_BYTES: int = 1024 * 1024
+
     # Who may read the API's operating details (`GET /api/v1/ops/health`):
     # comma-separated user ids, the `user` line `storydump whoami` prints. Empty —
     # the default — admits nobody, so the details stay closed until the
     # deployment names them. Not the `operator` token role: a person-bound
     # token of any role passes only if its person is listed here.
     OPS_USER_IDS: str = ""
+
+    # The secret the landing site's server sends with each waitlist signup
+    # (`POST /public/waitlist`, `07` §43), the same value as the site's
+    # WAITLIST_SITE_SECRET on Vercel. Set, the API refuses a call without it
+    # and limits each visitor the site names on their own counter; unset — the
+    # default — it keys the limit on the site's address, shared by everyone.
+    # Set it on the site first: until then the site sends nothing to match.
+    WAITLIST_SITE_SECRET: Optional[str] = None
 
     @property
     def web_app_origin(self) -> Optional[str]:
@@ -301,6 +325,13 @@ class Settings(BaseSettings):
         page whose origin CORS refuses.
         """
         return self.WEB_APP_URL.rstrip("/") if self.WEB_APP_URL else None
+
+    @property
+    def waitlist_site_secret(self) -> Optional[str]:
+        """`WAITLIST_SITE_SECRET` without surrounding whitespace (the site
+        trims its copy too, so a pasted newline cannot refuse every signup),
+        or None when unset or blank."""
+        return (self.WAITLIST_SITE_SECRET or "").strip() or None
 
     @property
     def trusted_proxy_hosts(self) -> list[str]:

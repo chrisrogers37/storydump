@@ -520,6 +520,57 @@ class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
         row = _row(world, "-1009000000001")
         assert row is not None and str(row[0]) == str(world["a"]["ws"])
 
+    def test_an_admin_demoted_after_minting_binds_nothing(self, world):
+        """The admin floor holds when the link is used, not only when it is
+        minted; the outcome names the re-check's refusal."""
+        from src.services.target import channel_bind
+
+        conn = psycopg2.connect(world["stream"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id")
+                admin = str(cur.fetchone()[0])
+                cur.execute(
+                    "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                    " VALUES (%s, %s, 'admin')",
+                    (str(world["a"]["ws"]), admin),
+                )
+                cur.execute(
+                    "INSERT INTO user_identities"
+                    " (user_id, provider, external_id, display_name)"
+                    " VALUES (%s, 'telegram', 'tg-admin-demoted', 'ada')",
+                    (admin,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        ids = {"ws": world["a"]["ws"], "user": admin}
+        link = run(
+            world,
+            lambda s: channel_bind.issue_bind_state(
+                s,
+                user_id=admin,
+                workspace_id=str(world["a"]["ws"]),
+                bot_username="storydump_app_bot",
+            ),
+            ids=ids,
+        )
+        _migrate(
+            world,
+            "UPDATE workspace_members SET role = 'member'"
+            " WHERE workspace_id = %s AND user_id = %s",
+            (str(world["a"]["ws"]), admin),
+        )
+        result = self._tap(
+            world,
+            link.rsplit("bind-", 1)[1],
+            tg_user_id="tg-admin-demoted",
+            external_ref="-1009000000003",
+        )
+        assert (result.outcome, result.handled) == ("insufficient_role", False)
+        assert _row(world, "-1009000000003") is None
+
     def test_a_stranger_holding_the_link_binds_nothing(self, world):
         self._linked_admin(world, "tg-admin-1")
         state = self._mint(world).rsplit("bind-", 1)[1]
@@ -597,6 +648,137 @@ class TestRetiringAndFollowingAChat:
         assert followed is False, "the taken id must refuse the repoint"
         assert _row(world, "-777000002")[1] == "revoked"
         assert _row(world, "-1009000000030") == (world["b"]["ws"], "active")
+
+
+class TestAnAdminRemovesAGroup:
+    """`bindings.revoke_for_workspace` — the route's half of `07` §13's
+    removal, as `svc_ingress` under the tenant's RLS: the binding is revoked,
+    its queued cards are superseded, another tenant can move neither, and a
+    fresh bind brings the group back with no backlog."""
+
+    def _queue(self, world, binding: str, *, ids=None) -> list[str]:
+        """Four rows, one per state the revoke must sort: two it retires and
+        two it leaves alone."""
+        ids = ids or world["a"]
+
+        async def enqueue(session):
+            return [
+                await outbox.enqueue(
+                    session,
+                    workspace_id=str(ids["ws"]),
+                    binding_id=binding,
+                    kind="notification",
+                    payload={"v": 1, "text": "queued"},
+                )
+                for _ in range(4)
+            ]
+
+        pending, ambiguous, sending, sent = run(world, enqueue, ids=ids)
+        for oid, state in (
+            (ambiguous, "ambiguous"),
+            (sending, "sending"),
+            (sent, "sent"),
+        ):
+            _migrate(
+                world,
+                "UPDATE channel_outbox SET state = %s WHERE id = %s",
+                (state, oid),
+            )
+        return [pending, ambiguous, sending, sent]
+
+    def _states(self, world, ids: list[str]) -> list[str]:
+        return [
+            fetch_one(
+                world["stream"], "SELECT state FROM channel_outbox WHERE id = %s", (i,)
+            )[0]
+            for i in ids
+        ]
+
+    def _remove(self, world, binding: str, *, ids=None) -> bool:
+        ids = ids or world["a"]
+        return run(
+            world,
+            lambda s: bindings.revoke_for_workspace(
+                s, workspace_id=str(ids["ws"]), binding_id=binding
+            ),
+            ids=ids,
+        )
+
+    def test_revokes_the_binding_and_supersedes_its_queue(self, world):
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        rows = self._queue(world, binding)
+        assert self._states(world, rows) == ["pending", "ambiguous", "sending", "sent"]
+
+        assert self._remove(world, binding) is True
+        assert _row(world, ref)[1] == "revoked"
+        assert self._states(world, rows) == [
+            "superseded",
+            "superseded",
+            "sending",  # the live sender's, settled by its own CAS
+            "sent",
+        ]
+        assert self._remove(world, binding) is False, "a second remove moves nothing"
+
+    def test_another_workspace_can_move_neither_the_binding_nor_its_queue(self, world):
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        rows = self._queue(world, binding)
+
+        assert self._remove(world, binding, ids=world["b"]) is False
+        assert _row(world, ref) == (world["a"]["ws"], "active")
+        assert self._states(world, rows)[:2] == ["pending", "ambiguous"]
+
+    def test_a_re_bind_re_activates_the_row_and_sends_no_backlog(self, world):
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        rows = self._queue(world, binding)
+        assert self._remove(world, binding) is True
+
+        assert _bind(world, ref) == REBOUND
+        assert _row(world, ref)[1] == "active"
+        assert str(_binding_id(world, ref)) == binding, "the same row, not a new one"
+        assert self._states(world, rows)[:2] == ["superseded", "superseded"]
+
+    def test_a_re_bind_retires_a_card_that_was_in_flight_at_the_removal(self, world):
+        """The card being sent when the group was removed is the live sender's
+        at the removal. Whatever it became after (here, back to `pending`
+        after a 429, or left `sending` by a dead sender), the re-bind retires
+        it before the group is active again, so it is never sent there."""
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        pending, _ambiguous, sending, sent = self._queue(world, binding)
+        assert self._remove(world, binding) is True
+        # After the removal, a 429 hands the in-flight card back to pending
+        # and a second one stays stranded in sending.
+        _migrate(
+            world,
+            "UPDATE channel_outbox SET state = 'pending' WHERE id = %s",
+            (pending,),
+        )
+        assert self._states(world, [pending, sending]) == ["pending", "sending"]
+
+        assert _bind(world, ref) == REBOUND
+        assert self._states(world, [pending, sending, sent]) == [
+            "superseded",
+            "superseded",
+            "sent",
+        ]
+
+    def test_re_binding_an_active_group_leaves_its_queue_alone(self, world):
+        """Tapping a fresh bind link for a group that is already bound is a
+        no-op for its cards: only a removed group's leftovers are retired."""
+        ref = _chat()
+        _bind(world, ref)
+        binding = str(_binding_id(world, ref))
+        rows = self._queue(world, binding)
+
+        assert _bind(world, ref) == REBOUND
+        assert self._states(world, rows) == ["pending", "ambiguous", "sending", "sent"]
 
 
 class TestTheJoinPathThroughTheDoors:
@@ -1079,3 +1261,165 @@ class TestARefusedJoinRollsBackAlone:
         assert members == [{"user_id": joiner, "role": "member"}], (
             "the other join commits; the refused one rolls back alone"
         )
+
+
+def _tg() -> int:
+    """A Telegram user id nobody else in the module holds."""
+    return 7_000_000_000 + uuid.uuid4().int % 10**9
+
+
+class TestASenderThatIsNotAPersonTouchesNothing:
+    """A message whose `from` is a stand-in — one sent on behalf of a chat
+    (`sender_chat`), or a channel post Telegram forwarded into its discussion
+    group (`is_automatic_forward`) — names no person. Through the real
+    dispatcher, as a bare `svc_ingress` connection: its `/start link-…`
+    reaches no handler, so the state stays live and nobody is linked; and in a
+    bound group it makes nobody a member, whatever identity row its id has."""
+
+    def _mint(self, world) -> str:
+        """A live `link-` state for a fresh user, minted as the web route
+        mints it: the user plane, no tenant."""
+        from src.services.target import identity_link
+
+        user = str(uuid.uuid4())
+        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (user,))
+        link = asyncio.run(
+            in_user_plane(
+                world["ingress"],
+                lambda c: identity_link.issue_link_state(
+                    c, user_id=user, bot_username="storydump_app_bot"
+                ),
+            )
+        )
+        return link.rsplit("start=link-", 1)[1]
+
+    def _holder(self, world, tg: int):
+        row = fetch_one(
+            world["stream"],
+            "SELECT user_id FROM user_identities"
+            " WHERE provider = 'telegram' AND external_id = %s",
+            (str(tg),),
+        )
+        return None if row is None else str(row[0])
+
+    def _live(self, world, state: str) -> bool:
+        row = fetch_one(
+            world["stream"],
+            "SELECT consumed_at IS NULL AND expires_at > now()"
+            "  FROM oauth_states WHERE state = %s",
+            (state,),
+        )
+        assert row is not None, "the state row is gone"
+        return bool(row[0])
+
+    def _role(self, world, user: str):
+        row = fetch_one(
+            world["stream"],
+            "SELECT role FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+            (str(world["a"]["ws"]), user),
+        )
+        return None if row is None else row[0]
+
+    @pytest.mark.parametrize(
+        "fields, outcome",
+        [
+            ({}, "not_private"),
+            ({"is_automatic_forward": True}, "unattributable"),
+            ({"sender_chat": {"id": -1001, "type": "supergroup"}}, "unattributable"),
+        ],
+        ids=["group", "automatic_forward", "sender_chat"],
+    )
+    def test_a_tap_from_a_group_or_a_placeholder_sender_touches_nothing(
+        self, world, fields, outcome
+    ):
+        state = self._mint(world)
+        sender = _tg()
+        result = _dispatch(
+            world,
+            _message(
+                710001,
+                _chat(),
+                "supergroup",
+                sender=sender,
+                text=f"/start@storydump_app_bot link-{state}",
+                **fields,
+            ),
+        )
+        assert (result.outcome, result.handled) == (outcome, False)
+        assert self._holder(world, sender) is None, "a placeholder sender was linked"
+        assert self._live(world, state), "the refused tap spent the state"
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"is_automatic_forward": True},
+            {"sender_chat": {"id": -1002, "type": "channel"}},
+        ],
+        ids=["automatic_forward", "sender_chat"],
+    )
+    def test_a_placeholder_sender_in_a_bound_group_joins_nobody(self, world, fields):
+        """A stand-in sender is nobody: its message makes no one a member,
+        whatever identity row its id has. The same id speaking as itself does
+        join, so the refusal is the stand-in's and not the fixture's."""
+        ref = _chat()
+        _bind(world, ref)
+        holder, placeholder = str(uuid.uuid4()), _tg()
+        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (holder,))
+        _migrate(
+            world,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'telegram', %s, 'placeholder')",
+            (holder, str(placeholder)),
+        )
+
+        _dispatch(
+            world,
+            _message(
+                710011, ref, "supergroup", sender=placeholder, text="hi", **fields
+            ),
+        )
+        assert self._role(world, holder) is None, "a placeholder sender joined"
+
+        spoke = _dispatch(
+            world, _message(710012, ref, "supergroup", sender=placeholder, text="hi")
+        )
+        assert spoke.outcome == "joined", spoke.outcome
+        assert self._role(world, holder) == "member"
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"is_automatic_forward": True},
+            {"sender_chat": {"id": -1003, "type": "supergroup"}},
+        ],
+        ids=["automatic_forward", "sender_chat"],
+    )
+    def test_a_placeholder_sender_cannot_spend_a_bind_link(self, world, fields):
+        """Refused before routing, so the bind lane never sees it: the link
+        stays live and no chat is bound."""
+        from src.services.target import channel_bind
+
+        state = run(
+            world,
+            lambda s: channel_bind.issue_bind_state(
+                s,
+                user_id=str(world["a"]["user"]),
+                workspace_id=str(world["a"]["ws"]),
+                bot_username="storydump_app_bot",
+            ),
+        ).rsplit("bind-", 1)[1]
+        ref = _chat()
+        result = _dispatch(
+            world,
+            _message(
+                710021,
+                ref,
+                "supergroup",
+                sender=_tg(),
+                text=f"/start@storydump_app_bot bind-{state}",
+                **fields,
+            ),
+        )
+        assert (result.outcome, result.handled) == ("unattributable", False)
+        assert self._live(world, state), "a stand-in spent the bind link"
+        assert _row(world, ref) is None, "a stand-in bound the chat"

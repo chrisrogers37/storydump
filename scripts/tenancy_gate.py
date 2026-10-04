@@ -115,6 +115,12 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     # exactly as CREATE FUNCTION above; the `OR REPLACE` form is a new prefix,
     # not a new kind.
     "CREATE OR REPLACE FUNCTION ",
+    # 098 revokes the pending invitations of inviters removed before it. An
+    # UPDATE of a user table writes rows, not a table, a policy or an RLS bit:
+    # inert on the four facts exactly as INSERT INTO above. Allowlisted for that
+    # one table, not as a bare "UPDATE ", which would also admit a catalog
+    # write such as `UPDATE pg_class SET relrowsecurity = false`.
+    "UPDATE workspace_invitations ",
 )
 
 

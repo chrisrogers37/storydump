@@ -27,6 +27,9 @@ class TestSettingsDefaults:
     def test_the_session_cookie_is_secure_by_default(self):
         assert Settings.model_fields["SESSION_COOKIE_SECURE"].default is True
 
+    def test_the_request_body_limit_defaults_to_one_mib(self):
+        assert Settings.model_fields["API_REQUEST_BODY_MAX_BYTES"].default == 2**20
+
     def test_optional_fields_default_to_none(self):
         assert (
             Settings.model_fields["TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN"].default

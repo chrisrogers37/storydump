@@ -125,6 +125,10 @@ a guide walking a reader through it contradicted a fixed constraint.
 **[landing-vercel-deployment.md](guides/landing-vercel-deployment.md)**
 - The Next.js site and dashboard in `landing/`: its Vercel environment variables (client vs server), common issues, project settings
 
+### Design System
+**[design-system.md](guides/design-system.md)**
+- The one design module the site, sign-in and the app share: tokens, fonts, the shared components, and the rules for changing them
+
 ---
 
 ## Operations & Maintenance

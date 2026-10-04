@@ -52,9 +52,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.requests import ClientDisconnect
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length
 from src.api.routes.auth import router as auth_router
 from src.api.routes.health import COMMIT_VAR, VERSION, AnswerCache
 from src.api.routes.health import router as health_router
@@ -65,8 +67,14 @@ from src.api.routes.tokens import router as tokens_router
 from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
+from src.api.routes.public import WaitlistSlots
+from src.api.routes.public import router as public_router
 from src.config.settings import parse_ops_user_ids, settings
-from src.exceptions.tenancy import TenantResolutionError, TokenRefused
+from src.exceptions.tenancy import (
+    CrossSiteRefused,
+    TenantResolutionError,
+    TokenRefused,
+)
 from src.services.target import oauth_states
 from src.services.target.commands import CommandNotBuilt, CommandRefused
 from src.services.target.invitations import InvitationRefused
@@ -156,6 +164,85 @@ class DropAmbiguousForwardedForMiddleware:
         await self.app(scope, receive, send)
 
 
+class BodySizeLimitMiddleware:
+    """Refuse a request body over *max_bytes* with 413, before a route reads it.
+
+    A declared Content-Length over the limit is refused before a byte is
+    read. A body without one is counted as it arrives: once the total passes
+    the limit the 413 goes out, the app is told the client disconnected — so
+    a route reading the body stops there — and nothing the app sends after
+    that reaches the client. Either way the connection is closed rather than
+    drained, so the rest of the body is never read.
+
+    The limit is the `API_REQUEST_BODY_MAX_BYTES` setting, which says why it
+    sits where it does; the Meta callbacks keep a tighter cap of their own
+    (`routes/meta.py`).
+    """
+
+    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        declared = declared_length(scope["headers"])
+        if declared is not None and declared > self.max_bytes:
+            await self._refuse(scope, receive, send, f"declared {declared}")
+            return
+
+        received = 0
+        started = False
+
+        async def bounded_receive() -> Message:
+            nonlocal received
+            if received > self.max_bytes:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    if not started:
+                        await self._refuse(scope, receive, send, "streamed")
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal started
+            if received > self.max_bytes:
+                return
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, bounded_receive, guarded_send)
+        except ClientDisconnect:
+            # The disconnect handed over above: the 413 is the answer.
+            if received <= self.max_bytes:
+                raise
+
+    async def _refuse(
+        self, scope: Scope, receive: Receive, send: Send, how: str
+    ) -> None:
+        client = scope.get("client")
+        logger.warning(
+            "refused %s %s from %s: request body over %d bytes (%s)",
+            scope.get("method"),
+            scope.get("path"),
+            client[0] if client else "unknown",
+            self.max_bytes,
+            how,
+        )
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": BODY_TOO_LARGE_DETAIL},
+            headers={"Connection": "close"},
+        )
+        await response(scope, receive, send)
+
+
 #: How often `_sample_webhook_live` re-reads what Telegram holds — the cadence
 #: is the API's to choose, so it is stated here and handed to the channel's
 #: `live_samples`. The CLI's `storydump health` reads the cached sample and
@@ -195,6 +282,10 @@ _TOKEN_STATUS = {
     "wrong_workspace": 403,
     "not_ops": 403,
 }
+
+#: `CrossSiteRefused.reason` → 403 WITH the reason, so a refused browser
+#: post says why. Pinned total by the factory test.
+_CROSS_SITE_STATUS = {"cross_site": 403}
 
 #: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
 #: the factory test, so a new reason cannot ship without a row here.
@@ -254,10 +345,9 @@ _INVITATION_STATUS = {
     "identity_mismatch": 403,
     # The CREATE half's refusals (#1172). All three are the caller's input
     # being wrong rather than a state or an authorization fact, so 400 — and
-    # `already_invited` is deliberately NOT 409: a pending invitation to that
-    # address is not a conflicting write to fix by retrying, it is a thing
-    # that already exists, and the remedy is to revoke or wait rather than to
-    # send again.
+    # `already_invited` stays 400 rather than 409 for the same reason. A send
+    # replaces the address's pending invitation (`invitations.create`, under a
+    # per-addressee lock), so it is a backstop no product path reaches today.
     "already_invited": 400,
     "email_required": 400,
     "invalid_channel": 400,
@@ -354,6 +444,10 @@ def _register_handlers(app: FastAPI) -> None:
     )
 
     app.add_exception_handler(TokenRefused, _mapped(_TOKEN_STATUS, _reason_detail))
+
+    app.add_exception_handler(
+        CrossSiteRefused, _mapped(_CROSS_SITE_STATUS, _reason_detail)
+    )
 
     @app.exception_handler(TokenArgsInvalid)
     async def _token_args(request: Request, exc: TokenArgsInvalid):
@@ -644,6 +738,8 @@ def create_app(
     # route's honest 503 into a 500 mid-delivery.
     bot = _telegram_transport(env)
     app.state.tap_metrics = webhooks.TapMetrics()
+    # The waitlist route's per-process slots (`routes/public.py`).
+    app.state.waitlist_slots = WaitlistSlots()
     app.state.ingress_workers = _ingress_workers(env)
     app.state.pool_watch = (
         PoolWatch(app.state.engine) if app.state.engine is not None else None
@@ -676,8 +772,13 @@ def create_app(
 
     # Middleware. Starlette prepends, so the LAST added runs FIRST on the
     # request path: CORS outermost, then the ambiguous-XFF drop (#765) ahead
-    # of the trusted-proxy walk (#726), then security headers innermost.
+    # of the trusted-proxy walk (#726), then the body limit — after the walk,
+    # so its refusal names the attributed client, and ahead of everything
+    # that could read a body — then security headers innermost.
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(
+        BodySizeLimitMiddleware, max_bytes=settings.API_REQUEST_BODY_MAX_BYTES
+    )
     app.add_middleware(
         ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts
     )
@@ -702,6 +803,10 @@ def create_app(
     # Meta's policy callbacks (#410). Under the same prefix as the other
     # provider-called doors; the URLs are not registered with Meta yet.
     app.include_router(meta_router, prefix="/webhooks/meta")
+    # What a visitor with no account reaches (`routes/public.py`): the
+    # marketing waitlist, outside `/api/v1` because every route there takes a
+    # principal.
+    app.include_router(public_router, prefix="/public")
     # The Mini App's URL is baked into buttons real users still hold; it
     # redirects rather than 404s (`routes/retired.py`).
     app.include_router(retired_router)
