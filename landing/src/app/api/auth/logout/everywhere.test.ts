@@ -63,7 +63,8 @@ describe("sign out of all devices", () => {
     expect(captured).toEqual([
       { path: "/signout?everywhere=true", init: { method: "POST", plane: "auth" } },
     ]);
-    expect(response.status).toBe(307);
+    // 303: the button's `fetch` follows it with a GET (a 307 re-POSTs to /login).
+    expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("https://storydump.app/login");
   });
 
@@ -88,6 +89,7 @@ describe("sign out of all devices", () => {
 
   it("lands a plain sign-out on /login when it worked", async () => {
     const response = await POST(post());
+    expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("https://storydump.app/login");
   });
 
