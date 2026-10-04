@@ -88,6 +88,7 @@ describe("notifyAdmin", () => {
     [["TELEGRAM_BOT_TOKEN", "ADMIN_TELEGRAM_CHAT_ID"], "TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_CHAT_ID"],
     // A blank pasted value counts as not set.
     [["TELEGRAM_BOT_TOKEN"], "TELEGRAM_BOT_TOKEN", " \n"],
+    [["ADMIN_TELEGRAM_CHAT_ID"], "ADMIN_TELEGRAM_CHAT_ID", " \n"],
   ])("names the missing setting %j and sends nothing", async (unset, named, value = "") => {
     for (const name of unset) vi.stubEnv(name, value)
     await notifyAdmin("a@example.com")
