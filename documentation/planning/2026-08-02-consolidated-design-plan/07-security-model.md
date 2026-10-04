@@ -85,7 +85,7 @@ RLS class: `session_tokens`, `oauth_states`, and `service_tokens` are **auth-pla
 ## §4. Audit integrity and retention (review A §5.13)
 
 - **Append-only in the database:** no role holds UPDATE on `audit_events`; DELETE only via `svc_maintenance`'s retention sweep (`02` §7). The `02` §4 audit trigger's GUC requirement means every state change carries a named actor — including break-glass psql sessions (below).
-- **Retention:** `05` table — audit rows kept 400 days, then swept via `fn_retention_batch` (`02` §7). **Not running as of 2026-09-20:** the `retention_sweep` executor is unbuilt (`work_loop.UNBUILT_KINDS`) and the clock never mints it, so nothing ages out of `audit_events`, `jobs`, `channel_outbox` or `archive` today — including 078's snapshots, whose 90-day clock the same class owns. Before each sweep batch is deleted it is COPY-exported **into the in-database `archive` schema** as a batch table (`05` §DR names the location; the rationale and the properties that decided it are `03` D30); **the sweep aborts if the export fails — export-or-abort, never delete-then-hope**. No login role holds any grant on the `archive` schema: writes happen only inside `svc_maintenance`-owned door bodies and `svc_migration` contract migrations; reads are the break-glass runbook (§5). Aged archive tables are dropped *as tables* per their `05` retention rows. Queryability of archives is explicitly not a v1 feature.
+- **Retention:** `05` table — audit rows kept 400 days, then swept via `fn_retention_batch` (`02` §7). **Not running for this class:** the `retention_sweep` executor runs only the `rate_counters` class (7 days, since 2026-10-03), so nothing ages out of `audit_events`, `jobs`, `channel_outbox` or `archive` today — including 078's snapshots, whose 90-day clock the same class owns. Before each sweep batch is deleted it is COPY-exported **into the in-database `archive` schema** as a batch table (`05` §DR names the location; the rationale and the properties that decided it are `03` D30); **the sweep aborts if the export fails — export-or-abort, never delete-then-hope**. No login role holds any grant on the `archive` schema: writes happen only inside `svc_maintenance`-owned door bodies and `svc_migration` contract migrations; reads are the break-glass runbook (§5). Aged archive tables are dropped *as tables* per their `05` retention rows. Queryability of archives is explicitly not a v1 feature.
 - **Redaction rule:** `detail` JSONB never contains secrets, tokens, invitation-token values, or `provider_account_ref` (internal UUIDs only); enforced by the writer helper everything routes through + a test that greps captured audit output in the harness. Tamper evidence beyond grants (hash chains, signed exports) is explicitly not v1 — the stated integrity level is "no role can rewrite history without leaving a grant violation," which is what the grant matrix delivers.
 
 ## §5. Existence-oracle and log hygiene (review A §5.14)
@@ -2134,8 +2134,10 @@ and the outbox records what happened to a row the same way. It ends only the clo
 singletons, its slot, refresh and reauth legs, the sender sweep's `deliver_outbox`, and the two
 sync kinds, whose source it re-arms for tomorrow, as `work_loop._rearm_source` does, because a
 sync's mint disarms it. Nothing re-mints the others (`publish_pipeline`, `send_email`,
-`offboard_workspace`, `revoke_workspace_credentials`, `retention_sweep`, `reencrypt_credentials`),
-so ending one would unblock no successor and only lose its work; they are left as they were. For
+`offboard_workspace`, `revoke_workspace_credentials`, `reencrypt_credentials`), so ending one
+would unblock no successor and only lose its work; they are left as they were. The leg also
+leaves `retention_sweep`, which nothing minted when it was written: since 2026-10-03 the clock
+mints it hourly, and a late one still runs, since `fn_claim_job` reads no deadline. For
 the kinds it ends, the leg is the worker's spent-budget path without the tenant notice, which that
 path calls a courtesy, not the record.
 
@@ -3088,4 +3090,64 @@ REVOKE CREATE ON SCHEMA public FROM svc_membership;
 REVOKE ALL ON FUNCTION fn_identity_unlink(uuid, text) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_identity_unlink(uuid, text) TO svc_ingress;
+```
+
+### §43. The waitlist is written by the API, not by the site (100)
+
+**Why:** the landing site's waitlist form inserted into a Drizzle-managed `waitlist_signups` table
+through its own `DATABASE_URL`, the one write in the system that did not go through the API, with
+a credential that reached every table. Production never had that table, so the form failed every
+signup. The owner ruled "one system, one writer" (2026-10-03): the API owns the write, and the
+site holds no database credential.
+
+**The table.** `waitlist_entries` is global, not tenant-plane: a visitor joining the waitlist has
+no user and no workspace. Its address rule is §35's, with a dot in the domain, no control, bidi-isolate, interlinear or tag characters, and at most 254 characters, and `utm`
+records the campaign the visitor came from, an object bounded at 2 KB. RLS is on and the one
+policy is `svc_ingress`'s INSERT, which is the route's only statement (`POST /public/waitlist`):
+the API can add an address and cannot read, change or remove one, so the public endpoint is no
+oracle for who is on the list. The owner reads the list as the database owner and admits people
+through `signup_admissions` (§35).
+
+**The site's secret.** The API sees only the site's server, so without more a limit keyed on the
+caller is one counter shared by every visitor, and one script spends it for everyone. With
+`WAITLIST_SITE_SECRET` set on both tiers, the site sends the secret and the visitor's address as
+Vercel reports it (Vercel overwrites `x-real-ip` and `x-forwarded-for`, so a visitor cannot choose
+it); the API compares the secret in constant time, refuses a call without it before reading the
+body, and keys the counter (10 a minute) and the per-address slot share on the visitor. Every
+accepted signup through the site, a repeat address too, also spends one counter shared by all
+visitors (600 a minute, spent after the insert so a refused body costs nothing; past it a
+savepoint rolls the row back and keeps the visitor's own spend), so a leaked secret, which lets a
+caller name a fresh visitor each time, still meets a ceiling on the table's growth. The waitlist
+counts every client, visitor or peer, by its IPv6 /64, never its single address. The
+visitor key holds only while Vercel is the first hop: off Vercel a client sets `x-real-ip` itself,
+and behind another CDN every visitor of one edge shares one key. Unset on
+the API it behaves as before whatever the site sends, which is what lets the owner set the site
+first. A matched call with no usable address falls back to the peer and the shared counter, and still
+spends the ceiling.
+
+**What it does not adopt.** A hand-made, empty `waitlist_signups` and the NOLOGIN
+`waitlist_writer` role were created in production as a stopgap on 2026-10-02 and never served a
+signup. The new name keeps this CREATE from meeting that table at the predeploy; the owner drops
+both by hand once the API serves the form.
+
+```sql
+-- [§43 the waitlist is written by the API, not by the site]
+
+CREATE TABLE waitlist_entries (
+  email     text PRIMARY KEY CONSTRAINT ck_waitlist_entries_email CHECK (
+              email = lower(email) AND length(email) <= 254
+              AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
+              AND email !~ '[[:cntrl:]]'
+              AND email !~ '[\u061c\u2066-\u2069\ufff9-\ufffb\U000e0000-\U000e007f]'
+              AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
+  joined_at timestamptz NOT NULL DEFAULT now(),
+  utm       jsonb CONSTRAINT ck_waitlist_entries_utm CHECK (
+              utm IS NULL OR (jsonb_typeof(utm) = 'object' AND length(utm::text) <= 2048))
+);
+
+ALTER TABLE waitlist_entries ENABLE ROW LEVEL SECURITY;
+
+GRANT INSERT ON waitlist_entries TO svc_ingress;
+
+CREATE POLICY p_ingress_waitlist ON waitlist_entries FOR INSERT TO svc_ingress WITH CHECK (true);
 ```

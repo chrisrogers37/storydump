@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -51,7 +51,12 @@ from src.exceptions.tenancy import (
     TenantResolutionError,
     TokenRefused,
 )
-from src.services.target import service_tokens, sessions, tenant_resolution
+from src.services.target import (
+    rate_counters,
+    service_tokens,
+    sessions,
+    tenant_resolution,
+)
 from src.services.target.unit_of_work import unit_of_work
 from src.services.target.vocabulary import DATABASE_URL_VAR
 
@@ -454,15 +459,63 @@ async def admin_session(request: Request, workspace_id: str, principal: Principa
         yield session
 
 
+def parse_json_object(raw: bytes) -> Optional[dict[str, Any]]:
+    """*raw* as a JSON object, or None when it is not one."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):  # deep nesting fits in a small body
+        return None
+    return body if isinstance(body, dict) else None
+
+
 async def json_object(request: Request) -> dict[str, Any]:
     """The body as a JSON object; an empty body is an empty object."""
     raw = await request.body()
     if not raw.strip():
         return {}
-    try:
-        body = json.loads(raw)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="body is not JSON")
-    if not isinstance(body, dict):
+    body = parse_json_object(raw)
+    if body is None:
         raise HTTPException(status_code=400, detail="body must be a JSON object")
     return body
+
+
+#: `05`: pre-auth admission, 30/min per client IP, scope `preauth_ip`.
+PREAUTH_LIMIT = 30
+PREAUTH_WINDOW_SECONDS = 60
+PREAUTH_SCOPE = "preauth_ip"
+
+
+def client_ip(request: Request) -> str:
+    """The attributed peer — `request.client.host` AFTER ProxyHeadersMiddleware
+    has applied the trusted-proxy walk (#726/#765), which is the `02` §6
+    client-IP source rule. Never a header read here; the one other address a
+    counter may key on is :func:`preauth_guard`'s *client*, which a caller
+    passes only after verifying who sent it."""
+    return request.client.host if request.client else "unknown"
+
+
+async def preauth_guard(
+    conn,
+    request: Request,
+    *,
+    detail: str,
+    key_prefix: str = "",
+    limit: Optional[int] = None,
+    client: Optional[str] = None,
+) -> None:
+    """Spend one of the caller's pre-auth admissions in *conn*'s transaction;
+    429 with *detail* past the limit. *key_prefix* gives a route its own
+    counter under the same scope; *limit* replaces `05`'s number for it;
+    *client* replaces the attributed peer, for a caller that vouches for the
+    address it forwards."""
+    count = await rate_counters.increment(
+        conn,
+        scope=PREAUTH_SCOPE,
+        key=key_prefix + (client or client_ip(request)),
+        window_start=rate_counters.window_start(
+            datetime.now(timezone.utc), PREAUTH_WINDOW_SECONDS
+        ),
+        limit=PREAUTH_LIMIT if limit is None else limit,
+    )
+    if count is None:
+        raise HTTPException(status_code=429, detail=detail)

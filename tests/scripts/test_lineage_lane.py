@@ -420,6 +420,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 099 appends §42, a person can unlink their own Telegram
             # identity: the door and svc_membership's delete behind it.
             "099_identity_unlink.sql",
+            # 100 appends §43, the waitlist written by the API: the global
+            # waitlist_entries and svc_ingress's insert-only policy.
+            "100_waitlist_entries.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

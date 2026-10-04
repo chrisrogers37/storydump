@@ -368,14 +368,14 @@ class TestExpectedTenancyDerivation:
         """CALIBRATION, and the reason this is not circular reasoning.
 
         `test_advertised_ddl_replay` executes the whole stream into a real
-        database and observes 28 tables, 20 of them tenant-keyed. This parses
+        database and observes 29 tables, 20 of them tenant-keyed. This parses
         the same stream as TEXT and must land on the same two numbers. Agreement
         between a catalog read and a text parse is what licenses using the parse
         as an expectation elsewhere; without it the derivation would only ever
         be self-consistent.
         """
         sig = expected_tenancy(self._stream())
-        assert len(sig) == 28
+        assert len(sig) == 29
         assert len(tenant_keyed_tables(sig)) == 20
 
     def test_the_completed_stream_satisfies_the_invariant_it_will_be_judged_by(self):
@@ -502,7 +502,7 @@ class TestExpectedTenancyDerivation:
         actually covers the corpus it has to run against, so the refusal is
         discriminating rather than merely strict.
         """
-        assert len(expected_tenancy(self._stream())) == 28
+        assert len(expected_tenancy(self._stream())) == 29
 
     def test_an_unclassified_statement_kind_refuses(self):
         """The allowlist's other direction: a statement kind nobody has judged
