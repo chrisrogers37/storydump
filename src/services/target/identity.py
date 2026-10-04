@@ -20,7 +20,7 @@ from typing import Optional
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import readers, vocabulary
+from src.services.target import oauth_states, readers, vocabulary
 
 PROVIDER_GOOGLE = vocabulary.PROVIDER_GOOGLE
 PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
@@ -69,7 +69,8 @@ async def upsert_google_identity(
 
     A subject seen before signs in whatever *signup_open* says. A NEW one
     creates its user only when `fn_signup_admitted` admits its email — an
-    owner admission or a live invitation addressed to it (092) — and is
+    owner admission or a live invitation addressed to it (092) from an active
+    workspace whose owner or admin still sent it (098) — and is
     refused with `SignupNotAdmitted` otherwise, a None email included.
     *signup_open* (`TARGET_SIGNUP_OPEN`) skips that ask.
     """
@@ -363,7 +364,7 @@ async def link_identity(
     ).first()
     if mine is not None:
         # `uq_user_provider`. Replacing it would silently unlink the old
-        # account, which is an operator action with an audit trail, not a tap.
+        # account; the person unlinks it first (`unlink_telegram`, 099).
         raise IdentityAlreadyLinked("user_already_has_this_provider")
 
     await executor.execute(
@@ -375,3 +376,34 @@ async def link_identity(
         {"u": str(user_id), "p": provider, "sub": external_id, "dn": display_name},
     )
     return True
+
+
+async def unlink_telegram(executor, *, user_id: str) -> str:
+    """Remove *user_id*'s own Telegram identity — the reverse of
+    :func:`link_identity`. Returns the door's outcome: `unlinked`,
+    `not_linked` or `last_identity` (099, `07` §42).
+
+    The delete is the `fn_identity_unlink` door's (099): no runtime role
+    deletes from `user_identities`, and the door keeps the user's other
+    identity, answering `last_identity` rather than leave an account with no
+    way to sign in. The caller proves the person — this is the session's user.
+
+    Memberships are untouched: a workspace joined from a Telegram group stays
+    joined. That Telegram account now resolves to nobody, so its taps answer
+    `unlinked` and its group messages join no one until the person links
+    again. In the same transaction the user's live `link` states are retired,
+    so a link minted before the unlink cannot re-attach an account the person
+    just removed.
+    """
+    outcome = (
+        await executor.execute(
+            text("SELECT fn_identity_unlink(CAST(:u AS uuid), :p)"),
+            {"u": str(user_id), "p": PROVIDER_TELEGRAM},
+        )
+    ).scalar_one()
+    if outcome != "last_identity":
+        # "link" is `identity_link.PURPOSE`, which imports this module.
+        await oauth_states.retire_live_states(
+            executor, provider=PROVIDER_TELEGRAM, purpose="link", user_id=user_id
+        )
+    return str(outcome)

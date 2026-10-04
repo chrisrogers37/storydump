@@ -235,6 +235,9 @@ def create_engine(url: str, *, pool_timeout: float = POOL_TIMEOUT_SEAM) -> Async
         pool_timeout=pool_timeout,
         pool_recycle=POOL_RECYCLE_SEAM,
         pool_pre_ping=True,
+        # A failed statement's logged error names the SQL, never the bound
+        # values: those are people's addresses, campaigns and tokens.
+        hide_parameters=True,
     )
 
 

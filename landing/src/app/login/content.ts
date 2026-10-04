@@ -35,9 +35,34 @@ export type LoginError = keyof typeof LOGIN_ERRORS;
 
 /** The copy for `?error=`, or null for none or a code this page does not know. */
 export function loginError(code: string | null | undefined): Linked | null {
-  return code && Object.hasOwn(LOGIN_ERRORS, code)
-    ? LOGIN_ERRORS[code as LoginError]
-    : null;
+  return pick(LOGIN_ERRORS, code);
+}
+
+/** `map[code]` for a code the map owns, else null (never an inherited key). */
+function pick<T>(map: Record<string, T>, code: string | null | undefined): T | null {
+  return code && Object.hasOwn(map, code) ? map[code] : null;
+}
+
+/**
+ * `?signout=` from the sign-out route, when the server side of a sign-out did
+ * not fully happen. This browser is signed out in every case.
+ * - `unconfirmed`: a plain sign-out the API never confirmed.
+ * - `incomplete`: "Sign out of all devices" could not reach the API.
+ * - `stale`: "Sign out of all devices" from a browser whose session had
+ *   already ended, so there was no session to say whose devices to sign out.
+ */
+export const SIGNOUT_NOTICES = {
+  unconfirmed:
+    "This browser is signed out, but we couldn't confirm your session ended. On a shared computer, sign in and use Sign out of all devices.",
+  incomplete:
+    "This browser is signed out, but we couldn't sign out your other devices. Sign in and try Sign out of all devices again.",
+  stale:
+    "This browser was already signed out, so your other devices weren't. Sign in and try Sign out of all devices again.",
+} satisfies Record<string, string>;
+
+/** The copy for `?signout=`, or null for none or a value this page does not know. */
+export function signoutNotice(code: string | null | undefined): string | null {
+  return pick(SIGNOUT_NOTICES, code);
 }
 
 /** The line under the card. */

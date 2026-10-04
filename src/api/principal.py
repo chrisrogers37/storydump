@@ -36,9 +36,10 @@ variable, never a silent fallback to the settings-built URL (#1010's class).
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -46,8 +47,17 @@ from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.config.settings import settings
-from src.exceptions.tenancy import TenantResolutionError, TokenRefused
-from src.services.target import service_tokens, sessions, tenant_resolution
+from src.exceptions.tenancy import (
+    CrossSiteRefused,
+    TenantResolutionError,
+    TokenRefused,
+)
+from src.services.target import (
+    rate_counters,
+    service_tokens,
+    sessions,
+    tenant_resolution,
+)
 from src.services.target.unit_of_work import unit_of_work
 from src.services.target.vocabulary import DATABASE_URL_VAR
 
@@ -236,12 +246,55 @@ def presented_token(request: Request) -> Optional[str]:
     return presented_bearer(request) or request.cookies.get(COOKIE) or None
 
 
+#: The methods a cookie may carry from anywhere: they change nothing.
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _origin_of(url: str) -> Optional[str]:
+    """``scheme://host[:port]`` of *url*, lowercased, or None when it has
+    neither — the form a browser sends in ``Origin``."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+def require_same_origin(request: Request) -> None:
+    """Refuse a COOKIE-carried, state-changing request another site's page
+    made — ``CrossSiteRefused("cross_site")``, a 403 that names it.
+
+    A bearer passes untouched: it is not ambient, so a page cannot make a
+    browser attach one, and the CLI's tokens and the front end's server side
+    (which forwards the session as a bearer, `landing/src/lib/target-api.ts`)
+    never meet this check. Admitted: `settings.web_app_origin` and the API's
+    own origin. ``Origin`` decides; a browser that sends none on a post still
+    sends ``Referer``, whose origin stands in. Neither is a refusal rather
+    than a pass — a cookie with no provenance is exactly what a forged
+    request looks like when its page sets ``Referrer-Policy: no-referrer``.
+    """
+    if request.method in SAFE_METHODS or presented_bearer(request) is not None:
+        return
+    claimed = request.headers.get("origin")
+    if claimed is None:
+        claimed = _origin_of(request.headers.get("referer", ""))
+    admitted = {_origin_of(str(request.base_url))}
+    if settings.web_app_origin:
+        admitted.add(_origin_of(settings.web_app_origin))
+    if claimed is None or claimed.lower() not in admitted:
+        raise CrossSiteRefused(
+            "cross_site",
+            f"{request.method} {request.url.path} from {claimed or 'no origin'}",
+        )
+
+
 async def current_principal(request: Request) -> Principal:
     """FastAPI dependency: authenticate, slide or stamp, return the principal.
 
     A bearer value with the token prefix is a token and resolves through the
     token resolver; every other value — bearer or cookie — is a session and
-    takes the path it always took.
+    takes the path it always took. A COOKIE on a state-changing request must
+    also come from an admitted origin (`require_same_origin`), checked before
+    the lookup so a forged request does not even slide the session.
     """
     engine = require_engine(request)
     bearer = presented_bearer(request)
@@ -264,6 +317,7 @@ async def current_principal(request: Request) -> Principal:
     value = bearer or request.cookies.get(COOKIE) or None
     if value is None:
         raise TenantResolutionError("invalid_session", "no session presented")
+    require_same_origin(request)
     async with engine.begin() as conn:
         session = await sessions.resolve(conn, token_hash=sessions.token_hash(value))
     return Principal(session_id=session.id, user_id=session.user_id)
@@ -406,15 +460,81 @@ async def admin_session(request: Request, workspace_id: str, principal: Principa
         yield session
 
 
+def parse_json_object(raw: bytes) -> Optional[dict[str, Any]]:
+    """*raw* as a JSON object, or None when it is not one."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):  # deep nesting fits in a small body
+        return None
+    return body if isinstance(body, dict) else None
+
+
 async def json_object(request: Request) -> dict[str, Any]:
     """The body as a JSON object; an empty body is an empty object."""
     raw = await request.body()
     if not raw.strip():
         return {}
-    try:
-        body = json.loads(raw)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="body is not JSON")
-    if not isinstance(body, dict):
+    body = parse_json_object(raw)
+    if body is None:
         raise HTTPException(status_code=400, detail="body must be a JSON object")
     return body
+
+
+#: The detail of every 413 that refuses a request body for its size.
+BODY_TOO_LARGE_DETAIL = "request body too large"
+
+
+def declared_length(raw_headers: Iterable[tuple[bytes, bytes]]) -> int | None:
+    """The declared ``Content-Length``, read from ASGI raw headers (names
+    lowercased, as the server hands them over): an int, or None when the
+    header is absent or not an integer. The first such header answers, as it
+    does for `Request.headers`."""
+    for name, value in raw_headers:
+        if name == b"content-length":
+            try:
+                return int(value.decode("latin-1"))
+            except ValueError:
+                return None
+    return None
+
+
+#: `05`: pre-auth admission, 30/min per client IP, scope `preauth_ip`.
+PREAUTH_LIMIT = 30
+PREAUTH_WINDOW_SECONDS = 60
+PREAUTH_SCOPE = "preauth_ip"
+
+
+def client_ip(request: Request) -> str:
+    """The attributed peer — `request.client.host` AFTER ProxyHeadersMiddleware
+    has applied the trusted-proxy walk (#726/#765), which is the `02` §6
+    client-IP source rule. Never a header read here; the one other address a
+    counter may key on is :func:`preauth_guard`'s *client*, which a caller
+    passes only after verifying who sent it."""
+    return request.client.host if request.client else "unknown"
+
+
+async def preauth_guard(
+    conn,
+    request: Request,
+    *,
+    detail: str,
+    key_prefix: str = "",
+    limit: Optional[int] = None,
+    client: Optional[str] = None,
+) -> None:
+    """Spend one of the caller's pre-auth admissions in *conn*'s transaction;
+    429 with *detail* past the limit. *key_prefix* gives a route its own
+    counter under the same scope; *limit* replaces `05`'s number for it;
+    *client* replaces the attributed peer, for a caller that vouches for the
+    address it forwards."""
+    count = await rate_counters.increment(
+        conn,
+        scope=PREAUTH_SCOPE,
+        key=key_prefix + (client or client_ip(request)),
+        window_start=rate_counters.window_start(
+            datetime.now(timezone.utc), PREAUTH_WINDOW_SECONDS
+        ),
+        limit=PREAUTH_LIMIT if limit is None else limit,
+    )
+    if count is None:
+        raise HTTPException(status_code=429, detail=detail)

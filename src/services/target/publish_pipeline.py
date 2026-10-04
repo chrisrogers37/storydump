@@ -34,6 +34,14 @@ running the real ladder.
 Every checkpoint transaction re-CASes the lease (`assert_lease`, §6 step 3),
 so a fenced worker can neither advance the ladder nor record outcomes.
 
+**The transit copy goes when the story ends**, not when the sweep comes by,
+on the worker's paths: posted, failed, cancelled, or met terminal by a job —
+the job a review give-up mints exists for exactly this, since the API holds no
+transit credentials. Each is a best-effort destroy after the terminal commit
+(`_destroy_transit_best_effort`); the FC-3.6 sweep is the guarantee, and the
+only path for a retried story's old copy and for one resolved as posted from
+review.
+
 ## Ordering decisions that are derivations, not choices
 
 **Pre-check → flip → transit → container → publish.** `02` §8 places the
@@ -299,6 +307,13 @@ async def run_publish_pipeline(
     if state in (*intent_ledger.TERMINAL_STATES, "review_required"):
         # Terminal, or operator-owned (review_required): this job has nothing
         # to execute. finalize_job's own token CAS is the fence here.
+        if state in intent_ledger.TERMINAL_STATES:
+            # The whole of the job a give-up mints (`_give_up`): destroyed
+            # before the finalize, so a crash between the two re-runs an
+            # idempotent destroy rather than losing it. Never for
+            # `review_required`, whose copy is the operator's call; a retry
+            # starts a fresh upload, and its old copy is the sweep's.
+            await _destroy_transit_best_effort(ctx, transit)
         async with uow.begin() as session:
             await finalize_job(session, job["id"], job["lease_token"], "cancelled")
         return CANCELLED
@@ -641,7 +656,6 @@ async def _flip_to_publishing(
     except IntentNotApproved:
         # (1,0): a race moved the intent while we held the job. The UoW
         # rolled back (debit included). Route on what it became.
-        cancelled_here = False
         async with _leased_tx(uow, ctx.job) as session:
             row = (
                 await session.execute(
@@ -663,14 +677,13 @@ async def _flip_to_publishing(
                 # and the destroy a stepped-back story carries — never a
                 # crash rung.
                 await _cancel_in(session, ctx)
-                cancelled_here = True
             else:
                 raise
-        if cancelled_here:
-            await _destroy_after_cancel(ctx, transit)
+        # Either way the story is terminal now: its transit copy goes.
+        await _destroy_transit_best_effort(ctx, transit)
         return CANCELLED
     if deferred == CANCELLED:
-        await _destroy_after_cancel(ctx, transit)
+        await _destroy_transit_best_effort(ctx, transit)
     return deferred
 
 
@@ -707,10 +720,15 @@ async def _cancel_in(session, ctx: _Ctx) -> None:
     await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "cancelled")
 
 
-async def _destroy_after_cancel(ctx: _Ctx, transit) -> None:
-    """After the cancel committed: the transit asset a stepped-back story
-    carries is destroyed best-effort (FC-3.5); the FC-3.6 sweep is the
-    guarantee. Never inside the transaction — a provider call."""
+async def _destroy_transit_best_effort(ctx: _Ctx, transit) -> None:
+    """Once the story's end has committed — posted, failed, cancelled, given
+    up — its transit asset is destroyed best-effort (FC-3.5); the FC-3.6
+    sweep is the guarantee. Never inside a transaction — a provider call. No
+    ref (the fetch rung failed, a dry run) is a no-op, and a failed destroy
+    is logged and swallowed: the story's outcome is already the database's.
+
+    The ref stays on the row: every caller runs after a terminal commit, and
+    the terminal freeze makes the row immutable (`02` §4)."""
     ref = ctx.intent.get("transit_asset_ref")
     if not ref or transit is None:
         return
@@ -718,9 +736,10 @@ async def _destroy_after_cancel(ctx: _Ctx, transit) -> None:
         await transit.destroy(ref, media_kind=ctx.intent["media_kind"])
     except Exception:  # noqa: BLE001 — the sweep owns what this misses
         logger.warning(
-            "publish_pipeline intent %s: transit destroy after cancel failed;"
+            "publish_pipeline intent %s: transit destroy failed;"
             " the sweep will reap it",
             ctx.intent_id,
+            exc_info=True,
         )
 
 
@@ -728,7 +747,7 @@ async def _honour_cancel(uow, ctx: _Ctx, transit) -> str:
     """The snapshot's cancel (`cancel_requested` seen at `_load`)."""
     async with _leased_tx(uow, ctx.job) as session:
         await _cancel_in(session, ctx)
-    await _destroy_after_cancel(ctx, transit)
+    await _destroy_transit_best_effort(ctx, transit)
     return CANCELLED
 
 
@@ -1133,7 +1152,9 @@ async def _ladder(
                 ctx.intent_id,
                 type(exc).__name__,
             )
-            return await _fail_terminal(uow, ctx, op_id=None, exc=exc, now_fn=now_fn)
+            return await _fail_terminal(
+                uow, ctx, op_id=None, exc=exc, transit=transit, now_fn=now_fn
+            )
         except (DriveError, DriveLostResponse, StorydumpError, httpx.HTTPError) as exc:
             logger.warning(
                 "publish_pipeline intent %s: fetch/upload failed (%s) — retrying",
@@ -1333,6 +1354,7 @@ async def _ladder(
                     ctx,
                     op_id=permit["id"],
                     exc=exc,
+                    transit=transit,
                     now_fn=now_fn,
                     record=_permit_record(
                         {"url_variant": variant},
@@ -1492,7 +1514,9 @@ async def _ladder(
                     await _say_waiting(session, ctx, next_run_at=slot)
             return DEFERRED_META_CAP
         except MetaTerminalError as exc:
-            return await _fail_terminal(uow, ctx, op_id=permit["id"], exc=exc)
+            return await _fail_terminal(
+                uow, ctx, op_id=permit["id"], exc=exc, transit=transit
+            )
         except MetaError as exc:
             if exc.code == CONTAINER_GONE_CODE:
                 gone = ctx.count("container_gone") + 1
@@ -1746,6 +1770,7 @@ async def _fail_terminal(
     *,
     op_id: Optional[str],
     exc: BaseException,
+    transit,
     now_fn=None,
     record: Optional[dict] = None,
 ) -> str:
@@ -1756,7 +1781,11 @@ async def _fail_terminal(
     workspace told in the same transaction (investigation of 2026-09-11: a
     failed post read "Approved" indefinitely and nobody was told). Nothing
     here locks the file: no answer Meta gives about a fetch is the file's
-    own (2026-09-12), and a file that is gone or too large is Drive's."""
+    own (2026-09-12), and a file that is gone or too large is Drive's.
+
+    After the commit the story's transit copy is destroyed best-effort, as a
+    posted one's is: a failed story is not retried from its asset, and the
+    sweep would otherwise hold it for up to two days (FC-3.5)."""
     at = now_fn() if now_fn is not None else datetime.now(timezone.utc)
     async with _leased_tx(uow, ctx.job) as session:
         if op_id is not None:
@@ -1803,6 +1832,7 @@ async def _fail_terminal(
             session, ctx, state="failed", at=at, notice=_failure_notice(exc)
         )
         await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "failed")
+    await _destroy_transit_best_effort(ctx, transit)
     return FAILED
 
 
@@ -2159,14 +2189,5 @@ async def _confirm(
             outcome_text=line,
         )
         await finalize_job(session, ctx.job["id"], ctx.job["lease_token"], "succeeded")
-    try:
-        await transit.destroy(
-            ctx.intent["transit_asset_ref"], media_kind=ctx.intent["media_kind"]
-        )
-    except Exception:  # noqa: BLE001 — best-effort; FC-3.6 is the guarantee
-        logger.warning(
-            "inline FC-3.5 destroy failed for intent %s; the sweep will reap it",
-            ctx.intent_id,
-            exc_info=True,
-        )
+    await _destroy_transit_best_effort(ctx, transit)
     return POSTED
