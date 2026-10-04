@@ -167,7 +167,7 @@ suggesting any of them.
   (`AGENTS.md` › What is deliberately not wired). An invitation's row and token
   are real; the message is not delivered.
 - Some vocabulary commands have no executor yet and answer 501
-  (`commands.UNBUILT`); two job kinds have none (`work_loop.UNBUILT_KINDS`).
+  (`commands.UNBUILT`); one job kind has none (`work_loop.UNBUILT_KINDS`).
 - The `legacy` schema is gone: the owner ran the window on 2026-09-19 (its
   record: `documentation/archive/2026-09-16-legacy-tear-out/legacy-window-close.md`
   — 079 dropped it, 080 stood the window down; both `applied` in the ledger).

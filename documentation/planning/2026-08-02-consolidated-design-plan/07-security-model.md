@@ -85,7 +85,7 @@ RLS class: `session_tokens`, `oauth_states`, and `service_tokens` are **auth-pla
 ## §4. Audit integrity and retention (review A §5.13)
 
 - **Append-only in the database:** no role holds UPDATE on `audit_events`; DELETE only via `svc_maintenance`'s retention sweep (`02` §7). The `02` §4 audit trigger's GUC requirement means every state change carries a named actor — including break-glass psql sessions (below).
-- **Retention:** `05` table — audit rows kept 400 days, then swept via `fn_retention_batch` (`02` §7). **Not running as of 2026-09-20:** the `retention_sweep` executor is unbuilt (`work_loop.UNBUILT_KINDS`) and the clock never mints it, so nothing ages out of `audit_events`, `jobs`, `channel_outbox` or `archive` today — including 078's snapshots, whose 90-day clock the same class owns. Before each sweep batch is deleted it is COPY-exported **into the in-database `archive` schema** as a batch table (`05` §DR names the location; the rationale and the properties that decided it are `03` D30); **the sweep aborts if the export fails — export-or-abort, never delete-then-hope**. No login role holds any grant on the `archive` schema: writes happen only inside `svc_maintenance`-owned door bodies and `svc_migration` contract migrations; reads are the break-glass runbook (§5). Aged archive tables are dropped *as tables* per their `05` retention rows. Queryability of archives is explicitly not a v1 feature.
+- **Retention:** `05` table — audit rows kept 400 days, then swept via `fn_retention_batch` (`02` §7). **Not running for this class:** the `retention_sweep` executor runs only the `rate_counters` class (7 days, since 2026-10-03), so nothing ages out of `audit_events`, `jobs`, `channel_outbox` or `archive` today — including 078's snapshots, whose 90-day clock the same class owns. Before each sweep batch is deleted it is COPY-exported **into the in-database `archive` schema** as a batch table (`05` §DR names the location; the rationale and the properties that decided it are `03` D30); **the sweep aborts if the export fails — export-or-abort, never delete-then-hope**. No login role holds any grant on the `archive` schema: writes happen only inside `svc_maintenance`-owned door bodies and `svc_migration` contract migrations; reads are the break-glass runbook (§5). Aged archive tables are dropped *as tables* per their `05` retention rows. Queryability of archives is explicitly not a v1 feature.
 - **Redaction rule:** `detail` JSONB never contains secrets, tokens, invitation-token values, or `provider_account_ref` (internal UUIDs only); enforced by the writer helper everything routes through + a test that greps captured audit output in the harness. Tamper evidence beyond grants (hash chains, signed exports) is explicitly not v1 — the stated integrity level is "no role can rewrite history without leaving a grant violation," which is what the grant matrix delivers.
 
 ## §5. Existence-oracle and log hygiene (review A §5.14)
@@ -2134,8 +2134,10 @@ and the outbox records what happened to a row the same way. It ends only the clo
 singletons, its slot, refresh and reauth legs, the sender sweep's `deliver_outbox`, and the two
 sync kinds, whose source it re-arms for tomorrow, as `work_loop._rearm_source` does, because a
 sync's mint disarms it. Nothing re-mints the others (`publish_pipeline`, `send_email`,
-`offboard_workspace`, `revoke_workspace_credentials`, `retention_sweep`, `reencrypt_credentials`),
-so ending one would unblock no successor and only lose its work; they are left as they were. For
+`offboard_workspace`, `revoke_workspace_credentials`, `reencrypt_credentials`), so ending one
+would unblock no successor and only lose its work; they are left as they were. The leg also
+leaves `retention_sweep`, which nothing minted when it was written: since 2026-10-03 the clock
+mints it hourly, and a late one still runs, since `fn_claim_job` reads no deadline. For
 the kinds it ends, the leg is the worker's spent-budget path without the tenant notice, which that
 path calls a courtesy, not the record.
 
