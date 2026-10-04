@@ -294,6 +294,13 @@ class Settings(BaseSettings):
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1,fd00::/8"
     )
 
+    # The largest request body the API reads, in bytes; over it is 413
+    # (`app.py::BodySizeLimitMiddleware`). No route takes an upload: the
+    # largest body anything reads is one Telegram update, and every other is
+    # a small JSON object or a Meta callback form, so 1 MiB is far above
+    # every legitimate request.
+    API_REQUEST_BODY_MAX_BYTES: int = 1024 * 1024
+
     # Who may read the API's operating details (`GET /api/v1/ops/health`):
     # comma-separated user ids, the `user` line `storydump whoami` prints. Empty —
     # the default — admits nobody, so the details stay closed until the
