@@ -9,15 +9,18 @@ with an injected clock and count the connections the routes open.
 from __future__ import annotations
 
 import asyncio
+import logging
 import traceback
 from contextlib import asynccontextmanager
 
 import pytest
+from asyncpg.exceptions import QueryCanceledError
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import DBAPIError
 
 from src.api.app import create_app
 from src.api.routes.health import HEALTH_CACHE_SECONDS, AnswerCache
-from src.services.target import posting_health, scheduling_health
+from src.services.target import health_reads, posting_health, scheduling_health
 
 from .conftest import FakeEngine
 
@@ -56,8 +59,9 @@ def clock(app):
 
 
 @pytest.fixture
-def seams(monkeypatch):
-    """Stub every seam of both routes; return how often each route read."""
+def seams(monkeypatch, stubbed_bound):
+    """Stub every seam of both routes, the statement cap's included; return
+    how often each route read."""
     reads = {"scheduling": 0, "posting": 0}
 
     async def lag(executor):
@@ -180,3 +184,80 @@ def test_an_absent_engine_is_still_a_503(seams):
     client = TestClient(create_app(env={}))
     assert client.get("/health/scheduling").status_code == 503
     assert client.get("/health/posting").status_code == 503
+
+
+async def test_concurrent_misses_share_one_read():
+    """The calls that arrive while one read is in flight wait for it rather
+    than each starting their own: ten at once read once."""
+    cache = AnswerCache(clock=lambda: 0.0)
+    gate = asyncio.Event()
+    reads = 0
+
+    async def read():
+        nonlocal reads
+        reads += 1
+        await gate.wait()
+        return {"stalled": 0}
+
+    calls = [asyncio.create_task(cache.answer("k", read)) for _ in range(10)]
+    # One turn of the loop: every call is at the cache before the read may finish.
+    await asyncio.sleep(0)
+    gate.set()
+    answers = await asyncio.gather(*calls)
+    assert reads == 1
+    assert answers == [{"stalled": 0}] * 10
+
+
+def test_a_statement_past_its_timeout_answers_503(
+    app, engine, clock, seams, monkeypatch, caplog
+):
+    """A read the statement cap cancelled (SQLSTATE 57014) is load, as a pool
+    wait is: a 503 to retry, kept for the window like any failure, and logged
+    once, by the read, not again for each answer the window reuses."""
+
+    async def cancelled(executor):
+        raise DBAPIError(
+            "SELECT 1",
+            None,
+            QueryCanceledError("canceling statement due to statement timeout"),
+        )
+
+    monkeypatch.setattr(posting_health, "posting_freshness", cancelled)
+    client = TestClient(app, raise_server_exceptions=False)
+    with caplog.at_level(logging.WARNING, logger=health_reads.__name__):
+        first = client.get("/health/posting")
+        second = client.get("/health/posting")
+    assert first.status_code == 503
+    assert first.json() == {"detail": "busy — try again", "reason": "statement_timeout"}
+    assert first.headers["retry-after"] == "1"
+    assert second.status_code == 503
+    assert engine.connects == 1
+    assert len([r for r in caplog.records if r.name == health_reads.__name__]) == 1
+
+
+def test_any_other_database_error_stays_a_500(app, engine, clock, seams, monkeypatch):
+    """Only the cancel is load: any other database error is a fault, and stays
+    the server's 500."""
+
+    async def broken(executor):
+        raise DBAPIError("SELECT 1", None, Exception("connection reset"))
+
+    monkeypatch.setattr(posting_health, "posting_freshness", broken)
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/health/posting").status_code == 500
+
+
+def test_each_read_runs_under_the_statement_cap(
+    client, engine, clock, seams, monkeypatch
+):
+    """Both surfaces set the cap on the connection they read with, before
+    anything else runs on it."""
+    capped = []
+
+    async def bound(executor):
+        capped.append(executor)
+
+    monkeypatch.setattr(health_reads, "bound", bound)
+    assert client.get("/health/scheduling").status_code == 200
+    assert client.get("/health/posting").status_code == 200
+    assert capped == [engine.session, engine.session]
