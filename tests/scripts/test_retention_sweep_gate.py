@@ -46,6 +46,7 @@ NEW = [
     ("preauth_ip", "waitlist:accepted", "1 minute"),
     ("tg_chat", "binding-1", "0 seconds"),
 ]
+NEW_KEYS = sorted((s, k) for s, k, _ in NEW)
 
 
 @pytest.fixture(scope="module")
@@ -134,7 +135,7 @@ def test_the_sweep_deletes_only_rate_counter_rows_older_than_seven_days(
 
     after = _counts(sweep_db)
     # Exactly the old rows went, every new one survived.
-    assert _survivors(sweep_db) == sorted((s, k) for s, k, _ in NEW)
+    assert _survivors(sweep_db) == NEW_KEYS
     # And no other table moved: the aged cap-ledger day, the aged job and the
     # aged archive table the door's unbuilt classes would take are all there.
     after.pop("public.rate_counters")
@@ -153,36 +154,37 @@ def test_a_run_keeps_calling_until_a_call_comes_back_short(sweep_db):
     """The same batch of 2 with time left: the run calls again and drains."""
     drain = WorkerConfig(retention_batch=2)
     asyncio.run(run_as_worker(sweep_db, "retention_sweep", config=drain))
-    assert _survivors(sweep_db) == sorted((s, k) for s, k, _ in NEW)
+    assert _survivors(sweep_db) == NEW_KEYS
 
 
 def test_each_batch_commits_on_its_own_and_a_short_batch_ends_the_run(sweep_db):
-    """Through the worker's own session factory, counting its calls: with a
-    batch of 2 and 3 aged rows, a factory that fails on its 2nd call leaves the
-    1st batch deleted (each batch commits on its own) and raises; then, with 1
-    aged row left, the run makes ONE call (a short batch ends it)."""
+    """Each batch commits on its own; a short batch ends the run (the exact
+    call count is what pins that, which the drain test does not)."""
     calls = []
 
-    async def run(fail_on_call):
+    async def run(fail_second: bool):
         async with ingress_engine(as_user(sweep_db, "svc_worker")) as engine:
             sessions = make_session_for(engine)
 
             def factory():
                 calls.append(None)
-                if len(calls) == fail_on_call:
+                if fail_second and len(calls) == 2:
                     raise RuntimeError("the 2nd batch fails")
                 return sessions({})
 
             await scheduler.execute_retention_sweep(
-                factory, keep_seconds=7 * 24 * 3600, batch=2, budget_seconds=60
+                factory,
+                keep_seconds=WorkerConfig().rate_counters_keep_seconds,
+                batch=2,
+                budget_seconds=60,
             )
 
     with pytest.raises(RuntimeError, match="2nd batch"):
-        asyncio.run(run(fail_on_call=2))
+        asyncio.run(run(fail_second=True))
     assert len(calls) == 2
     assert len(_survivors(sweep_db)) == len(NEW) + len(OLD) - 2
 
     calls.clear()
-    asyncio.run(run(fail_on_call=None))
+    asyncio.run(run(fail_second=False))
     assert len(calls) == 1
-    assert _survivors(sweep_db) == sorted((s, k) for s, k, _ in NEW)
+    assert _survivors(sweep_db) == NEW_KEYS
