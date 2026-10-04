@@ -141,6 +141,19 @@ def _credential_rows(world, workspace_id) -> list[dict]:
     )
 
 
+def _as_migration(world, sql, params=()) -> None:
+    """One committed statement as the migration actor (the governance audit
+    triggers refuse an anonymous write)."""
+    conn = psycopg2.connect(world["stream"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # --- the credential row ------------------------------------------------------
 
 
@@ -734,5 +747,75 @@ class TestTheRoutePairAsSvcIngress:
                 )
                 assert done.status_code == 302
                 assert done.headers["location"] == _error_page("denied")
+
+        _run(main())
+
+
+class TestTheCallbackReChecksTheAdmin:
+    """`07` §2's admin+ at issue AND at callback, on real membership rows
+    through the real app as `svc_ingress`: the role is read again inside the
+    write's unit of work, so a demotion between the connect and the return
+    lands nothing."""
+
+    def test_an_admin_demoted_after_minting_lands_nothing(
+        self, world, google_configured, monkeypatch
+    ):
+        exchanged = []
+
+        async def exchange_code(client_, **kw):
+            exchanged.append(kw["code"])
+            return drive_grant()
+
+        async def main():
+            async with api_client(world["ingress"]) as (client, _):
+                owner = await sign_in(
+                    client, monkeypatch, sub="sub-drive-own2", email="own2@example.test"
+                )
+                made = await client.post(
+                    "/api/v1/workspaces",
+                    json={"name": "Demoted"},
+                    headers={**owner, "Idempotency-Key": "drive-dem-1"},
+                )
+                assert made.status_code == 201, made.text
+                ws = made.json()["workspace_id"]
+                admin = await sign_in(
+                    client, monkeypatch, sub="sub-drive-adm", email="adm@example.test"
+                )
+                (admin_id,) = fetch_one(
+                    world["stream"],
+                    "SELECT user_id::text FROM user_identities"
+                    " WHERE provider = 'google' AND external_id = %s",
+                    ("sub-drive-adm",),
+                )
+                _as_migration(
+                    world,
+                    "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                    " VALUES (%s, %s, 'admin')",
+                    (ws, admin_id),
+                )
+                started = await client.post(
+                    f"/api/v1/workspaces/{ws}/drive/connect", headers=admin
+                )
+                assert started.status_code == 200, started.text
+                url = started.json()["authorization_url"]
+                state = parse_qs(urlsplit(url).query)["state"][0]
+                _as_migration(
+                    world,
+                    "UPDATE workspace_members SET role = 'member'"
+                    " WHERE workspace_id = %s AND user_id = %s",
+                    (ws, admin_id),
+                )
+                monkeypatch.setattr(drive, "exchange_code", exchange_code)
+                back = await client.get(
+                    f"/auth/google-drive/callback?state={state}&code=c0de",
+                    headers=admin,
+                    follow_redirects=False,
+                )
+                assert back.headers["location"] == _error_page("state_refused")
+                # The session check runs before the code is exchanged, so a
+                # spent code means the browser was admitted: the refusal is
+                # the admin re-check's.
+                assert exchanged == ["c0de"]
+                assert _credential_rows(world, ws) == []
 
         _run(main())
