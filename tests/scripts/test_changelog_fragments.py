@@ -3,10 +3,9 @@ Check applies to a pull request, and the fold into `CHANGELOG.md`.
 
 A PR records its changelog entry as one new file in `changelog.d/` and never
 edits `CHANGELOG.md`, so two open PRs never change the same lines. `check
---base` is the CI job's whole rule; `compile` folds the fragments in at release
-time. The rule is driven through `pr_problems` with fixtures and once through
-real git, because a gate verified only by exercise does not outlive its author
-(`test_pr_ready.py`).
+--base` is the CI job's whole rule; `compile` folds the fragments in. The rule
+is driven through `pr_problems` with fixtures and through real git, because a
+gate verified only by exercise does not outlive its author (`test_pr_ready.py`).
 """
 
 from __future__ import annotations
@@ -230,27 +229,37 @@ def test_a_code_change_without_a_fragment_fails_and_names_the_directory():
     assert "changelog.d/" in problem
 
 
-def test_a_code_change_that_edits_changelog_md_fails_even_with_a_fragment():
-    (problem,) = problems("M src/app.py", "A changelog.d/fix-x.md", "M CHANGELOG.md")
-    assert "CHANGELOG.md" in problem and "changelog.d/" in problem
+#: A docs-only PR edits CHANGELOG.md as often as not, so the edit is refused
+#: whatever else the PR changes.
+CHANGELOG_EDITS = {
+    "alone": ("M CHANGELOG.md",),
+    "beside-docs": ("M documentation/guides/x.md", "M CHANGELOG.md"),
+    "beside-code-and-a-fragment": (
+        "M src/app.py",
+        "A changelog.d/fix-x.md",
+        "M CHANGELOG.md",
+    ),
+}
 
 
 @pytest.mark.parametrize(
-    "changes",
-    [
-        ("M documentation/guides/x.md",),
-        ("M README.md", "M .github/workflows/ci.yml"),
-        ("M CHANGELOG.md",),
-        ("M CHANGELOG.md", "D changelog.d/a.md", "D changelog.d/b.md"),
-        ("A changelog.d/fix-x.md",),
-    ],
-    ids=[
-        "documentation",
-        "markdown-and-github",
-        "a-correction-to-an-old-entry",
-        "the-compile",
-        "a-fragment-alone",
-    ],
+    "changes", list(CHANGELOG_EDITS.values()), ids=list(CHANGELOG_EDITS)
+)
+def test_an_edit_to_changelog_md_fails_unless_it_is_the_compile(changes):
+    (problem,) = problems(*changes)
+    assert "CHANGELOG.md" in problem and "changelog.d/" in problem
+
+
+DOCS_ONLY_CHANGES = {
+    "documentation": ("M documentation/guides/x.md",),
+    "markdown-and-github": ("M README.md", "M .github/workflows/ci.yml"),
+    "a-fragment-alone": ("A changelog.d/fix-x.md",),
+    "the-compile": ("M CHANGELOG.md", "D changelog.d/a.md", "D changelog.d/b.md"),
+}
+
+
+@pytest.mark.parametrize(
+    "changes", list(DOCS_ONLY_CHANGES.values()), ids=list(DOCS_ONLY_CHANGES)
 )
 def test_a_docs_only_change_needs_no_fragment(changes):
     assert problems(*changes) == []
@@ -271,21 +280,15 @@ def test_only_a_new_fragment_directly_in_changelog_d_counts(fragment_change):
     assert problems("M src/app.py", fragment_change) != []
 
 
-GIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "test",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_COMMITTER_NAME": "test",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
-}
-
-
 def git(repo: Path, *args: str) -> None:
+    """git in the scratch repository, blind to this machine's config (a signing
+    key or a hook would sign or run on every commit)."""
     subprocess.run(
-        ["git", *args],
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.com", *args],
         cwd=repo,
         check=True,
         capture_output=True,
-        env={**os.environ, **GIT_IDENTITY},
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
     )
 
 
@@ -303,7 +306,8 @@ def test_check_against_a_base_reads_the_pull_requests_own_diff(repo):
 
     assert run(repo, "check", "--base", "main") == 1
 
-    fragment(repo, "feature.md", "### Added\n\n- **x.** y\n")
+    # A name git would quote without -z still reads as a fragment.
+    fragment(repo, "feature-café.md", "### Added\n\n- **x.** y\n")
     commit(repo, "fragment")
     assert run(repo, "check", "--base", "main") == 0
 

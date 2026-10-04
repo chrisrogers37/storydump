@@ -396,12 +396,8 @@ a PR is really ready — it catches a check that was never scheduled, which a
 green rollup hides (`documentation/guides/ci-cd-pipeline.md`).
 
 **Add a changelog fragment and never edit `CHANGELOG.md`** when opening a PR:
-one new file in `changelog.d/` holding the entry under its `### <Section>`
-heading (`changelog.d/README.md`). CI fails a PR that changes code without one,
-or that edits `CHANGELOG.md` beside code (the `changelog-check` job of
-`.github/workflows/ci.yml`; a PR that touches only `documentation/`, `.md`
-files or `.github/` is exempt). `scripts/changelog_fragments.py compile` folds
-the fragments into `CHANGELOG.md` under `## [Unreleased]` at release time.
+one new file in `changelog.d/`. `changelog.d/README.md` has the format and the
+rule the `changelog-check` job of `.github/workflows/ci.yml` holds every PR to.
 
 ## Documentation
 

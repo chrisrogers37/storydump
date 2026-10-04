@@ -252,6 +252,6 @@ jobs:
 
       # A PR adds its entry as a new file in changelog.d/ and never edits
       # CHANGELOG.md, so no two PRs change the same lines; a docs-only PR needs
-      # no entry. The rule and the fragment format live in the script.
+      # no fragment. changelog.d/README.md states the rule; the script holds it.
       - name: Check the changelog fragment
         run: python scripts/changelog_fragments.py check --base "origin/${{ github.base_ref }}"

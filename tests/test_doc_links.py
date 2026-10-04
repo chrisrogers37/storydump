@@ -88,7 +88,9 @@ def _markdown() -> list[Path]:
     return [
         p
         for p in _tracked()
-        if p.suffix == ".md" and _rel(p) not in UNSCANNED and not is_fragment(_rel(p))
+        if p.suffix == ".md"
+        and (rel := _rel(p)) not in UNSCANNED
+        and not is_fragment(rel)
     ]
 
 

@@ -1,13 +1,13 @@
 """Changelog fragments: one file per change in `changelog.d/`, folded into
-`CHANGELOG.md` at release time.
+`CHANGELOG.md` by the compile.
 
-Each pull request records its changelog entry as a new file in `changelog.d/`
-and never edits `CHANGELOG.md`, so no two open pull requests change the same
-lines. The format is in `changelog.d/README.md`; this module is its one parser.
+A pull request records its changelog entry as a new file in `changelog.d/` and
+never edits `CHANGELOG.md`, so no two open pull requests change the same lines.
+`changelog.d/README.md` states the format and the rule; this module is their
+one implementation.
 
 - `check` validates every fragment. With `--base REF` it also applies the rule
-  the Changelog Check job holds a pull request to (`pr_problems`): a change
-  outside the docs needs a new fragment and must not edit `CHANGELOG.md`.
+  the Changelog Check job holds a pull request to (`pr_problems`).
 - `compile` folds every fragment into `CHANGELOG.md` under `## [Unreleased]`,
   each entry first in its section, and deletes the fragments.
 
@@ -18,7 +18,6 @@ unit-testable and runs in CI without installing the application.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
@@ -41,9 +40,8 @@ SECTIONS = (
     "Tests",
 )
 
-#: A pull request that changes only these needs no entry: the changelog tracks
-#: behaviour, not docs. `CHANGELOG.md` is one of them, so the compile and a
-#: correction to an existing entry land as docs-only pull requests.
+#: A pull request that changes only these needs no fragment: the changelog
+#: tracks behaviour, not docs.
 DOCS_ONLY = re.compile(r"^(documentation/|.*\.md$|\.github/)")
 
 HEADING = re.compile(r"^#{1,6}\s")
@@ -54,9 +52,28 @@ class ChangelogError(Exception):
     diff git could not produce."""
 
 
+def is_fragment(path: str) -> bool:
+    """Whether a repository path is a fragment: an `.md` directly in
+    `changelog.d/`, other than its README."""
+    p = PurePosixPath(path)
+    return (
+        p.parent == PurePosixPath(FRAGMENTS)
+        and p.suffix == ".md"
+        and p.name != "README.md"
+    )
+
+
 def fragment_paths(directory: Path) -> list[Path]:
-    """Every fragment in `directory`, in name order: each `*.md` but the README."""
-    return sorted(p for p in directory.glob("*.md") if p.name != "README.md")
+    """Every fragment in `directory`, in name order."""
+    return sorted(
+        p for p in directory.glob("*.md") if is_fragment(f"{FRAGMENTS}/{p.name}")
+    )
+
+
+def _section(line: str) -> str | None:
+    """The section a `### <Section>` line opens, or None."""
+    name = line[4:].strip() if line.startswith("### ") else None
+    return name if name in SECTIONS else None
 
 
 def parse_fragment(path: Path) -> dict[str, str]:
@@ -66,18 +83,17 @@ def parse_fragment(path: Path) -> dict[str, str]:
     section = None
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if HEADING.match(line):
-            name = line[4:].strip() if line.startswith("### ") else None
-            if name not in SECTIONS:
+            section = _section(line)
+            if section is None:
                 raise ChangelogError(
                     f"{path.name}:{number}: {line.strip()!r} is not a section; a "
                     f"fragment's only headings are '### <Section>', one of "
                     f"{', '.join(SECTIONS)}"
                 )
-            if name in bodies:
+            if section in bodies:
                 raise ChangelogError(
-                    f"{path.name}:{number}: '### {name}' appears twice"
+                    f"{path.name}:{number}: '### {section}' appears twice"
                 )
-            section = name
             bodies[section] = []
         elif section is not None:
             bodies[section].append(line)
@@ -108,28 +124,23 @@ def _insert(lines: list[str], section: str, entries: list[str]) -> None:
     its headings follow `SECTIONS` order. When the newest group lacks `section`,
     the heading is created where that order puts it.
     """
-    start = lines.index(UNRELEASED)
-    end = next(
-        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
-        len(lines),
-    )
     rank = SECTIONS.index(section)
     previous = -1
-    for i in range(start + 1, end):
-        name = lines[i][4:].strip() if lines[i].startswith("### ") else None
-        if name not in SECTIONS:
-            continue
-        here = SECTIONS.index(name)
-        if here == rank:
-            gap = [""] if i + 1 < len(lines) and lines[i + 1].strip() else []
-            lines[i + 1 : i + 1] = ["", *entries, *gap]
-            return
-        if here > rank or here <= previous:
-            end = i
-            break
-        previous = here
-    gap = [""] if lines[end - 1].strip() else []
-    lines[end:end] = [*gap, f"### {section}", "", *entries, ""]
+    at = lines.index(UNRELEASED) + 1
+    while at < len(lines) and not lines[at].startswith("## "):
+        name = _section(lines[at])
+        if name is not None:
+            here = SECTIONS.index(name)
+            if here == rank:
+                gap = [""] if at + 1 < len(lines) and lines[at + 1].strip() else []
+                lines[at + 1 : at + 1] = ["", *entries, *gap]
+                return
+            if not previous < here < rank:  # past its place, or an older group began
+                break
+            previous = here
+        at += 1
+    gap = [""] if lines[at - 1].strip() else []
+    lines[at:at] = [*gap, f"### {section}", "", *entries, ""]
 
 
 def fold(changelog: str, fragments: list[dict[str, str]]) -> str:
@@ -148,7 +159,7 @@ def compile_fragments(repo: Path) -> list[Path]:
     """Fold every fragment into `CHANGELOG.md` and delete it; the paths folded.
 
     Every fragment parses before anything is written, and the changelog is
-    replaced whole before any fragment is deleted.
+    written before any fragment is deleted.
     """
     paths = fragment_paths(repo / FRAGMENTS)
     if not paths:
@@ -156,38 +167,32 @@ def compile_fragments(repo: Path) -> list[Path]:
     fragments = [parse_fragment(path) for path in paths]
     changelog = repo / "CHANGELOG.md"
     folded = fold(changelog.read_text(encoding="utf-8"), fragments)
-    staged = changelog.with_name("CHANGELOG.md.tmp")
-    staged.write_text(folded, encoding="utf-8")
-    os.replace(staged, changelog)
+    changelog.write_text(folded, encoding="utf-8")
     for path in paths:
         path.unlink()
     return paths
 
 
-def is_fragment(path: str) -> bool:
-    """Whether a repository path is where a fragment lives."""
-    p = PurePosixPath(path)
-    return (
-        p.parent == PurePosixPath(FRAGMENTS)
-        and p.suffix == ".md"
-        and p.name != "README.md"
-    )
-
-
 def pr_problems(changes: list[tuple[str, str]]) -> list[str]:
     """What fails a pull request whose `changes` are `git diff --name-status`
-    pairs (status letter, path): nothing for a pass."""
-    if all(DOCS_ONLY.match(path) for _, path in changes):
-        return []
+    pairs (status letter, path): nothing for a pass.
+
+    No pull request edits `CHANGELOG.md` but the compile, which deletes the
+    fragments it folds in; one that changes anything outside the docs adds a
+    fragment.
+    """
     problems = []
-    if any(path == "CHANGELOG.md" for _, path in changes):
+    compiles = any(status == "D" and is_fragment(path) for status, path in changes)
+    if not compiles and any(path == "CHANGELOG.md" for _, path in changes):
         problems.append(
             "This PR edits CHANGELOG.md. Put its entry in a changelog.d/ fragment "
-            "instead (changelog.d/README.md): CHANGELOG.md changes only when the "
-            "fragments are compiled, and a correction to an existing entry goes "
-            "in a docs-only PR."
+            "instead (changelog.d/README.md): CHANGELOG.md changes only through "
+            "the compile, and a correction to an existing entry rides in a "
+            "compile PR."
         )
-    if not any(status == "A" and is_fragment(path) for status, path in changes):
+    docs_only = all(DOCS_ONLY.match(path) for _, path in changes)
+    added = any(status == "A" and is_fragment(path) for status, path in changes)
+    if not docs_only and not added:
         problems.append(
             "No changelog fragment: add changelog.d/<branch-or-PR>.md holding the "
             "entry under its '### <Section>' heading (changelog.d/README.md)."
@@ -198,14 +203,15 @@ def pr_problems(changes: list[tuple[str, str]]) -> list[str]:
 def changes_since(repo: Path, base: str) -> list[tuple[str, str]]:
     """The pull request's own changes: `base...HEAD`, from the merge base."""
     diff = subprocess.run(
-        ["git", "diff", "--name-status", "--no-renames", f"{base}...HEAD"],
+        ["git", "diff", "--name-status", "--no-renames", "-z", f"{base}...HEAD"],
         cwd=repo,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
     )
     if diff.returncode != 0:
         raise ChangelogError(f"git diff {base}...HEAD failed: {diff.stderr.strip()}")
-    return [tuple(line.split("\t", 1)) for line in diff.stdout.splitlines() if line]
+    fields = diff.stdout.split("\0")
+    return list(zip(fields[0::2], fields[1::2]))
 
 
 def check(repo: Path, base: str | None = None) -> list[str]:

@@ -8,7 +8,7 @@ paths:
 
 **Format**: [Keep a Changelog](https://keepachangelog.com/) with [Semantic Versioning](https://semver.org/).
 
-**Every PR that touches code or config** adds its entry as one new fragment in `changelog.d/` and never edits `CHANGELOG.md` — CI's `changelog-check` (`.github/workflows/ci.yml`, `scripts/changelog_fragments.py check --base`) fails a PR without one, or with a `CHANGELOG.md` edit beside code; a docs-only PR (`documentation/`, `*.md`, `.github/`) is exempt. `changelog.d/README.md` has the naming; `scripts/changelog_fragments.py compile` folds the fragments under `## [Unreleased]` at release time.
+**Every PR that touches code or config** adds its entry as one new fragment in `changelog.d/`, and no PR edits `CHANGELOG.md`. Naming, the rule CI's `changelog-check` (`.github/workflows/ci.yml`) applies, and the compile that folds the fragments into `CHANGELOG.md`: `changelog.d/README.md`.
 
 ## Version Bump Rules
 

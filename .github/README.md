@@ -27,9 +27,7 @@ request into `main` or `develop`, six jobs:
   `npm run lint` (Node 22; `next build` is deliberately absent — Vercel builds
   every PR)
 - **Changelog Check** — pull requests only, `scripts/changelog_fragments.py
-  check --base`: a PR adds a fragment in `changelog.d/` and does not edit
-  `CHANGELOG.md`, unless it touches only `documentation/`, `*.md` files or
-  `.github/`
+  check --base`: the fragment rule in `changelog.d/README.md`
 
 All jobs run on **GitHub's cloud runners** (`ubuntu-latest`) — safe for public
 repositories. `main` declares no required status checks, so every check is
@@ -89,9 +87,8 @@ pytest tests/path/to/test.py::test_name -v
 The local recipe for a throwaway PostgreSQL is in `AGENTS.md` › Testing.
 
 ### Missing changelog fragment
-Every PR that changes behaviour adds one fragment in `changelog.d/`
-(`changelog.d/README.md`) and leaves `CHANGELOG.md` alone; docs-only PRs are
-exempt.
+Every PR that changes behaviour adds one fragment in `changelog.d/` and leaves
+`CHANGELOG.md` alone; `changelog.d/README.md` has the format and the rule.
 
 ---
 

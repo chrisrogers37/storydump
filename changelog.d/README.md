@@ -1,9 +1,20 @@
 # Changelog fragments
 
-A pull request that changes code or config records its changelog entry here,
-as one new file, and never edits `CHANGELOG.md`. Each pull request writes its
-own file, so no two of them change the same lines and a merge does not
-conflict the others.
+A pull request records its changelog entry here, as one new file, and never
+edits `CHANGELOG.md`. Each pull request writes its own file, so no two of them
+change the same lines and a merge does not conflict the others.
+
+## The rule
+
+The Changelog Check job runs `python scripts/changelog_fragments.py check
+--base origin/main` and holds every pull request to this:
+
+- A pull request that changes anything outside `documentation/`, `.md` files
+  and `.github/` adds a fragment. A docs-only one needs none; if it has an
+  entry, that is a fragment too.
+- No pull request edits `CHANGELOG.md` except the compile below. A correction
+  to an existing entry rides in a compile pull request.
+- Every fragment parses.
 
 ## Writing one
 
@@ -25,16 +36,16 @@ conflict the others.
   Those `### <Section>` lines are its only headings: no text before the first
   one, and no `##` or `####` inside an entry.
 
-`python scripts/changelog_fragments.py check` validates every fragment. The
-Changelog Check job runs it with `--base`, which also fails a pull request that
-changes code without adding a fragment, or that edits `CHANGELOG.md` beside
-code. A docs-only pull request (only `documentation/`, `.md` files or
-`.github/`) needs no fragment.
+`python scripts/changelog_fragments.py check` validates them locally.
 
-## At release
+## The compile
 
 `python scripts/changelog_fragments.py compile` folds every fragment into
 `CHANGELOG.md` under `## [Unreleased]`, in file-name order, each entry first in
 its section of the newest group (creating a section that group lacks), and
-deletes the fragments. Commit `CHANGELOG.md` and the deletions together: that
-pull request is docs-only.
+deletes the fragments. Commit `CHANGELOG.md` and the deletions together.
+
+Nothing ties it to a release. No open pull request touches `CHANGELOG.md` or
+another pull request's fragment, so a compile pull request conflicts with none
+of them and can run whenever `CHANGELOG.md` should catch up. Until then, the
+newest entries are here.

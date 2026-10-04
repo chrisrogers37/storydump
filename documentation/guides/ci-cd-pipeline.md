@@ -31,7 +31,7 @@ jobs:
   security:         # pip-audit -r requirements.txt               (GATES)
                     # bandit -r src/ storydump_cli/               (advisory)
   front-end:        # in landing/: npm ci, npm test, npx tsc --noEmit, npm run lint
-  changelog-check:  # pull requests only: a new changelog.d/ fragment
+  changelog-check:  # pull requests only: the rule in changelog.d/README.md
 ```
 
 ### What CI Checks
@@ -44,7 +44,7 @@ jobs:
 | Tests | `pytest` | The whole suite against a PostgreSQL 15 service. `REQUIRE_TEST_DATABASE=1` makes a database that failed to come up a failure instead of a silent skip ([`TEST_COVERAGE.md`](TEST_COVERAGE.md)). Coverage of `src` and `storydump_cli` is measured and uploaded to Codecov; no threshold is enforced |
 | Security | `pip-audit`, `bandit` | Vulnerability scanning. `pip-audit` GATES: a known-vulnerable pin in `requirements.txt` fails the job. It did not until #1216 — it ran behind `\|\| true` *and* `continue-on-error` with a placeholder `--ignore-vuln GHSA-1234`, and was masking four live advisories the whole time. `bandit` is still advisory (`\|\| true` + `continue-on-error`): its findings on this tree have not been triaged, so read the uploaded report rather than the step's colour |
 | Front end | `npm test`, `tsc --noEmit`, `npm run lint` | The web app in `landing/` (Node 22). `next build` is left to Vercel, which builds every PR |
-| Changelog | `scripts/changelog_fragments.py check --base` | A pull request must add a fragment in `changelog.d/` and must not edit `CHANGELOG.md`, unless it touches only `documentation/`, `*.md` files or `.github/`. Every fragment must parse. Stdlib-only, like the ratchet |
+| Changelog | `scripts/changelog_fragments.py check --base` | The fragment rule in `changelog.d/README.md`: a change outside the docs adds a fragment, and no pull request but the compile edits `CHANGELOG.md`. Stdlib-only, like the ratchet |
 
 The workflow's own note (`ci.yml:195-199`) records that `main` declares no
 required status checks, so every check is advisory as far as GitHub is
