@@ -5,6 +5,7 @@
   "provider_account_ref_log_sites": [],
   "telegram_modules": [
     "src/channels/telegram_transport.py",
+    "src/channels/telegram_waitlist_ping.py",
     "src/channels/telegram_webhook_registration.py",
     "src/services/target/telegram_dispatch.py"
   ]
