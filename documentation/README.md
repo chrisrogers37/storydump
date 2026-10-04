@@ -197,7 +197,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 ## Project Updates
 
-There is no live update note. The running record of changes is [../CHANGELOG.md](../CHANGELOG.md); an incident gets a folder under `planning/investigations/`.
+There is no live update note. The running record of changes is [../CHANGELOG.md](../CHANGELOG.md), with the entries not yet folded into it in [../changelog.d/](../changelog.d/); an incident gets a folder under `planning/investigations/`.
 
 The three notes of January 2026 — [bug fixes](archive/updates/2026-01-04-bugfixes.md), [category scheduling](archive/updates/2026-01-10-category-scheduling.md), [force posting and the queue shift](archive/updates/2026-01-11-force-posting-queue-shift.md) — describe the legacy scheduler, queue, bot and CLI, all deleted in the tear-out (#1216), and moved to `archive/updates/` on 2026-09-18. `updates/` no longer exists; the changelog and an investigation folder are where a change or an incident is recorded.
 
@@ -287,7 +287,7 @@ When adding new documentation:
    - Planning/design → `planning/`
    - How-to guides → `guides/`
    - Operations → `operations/`
-   - Bug fixes/patches → `../CHANGELOG.md`; a production incident → a folder under `planning/investigations/`
+   - Bug fixes/patches → a fragment in `../changelog.d/`; a production incident → a folder under `planning/investigations/`
    - Completed, superseded or abandoned plans, and any page that describes something the
      tree no longer holds → `git mv` to `archive/` (same layout), add a one-line status
      banner at the top, and add a row to `archive/README.md`

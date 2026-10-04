@@ -395,20 +395,23 @@ the tree daily.
 a PR is really ready — it catches a check that was never scheduled, which a
 green rollup hides (`documentation/guides/ci-cd-pipeline.md`).
 
-**Always update `CHANGELOG.md`** when opening a PR — CI fails without it (the
-`changelog-check` job of `.github/workflows/ci.yml`; a PR that touches only
-`documentation/`, `.md` files or `.github/` is exempt).
-[Keep a Changelog](https://keepachangelog.com/) format, entries under
-`## [Unreleased]`.
+**Add a changelog fragment and never edit `CHANGELOG.md`** when opening a PR:
+one new file in `changelog.d/` holding the entry under its `### <Section>`
+heading (`changelog.d/README.md`). CI fails a PR that changes code without one,
+or that edits `CHANGELOG.md` beside code (the `changelog-check` job of
+`.github/workflows/ci.yml`; a PR that touches only `documentation/`, `.md`
+files or `.github/` is exempt). `scripts/changelog_fragments.py compile` folds
+the fragments into `CHANGELOG.md` under `## [Unreleased]` at release time.
 
 ## Documentation
 
 - Full docs: `documentation/README.md`
 - New docs go in `documentation/` subdirectories: `planning/` (plans and
   specs), `guides/` (how-to), `operations/` (runbooks)
-- Bug fixes and patches: `CHANGELOG.md`; a production incident gets a folder
-  under `documentation/planning/investigations/` (`documentation/updates/` was
-  emptied into `archive/updates/` on 2026-09-18 and no longer exists)
+- Bug fixes and patches: a changelog fragment (`changelog.d/`); a production
+  incident gets a folder under `documentation/planning/investigations/`
+  (`documentation/updates/` was emptied into `archive/updates/` on 2026-09-18
+  and no longer exists)
 - A finished, superseded or abandoned document moves to
   `documentation/archive/` with a status banner and a row in
   `documentation/archive/README.md`. `CLAUDE.md`, `AGENTS.md`, `README.md`,

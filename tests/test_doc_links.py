@@ -5,8 +5,9 @@ Plans move — `documentation/planning/` to `documentation/archive/` when they
 complete — and a move that breaks a reference says nothing: before this file,
 no test read link targets or cited paths. Four rules:
 
-- **Links** in every tracked Markdown file except `CHANGELOG.md`, which is
-  history (each entry names paths as they were when it was written): a relative
+- **Links** in every tracked Markdown file except `CHANGELOG.md` and the
+  fragments in `changelog.d/` that fold into it, which are history (each entry
+  names paths as they were when it was written, from the root): a relative
   `[text](target)` names a file or folder that exists. `KNOWN_BROKEN` counts
   the exceptions — the archived v1 roadmap's links to phase docs deleted in
   #311 — and is a ratchet: fixing one occurrence fails until its count drops.
@@ -33,6 +34,9 @@ import re
 import subprocess
 from collections import Counter
 from pathlib import Path
+
+from scripts.changelog_fragments import is_fragment
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,7 +85,11 @@ def _rel(path: Path) -> str:
 
 
 def _markdown() -> list[Path]:
-    return [p for p in _tracked() if p.suffix == ".md" and _rel(p) not in UNSCANNED]
+    return [
+        p
+        for p in _tracked()
+        if p.suffix == ".md" and _rel(p) not in UNSCANNED and not is_fragment(_rel(p))
+    ]
 
 
 def _is_live(page: Path) -> bool:
@@ -155,6 +163,8 @@ def test_every_scan_sees_what_it_claims_to():
         ".github/README.md",
     } <= pages
     assert "CHANGELOG.md" not in pages
+    assert "changelog.d/README.md" in pages
+    assert not any(is_fragment(page) for page in pages)
     index = (ROOT / "documentation/README.md").read_text(encoding="utf-8")
     assert "archive/README.md" in {a or p for a, p in _LINK.findall(index)}
     live = _live_cites()
