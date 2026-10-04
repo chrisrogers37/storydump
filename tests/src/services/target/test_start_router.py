@@ -176,3 +176,34 @@ class TestTheHandlerContractLaneCRegistersAgainst:
         r.register("inv-", h)
         await r.dispatch(None, update("/start inv-t", ctype="supergroup", cid=-100))
         assert seen == {"t": "supergroup", "chat": "-100", "uid": "7"}
+
+
+class TestASenderThatIsNotAPersonIsUnattributable:
+    """A `sender_chat` message (an anonymous admin, a post sent as a channel),
+    a channel's automatic forward and a bot name no person, so no handler sees
+    them."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            {"sender_chat": {"id": -100555, "type": "channel"}},
+            {"is_automatic_forward": True},
+            {"from": {"id": 7, "username": "ada", "is_bot": True}},
+        ],
+        ids=["sender_chat", "automatic_forward", "bot"],
+    )
+    async def test_it_is_refused_before_any_handler_runs(self, shape):
+        called = []
+
+        async def handler(conn, ctx):
+            called.append(ctx)
+            return StartResult(outcome="did_it", handled=True, reply="done")
+
+        router = StartRouter()
+        router.register("link-", handler)
+        u = update("/start link-abc")
+        u["message"].update(shape)
+        result = await router.dispatch(None, u)
+        assert (result.outcome, result.handled) == ("unattributable", False)
+        assert called == [], "a handler saw a sender that is not a person"

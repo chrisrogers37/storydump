@@ -253,11 +253,12 @@ export function TelegramCard({
                   {telegramLink.link}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  <strong>Do not share this link.</strong> Whoever taps it links
-                  their Telegram to your account. Tap Start in the chat that
-                  opens — the bot confirms in the chat — then reload this page;
-                  it shows Linked once the bot has heard from you. Asking for a
-                  new link retires this one.
+                  <strong>Do not share this link.</strong> Whoever confirms it
+                  links their Telegram to your account. Tap Start in the chat
+                  that opens: the bot names this account and asks you to
+                  confirm. Tap Confirm, then reload this page; it shows Linked
+                  once you have confirmed. Asking for a new link retires this
+                  one.
                 </p>
                 <Button
                   variant="ghost"
