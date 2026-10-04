@@ -23,7 +23,7 @@ from sqlalchemy.pool import NullPool
 
 from src.api import principal
 from src.api.routes import public
-from src.channels import waitlist_ping
+from src.channels import telegram_waitlist_ping as waitlist_ping
 from src.services.target import waitlist
 from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (

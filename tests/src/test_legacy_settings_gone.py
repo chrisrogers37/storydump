@@ -25,7 +25,7 @@ reads the variable of the same name; the rule cannot see that either way.
 
 The landing app read two of the three names from its own environment on
 Vercel for the waitlist's admin message until that message moved to the API
-(`src/channels/waitlist_ping.py`, which reads `TARGET_WAITLIST_PING_CHAT_ID`);
+(`src/channels/telegram_waitlist_ping.py`, which reads `TARGET_WAITLIST_PING_CHAT_ID`);
 nothing reads any of them now.
 """
 
@@ -483,7 +483,7 @@ ENV_READ_OUTSIDE_SETTINGS = {
     "TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER",
     "TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS",
     "TARGET_TELEGRAM_API_BASE",
-    # the chat the waitlist's admin message goes to (`channels/waitlist_ping.py`)
+    # the chat the waitlist's admin message goes to (`channels/telegram_waitlist_ping.py`)
     "TARGET_WAITLIST_PING_CHAT_ID",
     # the worker's knobs
     "TARGET_WORKER_INTERACTIVE_CONCURRENCY",

@@ -660,7 +660,7 @@ def create_app(
     # The waitlist route's per-process slots (`routes/public.py`), and the
     # admin's message for each signup it accepts, sent with the same bot.
     app.state.waitlist_slots = WaitlistSlots()
-    from src.channels import waitlist_ping
+    from src.channels import telegram_waitlist_ping as waitlist_ping
 
     app.state.waitlist_ping = waitlist_ping.from_env(env, bot)
     app.state.ingress_workers = _ingress_workers(env)

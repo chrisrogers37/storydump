@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from src.channels import waitlist_ping
+from src.channels import telegram_waitlist_ping as waitlist_ping
 from src.channels.telegram_transport import TelegramTransport
 from src.services.target.egress import EgressPolicy
 
