@@ -46,11 +46,9 @@ commit, then talk to the provider."* It is both the correctness seam (the §6
 permit protocol depends on permit-commit-before-call) and the premise of the
 connection arithmetic above.
 
-Enforcement is a ContextVar flag set while a UoW transaction is open, which the
-egress floor checks before any provider call. The flag is reset from a token in
-a `finally`, never by assignment: a bare reset loses the previous value under
-nesting, and a leaked flag would make every later provider call in the same
-task raise — a wrong-way failure that looks like the discipline working.
+Enforcement is a ContextVar flag, armed by `transaction_discipline()` for the
+life of each transaction that enters it, which the egress floor checks before
+any provider call.
 
 **The flag is per-task, and that is the bound.** Measured: a call made directly
 inside the transaction, from a task spawned inside it, or via
@@ -127,7 +125,7 @@ INGRESS_POOL_TIMEOUT_SEAM = 1.0
 #: regression nobody chose.
 POOL_RECYCLE_SEAM = 300
 
-#: True while a UoW transaction is open in this task. Read by the egress floor.
+#: True inside `transaction_discipline()` in this task. Read by the egress floor.
 _IN_TRANSACTION: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "storydump_in_transaction", default=False
 )
@@ -142,15 +140,19 @@ class TransactionDisciplineError(StorydumpError):
 
 
 def in_transaction() -> bool:
-    """Whether this task currently holds an open UoW transaction."""
+    """Whether this task is inside `transaction_discipline()`."""
     return _IN_TRANSACTION.get()
 
 
 @contextmanager
 def transaction_discipline():
     """Mark this task as holding an open transaction for the block, so the
-    egress floor refuses a provider call made inside it (`02` §5). The module
-    docstring has the rule, and why the flag is reset from its token."""
+    egress floor refuses a provider call made inside it (`02` §5).
+
+    The flag is reset from its token in a `finally`, never by assignment: a
+    bare reset would lose an outer block's value under nesting, and a leaked
+    flag would make every later provider call in the task raise — a wrong-way
+    failure that looks like the discipline working."""
     token = _IN_TRANSACTION.set(True)
     try:
         yield
@@ -377,11 +379,11 @@ async def apply_gucs(
     set `app.actor_kind` in an earlier transaction reads it back as `''`, not
     NULL. The audit triggers treat `''` as unset for that reason (085, #1421).
 
-    Known coverage note: a raw-connection transaction (the permit path) never
-    sets `_IN_TRANSACTION`, so the §5 discipline tripwire does not cover the
-    permit window. Inert today — `acquire_permit` commits before returning,
-    so no provider call can happen inside it — named here because this is
-    where the next reader will look.
+    Known coverage note: the permit path's raw-connection transaction does not
+    enter `transaction_discipline()`, so the §5 discipline tripwire does not
+    cover the permit window. Inert today — `acquire_permit` commits before
+    returning, so no provider call can happen inside it — named here because
+    this is where the next reader will look.
     """
     # `lock_timeout` rides the same statement (#1286): a tap bounds its wait on
     # another tap's row lock, and a second round trip for `SET LOCAL` was the
@@ -481,11 +483,9 @@ def make_session_for(engine):
     def session_for(job: dict):
         @asynccontextmanager
         async def ctx():
-            # The §5 discipline flag, as `UnitOfWork.begin` sets it (#1368).
-            # Without it the tripwire covered no worker path at all, while two
-            # modules' docstrings said the floor enforced the rule here. #1387
-            # is what makes arming safe: the four executors
-            # that reach the floor now run with NO job session open.
+            # The §5 discipline flag, armed for the job's session. Arming is
+            # safe because an executor that reaches the egress floor owns its
+            # transactions and runs with no job session open.
             with transaction_discipline():
                 async with maker() as session:
                     async with session.begin():
@@ -513,11 +513,10 @@ def poller_session_factory(engine, tenant_id: str):
 
     @asynccontextmanager
     async def factory():
-        # The §5 discipline flag (#1368), for the same reason as
-        # `make_session_for` above. The refresh
-        # executor's three phases each take one of these, and its "the
-        # provider call, outside any transaction (floor-enforced)" is true
-        # of the process only once this is set.
+        # The §5 discipline flag, armed for each poller session. The refresh
+        # executor's three phases each take one of these; arming here is
+        # what makes its provider call floor-checked as outside any
+        # transaction.
         with transaction_discipline():
             async with maker() as session:
                 await apply_gucs(session, tenant_id=tenant_id, actor_kind="system")
