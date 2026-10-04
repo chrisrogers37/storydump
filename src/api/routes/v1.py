@@ -300,10 +300,12 @@ async def me(request: Request, principal: Principal = Depends(require_session)):
 async def telegram_link(
     request: Request, principal: Principal = Depends(require_session)
 ):
-    """The link a signed-in user taps to attach their Telegram identity
+    """The link a signed-in user opens to attach their Telegram identity
     (`07` §2 `link`: only from an authenticated session; the row pins the
-    user, and the bot's `/start` door attaches the tapping identity to exactly
-    that user — D35). The service half is #1180; this route is what the X.3
+    user). The bot's `/start` door names that user's account and offers
+    Confirm; only the Confirm, pressed by the person the offer was made to in
+    their own private chat with the bot, attaches their identity to exactly
+    that user — D35. The service half is #1180; this route is what the X.3
     drive was missing (#1172, #1157).
 
     Tenant-less, like `/me`: an identity belongs to a user, not a workspace.
