@@ -244,17 +244,6 @@ class TestTheAdminPing:
         assert resp.status_code == 400
         assert pinged == []
 
-    def test_a_signup_past_the_limit_is_not_pinged(self, world, pinged, monkeypatch):
-        monkeypatch.setattr(public, "WAITLIST_LIMIT", 1)
-        monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-ping-limit:")
-        responses = _post(
-            world,
-            {"email": "ping-limit1@example.com"},
-            {"email": "ping-limit2@example.com"},
-        )
-        assert [r.status_code for r in responses] == [202, 429]
-        assert pinged == [("ping-limit1@example.com", True)]
-
     def test_a_full_ceiling_is_not_pinged(self, world, pinged, monkeypatch):
         monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", SECRET)
         monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 1)

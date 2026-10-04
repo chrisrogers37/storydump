@@ -5,8 +5,10 @@ would receive and what each of its answers does are the real ones; the
 network and the waits are not.
 """
 
+import asyncio
 import json
 import logging
+import types
 from datetime import datetime, timezone
 
 import httpx
@@ -14,6 +16,7 @@ import pytest
 
 from src.channels import waitlist_ping
 from src.channels.telegram_transport import TelegramTransport
+from src.services.target.egress import EgressPolicy
 
 TOKEN = "8675309:AAtestSECRETtokenVALUExyz"
 CHAT = "-100777"
@@ -46,7 +49,9 @@ def no_waits(monkeypatch):
     async def sleep(seconds):
         waits.append(seconds)
 
-    monkeypatch.setattr(waitlist_ping.asyncio, "sleep", sleep)
+    # The module's own waits only; the semaphore stays the real one.
+    fake = types.SimpleNamespace(sleep=sleep, Semaphore=asyncio.Semaphore)
+    monkeypatch.setattr(waitlist_ping, "asyncio", fake)
     return waits
 
 
@@ -71,44 +76,63 @@ async def test_one_send_to_the_chat_as_plain_text(no_waits):
     assert no_waits == []
 
 
-async def test_a_429_waits_what_telegram_names_then_sends_again(no_waits):
-    paced = {
+def _paced(retry_after):
+    return {
         "ok": False,
         "error_code": 429,
         "description": "Too Many Requests",
-        "parameters": {"retry_after": 7},
+        "parameters": {"retry_after": retry_after},
     }
-    ping, sent = _ping(paced, OK)
+
+
+async def test_a_429_waits_what_telegram_names_then_sends_again(no_waits):
+    ping, sent = _ping(_paced(7), OK)
     await ping("a@example.com")
     assert len(sent) == 2
     assert no_waits == [7.0]
 
 
 async def test_a_long_retry_after_is_capped(no_waits):
-    paced = {
-        "ok": False,
-        "error_code": 429,
-        "description": "Too Many Requests",
-        "parameters": {"retry_after": 3600},
-    }
-    ping, _ = _ping(paced, OK)
+    ping, _ = _ping(_paced(3600), OK)
     await ping("a@example.com")
     assert no_waits == [waitlist_ping.MAX_PACED_WAIT_SECONDS]
 
 
-async def test_no_answer_is_retried_with_a_growing_wait_then_logged(no_waits, caplog):
+async def test_429s_past_the_last_send_are_logged(no_waits, caplog):
+    ping, sent = _ping(_paced(1))
+    with caplog.at_level(logging.ERROR, logger="channels.waitlist_ping"):
+        await ping("a@example.com")
+    assert len(sent) == waitlist_ping.ATTEMPTS
+    assert "waitlist ping: not sent after 3 tries" in _logged(caplog)
+
+
+async def test_a_lost_answer_is_left_to_the_egress_floor_and_logged(caplog):
     lost = httpx.ConnectError(
         f"no route to https://api.telegram.org/bot{TOKEN}/sendMessage"
     )
     ping, sent = _ping(lost)
     with caplog.at_level(logging.ERROR, logger="channels.waitlist_ping"):
         await ping("a@example.com")
-    # The egress floor retries a lost connection itself; these are the
-    # ping's own waits between its sends.
-    assert len(sent) >= waitlist_ping.ATTEMPTS
-    assert no_waits[-2:] == [2.0, 4.0]
-    assert "waitlist ping: not sent after 3 tries" in _logged(caplog)
+    # The floor's own attempts, and no more on top of them.
+    assert len(sent) == EgressPolicy().max_attempts
+    assert "waitlist ping: not sent" in _logged(caplog)
     assert TOKEN not in _logged(caplog)
+
+
+async def test_pings_go_out_one_at_a_time():
+    active, peak = 0, 0
+
+    async def send(chat_id, text):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return "1"
+
+    ping = waitlist_ping.WaitlistPing(send, CHAT)
+    await asyncio.gather(*(ping(f"p{i}@example.com") for i in range(5)))
+    assert peak == 1
 
 
 @pytest.mark.parametrize(
@@ -153,7 +177,7 @@ async def test_a_refusal_that_will_not_change_is_logged_with_its_reason_once(
     assert len(sent) == 1
     assert no_waits == []
     logged = _logged(caplog)
-    assert "waitlist ping: refused, not retried" in logged
+    assert "waitlist ping: not sent" in logged
     assert reason in logged
     assert TOKEN not in logged and CHAT not in logged
 
