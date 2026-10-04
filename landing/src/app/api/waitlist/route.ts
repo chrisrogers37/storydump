@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server"
+import { NextRequest, NextResponse, after } from "next/server"
 import { refuseCrossSite } from "@/lib/route-guards"
 import { targetFetch } from "@/lib/target-api"
 import { notifyAdmin } from "@/lib/telegram"
@@ -80,9 +80,11 @@ export async function POST(req: NextRequest) {
   })
 
   if (result.ok) {
-    // Fire-and-forget Telegram notification. The API does not say whether the
-    // address was new, so a repeat signup pings again.
-    notifyAdmin(email.toLowerCase()).catch(console.error)
+    // The admin ping runs after the answer is sent, and the host keeps the
+    // function alive until it finishes: a promise left floating could be cut
+    // off with the function. The API does not say whether the address was
+    // new, so a repeat signup pings again.
+    after(() => notifyAdmin(email.toLowerCase()))
     return NextResponse.json(JOINED)
   }
   if (result.error === "invalid_email") {

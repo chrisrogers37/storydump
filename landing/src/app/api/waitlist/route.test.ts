@@ -5,6 +5,13 @@ const targetFetch = vi.fn()
 vi.mock("@/lib/target-api", () => ({ targetFetch: (...args: unknown[]) => targetFetch(...args) }))
 const notifyAdmin = vi.fn<(email: string) => Promise<void>>(async () => {})
 vi.mock("@/lib/telegram", () => ({ notifyAdmin: (email: string) => notifyAdmin(email) }))
+// The host runs an after() task once the answer is sent; here it is held, and
+// a test runs it to see what it does.
+const afterTasks: Array<() => unknown> = []
+vi.mock("next/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/server")>()),
+  after: (task: () => unknown) => void afterTasks.push(task),
+}))
 
 import { POST } from "./route"
 
@@ -28,6 +35,7 @@ describe("POST /api/waitlist", () => {
   beforeEach(() => {
     targetFetch.mockReset()
     notifyAdmin.mockClear()
+    afterTasks.length = 0
     vi.spyOn(console, "error").mockImplementation(() => {})
   })
 
@@ -42,7 +50,25 @@ describe("POST /api/waitlist", () => {
     expect(init).toMatchObject({ method: "POST", plane: "public" })
     expect(init.signal).toBeInstanceOf(AbortSignal)
     expect(body).toEqual({ email: "New@Example.com" })
+    // The ping is not started before the answer; it is handed to the host.
+    expect(notifyAdmin).not.toHaveBeenCalled()
+    expect(afterTasks).toHaveLength(1)
+    await afterTasks[0]()
     expect(notifyAdmin).toHaveBeenCalledWith("new@example.com")
+  })
+
+  it("hands the host the ping's promise, so the function lives until the send ends", async () => {
+    targetFetch.mockResolvedValue({ ok: true, data: { status: "received" } })
+    let finish = () => {}
+    notifyAdmin.mockImplementationOnce(() => new Promise<void>((resolve) => (finish = resolve)))
+    await POST(signup("a@example.com"))
+    let settled = false
+    const pending = Promise.resolve(afterTasks[0]()).then(() => (settled = true))
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    finish()
+    await pending
+    expect(settled).toBe(true)
   })
 
   it("passes on the API's invalid_email refusal as the form's own 400", async () => {
@@ -50,7 +76,7 @@ describe("POST /api/waitlist", () => {
     const res = await POST(signup("odd@example.com"))
     expect(res.status).toBe(400)
     expect(await res.json()).toEqual(INVALID)
-    expect(notifyAdmin).not.toHaveBeenCalled()
+    expect(afterTasks).toHaveLength(0)
   })
 
   it.each([
@@ -68,7 +94,7 @@ describe("POST /api/waitlist", () => {
       message: "Something went wrong. Please try again.",
     })
     expect(console.error).toHaveBeenCalledWith("waitlist signup failed:", status, error)
-    expect(notifyAdmin).not.toHaveBeenCalled()
+    expect(afterTasks).toHaveLength(0)
   })
 
   it("leaves what an address is to the API, forwarding only a string", async () => {
