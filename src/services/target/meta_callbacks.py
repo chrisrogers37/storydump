@@ -55,64 +55,6 @@ def _b64url_decode(segment: str) -> bytes:
     return base64.urlsafe_b64decode(segment + padding)
 
 
-def parse_signed_request(
-    signed_request: Optional[str], app_secret: Optional[str]
-) -> dict[str, Any]:
-    """Verify Meta's `signed_request` and return its payload.
-
-    Raises `SignedRequestInvalid` for every failure mode. There is no partial
-    success and no "probably fine" path.
-
-    **The signature covers the RAW base64 payload string, not the decoded
-    JSON.** Re-encoding the parsed object and signing that would produce a
-    different byte string for the same logical payload (key order, separators),
-    so the check would fail for honest requests and — worse — a lenient
-    implementation that re-serialised could be steered by whitespace. The
-    received bytes are what get verified.
-    """
-    if not app_secret:
-        # A deployment with no secret cannot verify anything. Refusing is the
-        # only safe answer: the alternative is an unauthenticated public door
-        # onto a destructive operation.
-        logger.warning("meta callback: refused, no Meta app secret configured")
-        raise SignedRequestInvalid("not configured")
-    if not signed_request:
-        raise SignedRequestInvalid("absent")
-
-    parts = signed_request.split(".")
-    if len(parts) != 2:
-        raise SignedRequestInvalid("malformed")
-    encoded_sig, encoded_payload = parts
-
-    try:
-        received_sig = _b64url_decode(encoded_sig)
-        payload_bytes = _b64url_decode(encoded_payload)
-    except (ValueError, UnicodeDecodeError):
-        raise SignedRequestInvalid("undecodable")
-
-    try:
-        payload = json.loads(payload_bytes)
-    except (ValueError, UnicodeDecodeError):
-        raise SignedRequestInvalid("payload not json")
-    if not isinstance(payload, dict):
-        raise SignedRequestInvalid("payload not an object")
-
-    # Checked BEFORE the comparison, and against a constant. A payload naming
-    # any other algorithm is rejected outright rather than dispatched on.
-    if payload.get("algorithm") != _EXPECTED_ALGORITHM:
-        raise SignedRequestInvalid("unexpected algorithm")
-
-    expected_sig = hmac.new(
-        app_secret.encode("utf-8"),
-        encoded_payload.encode("ascii"),
-        hashlib.sha256,
-    ).digest()
-    if not hmac.compare_digest(received_sig, expected_sig):
-        raise SignedRequestInvalid("signature mismatch")
-
-    return payload
-
-
 def app_secrets() -> list[str]:
     """Every Meta app secret this deployment could legitimately be signed by.
 
@@ -163,7 +105,17 @@ def app_secret_names() -> list[str]:
 def verify_signed_request(
     signed_request: Optional[str], secrets: list[str]
 ) -> tuple[dict[str, Any], str]:
-    """`parse_signed_request` against each candidate secret; first match wins.
+    """Verify against each candidate secret, in order; the first match wins.
+
+    **Nothing in the payload is decoded or parsed until the signature has
+    verified.** Once it has, a refusal is final.
+
+    **The signature covers the RAW base64 payload string, not the decoded
+    JSON.** Re-encoding the parsed object and signing that would produce a
+    different byte string for the same logical payload (key order, separators),
+    so the check would fail for honest requests and — worse — a lenient
+    implementation that re-serialised could be steered by whitespace. The
+    received bytes are what get verified.
 
     Returns the payload **and the secret that verified it**, so a caller
     needing that secret afterwards (to derive a receipt code) takes it from the
@@ -174,18 +126,57 @@ def verify_signed_request(
 
     An empty `secrets` refuses, exactly as a single absent secret does — the
     fail-closed direction is a property of having nothing to verify with, not
-    of how many settings were consulted.
+    of how many settings were consulted. An empty value is not a secret, so it
+    is never a candidate.
     """
-    if not secrets:
+    candidates = [secret for secret in secrets if secret]
+    if not candidates:
         logger.warning("meta callback: refused, no Meta app secret configured")
         raise SignedRequestInvalid("not configured")
-    last: Exception = SignedRequestInvalid("not configured")
-    for secret in secrets:
-        try:
-            return parse_signed_request(signed_request, secret), secret
-        except SignedRequestInvalid as exc:
-            last = exc
-    raise last
+    if not signed_request:
+        raise SignedRequestInvalid("absent")
+
+    parts = signed_request.split(".")
+    if len(parts) != 2:
+        raise SignedRequestInvalid("malformed")
+    encoded_sig, encoded_payload = parts
+
+    try:
+        received_sig = _b64url_decode(encoded_sig)
+        # base64url is ASCII, so a segment outside it is undecodable.
+        signed_bytes = encoded_payload.encode("ascii")
+    except ValueError:
+        raise SignedRequestInvalid("undecodable")
+
+    for secret in candidates:
+        expected_sig = hmac.new(
+            secret.encode("utf-8"), signed_bytes, hashlib.sha256
+        ).digest()
+        if hmac.compare_digest(received_sig, expected_sig):
+            return _decode_payload(encoded_payload), secret
+    raise SignedRequestInvalid("signature mismatch")
+
+
+def _decode_payload(encoded_payload: str) -> dict[str, Any]:
+    """Decode and check the payload of a `signed_request` whose signature has
+    verified. Called only after a match, never before."""
+    try:
+        payload_bytes = _b64url_decode(encoded_payload)
+    except ValueError:
+        raise SignedRequestInvalid("undecodable")
+
+    try:
+        payload = json.loads(payload_bytes)
+    except ValueError:
+        raise SignedRequestInvalid("payload not json")
+    if not isinstance(payload, dict):
+        raise SignedRequestInvalid("payload not an object")
+
+    # Checked against a constant. A payload naming any other algorithm is
+    # rejected outright rather than dispatched on.
+    if payload.get("algorithm") != _EXPECTED_ALGORITHM:
+        raise SignedRequestInvalid("unexpected algorithm")
+    return payload
 
 
 def subject_ref(payload: dict[str, Any]) -> Optional[str]:
