@@ -23,6 +23,7 @@ import { IntegrationsTab } from "@/components/dashboard/settings/integrations-ta
 import { ApiTokensTab } from "@/components/dashboard/settings/api-tokens-tab";
 import { Notice } from "@/components/ui/notice";
 import { tokenRowsFrom } from "@/lib/tokens";
+import { PageHeader } from "@/design/page-header";
 
 /**
  * Settings — every tab writes. General is the command client (P3), Accounts
@@ -193,12 +194,10 @@ export default async function SettingsPage({
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Your posting schedule, accounts, integrations, and API tokens.
-        </p>
-      </div>
+      <PageHeader
+        title="Settings"
+        description="Your posting schedule, accounts, integrations, and API tokens."
+      />
 
       {/*
         SAYS ONLY WHAT THE REDIRECT SUBSTANTIATES, which is less than it is

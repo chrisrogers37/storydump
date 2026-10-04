@@ -19,13 +19,13 @@ production's schemas are `archive`, `public` and `runner`. Nothing under
 
 ## The tables
 
-Twenty-eight, in five model modules named after the migrations that create them
+Twenty-nine, in five model modules named after the migrations that create them
 (`src/models/target/__init__.py`; the count and the twenty tenant-keyed are
 pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
 
 | Models (migration) | Tables |
 |---|---|
-| `identity_and_tenancy.py` (053, 090, 092) | `users`, `user_identities`, `workspaces`, `workspace_members`, `workspace_member_removals` (090), `signup_admissions` (092), `workspace_invitations`, `channel_bindings`, `onboarding_sessions` |
+| `identity_and_tenancy.py` (053, 090, 092, 100) | `users`, `user_identities`, `workspaces`, `workspace_members`, `workspace_member_removals` (090), `signup_admissions` (092), `waitlist_entries` (100), `workspace_invitations`, `channel_bindings`, `onboarding_sessions` |
 | `accounts_sources_media.py` (054) | `ig_accounts`, `provider_quarantine`, `media_sources`, `oauth_credentials`, `media_items`, `post_locks` |
 | `intent_ledger.py` (055) | `post_intents`, `post_intent_transitions`, `audit_events`, `daily_post_counts`, `category_post_case_mix` |
 | `machinery.py` (056) | `jobs`, `channel_outbox`, `provider_operations`, `command_dedup`, `rate_counters` |
@@ -76,7 +76,9 @@ pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
   machinery counters are row-open to the runtime roles (`:169`-`:178`),
   `post_intent_transitions` is read-only reference data (`:182`), and
   `signup_admissions` (092) is global and readable only through
-  `fn_signup_admitted`: the runtime roles hold no grant on it. A
+  `fn_signup_admitted`: the runtime roles hold no grant on it.
+  `waitlist_entries` (100) is global too: `svc_ingress` may INSERT and
+  nothing else, so the public waitlist route cannot read the list. A
   `user_identities` row is deleted only by `fn_identity_unlink` (099), a
   person removing their own Telegram identity.
 - The runtime roles are `svc_ingress` (API) and `svc_worker`; cross-tenant work

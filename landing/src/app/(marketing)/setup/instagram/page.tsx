@@ -6,6 +6,8 @@ import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
 import { Screenshot } from "@/components/setup/screenshot"
 import { UiTerm } from "@/components/setup/ui-term"
+import { buttonVariants } from "@/components/ui/button"
+import { SetupPager } from "@/components/setup/setup-pager"
 
 const description =
   "How to switch your Instagram account to Business or Creator, which Instagram requires before Storydump can post your Stories through its API."
@@ -19,7 +21,7 @@ export const metadata: Metadata = pageMetadata({
 export default function InstagramSetup() {
   return (
     <div>
-      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
+      <h1 className="page-title text-4xl text-ink">
         Instagram Business Account
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">
@@ -108,7 +110,7 @@ export default function InstagramSetup() {
         </StepCard>
       </div>
 
-      <div className="mt-12 flex items-center justify-between">
+      <SetupPager>
         <Link
           href="/setup"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -118,12 +120,12 @@ export default function InstagramSetup() {
         </Link>
         <Link
           href="/setup/media-organize"
-          className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          className={buttonVariants()}
         >
           Next: Organize Media
           <ArrowRight className="h-4 w-4" />
         </Link>
-      </div>
+      </SetupPager>
     </div>
   )
 }
