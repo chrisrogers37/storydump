@@ -576,7 +576,7 @@ async def execute_retention_sweep(
         "retention_sweep: deleted %d rate_counters row(s) older than %ds; %s",
         total,
         keep_seconds,
-        "drained" if drained else "time budget spent, more remain",
+        "drained" if drained else "time budget spent, more may remain",
     )
     return total
 
