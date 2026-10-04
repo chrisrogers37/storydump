@@ -206,6 +206,12 @@ class TestTheRoute:
         assert _entry(world, "limit3@example.com") == []
 
 
+@pytest.fixture(autouse=True)
+def no_real_ping(monkeypatch):
+    """A developer's shell may hold the real bot and chat: no test here sends."""
+    monkeypatch.setattr(waitlist_ping, "from_env", lambda env, bot: None)
+
+
 @pytest.fixture
 def pinged(world, monkeypatch):
     """The addresses the admin ping was handed, each with whether its row was
