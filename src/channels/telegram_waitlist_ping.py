@@ -7,9 +7,10 @@ outbox row: the outbox delivers to a workspace's bound chats under that
 workspace's tenant, and the admin's chat is no workspace's.
 
 Pings go out one at a time, so a burst of signups never meets Telegram's
-limit as a crowd, and at most :data:`MAX_WAITING` wait their turn. A lost connection or a timeout is already retried by the
-egress floor under the transport; the one retry here is a 429, after the wait
-Telegram names (capped), up to :data:`ATTEMPTS` sends. Anything else that is
+limit as a crowd, and at most :data:`MAX_WAITING` wait their turn. A lost
+connection or a timeout is already retried by the egress floor under the
+transport; the one retry here is a 429, after the wait Telegram names
+(capped), up to :data:`ATTEMPTS` sends. Anything else that is
 not a delivered message is one log line naming the cause, Telegram's own
 reason when it gave one. The transport keeps the token out of every exception
 it raises, and nothing here logs the chat id or the address.
@@ -72,12 +73,18 @@ class WaitlistPing:
             return
         text = message(address, datetime.now(timezone.utc))
         self._waiting += 1
+        queued = True
         try:
             async with self._one_at_a_time:
                 self._waiting -= 1
+                queued = False
                 await self._send(text)
         except Exception:  # noqa: BLE001 — a background task has no caller
             logger.exception("waitlist ping: failed, NO MESSAGE WAS SENT")
+        finally:
+            # Cancelled (or failed) before its turn: it no longer waits.
+            if queued:
+                self._waiting -= 1
 
     async def _send(self, text: str) -> None:
         for attempt in range(1, ATTEMPTS + 1):
