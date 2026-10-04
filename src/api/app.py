@@ -657,8 +657,12 @@ def create_app(
     # route's honest 503 into a 500 mid-delivery.
     bot = _telegram_transport(env)
     app.state.tap_metrics = webhooks.TapMetrics()
-    # The waitlist route's per-process slots (`routes/public.py`).
+    # The waitlist route's per-process slots (`routes/public.py`), and the
+    # admin's message for each signup it accepts, sent with the same bot.
     app.state.waitlist_slots = WaitlistSlots()
+    from src.channels import waitlist_ping
+
+    app.state.waitlist_ping = waitlist_ping.from_env(env, bot)
     app.state.ingress_workers = _ingress_workers(env)
     app.state.pool_watch = (
         PoolWatch(app.state.engine) if app.state.engine is not None else None

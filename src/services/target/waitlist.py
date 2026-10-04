@@ -61,9 +61,9 @@ def campaign(fields: Mapping[str, object]) -> Optional[dict]:
     return utm or None
 
 
-async def join(conn, email: object, utm: Optional[dict] = None) -> None:
-    """Add *email*, trimmed and lower-cased, to the waitlist; an address
-    already there is not an error. Raises :class:`InvalidWaitlistEmail` for one
+async def join(conn, email: object, utm: Optional[dict] = None) -> str:
+    """Add *email*, trimmed and lower-cased, to the waitlist, and return it as
+    stored; an address already there is not an error. Raises :class:`InvalidWaitlistEmail` for one
     the CHECK refuses, under a savepoint so the caller's transaction carries
     on. Runs in the caller's transaction and does not commit."""
     address = email.strip().lower() if isinstance(email, str) else ""
@@ -84,3 +84,4 @@ async def join(conn, email: object, utm: Optional[dict] = None) -> None:
         if constraint_violated(exc, _EMAIL_CHECK):
             raise InvalidWaitlistEmail("not a valid email address") from exc
         raise
+    return address

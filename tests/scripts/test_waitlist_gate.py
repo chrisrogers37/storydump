@@ -23,6 +23,7 @@ from sqlalchemy.pool import NullPool
 
 from src.api import principal
 from src.api.routes import public
+from src.channels import waitlist_ping
 from src.services.target import waitlist
 from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (
@@ -203,6 +204,69 @@ class TestTheRoute:
         )
         assert [r.status_code for r in responses] == [202, 202, 429]
         assert _entry(world, "limit3@example.com") == []
+
+
+@pytest.fixture
+def pinged(world, monkeypatch):
+    """The addresses the admin ping was handed, each with whether its row was
+    already committed when the ping ran."""
+    seen = []
+
+    async def ping(address):
+        seen.append((address, bool(_entry(world, address))))
+
+    monkeypatch.setattr(waitlist_ping, "from_env", lambda env, bot: ping)
+    return seen
+
+
+class TestTheAdminPing:
+    """Every accepted address, a repeat too, is one ping after the commit;
+    nothing the route refuses is."""
+
+    def test_an_accepted_address_is_pinged_as_stored_after_the_commit(
+        self, world, pinged
+    ):
+        (resp,) = _post(world, {"email": "  Pinged@Example.com "})
+        assert resp.status_code == 202
+        assert pinged == [("pinged@example.com", True)]
+
+    def test_a_repeat_is_pinged_again(self, world, pinged):
+        responses = _post(
+            world,
+            {"email": "ping-twice@example.com"},
+            {"email": "ping-twice@example.com"},
+        )
+        assert [r.status_code for r in responses] == [202, 202]
+        assert pinged == [("ping-twice@example.com", True)] * 2
+
+    def test_a_refused_address_is_not_pinged(self, world, pinged):
+        (resp,) = _post(world, {"email": "no-at-sign"})
+        assert resp.status_code == 400
+        assert pinged == []
+
+    def test_a_signup_past_the_limit_is_not_pinged(self, world, pinged, monkeypatch):
+        monkeypatch.setattr(public, "WAITLIST_LIMIT", 1)
+        monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-ping-limit:")
+        responses = _post(
+            world,
+            {"email": "ping-limit1@example.com"},
+            {"email": "ping-limit2@example.com"},
+        )
+        assert [r.status_code for r in responses] == [202, 429]
+        assert pinged == [("ping-limit1@example.com", True)]
+
+    def test_a_full_ceiling_is_not_pinged(self, world, pinged, monkeypatch):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", SECRET)
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 1)
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-ping-test")
+        responses = _post(
+            world,
+            {"email": "ping-ceiling-0@example.com"},
+            {"email": "ping-ceiling-1@example.com"},
+            headers=_from_site("198.51.100.90"),
+        )
+        assert [r.status_code for r in responses] == [202, 429]
+        assert pinged == [("ping-ceiling-0@example.com", True)]
 
 
 class TestTheDoor:

@@ -3,8 +3,6 @@ import { NextRequest } from "next/server"
 
 const targetFetch = vi.fn()
 vi.mock("@/lib/target-api", () => ({ targetFetch: (...args: unknown[]) => targetFetch(...args) }))
-const notifyAdmin = vi.fn<(email: string) => Promise<void>>(async () => {})
-vi.mock("@/lib/telegram", () => ({ notifyAdmin: (email: string) => notifyAdmin(email) }))
 
 import { POST } from "./route"
 
@@ -27,11 +25,10 @@ function forwarded() {
 describe("POST /api/waitlist", () => {
   beforeEach(() => {
     targetFetch.mockReset()
-    notifyAdmin.mockClear()
     vi.spyOn(console, "error").mockImplementation(() => {})
   })
 
-  it("hands the address to the API's public plane with no credential, then pings the admin", async () => {
+  it("hands the address to the API's public plane with no credential", async () => {
     targetFetch.mockResolvedValue({ ok: true, data: { status: "received" } })
     const res = await POST(signup("  New@Example.com "))
     expect(res.status).toBe(200)
@@ -42,7 +39,6 @@ describe("POST /api/waitlist", () => {
     expect(init).toMatchObject({ method: "POST", plane: "public" })
     expect(init.signal).toBeInstanceOf(AbortSignal)
     expect(body).toEqual({ email: "New@Example.com" })
-    expect(notifyAdmin).toHaveBeenCalledWith("new@example.com")
   })
 
   it("passes on the API's invalid_email refusal as the form's own 400", async () => {
@@ -50,7 +46,6 @@ describe("POST /api/waitlist", () => {
     const res = await POST(signup("odd@example.com"))
     expect(res.status).toBe(400)
     expect(await res.json()).toEqual(INVALID)
-    expect(notifyAdmin).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -68,7 +63,6 @@ describe("POST /api/waitlist", () => {
       message: "Something went wrong. Please try again.",
     })
     expect(console.error).toHaveBeenCalledWith("waitlist signup failed:", status, error)
-    expect(notifyAdmin).not.toHaveBeenCalled()
   })
 
   it("leaves what an address is to the API, forwarding only a string", async () => {

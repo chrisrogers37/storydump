@@ -1,0 +1,204 @@
+"""The admin's Telegram message for each waitlist signup (`waitlist_ping`).
+
+Sent through the real transport over `httpx.MockTransport`, so what Telegram
+would receive and what each of its answers does are the real ones; the
+network and the waits are not.
+"""
+
+import json
+import logging
+from datetime import datetime, timezone
+
+import httpx
+import pytest
+
+from src.channels import waitlist_ping
+from src.channels.telegram_transport import TelegramTransport
+
+TOKEN = "8675309:AAtestSECRETtokenVALUExyz"
+CHAT = "-100777"
+OK = {"ok": True, "result": {"message_id": 1}}
+
+
+def _ping(*answers):
+    """A ping whose transport answers each request with the next of *answers*
+    (a dict body, or an exception to raise), the last one from then on;
+    returns it and the sent bodies."""
+    sent = []
+    queue = list(answers)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        answer = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return httpx.Response(answer.get("error_code", 200), json=answer)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    bot = TelegramTransport(TOKEN, client=client)
+    return waitlist_ping.WaitlistPing(bot.send_text, CHAT), sent
+
+
+@pytest.fixture(autouse=True)
+def no_waits(monkeypatch):
+    waits = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(waitlist_ping.asyncio, "sleep", sleep)
+    return waits
+
+
+def _logged(caplog) -> str:
+    return "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_the_message_names_the_address_and_the_time_in_utc():
+    at = datetime(2026, 10, 4, 21, 1, 7, 500000, tzinfo=timezone.utc)
+    assert waitlist_ping.message("a@example.com", at) == (
+        "New waitlist signup!\n\nEmail: a@example.com\nTime: 2026-10-04T21:01:07Z"
+    )
+
+
+async def test_one_send_to_the_chat_as_plain_text(no_waits):
+    ping, sent = _ping(OK)
+    await ping("*bold*@example.com")
+    assert len(sent) == 1
+    assert sent[0]["chat_id"] == CHAT
+    assert "parse_mode" not in sent[0]
+    assert "Email: *bold*@example.com" in sent[0]["text"]
+    assert no_waits == []
+
+
+async def test_a_429_waits_what_telegram_names_then_sends_again(no_waits):
+    paced = {
+        "ok": False,
+        "error_code": 429,
+        "description": "Too Many Requests",
+        "parameters": {"retry_after": 7},
+    }
+    ping, sent = _ping(paced, OK)
+    await ping("a@example.com")
+    assert len(sent) == 2
+    assert no_waits == [7.0]
+
+
+async def test_a_long_retry_after_is_capped(no_waits):
+    paced = {
+        "ok": False,
+        "error_code": 429,
+        "description": "Too Many Requests",
+        "parameters": {"retry_after": 3600},
+    }
+    ping, _ = _ping(paced, OK)
+    await ping("a@example.com")
+    assert no_waits == [waitlist_ping.MAX_PACED_WAIT_SECONDS]
+
+
+async def test_no_answer_is_retried_with_a_growing_wait_then_logged(no_waits, caplog):
+    lost = httpx.ConnectError(
+        f"no route to https://api.telegram.org/bot{TOKEN}/sendMessage"
+    )
+    ping, sent = _ping(lost)
+    with caplog.at_level(logging.ERROR, logger="channels.waitlist_ping"):
+        await ping("a@example.com")
+    # The egress floor retries a lost connection itself; these are the
+    # ping's own waits between its sends.
+    assert len(sent) >= waitlist_ping.ATTEMPTS
+    assert no_waits[-2:] == [2.0, 4.0]
+    assert "waitlist ping: not sent after 3 tries" in _logged(caplog)
+    assert TOKEN not in _logged(caplog)
+
+
+@pytest.mark.parametrize(
+    "answer, reason",
+    [
+        (
+            {
+                "ok": False,
+                "error_code": 400,
+                "description": "Bad Request: chat not found",
+            },
+            "chat not found",
+        ),
+        (
+            {"ok": False, "error_code": 401, "description": "Unauthorized"},
+            "Unauthorized",
+        ),
+        (
+            {
+                "ok": False,
+                "error_code": 403,
+                "description": "Forbidden: bot was blocked by the user",
+            },
+            "bot was blocked",
+        ),
+        (
+            {
+                "ok": False,
+                "error_code": 400,
+                "description": "Bad Request: message is too long",
+            },
+            "message is too long",
+        ),
+    ],
+)
+async def test_a_refusal_that_will_not_change_is_logged_with_its_reason_once(
+    answer, reason, no_waits, caplog
+):
+    ping, sent = _ping(answer)
+    with caplog.at_level(logging.ERROR, logger="channels.waitlist_ping"):
+        await ping("a@example.com")
+    assert len(sent) == 1
+    assert no_waits == []
+    logged = _logged(caplog)
+    assert "waitlist ping: refused, not retried" in logged
+    assert reason in logged
+    assert TOKEN not in logged and CHAT not in logged
+
+
+async def test_an_unexpected_failure_is_logged_and_never_raised(caplog):
+    async def broken(chat_id, text):
+        raise RuntimeError("a bug")
+
+    with caplog.at_level(logging.ERROR, logger="channels.waitlist_ping"):
+        await waitlist_ping.WaitlistPing(broken, CHAT)("a@example.com")
+    assert "NO MESSAGE WAS SENT" in _logged(caplog)
+
+
+class _Bot:
+    async def send_text(self, chat_id, text):
+        return "1"
+
+
+@pytest.mark.parametrize(
+    "env, bot, missing",
+    [
+        ({}, _Bot(), "TARGET_WAITLIST_PING_CHAT_ID"),
+        (
+            {"TARGET_WAITLIST_PING_CHAT_ID": " \n"},
+            _Bot(),
+            "TARGET_WAITLIST_PING_CHAT_ID",
+        ),
+        ({"TARGET_WAITLIST_PING_CHAT_ID": CHAT}, None, "TARGET_TELEGRAM_BOT_TOKEN"),
+        ({}, None, "TARGET_TELEGRAM_BOT_TOKEN, TARGET_WAITLIST_PING_CHAT_ID"),
+    ],
+)
+def test_without_a_bot_or_a_chat_it_is_off_and_says_which(env, bot, missing, caplog):
+    with caplog.at_level(logging.WARNING, logger="channels.waitlist_ping"):
+        assert waitlist_ping.from_env(env, bot) is None
+    assert f"waitlist ping: off, not set: {missing}" in _logged(caplog)
+
+
+async def test_with_both_it_sends_to_the_trimmed_chat():
+    seen = []
+
+    class Bot:
+        async def send_text(self, chat_id, text):
+            seen.append(chat_id)
+            return "1"
+
+    ping = waitlist_ping.from_env({"TARGET_WAITLIST_PING_CHAT_ID": f" {CHAT}\n"}, Bot())
+    await ping("a@example.com")
+    assert seen == [CHAT]
