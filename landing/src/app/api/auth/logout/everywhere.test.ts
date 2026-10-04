@@ -63,7 +63,7 @@ describe("sign out of all devices", () => {
     expect(captured).toEqual([
       { path: "/signout?everywhere=true", init: { method: "POST", plane: "auth" } },
     ]);
-    expect(response.status).toBe(307);
+    expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("https://storydump.app/login");
   });
 
@@ -80,6 +80,7 @@ describe("sign out of all devices", () => {
   it("says a plain sign-out was not confirmed when the API fails", async () => {
     state.apiOk = false;
     const response = await POST(post());
+    expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe(
       "https://storydump.app/login?signout=unconfirmed",
     );
@@ -88,6 +89,7 @@ describe("sign out of all devices", () => {
 
   it("lands a plain sign-out on /login when it worked", async () => {
     const response = await POST(post());
+    expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("https://storydump.app/login");
   });
 
