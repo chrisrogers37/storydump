@@ -2134,10 +2134,10 @@ and the outbox records what happened to a row the same way. It ends only the clo
 singletons, its slot, refresh and reauth legs, the sender sweep's `deliver_outbox`, and the two
 sync kinds, whose source it re-arms for tomorrow, as `work_loop._rearm_source` does, because a
 sync's mint disarms it. Nothing re-mints the others (`publish_pipeline`, `send_email`,
-`offboard_workspace`, `revoke_workspace_credentials`, `retention_sweep`, `reencrypt_credentials`),
-so ending one would unblock no successor and only lose its work; they are left as they were.
-(Since 2026-10-03 the clock mints `retention_sweep` hourly; a late one still runs, since
-`fn_claim_job` reads no deadline.) For
+`offboard_workspace`, `revoke_workspace_credentials`, `reencrypt_credentials`), so ending one
+would unblock no successor and only lose its work; they are left as they were. The leg also
+leaves `retention_sweep`, which nothing minted when it was written: since 2026-10-03 the clock
+mints it hourly, and a late one still runs, since `fn_claim_job` reads no deadline. For
 the kinds it ends, the leg is the worker's spent-budget path without the tenant notice, which that
 path calls a courtesy, not the record.
 

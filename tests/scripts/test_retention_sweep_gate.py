@@ -16,13 +16,17 @@ import uuid
 import psycopg2
 import pytest
 
+from src.services.target import scheduler
+from src.services.target.unit_of_work import make_session_for
 from src.services.target.work_loop import WorkerConfig
 
 from tests.scripts.conftest import (
     _scratch,
+    as_user,
     execute,
     fetch_all,
     fetch_one,
+    ingress_engine,
     replay_advertised_stream,
     run_as_worker,
     seed_workspace_chain,
@@ -149,4 +153,36 @@ def test_a_run_keeps_calling_until_a_call_comes_back_short(sweep_db):
     """The same batch of 2 with time left: the run calls again and drains."""
     drain = WorkerConfig(retention_batch=2)
     asyncio.run(run_as_worker(sweep_db, "retention_sweep", config=drain))
+    assert _survivors(sweep_db) == sorted((s, k) for s, k, _ in NEW)
+
+
+def test_each_batch_commits_on_its_own_and_a_short_batch_ends_the_run(sweep_db):
+    """Through the worker's own session factory, counting its calls: with a
+    batch of 2 and 3 aged rows, a factory that fails on its 2nd call leaves the
+    1st batch deleted (each batch commits on its own) and raises; then, with 1
+    aged row left, the run makes ONE call (a short batch ends it)."""
+    calls = []
+
+    async def run(fail_on_call):
+        async with ingress_engine(as_user(sweep_db, "svc_worker")) as engine:
+            sessions = make_session_for(engine)
+
+            def factory():
+                calls.append(None)
+                if len(calls) == fail_on_call:
+                    raise RuntimeError("the 2nd batch fails")
+                return sessions({})
+
+            await scheduler.execute_retention_sweep(
+                factory, keep_seconds=7 * 24 * 3600, batch=2, budget_seconds=60
+            )
+
+    with pytest.raises(RuntimeError, match="2nd batch"):
+        asyncio.run(run(fail_on_call=2))
+    assert len(calls) == 2
+    assert len(_survivors(sweep_db)) == len(NEW) + len(OLD) - 2
+
+    calls.clear()
+    asyncio.run(run(fail_on_call=None))
+    assert len(calls) == 1
     assert _survivors(sweep_db) == sorted((s, k) for s, k, _ in NEW)

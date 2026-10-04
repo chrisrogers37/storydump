@@ -103,8 +103,8 @@ class WorkerConfig:
     global_limit: int = 25  # 05: global sends per window
     global_window_seconds: int = 1
     reap_limit: int = 500  # 05: the reap's total per sweep; the card sweep reuses it
-    # 05 retention: `rate_counters` keeps 7 d (windows are minutes, so a row
-    # past its window only holds the address it was keyed on); 5,000 per batch.
+    # 05 retention: `rate_counters` keeps 7 d (every window is 24 h or less, so
+    # a row that old only holds the key it counted); 5,000 per batch.
     rate_counters_keep_seconds: int = 7 * 24 * 3600
     retention_batch: int = 5000
     #: Batches repeat within one run until one comes back short or this is spent.

@@ -64,9 +64,10 @@ does.
   `reap_expired` and `reconcile_ambiguous` every 60 s, `alert_stranded_sources`
   every 6 h, `retention_sweep` every hour (5,000-row batches until one comes
   back short or 5 s is spent), `reap_transit_assets` every 6 h when a transit
-  store exists. The reaper's 60 s and its 500-row budget (`WorkerConfig.reap_limit`, the sweep's
-  total across every leg) are `05`'s, pinned by `tests/src/test_worker.py`:
-  an expired lease holds its serialization key until the next sweep.
+  store exists. The reaper's 60 s and its 500-row budget
+  (`WorkerConfig.reap_limit`, the sweep's total across every leg) are `05`'s,
+  pinned by `tests/src/test_worker.py`: an expired lease holds its
+  serialization key until the next sweep.
   The fleet monitor's worker-down threshold (`DEFAULT_WORKER_STALE_S` in
   `scripts/scheduling_monitor.py`) rests on the fastest of these beats, today
   60 s: slow every 60 s kind and that threshold must rise with them —

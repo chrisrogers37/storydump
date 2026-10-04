@@ -569,12 +569,14 @@ async def execute_retention_sweep(
                 )
             ).scalar()
         total += deleted
-        if deleted < batch or time.monotonic() >= stop_at:
+        drained = deleted < batch
+        if drained or time.monotonic() >= stop_at:
             break
     logger.info(
-        "retention_sweep: deleted %d rate_counters row(s) older than %ds",
+        "retention_sweep: deleted %d rate_counters row(s) older than %ds; %s",
         total,
         keep_seconds,
+        "drained" if drained else "time budget spent, more remain",
     )
     return total
 
