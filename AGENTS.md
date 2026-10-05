@@ -2,8 +2,9 @@
 
 Guidance for any coding agent working in this repository. This is the
 vendor-neutral file the wider tool ecosystem reads; `CLAUDE.md` carries the
-Claude Code specifics and defers to this document for everything shared, so the
-two cannot disagree about the substance.
+Claude Code specifics, repeats the safety rules and the rules every PR follows,
+and defers to this document for everything else. A PR that adds or changes one
+of those rules here makes the same change in `CLAUDE.md`.
 
 **The safety rules below are not advisory.** This system posts to Instagram and
 Telegram on behalf of paying tenants.

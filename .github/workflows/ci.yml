@@ -134,6 +134,12 @@ jobs:
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
+        # Advisory, so it reports without gating: a red Test job can make
+        # Railway skip the deploy (documentation/guides/ci-cd-pipeline.md).
+        # fail_ci_if_error misses a failure of the action itself (a TLS
+        # handshake failure), and the timeout ends a stalled upload.
+        continue-on-error: true
+        timeout-minutes: 5
         with:
           files: ./coverage.xml
           fail_ci_if_error: false

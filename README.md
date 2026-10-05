@@ -234,7 +234,7 @@ storydump/
 
 Key resources:
 - **[AGENTS.md](AGENTS.md)** - The canonical developer and agent guide: safety rules, architecture, the command port, setup, commands, testing, services
-- **[CLAUDE.md](CLAUDE.md)** - Claude Code specifics, plus the safety rules repeated
+- **[CLAUDE.md](CLAUDE.md)** - Claude Code specifics, plus the rules it repeats from `AGENTS.md`
 - **[Quick Start Guide](documentation/guides/quickstart.md)** - Start here: using, developing, or operating Storydump
 - **[Reading the ledger](documentation/operations/reading-the-ledger.md)** - The `storydump` read and write verbs
 - **[Deployment Guide](documentation/guides/deployment.md)** - Production deployment checklist

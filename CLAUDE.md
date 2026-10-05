@@ -4,18 +4,20 @@ Guidance for Claude Code in this repository.
 
 **Read [`AGENTS.md`](AGENTS.md) first.** It is the canonical, vendor-neutral
 guide — project overview, architecture, the command port, setup, commands,
-testing, services, and what is deliberately not wired. This file carries only
-what is specific to Claude Code, plus the safety rules, which are repeated here
-rather than referenced because they are the one thing that must not depend on a
-reader following a link.
+testing, services, and what is deliberately not wired. This file carries what
+is specific to Claude Code, plus two kinds of rule repeated from `AGENTS.md`:
+the safety rules and the rules every PR follows. They are repeated here rather
+than referenced because an agent must know them before acting, and that must
+not depend on a reader following a link.
 
-Everything shared lives in `AGENTS.md` and is **not** duplicated here. Two
-documents that must be manually kept in agreement are two documents that will
-eventually disagree, so the overlap is **exactly one section** — the safety
-rules below, repeated because they must not depend on a reader following a
-link. That single overlap is guarded: `tests/test_agent_docs.py` fails if the
-two never-run lists drift apart, or if either document names a command the CLI
-does not have. Nothing else here is shared, and nothing else needs guarding.
+Everything else shared stays in `AGENTS.md`, behind the pointer above, and is
+**not** duplicated here, because two documents kept in agreement by hand
+eventually disagree. That includes reference needed only while using a tool,
+such as the CLI's usage or one verb's own rules. The never-run lists are
+guarded: `tests/test_agent_docs.py` fails if they drift apart, or if either
+document names a command the CLI does not have. Nothing pins the rest of either
+kind of rule, so a PR that adds or changes one in `AGENTS.md` makes the same
+change here, and review checks both files at the same head.
 
 ---
 
@@ -90,7 +92,5 @@ that write despite reading as inspection.
 ## Working here
 
 Everything else — setup, commands, testing, services, pre-commit and CI,
-documentation placement — is in [`AGENTS.md`](AGENTS.md) and is deliberately
-not repeated here. If you find yourself about to add operational guidance to
-this file, it belongs there instead: this file is Claude Code specifics plus
-the safety block, and nothing else.
+documentation placement — is in [`AGENTS.md`](AGENTS.md). If you find yourself
+about to add operational guidance to this file, it belongs there instead.

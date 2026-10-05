@@ -236,7 +236,7 @@ The design is the consolidated plan's `01-target-architecture.md` (the interacti
 1. Start with **[quickstart.md](guides/quickstart.md)**, then **[dev-environment-setup.md](guides/dev-environment-setup.md)** (local setup)
 2. Read **[testing-guide.md](guides/testing-guide.md)** (understand testing)
 3. Read **[../AGENTS.md](../AGENTS.md)** (architecture, the command port, setup, commands, testing) and the **[consolidated design plan](planning/2026-08-02-consolidated-design-plan/README.md)** (where the system is going)
-4. Read root **[CLAUDE.md](../CLAUDE.md)** for the safety rules (it defers to `AGENTS.md` for everything else)
+4. If you use Claude Code, also read root **[CLAUDE.md](../CLAUDE.md)**
 
 ### For Deploying to Production
 1. Follow **[deployment.md](guides/deployment.md)** step-by-step
@@ -268,7 +268,7 @@ These critical files remain in the project root for visibility:
 - **[../README.md](../README.md)** - Project overview and quick start
 - **[../CHANGELOG.md](../CHANGELOG.md)** - Version history and release notes
 - **[../AGENTS.md](../AGENTS.md)** - The canonical developer and agent guide (safety rules, architecture, the command port, setup, commands, testing, services)
-- **[../CLAUDE.md](../CLAUDE.md)** - Claude Code specifics plus the safety rules, repeated; it defers to `AGENTS.md` for everything else
+- **[../CLAUDE.md](../CLAUDE.md)** - Claude Code specifics, plus the rules it repeats from `AGENTS.md`; it defers to `AGENTS.md` for everything else
 
 ### External Documentation
 - [Telegram Bot API](https://core.telegram.org/bots/api)
