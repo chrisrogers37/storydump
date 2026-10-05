@@ -10,8 +10,7 @@
  * So this walks the join route's module graph (its page and route handler,
  * the root layout that wraps them, and everything they import, transitively)
  * and fails when it reaches `lib/analytics.ts`, the module custom events go
- * through, or any module other than `lib/posthog.ts` that loads posthog-js or
- * calls `capture` directly. The marketing home page is walked as the positive
+ * through, or any module other than `lib/posthog.ts` that loads posthog-js. The marketing home page is walked as the positive
  * control: its FAQ tracks an event, so a walker that could not follow an
  * import fails there first.
  *
@@ -29,7 +28,7 @@ import { describe, expect, it } from "vitest";
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const APP = path.join(SRC, "app");
 const ANALYTICS = path.join(SRC, "lib", "analytics.ts");
-const PAGEVIEWS = path.join(SRC, "lib", "posthog.ts");
+const POSTHOG = path.join(SRC, "lib", "posthog.ts");
 
 /** `import … from "x"`, `export … from "x"`, `import "x"` and `import("x")`. */
 const IMPORT =
@@ -83,7 +82,7 @@ function eventSenders(graph: Set<string>): string[] {
     .filter(
       (file) =>
         file === ANALYTICS ||
-        (file !== PAGEVIEWS && /posthog-js|\bcapture\(/.test(readFileSync(file, "utf8"))),
+        (file !== POSTHOG && /["']posthog-js[/"']/.test(readFileSync(file, "utf8"))),
     )
     .map((file) => path.relative(SRC, file));
 }

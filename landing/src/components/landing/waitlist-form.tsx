@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { trackEvent } from "@/lib/analytics"
-import { UTM_KEYS } from "@/lib/utm"
+import { type UtmKey, utmFrom } from "@/lib/utm"
 
 interface WaitlistFormProps {
   variant?: "hero" | "footer"
@@ -17,15 +17,9 @@ const STORAGE_KEY = "storydump-waitlist-registered"
 
 type FormStatus = "idle" | "submitting" | "success" | "error" | "duplicate"
 
-function getUtmParams(): Record<string, string> {
+function getUtmParams(): Partial<Record<UtmKey, string>> {
   if (typeof window === "undefined") return {}
-  const params = new URLSearchParams(window.location.search)
-  const utm: Record<string, string> = {}
-  for (const key of UTM_KEYS) {
-    const val = params.get(key)
-    if (val) utm[key] = val
-  }
-  return utm
+  return utmFrom(new URLSearchParams(window.location.search))
 }
 
 /**

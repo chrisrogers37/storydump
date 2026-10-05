@@ -1,53 +1,66 @@
 import type { CaptureResult, PostHog, PostHogConfig } from "posthog-js/dist/module.slim.no-external"
 import { POSTHOG_HOST } from "@/lib/posthog-host"
-import { UTM_KEYS } from "@/lib/utm"
+import { utmFrom } from "@/lib/utm"
 
 /**
  * The site's analytics: PostHog in cookieless mode, sending pageviews (here)
  * and the custom events in `analytics.ts`, and nothing else.
  *
- * Cookieless: nothing is written to the visitor's browser. PostHog counts a
- * visitor by a hash of the site, the visitor's address and browser and a salt
- * it replaces daily, computed on its servers. The address is dropped before
+ * Cookieless: nothing is kept in the visitor's browser (the library only
+ * checks that storage works, writing a test key and removing it at once).
+ * PostHog counts a visitor by a hash of the site, the visitor's address and
+ * browser and a salt it replaces daily, computed on its servers. The address is dropped before
  * the event is stored, so no event records it or a location derived from it.
  * The project needs "Cookieless server hash mode" turned on, or PostHog drops
  * every event at ingestion.
  *
  * The library is posthog-js's slim build, which bundles none of the optional
  * features (autocapture, session replay, heatmaps, surveys, feature flags,
- * exception capture). It is downloaded from this site, after the page has
- * hydrated, the first time something is sent; `disable_external_dependency_loading`
- * stops it fetching further scripts, so the only third-party origin the page
- * talks to is the ingestion host (`posthog-host.ts`).
+ * exception capture). It is downloaded from this site once the browser is
+ * idle after the first event, which calls queue for until then;
+ * `disable_external_dependency_loading` stops it fetching further scripts, so
+ * the only third-party origin the page talks to is the ingestion host
+ * (`posthog-host.ts`).
  */
 
 const KEY = process.env.NEXT_PUBLIC_POSTHOG_KEY
 
 /** An invite link's path is its token, a bearer credential; nothing under it is sent. */
-export function isInvitePath(pathname: string): boolean {
+function isInvitePath(pathname: string): boolean {
   return pathname.startsWith("/join/")
+}
+
+/** An address, or null for one that does not parse (`$direct`, say). */
+function parse(value: unknown): URL | null {
+  if (typeof value !== "string") return null
+  try {
+    return new URL(value)
+  } catch {
+    return null
+  }
 }
 
 /**
  * Strips an event to what the site means to send: the page's address without
- * its query string, the UTM tags as properties, the referrer's site only.
- * An event on an invite page is dropped whole.
+ * its query string, the UTM tags as properties, the referrer's site only, no
+ * page title. An event on an invite page is dropped whole, and an invite page
+ * is never named as the previous page.
  */
 export function redact(event: CaptureResult | null): CaptureResult | null {
   if (!event) return null
   const props = event.properties
-  if (typeof props.$current_url === "string") {
-    const url = new URL(props.$current_url)
-    if (isInvitePath(url.pathname)) return null
-    for (const key of UTM_KEYS) {
-      const value = url.searchParams.get(key)
-      if (value) props[key] ??= value
-    }
-    props.$current_url = url.origin + url.pathname
+  const page = parse(props.$current_url)
+  if (page) {
+    if (isInvitePath(page.pathname)) return null
+    for (const [key, value] of Object.entries(utmFrom(page.searchParams))) props[key] ??= value
+    props.$current_url = page.origin + page.pathname
   }
-  if (typeof props.$referrer === "string" && URL.canParse(props.$referrer)) {
-    props.$referrer = new URL(props.$referrer).origin
+  const referrer = parse(props.$referrer)
+  if (referrer) props.$referrer = referrer.origin
+  if (typeof props.$prev_pageview_pathname === "string" && isInvitePath(props.$prev_pageview_pathname)) {
+    delete props.$prev_pageview_pathname
   }
+  delete props.title
   delete event.$set
   delete event.$set_once
   return event
@@ -56,21 +69,16 @@ export function redact(event: CaptureResult | null): CaptureResult | null {
 const CONFIG: Partial<PostHogConfig> = {
   api_host: POSTHOG_HOST,
   cookieless_mode: "always",
+  persistence: "memory",
   person_profiles: "never",
-  // Pageviews are sent by `capturePageview`, on each route change.
+  // A link carrying ?__posthog_debug=true would otherwise store a debug flag
+  // in the visitor's localStorage.
+  debug: false,
+  // Pageviews are sent by `components/analytics/pageviews.tsx`, on each route
+  // change; with this off the library sends no pageleave either.
   capture_pageview: false,
-  capture_pageleave: false,
   autocapture: false,
-  rageclick: false,
-  capture_dead_clicks: false,
-  capture_heatmaps: false,
-  capture_exceptions: false,
-  capture_performance: false,
   disable_session_recording: true,
-  disable_surveys: true,
-  disable_product_tours: true,
-  disable_conversations: true,
-  disable_web_experiments: true,
   // No feature-flag or remote-config call: the project's settings cannot turn
   // on anything this file leaves off.
   advanced_disable_flags: true,
@@ -93,44 +101,40 @@ const CONFIG: Partial<PostHogConfig> = {
   before_send: redact,
 }
 
-type Call = (posthog: PostHog) => void
+let library: Promise<PostHog> | undefined
 
-let client: PostHog | undefined
-/** Calls made while the library downloads; undefined until the first call, null if it failed. */
-let pending: Call[] | null | undefined
-
-/** Runs `call` once the library has loaded; with no project key, never. */
-function withPostHog(call: Call) {
-  if (!KEY || typeof window === "undefined") return
-  if (client) return call(client)
-  if (pending === null) return
-  if (pending === undefined) {
-    const queue: Call[] = (pending = [])
-    import("posthog-js/dist/module.slim.no-external").then(
-      ({ default: posthog }) => {
-        posthog.init(KEY, CONFIG)
-        client = posthog
-        for (const queued of queue.splice(0)) queued(posthog)
-      },
-      () => {
-        pending = null
-      },
-    )
-  }
-  pending.push(call)
+/** Downloads and starts the library once, when the browser is next idle. */
+function load(key: string): Promise<PostHog> {
+  library ??= new Promise<void>((resolve) =>
+    "requestIdleCallback" in window ? requestIdleCallback(() => resolve()) : setTimeout(resolve, 1),
+  )
+    .then(() => import("posthog-js/dist/module.slim.no-external"))
+    .then(({ default: posthog }) => {
+      posthog.init(key, CONFIG)
+      return posthog
+    })
+  return library
 }
 
 /**
- * Sends one event. The time is taken now, so an event fired while the library
- * downloads keeps the moment it happened.
+ * Sends one event; with no project key, or on an invite page, nothing. The
+ * time is taken now, so an event fired while the library downloads keeps the
+ * moment it happened. Calls made meanwhile are sent in order once it arrives;
+ * if it fails to load they are dropped.
  */
 export function capture(name: string, properties?: Record<string, unknown>) {
-  if (typeof window === "undefined" || isInvitePath(window.location.pathname)) return
+  if (!KEY || typeof window === "undefined" || isInvitePath(window.location.pathname)) return
   const timestamp = new Date()
-  withPostHog((posthog) => posthog.capture(name, properties, { timestamp }))
-}
-
-/** Sends a pageview for the page the visitor is on. */
-export function capturePageview() {
-  capture("$pageview")
+  // The page the event happened on, not the one the visitor is on when the
+  // library arrives.
+  const page = { $current_url: window.location.href, $pathname: window.location.pathname }
+  load(KEY).then(
+    (posthog) => {
+      // The library notes the current page as it sends (the next pageview's
+      // previous page): never let it note an invite page.
+      if (isInvitePath(window.location.pathname)) return
+      posthog.capture(name, { ...properties, ...page }, { timestamp })
+    },
+    () => {},
+  )
 }

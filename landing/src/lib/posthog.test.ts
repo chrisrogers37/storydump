@@ -2,7 +2,7 @@
  * What the site sends to PostHog: `redact`, which every event passes through
  * on its way out, and `capture`, which loads the library on first use and
  * refuses invite pages. The library is mocked; `posthog.init`'s config is
- * pinned here, because a default it leaves on is data the site collects.
+ * pinned whole here, because a default it leaves on is data the site collects.
  */
 
 import type { CaptureResult } from "posthog-js/dist/module.slim.no-external";
@@ -15,10 +15,19 @@ function event(properties: Record<string, unknown>, extra: Partial<CaptureResult
   return { uuid: "u", event: "$pageview", properties, ...extra } as CaptureResult;
 }
 
-async function load({ key = "phc_test", pathname = "/" } = {}) {
+/** The browser's location, which a test moves to stand for a navigation. */
+const location = { href: "", pathname: "" };
+
+function goTo(path: string) {
+  location.href = `https://storydump.app${path}`;
+  location.pathname = new URL(location.href).pathname;
+}
+
+async function load({ key = "phc_test", path = "/" } = {}) {
   vi.resetModules();
   vi.stubEnv("NEXT_PUBLIC_POSTHOG_KEY", key);
-  vi.stubGlobal("window", { location: { pathname } });
+  goTo(path);
+  vi.stubGlobal("window", { location });
   return import("./posthog");
 }
 
@@ -83,55 +92,87 @@ describe("redact", () => {
     expect(redact(event({ $current_url: "https://storydump.app/join/some-token" }))).toBeNull();
   });
 
-  it("sets no person properties", async () => {
+  it("never names an invite page as the previous page", async () => {
     const { redact } = await load();
-    const out = redact(event({}, { $set: { a: 1 }, $set_once: { b: 2 } }));
+    const out = redact(event({ $current_url: "https://storydump.app/dashboard", $prev_pageview_pathname: "/join/tok" }));
+    expect(out?.properties).not.toHaveProperty("$prev_pageview_pathname");
+    const kept = redact(event({ $current_url: "https://storydump.app/blog", $prev_pageview_pathname: "/" }));
+    expect(kept?.properties.$prev_pageview_pathname).toBe("/");
+  });
+
+  it("sends no page title and no person properties", async () => {
+    const { redact } = await load();
+    const out = redact(event({ title: "Storydump" }, { $set: { a: 1 }, $set_once: { b: 2 } }));
+    expect(out?.properties).not.toHaveProperty("title");
     expect(out).not.toHaveProperty("$set");
     expect(out).not.toHaveProperty("$set_once");
   });
 });
 
 describe("capture", () => {
-  it("loads the library once, cookieless, with every optional feature off", async () => {
+  it("loads the library once, with exactly this config", async () => {
     const { capture, redact } = await load();
     capture("CTA Click", { location: "header" });
     capture("$pageview");
     await loaded();
     expect(library.init).toHaveBeenCalledTimes(1);
-    expect(library.init).toHaveBeenCalledWith(
-      "phc_test",
-      expect.objectContaining({
-        api_host: "https://us.i.posthog.com",
-        cookieless_mode: "always",
-        person_profiles: "never",
-        capture_pageview: false,
-        capture_pageleave: false,
-        autocapture: false,
-        disable_session_recording: true,
-        advanced_disable_flags: true,
-        disable_external_dependency_loading: true,
-        save_campaign_params: false,
-        property_denylist: expect.arrayContaining(["ph_keyword", "$screen_width", "$timezone"]),
-        before_send: redact,
-      }),
-    );
+    expect(library.init).toHaveBeenCalledWith("phc_test", {
+      api_host: "https://us.i.posthog.com",
+      cookieless_mode: "always",
+      persistence: "memory",
+      person_profiles: "never",
+      debug: false,
+      capture_pageview: false,
+      autocapture: false,
+      disable_session_recording: true,
+      advanced_disable_flags: true,
+      disable_external_dependency_loading: true,
+      save_campaign_params: false,
+      property_denylist: [
+        "ph_keyword",
+        "$screen_height",
+        "$screen_width",
+        "$viewport_height",
+        "$viewport_width",
+        "$timezone",
+        "$timezone_offset",
+        "$browser_language",
+        "$browser_language_prefix",
+      ],
+      before_send: redact,
+    });
   });
 
-  it("sends calls made while the library downloads, in order, with the time they were made", async () => {
-    const { capture } = await load();
+  it("sends calls made while the library downloads, in order, with the page and time they were made on", async () => {
+    const { capture } = await load({ path: "/?utm_source=x" });
     const before = Date.now();
     capture("CTA Click", { location: "header" });
+    goTo("/blog");
     capture("$pageview");
     await loaded();
-    expect(library.capture.mock.calls.map(([name]) => name)).toEqual(["CTA Click", "$pageview"]);
-    const [, props, options] = library.capture.mock.calls[0];
-    expect(props).toEqual({ location: "header" });
-    expect(options.timestamp.getTime()).toBeGreaterThanOrEqual(before);
+    const calls = library.capture.mock.calls;
+    expect(calls.map(([name]) => name)).toEqual(["CTA Click", "$pageview"]);
+    expect(calls[0][1]).toEqual({
+      location: "header",
+      $current_url: "https://storydump.app/?utm_source=x",
+      $pathname: "/",
+    });
+    expect(calls[1][1]).toMatchObject({ $pathname: "/blog" });
+    expect(calls[0][2].timestamp.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it("drops a queued call if the visitor is on an invite page when the library arrives", async () => {
+    const { capture } = await load();
+    capture("$pageview");
+    goTo("/join/some-token");
+    await loaded();
+    await settle();
+    expect(library.capture).not.toHaveBeenCalled();
   });
 
   it("sends nothing, and loads nothing, on an invite page", async () => {
-    const { capture, capturePageview } = await load({ pathname: "/join/some-token" });
-    capturePageview();
+    const { capture } = await load({ path: "/join/some-token" });
+    capture("$pageview");
     capture("Sign In Click", { location: "header" });
     await settle();
     expect(library.init).not.toHaveBeenCalled();
@@ -139,8 +180,8 @@ describe("capture", () => {
   });
 
   it("sends nothing without a project key", async () => {
-    const { capturePageview } = await load({ key: "" });
-    capturePageview();
+    const { capture } = await load({ key: "" });
+    capture("$pageview");
     await settle();
     expect(library.init).not.toHaveBeenCalled();
   });
