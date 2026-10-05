@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,7 @@ export function MembersCard({
   currentUserId,
   canRemove,
   telegramGroupLinked,
+  children,
 }: {
   workspaceId: string;
   members: WorkspaceMember[] | null;
@@ -43,6 +44,8 @@ export function MembersCard({
   canRemove: boolean;
   /** An active Telegram group is bound here (`hasActiveTelegramGroup`). */
   telegramGroupLinked: boolean;
+  /** What the page adds for an admin above the list: inviting (#1563). */
+  children?: ReactNode;
 }) {
   const router = useRouter();
   const [pending, setPending] = useState<string | null>(null);
@@ -79,6 +82,7 @@ export function MembersCard({
           <Notice tone="error">{error}</Notice>
         )}
         {stillInGroup && <Notice>{stillInGroup}</Notice>}
+        {children}
         {members === null ? (
           <p className="text-sm text-muted-foreground">
             Members could not be loaded just now. Reload to try again.
