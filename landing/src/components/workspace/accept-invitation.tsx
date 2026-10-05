@@ -1,11 +1,12 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, type ReactElement } from "react";
 import { Loader2 } from "lucide-react";
 
 import { callBff, postJson } from "@/lib/bff";
 import { Button } from "@/components/ui/button";
+import { SignOutButton } from "@/components/auth/sign-out-button";
 
 /**
  * The accept control.
@@ -18,17 +19,17 @@ import { Button } from "@/components/ui/button";
 export function AcceptInvitation({ token }: { token: string }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<{ reason: unknown; status: number } | null>(null);
 
   async function accept() {
     setPending(true);
-    setError(null);
+    setRefusal(null);
     const result = await callBff(
       `/api/invitations/${encodeURIComponent(token)}/accept`,
       postJson({}),
     );
     if (!result.ok) {
-      setError(messageFor(result.error, result.status));
+      setRefusal({ reason: result.error, status: result.status });
       setPending(false);
       return;
     }
@@ -48,12 +49,51 @@ export function AcceptInvitation({ token }: { token: string }) {
         {pending && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
         {pending ? "Joining…" : "Accept invitation"}
       </Button>
-      {error && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
-      )}
+      {refusal && <AcceptRefusal reason={refusal.reason} status={refusal.status} token={token} />}
     </div>
+  );
+}
+
+/**
+ * A refused accept: its sentence and, where one exists, the action that resolves
+ * it. Hook-free and exported, so a test can read it as an element tree.
+ *
+ * `identity_mismatch` is the API's answer when the signed-in Google address is
+ * not the invited one. Signing in again is the remedy, so the sign-out is right
+ * there, landing back on this invitation as the page's own does: only
+ * `/join/[token]/start` sets the cookie that carries the invitation through the
+ * next sign-in. The invited address is not named, for the reason the page names
+ * nothing about the invitation to whoever holds the link.
+ */
+export function AcceptRefusal({
+  reason,
+  status,
+  token,
+}: {
+  reason: unknown;
+  status: number;
+  token: string;
+}): ReactElement {
+  if (reason === "identity_mismatch") {
+    return (
+      <div className="space-y-1">
+        <p role="alert" className="text-sm text-destructive">
+          This invitation is for a different Google account. Sign out, then sign in with the
+          one it was sent to.
+        </p>
+        <SignOutButton
+          className="text-sm underline underline-offset-2"
+          redirectTo={`/join/${encodeURIComponent(token)}`}
+        >
+          Use a different account
+        </SignOutButton>
+      </div>
+    );
+  }
+  return (
+    <p role="alert" className="text-sm text-destructive">
+      {messageFor(reason, status)}
+    </p>
   );
 }
 
@@ -67,8 +107,6 @@ function messageFor(reason: unknown, status: number): string {
       return "This invitation has already been used.";
     case "invitation_not_found":
       return "This link is not a valid invitation. Check you copied all of it.";
-    case "email_mismatch":
-      return "This invitation was sent to a different address. Sign in with that account.";
     case "already_member":
       return "You are already in this workspace.";
     // The browser's own `fetch` throwing. It used to arrive in a `catch` beside
