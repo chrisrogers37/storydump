@@ -38,11 +38,16 @@ def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def make_signed_request(payload: dict, secret: str = SECRET) -> str:
-    """Build a `signed_request` the way Meta does: sign the ENCODED payload."""
-    encoded = _b64url(json.dumps(payload).encode("utf-8"))
+def sign_raw(raw: bytes, secret: str = SECRET) -> str:
+    """Build a `signed_request` around payload bytes the way Meta does: sign
+    the ENCODED payload."""
+    encoded = _b64url(raw)
     sig = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256)
     return f"{_b64url(sig.digest())}.{encoded}"
+
+
+def make_signed_request(payload: dict, secret: str = SECRET) -> str:
+    return sign_raw(json.dumps(payload).encode("utf-8"), secret)
 
 
 def valid_payload(**over) -> dict:
@@ -180,6 +185,18 @@ class TestTheSignatureIsVerifiedBeforeThePayloadIsRead:
             meta_callbacks.SignedRequestInvalid, match="unexpected algorithm"
         ):
             meta_callbacks.verify_signed_request(signed, [SECRET, "other-secret"])
+
+    def test_a_correctly_signed_payload_nested_past_the_recursion_limit_is_refused(
+        self,
+    ):
+        """JSON nested deeper than the parser recurses is refused as not JSON,
+        never raised out of the verifier."""
+        depth = 100_000  # far past any interpreter's recursion limit
+        raw = b'{"algorithm": "HMAC-SHA256", "x": ' + b"[" * depth + b"]" * depth + b"}"
+        with pytest.raises(
+            meta_callbacks.SignedRequestInvalid, match="payload not json"
+        ):
+            meta_callbacks.verify_signed_request(sign_raw(raw), [SECRET])
 
     def test_a_correctly_signed_valid_request_still_verifies(self, reads):
         signed = make_signed_request(valid_payload())

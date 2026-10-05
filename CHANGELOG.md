@@ -265,6 +265,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A Meta callback's signed payload nested past the interpreter's recursion limit is refused as not JSON.** `meta_callbacks._decode_payload` treats a `RecursionError` from `json.loads` like any other payload that is not JSON (`payload not json`), so the verifier refuses it as an invalid signed request.
 - **Meta's deauthorize and data-deletion callbacks decode and parse a `signed_request`'s payload only after its signature has verified.**
 - **The API bounds request bodies, and the Meta callbacks read only a small urlencoded form.** `/webhooks/meta/deauthorize` and `/webhooks/meta/data-deletion` accept only `application/x-www-form-urlencoded` (anything else is 415), read at most 16 KiB of it (`SIGNED_REQUEST_MAX_BYTES`; a larger body is 413, whether its length is declared or streamed), and parse only those bytes before verifying the `signed_request`. App-wide, `BodySizeLimitMiddleware` refuses a body over `API_REQUEST_BODY_MAX_BYTES` (default 1 MiB; no route takes an upload) with 413 before any route reads it, and a test pins that no route declares a body parameter.
 - **Binding a Telegram group re-checks that the person who made the link is still an admin.** A group-bind link binds only while the person who minted it is still an owner or admin of the workspace; a link minted by someone removed or demoted since binds nothing.

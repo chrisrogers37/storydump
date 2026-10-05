@@ -167,7 +167,9 @@ def _decode_payload(encoded_payload: str) -> dict[str, Any]:
 
     try:
         payload = json.loads(payload_bytes)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # Nesting past the interpreter's recursion limit is refused like any other
+        # payload that is not JSON: RecursionError is not a ValueError.
         raise SignedRequestInvalid("payload not json")
     if not isinstance(payload, dict):
         raise SignedRequestInvalid("payload not an object")
