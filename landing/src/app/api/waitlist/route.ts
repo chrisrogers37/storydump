@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { refuseCrossSite } from "@/lib/route-guards"
 import { targetFetch } from "@/lib/target-api"
-import { notifyAdmin } from "@/lib/telegram"
 import { UTM_KEYS } from "@/lib/analytics"
 
 /** The API's bounds, in characters: an address, and each campaign value. */
@@ -79,12 +78,8 @@ export async function POST(req: NextRequest) {
     signal: AbortSignal.timeout(API_TIMEOUT_MS),
   })
 
-  if (result.ok) {
-    // Fire-and-forget Telegram notification. The API does not say whether the
-    // address was new, so a repeat signup pings again.
-    notifyAdmin(email.toLowerCase()).catch(console.error)
-    return NextResponse.json(JOINED)
-  }
+  // The admin's Telegram message for the signup is the API's to send.
+  if (result.ok) return NextResponse.json(JOINED)
   if (result.error === "invalid_email") {
     return NextResponse.json(INVALID, { status: 400 })
   }

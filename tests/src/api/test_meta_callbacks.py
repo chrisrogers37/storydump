@@ -18,13 +18,17 @@ import base64
 import hashlib
 import hmac
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.formparsers import MultiPartParser
 
 from src.api.app import create_app
+from src.api.routes.meta import SIGNED_REQUEST_MAX_BYTES
 from src.config.settings import settings
 from src.services.target import meta_callbacks
+from tests.src.api.conftest import post_body, post_messages
 
 SECRET = "test-app-secret-not-a-real-one"
 SUBJECT = "1234567890"
@@ -133,6 +137,61 @@ class TestTheSignatureIsActuallyChecked:
         )
 
 
+@pytest.fixture
+def reads(monkeypatch):
+    """What the module decodes and parses, as it happens: every segment handed
+    to `_b64url_decode`, and every value handed to the `json.loads` it uses."""
+    seen = SimpleNamespace(decoded=[], parsed=[])
+    decode = meta_callbacks._b64url_decode
+
+    def spy_decode(segment):
+        seen.decoded.append(segment)
+        return decode(segment)
+
+    def spy_loads(raw):
+        seen.parsed.append(raw)
+        return json.loads(raw)
+
+    monkeypatch.setattr(meta_callbacks, "_b64url_decode", spy_decode)
+    monkeypatch.setattr(meta_callbacks, "json", SimpleNamespace(loads=spy_loads))
+    return seen
+
+
+class TestTheSignatureIsVerifiedBeforeThePayloadIsRead:
+    """The signature is checked against the payload segment exactly as
+    received, under each candidate secret in order. Nothing in the payload is
+    decoded or parsed until one of them verifies it."""
+
+    def test_a_wrong_signature_is_refused_before_the_payload_is_read(self, reads):
+        sig, _ = make_signed_request(valid_payload()).split(".")
+        with pytest.raises(meta_callbacks.SignedRequestInvalid) as refused:
+            meta_callbacks.verify_signed_request(
+                f"{sig}.{_b64url(b'not json')}", [SECRET, "other-secret"]
+            )
+        assert reads.parsed == [], "the payload is parsed only once it verifies"
+        assert reads.decoded == [sig], "the payload is decoded only once it verifies"
+        assert str(refused.value) == "signature mismatch"
+
+    def test_a_correctly_signed_payload_naming_another_algorithm_is_refused(self):
+        """Signed by the first candidate: the refusal is the algorithm's, and
+        no later candidate turns it into a mismatch."""
+        signed = make_signed_request(valid_payload(algorithm="HMAC-SHA1"))
+        with pytest.raises(
+            meta_callbacks.SignedRequestInvalid, match="unexpected algorithm"
+        ):
+            meta_callbacks.verify_signed_request(signed, [SECRET, "other-secret"])
+
+    def test_a_correctly_signed_valid_request_still_verifies(self, reads):
+        signed = make_signed_request(valid_payload())
+        assert meta_callbacks.verify_signed_request(signed, [SECRET]) == (
+            valid_payload(),
+            SECRET,
+        )
+        assert reads.parsed == [json.dumps(valid_payload()).encode()], (
+            "the verified payload is the one parsed"
+        )
+
+
 class TestItFailsClosed:
     """A deployment holding no secret must refuse EVERYTHING.
 
@@ -167,6 +226,13 @@ class TestItFailsClosed:
             ).status_code
             == 503
         )
+
+    def test_an_empty_secret_verifies_nothing(self):
+        """An empty value is not a secret, so it verifies no request — not even
+        one signed with an empty key."""
+        signed = make_signed_request(valid_payload(), secret="")
+        with pytest.raises(meta_callbacks.SignedRequestInvalid):
+            meta_callbacks.verify_signed_request(signed, [""])
 
 
 class TestTheConfirmationCode:
@@ -331,24 +397,17 @@ class TestTheGuardsMutationFoundUnpinned:
     here; the third was diagnosed INERT and is documented rather than chased.
 
     * Removing the single-secret `if not app_secret` guard survived, because
-      `verify_signed_request` filters falsy secrets before ever calling
-      `parse_signed_request` — so the route can no longer reach it. It is still
-      the primitive's own contract for direct callers, so it is pinned
-      DIRECTLY here rather than through a route.
+      no route could reach it. Refusing with no secret is still the
+      verifier's own contract for direct callers, so it is pinned DIRECTLY on
+      `verify_signed_request` here rather than through a route.
     * Dropping the workspace half of the revoke predicate survived, because no
       test executes SQL at all.
-    * Removing `if not secrets:` survived and CANNOT be killed: with the loop
-      not entered, `raise last` fires on the pre-seeded refusal, so the
-      fail-closed property is held twice over. An inert mutant is a redundant
-      guard, not a weak test, and the two diagnoses want opposite responses.
+    * Removing `if not candidates:` survives and CANNOT be killed by asserting
+      a refusal: with no candidate, no signature matches and the mismatch
+      refusal fires, so the fail-closed property is held twice over. An inert
+      mutant is a redundant guard, not a weak test, and the two diagnoses want
+      opposite responses.
     """
-
-    @pytest.mark.parametrize("secret", [None, ""])
-    def test_the_primitive_refuses_directly_when_it_has_no_secret(self, secret):
-        with pytest.raises(meta_callbacks.SignedRequestInvalid):
-            meta_callbacks.parse_signed_request(
-                make_signed_request(valid_payload()), secret
-            )
 
     def test_an_empty_candidate_list_refuses(self):
         with pytest.raises(meta_callbacks.SignedRequestInvalid):
@@ -459,3 +518,170 @@ class TestTheLineNamesWhichSecretVerified:
     def test_a_refused_request_logs_no_verified_line(self, client, verified_lines):
         assert self._post(client, _wrong_secret()).status_code == 400
         assert verified_lines() == []
+
+
+#: Both write doors. Every bound below is asserted on each: the two have
+#: separate handlers and could regress independently.
+META_POSTS = ("/webhooks/meta/deauthorize", "/webhooks/meta/data-deletion")
+#: Meta's body type.
+FORM_TYPE = "application/x-www-form-urlencoded"
+
+
+def _form_in_two(size: int) -> list[bytes]:
+    """A urlencoded body of exactly *size* bytes, one field, as two messages."""
+    prefix = b"signed_request="
+    body = prefix + b"a" * (size - len(prefix))
+    return [body[: size // 2], body[size // 2 :]]
+
+
+class TestTheBodyIsBoundedBeforeItIsParsed:
+    """Both doors are anonymous until the signature verifies, so neither lets
+    the framework parse what arrives: only Meta's urlencoded form is read, only
+    up to `SIGNED_REQUEST_MAX_BYTES`, and only those bytes are parsed — then
+    verified exactly as before."""
+
+    @pytest.mark.parametrize("path", META_POSTS)
+    def test_a_multipart_body_is_refused_without_being_parsed(
+        self, client, monkeypatch, path
+    ):
+        """Correctly signed, so the refusal is the body's type and nothing else."""
+        parsed = []
+        parse = MultiPartParser.parse
+
+        async def spy(parser):
+            parsed.append(parser)
+            return await parse(parser)
+
+        monkeypatch.setattr(MultiPartParser, "parse", spy)
+        r = client.post(
+            path,
+            data={"signed_request": make_signed_request(valid_payload())},
+            files={"upload": ("upload.bin", b"\0" * 2048)},
+        )
+        assert r.status_code == 415, r.text
+        assert parsed == [], "the multipart parser ran on an unverified body"
+
+    @pytest.mark.parametrize("streamed", [False, True], ids=["declared", "streamed"])
+    @pytest.mark.parametrize("path", META_POSTS)
+    def test_a_form_just_over_the_cap_is_refused(self, client, path, streamed):
+        from src.api.routes import meta as meta_routes
+
+        prefix = b"signed_request="
+        filler = meta_routes.SIGNED_REQUEST_MAX_BYTES + 1 - len(prefix)
+        r = post_body(
+            client,
+            path,
+            prefix + b"a" * filler,
+            streamed=streamed,
+            content_type=FORM_TYPE,
+        )
+        assert r.status_code == 413, r.text
+
+    @pytest.mark.parametrize("path", META_POSTS)
+    async def test_a_declared_length_over_the_cap_is_refused_before_the_body_is_read(
+        self, client, path
+    ):
+        """The declared length alone refuses the body: no body message is
+        received."""
+        chunk = b"a" * 1024
+        reads = []
+
+        async def receive():
+            reads.append(len(chunk))
+            return {"type": "http.request", "body": chunk, "more_body": True}
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", FORM_TYPE.encode()),
+                (b"content-length", str(SIGNED_REQUEST_MAX_BYTES + 1).encode()),
+            ],
+            "client": ("127.0.0.1", 123),
+            "server": ("testserver", 80),
+        }
+        await client.app(scope, receive, send)
+        starts = [m["status"] for m in sent if m["type"] == "http.response.start"]
+        assert starts == [413]
+        assert reads == []
+
+    @pytest.mark.parametrize("path", META_POSTS)
+    async def test_the_cap_is_on_the_total_across_messages(self, client, path):
+        """Each message is under the cap and their total is over it: the cap
+        counts the whole body, not one message at a time."""
+        resp, received = await post_messages(
+            client.app,
+            path,
+            _form_in_two(SIGNED_REQUEST_MAX_BYTES + 1),
+            content_type=FORM_TYPE,
+        )
+        assert len(received) == 2
+        assert max(received) <= SIGNED_REQUEST_MAX_BYTES < sum(received)
+        assert resp.status_code == 413, resp.text
+
+    @pytest.mark.parametrize("declared", [True, False], ids=["declared", "streamed"])
+    @pytest.mark.parametrize("path", META_POSTS)
+    async def test_a_form_of_exactly_the_cap_reaches_verification(
+        self, client, path, declared
+    ):
+        """The cap is the most that is read: a body of exactly
+        `SIGNED_REQUEST_MAX_BYTES`, its length declared or not, is read in full
+        and answered by verification."""
+        resp, received = await post_messages(
+            client.app,
+            path,
+            _form_in_two(SIGNED_REQUEST_MAX_BYTES),
+            declared=declared,
+            content_type=FORM_TYPE,
+        )
+        assert len(received) == 2
+        assert sum(received) == SIGNED_REQUEST_MAX_BYTES
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {"detail": "invalid signed_request"}
+
+    @pytest.mark.parametrize(
+        "body",
+        [b"", b"other=1", b"signed_request"],
+        ids=["empty", "no field", "malformed"],
+    )
+    @pytest.mark.parametrize("path", META_POSTS)
+    def test_a_form_without_a_readable_field_is_refused_as_before(
+        self, client, path, body
+    ):
+        """A missing `signed_request` reads as an empty one did: the one 400
+        every verification failure gets."""
+        r = post_body(client, path, body, content_type=FORM_TYPE)
+        assert r.status_code == 400
+        assert r.json() == {"detail": "invalid signed_request"}
+
+    @pytest.mark.parametrize("path", META_POSTS)
+    def test_a_signed_form_still_verifies(self, client, path):
+        """Meta's type with a parameter on it, as a client may send it, is read
+        and verified: deauthorize reaches the engine gate (`client` has no
+        engine, so 503), and data-deletion, which needs none, returns the
+        receipt."""
+        r = client.post(
+            path,
+            data={"signed_request": make_signed_request(valid_payload())},
+            headers={"Content-Type": f"{FORM_TYPE}; charset=UTF-8"},
+        )
+        if path == "/webhooks/meta/deauthorize":
+            assert r.status_code == 503, r.text
+        else:
+            assert r.status_code == 200, r.text
+            assert r.json()["confirmation_code"] == meta_callbacks.confirmation_code(
+                SUBJECT, SECRET
+            )

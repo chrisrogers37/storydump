@@ -23,6 +23,7 @@ from src.models.target.machinery import Job
 from src.services.target import work_loop
 from src.services.target.jobs import JobFenced
 from src.services.target.work_loop import (
+    UNBUILT_KINDS,
     Parked,
     WorkerConfig,
     WorkerDeps,
@@ -90,6 +91,9 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         "first_ingest_chunk",  # the same _run_sync, one page at a time
     }
 
+    #: Marked for another reason: each of its batches commits on its own.
+    OWNS_ITS_BATCHES = {"retention_sweep"}
+
     def test_the_provider_facing_kinds_are_exactly_the_marked_ones(self):
         registry = build_registry(full_deps())
         marked = {
@@ -97,7 +101,7 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
             for kind, entry in registry.items()
             if getattr(entry, "owns_transactions", False)
         }
-        assert marked == self.PROVIDER_FACING, (
+        assert marked == self.PROVIDER_FACING | self.OWNS_ITS_BATCHES, (
             "an executor that reaches the egress floor must own its"
             " transactions, or the loop holds a pooled connection across the"
             " provider call — and arming the `_IN_TRANSACTION` tripwire would"
@@ -111,9 +115,9 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         its own HTTP)". Named here so the exclusion reads as a decision rather
         than an omission — it is the obvious candidate for someone to "fix".
 
-        `retention_sweep` and `reencrypt_credentials` are absent from the set
-        for a different reason: they are `UNBUILT_KINDS`, parked with no
-        executor at all, so there is nothing to reach a provider with.
+        `retention_sweep` is absent because it only deletes rows in the
+        database; `reencrypt_credentials` because it is `UNBUILT_KINDS`, parked
+        with no executor at all, so there is nothing to reach a provider with.
         """
         registry = build_registry(full_deps())
         assert "reap_transit_assets" in registry
@@ -156,6 +160,8 @@ class TestRegistryCoversTheSchema:
             # which `06` §1 already backstops with the FC-3.6 TTL sweep, so a
             # missing transit store must not park the whole workflow.
             "offboard_workspace",
+            # The `rate_counters` retention class only (05).
+            "retention_sweep",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -177,8 +183,10 @@ class TestRegistryCoversTheSchema:
             # supplies that seam like every other.
             "send_email",
             "offboard_workspace",  # #1090 H1
+            "retention_sweep",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
+        assert unbuilt == set(UNBUILT_KINDS)
         for kind in unbuilt:
             assert isinstance(registry[kind], Parked), f"{kind} should have no executor"
 

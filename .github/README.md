@@ -26,8 +26,8 @@ request into `main` or `develop`, six jobs:
 - **Front End** — in `landing/`: `npm ci`, `npm test`, `npx tsc --noEmit`,
   `npm run lint` (Node 22; `next build` is deliberately absent — Vercel builds
   every PR)
-- **Changelog Check** — pull requests only: `CHANGELOG.md` must change unless
-  the PR touches only `documentation/`, `*.md` files or `.github/`
+- **Changelog Check** — pull requests only, `scripts/changelog_fragments.py
+  check --base`: the fragment rule in `changelog.d/README.md`
 
 All jobs run on **GitHub's cloud runners** (`ubuntu-latest`) — safe for public
 repositories. `main` declares no required status checks, so every check is
@@ -86,16 +86,16 @@ pytest tests/path/to/test.py::test_name -v
 
 The local recipe for a throwaway PostgreSQL is in `AGENTS.md` › Testing.
 
-### Missing CHANGELOG Update
-Every PR that changes behaviour should update `CHANGELOG.md` under
-`## [Unreleased]`; docs-only PRs are exempt.
+### Missing changelog fragment
+Every PR that changes behaviour adds one fragment in `changelog.d/` and leaves
+`CHANGELOG.md` alone; `changelog.d/README.md` has the format and the rule.
 
 ---
 
 ## For Contributors
 
 When submitting a PR:
-1. Update `CHANGELOG.md` (unless the PR is docs-only)
+1. Add a changelog fragment in `changelog.d/` (unless the PR is docs-only)
 2. Ensure tests pass: `pytest tests/ -v`
 3. Format code: `ruff format .`
 4. Check linting: `ruff check .`

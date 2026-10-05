@@ -8,7 +8,9 @@ break.
 
 * `POST /public/waitlist` — add an address to the marketing waitlist. The
   landing site calls it server-side; it held a database credential of its own
-  for this write until 100.
+  for this write until 100. Each accepted address is also a Telegram message
+  to each operator who has linked Telegram
+  (`src/channels/telegram_waitlist_ping.py`), sent after the answer.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import asyncio
 import ipaddress
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from starlette.requests import ClientDisconnect
 from fastapi.responses import JSONResponse
 
@@ -204,7 +206,7 @@ async def _capped_body(request: Request) -> Optional[bytes]:
 
 
 @router.post("/waitlist", status_code=202)
-async def join_waitlist(request: Request):
+async def join_waitlist(request: Request, background: BackgroundTasks):
     """Add an address to the waitlist. The answer is the same whether the
     address is new or already there, so the route is no oracle for who has
     joined; an address the waitlist cannot hold is a 400 with
@@ -214,7 +216,11 @@ async def join_waitlist(request: Request):
     a request came from (`Origin` on a cross-site POST, `Sec-Fetch-Site` on
     every fetch) and a server-side fetch says neither, so a request carrying
     either is a page posting here directly and is refused before anything is
-    read. With `WAITLIST_SITE_SECRET` set, so is a request without it."""
+    read. With `WAITLIST_SITE_SECRET` set, so is a request without it.
+
+    Every accepted address, a repeat too (the route cannot tell them apart),
+    is a message to each operator who has linked Telegram, sent once the
+    answer has gone."""
     if "origin" in request.headers or "sec-fetch-site" in request.headers:
         return _refusal(403, "the waitlist takes no browser requests", "browser")
     counted = _client(request)
@@ -255,7 +261,7 @@ async def join_waitlist(request: Request):
             # ceiling is full.
             try:
                 async with conn.begin_nested():
-                    await waitlist.join(
+                    joined = await waitlist.join(
                         conn, body.get("email"), waitlist.campaign(body)
                     )
                     if capped:
@@ -276,4 +282,11 @@ async def join_waitlist(request: Request):
     finally:
         slots.release(address)
     logger.info("waitlist: an address was received")
+    ping = request.app.state.waitlist_ping
+    if ping is not None:
+        # After the commit and after the answer: Telegram's pace, and the read
+        # of whom to tell (on a connection of its own), never hold the
+        # visitor, a slot or the request's connection, and the API's process
+        # runs the task to its end.
+        background.add_task(ping, joined)
     return {"status": "received"}
