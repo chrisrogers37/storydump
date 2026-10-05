@@ -280,18 +280,25 @@ class Settings(BaseSettings):
     # whose forwarded-for claims the app believes; every other peer is
     # attributed by its real TCP address and its headers are ignored.
     #
-    # The default is the private ranges rather than a specific edge address.
-    # A public-internet client can never hold an RFC1918 source address, so it
-    # can never place itself in this set, and the value needs no per-platform
-    # tuning. Narrow it to the concrete edge address if the platform publishes
-    # a stable one.
+    # The default is the private ranges plus 100.64.0.0/10, the shared address
+    # space Railway's edge connects from (production's access log shows every
+    # request arriving from 100.64.0.x). None of these is routable on the
+    # public internet, so a public client can never hold one as its source
+    # address and place itself in this set. Narrow it to the concrete edge
+    # address if the platform publishes a stable one.
+    #
+    # Only the edge is trusted, never the CDN behind it. When Railway routes a
+    # request through Fastly, the header arrives as "<client>, <Fastly edge>"
+    # and the walk stops at the Fastly address: shared by the visitors that
+    # edge serves, but never caller-chosen. Skipping it would let anyone who
+    # fronts the API with their own Fastly service write the client entry.
     #
     # NEVER set this to "*". The wildcard makes uvicorn take the LEFTMOST
     # X-Forwarded-For entry, which is wholly caller-supplied, so every
     # IP-keyed control in the app (rate limiting, auth-failure alerting)
     # becomes attacker-partitionable. See issue #726.
     TRUSTED_PROXY_HOSTS: str = (
-        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1,fd00::/8"
+        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.1,::1,fd00::/8"
     )
 
     # The largest request body the API reads, in bytes; over it is 413
