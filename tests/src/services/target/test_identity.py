@@ -39,6 +39,9 @@ class _Scripted:
             def scalar_one(self_inner):
                 return answer
 
+            def __iter__(self_inner):
+                return iter(answer)
+
         return _R()
 
     def sql(self):
@@ -151,3 +154,19 @@ class TestUnlinkTelegram:
         assert await identity.unlink_telegram(ex, user_id="user-1") == "last_identity"
 
         assert len(ex.statements) == 1
+
+
+class TestTelegramIdsFor:
+    async def test_it_reads_the_linked_telegram_ids_of_exactly_those_people(self):
+        ex = _Scripted([("5550001",), ("5550002",)])
+        ids = await identity.telegram_ids_for(ex, frozenset({"u-2", "u-1"}))
+        assert ids == ["5550001", "5550002"]
+        ((sql, params),) = ex.statements
+        assert "FROM user_identities" in sql
+        assert "provider = :p" in sql and "user_id = ANY(CAST(:u AS uuid[]))" in sql
+        assert params == {"p": "telegram", "u": ["u-1", "u-2"]}
+
+    async def test_no_one_asks_nothing(self):
+        ex = _Scripted()
+        assert await identity.telegram_ids_for(ex, frozenset()) == []
+        assert ex.statements == []

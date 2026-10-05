@@ -255,6 +255,22 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
     return None if row is None else str(row[0])
 
 
+async def telegram_ids_for(executor, user_ids) -> list[str]:
+    """The Telegram ids of those of *user_ids* who have linked Telegram, in a
+    stable order; a person who has not linked is simply absent."""
+    if not user_ids:
+        return []
+    rows = await executor.execute(
+        text(
+            "SELECT external_id FROM user_identities"
+            " WHERE provider = :p AND user_id = ANY(CAST(:u AS uuid[]))"
+            " ORDER BY external_id"
+        ),
+        {"p": PROVIDER_TELEGRAM, "u": sorted(str(u) for u in user_ids)},
+    )
+    return [str(row[0]) for row in rows]
+
+
 def display_name_sql(user_id_sql: str) -> str:
     """The name a shared chat may see for the person *user_id_sql* names (an
     SQL operand: a column or a bind, never user input) as one SQL expression:

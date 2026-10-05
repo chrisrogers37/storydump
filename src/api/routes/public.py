@@ -9,7 +9,8 @@ break.
 * `POST /public/waitlist` — add an address to the marketing waitlist. The
   landing site calls it server-side; it held a database credential of its own
   for this write until 100. Each accepted address is also a Telegram message
-  to the admin's chat (`src/channels/telegram_waitlist_ping.py`), sent after the answer.
+  to each operator who has linked Telegram
+  (`src/channels/telegram_waitlist_ping.py`), sent after the answer.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from src.api.principal import (
     require_engine,
 )
 from src.config.settings import settings
-from src.services.target import waitlist
+from src.services.target import identity, waitlist
 from src.services.target.webhook_ingress import verify_secret_token
 from src.utils.logger import logger
 
@@ -218,7 +219,8 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
     read. With `WAITLIST_SITE_SECRET` set, so is a request without it.
 
     Every accepted address, a repeat too (the route cannot tell them apart),
-    is a message to the admin's chat, sent once the answer has gone."""
+    is a message to each operator who has linked Telegram, sent once the
+    answer has gone."""
     if "origin" in request.headers or "sec-fetch-site" in request.headers:
         return _refusal(403, "the waitlist takes no browser requests", "browser")
     counted = _client(request)
@@ -277,13 +279,20 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
                 return JSONResponse(
                     status_code=full.status_code, content={"detail": full.detail}
                 )
+            ping = request.app.state.waitlist_ping
+            chats = (
+                await identity.telegram_ids_for(conn, ping.operators) if ping else []
+            )
     finally:
         slots.release(address)
     logger.info("waitlist: an address was received")
-    ping = request.app.state.waitlist_ping
-    if ping is not None:
+    if chats:
         # After the commit and after the answer: Telegram's pace never holds
         # the visitor, a slot or a connection, and the API's process runs the
         # task to its end.
-        background.add_task(ping, joined)
+        background.add_task(ping, joined, chats)
+    elif ping is not None:
+        logger.warning(
+            "waitlist ping: not sent, no one in OPS_USER_IDS has linked Telegram"
+        )
     return {"status": "received"}

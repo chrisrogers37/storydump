@@ -743,7 +743,7 @@ def create_app(
     app.state.waitlist_slots = WaitlistSlots()
     from src.channels import telegram_waitlist_ping as waitlist_ping
 
-    app.state.waitlist_ping = waitlist_ping.from_env(env, bot)
+    app.state.waitlist_ping = waitlist_ping.from_settings(bot, settings.ops_user_ids)
     app.state.ingress_workers = _ingress_workers(env)
     app.state.pool_watch = (
         PoolWatch(app.state.engine) if app.state.engine is not None else None

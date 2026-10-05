@@ -209,32 +209,93 @@ class TestTheRoute:
 @pytest.fixture(autouse=True)
 def no_real_ping(monkeypatch):
     """A developer's shell may hold the real bot and chat: no test here sends."""
-    monkeypatch.setattr(waitlist_ping, "from_env", lambda env, bot: None)
+    monkeypatch.setattr(waitlist_ping, "from_settings", lambda bot, operators: None)
+
+
+#: An operator who has linked Telegram, one who has not, and a linked person
+#: who is no operator.
+LINKED_OP = "00000000-0000-4000-8000-0000000000a1"
+UNLINKED_OP = "00000000-0000-4000-8000-0000000000a2"
+LINKED_OTHER = "00000000-0000-4000-8000-0000000000a3"
 
 
 @pytest.fixture
-def pinged(world, monkeypatch):
-    """The addresses the admin ping was handed, each with whether its row was
-    already committed when the ping ran."""
-    seen = []
+def people(world):
+    """The three, made once per database: the identities are user-plane rows
+    the route reads as `svc_ingress`."""
+    conn = psycopg2.connect(world["owner"])
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (id) VALUES (%s), (%s), (%s) ON CONFLICT DO NOTHING",
+                (LINKED_OP, UNLINKED_OP, LINKED_OTHER),
+            )
+            cur.execute(
+                "INSERT INTO user_identities (user_id, provider, external_id)"
+                " VALUES (%s, 'telegram', '5550001'), (%s, 'telegram', '5550003')"
+                " ON CONFLICT DO NOTHING",
+                (LINKED_OP, LINKED_OTHER),
+            )
+    finally:
+        conn.close()
 
-    async def ping(address):
-        seen.append((address, bool(_entry(world, address))))
 
-    monkeypatch.setattr(waitlist_ping, "from_env", lambda env, bot: ping)
-    return seen
+class _Ping:
+    """The admin ping's stand-in: what it was handed, with whether the row
+    was already committed when it ran."""
+
+    def __init__(self, world, operators):
+        self.world, self.operators, self.seen = world, operators, []
+
+    async def __call__(self, address, chats):
+        self.seen.append((address, list(chats), bool(_entry(self.world, address))))
+
+
+@pytest.fixture
+def ping_for(world, people, monkeypatch):
+    def install(*operators):
+        ping = _Ping(world, frozenset(operators))
+        monkeypatch.setattr(waitlist_ping, "from_settings", lambda bot, ops: ping)
+        return ping
+
+    return install
+
+
+@pytest.fixture
+def pinged(ping_for):
+    """The ping, with the one linked operator among its two."""
+    return ping_for(LINKED_OP, UNLINKED_OP)
 
 
 class TestTheAdminPing:
     """Every accepted address, a repeat too, is one ping after the commit;
     nothing the route refuses is."""
 
+    def test_it_goes_to_each_linked_operator_and_no_one_else(self, world, ping_for):
+        ping = ping_for(LINKED_OP, UNLINKED_OP)
+        (resp,) = _post(world, {"email": "ops-only@example.com"})
+        assert resp.status_code == 202
+        assert ping.seen == [("ops-only@example.com", ["5550001"], True)]
+
+    def test_no_linked_operator_sends_nothing_and_says_why(
+        self, world, ping_for, caplog
+    ):
+        ping = ping_for(UNLINKED_OP)
+        public.logger.addHandler(caplog.handler)
+        try:
+            (resp,) = _post(world, {"email": "nobody-linked@example.com"})
+        finally:
+            public.logger.removeHandler(caplog.handler)
+        assert resp.status_code == 202
+        assert ping.seen == []
+        assert "no one in OPS_USER_IDS has linked Telegram" in caplog.text
+
     def test_an_accepted_address_is_pinged_as_stored_after_the_commit(
         self, world, pinged
     ):
         (resp,) = _post(world, {"email": "  Pinged@Example.com "})
         assert resp.status_code == 202
-        assert pinged == [("pinged@example.com", True)]
+        assert pinged.seen == [("pinged@example.com", ["5550001"], True)]
 
     def test_a_repeat_is_pinged_again(self, world, pinged):
         responses = _post(
@@ -243,12 +304,12 @@ class TestTheAdminPing:
             {"email": "ping-twice@example.com"},
         )
         assert [r.status_code for r in responses] == [202, 202]
-        assert pinged == [("ping-twice@example.com", True)] * 2
+        assert pinged.seen == [("ping-twice@example.com", ["5550001"], True)] * 2
 
     def test_a_refused_address_is_not_pinged(self, world, pinged):
         (resp,) = _post(world, {"email": "no-at-sign"})
         assert resp.status_code == 400
-        assert pinged == []
+        assert pinged.seen == []
 
     def test_a_full_ceiling_is_not_pinged(self, world, pinged, monkeypatch):
         monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", SECRET)
@@ -261,7 +322,7 @@ class TestTheAdminPing:
             headers=_from_site("198.51.100.90"),
         )
         assert [r.status_code for r in responses] == [202, 429]
-        assert pinged == [("ping-ceiling-0@example.com", True)]
+        assert pinged.seen == [("ping-ceiling-0@example.com", ["5550001"], True)]
 
 
 class TestTheDoor:

@@ -19,7 +19,8 @@ from src.channels.telegram_transport import TelegramTransport
 from src.services.target.egress import EgressPolicy
 
 TOKEN = "8675309:AAtestSECRETtokenVALUExyz"
-CHAT = "-100777"
+CHAT = "424242"
+OPS = frozenset({"00000000-0000-4000-8000-000000000001"})
 OK = {"ok": True, "result": {"message_id": 1}}
 
 
@@ -39,7 +40,7 @@ def _ping(*answers):
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     bot = TelegramTransport(TOKEN, client=client)
-    return waitlist_ping.WaitlistPing(bot.send_text, CHAT), sent
+    return waitlist_ping.WaitlistPing(bot.send_text, OPS), sent
 
 
 @pytest.fixture(autouse=True)
@@ -68,7 +69,7 @@ def test_the_message_names_the_address_and_the_time_in_utc():
 
 async def test_one_send_to_the_chat_as_plain_text(no_waits):
     ping, sent = _ping(OK)
-    await ping("*bold*@example.com")
+    await ping("*bold*@example.com", [CHAT])
     assert len(sent) == 1
     assert sent[0]["chat_id"] == CHAT
     assert "parse_mode" not in sent[0]
@@ -87,21 +88,21 @@ def _paced(retry_after):
 
 async def test_a_429_waits_what_telegram_names_then_sends_again(no_waits):
     ping, sent = _ping(_paced(7), OK)
-    await ping("a@example.com")
+    await ping("a@example.com", [CHAT])
     assert len(sent) == 2
     assert no_waits == [7.0]
 
 
 async def test_a_long_retry_after_is_capped(no_waits):
     ping, _ = _ping(_paced(3600), OK)
-    await ping("a@example.com")
+    await ping("a@example.com", [CHAT])
     assert no_waits == [waitlist_ping.MAX_PACED_WAIT_SECONDS]
 
 
 async def test_429s_past_the_last_send_are_logged(no_waits, caplog):
     ping, sent = _ping(_paced(1))
     with caplog.at_level(logging.ERROR, logger=waitlist_ping.__name__):
-        await ping("a@example.com")
+        await ping("a@example.com", [CHAT])
     assert len(sent) == waitlist_ping.ATTEMPTS
     assert "waitlist ping: not sent after 3 tries" in _logged(caplog)
 
@@ -112,7 +113,7 @@ async def test_a_lost_answer_is_left_to_the_egress_floor_and_logged(caplog):
     )
     ping, sent = _ping(lost)
     with caplog.at_level(logging.ERROR, logger=waitlist_ping.__name__):
-        await ping("a@example.com")
+        await ping("a@example.com", [CHAT])
     # The floor's own attempts, and no more on top of them.
     assert len(sent) == EgressPolicy().max_attempts
     assert "waitlist ping: not sent" in _logged(caplog)
@@ -128,16 +129,16 @@ async def test_past_the_queue_a_ping_is_dropped_and_logged(caplog):
         await release.wait()
         return "1"
 
-    ping = waitlist_ping.WaitlistPing(send, CHAT)
-    first = asyncio.ensure_future(ping("first@example.com"))
+    ping = waitlist_ping.WaitlistPing(send, OPS)
+    first = asyncio.ensure_future(ping("first@example.com", [CHAT]))
     await asyncio.sleep(0)
     queued = [
-        asyncio.ensure_future(ping(f"q{i}@example.com"))
+        asyncio.ensure_future(ping(f"q{i}@example.com", [CHAT]))
         for i in range(waitlist_ping.MAX_WAITING)
     ]
     await asyncio.sleep(0)
     with caplog.at_level(logging.ERROR, logger=waitlist_ping.__name__):
-        await ping("dropped@example.com")
+        await ping("dropped@example.com", [CHAT])
     assert "waitlist ping: dropped, 20 already waiting" in _logged(caplog)
     release.set()
     await asyncio.gather(first, *queued)
@@ -154,11 +155,11 @@ async def test_a_ping_cancelled_in_the_queue_frees_its_place():
         await release.wait()
         return "1"
 
-    ping = waitlist_ping.WaitlistPing(send, CHAT)
-    first = asyncio.ensure_future(ping("first@example.com"))
+    ping = waitlist_ping.WaitlistPing(send, OPS)
+    first = asyncio.ensure_future(ping("first@example.com", [CHAT]))
     await asyncio.sleep(0)
     queued = [
-        asyncio.ensure_future(ping(f"q{i}@example.com"))
+        asyncio.ensure_future(ping(f"q{i}@example.com", [CHAT]))
         for i in range(waitlist_ping.MAX_WAITING)
     ]
     await asyncio.sleep(0)
@@ -167,8 +168,10 @@ async def test_a_ping_cancelled_in_the_queue_frees_its_place():
     await asyncio.gather(*queued, return_exceptions=True)
     release.set()
     await first
-    await ping("later@example.com")
+    assert ping._waiting == 0
+    await ping("later@example.com", [CHAT])
     assert any("later@example.com" in text for text in sent)
+    assert ping._waiting == 0
 
 
 async def test_pings_go_out_one_at_a_time():
@@ -182,8 +185,8 @@ async def test_pings_go_out_one_at_a_time():
         active -= 1
         return "1"
 
-    ping = waitlist_ping.WaitlistPing(send, CHAT)
-    await asyncio.gather(*(ping(f"p{i}@example.com") for i in range(5)))
+    ping = waitlist_ping.WaitlistPing(send, OPS)
+    await asyncio.gather(*(ping(f"p{i}@example.com", [CHAT]) for i in range(5)))
     assert peak == 1
 
 
@@ -225,7 +228,7 @@ async def test_a_refusal_that_will_not_change_is_logged_with_its_reason_once(
 ):
     ping, sent = _ping(answer)
     with caplog.at_level(logging.ERROR, logger=waitlist_ping.__name__):
-        await ping("a@example.com")
+        await ping("a@example.com", [CHAT])
     assert len(sent) == 1
     assert no_waits == []
     logged = _logged(caplog)
@@ -239,8 +242,21 @@ async def test_an_unexpected_failure_is_logged_and_never_raised(caplog):
         raise RuntimeError("a bug")
 
     with caplog.at_level(logging.ERROR, logger=waitlist_ping.__name__):
-        await waitlist_ping.WaitlistPing(broken, CHAT)("a@example.com")
+        await waitlist_ping.WaitlistPing(broken, OPS)("a@example.com", [CHAT])
     assert "NO MESSAGE WAS SENT" in _logged(caplog)
+
+
+async def test_each_linked_operator_gets_it_and_a_refusal_stops_no_one(caplog):
+    gone = {
+        "ok": False,
+        "error_code": 403,
+        "description": "Forbidden: bot was blocked by the user",
+    }
+    ping, sent = _ping(gone, OK)
+    with caplog.at_level(logging.ERROR, logger=waitlist_ping.__name__):
+        await ping("a@example.com", ["111", "222"])
+    assert [body["chat_id"] for body in sent] == ["111", "222"]
+    assert "bot was blocked" in _logged(caplog)
 
 
 class _Bot:
@@ -249,50 +265,37 @@ class _Bot:
 
 
 @pytest.mark.parametrize(
-    "env, bot, missing",
+    "bot, operators, missing",
     [
-        ({}, _Bot(), "TARGET_WAITLIST_PING_CHAT_ID"),
-        (
-            {"TARGET_WAITLIST_PING_CHAT_ID": " \n"},
-            _Bot(),
-            "TARGET_WAITLIST_PING_CHAT_ID",
-        ),
-        ({"TARGET_WAITLIST_PING_CHAT_ID": CHAT}, None, "TARGET_TELEGRAM_BOT_TOKEN"),
-        ({}, None, "TARGET_TELEGRAM_BOT_TOKEN, TARGET_WAITLIST_PING_CHAT_ID"),
+        (_Bot(), frozenset(), "OPS_USER_IDS"),
+        (None, OPS, "TARGET_TELEGRAM_BOT_TOKEN"),
+        (None, frozenset(), "TARGET_TELEGRAM_BOT_TOKEN, OPS_USER_IDS"),
     ],
 )
-def test_without_a_bot_or_a_chat_it_is_off_and_says_which(env, bot, missing, caplog):
+def test_without_a_bot_or_an_operator_it_is_off_and_says_which(
+    bot, operators, missing, caplog
+):
     with caplog.at_level(logging.WARNING, logger=waitlist_ping.__name__):
-        assert waitlist_ping.from_env(env, bot) is None
+        assert waitlist_ping.from_settings(bot, operators) is None
     assert f"waitlist ping: off, not set: {missing}" in _logged(caplog)
 
 
-async def test_with_both_it_sends_to_the_trimmed_chat():
-    seen = []
-
-    class Bot:
-        async def send_text(self, chat_id, text):
-            seen.append(chat_id)
-            return "1"
-
-    ping = waitlist_ping.from_env({"TARGET_WAITLIST_PING_CHAT_ID": f" {CHAT}\n"}, Bot())
-    await ping("a@example.com")
-    assert seen == [CHAT]
+def test_with_both_it_knows_its_operators():
+    assert waitlist_ping.from_settings(_Bot(), OPS).operators == OPS
 
 
 @pytest.mark.parametrize(
-    "env, wired",
+    "env, operators, wired",
     [
-        (
-            {"TARGET_TELEGRAM_BOT_TOKEN": TOKEN, "TARGET_WAITLIST_PING_CHAT_ID": CHAT},
-            True,
-        ),
-        ({"TARGET_TELEGRAM_BOT_TOKEN": TOKEN}, False),
-        ({"TARGET_WAITLIST_PING_CHAT_ID": CHAT}, False),
+        ({"TARGET_TELEGRAM_BOT_TOKEN": TOKEN}, next(iter(OPS)), True),
+        ({"TARGET_TELEGRAM_BOT_TOKEN": TOKEN}, "", False),
+        ({}, next(iter(OPS)), False),
     ],
 )
-def test_the_app_wires_the_ping_from_its_environment(env, wired):
+def test_the_app_wires_the_ping_from_its_settings(env, operators, wired, monkeypatch):
     from src.api.app import create_app
+    from src.config.settings import settings
 
+    monkeypatch.setattr(settings, "OPS_USER_IDS", operators)
     app = create_app(env=env)
     assert isinstance(app.state.waitlist_ping, waitlist_ping.WaitlistPing) is wired
