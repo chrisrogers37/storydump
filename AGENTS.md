@@ -361,9 +361,11 @@ inert by design: `sender_from_env` returns `None` unless `RESEND_API_KEY` and
 the sender address (`EMAIL_FROM`) are both set, and the job registry parks
 `send_email` with a reason naming what is missing. The provider choice is a
 flagged decision that has not been ratified, and deferring it is deliberate.
-An invitation created today therefore reports
-`delivery: {"channel": "email", "state": "not_configured"}` — the row and its
-token are real, the message is never delivered.
+An email invitation reports `delivery: {"channel": "email", "state": "withheld"}`:
+the email arm is off (`invitations.EMAIL_DELIVERY_ENABLED`) until it can send
+without storing the token, so nothing is queued. The row is real, and the
+inviter hands over the response's `join_url` (`{WEB_APP_URL}/join/{token}`),
+which is returned once.
 
 Do not describe email as working, and do not wire a provider without the owner
 acknowledgement the design calls for.
