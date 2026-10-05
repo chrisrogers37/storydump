@@ -36,7 +36,11 @@ function Label({ children }: { children: ReactNode }) {
 }
 
 function Code({ children }: { children: ReactNode }) {
-  return <code className="rounded bg-muted px-1.5 py-0.5">{children}</code>
+  return (
+    <code className="whitespace-nowrap rounded bg-muted px-1 py-0.5 text-[0.85em]">
+      {children}
+    </code>
+  )
 }
 
 export default function PrivacyPolicy() {
@@ -60,7 +64,8 @@ export default function PrivacyPolicy() {
           <li>We never sell your data, and none of it is used for advertising.</li>
           <li>
             Our Google Drive access is read-only. We keep references to your
-            files, never the files themselves.
+            files, not the files; the only lasting copies are the approval
+            cards in the Telegram chats you link.
           </li>
           <li>
             The copy of a Story we make for posting is deleted as soon as the
@@ -68,13 +73,14 @@ export default function PrivacyPolicy() {
           </li>
           <li>
             We encrypt your Google and Instagram access tokens before storing
-            them, and keep sign-in sessions only as one-way hashes.
+            them, and keep sign-in sessions and API tokens only as one-way
+            hashes.
           </li>
           <li>Each workspace&apos;s data is walled off from every other.</li>
           <li>
             The IP addresses we use to stop abuse are deleted after 7 days.
           </li>
-          <li>No advertising or tracking cookies, so no cookie banner.</li>
+          <li>No tracking cookies, so no cookie banner.</li>
         </ul>
       </div>
 
@@ -116,81 +122,127 @@ export default function PrivacyPolicy() {
             3. Information we collect
           </h2>
           <p className="mt-3">Here is everything we keep, and where it comes from:</p>
-          <ul className="mt-3 list-disc space-y-2 pl-6">
+          <ul className="mt-3 list-disc space-y-3 pl-6">
             <li>
-              <Label>Waitlist</Label> — if you join the waitlist: the email
-              address you enter, when you first joined, and any campaign tags
-              (utm_source, utm_medium, utm_campaign, up to 100 characters each)
-              in the web address of the page where you signed up. Joining again
-              keeps your original entry. Each time the form is submitted, our
-              Telegram bot sends a direct message with the email address and
-              the time to each member of our team who has linked Telegram. When
-              we invite you, we add your address, the date and an optional
-              internal note to the list of addresses allowed to create an
-              account. To leave the waitlist, email <EmailLink /> from the
-              address you joined with, and we&apos;ll delete your entry, your
-              place on that list, and the Telegram messages we received about
-              your signup.
+              <Label>Waitlist</Label> — if you join the waitlist:
+              <ul className="mt-2 list-[circle] space-y-1 pl-5">
+                <li>
+                  the email address you enter, when you first joined, and any
+                  campaign tags (<Code>utm_source</Code>,{" "}
+                  <Code>utm_medium</Code>, <Code>utm_campaign</Code>, up to 100
+                  characters each) in the web address of the page where you
+                  signed up. Joining again keeps your original entry.
+                </li>
+                <li>
+                  a Telegram message: each time the form accepts a signup, our
+                  bot sends the email address and the time to each member of our
+                  team who has linked Telegram.
+                </li>
+                <li>
+                  when we invite you, your address, the date and an optional
+                  internal note on the list of addresses allowed to create an
+                  account.
+                </li>
+              </ul>
+              <p className="mt-2">
+                To leave the waitlist, email <EmailLink /> from the address you
+                joined with. We&apos;ll delete your entry, your place on that
+                list, and the Telegram messages we received about your signup.
+              </p>
             </li>
             <li>
-              <Label>Account data</Label> — from Google when you sign in: your
-              Google account identifier, your verified email address, your
-              display name, and when you last signed in. For each signed-in
-              session we keep a one-way hash of its token and when it was last
-              used, not your IP address or browser. If you link a Telegram
-              account to Storydump: your Telegram user ID and your Telegram
-              username, or your first name if you have no username. When you
-              start the bot in a chat, we also store that chat&apos;s Telegram
-              ID and whether it is a direct chat or a group, so we can deliver
-              to it.
+              <Label>Account data</Label>
+              <ul className="mt-2 list-[circle] space-y-1 pl-5">
+                <li>
+                  From Google when you sign in: your Google account identifier,
+                  your verified email address, your display name, and when you
+                  last signed in.
+                </li>
+                <li>
+                  For each signed-in session: a one-way hash of its token and
+                  when it was last used, not your IP address or browser. For
+                  each API token you create: its name, who created it and when
+                  it was last used, with the token itself stored only as a hash.
+                </li>
+                <li>
+                  If you link Telegram: your Telegram user ID and username, or
+                  your first name if you have no username. When you start the
+                  bot in a chat, we also store that chat&apos;s Telegram ID and
+                  whether it is a direct chat or a group, so we can deliver to
+                  it.
+                </li>
+              </ul>
             </li>
             <li>
               <Label>Workspace data</Label> — the names and settings of your
               workspaces; who belongs to each, in what role, and who added or
               removed them; invitations, including the invitee&apos;s email
               address or Telegram ID; who approved, scheduled or cancelled each
-              Story; and a log of those actions with who took them and when. If
-              you have linked Telegram and are active in a Telegram group linked
-              to a workspace, we add you to that workspace as a member.
+              Story; and a log of those actions with who took them and when.
+              <p className="mt-2">
+                If you have linked Telegram and you speak in, or are added to, a
+                Telegram group linked to a workspace, we add you to that
+                workspace as a member. Leaving the group does not remove you; a
+                workspace owner or admin can.
+              </p>
             </li>
             <li>
               <Label>Google Drive content</Label> — only after you connect
-              Google Drive, which is a separate step from signing in. To let you
-              pick a folder, we list the names of the folders in your My Drive
-              and in Shared with me. After you pick one, we list the photos and
-              videos in it and its subfolders, reading each file&apos;s ID,
-              name, type, size, modified time, checksum and parent folder. We
-              do not keep your files: we store a reference to each (its Drive
-              file ID, name, type, checksum, folder and the subfolder it sits
-              in), plus an encrypted Google Drive access token. We download a
-              file when we send its approval card and when we post it. To post
-              a Story, we upload a copy of the file to our media processor,
-              Cloudinary, which frames it for Instagram. We delete the copy as
-              soon as the Story posts, fails or is cancelled, and a cleanup that
-              runs every 6 hours deletes any copy older than 48 hours. If you
-              link the Storydump Telegram bot, each approval card it sends to
-              your chat carries a copy of the Story&apos;s photo or video and
-              its file name, which stay in the chat like any other message.
+              Google Drive, which is a separate step from signing in.
+              <ul className="mt-2 list-[circle] space-y-1 pl-5">
+                <li>
+                  To let you pick a folder, we list the names of the folders in
+                  your My Drive and in Shared with me, and the folders above
+                  the one you pick.
+                </li>
+                <li>
+                  After you pick one, we list the photos and videos in it and
+                  its subfolders, reading each file&apos;s ID, name, type, size,
+                  modified time, checksum and parent folder.
+                </li>
+                <li>
+                  We do not keep your files. We store a reference to each (its
+                  Drive file ID, name, type, checksum, folder and the subfolder
+                  it sits in), plus Google&apos;s access grant for your Drive,
+                  encrypted.
+                </li>
+                <li>
+                  We download a file when we send its approval card and when we
+                  post it. To post a Story, we upload a copy to our media
+                  processor, Cloudinary, which frames it for Instagram. We
+                  delete that copy as soon as the Story posts, fails or is
+                  cancelled, and a cleanup that runs every 6 hours deletes any
+                  copy older than 48 hours.
+                </li>
+                <li>
+                  If you link the Storydump Telegram bot, each approval card it
+                  sends carries the Story&apos;s photo or video and its file
+                  name, which stay in the chat like any other message.
+                </li>
+              </ul>
             </li>
             <li>
               <Label>Instagram data</Label> — for the Instagram professional
-              account you connect: an encrypted long-lived access token, the
-              account ID and username, and posting history (Instagram media IDs
-              and links, times, results and any error).
+              account you connect, with the{" "}
+              <Code>instagram_business_basic</Code> and{" "}
+              <Code>instagram_business_content_publish</Code> permissions: an
+              encrypted long-lived access token, the account ID and username,
+              and posting history (Instagram media IDs and links, times,
+              results and any error).
             </li>
             <li>
               <Label>Operational data</Label> — queues, schedules, posting
               hours and content mix preferences.
             </li>
             <li>
-              <Label>IP addresses</Label> — when you submit the waitlist form
-              or sign in, we store your IP address with a count of attempts per
-              minute, so we can limit repeated tries (for an IPv6 address on the
-              waitlist form, only its first 64 bits). We delete these records
-              after 7 days. Our hosting providers, Vercel and Railway, also keep
-              request logs (IP address, the page requested, the time and, on
-              Vercel, your browser&apos;s user agent) under their own retention
-              settings.
+              <Label>IP addresses</Label> — when you submit the waitlist form,
+              sign in, or connect Google Drive or Instagram, we store your IP
+              address with a count of attempts per minute, so we can limit
+              repeated tries (for an IPv6 address on the waitlist form, only its
+              first 64 bits). We delete these records after 7 days. Our hosting
+              providers, Vercel and Railway, also keep request logs (IP address,
+              the page requested, the time and, on Vercel, your browser&apos;s
+              user agent) under their own retention settings.
             </li>
             <li>
               <Label>Usage analytics</Label> — Plausible counts page views on
@@ -198,8 +250,8 @@ export default function PrivacyPolicy() {
               failing a waitlist signup, opening an FAQ answer, clicking a
               call-to-action or Sign in, and tapping the demo. A waitlist signup
               also sends the campaign tags from the link you came in by.
-              Invitation links (under /join/) are not counted, and Plausible
-              receives no email addresses.
+              Invitation links (under <Code>/join/</Code>) are not counted, and
+              Plausible receives no email addresses.
             </li>
           </ul>
         </section>
@@ -220,8 +272,8 @@ export default function PrivacyPolicy() {
             We ask Google for two things. Signing in uses the{" "}
             <Code>openid</Code>, <Code>email</Code> and <Code>profile</Code>{" "}
             permissions, which give us your Google account ID, email address and
-            name. Connecting Drive uses Google&apos;s read-only Drive permission
-            (<Code>drive.readonly</Code>). It technically allows reading your
+            name. Connecting Drive uses Google&apos;s read-only Drive permission,{" "}
+            <Code>drive.readonly</Code>. It technically allows reading your
             whole Drive; we only ever open the folders described below, and we
             never change or delete anything in your Drive.
           </p>
@@ -232,7 +284,7 @@ export default function PrivacyPolicy() {
             <li>Your Google account ID, email address and name, only to identify your account.</li>
             <li>
               Listing the folder names in your My Drive and Shared with me so you
-              can pick a folder, then the photos and videos in that folder and
+              can pick a folder, and the folders above the one you pick, then the photos and videos in that folder and
               its subfolders so you can build a posting queue.
             </li>
             <li>
@@ -350,11 +402,11 @@ export default function PrivacyPolicy() {
             each Story&apos;s photo or video and file name.
           </p>
           <div className="mt-4 overflow-x-auto">
-            <table className="w-full border-collapse text-left text-sm">
+            <table className="w-full border-collapse text-left text-sm [&_td]:align-top">
               <thead>
                 <tr className="border-b">
                   <th className="py-2 pr-4 font-medium text-foreground">
-                    Sub-processor
+                    Service
                   </th>
                   <th className="py-2 pr-4 font-medium text-foreground">
                     Purpose
@@ -440,7 +492,7 @@ export default function PrivacyPolicy() {
             cookieless analytics:
           </p>
           <div className="mt-4 overflow-x-auto max-md:scroll-hint">
-            <table className="w-full min-w-[36rem] border-collapse text-left text-sm">
+            <table className="w-full min-w-[36rem] border-collapse text-left text-sm [&_td]:align-top">
               <thead>
                 <tr className="border-b">
                   <th className="py-2 pr-4 font-medium text-foreground">Name</th>
@@ -553,8 +605,9 @@ export default function PrivacyPolicy() {
               <Label>Access tokens</Label> — when you disconnect Google Drive or
               remove an Instagram account, we stop using its token at once, and
               for Drive we also ask Google to revoke our access. The encrypted
-              token stays in our database, unusable, until the workspace is
-              deleted.
+              token stays in our database until the workspace is deleted. To
+              cut off access on Instagram&apos;s side too, remove Storydump
+              under Apps and websites in your Instagram settings.
             </li>
             <li>
               <Label>Your account</Label> — your sign-in details stay until you
@@ -575,7 +628,8 @@ export default function PrivacyPolicy() {
               history of the database so we can recover from mistakes; deleted
               data drops out of it as the history rolls forward. We also keep a
               one-time copy of the data from our previous system, taken on
-              September 17, 2026, when we moved to the current one.
+              September 17, 2026, when we moved to the current one; we apply
+              deletion requests to it by hand.
             </li>
           </ul>
         </section>
@@ -646,8 +700,9 @@ export default function PrivacyPolicy() {
           <h2 className="text-xl font-semibold text-foreground">12. Security</h2>
           <ul className="mt-3 list-disc space-y-2 pl-6">
             <li>
-              <Label>Encrypted in transit</Label> — every connection uses TLS,
-              and the site and API tell browsers to refuse anything else (HSTS).
+              <Label>Encrypted in transit</Label> — the site and API use TLS
+              and tell browsers to refuse anything else (HSTS), and our servers
+              reach our database and other services over TLS too.
             </li>
             <li>
               <Label>Encrypted at rest</Label> — our database provider encrypts
@@ -655,22 +710,21 @@ export default function PrivacyPolicy() {
               tokens ourselves before storing them.
             </li>
             <li>
-              <Label>Hashed secrets</Label> — sign-in sessions, API tokens and
-              invitation links are stored only as one-way hashes, so a copy of
-              our database would not let anyone use them.
+              <Label>Hashed secrets</Label> — sign-in sessions and API tokens
+              are stored only as one-way hashes, so a copy of our database
+              would not let anyone use them.
             </li>
             <li>
               <Label>Walled-off workspaces</Label> — row-level security in the
               database keeps each workspace&apos;s data apart, and our servers
-              connect as database users that can see only the workspace they
-              are acting for.
+              connect as database users that cannot bypass it.
             </li>
             <li>
               <Label>Least access</Label> — the public waitlist form can add an
               address but cannot read the list, our servers send data only to a
               fixed set of services, Cloudinary copies are private and need a
               signed link, and we ask Google and Instagram only for the
-              permissions described above.
+              permissions named in sections 3 and 4.
             </li>
           </ul>
           <p className="mt-3">
@@ -702,8 +756,10 @@ export default function PrivacyPolicy() {
           <p className="mt-3">
             To delete your Storydump account and the data tied to it, email{" "}
             <EmailLink /> from the email address on your account. We do this by
-            hand and complete it within 30 days of your request; deleted data
-            then drops out of our database backups as they roll forward. In the
+            hand and complete it within 30 days of your request, including
+            removing your details from the workspace action log and from the
+            copy of our previous system; deleted data then drops out of our
+            database backups as they roll forward. In the
             dashboard, a workspace owner can delete a workspace under Settings ›
             General, and it is permanently deleted 30 days later. You can
             unlink Telegram under Settings › Integrations at any time.
