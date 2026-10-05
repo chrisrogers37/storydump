@@ -258,7 +258,7 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
 async def telegram_ids_for(executor, user_ids: Iterable[str]) -> list[str]:
     """The Telegram ids of those of *user_ids* who have linked Telegram, in a
     stable order; a person who has not linked is simply absent."""
-    user_ids = sorted(str(u) for u in user_ids)  # a set, in a stable order
+    user_ids = [str(u) for u in user_ids]
     if not user_ids:
         return []
     rows = await executor.execute(

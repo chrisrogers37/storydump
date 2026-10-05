@@ -22,7 +22,6 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from starlette.requests import ClientDisconnect
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.principal import (
     client_ip,
@@ -31,7 +30,7 @@ from src.api.principal import (
     require_engine,
 )
 from src.config.settings import settings
-from src.services.target import identity, waitlist
+from src.services.target import waitlist
 from src.services.target.webhook_ingress import verify_secret_token
 from src.utils.logger import logger
 
@@ -206,21 +205,6 @@ async def _capped_body(request: Request) -> Optional[bytes]:
     return bytes(body)
 
 
-async def _operator_chats(conn, ping) -> Optional[list[str]]:
-    """The Telegram ids the admin message for this signup goes to: the
-    operators who have linked Telegram, possibly none; None when the ping is
-    off or the read failed. The read has a savepoint of its own, so a failure
-    costs the message (one log line), never the signup."""
-    if ping is None:
-        return None
-    try:
-        async with conn.begin_nested():
-            return await identity.telegram_ids_for(conn, ping.operators)
-    except SQLAlchemyError:
-        logger.exception("waitlist ping: not sent, the operators could not be read")
-        return None
-
-
 @router.post("/waitlist", status_code=202)
 async def join_waitlist(request: Request, background: BackgroundTasks):
     """Add an address to the waitlist. The answer is the same whether the
@@ -255,7 +239,6 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
     # A slot is taken only once the body is in hand, so a slow upload cannot
     # hold one.
     slots = request.app.state.waitlist_slots
-    ping = request.app.state.waitlist_ping
     if not await slots.acquire(address):
         return _refusal(429, TOO_MANY, "busy")
     try:
@@ -296,17 +279,13 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
                 return JSONResponse(
                     status_code=full.status_code, content={"detail": full.detail}
                 )
-            chats = await _operator_chats(conn, ping)
     finally:
         slots.release(address)
     logger.info("waitlist: an address was received")
-    if chats:
-        # After the commit and after the answer: Telegram's pace never holds
-        # the visitor, a slot or a connection, and the API's process runs the
-        # task to its end.
-        background.add_task(ping, joined, chats)
-    elif chats == []:
-        logger.warning(
-            "waitlist ping: not sent, no one in OPS_USER_IDS has linked Telegram"
-        )
+    ping = request.app.state.waitlist_ping
+    if ping is not None:
+        # After the commit and after the answer: Telegram's pace, and the read
+        # of whom to tell, never hold the visitor, a slot or a connection, and
+        # the API's process runs the task to its end.
+        background.add_task(ping, joined)
     return {"status": "received"}

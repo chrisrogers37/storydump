@@ -164,7 +164,7 @@ class TestTelegramIdsFor:
         ((sql, params),) = ex.statements
         assert "FROM user_identities" in sql
         assert "provider = :p" in sql and "user_id = ANY(CAST(:u AS uuid[]))" in sql
-        assert params == {"p": "telegram", "u": ["u-1", "u-2"]}
+        assert params["p"] == "telegram" and sorted(params["u"]) == ["u-1", "u-2"]
 
     async def test_no_one_asks_nothing(self):
         ex = _Scripted()

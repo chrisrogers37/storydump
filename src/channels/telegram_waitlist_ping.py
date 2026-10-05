@@ -1,12 +1,13 @@
 """The admin's Telegram message for each waitlist signup (`POST /public/waitlist`).
 
 The API sends it with the one bot (`TARGET_TELEGRAM_BOT_TOKEN`) as a direct
-message to each person in `OPS_USER_IDS` who has linked Telegram: the route
-reads their Telegram ids in its own transaction (`identity.telegram_ids_for`),
-and a person's private chat with the bot has their user id. Linking began
-with `/start` in that chat, so the bot may write to it. The send happens after
-the route has answered: a background task on the API's own process, which
-runs until the send ends. It is not an outbox row: the outbox delivers to a
+message to each person in `OPS_USER_IDS` who has linked Telegram, read when
+the ping's turn comes (``create_app`` hands it the read, so this module needs
+no database), since a person's private chat with the bot has their user id.
+Linking began with `/start` in that chat, so the bot may write to it. All of
+it happens after the route has answered: a background task on the API's own
+process, which runs until the send ends, so neither the read nor Telegram can
+cost a signup. It is not an outbox row: the outbox delivers to a
 workspace's bound chats under that workspace's tenant, and an operator's
 private chat is no workspace's.
 
@@ -25,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Optional, Sequence
+from typing import Awaitable, Callable, Optional
 
 from src.channels.telegram_transport import TelegramPaced, TelegramSendError
 from src.services.target.vocabulary import TELEGRAM_TOKEN_VAR
@@ -42,6 +43,9 @@ MAX_PACED_WAIT_SECONDS = 30.0
 MAX_WAITING = 20
 
 SendText = Callable[[str, str], Awaitable[str]]
+#: The Telegram ids of the operators who have linked Telegram, read anew for
+#: each ping, so a link made after startup counts.
+Recipients = Callable[[], Awaitable[list[str]]]
 
 
 def message(address: str, at: datetime) -> str:
@@ -54,20 +58,19 @@ def message(address: str, at: datetime) -> str:
 
 
 class WaitlistPing:
-    """One send function and the operators it writes to; ``create_app``
+    """One send function and the read of whom it writes to; ``create_app``
     builds one as ``app.state.waitlist_ping``, or None without a bot or an
     operator."""
 
-    def __init__(self, send_text: SendText, operators: frozenset[str]) -> None:
+    def __init__(self, send_text: SendText, recipients: Recipients) -> None:
         self._send_text = send_text
-        #: The `OPS_USER_IDS` user ids; the route reads their Telegram ids.
-        self.operators = operators
+        self._recipients = recipients
         self._one_at_a_time = asyncio.Semaphore(1)
         #: Pings queued behind the one being sent.
         self._waiting = 0
 
-    async def __call__(self, address: str, chats: Sequence[str]) -> None:
-        """Tell each of *chats* about *address*. Never raises."""
+    async def __call__(self, address: str) -> None:
+        """Tell each linked operator about *address*. Never raises."""
         if self._waiting >= MAX_WAITING:
             # Telegram is holding us back and the queue is full: one line
             # per dropped ping, so the log counts what was not announced.
@@ -80,19 +83,24 @@ class WaitlistPing:
             async with self._one_at_a_time:
                 self._waiting -= 1
                 queued = False
+                chats = await self._recipients()
+                if not chats:
+                    logger.warning(
+                        "waitlist ping: not sent, no one in OPS_USER_IDS"
+                        " has linked Telegram"
+                    )
                 for chat in chats:
-                    try:
-                        await self._send(chat, text)
-                    except Exception:  # noqa: BLE001 — a background task has no caller
-                        logger.exception(
-                            "waitlist ping: failed, NO MESSAGE WAS SENT to one operator"
-                        )
+                    await self._send(chat, text)
+        except Exception:  # noqa: BLE001 — a background task has no caller
+            logger.exception("waitlist ping: not sent, the operators could not be read")
         finally:
             # Cancelled before its turn: it no longer waits.
             if queued:
                 self._waiting -= 1
 
     async def _send(self, chat: str, text: str) -> None:
+        """Send to one chat; whatever stops it is logged, never raised, so the
+        next operator still gets theirs."""
         for attempt in range(1, ATTEMPTS + 1):
             try:
                 await self._send_text(chat, text)
@@ -110,11 +118,21 @@ class WaitlistPing:
                 # was retried below us.
                 logger.error("waitlist ping: not sent: %s", exc)
                 return
+            except Exception:  # noqa: BLE001 — a background task has no caller
+                logger.exception(
+                    "waitlist ping: failed, NO MESSAGE WAS SENT to one operator"
+                )
+                return
 
 
-def from_settings(bot, operators: frozenset[str]) -> Optional[WaitlistPing]:
+def from_settings(
+    bot,
+    operators: frozenset[str],
+    telegram_ids: Callable[[frozenset[str]], Awaitable[list[str]]],
+) -> Optional[WaitlistPing]:
     """The ping this process sends, or None, saying once at startup which
-    setting is missing, so a signup with no ping is explained in the log."""
+    setting is missing, so a signup with no ping is explained in the log.
+    *telegram_ids* reads the linked Telegram ids of the user ids it is given."""
     missing = [
         name
         for name, value in ((TELEGRAM_TOKEN_VAR, bot), ("OPS_USER_IDS", operators))
@@ -123,4 +141,4 @@ def from_settings(bot, operators: frozenset[str]) -> Optional[WaitlistPing]:
     if missing:
         logger.warning("waitlist ping: off, not set: %s", ", ".join(missing))
         return None
-    return WaitlistPing(bot.send_text, operators)
+    return WaitlistPing(bot.send_text, lambda: telegram_ids(operators))
