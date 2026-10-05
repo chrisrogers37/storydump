@@ -257,15 +257,17 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
 
 async def telegram_ids_for(executor, user_ids: Iterable[str]) -> list[str]:
     """The Telegram ids of those of *user_ids* who have linked Telegram, in a
-    stable order; a person who has not linked is simply absent."""
+    stable order; a person who has not linked, or whose account is disabled,
+    is simply absent."""
     user_ids = [str(u) for u in user_ids]
     if not user_ids:
         return []
     rows = await executor.execute(
         text(
-            "SELECT external_id FROM user_identities"
-            " WHERE provider = :p AND user_id = ANY(CAST(:u AS uuid[]))"
-            " ORDER BY external_id"
+            "SELECT i.external_id FROM user_identities i"
+            " JOIN users u ON u.id = i.user_id AND u.state = 'active'"
+            " WHERE i.provider = :p AND i.user_id = ANY(CAST(:u AS uuid[]))"
+            " ORDER BY i.external_id"
         ),
         {"p": PROVIDER_TELEGRAM, "u": user_ids},
     )

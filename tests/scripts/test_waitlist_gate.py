@@ -219,16 +219,18 @@ def no_real_ping(monkeypatch):
 
 
 #: Two operators who have linked Telegram (the first also Google), one who
-#: has linked only Google, and a person linked to Telegram who is no operator.
+#: has linked only Google, a person linked to Telegram who is no operator,
+#: and a linked operator whose account is disabled.
 LINKED_OP = "00000000-0000-4000-8000-0000000000a1"
 GOOGLE_ONLY_OP = "00000000-0000-4000-8000-0000000000a2"
 LINKED_OTHER = "00000000-0000-4000-8000-0000000000a3"
 LINKED_OP_2 = "00000000-0000-4000-8000-0000000000a4"
+DISABLED_OP = "00000000-0000-4000-8000-0000000000a5"
 
 
 @pytest.fixture
 def people(world):
-    """The four, made once per database: user-plane rows the ping reads as
+    """The five, made once per database: user-plane rows the ping reads as
     `svc_ingress`."""
     conn = psycopg2.connect(world["owner"])
     try:
@@ -239,12 +241,24 @@ def people(world):
                 (LINKED_OP, GOOGLE_ONLY_OP, LINKED_OTHER, LINKED_OP_2),
             )
             cur.execute(
+                "INSERT INTO users (id, state) VALUES (%s, 'disabled')"
+                " ON CONFLICT DO NOTHING",
+                (DISABLED_OP,),
+            )
+            cur.execute(
                 "INSERT INTO user_identities (user_id, provider, external_id)"
                 " VALUES (%s, 'telegram', '5550001'), (%s, 'google', 'g-5550001'),"
                 " (%s, 'google', 'g-5550002'), (%s, 'telegram', '5550003'),"
-                " (%s, 'telegram', '5550004')"
+                " (%s, 'telegram', '5550004'), (%s, 'telegram', '5550005')"
                 " ON CONFLICT DO NOTHING",
-                (LINKED_OP, LINKED_OP, GOOGLE_ONLY_OP, LINKED_OTHER, LINKED_OP_2),
+                (
+                    LINKED_OP,
+                    LINKED_OP,
+                    GOOGLE_ONLY_OP,
+                    LINKED_OTHER,
+                    LINKED_OP_2,
+                    DISABLED_OP,
+                ),
             )
     finally:
         conn.close()
@@ -267,16 +281,14 @@ class _Bot:
 def ping_for(world, people, monkeypatch):
     """The real ping and its real read of linked operators, on the route's
     engine, with *operators* as `OPS_USER_IDS` and a stand-in bot."""
-    real = REAL_FROM_SETTINGS
 
     def install(*operators):
         bot = _Bot(world)
+        monkeypatch.setattr(principal.settings, "OPS_USER_IDS", ",".join(operators))
         monkeypatch.setattr(
             waitlist_ping,
             "from_settings",
-            lambda _bot, _ops, telegram_ids: real(
-                bot, frozenset(operators), telegram_ids
-            ),
+            lambda _bot, ops, recipients: REAL_FROM_SETTINGS(bot, ops, recipients),
         )
         return bot
 
@@ -294,7 +306,7 @@ class TestTheAdminPing:
     operator after the commit; nothing the route refuses is."""
 
     def test_it_goes_to_each_linked_operator_and_no_one_else(self, world, ping_for):
-        bot = ping_for(LINKED_OP, GOOGLE_ONLY_OP, LINKED_OP_2)
+        bot = ping_for(LINKED_OP, GOOGLE_ONLY_OP, LINKED_OP_2, DISABLED_OP)
         (resp,) = _post(world, {"email": "ops-only@example.com"})
         assert resp.status_code == 202
         assert bot.sent == [
@@ -307,7 +319,7 @@ class TestTheAdminPing:
     ):
         bot = ping_for(LINKED_OP)
 
-        async def broken(executor, user_ids):
+        async def broken(executor, user_ids):  # a statement PostgreSQL refuses
             await executor.execute(text("SELECT 1/0"))
 
         monkeypatch.setattr(identity, "telegram_ids_for", broken)

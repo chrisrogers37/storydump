@@ -80,21 +80,25 @@ class WaitlistPing:
         self._waiting += 1
         queued = True
         try:
+            # Read before the turn, so a slow read (a busy pool) never holds
+            # the pings queued behind this one.
+            chats = await self._recipients()
+            if not chats:
+                logger.warning(
+                    "waitlist ping: not sent, no one in OPS_USER_IDS"
+                    " has linked Telegram"
+                )
+                return
             async with self._one_at_a_time:
                 self._waiting -= 1
                 queued = False
-                chats = await self._recipients()
-                if not chats:
-                    logger.warning(
-                        "waitlist ping: not sent, no one in OPS_USER_IDS"
-                        " has linked Telegram"
-                    )
                 for chat in chats:
                     await self._send(chat, text)
         except Exception:  # noqa: BLE001 — a background task has no caller
             logger.exception("waitlist ping: not sent, the operators could not be read")
         finally:
-            # Cancelled before its turn: it no longer waits.
+            # Cancelled, unread or no one to tell before its turn: it no
+            # longer waits.
             if queued:
                 self._waiting -= 1
 
@@ -126,13 +130,11 @@ class WaitlistPing:
 
 
 def from_settings(
-    bot,
-    operators: frozenset[str],
-    telegram_ids: Callable[[frozenset[str]], Awaitable[list[str]]],
+    bot, operators: frozenset[str], recipients: Recipients
 ) -> Optional[WaitlistPing]:
     """The ping this process sends, or None, saying once at startup which
     setting is missing, so a signup with no ping is explained in the log.
-    *telegram_ids* reads the linked Telegram ids of the user ids it is given."""
+    *recipients* reads the linked Telegram ids of *operators*."""
     missing = [
         name
         for name, value in ((TELEGRAM_TOKEN_VAR, bot), ("OPS_USER_IDS", operators))
@@ -141,4 +143,4 @@ def from_settings(
     if missing:
         logger.warning("waitlist ping: off, not set: %s", ", ".join(missing))
         return None
-    return WaitlistPing(bot.send_text, lambda: telegram_ids(operators))
+    return WaitlistPing(bot.send_text, recipients)

@@ -744,13 +744,15 @@ def create_app(
     from src.channels import telegram_waitlist_ping as waitlist_ping
     from src.services.target import identity
 
-    async def telegram_ids(user_ids):
+    operators = settings.ops_user_ids
+
+    async def operator_chats():
         # Its own short transaction, in the ping's background task.
         async with app.state.engine.begin() as conn:
-            return await identity.telegram_ids_for(conn, user_ids)
+            return await identity.telegram_ids_for(conn, operators)
 
     app.state.waitlist_ping = waitlist_ping.from_settings(
-        bot, settings.ops_user_ids, telegram_ids
+        bot, operators, operator_chats
     )
     app.state.ingress_workers = _ingress_workers(env)
     app.state.pool_watch = (

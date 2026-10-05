@@ -292,7 +292,7 @@ def test_without_a_bot_or_an_operator_it_is_off_and_says_which(
     assert f"waitlist ping: off, not set: {missing}" in _logged(caplog)
 
 
-async def _never(user_ids):
+async def _never():
     raise AssertionError("an off ping reads no one")
 
 
@@ -305,14 +305,14 @@ async def test_with_both_it_reads_its_operators_anew_for_each_ping():
             sent.append(chat_id)
             return "1"
 
-    async def telegram_ids(user_ids):
-        asked.append(user_ids)
+    async def recipients():
+        asked.append(True)
         return linked.pop(0)
 
-    ping = waitlist_ping.from_settings(Bot(), OPS, telegram_ids)
+    ping = waitlist_ping.from_settings(Bot(), OPS, recipients)
     await ping("a@example.com")
     await ping("b@example.com")
-    assert asked == [OPS, OPS]
+    assert len(asked) == 2
     assert sent == [CHAT]
 
 
