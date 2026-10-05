@@ -4,7 +4,8 @@ import { useRef, useState, useSyncExternalStore } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { trackEvent, UTM_KEYS } from "@/lib/analytics"
+import { trackEvent } from "@/lib/analytics"
+import { UTM_KEYS } from "@/lib/utm"
 
 interface WaitlistFormProps {
   variant?: "hero" | "footer"

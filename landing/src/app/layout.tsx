@@ -1,11 +1,9 @@
 import type { Metadata } from "next"
-import Script from "next/script"
+import { Pageviews } from "@/components/analytics/pageviews"
 import { siteConfig } from "@/config/site"
 import { fontVariables } from "@/design/fonts"
 import { homeSocial } from "@/lib/seo"
 import "./globals.css"
-
-const plausibleDomain = process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN
 
 export const metadata: Metadata = {
   title: {
@@ -46,19 +44,10 @@ export default function RootLayout({
       >
         {children}
         {/* An invite link's path is the invitation token, a bearer credential
-            that goes nowhere but the router. The exclusions build sends no
-            pageview for a path matching data-exclude. It excludes pageviews
-            only, so no page under /join may fire a custom event either
-            (join-fires-no-analytics-event-contract.test.ts holds this). */}
-        {plausibleDomain && (
-          <Script
-            defer
-            data-domain={plausibleDomain}
-            data-exclude="/join/**"
-            src="https://plausible.io/js/script.exclusions.js"
-            strategy="afterInteractive"
-          />
-        )}
+            that goes nowhere but the router: `lib/posthog.ts` sends nothing
+            from a path under /join, and no page there may load a custom
+            event (join-fires-no-analytics-event-contract.test.ts). */}
+        <Pageviews />
       </body>
     </html>
   )

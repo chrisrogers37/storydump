@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { refuseCrossSite } from "@/lib/route-guards"
 import { targetFetch } from "@/lib/target-api"
-import { UTM_KEYS } from "@/lib/analytics"
+import { UTM_KEYS } from "@/lib/utm"
 
 /** The API's bounds, in characters: an address, and each campaign value. */
 const MAX_EMAIL_CHARS = 254

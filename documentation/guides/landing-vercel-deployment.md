@@ -11,7 +11,7 @@ Set these in **Vercel → Project Settings → Environment Variables**:
 | `TARGET_API_URL` (or `BACKEND_URL`) | Server | The API's base URL, called by the server-side client (`landing/src/lib/target-api.ts:31`: `TARGET_API_URL` wins, then `BACKEND_URL`, then `http://localhost:8000`) |
 | `WAITLIST_SITE_SECRET` | Server | Optional. The same value as the API's `WAITLIST_SITE_SECRET` (generate one with `openssl rand -hex 32`). Set, the waitlist route sends it with the visitor's address, and the API gives each visitor their own limit and refuses any other caller. Set it here first, then on the API: the API ignores it while its own is unset. The redeploy that carries it must run with **Use project's Ignore Build Step** unchecked (the Ignored Build Step cancels a redeploy of unchanged code), and be Ready before the API's is set. The per-visitor key holds only while Vercel is the first hop |
 | `NEXT_PUBLIC_TELEGRAM_BOT_NAME` | Client | The product bot's handle without `@`, for the site's `t.me` links (`landing/src/lib/telegram-bot.ts`); unset, the links are omitted rather than guessed |
-| `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` | Client | Plausible analytics domain; omit to disable (`landing/src/app/layout.tsx:7`) |
+| `NEXT_PUBLIC_POSTHOG_KEY` | Client | The PostHog project's API key (`phc_…`, a public key by design); unset, the site sends no analytics (`landing/src/lib/posthog.ts`). The project needs **Cookieless server hash mode** on (Project settings › Web analytics), or PostHog drops every event |
 
 Sign-in is Google, through the API; the Telegram Login Widget is gone rather than hidden
 (`landing/src/app/login/page.tsx`), and with it every variable that signed a session here:
