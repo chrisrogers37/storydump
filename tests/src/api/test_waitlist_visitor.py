@@ -25,5 +25,5 @@ def test_an_address_is_its_key(raw, key):
 @pytest.mark.parametrize(
     "raw", [None, "", "unknown", "203.0.113.7, 10.0.0.1", "203.0.113.7:443"]
 )
-def test_anything_else_is_noaddress_key(raw):
+def test_anything_else_is_no_address(raw):
     assert address_key(raw) is None

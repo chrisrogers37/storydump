@@ -499,7 +499,8 @@ def declared_length(raw_headers: Iterable[tuple[bytes, bytes]]) -> int | None:
     return None
 
 
-#: `05`: pre-auth admission, 30/min per client IP, scope `preauth_ip`.
+#: `05`: pre-auth admission, 30/min per client (an IPv4 address or an IPv6
+#: /64, :func:`address_key`), scope `preauth_ip`.
 PREAUTH_LIMIT = 30
 PREAUTH_WINDOW_SECONDS = 60
 PREAUTH_SCOPE = "preauth_ip"
@@ -508,8 +509,8 @@ PREAUTH_SCOPE = "preauth_ip"
 def address_key(raw: Optional[str]) -> Optional[str]:
     """The key one client is counted under: an IPv4 address, or an IPv6
     address's /64 (one subscriber holds a whole /64, so keying on the address
-    alone would hand a script 2^64 limits and slot shares). None when *raw* is
-    not an address."""
+    alone would hand a script 2^64 limits). None when *raw* is not an
+    address."""
     try:
         ip = ipaddress.ip_address((raw or "").strip())
     except ValueError:
