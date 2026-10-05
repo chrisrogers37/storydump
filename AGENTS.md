@@ -395,9 +395,10 @@ the tree daily.
 a PR is really ready — it catches a check that was never scheduled, which a
 green rollup hides (`documentation/guides/ci-cd-pipeline.md`).
 
-**Add a changelog fragment and never edit `CHANGELOG.md`** when opening a PR:
-one new file in `changelog.d/`. `changelog.d/README.md` has the format and the
-rule the `changelog-check` job of `.github/workflows/ci.yml` holds every PR to.
+**A PR that touches code or config adds a changelog fragment, and no PR edits
+`CHANGELOG.md`**: one new file in `changelog.d/`. `changelog.d/README.md` has
+the format and the rule the `changelog-check` job of `.github/workflows/ci.yml`
+holds every PR to.
 
 ## Documentation
 
