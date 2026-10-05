@@ -17,7 +17,7 @@
  * Rendering them per request to give them a nonce would take them off the CDN.
  */
 
-const ANALYTICS = "https://plausible.io";
+import { POSTHOG_HOST } from "./posthog-host";
 
 /** Every directive but `script-src`, the same in both policies. */
 const SHARED = [
@@ -26,9 +26,9 @@ const SHARED = [
   // Drive thumbnails are served from Google's content hosts (`media-grid.tsx`).
   "img-src 'self' data: https:",
   "font-src 'self'",
-  // The browser calls only this tier and the analytics endpoint. Signing in is
-  // a navigation, not a fetch.
-  `connect-src 'self' ${ANALYTICS}`,
+  // The browser calls only this tier and PostHog's ingestion host. Signing in
+  // is a navigation, not a fetch.
+  `connect-src 'self' ${POSTHOG_HOST}`,
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -45,16 +45,16 @@ function policy(scriptSources: string[], { dev = false }: Options): string {
 
 /** For a prerendered page. */
 export function staticPagePolicy(options: Options = {}): string {
-  return policy(["'self'", "'unsafe-inline'", ANALYTICS], options);
+  return policy(["'self'", "'unsafe-inline'"], options);
 }
 
 /**
  * For a page rendered per request. 'strict-dynamic' lets a nonced script load
- * others (Next's chunks, the analytics script); 'self' and the analytics
- * origin are for browsers that predate it.
+ * others (Next's chunks, the analytics library among them); 'self' is for
+ * browsers that predate it.
  */
 export function noncePolicy(nonce: string, options: Options = {}): string {
-  return policy(["'self'", `'nonce-${nonce}'`, "'strict-dynamic'", ANALYTICS], options);
+  return policy(["'self'", `'nonce-${nonce}'`, "'strict-dynamic'"], options);
 }
 
 /** 128 random bits, base64. */
