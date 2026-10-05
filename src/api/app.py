@@ -77,6 +77,7 @@ from src.exceptions.tenancy import (
 )
 from src.services.target import oauth_states
 from src.services.target.commands import CommandNotBuilt, CommandRefused
+from src.services.target.health_reads import StatementTimedOut
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import MixInvalid
 from src.services.target.provisioning import ProvisioningRefused
@@ -368,6 +369,16 @@ def _unmapped(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": "internal error"})
 
 
+def _busy(reason: str) -> JSONResponse:
+    """The answer to load, not a fault: a 503 naming *reason*, which the
+    caller retries after a second."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "busy — try again", "reason": reason},
+        headers={"Retry-After": "1"},
+    )
+
+
 def _reason_detail(exc, status: int) -> dict:
     """The ordinary refusal body: the message, and the machine-routable
     reason the web's `target-api.ts::readError` matches on."""
@@ -433,11 +444,15 @@ def _register_handlers(app: FastAPI) -> None:
         # told to retry rather than shown a 500 (the webhook route maps the
         # same wait itself, before admission, and never reaches this).
         logger.warning("pool saturated on %s %s", request.method, request.url.path)
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "busy — try again", "reason": "pool_saturated"},
-            headers={"Retry-After": "1"},
-        )
+        return _busy("pool_saturated")
+
+    @app.exception_handler(StatementTimedOut)
+    async def _statement_timed_out(request: Request, exc: StatementTimedOut):
+        # A health read's statement cancelled under its cap is load, as a pool
+        # wait is, so it is told to retry. Not logged here: `health_reads`
+        # logs it once, for the read, and the health cache answers every hit
+        # of its window with the same refusal.
+        return _busy("statement_timeout")
 
     app.add_exception_handler(
         TenantResolutionError, _mapped(_TENANT_STATUS, _tenant_detail)
@@ -742,8 +757,18 @@ def create_app(
     # admin's message for each signup it accepts, sent with the same bot.
     app.state.waitlist_slots = WaitlistSlots()
     from src.channels import telegram_waitlist_ping as waitlist_ping
+    from src.services.target import identity
 
-    app.state.waitlist_ping = waitlist_ping.from_env(env, bot)
+    operators = settings.ops_user_ids
+
+    async def operator_chats():
+        # Its own short transaction, in the ping's background task.
+        async with app.state.engine.begin() as conn:
+            return await identity.telegram_ids_for(conn, operators)
+
+    app.state.waitlist_ping = waitlist_ping.from_settings(
+        bot, operators, operator_chats
+    )
     app.state.ingress_workers = _ingress_workers(env)
     app.state.pool_watch = (
         PoolWatch(app.state.engine) if app.state.engine is not None else None
