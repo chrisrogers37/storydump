@@ -1,0 +1,82 @@
+{
+ "phase": "keyboard",
+ "console_errors": [],
+ "page_errors": [],
+ "failed_requests": [],
+ "urls": [
+  "http://127.0.0.1:3117/dashboard/settings",
+  "http://127.0.0.1:3117/dashboard/settings"
+ ],
+ "checks": {
+  "keyboard_only_invite_copy_done": {
+   "ok": true,
+   "seen": {
+    "tab_1": "Role",
+    "tab_2": "Invite",
+    "after_enter": "Send this link to them. It works once.https://storydump.app/join/STUB0003xxxxxxx",
+    "tab_to_copy": "Copy to clipboard",
+    "tab_to_done": "Done",
+    "after_done": "input",
+    "clipboard_is_link": true
+   }
+  }
+ },
+ "states": {
+  "keyboard": [
+   [
+    "tab_1",
+    {
+     "tag": "button",
+     "type": "button",
+     "name": "Role",
+     "is_link_block": false
+    }
+   ],
+   [
+    "tab_2",
+    {
+     "tag": "button",
+     "type": "submit",
+     "name": "Invite",
+     "is_link_block": false
+    }
+   ],
+   [
+    "after_enter",
+    {
+     "tag": "div",
+     "type": null,
+     "name": "Send this link to them. It works once.https://storydump.app/join/STUB0003xxxxxxx",
+     "is_link_block": true
+    }
+   ],
+   [
+    "tab_to_copy",
+    {
+     "tag": "button",
+     "type": "button",
+     "name": "Copy to clipboard",
+     "is_link_block": false
+    }
+   ],
+   [
+    "tab_to_done",
+    {
+     "tag": "button",
+     "type": "button",
+     "name": "Done",
+     "is_link_block": false
+    }
+   ],
+   [
+    "after_done",
+    {
+     "tag": "input",
+     "type": "email",
+     "name": "",
+     "is_link_block": false
+    }
+   ]
+  ]
+ }
+}

@@ -1,0 +1,87 @@
+{
+ "phase": "owner",
+ "console_errors": [
+  "Failed to load resource: the server responded with a status of 400 (Bad Request)"
+ ],
+ "page_errors": [],
+ "failed_requests": [],
+ "urls": [
+  "http://127.0.0.1:3117/dashboard/settings",
+  "http://127.0.0.1:3117/dashboard/settings",
+  "http://127.0.0.1:3117/dashboard/settings"
+ ],
+ "checks": {
+  "the_link_shown_is_the_contract_join_url": {
+   "ok": true,
+   "seen": "https://storydump.app/join/STUB0001xxxxxxxxx"
+  },
+  "focus_moves_to_the_link_after_invite": {
+   "ok": true,
+   "seen": {
+    "tag": "div",
+    "type": null,
+    "name": "Send this link to them. It works once.https://storydump.app/join/STUB0001xxxxxxx",
+    "is_link_block": true
+   }
+  },
+  "link_on_the_page_exactly_once": {
+   "ok": true,
+   "seen": 1
+  },
+  "link_in_no_storage": {
+   "ok": true,
+   "seen": "[[],[],\"sd_session=<the stub's fake token>; storydump_workspace=11111111-2222-4333-8444-555555555555\"]"
+  },
+  "copy_puts_exactly_the_link_on_the_clipboard": {
+   "ok": true,
+   "seen": {
+    "state": "Copied",
+    "clip": "https://storydump.app/join/STUB0001xxxxxxxxx"
+   }
+  },
+  "focus_returns_to_the_address_after_done": {
+   "ok": true,
+   "seen": {
+    "tag": "input",
+    "type": "email",
+    "name": "",
+    "is_link_block": false
+   }
+  },
+  "link_gone_after_done": {
+   "ok": true,
+   "seen": 0
+  },
+  "pending_list_shows_the_new_invitation": {
+   "ok": true,
+   "seen": "Members\nInvite by email\nMember\nMember\nAdmin\nInvite\n\nPending invitations\n\nfriend@example.com\n\nInvited as member \u00b7 expires Oct 9\n\npartner@example.com\n\nInvited as admin \u00b7 expires Oct 12\n\ndemo@example.com (you)\n\nCreated this workspace\n\nowner\n\nteammate@example.com\n\nInvited\n\nmember\nRemove\n\nPeople who spea"
+  },
+  "role_back_to_member_after_an_admin_invite": {
+   "ok": true,
+   "seen": "Member"
+  },
+  "a_refusal_names_the_address": {
+   "ok": true,
+   "seen": "Members\nInvite by email\nMember\nMember\nAdmin\nInvite\nCheck the email address and try again. Nothing was created.\n\nPending invitations\n\nfriend@example.com\n\nInvited as member \u00b7 expires Oct 9\n\npartner@exam"
+  },
+  "a_null_join_url_says_so_and_shows_no_link": {
+   "ok": true,
+   "seen": "Members\nInvite by email\nMember\nMember\nAdmin\nInvite\nThe invitation was made, but its link can't be built on this deployment.\n\nPending invitations\n\nfriend@example.com\n\nInvited as member \u00b7 expires Oct 9\n"
+  },
+  "no_url_carries_a_link": {
+   "ok": true,
+   "seen": [
+    "http://127.0.0.1:3117/dashboard/settings",
+    "http://127.0.0.1:3117/dashboard/settings",
+    "http://127.0.0.1:3117/dashboard/settings"
+   ]
+  }
+ },
+ "states": {
+  "initial": "Members\nInvite by email\nInvite\n\nPending invitations\n\nfriend@example.com\n\nInvited as member \u00b7 expires Oct 9\n\ndemo@example.com (you)\n\nCreated this workspace\n\nowner\n\nteammate@example.com\n\nInvited\n\nmember\nRemove\n\nPeople who speak in a bound Telegram group join as members automatically once their Telegram is linked; leaving the group removes nobody. Removing someone here revokes their access to this workspace.",
+  "link_shown": "Members\n\nSend this link to them. It works once.\n\nhttps://storydump.app/join/STUB0001xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\nThey need to sign in with Google as partner@example.com.\n\nDone\n\nPending invitations\n\nfriend@example.com\n\nInvited as member \u00b7 expires Oct 9\n\ndemo@example.com (you)\n\nCreated this workspace\n\nowner\n\nteammate@example.com\n\nInvited\n\nmember\nRemove\n\nPeople who speak in a bound Telegram group join as members automatically once their Telegram is linked; leaving the group removes nobody. Removing someone here revokes their access to this workspace.",
+  "after_done": "Members\nInvite by email\nMember\nMember\nAdmin\nInvite\n\nPending invitations\n\nfriend@example.com\n\nInvited as member \u00b7 expires Oct 9\n\npartner@example.com\n\nInvited as admin \u00b7 expires Oct 12\n\ndemo@example.com (you)\n\nCreated this workspace\n\nowner\n\nteammate@example.com\n\nInvited\n\nmember\nRemove\n\nPeople who speak in a bound Telegram group join as members automatically once their Telegram is linked; leaving the group removes nobody. Removing someone here revokes their access to this workspace.",
+  "refused": "Members\nInvite by email\nMember\nMember\nAdmin\nInvite\nCheck the email address and try again. Nothing was created.\n\nPending invitations\n\nfriend@example.com\n\nInvited as member \u00b7 expires Oct 9\n\npartner@example.com\n\nInvited as admin \u00b7 expires Oct 12\n\ndemo@example.com (you)\n\nCreated this workspace\n\nowner\n\nteammate@example.com\n\nInvited\n\nmember\nRemove\n\nPeople who speak in a bound Telegram group join as members automatically once their Telegram is linked; leaving the group removes nobody. Removing someone here revokes their access to this workspace.",
+  "no_link": "Members\nInvite by email\nMember\nMember\nAdmin\nInvite\nThe invitation was made, but its link can't be built on this deployment.\n\nPending invitations\n\nfriend@example.com\n\nInvited as member \u00b7 expires Oct 9\n\npartner@example.com\n\nInvited as admin \u00b7 expires Oct 12\n\ndemo@example.com (you)\n\nCreated this workspace\n\nowner\n\nteammate@example.com\n\nInvited\n\nmember\nRemove\n\nPeople who speak in a bound Telegram group join as members automatically once their Telegram is linked; leaving the group removes nobody. Removing someone here revokes their access to this workspace."
+ }
+}

@@ -1,0 +1,17 @@
+{
+ "phase": "mobile",
+ "console_errors": [],
+ "page_errors": [],
+ "failed_requests": [],
+ "urls": [
+  "http://127.0.0.1:3117/dashboard/settings",
+  "http://127.0.0.1:3117/dashboard/settings"
+ ],
+ "checks": {
+  "no_horizontal_scroll_at_390": {
+   "ok": true,
+   "seen": 0
+  }
+ },
+ "states": {}
+}

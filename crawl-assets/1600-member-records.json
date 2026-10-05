@@ -1,0 +1,22 @@
+{
+ "phase": "member",
+ "console_errors": [],
+ "page_errors": [],
+ "failed_requests": [],
+ "urls": [
+  "http://127.0.0.1:3117/dashboard/settings",
+  "http://127.0.0.1:3117/dashboard/settings"
+ ],
+ "checks": {
+  "a_member_sees_no_invite_form_and_reads_no_invitations": {
+   "ok": true,
+   "seen": {
+    "invitation_reads": [],
+    "member_requests": 10
+   }
+  }
+ },
+ "states": {
+  "member": "Members\n\ndemo@example.com (you)\n\nCreated this workspace\n\nowner\n\nteammate@example.com\n\nInvited\n\nmember\n\nPeople who speak in a bound Telegram group join as members automatically once their Telegram is linked; leaving the group removes nobody. Removing someone here revokes their access to this workspace."
+ }
+}
