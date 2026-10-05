@@ -14,7 +14,7 @@ import traceback
 from contextlib import asynccontextmanager
 
 import pytest
-from asyncpg.exceptions import QueryCanceledError
+from asyncpg.exceptions import LockNotAvailableError, QueryCanceledError
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import DBAPIError
 
@@ -237,10 +237,10 @@ def test_a_statement_past_its_timeout_answers_503(
 
 def test_any_other_database_error_stays_a_500(app, engine, clock, seams, monkeypatch):
     """Only the cancel is load: any other database error is a fault, and stays
-    the server's 500."""
+    the server's 500, a server error of another class included."""
 
     async def broken(executor):
-        raise DBAPIError("SELECT 1", None, Exception("connection reset"))
+        raise DBAPIError("SELECT 1", None, LockNotAvailableError("lock not available"))
 
     monkeypatch.setattr(posting_health, "posting_freshness", broken)
     client = TestClient(app, raise_server_exceptions=False)

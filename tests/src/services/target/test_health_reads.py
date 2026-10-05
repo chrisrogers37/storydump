@@ -5,7 +5,14 @@ import logging
 from contextlib import asynccontextmanager
 
 import pytest
-from asyncpg.exceptions import QueryCanceledError
+from asyncpg.exceptions import (
+    AdminShutdownError,
+    DeadlockDetectedError,
+    LockNotAvailableError,
+    OperatorInterventionError,
+    PostgresError,
+    QueryCanceledError,
+)
 from sqlalchemy.exc import DBAPIError
 
 from src.services.target import health_reads
@@ -62,9 +69,44 @@ async def test_a_cancelled_statement_leaves_the_read_as_the_refusal(caplog):
     )
 
 
-async def test_any_other_database_error_leaves_the_read_unchanged():
-    broken = DBAPIError("SELECT 1", None, Exception("connection reset"))
-    with pytest.raises(DBAPIError) as raised:
-        async with health_reads.connect(_Engine()):
-            raise broken
+class _Adapter(Exception):
+    """SQLAlchemy's asyncpg adapter error in the one respect the translation
+    reads: the driver's error is its ``__cause__``."""
+
+
+def _as_orig(driver_error):
+    return DBAPIError("SELECT 1", None, driver_error)
+
+
+def _as_cause(driver_error):
+    adapter = _Adapter(str(driver_error))
+    adapter.__cause__ = driver_error
+    return DBAPIError("SELECT 1", None, adapter)
+
+
+@pytest.mark.parametrize("shape", [_as_orig, _as_cause], ids=["orig", "cause"])
+@pytest.mark.parametrize(
+    "driver_error",
+    [
+        LockNotAvailableError("not the cancel"),
+        DeadlockDetectedError("not the cancel"),
+        AdminShutdownError("not the cancel"),
+        OperatorInterventionError("not the cancel"),
+        PostgresError("not the cancel"),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+async def test_any_other_server_error_leaves_the_read_unchanged(
+    shape, driver_error, caplog
+):
+    """Only the cancel's own class is the refusal: its parent class, a sibling
+    in its SQLSTATE class, two lock errors and the base of every server error
+    leave the read unchanged, in both shapes the translation reads, and log
+    nothing."""
+    broken = shape(driver_error)
+    with caplog.at_level(logging.WARNING, logger=health_reads.__name__):
+        with pytest.raises(DBAPIError) as raised:
+            async with health_reads.connect(_Engine()):
+                raise broken
     assert raised.value is broken
+    assert [r for r in caplog.records if r.name == health_reads.__name__] == []
