@@ -11,8 +11,9 @@
  * the root layout that wraps them, and everything they import, transitively)
  * and fails when it reaches `lib/analytics.ts`, the module custom events go
  * through, or any module but the pageview sender (`lib/posthog.ts`,
- * `components/analytics/pageviews.tsx`) that loads posthog-js or `lib/posthog.ts`. The marketing home page is walked as the positive
- * control: its FAQ tracks an event, so a walker that could not follow an
+ * `components/analytics/pageviews.tsx`) that imports posthog-js or
+ * `lib/posthog.ts`, by whatever path. The marketing home page is walked as the
+ * positive control: its FAQ tracks an event, so a walker that could not follow an
  * import fails there first.
  *
  * WHAT THIS CANNOT SEE: a module loaded through a computed path.
@@ -30,9 +31,8 @@ const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const APP = path.join(SRC, "app");
 const ANALYTICS = path.join(SRC, "lib", "analytics.ts");
 /** The pageview sender every route loads, and the module it goes through. */
-const PAGEVIEWS = [path.join(SRC, "lib", "posthog.ts"), path.join(SRC, "components", "analytics", "pageviews.tsx")];
-/** posthog-js itself, or the site's wrapper around it. */
-const LOADS_POSTHOG = /["'](?:posthog-js[/"']|@\/lib\/posthog["']|\.\/posthog["'])/;
+const POSTHOG = path.join(SRC, "lib", "posthog.ts");
+const PAGEVIEWS = [POSTHOG, path.join(SRC, "components", "analytics", "pageviews.tsx")];
 
 /** `import … from "x"`, `export … from "x"`, `import "x"` and `import("x")`. */
 const IMPORT =
@@ -56,6 +56,14 @@ function resolveImport(from: string, spec: string): string | null {
   throw new Error(`cannot resolve ${JSON.stringify(spec)} from ${path.relative(SRC, from)}`);
 }
 
+/** Each import in a file: its specifier, and the source file it names (null for a package). */
+function importsOf(file: string): { spec: string; target: string | null }[] {
+  return [...readFileSync(file, "utf8").matchAll(IMPORT)].map((m) => {
+    const spec = m[1] ?? m[2] ?? m[3];
+    return { spec, target: resolveImport(file, spec) };
+  });
+}
+
 /** Every TypeScript module reachable from `entries`. */
 function moduleGraph(entries: string[]): Set<string> {
   const seen = new Set<string>();
@@ -64,8 +72,7 @@ function moduleGraph(entries: string[]): Set<string> {
     const file = queue.pop()!;
     if (seen.has(file)) continue;
     seen.add(file);
-    for (const m of readFileSync(file, "utf8").matchAll(IMPORT)) {
-      const target = resolveImport(file, m[1] ?? m[2] ?? m[3]);
+    for (const { target } of importsOf(file)) {
       if (target && /\.tsx?$/.test(target)) queue.push(target);
     }
   }
@@ -86,7 +93,8 @@ function eventSenders(graph: Set<string>): string[] {
     .filter(
       (file) =>
         file === ANALYTICS ||
-        (!PAGEVIEWS.includes(file) && LOADS_POSTHOG.test(readFileSync(file, "utf8"))),
+        (!PAGEVIEWS.includes(file) &&
+          importsOf(file).some(({ spec, target }) => target === POSTHOG || /^posthog-js(\/|$)/.test(spec))),
     )
     .map((file) => path.relative(SRC, file));
 }
