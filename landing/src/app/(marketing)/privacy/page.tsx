@@ -183,7 +183,7 @@ export default function PrivacyPolicy() {
                 If you have linked Telegram and you speak in, or are added to, a
                 Telegram group linked to a workspace, we add you to that
                 workspace as a member. Leaving the group does not remove you; a
-                workspace owner or admin can.
+                workspace owner or admin can, or you can email us.
               </p>
             </li>
             <li>
@@ -192,8 +192,9 @@ export default function PrivacyPolicy() {
               <ul className="mt-2 list-[circle] space-y-1 pl-5">
                 <li>
                   To let you pick a folder, we list the names of the folders in
-                  your My Drive and in Shared with me, and the folders above
-                  the one you pick.
+                  your My Drive and in Shared with me. When you pick one, we
+                  look up which folders contain it (their IDs only, not
+                  stored) so two connected folders never overlap.
                 </li>
                 <li>
                   After you pick one, we list the photos and videos in it and
@@ -284,7 +285,7 @@ export default function PrivacyPolicy() {
             <li>Your Google account ID, email address and name, only to identify your account.</li>
             <li>
               Listing the folder names in your My Drive and Shared with me so you
-              can pick a folder, and the folders above the one you pick, then the photos and videos in that folder and
+              can pick a folder, then the photos and videos in that folder and
               its subfolders so you can build a posting queue.
             </li>
             <li>
