@@ -252,12 +252,13 @@ export default function PrivacyPolicy() {
               answer, clicking a call-to-action or Sign in, and tapping the
               demo. With each one it receives the page&apos;s address without
               its query string, the site you came from (its address only, not
-              your search terms), your browser, operating system and device
-              type, how long you stayed on and how far you scrolled the previous
-              page, and any campaign tags in the page&apos;s address. Invitation
-              links (under{" "}
-              <Code>/join/</Code>) send nothing, and PostHog receives no names,
-              email addresses or account IDs.
+              your search terms), your browser&apos;s user agent (browser,
+              operating system and their versions, and device type), and any
+              campaign tags in the page&apos;s address. Each page view also
+              carries how long you stayed on the previous page and how far you
+              scrolled it. Invitation links (under <Code>/join/</Code>) send
+              nothing, and PostHog receives no names, email addresses or
+              account IDs.
             </li>
           </ul>
         </section>
@@ -700,8 +701,8 @@ export default function PrivacyPolicy() {
           </h2>
           <p className="mt-3">
             Our database, our servers and our analytics provider, PostHog, are
-            in the US, and Telegram, Meta, Google and Cloudinary process data worldwide. Where a
-            provider offers the EU&apos;s Standard Contractual Clauses in its
+            in the US, and Telegram, Meta, Google and Cloudinary process data
+            worldwide. Where a provider offers the EU&apos;s Standard Contractual Clauses in its
             data processing terms, those terms cover the transfer. Telegram
             offers no such terms, so messages sent through our bot are covered
             by Telegram&apos;s own privacy policy.
