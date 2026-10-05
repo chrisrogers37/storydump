@@ -30,7 +30,12 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy.exc import SQLAlchemyError
 
 from src import __version__
-from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target import (
+    backpressure,
+    health_reads,
+    posting_health,
+    scheduling_health,
+)
 from src.services.target.work_loop import WorkerConfig
 
 #: The one version string: the OpenAPI document's and `/health`'s. Read by
@@ -221,7 +226,10 @@ async def scheduling_health_check(request: Request):
         # The first switch to `svc_ingress` (2026-09-20, #751) is why: with
         # the reads still direct, every policy-covered table read empty and
         # this surface said `no-signal` for a live estate.
-        async with engine.connect() as conn:
+        #
+        # Each statement is capped (`health_reads`): a statement past the cap is
+        # cancelled, which the app answers as a 503, and frees its connection.
+        async with health_reads.connect(engine) as conn:
             # TWO AXES, ONE PAYLOAD (#1120). The cursor axis is empty whenever
             # no destination is active, and `no-signal` is then the answer
             # whether the worker is healthy or DEAD — so the one monitored axis
@@ -296,8 +304,8 @@ async def posting_health_check(request: Request):
         # above records: `UnitOfWork.__init__` refuses a blank tenant at
         # construction, and this aggregate is estate-wide and has no tenant.
         # Its cross-tenant reach is 081's doors, the same footing as the route
-        # above.
-        async with engine.connect() as conn:
+        # above, and its statements are capped the same way.
+        async with health_reads.connect(engine) as conn:
             posting = await posting_health.posting_freshness(conn)
             attempts = await posting_health.publish_attempts(conn)
             # `accounts_active` is CONTEXT for the alert text and never a gate:

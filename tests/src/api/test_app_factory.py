@@ -21,7 +21,12 @@ from src.api.principal import Principal, current_principal
 from src.api.routes import health as health_routes
 from src.api.routes.health import AnswerCache
 from src.config.settings import settings
-from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target import (
+    backpressure,
+    health_reads,
+    posting_health,
+    scheduling_health,
+)
 from tests.src.api.conftest import FakeEngine
 
 
@@ -389,6 +394,25 @@ class TestRefusalMappingsAreTotal:
         }
         assert resp.json()["detail"] != "the service's own wording"
 
+    @pytest.mark.usefixtures("stubbed_bound")
+    def test_a_cancelled_health_statement_is_the_busy_answer(self, client, monkeypatch):
+        """`health_reads.StatementTimedOut` is load, not a fault: the 503 a
+        pool wait gets, under its own reason, retried after a second."""
+
+        async def cancelled(executor):
+            raise health_reads.StatementTimedOut(
+                "canceling statement due to statement timeout"
+            )
+
+        monkeypatch.setattr(posting_health, "posting_freshness", cancelled)
+        resp = client.get("/health/posting")
+        assert resp.status_code == 503
+        assert resp.json() == {
+            "detail": "busy — try again",
+            "reason": "statement_timeout",
+        }
+        assert resp.headers["retry-after"] == "1"
+
 
 async def _fake_snapshot(executor, **kwargs):
     """The queue's backpressure seam (phase 3a), now the operating details':
@@ -404,6 +428,7 @@ async def _fake_snapshot(executor, **kwargs):
     }
 
 
+@pytest.mark.usefixtures("stubbed_bound")
 class TestSchedulingHealthIsASecondSurface:
     """#1090 F1. `/health` is Railway's liveness gate and must not open a
     connection; this is the dependency-touching check #1026 asked for, and the
@@ -613,6 +638,7 @@ class TestTheQueueMovedToTheDetails:
         assert slow == {"error": "TimeoutError"}
 
 
+@pytest.mark.usefixtures("stubbed_bound")
 class TestPostingHealthIsATHIRDSurface:
     """#1268. `/health/scheduling` reads the clock and the worker, and both
     stayed true through a sixteen-day silence in which nothing posted — 1936
