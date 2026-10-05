@@ -1,7 +1,16 @@
-"""Tests for security hardening: headers and X-Forwarded-For attribution (the
-startup-secret check went with the legacy tier's `ConfigValidator`, #1216)."""
+"""Tests for security hardening: headers, X-Forwarded-For attribution, and the
+cookie session's origin check (the startup-secret check went with the legacy
+tier's `ConfigValidator`, #1216)."""
 
 import pytest
+from fastapi import Depends
+from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
+
+from src.api.principal import COOKIE, current_principal
+from src.config.settings import settings
+from src.services.target import service_tokens, sessions
+from tests.src.api.conftest import post_body, post_messages
 
 
 # =============================================================================
@@ -294,3 +303,292 @@ class TestForwardedForAmbiguity:
             [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.CALLER
         )
         assert got == self.CALLER
+
+
+class TestRailwayEdgeAttribution:
+    """Who the assembled app believes the client is behind Railway's edge.
+
+    Production's access log showed every request arriving from 100.64.0.x,
+    Railway's edge, with the visitor's address unread: every IP-keyed control
+    counted all visitors as one. Railway's edge writes X-Forwarded-For itself,
+    as "<client>" or, when it routes through its Fastly CDN,
+    "<client>, <Fastly edge>". Driven through `create_app`, so these pin the
+    middleware as the app assembles it, not a copy.
+    """
+
+    EDGE = "100.64.0.13"  # Railway's edge, our TCP peer in production
+    CALLER = "192.0.2.50"
+    FORGED = "198.51.100.7"
+    FASTLY = "151.101.2.10"  # in Fastly's published 151.101.0.0/16
+
+    @pytest.fixture
+    def seen_from(self):
+        """``seen_from(peer, *xff)`` -> the client host the app attributes."""
+        from fastapi.responses import PlainTextResponse
+
+        from src.api.app import create_app
+
+        app = create_app(env={})
+
+        async def whoami(request):
+            return PlainTextResponse(request.client.host)
+
+        app.add_route("/whoami", whoami)
+
+        def seen(peer, *xff):
+            headers = [("X-Forwarded-For", v) for v in xff]
+            client = TestClient(app, client=(peer, 4321))
+            return client.get("/whoami", headers=headers).text
+
+        return seen
+
+    def test_the_visitor_is_read_through_railways_edge(self, seen_from):
+        assert seen_from(self.EDGE, self.CALLER) == self.CALLER
+
+    def test_an_ipv6_visitor_is_read_through_railways_edge(self, seen_from):
+        assert seen_from(self.EDGE, "2001:db8::1") == "2001:db8::1"
+
+    def test_a_forged_entry_left_of_the_edges_does_not_win(self, seen_from):
+        """Should the edge ever append rather than overwrite, the caller's own
+        entry sits left of what it observed and is never reached."""
+        assert seen_from(self.EDGE, f"{self.FORGED}, {self.CALLER}") == self.CALLER
+
+    def test_the_cdn_hop_is_not_skipped(self, seen_from):
+        """Through someone's Fastly service the client entry is whatever that
+        service wrote, so the walk stops at the Fastly edge: shared, never
+        forged."""
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.FASTLY}")
+        assert got == self.FASTLY
+
+
+# =============================================================================
+# Request body limit
+# =============================================================================
+
+
+class TestBodySizeLimit:
+    """No route reads more of a request body than the API admits.
+
+    Driven through the real app, so these pin BodySizeLimitMiddleware as
+    `create_app` registers it rather than a copy of it. The limit is lowered
+    to LIMIT so the bodies stay small, and a probe route reads its whole body,
+    recording that it ran and then how much it read.
+    """
+
+    LIMIT = 1024
+
+    @pytest.fixture
+    def probe(self, monkeypatch):
+        from fastapi import Response
+        from fastapi.testclient import TestClient
+
+        from src.api.app import create_app
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "API_REQUEST_BODY_MAX_BYTES", self.LIMIT)
+        app = create_app(env={})
+        seen = []
+
+        async def read_it_all(request):
+            seen.append("ran")
+            seen.append(len(await request.body()))
+            return Response()
+
+        app.add_route("/probe", read_it_all, methods=["POST"])
+        return TestClient(app), seen
+
+    def test_a_declared_length_over_the_limit_never_reaches_the_route(self, probe):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * (self.LIMIT + 1))
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        assert resp.headers["connection"] == "close"
+        assert seen == [], "the route ran on a body the limit refused"
+
+    def test_an_undeclared_body_is_cut_off_once_it_passes_the_limit(self, probe):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * (self.LIMIT + 1), streamed=True)
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        # The route ran -- no length was declared to refuse on -- and the read
+        # it began never completed.
+        assert seen == ["ran"]
+
+    @pytest.mark.parametrize("streamed", [False, True], ids=["declared", "streamed"])
+    def test_a_body_at_the_limit_reaches_its_route(self, probe, streamed):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * self.LIMIT, streamed=streamed)
+        assert resp.status_code == 200, resp.text
+        assert seen == ["ran", self.LIMIT]
+
+    async def test_the_limit_is_on_the_total_across_messages(self, probe):
+        """Each message is under the limit and their total is over it: the
+        limit counts the whole body, not one message at a time."""
+        client, seen = probe
+        resp, received = await post_messages(client.app, "/probe", [b"x" * 600] * 2)
+        assert received == [600, 600]
+        assert max(received) <= self.LIMIT < sum(received)
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        # The route ran -- no length was declared to refuse on -- and the read
+        # it began never completed.
+        assert seen == ["ran"]
+
+
+class TestRoutesReadTheirOwnBodies:
+    def test_no_route_declares_a_body_parameter(self, app):
+        """A route reads its own body after its gate, so none declares a body
+        parameter for the framework to parse first; bounds on the body live in
+        the app's body size limit and in the routes themselves."""
+        routes = [route for route in app.routes if isinstance(route, APIRoute)]
+        assert routes, "no APIRoute to walk"
+        declared = sorted(
+            f"{method} {route.path}"
+            for route in routes
+            if route.body_field is not None
+            for method in route.methods
+        )
+        assert declared == [], declared
+
+
+# =============================================================================
+# CSRF: a cookie-carried session on a state-changing request (`07` §1)
+# =============================================================================
+
+FRONT_ORIGIN = "https://app.example.test"
+SELF_ORIGIN = "http://testserver"  # TestClient's base URL: the API's own origin
+FOREIGN_ORIGIN = "https://evil.example.test"
+
+
+@pytest.mark.unit
+class TestCookieOriginCheck:
+    """`SameSite=Lax` keeps the cookie off a cross-SITE post, not off a post
+    from a sibling host of the same registrable domain. So a cookie session
+    on a POST must come from `web_app_origin` or the API's own origin, by
+    ``Origin`` or else ``Referer``; a bearer (the CLI's `sdt_` token, the
+    front end's server side) is not ambient and is not checked."""
+
+    @pytest.fixture
+    def world(self, app, monkeypatch):
+        monkeypatch.setattr(settings, "WEB_APP_URL", FRONT_ORIGIN, raising=False)
+        seen = []
+
+        async def resolve(conn, *, token_hash):
+            seen.append(token_hash)
+            return sessions.Session(id="sess", user_id="user")
+
+        async def resolve_token(conn, *, token_hash):
+            seen.append(token_hash)
+            return service_tokens.TokenPrincipal(
+                token_id="tok",
+                name="cli",
+                role="operator",
+                user_id="user",
+                workspace_id=None,
+                expires_at=None,
+            )
+
+        monkeypatch.setattr(sessions, "resolve", resolve)
+        monkeypatch.setattr(service_tokens, "resolve", resolve_token)
+
+        # A probe on the real app: the real dependency and the real handlers.
+        async def probe(principal=Depends(current_principal)):
+            return {"kind": principal.kind}
+
+        app.add_api_route("/zz-probe", probe, methods=["GET", "POST"])
+        client = TestClient(app)
+        client.cookies.set(COOKIE, "opaque")
+        return client, seen
+
+    def _post(self, world, **headers):
+        client, seen = world
+        return client.post("/zz-probe", headers=headers), seen
+
+    def test_a_foreign_origin_is_refused_by_name(self, world):
+        resp, seen = self._post(world, Origin=FOREIGN_ORIGIN)
+        assert resp.status_code == 403
+        assert resp.json()["reason"] == "cross_site"
+        assert seen == [], "a forged request must not even slide the session"
+
+    def test_no_origin_and_no_referer_is_refused(self, world):
+        resp, seen = self._post(world)
+        assert resp.status_code == 403 and resp.json()["reason"] == "cross_site"
+        assert seen == []
+
+    def test_a_null_origin_is_refused(self, world):
+        resp, _ = self._post(world, Origin="null")
+        assert resp.status_code == 403
+
+    def test_a_foreign_referer_is_refused(self, world):
+        resp, _ = self._post(world, Referer=f"{FOREIGN_ORIGIN}/page")
+        assert resp.status_code == 403
+
+    def test_a_prefix_of_the_front_end_is_not_the_front_end(self, world):
+        resp, _ = self._post(world, Origin=f"{FRONT_ORIGIN}.evil.example.test")
+        assert resp.status_code == 403
+
+    @pytest.mark.parametrize("origin", [FRONT_ORIGIN, SELF_ORIGIN])
+    def test_an_admitted_origin_passes(self, world, origin):
+        resp, seen = self._post(world, Origin=origin)
+        assert resp.status_code == 200, resp.text
+        assert len(seen) == 1
+
+    def test_the_front_ends_referer_stands_in_for_a_missing_origin(self, world):
+        resp, _ = self._post(world, Referer=f"{FRONT_ORIGIN}/dashboard/settings")
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.parametrize("origin", [FOREIGN_ORIGIN, None])
+    def test_a_session_bearer_is_not_checked(self, world, origin):
+        """The front end's server side forwards the session as a bearer
+        (`landing/src/lib/target-api.ts`) and sends no browser Origin."""
+        headers = {"Authorization": "Bearer opaque"}
+        if origin:
+            headers["Origin"] = origin
+        resp, _ = self._post(world, **headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"kind": "session"}
+
+    @pytest.mark.parametrize("origin", [FOREIGN_ORIGIN, None])
+    def test_an_api_token_is_not_checked(self, world, origin):
+        headers = {"Authorization": "Bearer sdt_abc"}
+        if origin:
+            headers["Origin"] = origin
+        resp, _ = self._post(world, **headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"kind": "token"}
+
+    def test_a_cookie_get_is_not_checked(self, world):
+        client, seen = world
+        resp = client.get("/zz-probe", headers={"Origin": FOREIGN_ORIGIN})
+        assert resp.status_code == 200, resp.text
+        assert len(seen) == 1
+
+    def test_signout_by_cookie_from_a_foreign_origin_is_refused(
+        self, world, monkeypatch
+    ):
+        """`/auth/signout` takes no principal, so it checks for itself: a
+        hidden form on a sibling host must not sign a person out of
+        everything."""
+
+        async def never(conn, *, token_hash):
+            raise AssertionError("a forged sign-out must revoke nothing")
+
+        monkeypatch.setattr(sessions, "revoke", never)
+        monkeypatch.setattr(sessions, "revoke_all_for_user", never)
+        client, _ = world
+        resp = client.post(
+            "/auth/signout?everywhere=true", headers={"Origin": FOREIGN_ORIGIN}
+        )
+        assert resp.status_code == 403 and resp.json()["reason"] == "cross_site"
+
+    def test_signout_by_cookie_from_the_front_end_revokes(self, world, monkeypatch):
+        revoked = []
+
+        async def revoke(conn, *, token_hash):
+            revoked.append(token_hash)
+            return True
+
+        monkeypatch.setattr(sessions, "revoke", revoke)
+        client, _ = world
+        resp = client.post("/auth/signout", headers={"Origin": FRONT_ORIGIN})
+        assert resp.status_code == 200 and len(revoked) == 1

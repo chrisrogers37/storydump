@@ -1,9 +1,10 @@
 """Application settings and configuration management."""
 
 import re
+import uuid
 from typing import Container
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ALIASED ON PURPOSE, and the collision is not hypothetical: the class directly
@@ -101,6 +102,22 @@ def _redact(exc: ValidationError) -> str:
         field = ".".join(str(part) for part in err.get("loc", ())) or "<root>"
         lines.append(f"  {field}: {err.get('type', 'invalid')}")
     return _PREFIX + "\n" + "\n".join(lines)
+
+
+def parse_ops_user_ids(raw: str) -> tuple[frozenset[str], list[int]]:
+    """`OPS_USER_IDS` (comma-separated) as ``(ids, refused)``: each entry
+    canonical the way the database spells a user id, so a braced, hyphen-less
+    or `urn:uuid:` paste still matches, and the 1-based positions of the
+    entries that are not a UUID at all and admit nobody. The one parser: the
+    API's startup warning reads ``refused`` from here."""
+    entries = [e.strip() for e in raw.split(",") if e.strip()]
+    ids, refused = set(), []
+    for position, entry in enumerate(entries, start=1):
+        try:
+            ids.add(str(uuid.UUID(entry)))
+        except ValueError:
+            refused.append(position)
+    return frozenset(ids), refused
 
 
 class Settings(BaseSettings):
@@ -242,6 +259,20 @@ class Settings(BaseSettings):
     # by default and only a local http dev setup should turn it off.
     SESSION_COOKIE_DOMAIN: Optional[str] = None
     SESSION_COOKIE_SECURE: bool = True
+    # A web session's ABSOLUTE lifetime, counted from sign-in
+    # (`session_tokens.created_at`). Use slides `expires_at` 30 days out, and
+    # without a cap a session used once a month would never end; past this
+    # age it is refused as expired however recently it was used, and no slide
+    # carries `expires_at` beyond `created_at` + this. 30 days: the cookie's
+    # own Max-Age and the "30 days" the Privacy page states.
+    # Bounded: 0 would end every session at once, and a huge value overflows
+    # the interval it builds.
+    SESSION_MAX_AGE_SECONDS: int = Field(30 * 24 * 3600, gt=0, le=365 * 24 * 3600)
+    # Sign-up while in beta (092, owner decision 2026-10-02): a NEW Google
+    # account creates its user only when `fn_signup_admitted` admits its
+    # verified email. True switches that ask off — a local stack's setting,
+    # never production's. An existing user signs in either way.
+    TARGET_SIGNUP_OPEN: bool = False
 
     # Which peers may set X-Forwarded-For / X-Forwarded-Proto on our behalf.
     #
@@ -249,19 +280,48 @@ class Settings(BaseSettings):
     # whose forwarded-for claims the app believes; every other peer is
     # attributed by its real TCP address and its headers are ignored.
     #
-    # The default is the private ranges rather than a specific edge address.
-    # A public-internet client can never hold an RFC1918 source address, so it
-    # can never place itself in this set, and the value needs no per-platform
-    # tuning. Narrow it to the concrete edge address if the platform publishes
-    # a stable one.
+    # The default is the private ranges plus 100.64.0.0/10, the shared address
+    # space Railway's edge connects from (production's access log shows every
+    # request arriving from 100.64.0.x). None of these is routable on the
+    # public internet, so a public client can never hold one as its source
+    # address and place itself in this set. Narrow it to the concrete edge
+    # address if the platform publishes a stable one.
+    #
+    # Only the edge is trusted, never the CDN behind it. When Railway routes a
+    # request through Fastly, the header arrives as "<client>, <Fastly edge>"
+    # and the walk stops at the Fastly address: shared by the visitors that
+    # edge serves, but never caller-chosen. Skipping it would let anyone who
+    # fronts the API with their own Fastly service write the client entry.
     #
     # NEVER set this to "*". The wildcard makes uvicorn take the LEFTMOST
     # X-Forwarded-For entry, which is wholly caller-supplied, so every
     # IP-keyed control in the app (rate limiting, auth-failure alerting)
     # becomes attacker-partitionable. See issue #726.
     TRUSTED_PROXY_HOSTS: str = (
-        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1,::1,fd00::/8"
+        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.1,::1,fd00::/8"
     )
+
+    # The largest request body the API reads, in bytes; over it is 413
+    # (`app.py::BodySizeLimitMiddleware`). No route takes an upload: the
+    # largest body anything reads is one Telegram update, and every other is
+    # a small JSON object or a Meta callback form, so 1 MiB is far above
+    # every legitimate request.
+    API_REQUEST_BODY_MAX_BYTES: int = 1024 * 1024
+
+    # Who may read the API's operating details (`GET /api/v1/ops/health`):
+    # comma-separated user ids, the `user` line `storydump whoami` prints. Empty —
+    # the default — admits nobody, so the details stay closed until the
+    # deployment names them. Not the `operator` token role: a person-bound
+    # token of any role passes only if its person is listed here.
+    OPS_USER_IDS: str = ""
+
+    # The secret the landing site's server sends with each waitlist signup
+    # (`POST /public/waitlist`, `07` §43), the same value as the site's
+    # WAITLIST_SITE_SECRET on Vercel. Set, the API refuses a call without it
+    # and limits each visitor the site names on their own counter; unset — the
+    # default — it keys the limit on the site's address, shared by everyone.
+    # Set it on the site first: until then the site sends nothing to match.
+    WAITLIST_SITE_SECRET: Optional[str] = None
 
     @property
     def web_app_origin(self) -> Optional[str]:
@@ -274,9 +334,21 @@ class Settings(BaseSettings):
         return self.WEB_APP_URL.rstrip("/") if self.WEB_APP_URL else None
 
     @property
+    def waitlist_site_secret(self) -> Optional[str]:
+        """`WAITLIST_SITE_SECRET` without surrounding whitespace (the site
+        trims its copy too, so a pasted newline cannot refuse every signup),
+        or None when unset or blank."""
+        return (self.WAITLIST_SITE_SECRET or "").strip() or None
+
+    @property
     def trusted_proxy_hosts(self) -> list[str]:
         """`TRUSTED_PROXY_HOSTS` as the list uvicorn's middleware expects."""
         return [h.strip() for h in self.TRUSTED_PROXY_HOSTS.split(",") if h.strip()]
+
+    @property
+    def ops_user_ids(self) -> frozenset[str]:
+        """`OPS_USER_IDS` as the canonical ids the database returns."""
+        return parse_ops_user_ids(self.OPS_USER_IDS)[0]
 
     # Google Drive OAuth: the client the workspace grant is minted and
     # refreshed with (the worker warns at boot without both).

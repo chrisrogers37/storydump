@@ -77,7 +77,8 @@ psql "$DATABASE_URL" -c "\dt"               # the target tables, in `public`
   for the API and `svc_worker` for the worker, which step 0 created; giving
   them passwords and switching the services is
   [`runtime-database-roles.md`](../operations/runtime-database-roles.md).
-  `/health` reports the login a service actually holds (`db_role`).
+  The API's operating details report the login it actually holds (`db_role`,
+  `storydump health --json`, for `OPS_USER_IDS`).
 
 ### Connection Pool Sizing
 
@@ -192,7 +193,11 @@ storydump doctor            # this laptop: token, API, config, Railway, the ledg
 
 Everything here happens on the web front end, signed in with Google.
 
-- [ ] Sign in and create a workspace
+- [ ] Admit your own email first: sign-up is invite-only (092), and on a fresh
+  database nobody is admitted, the first account included. As the owner (the
+  `DATABASE_URL` login), in lower case:
+  `psql "$DATABASE_URL" -c "INSERT INTO signup_admissions (email) VALUES ('you@example.com');"`
+- [ ] Sign in with that Google account and create a workspace
 - [ ] **Settings › Integrations → Link Telegram** — attaches your Telegram
   account to your user (the link opens the bot with a `/start link-…` payload)
 - [ ] **Settings › Integrations → Add a Telegram group** — opens Telegram's
@@ -229,7 +234,11 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 ## 6. Team Onboarding (5 minutes per person)
 
 - [ ] Each person signs in on the web with Google and links their Telegram
-  (Settings › Integrations → Link Telegram)
+  (Settings › Integrations → Link Telegram). Sign-up is gated (092): a new
+  account needs a pending invitation addressed to its email, sent from an
+  active workspace by someone still its owner or an admin (098), or an
+  admission (`INSERT INTO signup_admissions (email) VALUES ('person@example.com');` as
+  the database owner)
 - [ ] Add them to the workspace's Telegram group. Anyone with a linked Telegram
   who posts in — or is added to — a bound group becomes a member of that
   workspace, at the member role
@@ -237,10 +246,153 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 - [ ] Or invite them from the Members card under Settings › General. Outbound
   email does not send yet (`AGENTS.md`, *What is deliberately not wired*), so
   an emailed invitation is created and not delivered
-- [ ] Removing a member is the Members card too. Changing a member's role is
+- [ ] Removing a member is the Members card too; it also revokes the pending
+  invitations that member sent or was sent. Changing a member's role is
   the `change_role` command — registered, not yet built
 
 Leaving the Telegram group removes nobody.
+
+**Deleting a user** (an erasure request, say) is hand-run SQL as the database
+owner; there is no product door for it. In order:
+
+- [ ] **An owner first.** An owner cannot be deleted while their workspace
+  exists (each workspace has exactly one): the commit fails
+  (`ct_members_owner_exists`), and ownership cannot be handed over yet
+  (`transfer_ownership` is not built). Delete that workspace first (Settings ›
+  General) and let its grace window end, or keep the person.
+- [ ] **What nothing ties to them.** Two things can outlive the person
+  without a record naming them, so list both before the removals:
+  - Workspace service tokens minted before 090 record no minter, so neither a
+    removal nor the delete below can tell whether this person minted one,
+    even in a workspace they have since left. The first query lists every
+    live one, with `theirs` true in a workspace the person ever belonged to
+    (the audit trail's membership rows outlive the membership).
+  - A private-chat binding is found through the person's linked Telegram
+    account. If they unlinked it, the second query lists every active
+    private-chat binding no linked account holds; ask the person which
+    Telegram account was theirs.
+
+  ```sql
+  SELECT t.id, t.workspace_id, t.name, t.created_at,
+         t.workspace_id IN (SELECT a.workspace_id FROM audit_events a
+                             WHERE a.entity_kind = 'member'
+                               AND a.entity_id = '…') AS theirs
+    FROM service_tokens t
+   WHERE t.workspace_id IS NOT NULL AND t.created_by_user_id IS NULL
+     AND t.revoked_at IS NULL;
+  SELECT b.id, b.workspace_id, b.external_ref, b.created_at
+    FROM channel_bindings b
+   WHERE b.channel = 'telegram_dm' AND b.state = 'active'
+     AND NOT EXISTS (SELECT 1 FROM user_identities x
+                      WHERE x.provider = 'telegram' AND x.external_id = b.external_ref);
+  ```
+
+  For a token where `theirs` is true, ask that workspace's owner whether they
+  minted it themselves; revoke the ones they didn't inside the delete's (or
+  the erase's) transaction below:
+  `UPDATE service_tokens SET revoked_at = now() WHERE id = '<token id>';`.
+  Leave the other workspaces' tokens to their owners. End a private chat that
+  turns out to be theirs in the same transaction, its queue first:
+  `UPDATE channel_outbox SET state = 'superseded' WHERE binding_id =
+  '<binding id>' AND state IN ('pending', 'ambiguous');` then
+  `UPDATE channel_bindings SET state = 'revoked' WHERE id = '<binding id>';`.
+
+- [ ] **Remove them from every other workspace** they belong to (Settings ›
+  Members → Remove). A removal revokes the workspace service tokens they
+  minted and the pending invitations they sent or were sent, and records the
+  removal. A plain delete does neither: `ON DELETE SET NULL` leaves those tokens
+  working with no minter recorded, the invitations they sent pending with no
+  inviter, and an invitation to them able to bring them back.
+- [ ] **Their Google Drive**, when they connected a workspace's
+  (`oauth_credentials.granted_by_user_id` names them, 091): disconnect it
+  (Settings › Integrations → Google Drive → Disconnect). Otherwise `ON DELETE
+  SET NULL` clears the granter and leaves the grant active, still holding the
+  deleted person's Google token, and a grant with no granter is browsable by
+  the workspace's owner — the whole of that person's Drive, Shared with me
+  included.
+- [ ] **The delete**, always with an actor set and in one transaction, revoking
+  anything the removals missed on the way, dropping the owner's admission
+  of their email (`signup_admissions`), which would otherwise let a new
+  account with that address straight back in, and ending every workspace's
+  Telegram binding to their private chat, which would otherwise keep
+  receiving that workspace's cards; its queued cards are superseded first, as
+  Remove does. The bot does not remove anyone from a group: an admin removes
+  them in Telegram. The delete's cascades and `SET NULL`s fire the
+  governance trigger (on `workspace_members`, on `oauth_credentials` when they
+  granted Drive, and on `workspaces` when they paused one), which refuses a
+  write with no `app.actor_kind`; without it the delete fails and nothing is
+  removed.
+
+  ```sql
+  BEGIN;
+  SET LOCAL app.actor_kind = 'operator';
+  UPDATE service_tokens SET revoked_at = now()
+   WHERE created_by_user_id = '…' AND revoked_at IS NULL;
+  UPDATE workspace_invitations SET state = 'revoked'
+   WHERE state = 'pending'
+     AND (invited_by_user_id = '…'
+          OR lower(email) = (SELECT lower(primary_email) FROM users WHERE id = '…')
+          OR invited_tg_user_id::text IN (SELECT external_id FROM user_identities
+                                           WHERE user_id = '…' AND provider = 'telegram'));
+  DELETE FROM signup_admissions
+   WHERE email = (SELECT lower(primary_email) FROM users WHERE id = '…');
+  UPDATE channel_outbox SET state = 'superseded'
+   WHERE state IN ('pending', 'ambiguous')
+     AND binding_id IN (SELECT id FROM channel_bindings
+                         WHERE channel = 'telegram_dm' AND state = 'active'
+                           AND external_ref IN (SELECT external_id FROM user_identities
+                                                 WHERE user_id = '…' AND provider = 'telegram'));
+  UPDATE channel_bindings SET state = 'revoked'
+   WHERE channel = 'telegram_dm' AND state = 'active'
+     AND external_ref IN (SELECT external_id FROM user_identities
+                           WHERE user_id = '…' AND provider = 'telegram');
+  DELETE FROM users WHERE id = '…';
+  COMMIT;
+  ```
+
+- [ ] **If the delete is refused because a story "is terminal … and
+  immutable"**, the person approved or scheduled a story that has finished,
+  and finished stories are frozen with the reference to them, so the row
+  cannot be deleted. Erase what identifies them instead, in one transaction:
+  their sign-ins, tokens and unfinished sign-in or link attempts end, their
+  identities (the Google and Telegram accounts and their display names), the
+  admission of their email and the bindings to their private chat go, and
+  the `users` row stays as a bare id with no email that cannot sign in. Audit
+  rows keep that id, as they do after a delete. The invitations, admission
+  and binding steps run before the email and identities go, because they
+  find what is addressed to them by both; a revoked invitation keeps the
+  address it was sent to.
+
+  ```sql
+  BEGIN;
+  SET LOCAL app.actor_kind = 'operator';
+  UPDATE session_tokens SET revoked_at = now()
+   WHERE user_id = '…' AND revoked_at IS NULL;
+  UPDATE service_tokens SET revoked_at = now()
+   WHERE (user_id = '…' OR created_by_user_id = '…') AND revoked_at IS NULL;
+  UPDATE workspace_invitations SET state = 'revoked'
+   WHERE state = 'pending'
+     AND (invited_by_user_id = '…'
+          OR lower(email) = (SELECT lower(primary_email) FROM users WHERE id = '…')
+          OR invited_tg_user_id::text IN (SELECT external_id FROM user_identities
+                                           WHERE user_id = '…' AND provider = 'telegram'));
+  DELETE FROM signup_admissions
+   WHERE email = (SELECT lower(primary_email) FROM users WHERE id = '…');
+  UPDATE channel_outbox SET state = 'superseded'
+   WHERE state IN ('pending', 'ambiguous')
+     AND binding_id IN (SELECT id FROM channel_bindings
+                         WHERE channel = 'telegram_dm' AND state = 'active'
+                           AND external_ref IN (SELECT external_id FROM user_identities
+                                                 WHERE user_id = '…' AND provider = 'telegram'));
+  UPDATE channel_bindings SET state = 'revoked'
+   WHERE channel = 'telegram_dm' AND state = 'active'
+     AND external_ref IN (SELECT external_id FROM user_identities
+                           WHERE user_id = '…' AND provider = 'telegram');
+  DELETE FROM oauth_states WHERE user_id = '…';
+  DELETE FROM user_identities WHERE user_id = '…';
+  UPDATE users SET primary_email = NULL, state = 'disabled' WHERE id = '…';
+  COMMIT;
+  ```
 
 ---
 
@@ -279,8 +431,9 @@ non-zero — the worker does, when a supervised task dies — is restarted.
 ### From a laptop
 
 - `storydump health` — the API's `/health`, `/health/scheduling` and
-  `/health/posting`, and the bot's webhook, judged by the fleet monitors' own
-  verdicts; exit 4 when not well
+  `/health/posting`, and the bot's webhook from the operating details (for a
+  token whose person is in `OPS_USER_IDS`; otherwise `not_checked`), judged by
+  the fleet monitors' own verdicts; exit 4 when not well
 - `storydump deploys --watch --commit <sha>` — follows a deploy of both services
 
 ### The fleet monitors

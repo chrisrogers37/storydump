@@ -9,7 +9,7 @@ import {
   type StatsResponse,
 } from "@/lib/dashboard-payloads";
 import type { CategoryMixResponse } from "@/lib/category-mix";
-import { deriveConditions } from "@/lib/conditions";
+import { deriveConditions, nextSetupStep } from "@/lib/conditions";
 import type { IntentsResponse } from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
@@ -17,6 +17,7 @@ import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { PostingChart } from "@/components/dashboard/posting-chart";
 import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
+import { PageHeader } from "@/design/page-header";
 
 /**
  * The overview's history strip. Ten is a glance, not a log — the full list
@@ -26,7 +27,7 @@ import { RecentActivity } from "@/components/dashboard/recent-activity";
 const HISTORY_LIMIT = 10;
 
 export default async function DashboardPage() {
-  const { workspaceId } = await requireWorkspacePage();
+  const { session, workspaceId } = await requireWorkspacePage();
 
   // THREE CALLS BECAME TWO (#1044).
   //
@@ -73,17 +74,25 @@ export default async function DashboardPage() {
     sources: sourcesResult.data.sources,
     intentsByState: stats.intents_by_state,
   });
+  // A member is told an admin connects things; an unknown role (the list
+  // was unreachable) gets the button, which the API refuses if it must.
+  const role = session.workspaces?.find((w) => w.id === workspaceId)?.role;
+  const setupStep = nextSetupStep(
+    {
+      accounts: accountsResult.data.accounts,
+      sources: sourcesResult.data.sources,
+    },
+    { isAdmin: role !== "member" },
+  );
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Last 30 days of posting activity.
-        </p>
-      </div>
+      <PageHeader
+        title="Overview"
+        description="Last 30 days of posting activity."
+      />
 
-      <ConditionsPanel conditions={conditions} />
+      <ConditionsPanel conditions={conditions} setupStep={setupStep} />
 
       <AnalyticsCards summary={summary} />
 

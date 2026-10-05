@@ -76,7 +76,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 
 from src.config.settings import settings
-from src.services.target import vocabulary
+from src.services.target import unit_of_work, vocabulary
 from src.services.target.webhook_ingress import (
     AdmissionConflict,
     DeliveryReplayed,
@@ -126,13 +126,19 @@ class IngressRuntime:
     #: separate unpaced strip any more. Best effort, after the commit (phase
     #: 1 of the 2026-09-09 tap plan, step 10). None = silent.
     answer_callback: Optional[Callable[[str, str, bool], Awaitable[bool]]] = None
+    #: Replace a tapped message's text and remove its buttons —
+    #: `(chat_id, message_id, text)`. Only the identity link's confirmation
+    #: prompt asks for it (`TapResult.edit_text`); a card's edit is the
+    #: outbox's, paced. Best effort, after the commit. None = the prompt keeps
+    #: its buttons, and a second tap is refused by the spent state.
+    edit: Optional[Callable[[str, str, str], Awaitable[Any]]] = None
 
 
 @dataclass
 class TapMetrics:
-    """Counters `/health` reports: taps by outcome, and answers that did
-    not land (phase 1 step 12; the strip counter went with the route strip,
-    2026-09-12)."""
+    """Counters the operating details (`/api/v1/ops/health`) report: taps by
+    outcome, and answers that did not land (phase 1 step 12; the strip counter
+    went with the route strip, 2026-09-12)."""
 
     taps: dict[str, int] = field(default_factory=dict)
     answer_failed: int = 0
@@ -226,28 +232,30 @@ async def telegram_webhook(
     except PoolTimeout:
         return _refuse_saturated(runtime, payload, metrics, background)
     try:
-        try:
-            await admit(
-                conn,
-                channel="telegram",
-                external_ref=str(update_id),
-                payload=payload,
-                principal=TELEGRAM_PRINCIPAL,
-            )
-        except DeliveryReplayed:
-            # Acknowledged WITHOUT re-execution — the two obligations L.8 names.
-            logger.info("telegram webhook: replay of update_id=%s", update_id)
-            replayed = True
-        except AdmissionConflict:
-            # Never swallowed as a replay: same key, different content.
-            logger.warning(
-                "telegram webhook: admission conflict on update_id=%s", update_id
-            )
-            raise HTTPException(status_code=409, detail="admission conflict")
+        # §5: no provider call inside the delivery's transaction.
+        with unit_of_work.transaction_discipline():
+            try:
+                await admit(
+                    conn,
+                    channel="telegram",
+                    external_ref=str(update_id),
+                    payload=payload,
+                    principal=TELEGRAM_PRINCIPAL,
+                )
+            except DeliveryReplayed:
+                # Acknowledged WITHOUT re-execution — the two obligations L.8 names.
+                logger.info("telegram webhook: replay of update_id=%s", update_id)
+                replayed = True
+            except AdmissionConflict:
+                # Never swallowed as a replay: same key, different content.
+                logger.warning(
+                    "telegram webhook: admission conflict on update_id=%s", update_id
+                )
+                raise HTTPException(status_code=409, detail="admission conflict")
 
-        if not replayed:
-            result = await runtime.dispatch(conn, payload)
-            await conn.commit()
+            if not replayed:
+                result = await runtime.dispatch(conn, payload)
+                await conn.commit()
     except SQLAlchemyError as exc:
         # A database fault around admit()/dispatch/commit: the admission row
         # rolls back with the connection (L.8 `TestAnAbortedWinnerDoesNotPoisonTheKey`),
@@ -377,12 +385,28 @@ async def _answer_tap(
             answered = False
         if answered is False and metrics is not None:
             metrics.answer_failed += 1
+    answer_ms = int((time.monotonic() - started) * 1000)
+    edit_text = getattr(result, "edit_text", None)
+    if (
+        edit_text
+        and runtime.edit is not None
+        and result.chat_ref is not None
+        and result.message_ref is not None
+    ):
+        try:
+            await runtime.edit(result.chat_ref, result.message_ref, edit_text)
+        except Exception:  # noqa: BLE001 — best effort, and the delivery is committed
+            logger.warning(
+                "tap prompt not edited (update_id=%s, outcome=%s)",
+                payload.get("update_id"),
+                result.outcome,
+            )
     logger.info(
         "tap answered update_id=%s outcome=%s answered=%s answer_ms=%d",
         payload.get("update_id"),
         result.outcome,
         answered,
-        int((time.monotonic() - started) * 1000),
+        answer_ms,
     )
 
 
@@ -407,8 +431,12 @@ async def _acknowledge(
     chat_id = ((payload.get("message") or {}).get("chat") or {}).get("id")
     if chat_id is None:
         return
+    markup = getattr(result, "reply_markup", None)
     try:
-        await runtime.reply(str(chat_id), result.reply)
+        if markup:
+            await runtime.reply(str(chat_id), result.reply, reply_markup=markup)
+        else:
+            await runtime.reply(str(chat_id), result.reply)
     except Exception:  # noqa: BLE001 — best-effort, and the delivery is already committed
         logger.warning(
             "telegram webhook: acknowledgement not delivered (update_id=%s, outcome=%s)",

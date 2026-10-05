@@ -430,6 +430,20 @@ class TelegramTransport:
             raise TelegramSendError("sendMessage: ok response without a message_id")
         return str(message_id)
 
+    async def edit_text(self, chat_id: str, message_id: str, text: str) -> None:
+        """One `editMessageText` that also removes the message's keyboard —
+        the identity link's prompt, rewritten to its outcome after a Confirm
+        or Cancel tap. Telegram's "message is not modified" is success."""
+        await self._edit(
+            "editMessageText",
+            {
+                "chat_id": chat_id,
+                "message_id": _message_id(message_id),
+                "text": text[:4096],
+                "reply_markup": _EMPTY_KEYBOARD,
+            },
+        )
+
     async def send_media(
         self,
         chat_id: str,
@@ -639,9 +653,7 @@ def transport_from_env(token: str, env, **kwargs) -> "TelegramTransport":
     base = (env.get(API_BASE_VAR) or "").strip()
     if not base:
         return TelegramTransport(token, **kwargs)
-    if (env.get(vocabulary.RAILWAY_ENVIRONMENT_VAR) or "").strip().lower() == (
-        vocabulary.PRODUCTION_ENVIRONMENT
-    ):
+    if vocabulary.is_production(env):
         raise ApiBaseRefused(f"{API_BASE_VAR} is not honoured in production")
     host = httpx.URL(base).host
     if host not in _LOOPBACK:

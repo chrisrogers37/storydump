@@ -8,10 +8,8 @@ Set these in **Vercel → Project Settings → Environment Variables**:
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `DATABASE_URL` | Server | Neon connection string for the ONE table the landing app owns: the marketing waitlist (`landing/src/lib/schema.ts`, Drizzle; `landing/src/lib/db.ts`). No Python migration manages it |
 | `TARGET_API_URL` (or `BACKEND_URL`) | Server | The API's base URL, called by the server-side client (`landing/src/lib/target-api.ts:31`: `TARGET_API_URL` wins, then `BACKEND_URL`, then `http://localhost:8000`) |
-| `TELEGRAM_BOT_TOKEN` | Server | The bot that posts WAITLIST-SIGNUP notifications (`landing/src/lib/telegram.ts`). This is the landing app's own variable: the API and the worker read the product bot's token under another name, `TARGET_TELEGRAM_BOT_TOKEN` |
-| `ADMIN_TELEGRAM_CHAT_ID` | Server | The chat that receives those notifications |
+| `WAITLIST_SITE_SECRET` | Server | Optional. The same value as the API's `WAITLIST_SITE_SECRET` (generate one with `openssl rand -hex 32`). Set, the waitlist route sends it with the visitor's address, and the API gives each visitor their own limit and refuses any other caller. Set it here first, then on the API: the API ignores it while its own is unset. The redeploy that carries it must run with **Use project's Ignore Build Step** unchecked (the Ignored Build Step cancels a redeploy of unchanged code), and be Ready before the API's is set. The per-visitor key holds only while Vercel is the first hop |
 | `NEXT_PUBLIC_TELEGRAM_BOT_NAME` | Client | The product bot's handle without `@`, for the site's `t.me` links (`landing/src/lib/telegram-bot.ts`); unset, the links are omitted rather than guessed |
 | `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` | Client | Plausible analytics domain; omit to disable (`landing/src/app/layout.tsx:7`) |
 
@@ -21,10 +19,10 @@ nothing under `landing/src` reads `JWT_SECRET` or `NEXT_PUBLIC_SITE_URL` any mor
 `landing/.env.local.example` names neither (`tests/test_landing_env_example.py` keeps the example
 file and the reads in agreement both ways).
 
-The waitlist table is created by drizzle-kit, not by any Python migration: `npm run db:push`
-(or `db:generate` + `db:migrate`) in `landing/`, against the `DATABASE_URL` that
-`landing/drizzle.config.ts` reads; `scripts/migrations/NOTE_waitlist_table.md` says the same from
-the runner's side.
+The landing app holds no database credential. The waitlist form's server route
+(`landing/src/app/api/waitlist/route.ts`) hands the address to the API's `POST /public/waitlist`
+over `TARGET_API_URL`, and the API writes `waitlist_entries` (migration 100). A `DATABASE_URL`
+left over in the Vercel project is read by nothing and can be deleted.
 
 ### Client vs Server Variables
 
@@ -34,7 +32,8 @@ the runner's side.
 ### Common Issues
 
 - **Dashboard API calls fail**: `TARGET_API_URL` / `BACKEND_URL` is missing or wrong, or the Railway API service is down. On Vercel it must be the API's public origin (`https://api.storydump.app` in production); the example file's `http://localhost:8000` is the laptop value.
-- **A waitlist signup saves but no Telegram notification arrives**: `TELEGRAM_BOT_TOKEN` or `ADMIN_TELEGRAM_CHAT_ID` is missing — the notifier logs "Telegram notification skipped" and returns (`landing/src/lib/telegram.ts:5-10`) — or the bot is not a member of that chat.
+- **The waitlist form answers "Something went wrong"**: the function log has a `waitlist signup failed:` line with the API's status and reason. `target_router_unreachable` means `TARGET_API_URL` is wrong, or the API is down or took over 8 seconds. `http_429` means a waitlist limit was reached: with `WAITLIST_SITE_SECRET` set on both sides, the visitor's own (10 a minute) or the 600 accepted signups a minute all visitors share, otherwise the 300 a minute the whole site shares; `busy` means no slot came free within 2 seconds: one API process serves four waitlist requests at once, at most two per client (per visitor with the secret). `not_site` means the API has `WAITLIST_SITE_SECRET` set and the site's is missing or different. `browser`, `not_json` or `too_large` mean the request was not the site's own.
+- **A waitlist signup saves but no Telegram message arrives**: the message is the API's, not the site's (`src/channels/telegram_waitlist_ping.py`); the site holds no bot token, so the two Telegram variables it used to read can be deleted from Vercel (and that bot's token revoked in @BotFather if it was not the product bot). The API messages each person in its `OPS_USER_IDS` who has linked Telegram in the app (see **Cloud Deployment** › `OPS_USER_IDS`); the API's log says why one did not go, on a line starting `waitlist ping:`.
 - **The site's Telegram links are missing**: `NEXT_PUBLIC_TELEGRAM_BOT_NAME` is unset (a client variable: set it, then rebuild).
   A rebuild is a dashboard **Redeploy** with **Use project's Ignore Build Step** unchecked (see **Ignored Build Step** below).
 

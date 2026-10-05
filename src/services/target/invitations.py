@@ -100,6 +100,33 @@ async def accept(executor, *, token: str, user_id: str, channel: str) -> dict[st
     return {"workspace_id": str(row[0]), "role": row[1], "matched": bool(row[2])}
 
 
+async def revoke_on_removal(executor, *, workspace_id: str, user_id: str) -> int:
+    """Revoke the pending invitations in *workspace_id* that *user_id* sent or
+    that are addressed to them — what a removal does to the invitations it
+    leaves behind (`workspaces.remove_member`, in the removal's transaction).
+
+    Sent: the removed member's invitations no longer speak for the workspace.
+    Addressed: the accept door already refuses an invitation older than the
+    removal (098), so neither arm should stay listed as pending; an email one
+    would also hold `uq_invite_live` and block the fresh invitation that is
+    meant to bring the person back. The Telegram id is compared as text
+    because that is how `user_identities` stores it. Returns how many moved."""
+    result = await executor.execute(
+        text(
+            "UPDATE workspace_invitations SET state = 'revoked'"
+            " WHERE workspace_id = :ws AND state = 'pending'"
+            "   AND (invited_by_user_id = :u"
+            "        OR lower(email) = (SELECT lower(primary_email) FROM users"
+            "                            WHERE id = :u)"
+            "        OR invited_tg_user_id::text IN"
+            "           (SELECT external_id FROM user_identities"
+            "             WHERE user_id = :u AND provider = 'telegram'))"
+        ),
+        {"ws": str(workspace_id), "u": str(user_id)},
+    )
+    return result.rowcount
+
+
 async def create(
     executor,
     *,
@@ -168,6 +195,35 @@ async def create(
     address = email.strip().lower() if email else None
     token = sessions.new_token()
 
+    # Re-inviting an addressee replaces their pending invitation: the old link
+    # stops working and the new one carries this send's role and inviter. The
+    # addressee is the email or the Telegram id, as `revoke_on_removal` reads
+    # it. The old one may also be one the accept door now refuses (its sender
+    # demoted or removed, or its addressee removed since, 098), which for an
+    # email would otherwise hold `uq_invite_live` until the reaper expires it.
+    #
+    # Sends to one addressee are serialized for the rest of the transaction:
+    # `uq_invite_live` backs the email arm, but nothing indexes the Telegram
+    # id, so two concurrent sends to it would each miss the other's row. Keys
+    # are taken in a fixed order so a send naming both cannot deadlock.
+    addressees = [f"em:{address}"] if address is not None else []
+    if invited_tg_user_id is not None:
+        addressees.append(f"tg:{invited_tg_user_id}")
+    for addressee in addressees:
+        await executor.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"invite:{workspace_id}:{addressee}"},
+        )
+    if addressees:
+        await executor.execute(
+            text(
+                "UPDATE workspace_invitations SET state = 'revoked'"
+                " WHERE workspace_id = :ws AND state = 'pending'"
+                "   AND (lower(email) = :em OR invited_tg_user_id = :tg)"
+            ),
+            {"ws": str(workspace_id), "em": address, "tg": invited_tg_user_id},
+        )
+
     try:
         row = (
             await executor.execute(
@@ -194,10 +250,10 @@ async def create(
             )
         ).first()
     except DBAPIError as exc:
-        # `uq_invite_live` is PARTIAL on `state = 'pending'`, so this fires
-        # only against a LIVE invitation — a revoked or accepted one does not
-        # block a new send, which is the behaviour a person expects when they
-        # re-invite someone whose first invite expired.
+        # A backstop no product path reaches today: the lock and revoke above
+        # clear this address's live invitation before the INSERT, so
+        # `uq_invite_live` (PARTIAL on `state = 'pending'`) has nothing left to
+        # collide with unless a pending row appears outside `create`.
         if driver_error_is(exc, UniqueViolationError) is not None:
             raise InvitationRefused(
                 "already_invited",

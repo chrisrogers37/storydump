@@ -112,14 +112,9 @@ export function WaitlistForm({
       const data = await res.json()
 
       if (data.status === "success") {
-        if (data.alreadyRegistered) {
-          setStatus("duplicate")
-          setMessage(data.message)
-        } else {
-          setStatus("success")
-          setMessage(data.message)
-          trackEvent("Waitlist Signup", { variant, ...utm })
-        }
+        setStatus("success")
+        setMessage(data.message)
+        trackEvent("Waitlist Signup", { variant, ...utm })
         markRegistered()
       } else {
         setStatus("error")
@@ -162,7 +157,7 @@ export function WaitlistForm({
       onSubmit={handleSubmit}
       className={cn("w-full scroll-mt-20", className)}
     >
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:rounded-full sm:border sm:border-ink sm:bg-white sm:p-1.5 sm:pl-5">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:rounded-full sm:border sm:border-ink sm:bg-white sm:p-1.5 sm:pl-5 sm:has-[input:focus-visible]:ring-2 sm:has-[input:focus-visible]:ring-ring sm:has-[input:focus-visible]:ring-offset-2">
         <label htmlFor={`waitlist-email-${variant}`} className="sr-only">
           Email address
         </label>
@@ -191,7 +186,8 @@ export function WaitlistForm({
         <Button
           type="submit"
           disabled={status === "submitting"}
-          className="h-12 rounded-full bg-ink px-6 text-base font-semibold text-white hover:bg-ink/85 sm:h-11"
+          size="xl"
+          className="text-base max-sm:h-12"
         >
           {status === "submitting" ? "Joining…" : "Join the waitlist"}
         </Button>
@@ -199,7 +195,7 @@ export function WaitlistForm({
       {status === "error" && (
         <p
           id={`waitlist-error-${variant}`}
-          className="mt-2 text-sm font-medium text-[#9f1d1d]"
+          className="mt-2 text-sm font-medium text-alarm"
           role="alert"
         >
           {message}

@@ -17,10 +17,11 @@ What it mounts, and why each lives where it does:
   delivery is refused), and is dispatched through `app.state.ingress`, which
   the factory wires whenever an engine exists.
   Chat-inbound COMMANDS remain #854 and are not dispatched.
-- ``/health`` — Railway's probe (`railway.toml`), which now also says whether
-  a target engine is configured, so a service that would 503 every data route
-  is visible from the probe instead of only from the first request; with
-  ``/health/scheduling`` and ``/health/posting``, see `routes/health.py`.
+- ``/health`` — Railway's probe (`railway.toml`): ok, the version and the
+  commit, nothing else; the operating details (whether a target engine is
+  configured, the login, the pool, the webhook) are ``/api/v1/ops/health``,
+  for `OPS_USER_IDS` alone. With ``/health/scheduling`` and
+  ``/health/posting``, see `routes/health.py`.
 
 What deliberately does not exist any more: the legacy ``/auth`` OAuth router,
 the ``/api/onboarding`` router and its Mini App (`/static`; the Mini App's
@@ -51,11 +52,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.requests import ClientDisconnect
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length
 from src.api.routes.auth import router as auth_router
-from src.api.routes.health import VERSION
+from src.api.routes.health import COMMIT_VAR, VERSION, AnswerCache
 from src.api.routes.health import router as health_router
 from src.api.routes.retired import router as retired_router
 from src.api.routes.v1 import IDEMPOTENCY_HEADER
@@ -64,10 +67,17 @@ from src.api.routes.tokens import router as tokens_router
 from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
-from src.config.settings import settings
-from src.exceptions.tenancy import TenantResolutionError, TokenRefused
+from src.api.routes.public import WaitlistSlots
+from src.api.routes.public import router as public_router
+from src.config.settings import parse_ops_user_ids, settings
+from src.exceptions.tenancy import (
+    CrossSiteRefused,
+    TenantResolutionError,
+    TokenRefused,
+)
 from src.services.target import oauth_states
 from src.services.target.commands import CommandNotBuilt, CommandRefused
+from src.services.target.health_reads import StatementTimedOut
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import MixInvalid
 from src.services.target.provisioning import ProvisioningRefused
@@ -79,7 +89,7 @@ from src.services.target.unit_of_work import (
     INGRESS_POOL_TIMEOUT_SEAM,
     PoolWatch,
 )
-from src.services.target.vocabulary import DATABASE_URL_VAR
+from src.services.target.vocabulary import DATABASE_URL_VAR, is_production
 from src.services.target.telegram_dispatch import TelegramDispatcher
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
 from src.utils.logger import logger
@@ -155,6 +165,85 @@ class DropAmbiguousForwardedForMiddleware:
         await self.app(scope, receive, send)
 
 
+class BodySizeLimitMiddleware:
+    """Refuse a request body over *max_bytes* with 413, before a route reads it.
+
+    A declared Content-Length over the limit is refused before a byte is
+    read. A body without one is counted as it arrives: once the total passes
+    the limit the 413 goes out, the app is told the client disconnected — so
+    a route reading the body stops there — and nothing the app sends after
+    that reaches the client. Either way the connection is closed rather than
+    drained, so the rest of the body is never read.
+
+    The limit is the `API_REQUEST_BODY_MAX_BYTES` setting, which says why it
+    sits where it does; the Meta callbacks keep a tighter cap of their own
+    (`routes/meta.py`).
+    """
+
+    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        declared = declared_length(scope["headers"])
+        if declared is not None and declared > self.max_bytes:
+            await self._refuse(scope, receive, send, f"declared {declared}")
+            return
+
+        received = 0
+        started = False
+
+        async def bounded_receive() -> Message:
+            nonlocal received
+            if received > self.max_bytes:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    if not started:
+                        await self._refuse(scope, receive, send, "streamed")
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal started
+            if received > self.max_bytes:
+                return
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, bounded_receive, guarded_send)
+        except ClientDisconnect:
+            # The disconnect handed over above: the 413 is the answer.
+            if received <= self.max_bytes:
+                raise
+
+    async def _refuse(
+        self, scope: Scope, receive: Receive, send: Send, how: str
+    ) -> None:
+        client = scope.get("client")
+        logger.warning(
+            "refused %s %s from %s: request body over %d bytes (%s)",
+            scope.get("method"),
+            scope.get("path"),
+            client[0] if client else "unknown",
+            self.max_bytes,
+            how,
+        )
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": BODY_TOO_LARGE_DETAIL},
+            headers={"Connection": "close"},
+        )
+        await response(scope, receive, send)
+
+
 #: How often `_sample_webhook_live` re-reads what Telegram holds — the cadence
 #: is the API's to choose, so it is stated here and handed to the channel's
 #: `live_samples`. The CLI's `storydump health` reads the cached sample and
@@ -192,7 +281,12 @@ _TOKEN_STATUS = {
     "session_required": 403,
     "readonly_token": 403,
     "wrong_workspace": 403,
+    "not_ops": 403,
 }
+
+#: `CrossSiteRefused.reason` → 403 WITH the reason, so a refused browser
+#: post says why. Pinned total by the factory test.
+_CROSS_SITE_STATUS = {"cross_site": 403}
 
 #: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
 #: the factory test, so a new reason cannot ship without a row here.
@@ -241,6 +335,9 @@ _PROVISIONING_STATUS = {
     # The connected folders changed between the pick's check and its write
     # (two admins at once): a conflict to retry, not a typo.
     "sources_changed": 409,
+    # An admin who is not the person who connected Drive, at the folder
+    # browser or the pick (091): a floor, like `insufficient_role`.
+    "drive_not_yours": 403,
 }
 
 #: `InvitationRefused.reason` → status, total over `invitations.REASONS`.
@@ -249,10 +346,9 @@ _INVITATION_STATUS = {
     "identity_mismatch": 403,
     # The CREATE half's refusals (#1172). All three are the caller's input
     # being wrong rather than a state or an authorization fact, so 400 — and
-    # `already_invited` is deliberately NOT 409: a pending invitation to that
-    # address is not a conflicting write to fix by retrying, it is a thing
-    # that already exists, and the remedy is to revoke or wait rather than to
-    # send again.
+    # `already_invited` stays 400 rather than 409 for the same reason. A send
+    # replaces the address's pending invitation (`invitations.create`, under a
+    # per-addressee lock), so it is a backstop no product path reaches today.
     "already_invited": 400,
     "email_required": 400,
     "invalid_channel": 400,
@@ -271,6 +367,16 @@ _INVITATION_DETAIL = {
 def _unmapped(request: Request, exc: Exception) -> JSONResponse:
     logger.error("unmapped refusal on %s %s: %s", request.method, request.url.path, exc)
     return JSONResponse(status_code=500, content={"detail": "internal error"})
+
+
+def _busy(reason: str) -> JSONResponse:
+    """The answer to load, not a fault: a 503 naming *reason*, which the
+    caller retries after a second."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "busy — try again", "reason": reason},
+        headers={"Retry-After": "1"},
+    )
 
 
 def _reason_detail(exc, status: int) -> dict:
@@ -338,17 +444,25 @@ def _register_handlers(app: FastAPI) -> None:
         # told to retry rather than shown a 500 (the webhook route maps the
         # same wait itself, before admission, and never reaches this).
         logger.warning("pool saturated on %s %s", request.method, request.url.path)
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "busy — try again", "reason": "pool_saturated"},
-            headers={"Retry-After": "1"},
-        )
+        return _busy("pool_saturated")
+
+    @app.exception_handler(StatementTimedOut)
+    async def _statement_timed_out(request: Request, exc: StatementTimedOut):
+        # A health read's statement cancelled under its cap is load, as a pool
+        # wait is, so it is told to retry. Not logged here: `health_reads`
+        # logs it once, for the read, and the health cache answers every hit
+        # of its window with the same refusal.
+        return _busy("statement_timeout")
 
     app.add_exception_handler(
         TenantResolutionError, _mapped(_TENANT_STATUS, _tenant_detail)
     )
 
     app.add_exception_handler(TokenRefused, _mapped(_TOKEN_STATUS, _reason_detail))
+
+    app.add_exception_handler(
+        CrossSiteRefused, _mapped(_CROSS_SITE_STATUS, _reason_detail)
+    )
 
     @app.exception_handler(TokenArgsInvalid)
     async def _token_args(request: Request, exc: TokenArgsInvalid):
@@ -422,10 +536,10 @@ def _ingress_workers(env: Mapping[str, str]) -> int:
 
 
 async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
-    """Cache the startup registration's report on `app.state.webhook` for
-    `/health` — `reg.register_at_startup` decides it and never raises, so this
-    is the whole of the API's part: hand it the bot transport this process
-    speaks with, and keep what it says."""
+    """Cache the startup registration's report on `app.state.webhook` for the
+    operating details (`/api/v1/ops/health`) — `reg.register_at_startup`
+    decides it and never raises, so this is the whole of the API's part: hand
+    it the bot transport this process speaks with, and keep what it says."""
     from src.channels import telegram_webhook_registration as reg
 
     app.state.webhook = await reg.register_at_startup(
@@ -434,10 +548,11 @@ async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
 
 
 async def _sample_webhook_live(app: FastAPI, env: Mapping[str, str]) -> None:
-    """Cache each live webhook sample on `app.state.webhook_live` for `/health`.
-    The loop, its cadence and its never-raise rule are `reg.live_samples`; this
-    task exists to hold the latest one where the probe can read it, and is
-    cancelled at shutdown like the other two."""
+    """Cache each live webhook sample on `app.state.webhook_live` for the
+    operating details (`/api/v1/ops/health`). The loop, its cadence and its
+    never-raise rule are `reg.live_samples`; this task exists to hold the
+    latest one where the probe can read it, and is cancelled at shutdown like
+    the other two."""
     from src.channels import telegram_webhook_registration as reg
 
     async for sample in reg.live_samples(
@@ -465,6 +580,26 @@ async def _sample_db_role(app: FastAPI) -> None:
         logger.warning("database role not sampled at startup: %s", exc)
 
 
+def _warn_about_ops_user_ids(raw: str) -> None:
+    """Say at startup why the operating details and posture will refuse
+    everyone, since the refusal itself cannot: `OPS_USER_IDS` empty, or an
+    entry that is not a user id (named by position, never echoed)."""
+    ids, refused = parse_ops_user_ids(raw)
+    if not ids and not refused:
+        logger.warning(
+            "OPS_USER_IDS is empty: /api/v1/ops/health and /api/v1/ops/posture"
+            " refuse everyone. Set it to your user id (storydump whoami)."
+        )
+        return
+    for position in refused:
+        logger.warning(
+            "OPS_USER_IDS entry %d of %d is not a user id (a UUID, comma-"
+            "separated); it admits nobody",
+            position,
+            sum(1 for e in raw.split(",") if e.strip()),
+        )
+
+
 def _require_key_ring() -> None:
     """Build the credential key ring, or refuse to start.
 
@@ -473,7 +608,7 @@ def _require_key_ring() -> None:
     (`oauth_states.ring`). Built lazily, a missing or malformed key passed
     Railway's health check and failed at those routes — a connect only after
     the person had granted access at Meta or Google. A missing engine is
-    answered per route instead (503, and `/health` says so); nothing on the
+    answered per route instead (503, and `/api/v1/ops/health` says so); nothing on the
     probe would say the key is missing. Raised from startup, the lifespan
     fails and uvicorn exits (one process: `WEB_CONCURRENCY` is unset in
     production), the deploy fails its check, and the previous deploy keeps
@@ -515,6 +650,15 @@ def _telegram_transport(env: Mapping[str, str]):
     return transport_from_env(token, env)
 
 
+#: `1` serves `/docs`, `/redoc` and `/openapi.json` — a development server's
+#: switch, ignored in production.
+API_DOCS_VAR = "API_DOCS"
+
+
+def _serves_docs(env: Mapping[str, str]) -> bool:
+    return (env.get(API_DOCS_VAR) or "").strip() == "1" and not is_production(env)
+
+
 def create_app(
     *, engine: Optional[AsyncEngine] = None, env: Optional[Mapping[str, str]] = None
 ) -> FastAPI:
@@ -533,6 +677,7 @@ def create_app(
         # First, so a process that cannot encrypt starts no task — in
         # particular it never re-registers the production bot's webhook.
         _require_key_ring()
+        _warn_about_ops_user_ids(settings.OPS_USER_IDS)
         # The role sample and the webhook registration run as background
         # tasks so startup never waits on the database or on Telegram (see
         # `app.state.db_role` / `app.state.webhook` below); a task still
@@ -549,20 +694,38 @@ def create_app(
                 if not task.done():
                     task.cancel()
 
+    # The interactive docs and the schema map every route for whoever asks,
+    # and nothing deployed reads them (the CLI and the web know their routes),
+    # so they are opt-in: `API_DOCS=1`, and never in production even then. A
+    # renamed environment or another host serves none.
+    docs = _serves_docs(env)
     app = FastAPI(
         title="Storydump API",
         description="Sign-in, reads and commands for the target tier",
         version=VERSION,
         lifespan=_lifespan,
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
     )
+    # The deployed commit, for `/health` (Railway sets it on a Git deploy).
+    app.state.commit = (env.get(COMMIT_VAR) or "").strip()[:7] or None
     app.state.engine = engine if engine is not None else _engine_from_env(env)
+    if settings.TARGET_SIGNUP_OPEN:
+        # A local stack's switch (092): said at startup, so it is never on
+        # in production unnoticed.
+        logger.warning(
+            "TARGET_SIGNUP_OPEN is on: any Google account can create a user, "
+            "admitted or not"
+        )
     # Which database login this process holds, and whether it bypasses RLS
-    # (#751, F.4). Sampled ONCE, in the background, after startup — `/health`
-    # reports the cached answer and still opens no connection of its own, so a
-    # database blip cannot fail the probe. None means "not sampled", never
-    # "safe": production has connected as the owner role with BYPASSRLS, which
-    # makes every tenant policy inert, and this field is how the switch to the
-    # runtime login is verified after a deploy.
+    # (#751, F.4). Sampled ONCE, in the background, after startup — the
+    # operating details (`/api/v1/ops/health`) report the cached answer and
+    # still opens no connection of its own, so a database blip cannot fail the
+    # probe. None means "not sampled", never "safe": production has connected
+    # as the owner role with BYPASSRLS, which makes every tenant policy inert,
+    # and this field is how the switch to the runtime login is verified after a
+    # deploy.
     app.state.db_role = None
     # The webhook registration report (`_register_webhook`): None until the
     # startup task has run; then `ok`, what Telegram holds, or why it was
@@ -572,6 +735,10 @@ def create_app(
     # minute): the backlog and the last delivery error — the signal that tells
     # "Telegram is not delivering" from "our route is failing".
     app.state.webhook_live = None
+    # The last answer of `/health/scheduling` and `/health/posting`, reused for
+    # `HEALTH_CACHE_SECONDS` so polling two unauthenticated routes cannot drain
+    # the shared pool. One per app, so every app a test builds starts empty.
+    app.state.health_cache = AnswerCache()
 
     # The W4 ingress seam: the `/start` door (#1183) and the group join path
     # (#1242, on #854's resolver door `fn_resolve_binding` — `07` §14).
@@ -586,6 +753,22 @@ def create_app(
     # route's honest 503 into a 500 mid-delivery.
     bot = _telegram_transport(env)
     app.state.tap_metrics = webhooks.TapMetrics()
+    # The waitlist route's per-process slots (`routes/public.py`), and the
+    # admin's message for each signup it accepts, sent with the same bot.
+    app.state.waitlist_slots = WaitlistSlots()
+    from src.channels import telegram_waitlist_ping as waitlist_ping
+    from src.services.target import identity
+
+    operators = settings.ops_user_ids
+
+    async def operator_chats():
+        # Its own short transaction, in the ping's background task.
+        async with app.state.engine.begin() as conn:
+            return await identity.telegram_ids_for(conn, operators)
+
+    app.state.waitlist_ping = waitlist_ping.from_settings(
+        bot, operators, operator_chats
+    )
     app.state.ingress_workers = _ingress_workers(env)
     app.state.pool_watch = (
         PoolWatch(app.state.engine) if app.state.engine is not None else None
@@ -608,6 +791,7 @@ def create_app(
             dispatch=TelegramDispatcher(),
             reply=None if bot is None else bot.send_text,
             answer_callback=None if bot is None else bot.answer_callback,
+            edit=None if bot is None else bot.edit_text,
         )
         if app.state.engine is not None
         else None
@@ -617,8 +801,13 @@ def create_app(
 
     # Middleware. Starlette prepends, so the LAST added runs FIRST on the
     # request path: CORS outermost, then the ambiguous-XFF drop (#765) ahead
-    # of the trusted-proxy walk (#726), then security headers innermost.
+    # of the trusted-proxy walk (#726), then the body limit — after the walk,
+    # so its refusal names the attributed client, and ahead of everything
+    # that could read a body — then security headers innermost.
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(
+        BodySizeLimitMiddleware, max_bytes=settings.API_REQUEST_BODY_MAX_BYTES
+    )
     app.add_middleware(
         ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts
     )
@@ -643,6 +832,10 @@ def create_app(
     # Meta's policy callbacks (#410). Under the same prefix as the other
     # provider-called doors; the URLs are not registered with Meta yet.
     app.include_router(meta_router, prefix="/webhooks/meta")
+    # What a visitor with no account reaches (`routes/public.py`): the
+    # marketing waitlist, outside `/api/v1` because every route there takes a
+    # principal.
+    app.include_router(public_router, prefix="/public")
     # The Mini App's URL is baked into buttons real users still hold; it
     # redirects rather than 404s (`routes/retired.py`).
     app.include_router(retired_router)
