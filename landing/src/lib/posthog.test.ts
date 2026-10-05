@@ -92,6 +92,11 @@ describe("redact", () => {
     expect(redact(event({ $current_url: "https://storydump.app/join/some-token" }))).toBeNull();
   });
 
+  it("drops an event whose page address will not parse", async () => {
+    const { redact } = await load();
+    expect(redact(event({ $current_url: "not a url" }))).toBeNull();
+  });
+
   it("never names an invite page as the previous page", async () => {
     const { redact } = await load();
     const out = redact(event({ $current_url: "https://storydump.app/dashboard", $prev_pageview_pathname: "/join/tok" }));
