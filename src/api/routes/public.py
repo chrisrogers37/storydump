@@ -285,7 +285,8 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
     ping = request.app.state.waitlist_ping
     if ping is not None:
         # After the commit and after the answer: Telegram's pace, and the read
-        # of whom to tell, never hold the visitor, a slot or a connection, and
-        # the API's process runs the task to its end.
+        # of whom to tell (on a connection of its own), never hold the
+        # visitor, a slot or the request's connection, and the API's process
+        # runs the task to its end.
         background.add_task(ping, joined)
     return {"status": "received"}

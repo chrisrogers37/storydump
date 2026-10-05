@@ -1,9 +1,10 @@
 """The admin's Telegram message for each waitlist signup (`POST /public/waitlist`).
 
 The API sends it with the one bot (`TARGET_TELEGRAM_BOT_TOKEN`) as a direct
-message to each person in `OPS_USER_IDS` who has linked Telegram, read when
-the ping's turn comes (``create_app`` hands it the read, so this module needs
-no database), since a person's private chat with the bot has their user id.
+message to each person in `OPS_USER_IDS` whose account is active and who has
+linked Telegram, read afresh for each ping before it queues for its turn
+(``create_app`` hands it the read, so this module needs no database), since a
+person's private chat with the bot has their user id.
 Linking began with `/start` in that chat, so the bot may write to it. All of
 it happens after the route has answered: a background task on the API's own
 process, which runs until the send ends, so neither the read nor Telegram can
@@ -66,7 +67,7 @@ class WaitlistPing:
         self._send_text = send_text
         self._recipients = recipients
         self._one_at_a_time = asyncio.Semaphore(1)
-        #: Pings queued behind the one being sent.
+        #: Pings reading their recipients or queued behind the one being sent.
         self._waiting = 0
 
     async def __call__(self, address: str) -> None:

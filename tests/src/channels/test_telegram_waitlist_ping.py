@@ -374,3 +374,40 @@ async def test_an_unexpected_failure_for_one_operator_still_reaches_the_next(cap
         await waitlist_ping.WaitlistPing(send, _to("111", "222"))("a@example.com")
     assert sent == ["222"]
     assert "NO MESSAGE WAS SENT to one operator" in _logged(caplog)
+
+
+async def test_a_slow_read_never_holds_the_queue_and_an_empty_one_frees_its_place():
+    gate, sent = asyncio.Event(), []
+
+    async def send(chat_id, text):
+        sent.append(text)
+        return "1"
+
+    async def slow():
+        await gate.wait()
+        return []
+
+    stuck = waitlist_ping.WaitlistPing(send, slow)
+    reading = asyncio.ensure_future(stuck("slow@example.com"))
+    await asyncio.sleep(0)
+    assert stuck._waiting == 1
+    # Another ping on the same queue is sent while the first still reads.
+    stuck._recipients = _to(CHAT)
+    await stuck("quick@example.com")
+    assert any("quick@example.com" in text for text in sent)
+    gate.set()
+    await reading
+    assert stuck._waiting == 0
+
+
+async def test_a_ping_cancelled_while_reading_frees_its_place():
+    async def never():
+        await asyncio.Event().wait()
+
+    ping = waitlist_ping.WaitlistPing(_Bot().send_text, never)
+    task = asyncio.ensure_future(ping("a@example.com"))
+    await asyncio.sleep(0)
+    assert ping._waiting == 1
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert ping._waiting == 0
