@@ -17,6 +17,7 @@ import psycopg2
 import psycopg2.errors
 import pytest
 
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -212,11 +213,12 @@ def no_real_ping(monkeypatch):
     monkeypatch.setattr(waitlist_ping, "from_settings", lambda bot, operators: None)
 
 
-#: An operator who has linked Telegram, one who has not, and a linked person
-#: who is no operator.
+#: Two operators who have linked Telegram (the first also Google), one who
+#: has linked only Google, and a linked person who is no operator.
 LINKED_OP = "00000000-0000-4000-8000-0000000000a1"
 UNLINKED_OP = "00000000-0000-4000-8000-0000000000a2"
 LINKED_OTHER = "00000000-0000-4000-8000-0000000000a3"
+LINKED_OP_2 = "00000000-0000-4000-8000-0000000000a4"
 
 
 @pytest.fixture
@@ -227,14 +229,17 @@ def people(world):
     try:
         with conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO users (id) VALUES (%s), (%s), (%s) ON CONFLICT DO NOTHING",
-                (LINKED_OP, UNLINKED_OP, LINKED_OTHER),
+                "INSERT INTO users (id) VALUES (%s), (%s), (%s), (%s)"
+                " ON CONFLICT DO NOTHING",
+                (LINKED_OP, UNLINKED_OP, LINKED_OTHER, LINKED_OP_2),
             )
             cur.execute(
                 "INSERT INTO user_identities (user_id, provider, external_id)"
-                " VALUES (%s, 'telegram', '5550001'), (%s, 'telegram', '5550003')"
+                " VALUES (%s, 'telegram', '5550001'), (%s, 'google', 'g-5550001'),"
+                " (%s, 'google', 'g-5550002'), (%s, 'telegram', '5550003'),"
+                " (%s, 'telegram', '5550004')"
                 " ON CONFLICT DO NOTHING",
-                (LINKED_OP, LINKED_OTHER),
+                (LINKED_OP, LINKED_OP, UNLINKED_OP, LINKED_OTHER, LINKED_OP_2),
             )
     finally:
         conn.close()
@@ -272,10 +277,29 @@ class TestTheAdminPing:
     nothing the route refuses is."""
 
     def test_it_goes_to_each_linked_operator_and_no_one_else(self, world, ping_for):
-        ping = ping_for(LINKED_OP, UNLINKED_OP)
+        ping = ping_for(LINKED_OP, UNLINKED_OP, LINKED_OP_2)
         (resp,) = _post(world, {"email": "ops-only@example.com"})
         assert resp.status_code == 202
-        assert ping.seen == [("ops-only@example.com", ["5550001"], True)]
+        assert ping.seen == [("ops-only@example.com", ["5550001", "5550004"], True)]
+
+    def test_a_failed_read_costs_the_message_never_the_signup(
+        self, world, ping_for, monkeypatch, caplog
+    ):
+        ping = ping_for(LINKED_OP)
+
+        async def broken(executor, user_ids):
+            await executor.execute(text("SELECT 1/0"))
+
+        monkeypatch.setattr(public.identity, "telegram_ids_for", broken)
+        public.logger.addHandler(caplog.handler)
+        try:
+            (resp,) = _post(world, {"email": "read-failed@example.com"})
+        finally:
+            public.logger.removeHandler(caplog.handler)
+        assert resp.status_code == 202
+        assert _entry(world, "read-failed@example.com") != []
+        assert ping.seen == []
+        assert "the operators could not be read" in caplog.text
 
     def test_no_linked_operator_sends_nothing_and_says_why(
         self, world, ping_for, caplog

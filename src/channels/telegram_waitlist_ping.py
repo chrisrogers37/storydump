@@ -81,9 +81,12 @@ class WaitlistPing:
                 self._waiting -= 1
                 queued = False
                 for chat in chats:
-                    await self._send(chat, text)
-        except Exception:  # noqa: BLE001 — a background task has no caller
-            logger.exception("waitlist ping: failed, NO MESSAGE WAS SENT")
+                    try:
+                        await self._send(chat, text)
+                    except Exception:  # noqa: BLE001 — a background task has no caller
+                        logger.exception(
+                            "waitlist ping: failed, NO MESSAGE WAS SENT to one operator"
+                        )
         finally:
             # Cancelled before its turn: it no longer waits.
             if queued:

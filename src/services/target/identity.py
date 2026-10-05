@@ -15,7 +15,7 @@ this runs before any `app.tenant_id` exists — identity precedes tenancy.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlalchemy import text
 
@@ -255,9 +255,10 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
     return None if row is None else str(row[0])
 
 
-async def telegram_ids_for(executor, user_ids) -> list[str]:
+async def telegram_ids_for(executor, user_ids: Iterable[str]) -> list[str]:
     """The Telegram ids of those of *user_ids* who have linked Telegram, in a
     stable order; a person who has not linked is simply absent."""
+    user_ids = sorted(str(u) for u in user_ids)  # a set, in a stable order
     if not user_ids:
         return []
     rows = await executor.execute(
@@ -266,7 +267,7 @@ async def telegram_ids_for(executor, user_ids) -> list[str]:
             " WHERE provider = :p AND user_id = ANY(CAST(:u AS uuid[]))"
             " ORDER BY external_id"
         ),
-        {"p": PROVIDER_TELEGRAM, "u": sorted(str(u) for u in user_ids)},
+        {"p": PROVIDER_TELEGRAM, "u": user_ids},
     )
     return [str(row[0]) for row in rows]
 

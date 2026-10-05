@@ -299,3 +299,18 @@ def test_the_app_wires_the_ping_from_its_settings(env, operators, wired, monkeyp
     monkeypatch.setattr(settings, "OPS_USER_IDS", operators)
     app = create_app(env=env)
     assert isinstance(app.state.waitlist_ping, waitlist_ping.WaitlistPing) is wired
+
+
+async def test_an_unexpected_failure_for_one_operator_still_reaches_the_next(caplog):
+    sent = []
+
+    async def send(chat_id, text):
+        if chat_id == "111":
+            raise RuntimeError("a bug")
+        sent.append(chat_id)
+        return "1"
+
+    with caplog.at_level(logging.ERROR, logger=waitlist_ping.__name__):
+        await waitlist_ping.WaitlistPing(send, OPS)("a@example.com", ["111", "222"])
+    assert sent == ["222"]
+    assert "NO MESSAGE WAS SENT to one operator" in _logged(caplog)
