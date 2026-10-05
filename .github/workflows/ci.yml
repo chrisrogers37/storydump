@@ -132,8 +132,14 @@ jobs:
         run: |
           pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing
 
+      # Test is a required check on main, and the upload gates nothing (no
+      # coverage threshold). `fail_ci_if_error: false` does not cover the
+      # action itself crashing: a TLS handshake failure to Codecov turned a
+      # 4726-passed run red on 2026-10-05. An outage at Codecov must not
+      # block every merge.
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
+        continue-on-error: true
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
