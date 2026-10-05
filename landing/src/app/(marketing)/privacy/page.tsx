@@ -113,7 +113,7 @@ export default function PrivacyPolicy() {
             <ExternalLink href="https://policies.google.com/privacy">Google</ExternalLink>,{" "}
             <ExternalLink href="https://cloudinary.com/privacy">Cloudinary</ExternalLink>{" "}
             and{" "}
-            <ExternalLink href="https://plausible.io/privacy">Plausible</ExternalLink>.
+            <ExternalLink href="https://posthog.com/privacy">PostHog</ExternalLink>.
           </p>
         </section>
 
@@ -246,13 +246,18 @@ export default function PrivacyPolicy() {
               user agent) under their own retention settings.
             </li>
             <li>
-              <Label>Usage analytics</Label> — Plausible counts page views on
-              the site and dashboard, and a few actions: starting, completing or
-              failing a waitlist signup, opening an FAQ answer, clicking a
-              call-to-action or Sign in, and tapping the demo. A waitlist signup
-              also sends the campaign tags from the link you came in by.
-              Invitation links (under <Code>/join/</Code>) are not counted, and
-              Plausible receives no email addresses.
+              <Label>Usage analytics</Label> — PostHog, in cookieless mode,
+              counts page views on the site and dashboard, and a few actions:
+              starting, completing or failing a waitlist signup, opening an FAQ
+              answer, clicking a call-to-action or Sign in, and tapping the
+              demo. With each one it receives the page&apos;s address without
+              its query string, the site you came from (its address only, not
+              your search terms), your browser, operating system and device
+              type, how long you stayed on and how far you scrolled the previous
+              page, and any campaign tags in the page&apos;s address. Invitation
+              links (under{" "}
+              <Code>/join/</Code>) send nothing, and PostHog receives no names,
+              email addresses or account IDs.
             </li>
           </ul>
         </section>
@@ -356,7 +361,7 @@ export default function PrivacyPolicy() {
               to limit abuse, keep a log of who changed what in each workspace,
               and read our services&apos; logs to fix problems.
             </li>
-            <li>To understand which pages and links people use (Plausible).</li>
+            <li>To understand which pages and links people use (PostHog).</li>
             <li>
               To comply with legal obligations, including responding to lawful
               requests.
@@ -382,7 +387,7 @@ export default function PrivacyPolicy() {
             <li>
               <Label>Legitimate interest</Label> — security and abuse prevention
               (rate limits and the workspace action log), understanding which
-              pages and links work (Plausible and campaign tags), and telling
+              pages and links work (PostHog and campaign tags), and telling
               our team about new waitlist signups.
             </li>
             <li>
@@ -467,12 +472,12 @@ export default function PrivacyPolicy() {
                   <td className="py-2">Global</td>
                 </tr>
                 <tr>
-                  <td className="py-2 pr-4">Plausible Analytics</td>
+                  <td className="py-2 pr-4">PostHog</td>
                   <td className="py-2 pr-4">
                     Counting page views and actions on the site and dashboard,
                     without cookies
                   </td>
-                  <td className="py-2">EU</td>
+                  <td className="py-2">US</td>
                 </tr>
               </tbody>
             </table>
@@ -560,7 +565,7 @@ export default function PrivacyPolicy() {
                   <td className="py-2">Until cleared</td>
                 </tr>
                 <tr>
-                  <td className="py-2 pr-4">Plausible</td>
+                  <td className="py-2 pr-4">PostHog</td>
                   <td className="py-2 pr-4">None (cookieless)</td>
                   <td className="py-2 pr-4">Aggregate analytics</td>
                   <td className="py-2">—</td>
@@ -570,9 +575,11 @@ export default function PrivacyPolicy() {
           </div>
           <p className="mt-3">
             None of these is used for advertising or to follow you across other
-            sites, so we do not display a cookie banner. Plausible sets no
-            cookies; according to Plausible, it does not store IP addresses and
-            counts unique visitors with a code that changes every day.
+            sites, so we do not display a cookie banner. PostHog runs in
+            cookieless mode and keeps nothing in your browser. According to
+            PostHog, it counts unique visitors with a code that changes every
+            day and removes your IP address before storing an event, so it
+            records no location.
           </p>
         </section>
 
@@ -623,6 +630,10 @@ export default function PrivacyPolicy() {
             <li>
               <Label>Server logs</Label> — kept by Vercel and Railway under
               their retention settings.
+            </li>
+            <li>
+              <Label>Analytics</Label> — kept by PostHog under its retention
+              settings.
             </li>
             <li>
               <Label>Backups</Label> — our database provider keeps a rolling
@@ -688,8 +699,8 @@ export default function PrivacyPolicy() {
             11. International transfers
           </h2>
           <p className="mt-3">
-            Our database and servers are in the US, Plausible is in the EU, and
-            Telegram, Meta, Google and Cloudinary process data worldwide. Where a
+            Our database, our servers and our analytics provider, PostHog, are
+            in the US, and Telegram, Meta, Google and Cloudinary process data worldwide. Where a
             provider offers the EU&apos;s Standard Contractual Clauses in its
             data processing terms, those terms cover the transfer. Telegram
             offers no such terms, so messages sent through our bot are covered
