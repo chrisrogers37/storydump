@@ -105,8 +105,9 @@ describe("the pending invitations an admin sees", () => {
       " | ",
     );
     expect(text).toContain("partner@example.com");
-    expect(text).toContain("Admin · expires Oct 13");
+    // "Invited as", so a pending row cannot read as a member with that role.
+    expect(text).toContain("Invited as admin · expires Oct 13");
     expect(text).toContain("Telegram invitation");
-    expect(text).toContain("Member · expires Oct 14");
+    expect(text).toContain("Invited as member · expires Oct 14");
   });
 });

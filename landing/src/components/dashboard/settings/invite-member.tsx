@@ -60,16 +60,6 @@ export function inviteLinkSlot(
   return minted ? <InviteLinkBlock link={minted.link} email={minted.email} onDone={onDone} /> : null;
 }
 
-function roleLabel(role: string): string {
-  switch (role) {
-    case "admin":
-      return "Admin";
-    case "member":
-      return "Member";
-  }
-  return role;
-}
-
 /**
  * The invitations not yet accepted. `null` is a read that failed and says so;
  * an empty list renders nothing. A Telegram invitation names no address.
@@ -97,7 +87,7 @@ export function PendingInvitations({
           <li key={invitation.id} className="py-2">
             <p className="truncate text-sm">{invitation.email ?? "Telegram invitation"}</p>
             <p className="text-xs text-muted-foreground">
-              {`${roleLabel(invitation.role)} · expires ${expiryLabel(invitation.expiresAt, tz)}`}
+              {`Invited as ${invitation.role} · expires ${expiryLabel(invitation.expiresAt, tz)}`}
             </p>
           </li>
         ))}
@@ -156,6 +146,9 @@ export function InviteMember({
       } else {
         setMinted({ link, email: address });
         setEmail("");
+        // Back to the least role, as the token form starts read-only: the next
+        // invitation is never an admin because the select was left alone.
+        setRole("member");
       }
       router.refresh();
     } finally {
@@ -169,7 +162,7 @@ export function InviteMember({
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 border-b pb-4">
       {minted ? (
         <div ref={blockRef} tabIndex={-1} className="outline-hidden">
           {inviteLinkSlot(minted, done)}
