@@ -9,7 +9,8 @@ break.
 * `POST /public/waitlist` — add an address to the marketing waitlist. The
   landing site calls it server-side; it held a database credential of its own
   for this write until 100. Each accepted address is also a Telegram message
-  to the admin's chat (`src/channels/telegram_waitlist_ping.py`), sent after the answer.
+  to each operator who has linked Telegram
+  (`src/channels/telegram_waitlist_ping.py`), sent after the answer.
 """
 
 from __future__ import annotations
@@ -218,7 +219,8 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
     read. With `WAITLIST_SITE_SECRET` set, so is a request without it.
 
     Every accepted address, a repeat too (the route cannot tell them apart),
-    is a message to the admin's chat, sent once the answer has gone."""
+    is a message to each operator who has linked Telegram, sent once the
+    answer has gone."""
     if "origin" in request.headers or "sec-fetch-site" in request.headers:
         return _refusal(403, "the waitlist takes no browser requests", "browser")
     counted = _client(request)
@@ -282,8 +284,9 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
     logger.info("waitlist: an address was received")
     ping = request.app.state.waitlist_ping
     if ping is not None:
-        # After the commit and after the answer: Telegram's pace never holds
-        # the visitor, a slot or a connection, and the API's process runs the
-        # task to its end.
+        # After the commit and after the answer: Telegram's pace, and the read
+        # of whom to tell (on a connection of its own), never hold the
+        # visitor, a slot or the request's connection, and the API's process
+        # runs the task to its end.
         background.add_task(ping, joined)
     return {"status": "received"}
