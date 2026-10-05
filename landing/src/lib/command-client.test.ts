@@ -33,6 +33,8 @@ import {
   disableAccountRefusalCopy,
   submitRemoveMember,
   removeMemberRefusalCopy,
+  submitInviteMember,
+  inviteMemberRefusalCopy,
 } from "./command-client";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -399,5 +401,39 @@ describe("removing a member — remove_member (the revoke for every join edge)",
     expect(removeMemberRefusalCopy("http_403", 403)).toMatch(/admin/i);
     expect(removeMemberRefusalCopy("illegal_transition")).toMatch(/owner/i);
     expect(removeMemberRefusalCopy("not_found")).toMatch(/reload/i);
+  });
+});
+
+describe("inviting a person — invite_member (#1563)", () => {
+  it("sends the address and the role under a fresh submission id, to the port's door", async () => {
+    stubFetch({ outcome: "executed", invitation_id: "i", invite_token: "t", role: "admin" }, 200);
+    const result = await submitInviteMember(WS, { email: "partner@example.com", role: "admin" });
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/invite_member`);
+    expect(sentBody(0)).toMatchObject({ email: "partner@example.com", role: "admin" });
+    expect(portKey(0, "invite_member")).toMatch(/^invite_member:/);
+  });
+
+  it("keys two invitations of the same person apart, so the second is made and not replayed", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitInviteMember(WS, { email: "partner@example.com", role: "member" });
+    await submitInviteMember(WS, { email: "partner@example.com", role: "member" });
+    expect(portKey(0, "invite_member")).not.toBe(portKey(1, "invite_member"));
+  });
+
+  it("names the admin floor, a bad address, and a link that cannot come back", () => {
+    expect(inviteMemberRefusalCopy("http_403", 403)).toMatch(/admin/i);
+    // The port's one code for every invitation refusal, and the route's own.
+    for (const code of ["invalid_args", "invalid_email"]) {
+      expect(inviteMemberRefusalCopy(code, 400), code).toMatch(/email address/i);
+    }
+    expect(inviteMemberRefusalCopy("invalid_role", 400)).toMatch(/member or admin/i);
+    expect(inviteMemberRefusalCopy(REPLAYED_ERROR, 200)).toMatch(/invite them again/i);
+  });
+
+  it("says nothing was created when the app is unreachable or the session is gone", () => {
+    expect(inviteMemberRefusalCopy("unreachable", 0)).toMatch(/cannot reach the server.*nothing was created/i);
+    expect(inviteMemberRefusalCopy("http_401", 401)).toMatch(/not signed in.*nothing was created/i);
+    expect(inviteMemberRefusalCopy("something_new", 500)).toMatch(/nothing was created/i);
   });
 });
