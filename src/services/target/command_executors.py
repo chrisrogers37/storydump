@@ -1409,12 +1409,12 @@ async def invite_member(session, command: Command) -> CommandResult:
     `token_hash` alone, and `invitations.create` writes every column its D33
     identity check reads.
 
-    **The token is returned, once.** It is the credential — possession
-    accepts — and only its hash is stored, so this return value is the single
-    opportunity to deliver it. A delivery producer (email, or a Telegram card
-    in `06` §2's other half) is what turns it into something a person
-    receives; the two share this one minting door rather than each having
-    their own.
+    **The token is returned, once,** with `join_url`, the link built from it.
+    It is the credential — possession accepts — and only its hash is stored,
+    so this return value is the single opportunity to deliver it. The inviter
+    hands `join_url` over; a delivery producer (email, or a Telegram card in
+    `06` §2's other half) could do it instead, and the producers share this
+    one minting door rather than each having their own.
 
     **`delivery_channel` is the caller's, defaulting to `email`.** It was
     pinned to `email` here while `invitations.create` accepted both, which
@@ -1443,7 +1443,6 @@ async def invite_member(session, command: Command) -> CommandResult:
     it is stated rather than left for someone to find in the seam. It is
     inert in practice — no surface passes `delivery_channel` today, so nothing
     mints one — and it closes when #1188 wires the producer to this call site.
-    The `email` arm has no such gap.
 
     `role` defaults to `member` and is a CEILING, never a grant: the acceptor
     downgrades an unmatched admin invite to `member` plus an
@@ -1498,24 +1497,17 @@ async def invite_member(session, command: Command) -> CommandResult:
     # a success. `delivery` carries `channel` + `state` for either arm, so a
     # caller reads one shape whichever channel was used.
     delivery: dict[str, Any] = {"channel": channel}
-    if channel == "email" and not invitations.EMAIL_DELIVERY_ENABLED:
-        # The arm is off: a queued email would hold the token. The link goes
-        # back in this response only — see `invitations.EMAIL_DELIVERY_ENABLED`.
-        delivery["state"] = "withheld"
-    elif channel == "email":
-        job_id = await invitations.deliver_by_email(
-            session,
-            workspace_id=command.workspace_id,
-            invitation_id=invitation_id,
-            token=token,
-            email=email,
-            web_app_origin=settings.web_app_origin,
+    if channel == "email":
+        delivery.update(
+            await invitations.deliver_by_email(
+                session,
+                workspace_id=command.workspace_id,
+                invitation_id=invitation_id,
+                token=token,
+                email=email,
+                web_app_origin=settings.web_app_origin,
+            )
         )
-        if job_id is None:
-            delivery["state"] = "not_configured"
-        else:
-            delivery["state"] = "queued"
-            delivery["job_id"] = job_id
     else:
         # The card producer is #1188 and is not wired here yet — see the BOUND
         # in the docstring. Reported as the gap it is rather than omitted,
@@ -1525,13 +1517,13 @@ async def invite_member(session, command: Command) -> CommandResult:
 
     expires_at = (
         await session.execute(
-            text("SELECT expires_at FROM workspace_invitations WHERE id = :id"),
-            {"id": str(invitation_id)},
+            text(
+                "SELECT expires_at FROM workspace_invitations"
+                " WHERE workspace_id = :ws AND id = :id"
+            ),
+            {"ws": str(command.workspace_id), "id": str(invitation_id)},
         )
     ).scalar_one()
-    # This response is the only place the token leaves the server: the
-    # invitation row holds its hash, and `join_url` is the link the inviter
-    # hands over (null on a deployment with no web origin).
     return CommandResult(
         "executed",
         {

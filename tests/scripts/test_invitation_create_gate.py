@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 import psycopg2
 import pytest
@@ -30,6 +31,7 @@ from psycopg2 import sql
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import commands, invitations, sessions
 from src.services.target.commands import Command, CommandRefused
@@ -129,21 +131,16 @@ class _Round:
         await self.engine.dispose()
 
 
-async def _execute_invite(
-    world, args, *, origin="https://app.example.test", actor=None
-):
-    """`invite_member` through `commands.execute`, as the web's command route
-    drives it, on a deployment whose web origin is *origin*."""
+#: The web origin the invite tests' deployment is configured with.
+ORIGIN = "https://app.example.test"
+
+
+async def _execute_invite(world, args, *, origin=ORIGIN, actor=None):
+    """`invite_member` through `commands.execute`, the executor the web's
+    command route dispatches to, on a deployment whose web origin is *origin*."""
     engine = create_async_engine(async_url(world["dsn"]))
     try:
-        import src.services.target.command_executors as ce
-
-        class _Settings:
-            web_app_origin = origin
-
-        original = ce.settings
-        ce.settings = _Settings()
-        try:
+        with mock.patch.object(settings, "WEB_APP_URL", origin):
             async with engine.begin() as conn:
                 return await commands.execute(
                     conn,
@@ -155,8 +152,6 @@ async def _execute_invite(
                         args=args,
                     ),
                 )
-        finally:
-            ce.settings = original
     finally:
         await engine.dispose()
 
@@ -540,16 +535,16 @@ class TestTheEmailProducer:
     the whole channel was unreachable. These drive `commands.execute`, so they
     cover the producer AND the wiring, which is the pair the delivery_channel
     defect showed can disagree.
+
+    They pin the arm as built, and as built its job holds the accept URL, the
+    raw token. That is why the arm is off in every deployment
+    (`EMAIL_DELIVERY_ENABLED`). Whoever switches it on replaces the accept URL
+    test with one for a path that does not store the token.
     """
 
     @pytest.fixture(autouse=True)
     def _the_arm_switched_on(self, monkeypatch):
-        """The arm is off in every deployment (`EMAIL_DELIVERY_ENABLED`); these
-        tests switch it on so the arm itself stays tested."""
         monkeypatch.setattr(invitations, "EMAIL_DELIVERY_ENABLED", True)
-
-    async def _invite(self, world, args, *, origin="https://app.example.test"):
-        return await _execute_invite(world, args, origin=origin)
 
     async def _job(self, world, job_id):
         engine = create_async_engine(async_url(world["dsn"]))
@@ -571,7 +566,7 @@ class TestTheEmailProducer:
 
     async def test_an_email_invitation_enqueues_a_send_email_job(self, world):
         """The gap this closes, stated as the row that never existed."""
-        result = await self._invite(world, {"email": "Invitee@Example.com"})
+        result = await _execute_invite(world, {"email": "Invitee@Example.com"})
         delivery = result.data["delivery"]
         assert delivery["channel"] == "email"
         assert delivery["state"] == "queued"
@@ -590,10 +585,10 @@ class TestTheEmailProducer:
         """The link is the whole credential, so it has to be THE token — not a
         second one, and not the invitation id. Asserted by round-tripping the
         value out of the URL through the real accept door."""
-        result = await self._invite(world, {"email": "roundtrip@example.com"})
+        result = await _execute_invite(world, {"email": "roundtrip@example.com"})
         job = await self._job(world, result.data["delivery"]["job_id"])
         accept_url = job["payload"]["params"]["accept_url"]
-        assert accept_url.startswith("https://app.example.test/join/")
+        assert accept_url.startswith(f"{ORIGIN}/join/")
 
         from_url = accept_url.rsplit("/", 1)[-1]
         assert from_url == result.data["invite_token"]
@@ -615,7 +610,7 @@ class TestTheEmailProducer:
         or a state nothing claims — which is the shape the entire email channel
         was already in.
         """
-        result = await self._invite(world, {"email": "claimable@example.com"})
+        result = await _execute_invite(world, {"email": "claimable@example.com"})
         engine = create_async_engine(async_url(world["dsn"]))
         try:
             async with engine.begin() as conn:
@@ -644,7 +639,7 @@ class TestTheEmailProducer:
         by hand — so this is a delivery outcome, not a reason to refuse the
         command. What it must never be is silent.
         """
-        result = await self._invite(
+        result = await _execute_invite(
             world, {"email": "noorigin@example.com"}, origin=None
         )
         assert result.data["delivery"] == {
@@ -682,8 +677,6 @@ class TestTheLinkIsShownOnce:
     ran would have written its accept URL.
     """
 
-    ORIGIN = "https://app.example.test"
-
     @staticmethod
     def _address():
         return f"{uuid.uuid4().hex[:8]}@example.com"
@@ -691,7 +684,7 @@ class TestTheLinkIsShownOnce:
     async def test_the_response_carries_the_join_link_and_its_expiry(self, world):
         result = await _execute_invite(world, {"email": self._address()})
         token = result.data["invite_token"]
-        assert result.data["join_url"] == f"{self.ORIGIN}/join/{token}"
+        assert result.data["join_url"] == f"{ORIGIN}/join/{token}"
         left = datetime.fromisoformat(result.data["expires_at"]) - datetime.now(
             timezone.utc
         )
