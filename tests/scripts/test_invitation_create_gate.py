@@ -689,6 +689,12 @@ class TestTheLinkIsShownOnce:
             timezone.utc
         )
         assert timedelta(days=7) - timedelta(minutes=5) < left <= timedelta(days=7)
+        [row] = fetch_all(
+            world["dsn"],
+            "SELECT expires_at FROM workspace_invitations WHERE id = %s",
+            (result.data["invitation_id"],),
+        )
+        assert datetime.fromisoformat(result.data["expires_at"]) == row["expires_at"]
 
     async def test_with_no_web_origin_there_is_no_link(self, world):
         result = await _execute_invite(world, {"email": self._address()}, origin=None)
@@ -728,6 +734,36 @@ class TestTheLinkIsShownOnce:
                 world, {"email": self._address()}, actor=world["invitee"]
             )
         assert refused.value.reason == "insufficient_role"
+
+    async def test_the_link_is_refused_once_it_has_expired(self, world):
+        address = self._address()
+        result = await _execute_invite(world, {"email": address})
+        token = result.data["invite_token"]
+        r = _Round(world)
+
+        async def expire_at(moment):
+            async with r.engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE workspace_invitations SET expires_at = "
+                        + moment
+                        + " WHERE id = :i"
+                    ),
+                    {"i": result.data["invitation_id"]},
+                )
+
+        try:
+            await expire_at("now() - interval '1 second'")
+            with pytest.raises(invitations.InvitationRefused) as refused:
+                await r.accept(token, email=address)
+            assert refused.value.reason == "not_acceptable"
+            # The control: the same link with its expiry back in the future is
+            # accepted, so the refusal above was the expiry's.
+            await expire_at("now() + interval '1 hour'")
+            joined = await r.accept(token, email=address)
+            assert joined["workspace_id"] == str(world["ws"])
+        finally:
+            await r.close()
 
     async def test_the_link_works_once(self, world):
         address = self._address()
