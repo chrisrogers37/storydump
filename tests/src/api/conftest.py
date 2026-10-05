@@ -29,7 +29,7 @@ from src.api.principal import COOKIE, Principal, current_principal
 from src.api import principal
 from src.api.routes import auth
 from src.config.settings import settings
-from src.services.target import google_oidc, tenant_resolution
+from src.services.target import google_oidc, health_reads, tenant_resolution
 from src.services.target.unit_of_work import asyncpg_url
 
 PRINCIPAL = Principal(
@@ -165,6 +165,18 @@ class FakeEngine:
         yield self.session
 
     connect = begin
+
+
+@pytest.fixture
+def stubbed_bound(monkeypatch):
+    """The health reads' statement cap, stubbed so a route test never reaches
+    SQL; its own pins are `tests/src/services/target/test_health_reads.py`
+    and `tests/scripts/test_health_reads_gate.py`."""
+
+    async def bound(executor):
+        return None
+
+    monkeypatch.setattr(health_reads, "bound", bound)
 
 
 @pytest.fixture

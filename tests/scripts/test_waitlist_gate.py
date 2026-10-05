@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import psycopg2
 import psycopg2.errors
@@ -784,7 +785,11 @@ class TestTheSiteSecret:
         self, world, monkeypatch, acquired
     ):
         monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", None)
-        monkeypatch.setattr(public, "client_ip", lambda request: "2001:db8:7:7::42")
+        # The real client_ip, as if the peer were that address: the /64 step
+        # lives there (`principal.address_key`), so the stub must not skip it.
+        peer = SimpleNamespace(client=SimpleNamespace(host="2001:db8:7:7::42"))
+        real = public.client_ip
+        monkeypatch.setattr(public, "client_ip", lambda request: real(peer))
         (resp,) = _post(world, {"email": "direct-v6@example.com"})
         assert resp.status_code == 202, resp.text
         assert acquired == ["2001:db8:7:7::/64"]

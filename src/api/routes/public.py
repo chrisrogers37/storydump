@@ -16,7 +16,6 @@ break.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -24,6 +23,7 @@ from starlette.requests import ClientDisconnect
 from fastapi.responses import JSONResponse
 
 from src.api.principal import (
+    address_key,
     client_ip,
     parse_json_object,
     preauth_guard,
@@ -139,22 +139,6 @@ class WaitlistSlots:
             del self.by_address[address]
 
 
-def _address(raw: Optional[str]) -> Optional[str]:
-    """The key one client is counted under: an IPv4 address, or an IPv6
-    address's /64 (one subscriber holds a whole /64, so keying on the address
-    alone would hand a script 2^64 limits and slot shares). None when *raw* is
-    not an address."""
-    try:
-        ip = ipaddress.ip_address((raw or "").strip())
-    except ValueError:
-        return None
-    if ip.version == 4:
-        return str(ip)
-    if ip.ipv4_mapped:
-        return str(ip.ipv4_mapped)
-    return str(ipaddress.IPv6Network((ip.packed, 64), strict=False))
-
-
 def _client(request: Request) -> Optional[tuple[str, str, int, bool]]:
     """Whose slot share and counter this request spends, as ``(key prefix,
     client, limit, capped)``, where *capped* (the secret matched) says an
@@ -167,14 +151,13 @@ def _client(request: Request) -> Optional[tuple[str, str, int, bool]]:
     missing or malformed visitor address falls back to the peer and the shared
     counter rather than failing the signup. Every matched request is capped,
     the fallback too, or leaving out the visitor would skip the ceiling."""
-    peer = client_ip(request)
-    address = _address(peer) or peer
+    address = client_ip(request)
     expected = settings.waitlist_site_secret
     if not expected:
         return WAITLIST_KEY_PREFIX, address, WAITLIST_LIMIT, False
     if not verify_secret_token(request.headers.get(SITE_SECRET_HEADER), expected):
         return None
-    visitor = _address(request.headers.get(VISITOR_IP_HEADER))
+    visitor = address_key(request.headers.get(VISITOR_IP_HEADER))
     if visitor is None:
         logger.warning("waitlist: the site sent no usable visitor address")
         return WAITLIST_KEY_PREFIX, address, WAITLIST_LIMIT, True
