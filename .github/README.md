@@ -21,8 +21,9 @@ request into `main` or `develop`, six jobs:
 - **Test** — `pytest tests/ -v --cov=src --cov=storydump_cli` against a
   PostgreSQL 15 service container, with `REQUIRE_TEST_DATABASE=1` so a database
   that fails to come up fails the run instead of skipping the tests it backs
-- **Security Scan** — pip-audit and bandit, both advisory: each step is
-  `|| true` and `continue-on-error`, so the job cannot go red
+- **Security Scan** — pip-audit gates (a known-vulnerable pin in
+  `requirements.txt` fails the job); bandit is advisory (`|| true` and
+  `continue-on-error`)
 - **Front End** — in `landing/`: `npm ci`, `npm test`, `npx tsc --noEmit`,
   `npm run lint` (Node 22; `next build` is deliberately absent — Vercel builds
   every PR)
