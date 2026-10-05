@@ -290,7 +290,35 @@ INVITE_TEMPLATE = "invitation"
 #:   state it reads as ``queued``, which passes clause 3 while failing clause 4
 #:   in silence. Telegram-only in practice today — `jobs.enqueue` returns None
 #:   only under `unless_pending`, which the email arm does not pass.
-DELIVERY_STATES = ("queued", "not_configured", "no_binding", "none_produced")
+#: * ``withheld`` — nothing was sent, by design: the email arm is off
+#:   (`EMAIL_DELIVERY_ENABLED`), so the link goes back to the inviter only. Not
+#:   a configuration fault, which is why it is not ``not_configured``.
+DELIVERY_STATES = (
+    "queued",
+    "not_configured",
+    "no_binding",
+    "none_produced",
+    "withheld",
+)
+
+#: Whether the email arm may run at all. OFF: a queued email holds its accept
+#: URL — the raw token, the whole credential — in `jobs.payload` until it sends,
+#: and this module's rule is that the token reaches the database only as its
+#: SHA-256. Switch it on only together with an email path that keeps that rule.
+#: While it is off, `invite_member` reports ``withheld`` and the inviter hands
+#: the link over.
+EMAIL_DELIVERY_ENABLED = False
+
+
+def join_url(web_app_origin: str | None, token: str) -> str | None:
+    """The link an invitee opens, ``{origin}/join/{token}``, or None when the
+    deployment has no web origin to build it from.
+
+    One spelling for every place a link is built. The host is the deployment's
+    own setting, never a caller's: see `deliver_by_email`.
+    """
+    origin = (web_app_origin or "").strip().rstrip("/")
+    return f"{origin}/join/{token}" if origin else None
 
 
 async def deliver_by_email(
@@ -347,8 +375,12 @@ async def deliver_by_email(
     What it must never be is silent: a run where nobody could have been told
     must be distinguishable from a delivered one.
     """
-    origin = (web_app_origin or "").strip().rstrip("/")
-    if not origin:
+    if not EMAIL_DELIVERY_ENABLED:
+        # The caller checks the switch first and reports `withheld`; this guard
+        # is for a caller that does not, so its job never holds the token.
+        raise RuntimeError("email delivery is off: EMAIL_DELIVERY_ENABLED")
+    accept_url = join_url(web_app_origin, token)
+    if accept_url is None:
         logger.warning(
             "invitation %s created but no email enqueued: no web_app_origin"
             " configured, so no accept URL can be built",
@@ -367,7 +399,7 @@ async def deliver_by_email(
         # A workspace with no name is not a reason to withhold the invitation;
         # the sentence still reads and the link still works.
         "workspace_name": (name or "").strip() or "your workspace",
-        "accept_url": f"{origin}/join/{token}",
+        "accept_url": accept_url,
     }
     if inviter_name and inviter_name.strip():
         # OPTIONAL in the template, which is why it is omitted rather than

@@ -1498,7 +1498,11 @@ async def invite_member(session, command: Command) -> CommandResult:
     # a success. `delivery` carries `channel` + `state` for either arm, so a
     # caller reads one shape whichever channel was used.
     delivery: dict[str, Any] = {"channel": channel}
-    if channel == "email":
+    if channel == "email" and not invitations.EMAIL_DELIVERY_ENABLED:
+        # The arm is off: a queued email would hold the token. The link goes
+        # back in this response only — see `invitations.EMAIL_DELIVERY_ENABLED`.
+        delivery["state"] = "withheld"
+    elif channel == "email":
         job_id = await invitations.deliver_by_email(
             session,
             workspace_id=command.workspace_id,
@@ -1519,11 +1523,22 @@ async def invite_member(session, command: Command) -> CommandResult:
         delivery["state"] = "none_produced"
         delivery["cards"] = 0
 
+    expires_at = (
+        await session.execute(
+            text("SELECT expires_at FROM workspace_invitations WHERE id = :id"),
+            {"id": str(invitation_id)},
+        )
+    ).scalar_one()
+    # This response is the only place the token leaves the server: the
+    # invitation row holds its hash, and `join_url` is the link the inviter
+    # hands over (null on a deployment with no web origin).
     return CommandResult(
         "executed",
         {
             "invitation_id": invitation_id,
             "invite_token": token,
+            "join_url": invitations.join_url(settings.web_app_origin, token),
+            "expires_at": expires_at.isoformat(),
             "role": role,
             "delivery": delivery,
         },

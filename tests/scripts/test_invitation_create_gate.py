@@ -20,13 +20,17 @@ deployed ones rather than a fixture's idea of them.
 
 from __future__ import annotations
 
+import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import pytest
+from psycopg2 import sql
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import commands, invitations, sessions
 from src.services.target.commands import Command, CommandRefused
 from tests.scripts.conftest import (
@@ -123,6 +127,66 @@ class _Round:
 
     async def close(self):
         await self.engine.dispose()
+
+
+async def _execute_invite(
+    world, args, *, origin="https://app.example.test", actor=None
+):
+    """`invite_member` through `commands.execute`, as the web's command route
+    drives it, on a deployment whose web origin is *origin*."""
+    engine = create_async_engine(async_url(world["dsn"]))
+    try:
+        import src.services.target.command_executors as ce
+
+        class _Settings:
+            web_app_origin = origin
+
+        original = ce.settings
+        ce.settings = _Settings()
+        try:
+            async with engine.begin() as conn:
+                return await commands.execute(
+                    conn,
+                    Command(
+                        kind="invite_member",
+                        workspace_id=world["ws"],
+                        actor_user_id=actor or world["user"],
+                        channel="web",
+                        args=args,
+                    ),
+                )
+        finally:
+            ce.settings = original
+    finally:
+        await engine.dispose()
+
+
+def _rows_holding(dsn, needle):
+    """Every base table whose rows, read as text, contain *needle*, as
+    ``{"schema.table": rows}``. A scan rather than a list of known writers, so
+    it also catches the next one."""
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_schema, table_name FROM information_schema.tables"
+                " WHERE table_type = 'BASE TABLE'"
+                " AND table_schema NOT IN ('pg_catalog', 'information_schema')"
+            )
+            hits = {}
+            for schema, table in cur.fetchall():
+                cur.execute(
+                    sql.SQL(
+                        "SELECT count(*) FROM {}.{} AS t WHERE strpos(t::text, %s) > 0"
+                    ).format(sql.Identifier(schema), sql.Identifier(table)),
+                    (needle,),
+                )
+                rows = cur.fetchone()[0]
+                if rows:
+                    hits[f"{schema}.{table}"] = rows
+            return hits
+    finally:
+        conn.close()
 
 
 class TestTheCreateHalfMatchesTheAcceptor:
@@ -478,32 +542,14 @@ class TestTheEmailProducer:
     defect showed can disagree.
     """
 
+    @pytest.fixture(autouse=True)
+    def _the_arm_switched_on(self, monkeypatch):
+        """The arm is off in every deployment (`EMAIL_DELIVERY_ENABLED`); these
+        tests switch it on so the arm itself stays tested."""
+        monkeypatch.setattr(invitations, "EMAIL_DELIVERY_ENABLED", True)
+
     async def _invite(self, world, args, *, origin="https://app.example.test"):
-        engine = create_async_engine(async_url(world["dsn"]))
-        try:
-            import src.services.target.command_executors as ce
-
-            class _Settings:
-                web_app_origin = origin
-
-            original = ce.settings
-            ce.settings = _Settings()
-            try:
-                async with engine.begin() as conn:
-                    return await commands.execute(
-                        conn,
-                        Command(
-                            kind="invite_member",
-                            workspace_id=world["ws"],
-                            actor_user_id=world["user"],
-                            channel="web",
-                            args=args,
-                        ),
-                    )
-            finally:
-                ce.settings = original
-        finally:
-            await engine.dispose()
+        return await _execute_invite(world, args, origin=origin)
 
     async def _job(self, world, job_id):
         engine = create_async_engine(async_url(world["dsn"]))
@@ -625,3 +671,81 @@ class TestTheEmailProducer:
         finally:
             await engine.dispose()
         assert count == 0, "a job was enqueued that could never render"
+
+
+class TestTheLinkIsShownOnce:
+    """#1563/#1564: an admin mints an invitation from the web and is shown its
+    link once. The token reaches the database only as its SHA-256, so the
+    command's response is the only place it appears.
+
+    An origin is configured unless a test says otherwise, so an email arm that
+    ran would have written its accept URL.
+    """
+
+    ORIGIN = "https://app.example.test"
+
+    @staticmethod
+    def _address():
+        return f"{uuid.uuid4().hex[:8]}@example.com"
+
+    async def test_the_response_carries_the_join_link_and_its_expiry(self, world):
+        result = await _execute_invite(world, {"email": self._address()})
+        token = result.data["invite_token"]
+        assert result.data["join_url"] == f"{self.ORIGIN}/join/{token}"
+        left = datetime.fromisoformat(result.data["expires_at"]) - datetime.now(
+            timezone.utc
+        )
+        assert timedelta(days=7) - timedelta(minutes=5) < left <= timedelta(days=7)
+
+    async def test_with_no_web_origin_there_is_no_link(self, world):
+        result = await _execute_invite(world, {"email": self._address()}, origin=None)
+        assert result.data["join_url"] is None
+        assert result.data["invite_token"]
+
+    async def test_the_email_arm_is_withheld(self, world):
+        result = await _execute_invite(world, {"email": self._address()})
+        assert result.data["delivery"] == {"channel": "email", "state": "withheld"}
+
+    async def test_the_token_reaches_the_database_only_as_its_hash(self, world):
+        result = await _execute_invite(world, {"email": self._address()})
+        token = result.data["invite_token"]
+        assert _rows_holding(world["dsn"], token) == {}
+        # The scan's own control: it finds the hash, in the one row that holds it.
+        assert _rows_holding(world["dsn"], sessions.token_hash(token)) == {
+            "public.workspace_invitations": 1
+        }
+
+    async def test_the_token_is_logged_nowhere(self, world, caplog):
+        with caplog.at_level(logging.DEBUG):
+            result = await _execute_invite(world, {"email": self._address()})
+        token = result.data["invite_token"]
+        assert [r.name for r in caplog.records if token in r.getMessage()] == []
+
+    async def test_a_member_below_admin_cannot_mint_one(self, world):
+        r = _Round(world)
+        try:
+            address = self._address()
+            _id, token = await r.create(email=address)
+            await r.accept(token, email=address)
+            assert await r.role_of() == "member"
+        finally:
+            await r.close()
+        with pytest.raises(TenantResolutionError) as refused:
+            await _execute_invite(
+                world, {"email": self._address()}, actor=world["invitee"]
+            )
+        assert refused.value.reason == "insufficient_role"
+
+    async def test_the_link_works_once(self, world):
+        address = self._address()
+        result = await _execute_invite(world, {"email": address})
+        token = result.data["join_url"].rsplit("/", 1)[-1]
+        r = _Round(world)
+        try:
+            joined = await r.accept(token, email=address)
+            assert joined["workspace_id"] == str(world["ws"])
+            with pytest.raises(invitations.InvitationRefused) as again:
+                await r.accept(token, email=address)
+            assert again.value.reason == "not_acceptable"
+        finally:
+            await r.close()
