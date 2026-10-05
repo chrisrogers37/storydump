@@ -140,6 +140,9 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         continue-on-error: true
+        # A stalled upload would otherwise hold Test, and the merge or deploy
+        # waiting on it, until the job's six-hour default timeout.
+        timeout-minutes: 5
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
@@ -251,26 +254,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check CHANGELOG.md was updated
-        run: |
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-          # Docs-only PRs (everything under documentation/ or root .md files
-          # other than CHANGELOG itself) don't need a CHANGELOG entry — the
-          # changelog tracks user-facing behavior changes, not docs.
-          NON_DOC=$(echo "$CHANGED" | grep -v -E '^(documentation/|.*\.md$|\.github/)' || true)
-          if [ -z "$NON_DOC" ]; then
-            echo "✅ Docs-only PR — CHANGELOG.md update not required"
-            exit 0
-          fi
-
-          if echo "$CHANGED" | grep -q "^CHANGELOG\.md$"; then
-            echo "✅ CHANGELOG.md was updated"
-          else
-            echo "⚠️ WARNING: CHANGELOG.md was not updated"
-            echo "Please add an entry under ## [Unreleased] describing your changes"
-            echo ""
-            echo "Files changed:"
-            echo "$CHANGED" | sed 's/^/  /'
-            exit 1
-          fi
+      # A PR adds its entry as a new file in changelog.d/ and never edits
+      # CHANGELOG.md, so no two PRs change the same lines; a docs-only PR needs
+      # no fragment. changelog.d/README.md states the rule; the script holds it.
+      - name: Check the changelog fragment
+        run: python scripts/changelog_fragments.py check --base "origin/${{ github.base_ref }}"
