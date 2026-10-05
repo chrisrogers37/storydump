@@ -89,8 +89,9 @@ export default function PrivacyPolicy() {
           <h2 className="text-xl font-semibold text-foreground">1. Who we are</h2>
           <p className="mt-3">
             Storydump (&quot;Storydump&quot;, &quot;we&quot;, &quot;us&quot;) is
-            an independent project run by Christopher Rogers, who decides how
-            the personal data described here is used (the &quot;data
+            an independent project run by Christopher Rogers, based in the
+            United States, who decides how the personal data described here is
+            used (the &quot;data
             controller&quot; under GDPR). For any privacy question or request,
             email <EmailLink />, which reaches him directly.
           </p>
