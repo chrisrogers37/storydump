@@ -35,6 +35,7 @@ variable, never a silent fallback to the settings-built URL (#1010's class).
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
@@ -504,13 +505,31 @@ PREAUTH_WINDOW_SECONDS = 60
 PREAUTH_SCOPE = "preauth_ip"
 
 
+def address_key(raw: Optional[str]) -> Optional[str]:
+    """The key one client is counted under: an IPv4 address, or an IPv6
+    address's /64 (one subscriber holds a whole /64, so keying on the address
+    alone would hand a script 2^64 limits and slot shares). None when *raw* is
+    not an address."""
+    try:
+        ip = ipaddress.ip_address((raw or "").strip())
+    except ValueError:
+        return None
+    if ip.version == 4:
+        return str(ip)
+    if ip.ipv4_mapped:
+        return str(ip.ipv4_mapped)
+    return str(ipaddress.IPv6Network((ip.packed, 64), strict=False))
+
+
 def client_ip(request: Request) -> str:
-    """The attributed peer — `request.client.host` AFTER ProxyHeadersMiddleware
-    has applied the trusted-proxy walk (#726/#765), which is the `02` §6
-    client-IP source rule. Never a header read here; the one other address a
-    counter may key on is :func:`preauth_guard`'s *client*, which a caller
-    passes only after verifying who sent it."""
-    return request.client.host if request.client else "unknown"
+    """The attributed peer as a counter key (:func:`address_key`) —
+    `request.client.host` AFTER ProxyHeadersMiddleware has applied the
+    trusted-proxy walk (#726/#765), which is the `02` §6 client-IP source
+    rule. Never a header read here; the one other address a counter may key
+    on is :func:`preauth_guard`'s *client*, which a caller passes only after
+    verifying who sent it."""
+    host = request.client.host if request.client else "unknown"
+    return address_key(host) or host
 
 
 async def preauth_guard(

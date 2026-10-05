@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.api.routes.public import _address
+from src.api.principal import address_key
 
 
 @pytest.mark.parametrize(
@@ -19,11 +19,11 @@ from src.api.routes.public import _address
     ],
 )
 def test_an_address_is_its_key(raw, key):
-    assert _address(raw) == key
+    assert address_key(raw) == key
 
 
 @pytest.mark.parametrize(
     "raw", [None, "", "unknown", "203.0.113.7, 10.0.0.1", "203.0.113.7:443"]
 )
-def test_anything_else_is_no_address(raw):
-    assert _address(raw) is None
+def test_anything_else_is_noaddress_key(raw):
+    assert address_key(raw) is None

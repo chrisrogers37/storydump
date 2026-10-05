@@ -151,6 +151,23 @@ class TestSignin:
         )
         assert counter["keys"] == ["203.0.113.9"]
 
+    def test_behind_railways_edge_the_counter_keys_on_each_visitors_64(
+        self, app, configured, counter, state_store
+    ):
+        """Behind Railway's edge (100.64.0.0/10) the key is the visitor, and
+        an IPv6 visitor's whole /64 is one key, so walking the addresses of
+        one subscriber's /64 is not a fresh limit per request."""
+        client = TestClient(app, client=("100.64.0.13", 4321))
+        for xff in ("192.0.2.50", "2001:db8:1:2::1", "2001:db8:1:2::ffff"):
+            client.get(
+                "/auth/google", headers={"X-Forwarded-For": xff}, follow_redirects=False
+            )
+        assert counter["keys"] == [
+            "192.0.2.50",
+            "2001:db8:1:2::/64",
+            "2001:db8:1:2::/64",
+        ]
+
 
 class TestCallback:
     def _signin(self, client):
