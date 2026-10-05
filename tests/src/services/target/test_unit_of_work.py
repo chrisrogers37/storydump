@@ -25,6 +25,7 @@ from src.services.target.unit_of_work import (
     async_database_url,
     create_engine,
     in_transaction,
+    transaction_discipline,
     unit_of_work,
 )
 
@@ -162,6 +163,16 @@ class TestTheDisciplineFlagDoesNotLeak:
         assert in_transaction() is False, "the discipline flag leaked past a failure"
         await engine.dispose()
 
+    def test_a_nested_exit_restores_the_outer_flag(self):
+        """`transaction_discipline` resets from its token: leaving an inner
+        block restores the outer block's flag, where a bare reset would clear
+        it while the outer transaction is still open."""
+        with transaction_discipline():
+            with transaction_discipline():
+                assert in_transaction() is True
+            assert in_transaction() is True, "a nested exit cleared the outer flag"
+        assert in_transaction() is False
+
 
 @pytest.mark.integration
 @pytest.mark.slow
@@ -255,8 +266,8 @@ class TestTenantScopingAndGucHygieneUnderPoolReuse:
     @pytest.mark.asyncio
     async def test_the_COMPOSED_path_refuses_a_provider_call_inside_a_real_uow(self):
         """branden's finding: the two halves were each proven and the JOIN was
-        not. `test_a_provider_call_inside_an_open_transaction_fails` sets the
-        ContextVar by hand, and the flag test proves a UoW sets it — but no
+        not. `test_a_provider_call_inside_an_open_transaction_fails` arms the
+        flag directly, and the flag test proves a UoW sets it — but no
         test ran the shape a caller actually writes. Each half can keep passing
         while the join breaks, so this runs a real UoW transaction against live
         Postgres with a real `egress.request` through it."""
