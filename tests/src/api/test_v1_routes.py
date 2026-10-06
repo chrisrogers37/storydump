@@ -27,6 +27,7 @@ from src.services.target import (
     oauth_states,
     provisioning,
     sessions,
+    tenant_resolution,
     webhook_ingress,
     workspaces,
 )
@@ -249,6 +250,35 @@ class TestWorkspaceReads:
         assert resp.status_code == 200
         assert resp.json()["intents_by_state"] == {"posted": 2}
         assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
+
+    @pytest.fixture
+    def pending(self, monkeypatch):
+        async def list_invitations(session, *, workspace_id):
+            return [{"email": "invitee@example.com"}]
+
+        monkeypatch.setattr(workspaces, "list_invitations", list_invitations)
+
+    def test_an_admin_gets_the_pending_invitations(
+        self, client, signed_in, tenant, pending
+    ):
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 200
+        assert resp.json()["invitations"][0]["email"] == "invitee@example.com"
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_member_gets_no_pending_invitation(
+        self, client, signed_in, tenant, pending, monkeypatch
+    ):
+        """A member: the gate passes the member floor and refuses any higher."""
+
+        async def as_a_member(session, workspace_id, user_id, minimum_role="member"):
+            if minimum_role != "member":
+                raise TenantResolutionError("insufficient_role")
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", as_a_member)
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 403
+        assert "invitee@example.com" not in resp.text
 
 
 @pytest.fixture
