@@ -158,6 +158,19 @@ POLICY_CENSUS = {
         "UPDATE",
         ("svc_maintenance",),
     ): "door:fn_reaper_sweep",
+    # 104: the two tables svc_maintenance lacked for the activation funnel.
+    (
+        "p_maint_users",
+        "users",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_activation_funnel",
+    (
+        "p_maint_members",
+        "workspace_members",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_activation_funnel",
     ("p_tenant", "provider_quarantine", "ALL", T): "matrix",
     (
         "p_claim_quar",
@@ -516,6 +529,13 @@ DOORS = {
     "fn_health_outbox_sent": (
         ("svc_ingress", "svc_worker"),
         "SELECT fn_health_outbox_sent(3600)",
+    ),
+    # 104 (`07` §47, #1481): the activation funnel, counts only across every
+    # workspace. The worker's login alone, the one the psql escape hatch
+    # connects as; no API principal until an operator principal exists (#1124).
+    "fn_activation_funnel": (
+        "svc_worker",
+        "SELECT * FROM fn_activation_funnel(now() - interval '30 days')",
     ),
 }
 
@@ -886,7 +906,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 68
+        assert len(POLICY_CENSUS) == 70
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -905,8 +925,9 @@ class TestRuntimeTenantIsolationMatrix:
         assert len(by_kind["matrix"]) == 16
         # 081: p_maint_accts; 082: the three maintenance reads; 086: the
         # reaper's source re-arm; 090: the removals record; 092: the sign-up
-        # admissions; 098: the inviter's account state; 099: the Telegram unlink.
-        assert len(by_kind["door"]) == 38
+        # admissions; 098: the inviter's account state; 099: the Telegram
+        # unlink; 104: the activation funnel's two reads.
+        assert len(by_kind["door"]) == 40
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():

@@ -427,8 +427,11 @@ class TestTheDerivedAdoptionProbesReadBothWays:
     # `channel_outbox` and the service roles, read from the catalogs by
     # name. 102 is here because both its probes read a door from `pg_proc`
     # by name, its body and its `proconfig`: false, not an error, where
-    # neither door exists.
-    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89, 101, 102])
+    # neither door exists. 104 is here for its door, grant and policy
+    # probes, which join the catalogs to roles by name: a database before
+    # the lineage has none of them, while its `users` is the legacy table
+    # of that name, whose grants the grant probe reads.
+    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89, 101, 102, 104])
     def test_probes_read_false_without_raising_before_the_target_lineage(
         self, version, at49_db, owner_actor
     ):

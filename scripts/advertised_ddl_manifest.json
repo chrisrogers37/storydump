@@ -403,6 +403,13 @@
       "label": "§46 every SECURITY DEFINER function pins search_path = pg_catalog, public, pg_temp, with pg_temp last (103) — one ALTER FUNCTION ... SET search_path per door, the 29 definer functions in public written out by signature, no body restated",
       "doc": "07-security-model.md",
       "ordinal": 39
+    },
+    {
+      "sha256": "9e9f55b11015cedf449374daa180852e28ff5045a5e5e514f4290d32e4597c20",
+      "class": "normative",
+      "label": "§47 the activation funnel door (104, #1481) — svc_maintenance's SELECT and a USING (true) policy on users and workspace_members, and fn_activation_funnel: five stage rows of reached and stalled counts for the active users created since p_since, owned by svc_maintenance, EXECUTE for svc_worker only",
+      "doc": "07-security-model.md",
+      "ordinal": 40
     }
   ],
   "policy_expansion": {

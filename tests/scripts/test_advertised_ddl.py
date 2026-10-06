@@ -306,8 +306,9 @@ class TestAgainstTheRealDocs:
         # written by the API (100) makes it 50; and §44's outbox failure record
         # and its doors (101, #1482) make it 51; and §45's removal that holds,
         # the remove door checking its caller (102), makes it 52; and §46's
-        # definer functions pinning search_path with pg_temp last (103) make it 53.
-        assert classes.count("normative") == 53
+        # definer functions pinning search_path with pg_temp last (103) make it 53;
+        # and §47's activation funnel door (104, #1481) makes it 54.
+        assert classes.count("normative") == 54
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
@@ -488,7 +489,7 @@ class TestWhatTheCommentRuleChangedInTheStream:
     """#1406 changed what the prefix gate compares, and this pins the change.
 
     Normalization now drops every comment outside a literal and keeps every
-    literal whole. Against the rule it replaced, 45 of the stream's 464
+    literal whole. Against the rule it replaced, 45 of the stream's 475
     statements normalize differently, and in two directions:
 
     - 31 STOP comparing a comment that sits outside every literal — after a

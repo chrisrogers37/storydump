@@ -433,6 +433,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 103 appends §46: every SECURITY DEFINER function pins its
             # search_path with pg_temp last, and a census holds the doors to it.
             "103_definer_search_path_pinned.sql",
+            # 104 appends §47, the activation funnel door: onboarding counted
+            # across every workspace, owned by svc_maintenance and executable
+            # by svc_worker alone (#1481).
+            "104_activation_funnel_door.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
