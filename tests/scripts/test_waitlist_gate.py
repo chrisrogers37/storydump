@@ -374,6 +374,14 @@ class TestTheAdminPing:
         monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-ping-test")
         # The route's shared logger does not propagate; caplog listens at root.
         monkeypatch.setattr(public.logger, "propagate", True)
+        alerted = []
+        send = waitlist_ping.WaitlistPing.send
+
+        async def spy(ping, text, *, alert=False):
+            alerted.append(alert)
+            await send(ping, text, alert=alert)
+
+        monkeypatch.setattr(waitlist_ping.WaitlistPing, "send", spy)
         caplog.set_level(logging.INFO)
         responses = _post(
             world,
@@ -386,8 +394,8 @@ class TestTheAdminPing:
         # The signup's own ping, then one alert for the two refusals: the
         # second refusal falls inside the first's notice window.
         alert = (
-            "Waitlist signups hit the limit of 1 a minute that all visitors"
-            " share, and are being turned away as busy: 1 on this server so far."
+            "Waitlist signups hit their shared limit of 1 a minute, and are"
+            " being turned away as busy: 1 on this server so far."
         )
         assert pinged.sent == [
             ("5550001", "ping-ceiling-0@example.com", True),
@@ -397,6 +405,9 @@ class TestTheAdminPing:
             r.getMessage() for r in caplog.records if "turned away" in r.getMessage()
         ]
         assert warned == [f"waitlist: {alert}"]
+        # The signup's ping is a plain send; the notice is an alert, which a
+        # queue full of signup pings cannot drop.
+        assert alerted == [False, True]
         assert "198.51.100.90" not in caplog.text
         assert "ping-ceiling-1" not in caplog.text
 
@@ -710,6 +721,8 @@ class TestTheSiteSecret:
             headers=_from_site("198.51.100.4"),
         )
         assert [r.status_code for r in first] == [202, 202, 429]
+        # Their own limit, not one all visitors share: no "full", no "busy".
+        assert first[-1].json() == {"detail": public.TOO_MANY}
         assert [r.status_code for r in other] == [202]
         assert _entry(world, "visitor-b1@example.com") != []
 

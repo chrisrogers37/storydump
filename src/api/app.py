@@ -75,7 +75,7 @@ from src.api.routes.tokens import router as tokens_router
 from src.api.routes.ops import router as ops_router
 from src.api.routes import webhooks
 from src.api.routes.meta import router as meta_router
-from src.api.routes.public import CeilingNotice, WaitlistSlots
+from src.api.routes.public import WaitlistSlots, full_notices
 from src.api.routes.public import router as public_router
 from src.config.settings import parse_ops_user_ids, settings
 from src.exceptions.tenancy import (
@@ -810,11 +810,11 @@ def create_app(
     # route's honest 503 into a 500 mid-delivery.
     bot = _telegram_transport(env)
     app.state.tap_metrics = webhooks.TapMetrics()
-    # The waitlist route's per-process slots and ceiling notice
+    # The waitlist route's per-process slots and full-limit notices
     # (`routes/public.py`), and the admin's message for each signup it
     # accepts, sent with the same bot.
     app.state.waitlist_slots = WaitlistSlots()
-    app.state.waitlist_ceiling = CeilingNotice()
+    app.state.waitlist_full = full_notices()
     from src.channels import telegram_waitlist_ping as waitlist_ping
     from src.services.target import identity
 

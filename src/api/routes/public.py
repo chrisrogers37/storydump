@@ -147,9 +147,12 @@ class CeilingNotice:
     """When a limit all visitors share refuses: at most one notice each
     :data:`CEILING_NOTICE_SECONDS`, counting the refusals in between, so a
     flood is one line and one message, never one per request. ``create_app``
-    builds one per app, as ``app.state.waitlist_ceiling``."""
+    builds one per limit, as ``app.state.waitlist_full``, so one limit's
+    refusals never silence or swell the other's notice. *what* names whose
+    calls the limit counts."""
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, what: str, clock: Callable[[], float] = time.monotonic) -> None:
+        self._what = what
         self._clock = clock
         self._last: Optional[float] = None
         self._refused = 0
@@ -169,19 +172,34 @@ class CeilingNotice:
             else f"in the {round((now - self._last) / 60)} minutes since its last notice"
         )
         text = (
-            f"Waitlist signups hit the limit of {limit} a minute that all"
-            f" visitors share, and are being turned away as busy:"
+            f"Waitlist {self._what} hit their shared limit of {limit} a minute,"
+            f" and are being turned away as busy:"
             f" {self._refused} on this server {since}."
         )
         self._last, self._refused = now, 0
         return text
 
 
-def _full(request: Request, background: BackgroundTasks, limit: int) -> JSONResponse:
+#: The limits all visitors share, by their key in ``app.state.waitlist_full``:
+#: the accepted signups, and the fallback counter of calls with no visitor.
+ACCEPTED, NO_VISITOR = "accepted", "no_visitor"
+
+
+def full_notices() -> dict[str, CeilingNotice]:
+    """One notice per shared limit, for ``app.state.waitlist_full``."""
+    return {
+        ACCEPTED: CeilingNotice("signups"),
+        NO_VISITOR: CeilingNotice("calls without a visitor address"),
+    }
+
+
+def _full(
+    request: Request, background: BackgroundTasks, which: str, limit: int
+) -> JSONResponse:
     """The 429 for a limit all visitors share, `reason: full`, so the site can
     say "busy" and an operator can tell it from one visitor's own limit; and
     the notice, when one is due, to the log and to the operators."""
-    notice = request.app.state.waitlist_ceiling.refused(limit)
+    notice = request.app.state.waitlist_full[which].refused(limit)
     if notice is not None:
         logger.warning("waitlist: %s", notice)
         ping = request.app.state.waitlist_ping
@@ -294,7 +312,7 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
                 # one caller's own, and stays the plain 429.
                 if not (capped and key_prefix == WAITLIST_KEY_PREFIX):
                     raise
-                return _full(request, background, limit)
+                return _full(request, background, NO_VISITOR, limit)
             if body is None:
                 return _refusal(400, "the body must be a JSON object", "not_json")
             # The insert and the ceiling's spend share a savepoint: past the
@@ -319,7 +337,7 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
                 return _refusal(400, "not a valid email address", "invalid_email")
             except HTTPException:  # only the ceiling raises here
                 # The same answer for a new address and a repeat: both spent it.
-                return _full(request, background, WAITLIST_ACCEPTED_LIMIT)
+                return _full(request, background, ACCEPTED, WAITLIST_ACCEPTED_LIMIT)
     finally:
         slots.release(address)
     logger.info("waitlist: an address was received")
