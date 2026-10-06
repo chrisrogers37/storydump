@@ -176,11 +176,11 @@ class TestPositiveControls:
         # #1167's instance 7 (`pause_workspace` / `resume_workspace`) was FIXED
         # on 2026-09-10 (#1282: Pause Posting rides the two commands from the
         # web), so the positive control moved to instances the web still does
-        # not offer. `invite_member` is offered by the Members card (#1563), so
-        # the control is `cancel` alone. When it is wired, move it again —
-        # never delete.
+        # not offer. `invite_member` is offered by the Members card (#1563) and
+        # `cancel` by the Queue's planned stories (#1616), so the control is
+        # `set_item_link` alone. When it is wired, move it again — never delete.
         names = {f.name for f in uc.probe_commands().findings}
-        assert "cancel" in names, (
+        assert "set_item_link" in names, (
             "no known unreachable command is detected any more — either every"
             " instance was fixed (retire this control) or the probe stopped"
             " working (fix the probe)."
@@ -190,6 +190,9 @@ class TestPositiveControls:
         )
         assert "invite_member" not in names, (
             "inviting is offered by the Members card since #1563; the probe must not list it"
+        )
+        assert "cancel" not in names, (
+            "cancelling is offered by the Queue since #1616; the probe must not list it"
         )
 
     def test_it_still_finds_the_sixth_instance(self):
