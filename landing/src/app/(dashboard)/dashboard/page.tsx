@@ -2,20 +2,22 @@ import { requireWorkspacePage } from "@/lib/page-guards";
 import { workspaceFetch } from "@/lib/workspaces";
 import {
   HISTORY_STATES,
-  deriveCategories,
+  deriveFolderMix,
   deriveSummary,
   type AccountsResponse,
   type SourcesResponse,
   type StatsResponse,
 } from "@/lib/dashboard-payloads";
-import { deriveConditions } from "@/lib/conditions";
+import type { CategoryMixResponse } from "@/lib/category-mix";
+import { deriveConditions, nextSetupStep } from "@/lib/conditions";
 import type { IntentsResponse } from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { PostingChart } from "@/components/dashboard/posting-chart";
-import { CategoryBreakdown } from "@/components/dashboard/category-breakdown";
+import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
+import { PageHeader } from "@/design/page-header";
 
 /**
  * The overview's history strip. Ten is a glance, not a log — the full list
@@ -25,7 +27,7 @@ import { RecentActivity } from "@/components/dashboard/recent-activity";
 const HISTORY_LIMIT = 10;
 
 export default async function DashboardPage() {
-  const { workspaceId } = await requireWorkspacePage();
+  const { session, workspaceId } = await requireWorkspacePage();
 
   // THREE CALLS BECAME TWO (#1044).
   //
@@ -34,7 +36,7 @@ export default async function DashboardPage() {
   // bounded list, which is what made the old figures wrong on any workspace
   // past the page size. History is the intent ledger filtered to its terminal
   // states, which is one call rather than a separate endpoint.
-  const [statsResult, historyResult, accountsResult, sourcesResult] =
+  const [statsResult, historyResult, accountsResult, sourcesResult, mixResult] =
     await Promise.all([
       workspaceFetch<StatsResponse>("stats", workspaceId),
       workspaceFetch<IntentsResponse>(
@@ -46,6 +48,8 @@ export default async function DashboardPage() {
       // size. Its review count comes from `stats`.
       workspaceFetch<AccountsResponse>("accounts", workspaceId),
       workspaceFetch<SourcesResponse>("sources", workspaceId),
+      // The mix card's plan per connected folder; what each posted is `stats`.
+      workspaceFetch<CategoryMixResponse>("category-mix", workspaceId),
     ]);
 
   // EVERY dependency, not just the one that fills the most pixels. Two
@@ -56,36 +60,45 @@ export default async function DashboardPage() {
     !statsResult.ok ||
     !historyResult.ok ||
     !accountsResult.ok ||
-    !sourcesResult.ok
+    !sourcesResult.ok ||
+    !mixResult.ok
   ) {
     return <RouterUnavailable what="Your dashboard" />;
   }
 
   const stats = statsResult.data;
   const summary = deriveSummary(stats);
-  const categories = deriveCategories(stats);
+  const mix = deriveFolderMix(stats, mixResult.data);
   const conditions = deriveConditions({
     accounts: accountsResult.data.accounts,
     sources: sourcesResult.data.sources,
     intentsByState: stats.intents_by_state,
   });
+  // A member is told an admin connects things; an unknown role (the list
+  // was unreachable) gets the button, which the API refuses if it must.
+  const role = session.workspaces?.find((w) => w.id === workspaceId)?.role;
+  const setupStep = nextSetupStep(
+    {
+      accounts: accountsResult.data.accounts,
+      sources: sourcesResult.data.sources,
+    },
+    { isAdmin: role !== "member" },
+  );
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Last 30 days of posting activity.
-        </p>
-      </div>
+      <PageHeader
+        title="Overview"
+        description="Last 30 days of posting activity."
+      />
 
-      <ConditionsPanel conditions={conditions} />
+      <ConditionsPanel conditions={conditions} setupStep={setupStep} />
 
       <AnalyticsCards summary={summary} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <PostingChart data={stats.posts_by_day ?? []} />
-        <CategoryBreakdown categories={categories} />
+        <PostingMixCard mix={mix} />
       </div>
 
       <RecentActivity items={historyResult.data.intents ?? []} />

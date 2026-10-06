@@ -368,15 +368,15 @@ class TestExpectedTenancyDerivation:
         """CALIBRATION, and the reason this is not circular reasoning.
 
         `test_advertised_ddl_replay` executes the whole stream into a real
-        database and observes 26 tables, 19 of them tenant-keyed. This parses
+        database and observes 29 tables, 20 of them tenant-keyed. This parses
         the same stream as TEXT and must land on the same two numbers. Agreement
         between a catalog read and a text parse is what licenses using the parse
         as an expectation elsewhere; without it the derivation would only ever
         be self-consistent.
         """
         sig = expected_tenancy(self._stream())
-        assert len(sig) == 26
-        assert len(tenant_keyed_tables(sig)) == 19
+        assert len(sig) == 29
+        assert len(tenant_keyed_tables(sig)) == 20
 
     def test_the_completed_stream_satisfies_the_invariant_it_will_be_judged_by(self):
         """At the end of the stream — and only there — the plan's own tenancy
@@ -502,7 +502,7 @@ class TestExpectedTenancyDerivation:
         actually covers the corpus it has to run against, so the refusal is
         discriminating rather than merely strict.
         """
-        assert len(expected_tenancy(self._stream())) == 26
+        assert len(expected_tenancy(self._stream())) == 29
 
     def test_an_unclassified_statement_kind_refuses(self):
         """The allowlist's other direction: a statement kind nobody has judged
@@ -512,6 +512,34 @@ class TestExpectedTenancyDerivation:
         """
         with pytest.raises(AssertionError, match="does not classify"):
             expected_tenancy(["CREATE SEQUENCE s START 1"])
+
+
+class TestADataUpdateIsInert:
+    """098 is the first migration on the target lineage to UPDATE rows (its
+    one-time revoke of a removed inviter's invitations). Rows are none of the
+    four facts, so that table's UPDATE is allowlisted beside INSERT INTO; this
+    is the control that proves the entry is reachable, and that it admits no
+    other UPDATE."""
+
+    def test_update_of_the_invitations_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE workspace_invitations ( id uuid, workspace_id uuid )",
+                "UPDATE workspace_invitations i SET id = NULL"
+                " WHERE workspace_id IS NULL",
+            ]
+        )
+        assert sig["workspace_invitations"]["tenant_keyed"] is True
+        assert sig["workspace_invitations"]["policies"] == 0
+
+    def test_a_catalog_update_is_not_waved_through(self):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(
+                [
+                    "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                    "UPDATE pg_class SET relrowsecurity = false WHERE relname = 't'",
+                ]
+            )
 
 
 class TestDroppingAnIndexIsInert:

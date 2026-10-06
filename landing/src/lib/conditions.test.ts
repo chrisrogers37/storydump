@@ -14,6 +14,7 @@ import {
   ALL_CLEAR_DETAIL,
   RESOLVED_IN,
   deriveConditions,
+  nextSetupStep,
   type ConditionInputs,
 } from "./conditions";
 import {
@@ -191,5 +192,53 @@ describe("deriveConditions — the panel as a whole", () => {
     expect(ALL_CLEAR_DETAIL).toMatch(/account/);
     expect(ALL_CLEAR_DETAIL).toMatch(/folder/);
     expect(ALL_CLEAR_DETAIL).toMatch(/post/);
+  });
+});
+
+describe("nextSetupStep — what an unset workspace is pointed at instead of an all-clear", () => {
+  const ACCOUNT = { id: "a1" };
+  const FOLDER = { removed: false };
+
+  it("no Instagram account: step 1, on the Accounts tab", () => {
+    const step = nextSetupStep({ accounts: [], sources: [FOLDER] });
+    expect(step).toMatchObject({
+      number: 1,
+      title: "Connect your Instagram account to get started",
+      ...RESOLVED_IN.accounts,
+    });
+  });
+
+  it("an account but no folder: step 2, on the Integrations tab", () => {
+    const step = nextSetupStep({ accounts: [ACCOUNT], sources: [] });
+    expect(step).toMatchObject({
+      number: 2,
+      title: "Connect Google Drive and pick a folder",
+      ...RESOLVED_IN.integrations,
+    });
+  });
+
+  it("a removed folder is not a connected one", () => {
+    expect(
+      nextSetupStep({ accounts: [ACCOUNT], sources: [{ removed: true }] })?.number,
+    ).toBe(2);
+  });
+
+  it("a member is told an admin connects it, with no button", () => {
+    expect(nextSetupStep({ accounts: [], sources: [] }, { isAdmin: false })).toEqual({
+      number: 1,
+      title: "Waiting on an admin to connect Instagram",
+      detail: "That's the account your Stories will be posted to.",
+    });
+    expect(nextSetupStep({ accounts: [ACCOUNT], sources: [] }, { isAdmin: false })).toEqual({
+      number: 2,
+      title: "Waiting on an admin to connect Google Drive",
+      detail: "Storydump picks each Story from the photos and videos in the folders an admin connects.",
+    });
+  });
+
+  it("an account and a connected folder: set up, nothing to point at", () => {
+    expect(
+      nextSetupStep({ accounts: [ACCOUNT], sources: [{ removed: true }, FOLDER] }),
+    ).toBeNull();
   });
 });

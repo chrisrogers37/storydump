@@ -90,6 +90,15 @@ TERMINAL_STATES = intent_ledger.TERMINAL_STATES
 #: says must DRAIN rather than be flipped.
 DRAINING_STATES = ("publishing", "publishing_ambiguous")
 
+#: The most cancels one run makes. Each rides its own savepoint, and a
+#: savepoint that writes takes a subtransaction id; a backend caches 64 of them
+#: (`PGPROC_MAX_CACHED_SUBXIDS`). Past that, every other backend's snapshot is
+#: marked suboverflowed until this transaction ends, and their visibility
+#: checks fall back to `pg_subtrans` (#1441). The drain's are the only
+#: savepoints its transaction takes. A refused cancel's savepoint rolls back
+#: and its id leaves the cache, so only a cancel counts.
+MAX_WRITING_SAVEPOINTS = 64
+
 #: `06` §1's grace window, and the ONE definition of it. `WorkerConfig` defaults
 #: to this and `restore_workspace` refuses past it, so the finalizer and the way
 #: back cannot disagree about when the window closed — the same reason
@@ -143,8 +152,12 @@ async def drain(session, workspace_id: str, *, limit: int) -> dict[str, Any]:
     The cancel goes through `intent_ledger.transition` rather than a bulk
     UPDATE so `trg_intent_guard` rules on each edge; `06` §1 says cancel is
     "legal from every working state except publishing/ambiguous" and the guard
-    is where that is actually enforced. A refusal on one intent is recorded and
-    the rest continue — one unexpected edge must not strand the whole offboard.
+    is where that is actually enforced. A refusal on one intent is returned
+    for the caller to record, and the rest continue — one unexpected edge must
+    not strand the whole offboard.
+
+    It reads up to *limit* live intents and stops after
+    :data:`MAX_WRITING_SAVEPOINTS` cancels; ``more`` says intents may be left.
     """
     rows = (
         await session.execute(
@@ -164,8 +177,11 @@ async def drain(session, workspace_id: str, *, limit: int) -> dict[str, Any]:
             },
         )
     ).all()
-    cancelled, refused = 0, 0
+    cancelled, processed, refusals = 0, 0, []
     for (intent_id,) in rows:
+        if cancelled == MAX_WRITING_SAVEPOINTS:
+            break
+        processed += 1
         # A refusal aborts the transaction; the savepoint is what lets the drain
         # go on to the next intent after one (`intent_ledger.transition`, #1422).
         try:
@@ -179,8 +195,13 @@ async def drain(session, workspace_id: str, *, limit: int) -> dict[str, Any]:
                 intent_id,
                 exc,
             )
-            refused += 1
-    return {"cancelled": cancelled, "refused": refused}
+            refusals.append({"intent_id": intent_id, "refusal": str(exc)})
+    return {
+        "cancelled": cancelled,
+        "refused": len(refusals),
+        "more": processed < len(rows) or len(rows) == limit,
+        "refusals": refusals,
+    }
 
 
 async def revoke_credentials(session, workspace_id: str) -> int:
@@ -279,28 +300,32 @@ async def reap_transit(session, workspace_id: str, *, transit) -> dict[str, Any]
     return {"reaped": reaped, "left_to_ttl": failed, "seam": "wired"}
 
 
-async def _audit(factory, workspace_id: str, event: str, detail: dict) -> None:
+async def _audit(factory, workspace_id: str, event: str, *details: dict) -> None:
     """A parked leg writes no row of its own — `workspaces` carries
     `trg_governance_audit` only for UPDATEs to itself, and a drain that stalls
-    updates nothing — so it writes one here.
+    updates nothing — so it writes one here, as it does for each refused
+    cancel, whose savepoint rolled its own trace back. One row per *detail*.
 
-    **In its OWN transaction, which is the whole point.** The caller that needs
-    this raises immediately afterwards, and a record written in the raising
-    transaction is rolled back with it: the durable signal for a parked drain
-    would be exactly as durable as no signal at all. Same reason
+    **In its OWN transaction, which is the whole point.** The park raises
+    immediately afterwards, and a record written in the raising transaction is
+    rolled back with it: the durable signal for a parked drain would be exactly
+    as durable as no signal at all. The refusals are written before the park
+    raises, one row per refused attempt: a run that reads the intent again
+    records it again. Same reason
     `credential_lifecycle._audit_revoke_failed` opens its own.
     """
     async with factory() as session:
-        await audit.record(
-            session,
-            workspace_id=workspace_id,
-            entity_kind="workspace",
-            entity_id_sql="CAST(:ws AS uuid)",
-            from_state="offboarding",
-            to_state="offboarding",
-            detail={"v": 1, "event": event, **detail},
-            actor_sql=audit.ACTOR_SYSTEM_CHANNEL,
-        )
+        for detail in details:
+            await audit.record(
+                session,
+                workspace_id=workspace_id,
+                entity_kind="workspace",
+                entity_id_sql="CAST(:ws AS uuid)",
+                from_state="offboarding",
+                to_state="offboarding",
+                detail={"v": 1, "event": event, **detail},
+                actor_sql=audit.ACTOR_SYSTEM_CHANNEL,
+            )
         await session.commit()
 
 
@@ -414,7 +439,16 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
         # what `06` §1's restore semantics say (state + mandatory reconnect).
         return {"outcome": "not_offboarding", "state": row[0]}
 
+    own_tx = unit_of_work.poller_session_factory(deps.engine, workspace_id)
     drained = await drain(session, workspace_id, limit=cfg.offboard_drain_limit)
+    refusals = drained.pop("refusals")
+    if refusals:
+        await _audit(own_tx, workspace_id, "offboard_cancel_refused", *refusals)
+    # A run the write bound stopped drains again now, not at the recheck or the
+    # end of the grace window (#1441). A run that stopped for any other reason
+    # does not: a read window of refusals would otherwise turn into back-to-back
+    # runs of a few cancels each, recording its refusals every time.
+    again = drained["more"] and drained["cancelled"] == MAX_WRITING_SAVEPOINTS
     still_publishing = await _live_publishing(session, workspace_id)
     if still_publishing:
         if row[1]:  # drain_expired
@@ -424,7 +458,7 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
             # signals available are used: an audit row, and a raise that spends
             # the job's retry budget and lands as a dead job row.
             await _audit(
-                unit_of_work.poller_session_factory(deps.engine, workspace_id),
+                own_tx,
                 workspace_id,
                 "offboard_drain_timeout",
                 {"publishing": still_publishing},
@@ -434,12 +468,13 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
                 f" publishing past the {cfg.offboard_drain_timeout_seconds}s"
                 " drain timeout; not revoking under live work"
             )
+        if again:
+            run_at_sql, params = "now()", {}
+        else:
+            run_at_sql = "now() + (interval '1 second' * CAST(:recheck AS bigint))"
+            params = {"recheck": cfg.offboard_drain_recheck_seconds}
         successor = await _mint_successor(
-            session,
-            job,
-            workspace_id,
-            "now() + (interval '1 second' * CAST(:recheck AS bigint))",
-            {"recheck": cfg.offboard_drain_recheck_seconds},
+            session, job, workspace_id, run_at_sql, params
         )
         return {
             "outcome": "draining",
@@ -447,6 +482,11 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
             "successor": successor,
             **drained,
         }
+    if again:
+        # Legs 2-3 wait for the drain to finish: revoke stays after the last
+        # cancel, and the transit reap runs once rather than once a batch.
+        successor = await _mint_successor(session, job, workspace_id, "now()", {})
+        return {"outcome": "draining", "successor": successor, **drained}
 
     revoked = await revoke_credentials(session, workspace_id)
     transit = await reap_transit(session, workspace_id, transit=deps.transit)
@@ -485,9 +525,5 @@ async def execute_offboard(deps, session, job) -> dict[str, Any]:
         " observing its own cascade, not another owner winning",
         workspace_id,
     )
-    await finalize(
-        unit_of_work.poller_session_factory(deps.engine, workspace_id),
-        workspace_id,
-        cfg.offboard_grace_seconds,
-    )
+    await finalize(own_tx, workspace_id, cfg.offboard_grace_seconds)
     return {"outcome": "finalized", "revoked": revoked, "transit": transit, **drained}

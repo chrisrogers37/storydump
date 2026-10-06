@@ -90,7 +90,7 @@ from sqlalchemy.exc import DBAPIError
 
 from src.exceptions import StorydumpError
 from src.services.target import oauth_states, prompts, readers, vocabulary
-from src.services.target.intent_ledger import TERMINAL_STATES
+from src.services.target.intent_ledger import NOT_TERMINAL
 from src.services.target._dbapi import constraint_violated
 
 logger = logging.getLogger(__name__)
@@ -831,12 +831,11 @@ async def disable_destination(
     # Queue shows a flagged card as cancelling and offers it no action; the
     # reaper's cancel leg (087) ends the WAITING states at its next sweep;
     # the caller retires the cards now (`_supersede_everywhere`).
-    terminal = ", ".join(f"'{state}'" for state in TERMINAL_STATES)
     flagged = await executor.execute(
         text(
             "UPDATE post_intents SET cancel_requested = true"
             " WHERE workspace_id = :ws AND ig_account_id = :acct"
-            f"   AND NOT cancel_requested AND state NOT IN ({terminal})"
+            f"   AND NOT cancel_requested AND {NOT_TERMINAL}"
             " RETURNING id, origin, state"
         ),
         {"acct": str(ig_account_id), "ws": str(workspace_id)},

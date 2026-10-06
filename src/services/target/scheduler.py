@@ -73,6 +73,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import time
 
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -539,6 +540,45 @@ async def execute_reap_expired(
         else 0
     )
     return int(swept or 0) + parked
+
+
+async def execute_retention_sweep(
+    session_factory, *, keep_seconds: int, batch: int, budget_seconds: float
+) -> int:
+    """The `retention_sweep` executor. Returns rate-counter rows deleted.
+
+    Runs ONE `05` retention class, `rate_counters`, through the 059 door
+    `fn_retention_batch`. Each call deletes at most *batch* rows in a short
+    transaction of its own from *session_factory* (H5), repeated until a call
+    comes back short or *budget_seconds* is spent. The other classes the door knows stay
+    unswept: each changes something a reader relies on (the audit trail, the
+    cap ledger's `debited_total`, the M.3 snapshots), so each is its own
+    decision (#1327).
+    """
+    stop_at = time.monotonic() + budget_seconds
+    total = 0
+    while True:
+        async with session_factory() as session:
+            deleted = (
+                await session.execute(
+                    text(
+                        "SELECT fn_retention_batch('rate_counters',"
+                        " make_interval(secs => :keep), :batch)"
+                    ),
+                    {"keep": keep_seconds, "batch": batch},
+                )
+            ).scalar()
+        total += deleted
+        drained = deleted < batch
+        if drained or time.monotonic() >= stop_at:
+            break
+    logger.info(
+        "retention_sweep: deleted %d rate_counters row(s) older than %ds; %s",
+        total,
+        keep_seconds,
+        "drained" if drained else "time budget spent, more may remain",
+    )
+    return total
 
 
 async def execute_reap_transit_assets(

@@ -152,10 +152,16 @@ def test_tokens_end_to_end_as_svc_ingress(world, google_configured, monkeypatch)
                 (token["id"],),
             )
             assert stamped, "every use stamps last_used_at"
+            # the Queue read is a token's too (the CLI's `planned`)
+            queue = await client.get(
+                f"/api/v1/workspaces/{ws}/intents?origin=planned",
+                headers=_bearer(secret),
+            )
+            assert queue.status_code == 200, queue.text
             for method, path in [
                 ("GET", "/api/v1/me"),
                 ("POST", "/api/v1/me/tokens"),
-                ("GET", f"/api/v1/workspaces/{ws}/intents"),
+                ("GET", f"/api/v1/workspaces/{ws}/media"),
                 ("POST", f"/api/v1/workspaces/{ws}/tokens"),
                 ("POST", "/api/v1/invitations/nope/accept"),
             ]:

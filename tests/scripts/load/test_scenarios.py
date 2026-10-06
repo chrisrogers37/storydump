@@ -38,7 +38,7 @@ from tests.scripts.conftest import (
 from . import harness as h
 from .fake_telegram import BOT_USERNAME, FakeServer, FakeTelegram
 from .latency_proxy import LatencyProxy, through_proxy
-from .processes import SECRET, Api, Worker, process_env
+from .processes import SECRET, Api, Worker, operator_session, process_env
 from .seed import seed_world
 
 pytestmark = [pytest.mark.load, pytest.mark.integration]
@@ -129,13 +129,15 @@ def stage(admin_conn, owner_actor):
                 delay_s=delay_ms / 1000,
             ).start()
             process_dsn = through_proxy(dsn, proxy)
+        operator_id, operator = operator_session(dsn)
         env = process_env(
             database_url=process_dsn,
             fake_base=server.base,
             bot_username=BOT_USERNAME,
             workers=workers,
+            operator_user_id=operator_id,
         )
-        api = Api(env, workers=workers)
+        api = Api(env, workers=workers, operator_session=operator)
         health = api.wait_ready()
         worker = Worker(env)
         time.sleep(3.0)  # the worker's probe and first beats

@@ -57,6 +57,7 @@ from sqlalchemy.exc import DBAPIError
 
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
 from src.exceptions.base import StorydumpError
+from src.services.target import audit, vocabulary
 from src.services.target._dbapi import driver_error_is
 
 
@@ -103,20 +104,21 @@ async def legal_transitions(session) -> set:
 
 
 #: `02` §4's terminal intent states — the closed set no edge leaves. ONE Python
-#: home, because two of the copies that existed had to AGREE for a workflow to
-#: converge at all: `offboarding.drain` selects `NOT terminal` and cancels it,
+#: home (`vocabulary`, where the CLI reads it too; this is its name for the
+#: services), because two of the copies that existed had to AGREE for a
+#: workflow to converge at all: `offboarding.drain` selects `NOT terminal` and
+#: cancels it,
 #: and `fn_offboard_finalize` (`059`) refuses while any `NOT terminal` row
 #: survives, so a state one list carries and the other does not is an offboard
 #: that mints successors forever. The database is still the authority — this is
 #: a name for `trg_intent_guard`'s set, not a second one.
-TERMINAL_STATES: tuple[str, ...] = (
-    "posted",
-    "skipped",
-    "rejected",
-    "expired",
-    "failed",
-    "cancelled",
-)
+TERMINAL_STATES: tuple[str, ...] = vocabulary.TERMINAL_STATES
+
+#: A story still in flight, as SQL on a bare `state`: the predicate of
+#: `uq_intent_live_subject` (one live story per item and account), which is
+#: how an INSERT names that index as its conflict arbiter, and the set a
+#: writer flags or drains. Spelled from TERMINAL_STATES, never typed again.
+NOT_TERMINAL = "state NOT IN (" + ", ".join(f"'{s}'" for s in TERMINAL_STATES) + ")"
 
 #: The `last_error->'evidence'` MERGE, as a fragment. `reconciler`'s own prose
 #: says this must never be a rebuild: `evidence` carries `checks`,
@@ -180,9 +182,10 @@ async def transition(session, intent_id: str, to_state: str) -> None:
 async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
     """What a card in any state past `awaiting_approval` says about itself:
     the state, who last moved it and when — the newest `audit_events` row for
-    the intent (`ix_audit_entity`, bound on `workspace_id`), or the row's own
-    `entered_state_at` when no audit row exists (a clock or reaper move records
-    `actor_user_id` NULL). Phase 1 of the 2026-09-09 tap plan, step 6."""
+    the intent that MOVED it (`ix_audit_entity`, bound on `workspace_id`;
+    `audit.moved`), or the row's own `entered_state_at` when no audit row
+    exists (a clock or reaper move records `actor_user_id` NULL). Phase 1 of
+    the 2026-09-09 tap plan, step 6."""
     row = (
         (
             await session.execute(
@@ -194,6 +197,7 @@ async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
                     "    SELECT actor_user_id, created_at FROM audit_events e"
                     "     WHERE e.workspace_id = i.workspace_id"
                     "       AND e.entity_kind = 'post_intent' AND e.entity_id = i.id"
+                    f"       AND {audit.moved('e')}"
                     "     ORDER BY e.id DESC LIMIT 1) a ON true"
                     " WHERE i.id = :i AND i.workspace_id = :ws"
                 ),

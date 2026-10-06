@@ -17,7 +17,7 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.services.target import workspaces
+from src.services.target import category_mix, workspaces
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
     _scratch,
@@ -33,10 +33,15 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 @pytest.fixture(scope="module")
 def world(admin_conn, owner_actor):
-    """Two workspaces. A carries: the chain's scheduled intent; one posted
+    """Three workspaces. A carries: the chain's scheduled intent; one posted
     intent (category 'food'); one skipped intent (category 'travel'); one
     media item with NO intent (category NULL, never posted); one cap-ledger
-    row for today. B carries only its chain."""
+    row for today. B carries only its chain. C carries the stats window's
+    edges, each in its own folder: a post debited on the window's first day
+    and one debited the day before it, beside the chain's folder, which has
+    never posted, and a story a person planned, posted today, which spends
+    no cap. Two cadence stories debited inside the window are not settled
+    posts either: a dry run, and a failure whose refund keeps its day."""
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
@@ -46,6 +51,7 @@ def world(admin_conn, owner_actor):
         try:
             a = seed_workspace_chain(conn, "reads-a")
             b = seed_workspace_chain(conn, "reads-b")
+            c = seed_workspace_chain(conn, "reads-c")
             conn.autocommit = False
             with conn.cursor() as cur:
                 cur.execute("SET app.actor_kind = 'migration'")
@@ -87,12 +93,76 @@ def world(admin_conn, owner_actor):
                     " VALUES (%s, %s, current_date, 2, 3)",
                     (a["ws"], posted["iga"]),
                 )
+                for edge, days_back in (
+                    ("in", workspaces.STATS_DAYS),
+                    ("out", workspaces.STATS_DAYS + 1),
+                ):
+                    chain = seed_intent_chain(
+                        cur, c["ws"], f"reads-c-edge-{edge}", state="awaiting_approval"
+                    )
+                    cur.execute(
+                        "UPDATE post_intents SET state = 'posted', published_via = 'manual',"
+                        " cap_consumed_on = current_date - %s WHERE id = %s",
+                        (days_back, chain["intent"]),
+                    )
+                    c[f"edge_{edge}"] = chain
+                # Born planned (088 fixes origin at birth); posted today, so its
+                # day is stamped in the window, but it never spent the cap.
+                planned_chain = seed_intent_chain(
+                    cur,
+                    c["ws"],
+                    "reads-c-planned",
+                    state="awaiting_approval",
+                    origin="planned",
+                )
+                cur.execute(
+                    "UPDATE post_intents SET state = 'posted', published_via = 'manual',"
+                    " cap_consumed_on = current_date WHERE id = %s",
+                    (planned_chain["intent"],),
+                )
+                c["planned"] = planned_chain
+                # Each walks the legal edges to `publishing`, which needs its
+                # debit day (ck_publishing_debited), then ends unposted for the
+                # count: a dry-run post, and a failure (its refund keeps the day).
+                dry_run = seed_intent_chain(
+                    cur, c["ws"], "reads-c-dry-run", state="awaiting_approval"
+                )
+                failed = seed_intent_chain(
+                    cur, c["ws"], "reads-c-failed", state="awaiting_approval"
+                )
+                for chain in (dry_run, failed):
+                    cur.execute(
+                        "UPDATE post_intents SET state = 'approved' WHERE id = %s",
+                        (chain["intent"],),
+                    )
+                    cur.execute(
+                        "UPDATE post_intents SET state = 'publishing',"
+                        " cap_consumed_on = current_date - 1 WHERE id = %s",
+                        (chain["intent"],),
+                    )
+                cur.execute(
+                    "UPDATE post_intents SET state = 'posted', published_via = 'dry_run',"
+                    " publish_step = 'effect_confirmed' WHERE id = %s",
+                    (dry_run["intent"],),
+                )
+                cur.execute(
+                    "UPDATE post_intents SET state = 'failed', cap_refunded_at = now()"
+                    " WHERE id = %s",
+                    (failed["intent"],),
+                )
+                c["dry_run"], c["failed"] = dry_run, failed
             conn.commit()
             a["posted"] = posted
             a["skipped"] = skipped
         finally:
             conn.close()
-        yield {"stream": stream, "ingress": as_user(db, "svc_ingress"), "a": a, "b": b}
+        yield {
+            "stream": stream,
+            "ingress": as_user(db, "svc_ingress"),
+            "a": a,
+            "b": b,
+            "c": c,
+        }
     finally:
         gen.close()
 
@@ -171,7 +241,7 @@ class TestStats:
         assert s["media_by_state"] == {"available": 4}
         assert s["media_never_posted"] == 3
         assert s["media_by_category"] == {"": 2, "food": 1, "travel": 1}
-        assert s["posted_by_category"] == {"food": 1}
+        assert s["posted_by_source"] == {str(a["posted"]["src"]): 1}
         assert s["accounts"] == 3 and s["sources"] == 3
         (day,) = s["posts_by_day"]
         assert (day["count"], day["cap"]) == (2, 3)
@@ -180,4 +250,31 @@ class TestStats:
         s = _read(world, world["b"], workspaces.stats)
         assert s["intents_by_state"] == {"scheduled": 1}
         assert s["media_by_state"] == {"available": 1}
-        assert s["posts_by_day"] == [] and s["posted_by_category"] == {}
+        assert s["posts_by_day"] == [] and s["posted_by_source"] == {}
+
+    def test_posted_by_source_counts_the_window_and_stops_at_its_edge(self, world):
+        # Both edge rows are dated against `current_date` when the world is
+        # seeded, so a run that crosses the database's midnight before this
+        # read moves the edge by a day.
+        c = world["c"]
+        s = _read(world, c, workspaces.stats)
+        assert s["intents_by_state"] == {"scheduled": 1, "posted": 4, "failed": 1}
+        # The window's first day counts; the day before it does not, so that
+        # folder has no post in the window and no key, like the chain's own.
+        # The planned story is in the window but spends no cap, so it is not
+        # counted: the mix draws the cadence, and `posts_by_day` skips it too.
+        # The dry run and the failure spent the cap inside the window, and
+        # neither is a settled post.
+        assert s["posted_by_source"] == {str(c["edge_in"]["src"]): 1}
+
+    def test_posted_by_source_keys_on_the_mix_routes_folder_ids(self, world):
+        c = world["c"]
+        folders = {r["source_id"] for r in _read(world, c, category_mix.mix_view)}
+        posted = set(_read(world, c, workspaces.stats)["posted_by_source"])
+        assert posted == {str(c["edge_in"]["src"])} and posted <= folders
+        # A folder with no post in the window is still one of the mix's rows.
+        assert {
+            str(c["src"]),
+            str(c["edge_out"]["src"]),
+            str(c["planned"]["src"]),
+        } <= folders - posted

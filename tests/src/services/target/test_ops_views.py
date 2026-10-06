@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from src.services.target import ops_views
+from src.services.target import audit, ops_views
 
 WS = str(uuid.uuid4())
 NOW = dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc)
@@ -162,6 +162,11 @@ class TestBounds:
         assert ex.calls[0][1] == {"ws": WS, "lim": ops_views.FLOATING_LIMIT_MAX}
         await ops_views.floating(ex, workspace_id=WS, limit=0)
         assert ex.calls[1][1]["lim"] == 1
+
+    def test_a_tap_is_a_move_off_awaiting_approval(self):
+        """A row that moved nothing — a cancel request records the story's own
+        state on both sides — is not a tap."""
+        assert audit.moved("a") in ops_views._TAPS
 
     def test_every_list_statement_is_bounded(self):
         for name in ("_AUDIT", "_OPERATIONS", "_STORY_CARDS", "_CARDS", "_FLOATING"):

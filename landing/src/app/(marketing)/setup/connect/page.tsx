@@ -1,19 +1,27 @@
 import type { Metadata } from "next"
+import { noindexMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { ArrowLeft, CheckCircle2 } from "lucide-react"
 import { StepCard } from "@/components/setup/step-card"
 import { Callout } from "@/components/setup/callout"
+import { UiTerm } from "@/components/setup/ui-term"
 import { siteConfig } from "@/config/site"
+import { SetupPager } from "@/components/setup/setup-pager"
 
+// Optional and reached from the dashboard, so kept out of search results; it
+// still names itself as canonical rather than inheriting another page's.
 export const metadata: Metadata = {
-  title: "Connect to Telegram — Storydump",
-  robots: { index: false, follow: false },
+  title: "Connect to Telegram",
+  description:
+    "Optional: link the Storydump Telegram bot to approve Instagram Stories from your phone. Everything also works on the web.",
+  alternates: { canonical: "/setup/connect" },
+  ...noindexMetadata,
 }
 
 export default function ConnectTelegram() {
   return (
     <div>
-      <h1 className="text-3xl font-bold tracking-tight">
+      <h1 className="page-title text-4xl text-ink">
         Connect to Telegram
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">
@@ -62,55 +70,65 @@ export default function ConnectTelegram() {
           <p className="mt-2">Already have Telegram? Skip to Step 2.</p>
         </StepCard>
 
-        <StepCard number={2} title="Start the bot">
+        <StepCard number={2} title="Link your Telegram account">
           <p>
-            Your invite link will be shared directly with you via email when your
-            waitlist spot opens up. Once you have it:
+            Sign in on the web and open{" "}
+            <UiTerm>Settings &rarr; Integrations</UiTerm>. On the Telegram card:
           </p>
           <ol className="mt-2 list-inside list-decimal space-y-1">
-            <li>Tap the link to open it in Telegram</li>
             <li>
-              Tap{" "}
-              <span className="font-medium text-foreground">
-                &quot;Start&quot;
-              </span>{" "}
-              to begin
+              Tap <UiTerm>Link Telegram</UiTerm>, then{" "}
+              <UiTerm>Open Telegram to finish linking</UiTerm>
+            </li>
+            <li>
+              Tap <UiTerm>Start</UiTerm> in the chat that opens. The bot confirms
+              you&apos;re linked.
+            </li>
+            <li>
+              Reload the page. The card shows <UiTerm>Linked</UiTerm>.
             </li>
           </ol>
           <Callout type="info" className="mt-3">
-            The bot link is shared privately with accepted waitlist users. If you
-            haven&apos;t received yours yet, check your email or reach out to us.
+            The link works once and expires after 15 minutes, and whoever taps
+            it links their Telegram to your account, so don&apos;t share it.
+            Everyone on your team who&apos;ll tap cards links their own account
+            the same way.
           </Callout>
         </StepCard>
 
-        <StepCard number={3} title="Set up your workspace on the web">
+        <StepCard number={3} title="Add your team's Telegram group">
           <p>
-            Setup happens in the dashboard, not in the chat. Sign in and open{" "}
-            <span className="font-medium text-foreground">Settings</span>:
+            A workspace admin does this once, after linking. On the same card,
+            under <UiTerm>Telegram groups</UiTerm>:
           </p>
           <ol className="mt-2 list-inside list-decimal space-y-1">
             <li>
-              <span className="font-medium text-foreground">Integrations</span>{" "}
-              — connect Google Drive, then pick the folders to sync
+              Tap <UiTerm>Add a Telegram group</UiTerm>, then{" "}
+              <UiTerm>Open Telegram to choose a group</UiTerm>
             </li>
+            <li>Pick your team&apos;s group. Telegram adds the bot to it.</li>
             <li>
-              <span className="font-medium text-foreground">Accounts</span> — use{" "}
-              <span className="font-medium text-foreground">Connect Instagram</span>{" "}
-              to add the account your Stories post to
-            </li>
-            <li>
-              <span className="font-medium text-foreground">General</span> — set
-              how many Stories per day and your posting window
+              The bot says in the group that it now receives your approval
+              cards. Reload the page and the group shows{" "}
+              <UiTerm>Bound</UiTerm>.
             </li>
           </ol>
+          <Callout type="tip" className="mt-3">
+            Bot already in the group? Send the start command the card shows in
+            the group instead. A group belongs to one workspace, and a
+            workspace can have more than one group.
+          </Callout>
         </StepCard>
 
         <StepCard number={4} title="What happens next">
-          <p>Once a folder is connected, Storydump will:</p>
+          <p>
+            Once your folders are connected and your schedule is set, Storydump
+            will:
+          </p>
           <ul className="mt-2 space-y-2">
             <li className="flex items-start gap-3">
               <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
-              <span>Sync the media in that Drive folder</span>
+              <span>Sync the media in your Drive folders</span>
             </li>
             <li className="flex items-start gap-3">
               <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
@@ -119,13 +137,17 @@ export default function ConnectTelegram() {
             <li className="flex items-start gap-3">
               <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
               <span>
-                Queue each one for approval — in the dashboard, and in Telegram
-                too if you connected it
+                Bring each one to your Queue on the web, and to your Telegram
+                group as a card
               </span>
             </li>
           </ul>
           <p className="mt-3">
-            Approve, skip, or reject — it&apos;s all up to you.
+            Post it and tap <UiTerm>Posted myself</UiTerm>, or{" "}
+            <UiTerm>Skip</UiTerm> or <UiTerm>Reject</UiTerm> it. When direct
+            posting is switched on for your workspace,{" "}
+            <UiTerm>Post now</UiTerm> puts it on your Story for you. The first
+            tap settles it, and the card says who tapped.
           </p>
         </StepCard>
 
@@ -158,7 +180,7 @@ export default function ConnectTelegram() {
         </StepCard>
       </div>
 
-      <div className="mt-12 flex items-center justify-between">
+      <SetupPager>
         <Link
           href="/setup/media-organize"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -172,7 +194,7 @@ export default function ConnectTelegram() {
         >
           Back to Overview
         </Link>
-      </div>
+      </SetupPager>
     </div>
   )
 }

@@ -42,8 +42,16 @@ from sqlalchemy.exc import DBAPIError
 from src.config.defaults import DEFAULT_REPOST_TTL_DAYS, DEFAULT_SKIP_TTL_DAYS
 from src.exceptions.base import StorydumpError
 from src.services.target import vocabulary
-from src.services.target import google_drive_oauth, offboarding, readers
+from src.services.target import (
+    google_drive_oauth,
+    identity,
+    invitations,
+    offboarding,
+    readers,
+    service_tokens,
+)
 from src.services.target._dbapi import driver_error_is
+from src.services.target.publish_cap import _SPENDS_CAP_SQL
 from src.services.target.unit_of_work import apply_gucs
 
 #: `workspaces.name` is VARCHAR(100).
@@ -326,6 +334,34 @@ async def drive_status(executor, *, workspace_id: str) -> dict:
     return {"status": row["status"], "connected_at": row["connected_at"]}
 
 
+async def may_browse_drive(executor, *, workspace_id: str, user_id: str) -> bool:
+    """Whether *user_id* may browse the workspace's Drive and pick a folder
+    from it (091, `07` §34): the grant is the workspace's, but what it reads is
+    the Drive of the person who granted it, so only they may walk it.
+
+    A grant with no recorded granter — every one made before 091, or one whose
+    granter's user was deleted (ON DELETE SET NULL) — is the owner's to browse
+    until a reconnect records one (the owner's decision, 2026-10-02: older
+    connections stay owner-only until reconnected). A granter removed or
+    demoted since fails the admin floor before this is asked, so nobody
+    browses until someone reconnects. False with no grant at all.
+    """
+    row = await readers.row(
+        executor,
+        "SELECT granted_by_user_id = :u"
+        "       OR (granted_by_user_id IS NULL AND EXISTS ("
+        "             SELECT 1 FROM workspace_members m"
+        "              WHERE m.workspace_id = :ws AND m.user_id = :u"
+        "                AND m.role = 'owner')) AS mine"
+        "  FROM oauth_credentials"
+        " WHERE " + google_drive_oauth.WORKSPACE_GRANT_WHERE,
+        ws=str(workspace_id),
+        u=str(user_id),
+        provider=GDRIVE_PROVIDER,
+    )
+    return bool(row and row["mine"])
+
+
 #: A `media_sources` row's `config.removed`, as a boolean — the flag Remove
 #: sets (#1233). Alias the table `s` wherever these are spliced.
 CONNECTED_FLAG_SQL = "COALESCE((s.config->>'removed')::boolean, false)"
@@ -366,15 +402,32 @@ async def list_bindings(executor, *, workspace_id: str) -> list[dict]:
 
 
 async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
-    """Pending invitations only. The token is never read back — only its hash
-    is stored, and the row exposes nothing a caller could present."""
+    """Pending invitations the doors would still honour (098): the workspace
+    is active and the sender is still an owner or admin there with an active
+    account. The others are dead links that age out with their expiry, so they
+    are not listed as pending. The predicate mirrors 098's two doors by hand,
+    so it belongs in the database with the next migration that touches them.
+
+    The doors' third check, a removal newer than the invitation, is not
+    repeated: the runtime cannot read the removal record (#1546 takes that
+    read away), and it needs none. A removal revokes the invitations addressed
+    to the person in its own transaction (`invitations.revoke_on_removal`),
+    and 098 revoked the ones older removals left pending, so the state filter
+    already leaves them out. The token is never read back — only its hash is
+    stored, and the row exposes nothing a caller could present."""
     return await readers.rows(
         executor,
-        "SELECT id, delivery_channel, email, role, state, expires_at,"
-        "       invited_by_user_id, created_at"
-        "  FROM workspace_invitations"
-        " WHERE workspace_id = :ws AND state = 'pending' AND expires_at > now()"
-        " ORDER BY created_at, id",
+        "SELECT i.id, i.delivery_channel, i.email, i.role, i.state, i.expires_at,"
+        "       i.invited_by_user_id, i.created_at"
+        "  FROM workspace_invitations i"
+        "  JOIN workspaces w ON w.id = i.workspace_id AND w.state = 'active'"
+        "  JOIN workspace_members m ON m.workspace_id = i.workspace_id"
+        "                          AND m.user_id = i.invited_by_user_id"
+        "                          AND m.role IN ('owner', 'admin')"
+        "  JOIN users u ON u.id = i.invited_by_user_id AND u.state = 'active'"
+        " WHERE i.workspace_id = :ws AND i.state = 'pending'"
+        "   AND i.expires_at > now()"
+        " ORDER BY i.created_at, i.id",
         ws=str(workspace_id),
     )
 
@@ -383,6 +436,9 @@ async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
 #: by the vocabulary module (pinned against the migration there). The list
 #: filter validates against this so a typo is a 422, not an empty page.
 INTENT_STATES: tuple[str, ...] = vocabulary.INTENT_STATES
+
+#: `ck_intent_origin`: the list filter's other closed set.
+INTENT_ORIGINS: tuple[str, ...] = vocabulary.INTENT_ORIGINS
 
 #: `ck_media_state`.
 MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed")
@@ -394,6 +450,15 @@ _INTENT_COLUMNS = (
     "i.id, i.state, i.ig_account_id, i.media_item_id, i.schedule_slot_at,"
     " i.approval_mode, i.published_via, i.publish_step, i.cancel_requested,"
     " i.ig_permalink, i.entered_state_at, i.created_at,"
+    " i.origin, i.scheduled_by_user_id,"
+    " CASE WHEN i.scheduled_by_user_id IS NOT NULL"
+    f"      THEN {identity.display_name_sql('i.scheduled_by_user_id')}"
+    " END AS scheduled_by,"
+    # the zone the story's times read in: the account's, else the workspace's
+    # (the one `schedule_item` resolved its wall time in)
+    " COALESCE(a.tz, w.tz) AS tz,"
+    f" CASE WHEN i.last_error->>'class' = '{vocabulary.PLANNED_MISSED}'"
+    "      THEN i.last_error->>'message' END AS miss_reason,"
     " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category,"
     " a.handle AS account_handle, a.display_name AS account_display_name"
 )
@@ -402,6 +467,7 @@ _INTENT_FROM = (
     "  FROM post_intents i"
     "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
     "  JOIN ig_accounts a ON a.workspace_id = i.workspace_id AND a.id = i.ig_account_id"
+    "  JOIN workspaces w ON w.id = i.workspace_id"
 )
 
 _MEDIA_COLUMNS = (
@@ -416,21 +482,30 @@ async def list_intents(
     *,
     workspace_id: str,
     states: Sequence[str] = (),
+    origin: Optional[str] = None,
+    newest_first: bool = False,
     limit: int = 50,
 ) -> list[dict]:
     """The ledger read model (X.2: "reads pending approvals from the ledger").
     *states* narrows to any of several states — a history tab is one call —
-    and must already be validated against :data:`INTENT_STATES`. Bounded
+    and must already be validated against :data:`INTENT_STATES`; *origin*
+    (one of :data:`INTENT_ORIGINS`) to the planned stories or the cadence's —
+    "what is coming" is the planned ones still `scheduled`. Soonest first, or
+    *newest_first* for a history (the latest misses, not the oldest). Bounded
     (`01` H5) — *limit* is applied after the caller's clamp."""
     params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
     where = "i.workspace_id = :ws"
     if states:
         where += " AND i.state = ANY(CAST(:states AS text[]))"
         params["states"] = list(states)
+    if origin is not None:
+        where += " AND i.origin = :origin"
+        params["origin"] = origin
+    order = "DESC" if newest_first else "ASC"
     return await readers.rows(
         executor,
         f"SELECT {_INTENT_COLUMNS}{_INTENT_FROM} WHERE {where}"
-        " ORDER BY i.schedule_slot_at, i.id LIMIT :lim",
+        f" ORDER BY i.schedule_slot_at {order}, i.id {order} LIMIT :lim",
         **params,
     )
 
@@ -472,7 +547,8 @@ async def get_media(executor, *, workspace_id: str, media_id: str) -> Optional[d
     )
 
 
-#: `stats.posts_by_day` looks back this many days of `daily_post_counts`.
+#: The stats window: `posts_by_day` and `posted_by_source` count today and the
+#: `STATS_DAYS` local dates before it, on the date a post debited the daily cap.
 STATS_DAYS = 30
 
 
@@ -488,10 +564,10 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
     """
     ws = str(workspace_id)
 
-    async def by(sql: str) -> dict[str, int]:
+    async def by(sql: str, **params: Any) -> dict[str, int]:
         return {
             (row["k"] if row["k"] is not None else ""): int(row["n"])
-            for row in await readers.rows(executor, sql, ws=ws)
+            for row in await readers.rows(executor, sql, ws=ws, **params)
         }
 
     intents_by_state = await by(
@@ -506,12 +582,24 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
         "SELECT category AS k, count(*) AS n FROM media_items"
         " WHERE workspace_id = :ws AND state = 'available' GROUP BY 1"
     )
-    posted_by_category = await by(
-        "SELECT m.category AS k, count(*) AS n"
+    posted_by_source = await by(
+        # Keyed on the connected folder the post's media came from, as the
+        # category-mix route keys its weights (`source_id`, the text of
+        # `media_sources.id`); `category` is a display label no weight keys on.
+        # Counted as `posts_by_day` counts: only stories that spend the cap
+        # (`_SPENDS_CAP_SQL`), since a story a person planned is outside the
+        # cadence the mix draws, and windowed on the local date the post
+        # debited the cap, the date `daily_post_counts` counts it on. A
+        # `legacy_backfill` row never debited the cap, so it is outside the
+        # window here as it is in the ledger.
+        "SELECT m.source_id::text AS k, count(*) AS n"
         "  FROM post_intents i"
         "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
         " WHERE i.workspace_id = :ws AND i.state = 'posted'"
-        "   AND i.published_via <> 'dry_run' GROUP BY 1"
+        "   AND i.published_via <> 'dry_run'"
+        "   AND i.cap_consumed_on >= current_date - make_interval(days => :days)"
+        "   AND " + _SPENDS_CAP_SQL + " GROUP BY 1",
+        days=STATS_DAYS,
     )
     counts = await readers.row(
         executor,
@@ -537,7 +625,7 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
         "media_by_state": media_by_state,
         "media_never_posted": int(counts["media_never_posted"]),
         "media_by_category": media_by_category,
-        "posted_by_category": posted_by_category,
+        "posted_by_source": posted_by_source,
         "posts_by_day": [
             {
                 "local_date": r["local_date"],
@@ -712,7 +800,12 @@ async def remove_member(
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
-    non-member is `not_found`."""
+    non-member is `not_found`. The removal is recorded by the door, so the
+    Telegram join path cannot re-add the person until they are invited back,
+    and the workspace service identities they minted are revoked here, in the
+    same transaction (090), as are the pending invitations in the workspace
+    that they sent or that are addressed to them, so none of them lets anyone
+    in and none blocks the fresh invitation that brings them back."""
     row = (
         await executor.execute(
             text(
@@ -724,6 +817,15 @@ async def remove_member(
     ).first()
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
+        # The door recorded the removal, so the Telegram group cannot undo it
+        # (090); the service identities this person minted go with them, and so
+        # do the pending invitations they sent or were sent.
+        await service_tokens.revoke_minted_by(
+            executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
+        await invitations.revoke_on_removal(
+            executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
         return str(row[1])
     if outcome == "not_found":
         raise LookupError("not_found")

@@ -6,14 +6,16 @@ The Google OAuth consent screen shows users a red **"Google hasn't verified this
 
 ## Why the warning fires
 
-Google flags **sensitive scopes** for verification before they can be used in Production mode without warnings. Storydump's Drive integration requests:
+Google requires verification for **sensitive and restricted scopes** before they can be used in Production mode without warnings. Storydump's Drive integration requests:
 
 | Scope | File | Class |
 |---|---|---|
-| `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:90` (`SCOPE`) | **Sensitive** |
+| `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:90` (`SCOPE`) | **Restricted** |
 | `https://www.googleapis.com/auth/userinfo.email` (with `openid` and `userinfo.profile`) | `src/services/target/google_oidc.py:54` (`SCOPE = "openid email profile"`) — Google sign-in, not the Drive flow; the Drive leg dropped the older `userinfo.email` scope because nothing in the target schema stores the granting account's email (`google_drive_oauth.py:28`) | Standard |
 
 The `drive.readonly` scope is what triggers the warning. Issue [#327](https://github.com/chrisrogers37/storydump/issues/327) audited the alternatives (`drive.file`, `drive.metadata.readonly`) and concluded that `drive.readonly` is the minimum viable scope — `drive.file` would break folder browsing (user media predates the app), and `drive.metadata.readonly` blocks file downloads (which we need to upload to Instagram). With scope-narrowing off the table, **verification submission is the only path to clear the warning** for non-developer users.
+
+**`drive.readonly` is a restricted scope, not a sensitive one.** Google's list of Drive scopes ([Choose Google Drive API scopes](https://developers.google.com/workspace/drive/api/guides/api-specific-auth), last updated 2026-09-03 UTC) classes it **Restricted**, beside `drive` and `drive.metadata.readonly`; `drive.file` is **Non-sensitive**. A restricted scope needs everything a sensitive one does plus a **security assessment**: the same page says an app that stores or transmits restricted-scope data on its servers must go through one, and storydump does both — each file's name, Drive id and content hash, which it stores, and the copy of the file a publish stages on Cloudinary (step 5a).
 
 ## Prerequisites checklist
 
@@ -27,6 +29,7 @@ Before opening the OAuth Brand / consent screen submission form:
 - [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. With `OAUTH_REDIRECT_BASE_URL = https://api.storydump.app` (the API's public origin, `guides/cloud-deployment.md`) that is `https://api.storydump.app/auth/google-drive/callback` (`src/api/routes/auth.py:300`). Add it under **APIs & Services → Credentials → [OAuth 2.0 Client] → Authorized redirect URIs**. (`OAUTH_REDIRECT_BASE_URL` is documented in [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md).)
 - [ ] **Scope justification copy** — short text explaining why we need `drive.readonly` (see template below).
 - [ ] **Demo video** — screencast (≤ 5 min) demonstrating each requested scope in use. YouTube unlisted is fine.
+- [ ] **Security assessment** — `drive.readonly` is restricted, so verification ends with one (step 5a). Budget for the assessor's fee before submitting.
 
 ## Step-by-step submission
 
@@ -91,9 +94,13 @@ Google will ask for the demo video URL. Record one that shows:
 
 YouTube unlisted is the standard hosting. Aim for under 5 minutes (convention, not a hard limit — Google will accept longer if the content justifies it).
 
+### 5a. Complete the security assessment
+
+Because `drive.readonly` is restricted, verification ends with a **security assessment** by a Google-authorised assessor under the App Defense Alliance's CASA framework, and it repeats **at least every 12 months** after the assessor's approval ([Restricted scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification), last updated 2026-08-19 UTC). Google's pages state no fee: the assessor charges it, and assessors publish their own prices.
+
 ### 6. Wait + respond to review
 
-Google review timeline is typically **2–6 weeks**. The team may send back a list of clarifying questions or screencast re-records. Reply through the Cloud Console verification ticket — *do not* open a new submission.
+Google says restricted-scope verification "can potentially take several weeks to complete", because of the security assessment ([Restricted scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification), last updated 2026-08-19 UTC); whether the assessor's time is inside that figure is not stated. The 2–6 weeks this page used to give is unsourced. The team may send back a list of clarifying questions or screencast re-records. Reply through the Cloud Console verification ticket — *do not* open a new submission.
 
 While waiting:
 - The unverified-app warning continues to show. Users still have the "Go to storydump (unsafe)" workaround.

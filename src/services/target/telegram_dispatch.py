@@ -3,8 +3,9 @@ and a group's move to a supergroup (#743).
 
 Three things are served, and the bound is still worth stating:
 
-- **`/start <payload>`** — `link-` (identity) and `bind-` (a group joins a
-  workspace); `build_router` registers those two lanes and no other. The
+- **`/start <payload>`** — `link-` (identity: the `/start` only asks, and
+  the prompt's Confirm tap — a `callback_query` served beside the cards'
+  taps — links) and `bind-` (a group joins a workspace); `build_router` registers those two lanes and no other. The
   `inv-` lane (an invitation) is designed in `start_router.py` and not
   registered — an invitation is accepted on the web (#1172 is unbuilt). The
   payload carries its own resolution, so these never needed a resolver.
@@ -293,6 +294,10 @@ class TapResult:
     answer_text: str
     show_alert: bool = False
     reply: Optional[str] = None
+    #: Text that replaces the tapped message, its buttons removed — the
+    #: identity link's confirmation prompt only, edited by the route after the
+    #: commit, best effort. A card's edit is the outbox's, never this.
+    edit_text: Optional[str] = None
 
 
 #: Neither a `/start` nor a group message — a DM that is not a command, an
@@ -403,6 +408,10 @@ class TelegramDispatcher:
                 show_alert=alert,
             )
 
+        link_tap = callback_tokens.parse_link(cq.get("data"))
+        if link_tap is not None:
+            return await self._link_tap(conn, payload, link_tap, started)
+
         try:
             tap = callback_tokens.parse(cq.get("data"))
             if tap is None:
@@ -483,6 +492,59 @@ class TelegramDispatcher:
                 payload.get("update_id"),
             )
             return done("tap_failed")
+
+    async def _link_tap(
+        self, conn, payload: dict, link_tap: callback_tokens.LinkTap, started: float
+    ) -> TapResult:
+        """Confirm or Cancel on the identity link's prompt — the `link-`
+        lane's second step, user-plane like its first: no chat resolution, no
+        tenant, no command port and no admission debit (no workspace exists to
+        charge). Every gate is :func:`identity_link.handle_tap`'s; this only
+        reads the update. A database error escapes to the route as a card
+        tap's does; anything else is a named `tap_failed`."""
+        cq: dict[str, Any] = payload["callback_query"]
+        qid = None if cq.get("id") is None else str(cq.get("id"))
+        message = cq.get("message") if isinstance(cq.get("message"), dict) else {}
+        chat = message.get("chat") or {}
+        sender = cq.get("from") or {}
+        chat_ref = None if chat.get("id") is None else str(chat.get("id"))
+        message_id = message.get("message_id")
+        message_ref = None if message_id is None else str(message_id)
+        try:
+            outcome = await identity_link.handle_tap(
+                conn,
+                link_tap,
+                from_user_id=None if sender.get("id") is None else str(sender["id"]),
+                chat_ref=chat_ref,
+                chat_type=chat.get("type"),
+                display_name=sender.get("username") or sender.get("first_name"),
+            )
+        except SQLAlchemyError:
+            raise
+        except Exception:  # noqa: BLE001 — a poisoned update must be a NAMED outcome
+            logger.exception(
+                "link tap failed (update_id=%s) — answered as tap_failed, delivery kept",
+                payload.get("update_id"),
+            )
+            text, alert = answer_for("tap_failed")
+            outcome = identity_link.LinkTapOutcome("tap_failed", text, alert)
+        logger.info(
+            "link tap update_id=%s action=%s outcome=%s dispatch_ms=%d",
+            payload.get("update_id"),
+            link_tap.action,
+            outcome.outcome,
+            int((time.monotonic() - started) * 1000),
+        )
+        return TapResult(
+            outcome=outcome.outcome,
+            handled=True,
+            callback_query_id=qid,
+            chat_ref=chat_ref,
+            message_ref=message_ref,
+            answer_text=outcome.answer_text,
+            show_alert=outcome.show_alert,
+            edit_text=outcome.edit_text,
+        )
 
     async def _execute_with_debit(
         self, conn, command: Command, tenant, window, limit: int

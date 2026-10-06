@@ -56,6 +56,9 @@ caught here: `commands.execute` maps it once, for every executor.
 
 from __future__ import annotations
 
+import re
+import uuid
+from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -63,6 +66,7 @@ from sqlalchemy import text
 from src.config.defaults import DEFAULT_SKIP_TTL_DAYS
 from src.config.settings import settings
 from src.services.target import (
+    audit,
     google_drive_oauth,
     identity,
     intent_ledger,
@@ -101,13 +105,15 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
     read `FOR UPDATE` (F2 (a), phase 1 of the 2026-09-09 tap plan): the lock
     is what makes the read the DECISION — two taps racing on one card queue
     here, and the second reads the first's committed state and answers with
-    it. Workspace-bound in the WHERE, not only by RLS."""
-    intent_id = _arg(command, "intent_id")
+    it. Workspace-bound in the WHERE, not only by RLS. A string that is not
+    an id is refused by name (`_id_arg`), never left to the driver."""
+    intent_id = _id_arg(command, "intent_id")
     row = await readers.row(
         session,
         "SELECT i.id, i.workspace_id, i.state, i.media_item_id, i.ig_account_id,"
         "       i.provider_account_ref, i.cancel_requested, i.published_via,"
         "       i.publish_step, i.ig_container_id, i.attempts_by_step,"
+        "       i.origin, i.schedule_slot_at, i.transit_asset_ref,"
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
         "       w.dry_run_mode, w.is_paused,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
@@ -402,7 +408,8 @@ def _result(intent: dict[str, Any], state: str, **extra: Any) -> CommandResult:
 
 async def _mint_publish_job(session, intent: dict[str, Any], command: Command) -> None:
     """The `publish_pipeline` job for an intent entering the ladder — the one
-    mint `approve` and `resolve_review` both use.
+    mint `approve` and `resolve_review` both use. A give-up mints it too, for
+    an intent that has LEFT the ladder: see `_give_up`.
 
     It was written out in both (the tech-debt audit, 2026-09-20), and only
     `approve`'s copy carried the two reasons below, so a reader of the
@@ -735,12 +742,22 @@ async def _give_up(
     session, intent: dict[str, Any], command: Command, op: Optional[dict[str, Any]]
 ) -> CommandResult:
     """`review_required → cancelled`, the debit retained; the unresolved op
-    ends by verdict; the line reaches every card by ref, without buttons."""
+    ends by verdict; the line reaches every card by ref, without buttons.
+
+    A story that reached the transit upload carries a copy on Cloudinary,
+    and the API holds no transit credentials to destroy it. The give-up
+    mints a `publish_pipeline` job in the same transaction instead: the
+    worker meets the intent already `cancelled`, destroys the copy and
+    finalizes — the pipeline's terminal route, which never posts (the row
+    is frozen before the job is visible). Without one, the copy waited for
+    the backstop sweep, up to two days."""
     if not await publish_cap.resolve_cancel(session, intent_id=str(intent["id"])):
         raise CommandRefused("illegal_transition", _RESOLVED_BY_SOMEONE_ELSE)
     await _end_op_by_verdict(
         session, op, outcome="failed", verdict="given_up", command=command
     )
+    if intent.get("transit_asset_ref"):
+        await _mint_publish_job(session, intent, command)
     await _restate_outcome(session, intent, command, "cancelled")
     return _result(intent, "cancelled")
 
@@ -758,13 +775,321 @@ async def cancel(session, command: Command) -> CommandResult:
             "illegal_transition", f"intent is already {intent['state']!r}"
         )
     await session.execute(
-        text("UPDATE post_intents SET cancel_requested = true WHERE id = :id"),
-        {"id": str(intent["id"])},
+        text(
+            "UPDATE post_intents SET cancel_requested = true"
+            " WHERE id = :id AND workspace_id = :ws"
+        ),
+        {"id": str(intent["id"]), "ws": command.workspace_id},
+    )
+    # The flag is not a state change, so the intent's audit trigger writes
+    # nothing for it: the request is recorded here, naming the person.
+    await _audit_intent(
+        session,
+        intent,
+        from_state=intent["state"],
+        to_state=intent["state"],
+        detail={"event": "cancel_requested"},
     )
     # The card loses its buttons now: a cancelling card offers no lever, and
     # the worker's terminalization is a later checkpoint (the reaper, 087).
     await _record_outcome(session, intent, command, "cancelled")
     return _result(intent, intent["state"], cancel_requested=True)
+
+
+# --- a planned story (#1413 phase 5; plan `05_schedule-verbs.md`) -------------
+
+#: A planned story's time as the person gives it: a date and a clock time,
+#: seconds optional, and NO offset — the account's zone makes it an instant.
+#: Postgres would read an offset on a `timestamp` and silently drop it.
+_LOCAL_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?")
+
+#: The account read's predicate, one spelling with the serve and miss doors'
+#: (pinned against their bodies by the gate).
+_LIVE_ACCOUNT = (
+    "a.state IN (" + ", ".join(f"'{s}'" for s in vocabulary.LIVE_ACCOUNT_STATES) + ")"
+)
+
+
+#: The wall time :local_at in the zone :tz as an instant, NULL when the
+#: clocks skip it. Two readings are candidates: Postgres's own (a skipped
+#: time takes the offset before the jump, an ambiguous one the offset after
+#: it — its SECOND occurrence), and the reading with a day earlier's offset.
+#: The answer is the earliest candidate that reads back as the wall time: a
+#: skipped time has none, an ambiguous one is its first occurrence. The zone
+#: is the database's reading; unlike the clock, which reads a zone through
+#: `fn_safe_tz`, a stored zone the tzdata has since withdrawn fails the
+#: request here (an error, not a refusal) rather than being read as UTC — a
+#: planned time is never guessed.
+_INSTANT = (
+    "SELECT min(v.at) FILTER (WHERE v.at AT TIME ZONE p.z = p.l) AS at,"
+    "       now() AS now,"
+    "       now() + make_interval(days => CAST(:horizon AS integer)) AS horizon"
+    "  FROM (SELECT CAST(CAST(:local_at AS text) AS timestamp) AS l,"
+    "               CAST(:tz AS text) AS z) p"
+    " CROSS JOIN LATERAL (VALUES (p.l AT TIME ZONE p.z),"
+    "        ((p.l - interval '1 day') AT TIME ZONE p.z + interval '24 hours')) v(at)"
+)
+
+
+def _id_arg(command: Command, name: str) -> str:
+    """`_arg` for an id: a string that is not one is refused by name, not
+    left to a failed cast the database answers with a 500."""
+    value = _arg(command, name)
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        raise CommandRefused("invalid_args", f"{name} is not an id") from None
+
+
+def _local_at(command: Command) -> str:
+    """The wall time: its shape checked here, the date by the parser."""
+    value = _arg(command, "local_at")
+    if not _LOCAL_AT.fullmatch(value):
+        raise CommandRefused(
+            "invalid_args",
+            "local_at is a date and a time with no offset: YYYY-MM-DD HH:MM",
+            facts={"at_rule": "shape"},
+        )
+    try:
+        return datetime.fromisoformat(value).isoformat(sep=" ")
+    except ValueError:
+        raise CommandRefused(
+            "invalid_args",
+            f"local_at {value!r} is not a date and time",
+            facts={"at_rule": "not_a_date"},
+        ) from None
+
+
+async def _planned_instant(session, *, local_at: str, tz: str) -> datetime:
+    """When a planned story is due: *local_at* in *tz*, after now and within
+    the horizon, both as the database's clock reads them."""
+    found = await readers.row(
+        session,
+        _INSTANT,
+        local_at=local_at,
+        tz=tz,
+        horizon=vocabulary.PLAN_HORIZON_DAYS,
+    )
+    at = found["at"]
+    if at is None:
+        raise CommandRefused(
+            "invalid_args",
+            f"{local_at} does not happen in {tz}: the clocks skip it",
+            facts={"at_rule": "skipped"},
+        )
+    if at <= found["now"]:
+        raise CommandRefused(
+            "invalid_args",
+            f"{local_at} {tz} is not in the future",
+            facts={"at_rule": "past"},
+        )
+    if at > found["horizon"]:
+        raise CommandRefused(
+            "invalid_args",
+            f"{local_at} {tz} is more than {vocabulary.PLAN_HORIZON_DAYS} days ahead",
+            facts={"at_rule": "horizon"},
+        )
+    return at
+
+
+async def _audit_intent(
+    session,
+    intent: dict[str, Any],
+    *,
+    from_state: Optional[str],
+    to_state: str,
+    detail: dict[str, Any],
+) -> None:
+    """An intent's audit row for a write its trigger cannot see — a birth, a
+    new time, a flag — under the command's actor (the unit of work's GUCs)."""
+    await audit.record(
+        session,
+        workspace_id=str(intent["workspace_id"]),
+        entity_kind="post_intent",
+        entity_id_sql=":intent",
+        from_state=from_state,
+        to_state=to_state,
+        detail={"v": 1, **detail},
+        intent=str(intent["id"]),
+    )
+
+
+async def schedule_item(session, command: Command) -> CommandResult:
+    """A planned story: this item, to this account, at this wall time in the
+    account's zone (F11). It is born `scheduled` with `origin = 'planned'`,
+    is served at its time or missed out loud (phase 3), and only a person
+    approves it (088).
+
+    The database decides what it can: the account must be live here, and
+    its row is held (`FOR SHARE`) until the story is in, so a removal that
+    disables it either waits and then flags the story, or lands first and the
+    account reads as gone; the time must exist in its zone, and
+    `uq_intent_live_subject` — the same item waiting on the same account — is
+    the INSERT's to refuse, with no read before it. The lock and item rule (F7) is the one decision made
+    here (`vocabulary.BLOCKING_LOCKS`: an item that cannot post, or a lock
+    that would miss it at its time), and `override_locks` gets past only its
+    warnings."""
+    account_id = _id_arg(command, "ig_account_id")
+    media_id = _id_arg(command, "media_item_id")
+    local_at = _local_at(command)
+    override = command.args.get("override_locks", False)
+    if not isinstance(override, bool):
+        raise CommandRefused("invalid_args", "override_locks is true or false")
+    account = await readers.row(
+        session,
+        "SELECT a.provider_account_ref, COALESCE(a.tz, w.tz) AS eff_tz"
+        "  FROM ig_accounts a JOIN workspaces w ON w.id = a.workspace_id"
+        " WHERE a.id = :acct AND a.workspace_id = :ws"
+        f"   AND {_LIVE_ACCOUNT}"
+        " FOR SHARE OF a",
+        acct=account_id,
+        ws=command.workspace_id,
+    )
+    if account is None:
+        raise CommandRefused(
+            "not_found", f"account {account_id}", facts={"missing": "account"}
+        )
+    item = await readers.row(
+        session,
+        "SELECT m.state,"
+        "       ARRAY(SELECT DISTINCT l.kind FROM post_locks l"
+        "              WHERE l.workspace_id = m.workspace_id AND l.media_item_id = m.id"
+        "                AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct)"
+        "                AND (l.expires_at IS NULL OR l.expires_at > now())"
+        "              ORDER BY l.kind) AS locks"
+        "  FROM media_items m WHERE m.id = :media AND m.workspace_id = :ws",
+        acct=account_id,
+        media=media_id,
+        ws=command.workspace_id,
+    )
+    if item is None:
+        raise CommandRefused("not_found", f"item {media_id}", facts={"missing": "item"})
+    tz = _tz(account)
+    at = await _planned_instant(session, local_at=local_at, tz=tz)
+    blockers = [] if item["state"] == "available" else [f"item_{item['state']}"]
+    blockers += [k for k in item["locks"] if k in vocabulary.BLOCKING_LOCKS]
+    warnings = [k for k in item["locks"] if k in vocabulary.WARNING_LOCKS]
+    if blockers or (warnings and not override):
+        in_the_way = blockers + warnings
+        raise CommandRefused(
+            "locked",
+            f"item {media_id}: {', '.join(in_the_way)}"
+            + ("" if blockers else " — override_locks schedules it anyway"),
+            facts={"in_the_way": in_the_way, "overridable": not blockers},
+        )
+    born = await readers.row(
+        session,
+        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, state, origin,"
+        " scheduled_by_user_id)"
+        " VALUES (:ws, :acct, :media, :ref, 'manual', :at, 'scheduled',"
+        "         'planned', :by)"
+        # `uq_intent_live_subject` is the arbiter, named by its predicate: the
+        # database refuses the duplicate, with no read before it
+        " ON CONFLICT (workspace_id, media_item_id, ig_account_id)"
+        f" WHERE {intent_ledger.NOT_TERMINAL} DO NOTHING RETURNING id, workspace_id",
+        ws=command.workspace_id,
+        acct=account_id,
+        media=media_id,
+        ref=account["provider_account_ref"],
+        at=at,
+        by=command.actor_user_id,
+    )
+    if born is None:
+        # The same item already waits on this account; the database said so,
+        # and the story in the way is named so a person can find it — with its
+        # cancel flag, since a story cancelled a moment ago still waits.
+        existing = await readers.row(
+            session,
+            "SELECT id, state, origin, cancel_requested FROM post_intents"
+            " WHERE workspace_id = :ws AND media_item_id = :media"
+            f"   AND ig_account_id = :acct AND {intent_ledger.NOT_TERMINAL}",
+            ws=command.workspace_id,
+            media=media_id,
+            acct=account_id,
+        )
+        raise CommandRefused(
+            "illegal_transition",
+            f"item {media_id} is already waiting to post on account {account_id}",
+            facts={
+                "existing": {
+                    "intent_id": str(existing["id"]),
+                    "state": existing["state"],
+                    "origin": existing["origin"],
+                    "cancel_requested": existing["cancel_requested"],
+                }
+            }
+            if existing
+            else {},
+        )
+    detail: dict[str, Any] = {
+        "event": "scheduled",
+        "at": at.isoformat(),
+        "tz": tz,
+        "local_at": local_at,
+    }
+    if warnings:
+        detail["override"] = warnings
+    await _audit_intent(
+        session, born, from_state=None, to_state="scheduled", detail=detail
+    )
+    bound = await prompts.push_bindings(session, command.workspace_id)
+    return _result(
+        born,
+        "scheduled",
+        schedule_slot_at=at.isoformat(),
+        tz=tz,
+        local_at=local_at,
+        overridden=warnings,
+        # Nothing is served where no chat is bound: said, not refused.
+        warnings=[] if bound else [vocabulary.NO_PUSH_BINDING],
+    )
+
+
+async def reschedule_item(session, command: Command) -> CommandResult:
+    """A planned story's new time, in place (F4): the same row and id, so
+    nothing else about it can change here — a different item or account is
+    a cancel and a new schedule. The row is read under its lock, so that
+    read decides, as it does for every lever on a story."""
+    intent = await _intent_row(session, command)
+    if intent["origin"] != "planned" or intent["state"] != "scheduled":
+        raise CommandRefused(
+            "illegal_transition",
+            "only a planned story still waiting for its time moves"
+            f" (this one is {intent['origin']}, {intent['state']})",
+        )
+    _refuse_if_cancelling(intent)
+    local_at = _local_at(command)
+    tz = _tz(intent)
+    at = await _planned_instant(session, local_at=local_at, tz=tz)
+    await session.execute(
+        text(
+            "UPDATE post_intents SET schedule_slot_at = :at"
+            " WHERE id = :id AND workspace_id = :ws"
+        ),
+        {"at": at, "id": str(intent["id"]), "ws": command.workspace_id},
+    )
+    await _audit_intent(
+        session,
+        intent,
+        from_state="scheduled",
+        to_state="scheduled",
+        detail={
+            "event": "rescheduled",
+            "from": intent["schedule_slot_at"].isoformat(),
+            "to": at.isoformat(),
+            "tz": tz,
+            "local_at": local_at,
+        },
+    )
+    return _result(
+        intent,
+        "scheduled",
+        schedule_slot_at=at.isoformat(),
+        previous_slot_at=intent["schedule_slot_at"].isoformat(),
+        tz=tz,
+        local_at=local_at,
+    )
 
 
 async def sync_now(session, command: Command) -> CommandResult:
@@ -1084,12 +1409,12 @@ async def invite_member(session, command: Command) -> CommandResult:
     `token_hash` alone, and `invitations.create` writes every column its D33
     identity check reads.
 
-    **The token is returned, once.** It is the credential — possession
-    accepts — and only its hash is stored, so this return value is the single
-    opportunity to deliver it. A delivery producer (email, or a Telegram card
-    in `06` §2's other half) is what turns it into something a person
-    receives; the two share this one minting door rather than each having
-    their own.
+    **The token is returned, once,** with `join_url`, the link built from it.
+    It is the credential — possession accepts — and only its hash is stored,
+    so this return value is the single opportunity to deliver it. The inviter
+    hands `join_url` over; a delivery producer (email, or a Telegram card in
+    `06` §2's other half) could do it instead, and the producers share this
+    one minting door rather than each having their own.
 
     **`delivery_channel` is the caller's, defaulting to `email`.** It was
     pinned to `email` here while `invitations.create` accepted both, which
@@ -1101,9 +1426,10 @@ async def invite_member(session, command: Command) -> CommandResult:
     match and takes the recorded-skip path — landing as `member` with an
     elevation-pending notice. It would look like it worked. Two schema facts
     make the honest shape safe instead: `uq_invite_live` is
-    `(workspace_id, email)` and NULLs never collide there, so Telegram
-    invitations do not conflict with each other or with an email invite to the
-    same workspace; and a hint-only invitation carries no identity proof, so
+    `(workspace_id, email)` and NULLs never collide there, so a Telegram
+    invitation does not conflict with an email invite to the same workspace (a
+    second one to the same Telegram id replaces the first, `invitations.create`);
+    and a hint-only invitation carries no identity proof, so
     D33/D36 downgrades an admin invite on accept rather than elevating.
     (Raised by lane C rather than built around, which is what kept the
     broadcast shape out of the tier.)
@@ -1117,7 +1443,6 @@ async def invite_member(session, command: Command) -> CommandResult:
     it is stated rather than left for someone to find in the seam. It is
     inert in practice — no surface passes `delivery_channel` today, so nothing
     mints one — and it closes when #1188 wires the producer to this call site.
-    The `email` arm has no such gap.
 
     `role` defaults to `member` and is a CEILING, never a grant: the acceptor
     downgrades an unmatched admin invite to `member` plus an
@@ -1173,19 +1498,16 @@ async def invite_member(session, command: Command) -> CommandResult:
     # caller reads one shape whichever channel was used.
     delivery: dict[str, Any] = {"channel": channel}
     if channel == "email":
-        job_id = await invitations.deliver_by_email(
-            session,
-            workspace_id=command.workspace_id,
-            invitation_id=invitation_id,
-            token=token,
-            email=email,
-            web_app_origin=settings.web_app_origin,
+        delivery.update(
+            await invitations.deliver_by_email(
+                session,
+                workspace_id=command.workspace_id,
+                invitation_id=invitation_id,
+                token=token,
+                email=email,
+                web_app_origin=settings.web_app_origin,
+            )
         )
-        if job_id is None:
-            delivery["state"] = "not_configured"
-        else:
-            delivery["state"] = "queued"
-            delivery["job_id"] = job_id
     else:
         # The card producer is #1188 and is not wired here yet — see the BOUND
         # in the docstring. Reported as the gap it is rather than omitted,
@@ -1193,11 +1515,22 @@ async def invite_member(session, command: Command) -> CommandResult:
         delivery["state"] = "none_produced"
         delivery["cards"] = 0
 
+    expires_at = (
+        await session.execute(
+            text(
+                "SELECT expires_at FROM workspace_invitations"
+                " WHERE workspace_id = :ws AND id = :id"
+            ),
+            {"ws": str(command.workspace_id), "id": str(invitation_id)},
+        )
+    ).scalar_one()
     return CommandResult(
         "executed",
         {
             "invitation_id": invitation_id,
             "invite_token": token,
+            "join_url": invitations.join_url(settings.web_app_origin, token),
+            "expires_at": expires_at.isoformat(),
             "role": role,
             "delivery": delivery,
         },

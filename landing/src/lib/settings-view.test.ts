@@ -54,7 +54,7 @@ const STATS: StatsResponse = {
   media_by_state: { available: 12, archived: 3 },
   media_never_posted: 5,
   media_by_category: {},
-  posted_by_category: {},
+  posted_by_source: {},
   posts_by_day: [],
   accounts: 1,
   sources: 1,

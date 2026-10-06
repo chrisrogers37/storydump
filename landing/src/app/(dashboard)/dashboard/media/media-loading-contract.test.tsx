@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { ReactElement, ReactNode } from "react";
-import { Card } from "@/components/ui/card";
+import { Card, StatCard } from "@/components/ui/card";
 import { derivePoolHealth, type StatsResponse } from "@/lib/dashboard-payloads";
 import { PoolHealth } from "@/components/dashboard/media/pool-health";
 import MediaLoading from "./loading";
@@ -37,7 +37,7 @@ function* walk(node: ReactNode): Generator<ReactElement> {
 }
 
 /**
- * The first `grid` container in a tree, and how many `Card`s it holds.
+ * The first `grid` container in a tree, and how many `StatCard`s it holds.
  *
  * Both trees put the pool-health row first, so "first grid" identifies the
  * same region in each without either file needing a test-only marker. The
@@ -48,7 +48,7 @@ function firstGridCardCount(tree: ReactNode): number {
   for (const el of walk(tree)) {
     const cls = (el.props as { className?: unknown })?.className;
     if (typeof cls === "string" && cls.includes("grid")) {
-      return [...walk(el)].filter((c) => c.type === Card).length;
+      return [...walk(el)].filter((c) => c.type === StatCard).length;
     }
   }
   throw new Error("no grid container found — the layout moved, so this contract is unverified");
@@ -60,7 +60,7 @@ const STATS: StatsResponse = {
   media_by_state: { available: 12 },
   media_never_posted: 5,
   media_by_category: { surf: 7 },
-  posted_by_category: { surf: 3 },
+  posted_by_source: { "src-surf": 3 },
   posts_by_day: [],
   accounts: 1,
   sources: 1,

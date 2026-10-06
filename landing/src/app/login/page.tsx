@@ -1,10 +1,20 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
 import { siteConfig } from "@/config/site";
+import { noindexMetadata } from "@/lib/seo";
+import { Wordmark } from "@/design/brand";
+import { Screen } from "@/design/screen";
+import { PageHeader } from "@/design/page-header";
+import { Card } from "@/components/ui/card";
+import { NEW_HERE, WAITLIST_HREF } from "./content";
+import { LoginNotice } from "./login-notice";
 
 export const metadata = {
-  title: `Sign in — ${siteConfig.name}`,
+  title: "Sign in",
+  description: `Sign in to ${siteConfig.name} with Google.`,
+  ...noindexMetadata,
 };
 
 /**
@@ -32,33 +42,39 @@ export const metadata = {
  */
 export default function LoginPage() {
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
-      <div className="w-full max-w-sm space-y-6">
+    <Screen>
+      <Link
+        href="/"
+        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        Back to {siteConfig.name}
+      </Link>
+
+      <PageHeader
+        align="center"
+        title={<Wordmark className="justify-center" markClassName="size-7" />}
+        description="Sign in to your Story queue."
+      />
+
+      <Suspense fallback={null}>
+        <LoginNotice />
+      </Suspense>
+
+      <Card className="p-6">
+        <GoogleLoginButton />
+      </Card>
+
+      <p className="text-center text-xs text-muted-foreground">
+        {NEW_HERE.lead}
         <Link
-          href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+          href={WAITLIST_HREF}
+          className="underline underline-offset-4 transition-colors hover:text-foreground"
         >
-          <ArrowLeft className="h-4 w-4" />
-          Back to {siteConfig.name}
+          {NEW_HERE.link}
         </Link>
-
-        <div className="space-y-2 text-center">
-          <h1 className="text-2xl font-bold tracking-tight">
-            {siteConfig.name}
-          </h1>
-          <p className="text-muted-foreground text-sm">
-            Sign in to access your dashboard.
-          </p>
-        </div>
-
-        <div className="rounded-lg border bg-card p-6 shadow-sm">
-          <GoogleLoginButton />
-        </div>
-
-        <p className="text-center text-xs text-muted-foreground">
-          New here? Signing in creates your account.
-        </p>
-      </div>
-    </div>
+        {NEW_HERE.tail}
+      </p>
+    </Screen>
   );
 }

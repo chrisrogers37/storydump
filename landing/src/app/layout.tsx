@@ -1,33 +1,18 @@
 import type { Metadata } from "next"
-import Script from "next/script"
-import { Geist, Geist_Mono } from "next/font/google"
+import { Pageviews } from "@/components/analytics/pageviews"
 import { siteConfig } from "@/config/site"
+import { fontVariables } from "@/design/fonts"
+import { homeSocial } from "@/lib/seo"
 import "./globals.css"
-
-const plausibleDomain = process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-})
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-})
 
 export const metadata: Metadata = {
   title: {
     template: "%s | Storydump",
-    default: siteConfig.name + " — Keep Your Stories Alive",
+    default: siteConfig.name + " — Instagram Stories from Google Drive, on tap",
   },
   description: siteConfig.description,
-  keywords: siteConfig.keywords,
-  authors: [{ name: "Chris Rogers", url: siteConfig.contact.portfolio }],
+  authors: [{ name: siteConfig.author.name, url: siteConfig.contact.portfolio }],
   metadataBase: new URL(siteConfig.url),
-  alternates: {
-    canonical: "/",
-  },
   verification: {
     google: "JqcV49p6TP9UbtzZgflEngO3ijSsHRx8jtPV4qqxAj0",
   },
@@ -42,28 +27,9 @@ export const metadata: Metadata = {
       "max-snippet": -1,
     },
   },
-  openGraph: {
-    title: siteConfig.name + " — Instagram Stories on Autopilot",
-    description: siteConfig.description,
-    url: siteConfig.url,
-    siteName: siteConfig.name,
-    type: "website",
-    locale: "en_US",
-    images: [
-      {
-        url: "/og-image.png",
-        width: 1200,
-        height: 630,
-        alt: siteConfig.name + " — Instagram Story automation tool",
-      },
-    ],
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: siteConfig.name + " — Instagram Stories on Autopilot",
-    description: siteConfig.description,
-    images: ["/og-image.png"],
-  },
+  // The home page's card is every page's default; the home page adds its own
+  // og:url, so no other page claims to be the home page (seo-contract.test.ts).
+  ...homeSocial,
 }
 
 export default function RootLayout({
@@ -74,23 +40,14 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${fontVariables} antialiased`}
       >
         {children}
         {/* An invite link's path is the invitation token, a bearer credential
-            that goes nowhere but the router. The exclusions build sends no
-            pageview for a path matching data-exclude. It excludes pageviews
-            only, so no page under /join may fire a custom event either
-            (join-fires-no-analytics-event-contract.test.ts holds this). */}
-        {plausibleDomain && (
-          <Script
-            defer
-            data-domain={plausibleDomain}
-            data-exclude="/join/**"
-            src="https://plausible.io/js/script.exclusions.js"
-            strategy="afterInteractive"
-          />
-        )}
+            that goes nowhere but the router: `lib/posthog.ts` sends nothing
+            from a path under /join, and no page there may load a custom
+            event (join-fires-no-analytics-event-contract.test.ts). */}
+        <Pageviews />
       </body>
     </html>
   )
