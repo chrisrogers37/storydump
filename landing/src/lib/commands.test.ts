@@ -65,6 +65,7 @@ describe("every offered command can produce an idempotency key", () => {
     disconnect_account: { submission_id: UUID },
     disable_account: { submission_id: UUID, ig_account_id: UUID2 },
     remove_member: { submission_id: UUID, user_id: UUID2 },
+    invite_member: { submission_id: UUID, email: "partner@example.com", role: "member" },
     account_settings_change: {
       submission_id: UUID,
       ig_account_id: UUID2,
@@ -573,5 +574,45 @@ describe("resolve_review — the review card's three resolutions (2026-09-12)", 
       ok: false,
       error: "invalid_intent",
     });
+  });
+});
+
+describe("invite_member — the web's invitation is an email invitation, and only that", () => {
+  it("passes the address and the role through as typed: the port validates both", () => {
+    expect(
+      parseCommand("invite_member", {
+        submission_id: UUID,
+        email: "Partner@Example.com",
+        role: "admin",
+      }),
+    ).toEqual({
+      ok: true,
+      body: { email: "Partner@Example.com", role: "admin" },
+      identity: UUID,
+    });
+  });
+
+  it("sends nothing else, so the browser cannot pick the Telegram arm or name a Telegram user", () => {
+    const parsed = parseCommand("invite_member", {
+      submission_id: UUID,
+      email: "partner@example.com",
+      role: "member",
+      delivery_channel: "telegram",
+      invited_tg_user_id: 42,
+    });
+    expect(parsed.ok && Object.keys(parsed.body).sort()).toEqual(["email", "role"]);
+  });
+
+  it("refuses an address or a role that is not a string before any round trip", () => {
+    for (const bad of [undefined, null, 3, ["a@b.co"]]) {
+      expect(
+        parseCommand("invite_member", { submission_id: UUID, email: bad, role: "member" }),
+        String(bad),
+      ).toEqual({ ok: false, error: "invalid_email" });
+      expect(
+        parseCommand("invite_member", { submission_id: UUID, email: "a@b.co", role: bad }),
+        String(bad),
+      ).toEqual({ ok: false, error: "invalid_role" });
+    }
   });
 });

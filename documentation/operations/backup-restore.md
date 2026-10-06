@@ -243,8 +243,8 @@ row count to its source in the same transaction.
   from it.
 - **Lifetime (fork F9).** The snapshots carry the `archive_snapshots` retention class: 90 days
   from the date in their names, so they are eligible from **2026-12-16** — the clock is the date in
-  their names, not the day 079 ran (2026-09-19) — once the `retention_sweep` executor exists. The export-or-lapse decision is #1326; the executor is #1327. It is unbuilt (`work_loop.UNBUILT_KINDS`), so
-  nothing drops them today; the door it will call reads the date from the table's name
+  their names, not the day 079 ran (2026-09-19) — once the `retention_sweep` executor runs that class. The export-or-lapse decision is #1326; the executor is #1327. It runs only the `rate_counters` class today (`scheduler.execute_retention_sweep`), so
+  nothing drops them; the door it will call reads the date from the table's name
   (`fn_retention_batch`, `059_security_definer_doors.sql:440-456`).
 - **The owner's export, before then.** An owner who wants them longer exports first:
   ```bash

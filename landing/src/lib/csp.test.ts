@@ -69,11 +69,11 @@ describe("both policies", () => {
     }
   });
 
-  it("let the analytics script load and report", () => {
+  it("let the browser send analytics to PostHog, and load no script from it", () => {
     for (const policy of [staticPagePolicy(), noncePolicy("abc123")]) {
       const parsed = directives(policy);
-      expect(parsed.get("script-src")).toContain("https://plausible.io");
-      expect(parsed.get("connect-src")).toContain("https://plausible.io");
+      expect(parsed.get("connect-src")).toEqual(["'self'", "https://us.i.posthog.com"]);
+      expect(parsed.get("script-src")?.some((source) => source.includes("posthog"))).toBe(false);
     }
   });
 

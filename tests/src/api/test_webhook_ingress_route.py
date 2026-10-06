@@ -114,6 +114,12 @@ def test_a_missing_header_is_refused(client, armed):
     assert _post(client, {"update_id": 1}, secret=None).status_code == 403
 
 
+def test_a_non_ascii_secret_is_refused_not_a_500(client, armed):
+    """A header byte of 0x80 or above reaches the check as a non-ASCII str,
+    which `compare_digest` refuses to compare as text."""
+    assert _post(client, {"update_id": 1}, secret=b"s\xe9cret").status_code == 403
+
+
 def test_the_secret_is_checked_before_the_body_is_parsed(client, armed):
     """A bad secret with an unparseable body must still be 403, not 400.
 
@@ -577,6 +583,59 @@ def test_a_replayed_tap_is_toasted_after_the_connection_is_released(
     assert seen["released_at_call"] is True, "the toast must not hold the pool slot"
     assert seen["json"]["callback_query_id"] == "q-again"
     assert conn.commits == 0
+
+
+# --- §5: no provider call inside the delivery's transaction ----------------
+
+
+def test_a_provider_call_inside_the_delivery_transaction_is_refused(
+    client, armed, replying
+):
+    """The route enters `unit_of_work.transaction_discipline()` around
+    admission, dispatch and commit, so the egress floor refuses a provider
+    call the dispatcher makes, and the same call made by the acknowledgement,
+    after the commit, goes out. The floor is the real one over a scripted
+    transport. With no arm both calls go out (`["sent", "sent"]`); a flag
+    that outlived the transaction would refuse both (`["refused", "refused"]`).
+    """
+    import httpx
+
+    from src.services.target.egress import EgressPolicy
+    from src.services.target.egress import request as egress_request
+    from src.services.target.unit_of_work import TransactionDisciplineError
+
+    outcomes = []
+
+    async def provider_call():
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as http:
+            try:
+                await egress_request(
+                    http,
+                    "GET",
+                    "https://graph.instagram.com/v1/me",
+                    policy=EgressPolicy(),
+                    resolver=lambda h: ["93.184.216.34"],
+                )
+            except TransactionDisciplineError:
+                outcomes.append("refused")
+            else:
+                outcomes.append("sent")
+
+    async def dispatch(conn, payload):
+        await provider_call()  # inside the delivery's transaction
+        return replying["StartResult"](outcome="linked", handled=True, reply="Linked.")
+
+    async def reply(chat_id, text):
+        await provider_call()  # after the commit, behind the 200
+
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: replying["conn"], dispatch=dispatch, reply=reply
+    )
+    resp = _post(client, START_UPDATE)
+
+    assert resp.status_code == 200 and resp.json()["status"] == "admitted"
+    assert outcomes == ["refused", "sent"]
 
 
 # --- the boundary (phase 2 of the 2026-09-09 tap plan, step 2) ---------------

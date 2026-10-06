@@ -4,7 +4,8 @@
 Deleting the package is one commit; the name lingering in a runbook, a
 Makefile target, a console script or a ratchet baseline is a pointer to a
 command nobody can run. `storydump-cli` may survive only where it is
-HISTORY: the CHANGELOG, the archive (the dated updates since the tear-out's
+HISTORY: the CHANGELOG and the fragments in `changelog.d/` that fold into it,
+the archive (the dated updates since the tear-out's
 phase 05, and since 2026-09-22 the CLI plan that ordered the deletion) — and
 the owner's own Claude Code permission file, which is not the repository's
 to edit (queued to the owner).
@@ -17,6 +18,8 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+
+from scripts.changelog_fragments import is_fragment
 
 ROOT = Path(__file__).resolve().parents[1]
 NAME = "storydump-cli"
@@ -84,7 +87,7 @@ def test_the_name_survives_only_in_history():
     offenders = []
     for path in _tracked():
         rel = path.relative_to(ROOT).as_posix()
-        if any(rel == h or rel.startswith(h) for h in HISTORY):
+        if is_fragment(rel) or any(rel == h or rel.startswith(h) for h in HISTORY):
             continue
         try:
             text = path.read_bytes()

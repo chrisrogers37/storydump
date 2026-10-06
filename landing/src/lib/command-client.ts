@@ -419,3 +419,42 @@ export function removeMemberRefusalCopy(reason: unknown, status?: number): strin
   }
   return "Could not remove that member. Nothing changed — try again shortly.";
 }
+
+/**
+ * Invite a person by email (#1563). The answer is the only place the
+ * invitation's join link exists in full — the port keeps a hash of its
+ * token — so the caller shows it once and keeps it nowhere else.
+ */
+export function submitInviteMember(
+  workspaceId: string,
+  invite: { email: string; role: string },
+): Promise<SubmitResult> {
+  return submitCommand(workspaceId, "invite_member", {
+    email: invite.email,
+    role: invite.role,
+  });
+}
+
+export function inviteMemberRefusalCopy(reason: unknown, status?: number): string {
+  if (status === 403 || reason === "insufficient_role") {
+    return "You need to be an admin of this workspace to invite someone.";
+  }
+  switch (reason) {
+    // The route refuses a non-string address; the port gives every invitation
+    // refusal `invalid_args`, and the form's role select cannot send a bad role.
+    case "invalid_email":
+    case "invalid_args":
+      return "Check the email address and try again. Nothing was created.";
+    case "invalid_role":
+      return "Choose Member or Admin. Nothing was created.";
+    case REPLAYED_ERROR:
+      return "That invitation was already made, and its link cannot be shown again. Invite them again for a new link.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing was created.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing was created");
+  }
+  return "That invitation did not go through. Nothing was created — try again shortly.";
+}

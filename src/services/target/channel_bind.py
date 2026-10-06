@@ -11,20 +11,23 @@ Owner ruling 2026-09-05 (#1175 D-3 token, D-4 same flow for the Nth group):
    bindings writer, so `uq_binding_external` (a chat binds once) and D13
    (`0..n` per workspace) hold by construction.
 
-Refusals before the tapper is proven to be the minting admin are silent — the
-router's existence-oracle rule; after that they are answered, and a bound group
-is told so, since the door acknowledges handled starts (#1239).
+Refusals before the tapper is proven to be the minting admin, and still an
+admin, are silent — the router's existence-oracle rule; after that they are
+answered, and a bound group is told so, since the door acknowledges handled
+starts (#1239).
 """
 
 from __future__ import annotations
 
 import logging
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     bindings,
     identity,
     oauth_states,
     readers,
+    tenant_resolution,
     unit_of_work,
 )
 from src.services.target.start_router import StartContext, StartResult
@@ -68,17 +71,18 @@ async def issue_bind_state(
 async def handle_bind(conn, ctx: StartContext) -> StartResult:
     """Consume a `bind-` payload and bind the chat it arrived in.
 
-    Two gates before anything is written, both silent on refusal (the
-    router's existence-oracle rule): the state must be live, and the tapper
-    must BE the admin who minted it — the link is not a bearer of the
-    workspace's card stream (#1240 review). The tapper is known by their
-    linked Telegram identity, so an admin links (clause 1) before they bind;
-    the mint route refuses up front when they have not.
+    Three gates before anything is written, all silent on refusal (the
+    router's existence-oracle rule): the state must be live, the tapper must
+    BE the admin who minted it — the link is not a bearer of the workspace's
+    card stream (#1240 review) — and the minter must still be an owner or
+    admin of the workspace when the link is used, not only when it was
+    minted. The tapper is known by their linked Telegram identity, so an
+    admin links (clause 1) before they bind; the mint route refuses up front
+    when they have not.
 
-    Once the tapper is proven to be the minting admin, refusals may speak:
-    a link opened in a DM and a group another workspace holds are answered,
-    because the person reading the answer is the one entitled to it, and a
-    silent spent link is a trap.
+    Once all three hold, refusals may speak: a link opened in a DM and a
+    group another workspace holds are answered, because the person reading
+    the answer is the one entitled to it, and a silent spent link is a trap.
 
     The write runs on the door's raw connection, which carries no tenant or
     actor context of its own; the consumed state row — minted at the admin
@@ -114,6 +118,19 @@ async def handle_bind(conn, ctx: StartContext) -> StartResult:
         actor_user_id=str(minter),
         channel="telegram",
     )
+    try:
+        # What can change between the mint and the tap is the membership:
+        # re-checked under the tenant just set, before anything is written.
+        await tenant_resolution.authorize_member(
+            conn,
+            str(workspace_id),
+            str(minter),
+            minimum_role="admin",
+            tenant_bound=True,
+        )
+    except TenantResolutionError as exc:
+        logger.warning("group bind: the minter is no longer an admin (%s)", exc.reason)
+        return StartResult(outcome=exc.reason, handled=False)
     if ctx.chat_type not in GROUP_CHAT_TYPES:
         # Spent either way — a link opened in a DM must not stay usable for a
         # group later. The admin is told, since it is them reading it.
