@@ -24,9 +24,12 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from src.exceptions.base import StorydumpError
-from src.services.target import oauth_states, readers, vocabulary
+from src.services.target import _dbapi, oauth_states, readers, vocabulary
 
 logger = logging.getLogger(__name__)
+
+#: The one constraint an address clash surfaces as.
+_EMAIL_HELD = "uq_users_primary_email"
 
 PROVIDER_GOOGLE = vocabulary.PROVIDER_GOOGLE
 PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
@@ -142,24 +145,19 @@ async def upsert_google_identity(
     if not signup_open:
         await _refuse_unless_admitted(executor, email=claim)
     if claim is not None:
-        held_elsewhere = (
-            await executor.execute(
-                text("SELECT 1 FROM users WHERE primary_email = :e"), {"e": claim}
-            )
-        ).first()
-        if held_elsewhere is not None:
-            raise IdentityCollision(
-                "the verified email belongs to a different account;"
-                " accounts are never merged"
-            )
-    user_id = str(
-        (
-            await executor.execute(
-                text("INSERT INTO users (primary_email) VALUES (:e) RETURNING id"),
-                {"e": claim},
-            )
-        ).scalar_one()
-    )
+        await _refuse_if_email_held(executor, email=claim)
+    try:
+        inserted = await executor.execute(
+            text("INSERT INTO users (primary_email) VALUES (:e) RETURNING id"),
+            {"e": claim},
+        )
+    except IntegrityError as exc:
+        # Another sign-in took the address after the check above: the same
+        # refusal, not a 500. The transaction is aborted and rolls back whole.
+        if _dbapi.constraint_violated(exc, _EMAIL_HELD):
+            raise IdentityCollision(_COLLISION) from exc
+        raise
+    user_id = str(inserted.scalar_one())
     await executor.execute(
         text(
             "INSERT INTO user_identities"
@@ -187,6 +185,21 @@ async def _refuse_unless_admitted(executor, *, email: Optional[str]) -> None:
     )
 
 
+_COLLISION = (
+    "the verified email belongs to a different account; accounts are never merged"
+)
+
+
+async def _refuse_if_email_held(executor, *, email: str) -> None:
+    held = (
+        await executor.execute(
+            text("SELECT 1 FROM users WHERE primary_email = :e"), {"e": email}
+        )
+    ).first()
+    if held is not None:
+        raise IdentityCollision(_COLLISION)
+
+
 async def _refresh_primary_email(executor, *, user_id: str, email: str) -> None:
     """Point a returning user's `primary_email` at their verified claim
     (#1579). The caller asks only when the claim differs from what is stored,
@@ -201,11 +214,16 @@ async def _refresh_primary_email(executor, *, user_id: str, email: str) -> None:
                 text("UPDATE users SET primary_email = :e WHERE id = :u"),
                 {"e": email, "u": user_id},
             )
-    except IntegrityError:
+    except IntegrityError as exc:
+        if not _dbapi.constraint_violated(exc, _EMAIL_HELD):
+            raise
+        # A warning, not `logger.exception`: the driver's detail quotes the
+        # key ("Key (primary_email)=(...)"), and an address never reaches a log.
         logger.warning(
-            "identity: user %s's verified email is held by another account;"
-            " kept the stored address",
+            "identity: user %s's verified email is held by another account"
+            " (%s); primary_email was NOT updated, the stored address is kept",
             user_id,
+            _EMAIL_HELD,
         )
         return
     logger.info("identity: user %s's primary email now follows the claim", user_id)

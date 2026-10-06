@@ -139,6 +139,46 @@ def stored_email(world, user_id):
     return owner(world, "SELECT primary_email FROM users WHERE id = %s", (user_id,))[0]
 
 
+def race_for_address(world, rival, email, *, sub):
+    """*rival* takes *email* in a transaction left open while *sub* signs in
+    with it; the rival commits only once that sign-in is provably blocked on
+    its row, so the wait is exercised, not raced. Returns the sign-in's user."""
+    open_txn = psycopg2.connect(world["stream"])
+    try:
+        with open_txn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET primary_email = %s WHERE id = %s", (email, rival)
+            )
+
+        async def race():
+            signing_in = asyncio.create_task(
+                in_user_plane(
+                    world["ingress"],
+                    lambda c: identity.upsert_google_identity(
+                        c, sub=sub, email=email, display_name=None, signup_open=True
+                    ),
+                )
+            )
+            for _ in range(100):
+                # pg_locks, not pg_stat_activity: the latter hides another
+                # role's wait columns from a non-superuser.
+                if owner(
+                    world,
+                    "SELECT count(*) FROM pg_locks"
+                    " WHERE NOT granted AND locktype = 'transactionid'",
+                )[0]:
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                pytest.fail("the sign-in never waited on the rival's row")
+            open_txn.commit()
+            return await signing_in
+
+        return asyncio.run(race())
+    finally:
+        open_txn.close()
+
+
 def _claim(cur, tenant_id, actor_kind="user", channel="web"):
     """Set the tenant/actor context with RAW SQL, for the positive controls.
 
@@ -331,7 +371,7 @@ class TestTheIdentityWriter:
         assert stored_email(world, holder) == "taken@example.com"
         clashes = [r for r in caplog.records if r.levelname == "WARNING"]
         assert sorted(r.args[0] for r in clashes) == sorted([empty, moved])
-        assert not any("@" in r.getMessage() for r in clashes)
+        assert not any("@" in r.getMessage() or r.exc_info for r in clashes)
 
     def test_a_concurrent_claim_of_the_new_address_is_a_clash_not_a_failure(
         self, world, caplog
@@ -346,42 +386,35 @@ class TestTheIdentityWriter:
         rival = upsert(world, sub="sub-race-rival", email="rival@example.com")
         mover = upsert(world, sub="sub-race-mover", email="before@example.com")
 
-        open_txn = psycopg2.connect(world["stream"])
-        try:
-            with open_txn.cursor() as cur:
-                cur.execute(
-                    "UPDATE users SET primary_email = %s WHERE id = %s",
-                    ("raced@example.com", rival),
-                )
+        with caplog.at_level("WARNING", logger=identity.__name__):
+            signed_in = race_for_address(
+                world, rival, "raced@example.com", sub="sub-race-mover"
+            )
 
-            async def race():
-                signing_in = asyncio.create_task(
-                    in_user_plane(
-                        world["ingress"],
-                        lambda c: identity.upsert_google_identity(
-                            c,
-                            sub="sub-race-mover",
-                            email="raced@example.com",
-                            display_name=None,
-                            signup_open=True,
-                        ),
-                    )
-                )
-                await asyncio.sleep(0.5)
-                assert not signing_in.done(), "the refresh did not wait on the row"
-                open_txn.commit()
-                return await signing_in
-
-            with caplog.at_level("WARNING", logger=identity.__name__):
-                assert asyncio.run(race()) == mover
-        finally:
-            open_txn.close()
-
+        assert signed_in == mover
         assert stored_email(world, mover) == "before@example.com"
         assert stored_email(world, rival) == "raced@example.com"
         assert [r.args[0] for r in caplog.records if r.levelname == "WARNING"] == [
             mover
         ]
+
+    def test_a_concurrent_claim_against_a_new_subject_is_the_collision(self, world):
+        """The create path's check reads before the rival commits, so its
+        INSERT is the one that meets `uq_users_primary_email`: that is the
+        same `IdentityCollision` as the check's, not an unhandled 500."""
+        rival = upsert(world, sub="sub-race-rival-2", email="rival2@example.com")
+
+        with pytest.raises(identity.IdentityCollision):
+            race_for_address(world, rival, "raced2@example.com", sub="sub-race-new")
+
+        assert (
+            owner(
+                world,
+                "SELECT user_id FROM user_identities WHERE external_id = %s",
+                ("sub-race-new",),
+            )
+            is None
+        )
 
     def test_two_concurrent_first_sign_ins_converge_on_one_user(self, world):
         """The race, run for real on two connections, against the LIVE lane.
