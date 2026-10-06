@@ -3229,3 +3229,132 @@ GRANT EXECUTE ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) TO svc
 
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 ```
+
+### §45. A removal holds: the remove door checks its caller, and the record is the membership doors' alone (102)
+
+**The invariant.** A member is removed only by an owner or admin of their workspace, acting in that
+workspace, and the removal record (`workspace_member_removals`, §33) is read and written by the
+membership doors alone.
+
+**The remove door checks its own caller.** `fn_member_remove` refuses, before anything else, a
+workspace that is not the caller's claimed tenant (`app.tenant_id`) or a remover (`p_by_user`) who
+is not an owner or admin of it. The command port already holds its caller to both, and the door now
+checks them itself. The refusal is a `RAISE` known by its message, as `fn_offboard_finalize`'s are,
+so SQLSTATE 42501 stays the grant and policy denials' alone. CREATE OR REPLACE keeps the door's
+signature, owner (`svc_membership`) and EXECUTE grant (`svc_ingress`); its comment is restated to
+say what the door checks.
+
+**The join door's path.** §14 and §33 pinned `fn_group_member_seen` to `pg_catalog, public`.
+PostgreSQL searches `pg_temp` first for relations unless the path names it, so this file names it
+last, as `fn_member_remove`'s path already does, and every unqualified name in the door resolves in
+`pg_catalog` or `public`. `ALTER FUNCTION … SET` changes the setting alone and leaves §33's body as
+it is.
+
+**The record is the doors' alone.** §33 granted the runtime logins SELECT on the record under a
+tenant read policy (`p_tenant_read`). Nothing outside the two doors reads it, and the doors run as
+`svc_membership`, so this file revokes that SELECT and drops that policy: `svc_membership`'s grant
+and its row-open policy (`p_member_removals`) are the table's only access. RLS stays enabled, and
+the table keeps the one policy the tenancy gate asks of it.
+
+**Earlier removals.** The backfill reads the governance audit trail (`entity_kind` `member`, op
+`DELETE`, with the workspace and the person). For everyone who is not a member again and whose
+workspace and account still exist, it takes the latest removal and records it when another person
+made it (`actor_kind` `user`, not the member themselves), naming the remover where that account
+still exists. A record the door already wrote is kept (`ON CONFLICT DO NOTHING`).
+
+**The invitations they outrank.** After the backfill, §41's one-time revoke statement runs again,
+unchanged: a pending invitation whose inviter has a removal record in its workspace and is not a
+member there again, and one addressed (by email or Telegram id) to a person removed from its
+workspace after it was sent, are revoked. The doors refuse both (§41).
+
+**Outside the doors.** `remove_member` retires the removed person's live link states for the
+workspace (the `oauth_states` rows naming both the person and the workspace: the group bind and the
+Drive and Instagram connects) in the same unit of work as §33's token revoke, and the Members card
+says that the group does not add a removed person back unless they are invited again.
+
+```sql
+-- [§45 a removal holds]
+
+REVOKE SELECT ON workspace_member_removals FROM svc_ingress, svc_worker;
+
+DROP POLICY p_tenant_read ON workspace_member_removals;
+
+INSERT INTO workspace_member_removals (workspace_id, user_id, removed_by_user_id, removed_at)
+SELECT latest.workspace_id, latest.entity_id, u.id, latest.created_at
+  FROM (SELECT DISTINCT ON (e.workspace_id, e.entity_id)
+               e.workspace_id, e.entity_id, e.actor_kind, e.actor_user_id, e.created_at
+          FROM audit_events e
+         WHERE e.entity_kind = 'member'
+           AND e.detail ->> 'op' = 'DELETE'
+         ORDER BY e.workspace_id, e.entity_id, e.created_at DESC, e.id DESC) latest
+  LEFT JOIN users u ON u.id = latest.actor_user_id
+ WHERE latest.actor_kind = 'user'
+   AND latest.actor_user_id IS DISTINCT FROM latest.entity_id
+   AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = latest.workspace_id)
+   AND EXISTS (SELECT 1 FROM users p WHERE p.id = latest.entity_id)
+   AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                    WHERE m.workspace_id = latest.workspace_id AND m.user_id = latest.entity_id)
+ON CONFLICT (workspace_id, user_id) DO NOTHING;
+
+UPDATE workspace_invitations i SET state = 'revoked'
+ WHERE i.state = 'pending'
+   AND (EXISTS (SELECT 1 FROM workspace_member_removals r
+                 WHERE r.workspace_id = i.workspace_id AND r.user_id = i.invited_by_user_id
+                   AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                                    WHERE m.workspace_id = i.workspace_id
+                                      AND m.user_id = i.invited_by_user_id))
+        OR EXISTS (SELECT 1 FROM workspace_member_removals r
+                     JOIN users u ON u.id = r.user_id
+                    WHERE r.workspace_id = i.workspace_id AND r.removed_at >= i.created_at
+                      AND (lower(u.primary_email) = lower(i.email)
+                           OR i.invited_tg_user_id::text IN
+                              (SELECT x.external_id FROM user_identities x
+                                WHERE x.user_id = r.user_id AND x.provider = 'telegram'))));
+
+GRANT CREATE ON SCHEMA public TO svc_membership;
+
+ALTER FUNCTION fn_group_member_seen(text, text, uuid)
+  SET search_path = pg_catalog, public, pg_temp;
+
+CREATE OR REPLACE FUNCTION fn_member_remove(p_workspace uuid, p_user uuid, p_by_user uuid)
+RETURNS TABLE (o_outcome text, o_role text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  v_role text;
+BEGIN
+  IF p_workspace IS DISTINCT FROM NULLIF(current_setting('app.tenant_id', true), '')::uuid
+     OR NOT EXISTS (SELECT 1 FROM workspace_members a
+                     WHERE a.workspace_id = p_workspace AND a.user_id = p_by_user
+                       AND a.role IN ('owner', 'admin')) THEN
+    RAISE EXCEPTION 'member removal outside the caller''s admin scope';
+  END IF;
+  IF p_user = p_by_user THEN
+    RETURN QUERY SELECT 'self'::text, NULL::text; RETURN;
+  END IF;
+  SELECT m.role INTO v_role FROM workspace_members m
+   WHERE m.workspace_id = p_workspace AND m.user_id = p_user;
+  IF v_role IS NULL THEN
+    RETURN QUERY SELECT 'not_found'::text, NULL::text; RETURN;
+  END IF;
+  IF v_role = 'owner' THEN
+    RETURN QUERY SELECT 'owner'::text, v_role; RETURN;
+  END IF;
+  DELETE FROM workspace_members m WHERE m.workspace_id = p_workspace AND m.user_id = p_user;
+  INSERT INTO workspace_member_removals (workspace_id, user_id, removed_by_user_id)
+  VALUES (p_workspace, p_user, p_by_user)
+  ON CONFLICT (workspace_id, user_id)
+  DO UPDATE SET removed_by_user_id = EXCLUDED.removed_by_user_id, removed_at = now();
+  RETURN QUERY SELECT 'removed'::text, v_role;
+END $$;
+
+COMMENT ON FUNCTION fn_member_remove(uuid, uuid, uuid) IS
+  'The revoke for every join edge (06): an admin removes a member explicitly, and the removal is '
+  'recorded so the Telegram join path cannot undo it (090). The one DELETE on workspace_members '
+  'in the system lives here (057: no login role deletes). The door checks its caller itself '
+  '(102): p_workspace must be the claimed tenant (app.tenant_id) and p_by_user an owner or admin '
+  'of it, or it raises. Outcomes: removed, not_found, owner (never removable here), self (never '
+  'through this door). SECURITY DEFINER owned by svc_membership with EXECUTE granted to '
+  'svc_ingress.';
+
+REVOKE CREATE ON SCHEMA public FROM svc_membership;
+```

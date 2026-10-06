@@ -389,6 +389,13 @@
       "label": "§44 the outbox records why a delivery failed (101, #1482) — channel_outbox gains last_failure_class (checked against the five classes), last_error_code and last_failed_at with a partial index on the time, and two svc_maintenance doors: fn_health_outbox_failures counting the window's failures by class and code with their alerting subset, and fn_health_outbox_sent counting the window's sends",
       "doc": "07-security-model.md",
       "ordinal": 37
+    },
+    {
+      "sha256": "0419e9b7ad0e6723df7a976f0715f3f0170a7b47b78d54be7f67db7e7f8ab0f9",
+      "class": "normative",
+      "label": "§45 a removal holds (102) — the runtime logins' SELECT on workspace_member_removals revoked and p_tenant_read dropped (the membership doors alone read and write it), earlier removals backfilled from the governance audit trail keeping any record the door wrote, §41's one-time invitation revoke repeated after the backfill so the pending invitations those removals outrank end revoked, fn_group_member_seen's search_path pinned with pg_temp last (ALTER FUNCTION … SET), and fn_member_remove replace that checks the claimed tenant and the remover's owner-or-admin role first",
+      "doc": "07-security-model.md",
+      "ordinal": 38
     }
   ],
   "policy_expansion": {
