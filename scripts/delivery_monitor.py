@@ -72,6 +72,11 @@ ABOVE = "above"
 BAND = "band"
 BELOW = "below"
 
+#: What `classify` reads, and so all `/health/delivery` publishes (a test holds
+#: the route to these): the window's counts and its breakdown by class.
+_COUNTS = ("failed_or_ambiguous", "sent_in_window", "window_seconds")
+_BY_CLASS = "by_class"
+
 
 def _summary(by_class: dict) -> str:
     """`destination_gone ×5 (403 ×5), refused ×2 (400 ×2)`: the classes that
@@ -106,10 +111,8 @@ def classify(status: int, body: str, *, raise_at: int, clear_at: int) -> Verdict
         return Verdict(UNREACHABLE, "response was not JSON")
     if not isinstance(data, dict):
         return Verdict(UNREACHABLE, "response was not an object")
-    n, sent, window = (
-        data.get(k) for k in ("failed_or_ambiguous", "sent_in_window", "window_seconds")
-    )
-    by_class = data.get("by_class")
+    n, sent, window = (data.get(k) for k in _COUNTS)
+    by_class = data.get(_BY_CLASS)
     if not (
         _is_count(n)
         and _is_count(sent)

@@ -1,7 +1,7 @@
 """`/health/scheduling`, `/health/posting` and `/health/delivery` reuse their
 last answer.
 
-All three are unauthenticated and each answer takes a connection from the API's
+Each is unauthenticated and each answer takes a connection from the API's
 shared pool, so a caller polling them could drain the pool the webhook needs.
 Each answer is kept for `HEALTH_CACHE_SECONDS`; these tests drive the window
 with an injected clock and count the connections the routes open.
@@ -66,7 +66,7 @@ def clock(app):
 
 @pytest.fixture
 def seams(monkeypatch, stubbed_bound):
-    """Stub every seam of the three routes, the statement cap's included;
+    """Stub every seam of the health routes, the statement cap's included;
     return how often each route read."""
     reads = {"scheduling": 0, "posting": 0, "delivery": 0}
 
@@ -100,18 +100,29 @@ def seams(monkeypatch, stubbed_bound):
     return reads
 
 
+#: Each health axis: its path, the key its answer is cached under, and the field
+#: its stub in `seams` counts reads in. Held to the app's `/health/*` routes
+#: below, so an axis the app gains and this table lacks fails.
+SURFACES = [
+    ("/health/scheduling", "scheduling", "accounts_active"),
+    ("/health/posting", "posting", "posted_ever"),
+    ("/health/delivery", "delivery", "sent_in_window"),
+]
+
+
+def _health_axes(app) -> list[str]:
+    return sorted(r.path for r in app.routes if r.path.startswith("/health/"))
+
+
 def test_the_window_is_thirty_seconds():
     assert HEALTH_CACHE_SECONDS == 30
 
 
-@pytest.mark.parametrize(
-    "path,key,field",
-    [
-        ("/health/scheduling", "scheduling", "accounts_active"),
-        ("/health/posting", "posting", "posted_ever"),
-        ("/health/delivery", "delivery", "sent_in_window"),
-    ],
-)
+def test_every_health_axis_is_in_the_table(app):
+    assert sorted(path for path, _, _ in SURFACES) == _health_axes(app)
+
+
+@pytest.mark.parametrize("path,key,field", SURFACES)
 def test_a_second_hit_in_the_window_reuses_the_answer_and_opens_nothing(
     client, engine, clock, seams, path, key, field
 ):
@@ -132,11 +143,10 @@ def test_a_second_hit_in_the_window_reuses_the_answer_and_opens_nothing(
     assert (engine.connects, seams[key]) == (2, 2)
 
 
-def test_the_two_surfaces_are_cached_apart(client, engine, clock, seams):
-    client.get("/health/scheduling")
-    posting = client.get("/health/posting")
-    assert posting.json()["posted_ever"] == 1
-    assert engine.connects == 2
+def test_the_surfaces_are_cached_apart(client, engine, clock, seams):
+    for path, _, field in SURFACES:
+        assert client.get(path).json()[field] == 1, path
+    assert engine.connects == len(SURFACES)
 
 
 def test_a_failure_is_reused_for_the_window_too(app, engine, clock, seams, monkeypatch):
@@ -263,14 +273,15 @@ def test_each_read_runs_under_the_statement_cap(
     client, engine, clock, seams, monkeypatch
 ):
     """Each surface sets the cap on the connection it reads with, before
-    anything else runs on it."""
+    anything else runs on it: every `/health/*` route the app has, so one that
+    opens a connection without the cap is a read short here."""
     capped = []
 
     async def bound(executor):
         capped.append(executor)
 
     monkeypatch.setattr(health_reads, "bound", bound)
-    assert client.get("/health/scheduling").status_code == 200
-    assert client.get("/health/posting").status_code == 200
-    assert client.get("/health/delivery").status_code == 200
-    assert capped == [engine.session] * 3
+    paths = _health_axes(client.app)
+    for path in paths:
+        assert client.get(path).status_code == 200, path
+    assert capped == [engine.session] * len(paths)

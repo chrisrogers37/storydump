@@ -20,8 +20,8 @@ What it mounts, and why each lives where it does:
 - ``/health`` — Railway's probe (`railway.toml`): ok, the version and the
   commit, nothing else; the operating details (whether a target engine is
   configured, the login, the pool, the webhook) are ``/api/v1/ops/health``,
-  for `OPS_USER_IDS` alone. With ``/health/scheduling`` and
-  ``/health/posting``, see `routes/health.py`.
+  for `OPS_USER_IDS` alone. With ``/health/scheduling``,
+  ``/health/posting`` and ``/health/delivery``, see `routes/health.py`.
 
 What deliberately does not exist any more: the legacy ``/auth`` OAuth router,
 the ``/api/onboarding`` router and its Mini App (`/static`; the Mini App's
@@ -790,9 +790,9 @@ def create_app(
     # minute): the backlog and the last delivery error — the signal that tells
     # "Telegram is not delivering" from "our route is failing".
     app.state.webhook_live = None
-    # The last answer of `/health/scheduling` and `/health/posting`, reused for
-    # `HEALTH_CACHE_SECONDS` so polling two unauthenticated routes cannot drain
-    # the shared pool. One per app, so every app a test builds starts empty.
+    # The last answer of each `/health/*` axis, reused for `HEALTH_CACHE_SECONDS`
+    # so polling the unauthenticated routes cannot drain the shared pool. One per
+    # app, so every app a test builds starts empty.
     app.state.health_cache = AnswerCache()
 
     # The W4 ingress seam: the `/start` door (#1183) and the group join path

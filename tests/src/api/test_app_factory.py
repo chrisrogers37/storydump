@@ -844,6 +844,16 @@ class TestDeliveryHealthIsAFOURTHSurface:
             assert word not in resp.text
         assert len(doors.statements) == 2
 
+    def test_the_public_payload_is_exactly_what_the_monitor_reads(self, engine, client):
+        """Public because the fleet monitor polls it, so it carries what
+        `scripts/delivery_monitor.py` reads and nothing more: a key added here
+        is published to anyone, and a key dropped here is lost to the monitor.
+        The REAL service answers behind the route, which passes its dict on."""
+        from scripts import delivery_monitor as dm
+
+        resp, _ = self._get(engine, client, [("destination_gone", 403, 5, 5)])
+        assert set(resp.json()) == {*dm._COUNTS, dm._BY_CLASS}
+
     @pytest.mark.parametrize(
         "failures, reading",
         [
