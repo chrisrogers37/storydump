@@ -58,8 +58,11 @@ the ledger — `post_intents`, `jobs`, `channel_outbox` and every other table
 `src/models/target/` declares — or any `archive` snapshot.
 
 This list names what is unambiguously destructive; absence from it does not mean
-a command is read-only. See the same section in `AGENTS.md` for the commands
-that write despite reading as inspection.
+a command is read-only. The other write verbs (`skip`, `reject`, `posted`,
+`pause`, `resume`, `sync`, `schedule`, `reschedule`, `link`) change the ledger
+through the command port too, and each is a posting-related action under the
+STOP rule above. See the same section in `AGENTS.md` for the commands that
+write despite reading as inspection.
 
 ---
 
