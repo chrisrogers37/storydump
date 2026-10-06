@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -836,10 +837,23 @@ REARM_AFTER_SECONDS = 24 * 3600
 async def _rearm_source(session, job) -> int:
     """Re-arm the source a spent sync job carried (`payload.source_id`) for
     tomorrow's baseline, if it is still active and still disarmed. Returns
-    rows re-armed (0 when the payload names no source or it moved on)."""
+    rows re-armed (0 when the payload names no source, names one that is not
+    a uuid, or it moved on). A malformed id is refused here rather than by the
+    cast: the re-arm runs in the finalize's own transaction, where a raise
+    would abort the finalize and the spent job would be claimed again on
+    every lease lapse. The reaper's re-arm tolerates it the same way."""
     source_id = (job.get("payload") or {}).get("source_id")
     workspace_id = job.get("workspace_id")
     if not source_id or workspace_id is None:
+        return 0
+    try:
+        uuid.UUID(str(source_id))
+    except ValueError:
+        logger.warning(
+            "job %s: payload source_id %r is not a uuid; no source re-armed",
+            job.get("id"),
+            source_id,
+        )
         return 0
     result = await session.execute(
         text(
@@ -874,8 +888,6 @@ async def _notify_exhausted(session, job) -> None:
         # line — never left reading Approved behind a generic notice.
         await publish_pipeline.park_exhausted(session, job)
         return
-    if kind in _SYNC_KINDS:
-        await _rearm_source(session, job)
     bindings = await prompts.push_bindings(session, str(workspace_id))
     await outbox.fanout_notification(
         session,
@@ -1101,6 +1113,10 @@ class WorkLoop:
                 )
                 try:
                     async with self._session_for(job) as session:
+                        # Ahead of the notice's savepoint, so a failed notice
+                        # cannot roll the re-arm back.
+                        if kind in _SYNC_KINDS:
+                            await _rearm_source(session, job)
                         # The notice rides a savepoint: a failure writing it
                         # must not take the finalize down with it (the log
                         # already carries the failure; the notice is a
