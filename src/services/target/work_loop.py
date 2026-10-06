@@ -552,7 +552,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             # (`outbox.claim_next`); ending here spends no hold on a chat the
             # workspace let go of, and retiring what is left of its queue
             # keeps a later re-bind from posting it as stale cards.
-            async with short() as writer:
+            async with short(session, job) as writer:
                 retired = await bindings.retire_unsettled(writer, binding_id=binding_id)
             logger.info(
                 "deliver_outbox %s: binding %s is %s — nothing sent, %d retired",
