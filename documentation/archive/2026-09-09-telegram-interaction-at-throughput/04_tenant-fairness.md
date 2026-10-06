@@ -30,7 +30,7 @@ links: []
   one deployment per call, so a window needs the deployment list first:
 
   ```
-  storydump health    # now: the backpressure cell, from /health/scheduling
+  storydump health    # now: the backpressure cell on the api row (an OPS_USER_IDS token; #1575)
   railway deployment list --service worker --json --limit 100   # the default is 20
   railway logs <deployment-id> --service worker --filter ws_oldest_wait --lines 5000
   # --lines is capped below 20000. Per line: ws_oldest_wait=(?:[0-9a-f]{8} )?([\d.]+)s and

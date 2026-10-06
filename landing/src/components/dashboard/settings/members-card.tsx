@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,11 +12,12 @@ import {
 } from "@/lib/command-client";
 import { memberOrigin, stillInTelegramGroupCopy } from "@/lib/members";
 import type { WorkspaceMember } from "@/lib/types";
+import { TONE_CLASS } from "@/components/dashboard/tone";
 
 const ROLE_CLASS: Record<string, string> = {
-  owner: "bg-purple-100 text-purple-900",
-  admin: "bg-blue-100 text-blue-900",
-  member: "bg-muted text-muted-foreground",
+  owner: "bg-ink text-white",
+  admin: "border-ink/10 bg-paper text-ink",
+  member: TONE_CLASS.inert,
 };
 
 /**
@@ -35,6 +36,7 @@ export function MembersCard({
   currentUserId,
   canRemove,
   telegramGroupLinked,
+  children,
 }: {
   workspaceId: string;
   members: WorkspaceMember[] | null;
@@ -42,6 +44,8 @@ export function MembersCard({
   canRemove: boolean;
   /** An active Telegram group is bound here (`hasActiveTelegramGroup`). */
   telegramGroupLinked: boolean;
+  /** What the page adds for an admin above the list: inviting (#1563). */
+  children?: ReactNode;
 }) {
   const router = useRouter();
   const [pending, setPending] = useState<string | null>(null);
@@ -71,13 +75,14 @@ export function MembersCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Members</CardTitle>
+        <CardTitle>Members</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {error && (
           <Notice tone="error">{error}</Notice>
         )}
         {stillInGroup && <Notice>{stillInGroup}</Notice>}
+        {children}
         {members === null ? (
           <p className="text-sm text-muted-foreground">
             Members could not be loaded just now. Reload to try again.
@@ -126,7 +131,8 @@ export function MembersCard({
         <p className="text-xs text-muted-foreground">
           People who speak in a bound Telegram group join as members
           automatically once their Telegram is linked; leaving the group removes
-          nobody. Removing someone here revokes their access to this workspace.
+          nobody. Removing someone here revokes their access to this workspace,
+          and the group does not add them back unless you invite them again.
         </p>
       </CardContent>
     </Card>

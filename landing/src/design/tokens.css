@@ -1,0 +1,141 @@
+/*
+ * Storydump's design tokens: the one source for the marketing site, sign-in
+ * and the app. Palette, type roles, radius, the shadcn semantic tokens the
+ * ui/ primitives read, and the type utilities. Imported once, by
+ * app/globals.css. The rules for using it are in
+ * documentation/guides/design-system.md.
+ */
+
+/* Nothing sets .dark, so the dark: utilities in ui/ stay off; without this
+   variant they would follow the OS setting while the tokens stay light. */
+@custom-variant dark (&:is(.dark *));
+
+/* The palette. Tap orange, its darker shade for text on light backgrounds
+   (4.5:1 on paper), warm paper and ink, the site's error red, and the warm
+   greys the app's surfaces use (see surface-app below). "static" emits every
+   one on :root, so the semantic tokens can point at them whether or not a
+   utility uses them. */
+@theme static {
+  --color-tap: #ff5a1f;
+  --color-tap-ink: #b23c0a;
+  --color-paper: #f4f1ea;
+  --color-ink: #15130f;
+  --color-alarm: #9f1d1d;
+  /* Muted text: 6.9:1 on white, 6.1:1 on paper. */
+  --color-ink-muted: #5f594f;
+  --color-sand: #ece7dd;
+  --color-line: #e2dccf;
+  --color-line-strong: #d6cfc1;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  /* The generic fallbacks keep a sans face if the font is late on a device
+     without the metric-matched fallback's Arial. */
+  --font-display: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-warning: var(--warning);
+  --color-success: var(--success);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+}
+
+/* The semantic tokens. The landing home page is the source of truth: these
+   are the exact values it rendered with before the app took the site's look,
+   so the home and use-case pages stay pixel-identical. The app's surfaces
+   override the greys with surface-app, below. */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  /* Home's calls to action are ink pills with white text. */
+  --primary: var(--color-ink);
+  --primary-foreground: var(--color-white);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  /* Focus: solid tap-ink, 5.9:1 on white and 5.3:1 on paper (WCAG asks 3:1). */
+  --ring: var(--color-tap-ink);
+  /* The posting chart's bars. */
+  --chart-1: var(--color-tap);
+  --warning: oklch(0.75 0.15 75);
+  --success: oklch(0.65 0.15 145);
+}
+
+/* The app's surfaces: paper, with the warm greys in place of the neutral ones.
+   On paper the neutral muted grey is 4.2:1, under WCAG's 4.5:1; the warm one
+   is 6.1:1. Set by ./screen.tsx and the dashboard layout. Dialogs and menus
+   portal to <body>, outside it, and keep the neutral greys on white (4.7:1). */
+@utility surface-app {
+  background-color: var(--color-paper);
+  color: var(--foreground);
+  --foreground: var(--color-ink);
+  --card-foreground: var(--color-ink);
+  --secondary: var(--color-sand);
+  --secondary-foreground: var(--color-ink);
+  --muted: var(--color-sand);
+  --muted-foreground: var(--color-ink-muted);
+  --accent: var(--color-sand);
+  --accent-foreground: var(--color-ink);
+  --border: var(--color-line);
+  --input: var(--color-line-strong);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring;
+  }
+  body {
+    @apply bg-background font-sans text-foreground;
+  }
+}
+
+/* Type. The kicker is the small mono label over a section or a stat; the
+   section title is the marketing sections' big heading; the page title is
+   the display face at the size its caller sets (page headings, card titles,
+   the wordmark, stat values). */
+@utility kicker {
+  @apply font-mono text-xs font-medium tracking-[0.14em] uppercase;
+}
+
+@utility section-title {
+  @apply font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.035em] text-ink sm:text-5xl md:text-[4.25rem];
+}
+
+@utility page-title {
+  @apply font-display font-extrabold tracking-[-0.03em];
+}

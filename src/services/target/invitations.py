@@ -100,6 +100,33 @@ async def accept(executor, *, token: str, user_id: str, channel: str) -> dict[st
     return {"workspace_id": str(row[0]), "role": row[1], "matched": bool(row[2])}
 
 
+async def revoke_on_removal(executor, *, workspace_id: str, user_id: str) -> int:
+    """Revoke the pending invitations in *workspace_id* that *user_id* sent or
+    that are addressed to them — what a removal does to the invitations it
+    leaves behind (`workspaces.remove_member`, in the removal's transaction).
+
+    Sent: the removed member's invitations no longer speak for the workspace.
+    Addressed: the accept door already refuses an invitation older than the
+    removal (098), so neither arm should stay listed as pending; an email one
+    would also hold `uq_invite_live` and block the fresh invitation that is
+    meant to bring the person back. The Telegram id is compared as text
+    because that is how `user_identities` stores it. Returns how many moved."""
+    result = await executor.execute(
+        text(
+            "UPDATE workspace_invitations SET state = 'revoked'"
+            " WHERE workspace_id = :ws AND state = 'pending'"
+            "   AND (invited_by_user_id = :u"
+            "        OR lower(email) = (SELECT lower(primary_email) FROM users"
+            "                            WHERE id = :u)"
+            "        OR invited_tg_user_id::text IN"
+            "           (SELECT external_id FROM user_identities"
+            "             WHERE user_id = :u AND provider = 'telegram'))"
+        ),
+        {"ws": str(workspace_id), "u": str(user_id)},
+    )
+    return result.rowcount
+
+
 async def create(
     executor,
     *,
@@ -168,6 +195,35 @@ async def create(
     address = email.strip().lower() if email else None
     token = sessions.new_token()
 
+    # Re-inviting an addressee replaces their pending invitation: the old link
+    # stops working and the new one carries this send's role and inviter. The
+    # addressee is the email or the Telegram id, as `revoke_on_removal` reads
+    # it. The old one may also be one the accept door now refuses (its sender
+    # demoted or removed, or its addressee removed since, 098), which for an
+    # email would otherwise hold `uq_invite_live` until the reaper expires it.
+    #
+    # Sends to one addressee are serialized for the rest of the transaction:
+    # `uq_invite_live` backs the email arm, but nothing indexes the Telegram
+    # id, so two concurrent sends to it would each miss the other's row. Keys
+    # are taken in a fixed order so a send naming both cannot deadlock.
+    addressees = [f"em:{address}"] if address is not None else []
+    if invited_tg_user_id is not None:
+        addressees.append(f"tg:{invited_tg_user_id}")
+    for addressee in addressees:
+        await executor.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"invite:{workspace_id}:{addressee}"},
+        )
+    if addressees:
+        await executor.execute(
+            text(
+                "UPDATE workspace_invitations SET state = 'revoked'"
+                " WHERE workspace_id = :ws AND state = 'pending'"
+                "   AND (lower(email) = :em OR invited_tg_user_id = :tg)"
+            ),
+            {"ws": str(workspace_id), "em": address, "tg": invited_tg_user_id},
+        )
+
     try:
         row = (
             await executor.execute(
@@ -194,10 +250,10 @@ async def create(
             )
         ).first()
     except DBAPIError as exc:
-        # `uq_invite_live` is PARTIAL on `state = 'pending'`, so this fires
-        # only against a LIVE invitation — a revoked or accepted one does not
-        # block a new send, which is the behaviour a person expects when they
-        # re-invite someone whose first invite expired.
+        # A backstop no product path reaches today: the lock and revoke above
+        # clear this address's live invitation before the INSERT, so
+        # `uq_invite_live` (PARTIAL on `state = 'pending'`) has nothing left to
+        # collide with unless a pending row appears outside `create`.
         if driver_error_is(exc, UniqueViolationError) is not None:
             raise InvitationRefused(
                 "already_invited",
@@ -234,7 +290,33 @@ INVITE_TEMPLATE = "invitation"
 #:   state it reads as ``queued``, which passes clause 3 while failing clause 4
 #:   in silence. Telegram-only in practice today — `jobs.enqueue` returns None
 #:   only under `unless_pending`, which the email arm does not pass.
-DELIVERY_STATES = ("queued", "not_configured", "no_binding", "none_produced")
+#: * ``withheld`` — nothing was sent, by design: the email arm is off
+#:   (`EMAIL_DELIVERY_ENABLED`), so the link goes back to the inviter only. Not
+#:   a configuration fault, which is why it is not ``not_configured``.
+DELIVERY_STATES = (
+    "queued",
+    "not_configured",
+    "no_binding",
+    "none_produced",
+    "withheld",
+)
+
+#: Whether the email arm may run at all. OFF: a queued email holds its accept
+#: URL — the raw token, the whole credential — in `jobs.payload` until it sends,
+#: and this module's rule is that the token reaches the database only as its
+#: SHA-256. Switch it on only together with an email path that keeps that rule.
+EMAIL_DELIVERY_ENABLED = False
+
+
+def join_url(web_app_origin: str | None, token: str) -> str | None:
+    """The link an invitee opens, ``{origin}/join/{token}``, or None when the
+    deployment has no web origin to build it from.
+
+    One spelling for every place a link is built. *web_app_origin* is
+    `settings.web_app_origin`, already normalized: the host is the
+    deployment's own setting, never a caller's (see `deliver_by_email`).
+    """
+    return f"{web_app_origin}/join/{token}" if web_app_origin else None
 
 
 async def deliver_by_email(
@@ -246,11 +328,14 @@ async def deliver_by_email(
     email: str,
     web_app_origin: str | None,
     inviter_name: str | None = None,
-) -> str | None:
+) -> dict[str, str]:
     """Enqueue the `send_email` job that carries this invitation's token.
 
-    Returns the job id, or **None** when no accept URL can be built — see the
-    refusal note below. The caller must not discard either answer.
+    Returns the outcome for the response's ``delivery``: ``{"state":
+    "queued", "job_id": ...}``; ``{"state": "not_configured"}`` when no accept
+    URL can be built (see the refusal note below); or ``{"state":
+    "withheld"}`` while the arm is off (`EMAIL_DELIVERY_ENABLED`). Nothing is
+    enqueued in the last two. The caller must not discard the answer.
 
     **This is the producer half of a split the tier already made.**
     `email_sender` is the transport and says outright that it decides nothing;
@@ -291,14 +376,16 @@ async def deliver_by_email(
     What it must never be is silent: a run where nobody could have been told
     must be distinguishable from a delivered one.
     """
-    origin = (web_app_origin or "").strip().rstrip("/")
-    if not origin:
+    if not EMAIL_DELIVERY_ENABLED:
+        return {"state": "withheld"}
+    accept_url = join_url(web_app_origin, token)
+    if accept_url is None:
         logger.warning(
             "invitation %s created but no email enqueued: no web_app_origin"
             " configured, so no accept URL can be built",
             invitation_id,
         )
-        return None
+        return {"state": "not_configured"}
 
     name = (
         await executor.execute(
@@ -311,7 +398,7 @@ async def deliver_by_email(
         # A workspace with no name is not a reason to withhold the invitation;
         # the sentence still reads and the link still works.
         "workspace_name": (name or "").strip() or "your workspace",
-        "accept_url": f"{origin}/join/{token}",
+        "accept_url": accept_url,
     }
     if inviter_name and inviter_name.strip():
         # OPTIONAL in the template, which is why it is omitted rather than
@@ -319,7 +406,7 @@ async def deliver_by_email(
         # is absent, and inventing a name would be worse than the generic line.
         params["inviter_name"] = inviter_name.strip()
 
-    return await jobs.enqueue(
+    job_id = await jobs.enqueue(
         executor,
         kind="send_email",
         # NULL, by constraint — see the docstring.
@@ -337,3 +424,4 @@ async def deliver_by_email(
         # is the lane the email gate already seeds.
         lane="interactive",
     )
+    return {"state": "queued", "job_id": job_id}

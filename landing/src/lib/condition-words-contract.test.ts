@@ -46,3 +46,20 @@ describe("the rows the condition panel links to use the panel's words", () => {
     expect(source("drive-card.tsx")).toContain("{sourceStateLabel(source.state)}");
   });
 });
+
+// The same source-reading pin, for the Drive card's warning about Google's
+// unverified-app page. Dropping or inverting the call site, rendering nothing,
+// or detaching the sentence from the button it describes all keep tsc, lint
+// and drive.test.ts green, so only the card's text can say it. The same bound
+// as above: it catches the call dropped, not the call made and discarded.
+describe("the Drive card shows Google's warning and ties it to the button", () => {
+  it("computes the warning from the grant, renders it, and describes the button with it", () => {
+    const card = source("drive-card.tsx");
+    expect(card).toContain(
+      "const connectWarning = drive ? driveConnectWarning(drive.status) : null;",
+    );
+    expect(card).toContain("{connectWarning && (");
+    expect(card).toContain("{connectWarning}");
+    expect(card).toContain("aria-describedby={connectWarning ? hintId : undefined}");
+  });
+});

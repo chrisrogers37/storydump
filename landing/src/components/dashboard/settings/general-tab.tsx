@@ -27,6 +27,7 @@ import { slotLabels, timeZoneOptions } from "@/lib/schedule";
 import { WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
 import { DangerZoneCard } from "./danger-zone-card";
 import { RepostCadenceCard } from "./repost-cadence-card";
+import { SignInSessionsCard } from "./sign-in-sessions-card";
 
 /**
  * ── The writes here now reach the port ─────────────────────────────────
@@ -360,7 +361,7 @@ export function GeneralTab({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Workspace</CardTitle>
+          <CardTitle>Workspace</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -389,7 +390,7 @@ export function GeneralTab({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Posting Schedule</CardTitle>
+          <CardTitle>Posting schedule</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-4">
@@ -549,7 +550,7 @@ export function GeneralTab({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Toggles</CardTitle>
+          <CardTitle>Toggles</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {TOGGLES.map((row, i) => {
@@ -611,6 +612,8 @@ export function GeneralTab({
       </Card>
 
       {members}
+
+      <SignInSessionsCard />
 
       {/*
         Owner-only, and gated HERE rather than left to the port's 403: a delete

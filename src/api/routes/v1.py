@@ -57,9 +57,11 @@ from src.services.target.drive_adapter import (
     DriveTerminalError,
 )
 from src.services.target import (
+    bindings,
     category_mix,
     channel_bind,
     commands,
+    content_runway,
     drive_credentials,
     google_drive_adapter,
     google_drive_oauth,
@@ -74,6 +76,7 @@ from src.services.target import (
 )
 from src.services.target.commands import Command, CommandResult
 from src.services.target.oauth_states import STATE_TTL_SECONDS, issue_state
+from src.services.target.work_loop import WorkerConfig
 from src.exceptions.tenancy import TokenRefused
 from sqlalchemy import text
 
@@ -299,10 +302,12 @@ async def me(request: Request, principal: Principal = Depends(require_session)):
 async def telegram_link(
     request: Request, principal: Principal = Depends(require_session)
 ):
-    """The link a signed-in user taps to attach their Telegram identity
+    """The link a signed-in user opens to attach their Telegram identity
     (`07` §2 `link`: only from an authenticated session; the row pins the
-    user, and the bot's `/start` door attaches the tapping identity to exactly
-    that user — D35). The service half is #1180; this route is what the X.3
+    user). The bot's `/start` door names that user's account and offers
+    Confirm; only the Confirm, pressed by the person the offer was made to in
+    their own private chat with the bot, attaches their identity to exactly
+    that user — D35. The service half is #1180; this route is what the X.3
     drive was missing (#1172, #1157).
 
     Tenant-less, like `/me`: an identity belongs to a user, not a workspace.
@@ -318,6 +323,26 @@ async def telegram_link(
             conn, user_id=principal.user_id, bot_username=bot_username
         )
     return {"link": link, "expires_in_seconds": STATE_TTL_SECONDS}
+
+
+@router.delete("/me/telegram")
+async def telegram_unlink(
+    request: Request, principal: Principal = Depends(require_session)
+):
+    """The signed-in user removes their own Telegram identity (099, `07`
+    §42). Tenant-less, like the link it reverses. Idempotent: with nothing
+    linked the answer is `not_linked`, still 200. The one refusal is
+    `last_identity` (409) — the Telegram identity is the account's only one,
+    and removing it would leave no way to sign in. Memberships stay; that
+    Telegram account's taps and group messages count for nobody until the
+    person links again.
+    """
+    engine = require_engine(request)
+    async with engine.begin() as conn:
+        outcome = await identity.unlink_telegram(conn, user_id=principal.user_id)
+    if outcome == "last_identity":
+        raise HTTPException(status_code=409, detail="last_identity")
+    return {"outcome": outcome}
 
 
 @router.post("/workspaces/{ws}/telegram/bind-link")
@@ -427,13 +452,36 @@ async def list_bindings(
     )
 
 
+@router.delete("/workspaces/{ws}/bindings/{binding_id}")
+async def remove_binding(
+    ws: uuid.UUID,
+    binding_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_session),
+):
+    """Remove a Telegram group from the workspace (`07` §13) — a REVOKE,
+    never a delete (`bindings.revoke_for_workspace`): the row is kept, the
+    cards still queued for it are superseded, and a fresh bind link brings the
+    group back. Cards already posted stay in the group, and the bot is not
+    made to leave it. Admin floor, like binding one."""
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
+        revoked = await bindings.revoke_for_workspace(
+            session, workspace_id=str(ws), binding_id=str(binding_id)
+        )
+    if not revoked:
+        raise principal_mod.not_found()
+    return {"binding_id": str(binding_id), "state": "revoked"}
+
+
 @router.get("/workspaces/{ws}/invitations")
 async def list_invitations(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
-    return await _collection(
-        request, ws, principal, workspaces.list_invitations, "invitations"
-    )
+    """The pending invitations, each with its invitee's address, so admin
+    floor: the same as minting one (`commands.ROLE_FLOOR["invite_member"]`)."""
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
+        items = await workspaces.list_invitations(session, workspace_id=str(ws))
+    return {"invitations": items}
 
 
 def _states(state: Optional[str]) -> list[str]:
@@ -532,6 +580,22 @@ async def get_stats(
         return await workspaces.stats(session, workspace_id=str(ws))
 
 
+@router.get("/workspaces/{ws}/runway")
+async def get_runway(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
+):
+    """Days of content left per account (#1478): the eligible files over the
+    posts per day they are spent at, counted by the planner's own rule. An
+    account is marked low at the worker's own level, so the card marks the
+    accounts the notice is about."""
+    async with principal_mod.member_session(request, str(ws), principal) as session:
+        return await content_runway.runway(
+            session,
+            workspace_id=str(ws),
+            below_days=WorkerConfig().low_runway_days,
+        )
+
+
 @router.get("/workspaces/{ws}/intents/{intent_id}")
 async def get_intent(
     ws: uuid.UUID,
@@ -573,18 +637,16 @@ async def create_account(
     `provider_account_ref`, and a workspace with `api_publishing_enabled` false
     (the default) publishes through a human rather than through the API.
 
-    **The web no longer adds destinations this way** (owner ruling 2026-09-04:
-    a destination is added by CONNECTING — `connect_workspace_account` below
-    — so the handle is Instagram's word, never a second source of truth). The
-    route stays as the API's typed path: the CLI, tests, and a destination
-    that is deliberately parked without a login.
-
-    **Two bodies, one row (#1089).** ``{"handle": "..."}`` is the typed path the
-    CLI and tests use: there is no Meta id to send, so `create_destination`
-    derives a provisional ``manual:<handle>`` reference. ``{"provider_account_ref":
-    "..."}`` is the OAuth path for when a real id exists, and it still wins if
-    both are sent. A request carrying NEITHER is refused as
-    `account_ref_required`, unchanged.
+    **A handle only (#1089).** A destination's real Instagram account id is
+    written only by connecting the account: `connect_workspace_account` below
+    (``POST …/accounts/connect``, the route the web uses) and its callback.
+    The CLI does not call this route. It is the API's typed path, for a
+    destination deliberately parked without a login: ``{"handle": "..."}``,
+    from which `create_destination` derives a provisional ``manual:<handle>``
+    reference. A body carrying ``provider_account_ref`` is refused as
+    `account_ref_requires_connect`, with or without a handle beside it, and
+    nothing is written; a body with no handle is refused as
+    `account_ref_required`.
 
     Creating a destination SCHEDULES it: the posting cursor is seeded so the
     clock can see the row at all (`provisioning.create_destination` explains
@@ -599,17 +661,21 @@ async def create_account(
     schedule = body.get("schedule", True)
     if not isinstance(schedule, bool):
         raise HTTPException(status_code=400, detail="schedule must be a boolean")
-    # Both values pass through RAW. Coercing a blank handle to None here would
+    # The handle passes through RAW. Coercing a blank handle to None here would
     # be this route holding a second copy of "what counts as a handle" — the
     # thing the sibling `sources` route's comment forbids — and the copy already
     # disagreed: `{"handle": "   "}` answered `account_ref_required` while
     # `{"handle": "@"}` answered `handle_required`, one user error with two
     # reasons. `provisioning` owns presence for both columns.
     async with principal_mod.admin_session(request, str(ws), principal) as session:
+        if body.get("provider_account_ref") is not None:
+            raise provisioning.ProvisioningRefused(
+                "account_ref_requires_connect", "send a handle, or connect the account"
+            )
         account_id, created = await provisioning.create_destination(
             session,
             workspace_id=str(ws),
-            provider_account_ref=body.get("provider_account_ref"),
+            provider_account_ref=None,
             handle=body.get("handle"),
             schedule=schedule,
         )
