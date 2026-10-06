@@ -33,6 +33,7 @@ from src.services.target import credential_lifecycle, email_sender, media_sync
 
 from src.services.target import (
     bindings,
+    content_runway,
     jobs,
     offboarding,
     outbox,
@@ -103,6 +104,12 @@ class WorkerConfig:
     global_limit: int = 25  # 05: global sends per window
     global_window_seconds: int = 1
     reap_limit: int = 500  # 05: the reap's total per sweep; the card sweep reuses it
+    # 05 retention: `rate_counters` keeps 7 d (every window is 24 h or less, so
+    # a row that old only holds the key it counted); 5,000 per batch.
+    rate_counters_keep_seconds: int = 7 * 24 * 3600
+    retention_batch: int = 5000
+    #: Batches repeat within one run until one comes back short or this is spent.
+    retention_budget_seconds: float = 5.0
     # 05 §4: 1,440 min (24 h) when the workspace's approval_ttl_minutes is NULL.
     approval_ttl_seconds: int = 24 * 3600
     approved_ttl_seconds: int = 72 * 3600
@@ -113,6 +120,9 @@ class WorkerConfig:
     stranded_alert_limit: int = 200  # rows re-alerted per beat
     # 05: "no media available" notice dedup 24 h (06 section 5, slot missed).
     no_media_notice_after_seconds: int = 24 * 3600
+    # The runway notice's level, in days of eligible content (#1478): told once
+    # below it, re-armed a margin above it (`content_runway.REARM_MARGIN_DAYS`).
+    low_runway_days: int = content_runway.LOW_RUNWAY_DAYS
     # The front end's origin (`settings.web_app_origin`), for the deep link in
     # the parked-intent notice (06 section 5). None = the notice still fires,
     # without a link: being told late beats not being told.
@@ -232,10 +242,7 @@ _UNBUILT_REASON = (
 
 #: Kinds the tier has never carried an executor for. The registry parks them
 #: unconditionally; the schema-derived completeness test keeps this honest.
-UNBUILT_KINDS = (
-    "retention_sweep",
-    "reencrypt_credentials",
-)
+UNBUILT_KINDS = ("reencrypt_credentials",)
 
 
 def build_registry(deps: WorkerDeps) -> dict:
@@ -291,6 +298,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             provider_account_ref=row["provider_account_ref"],
             approval_mode=row["approval_mode"],
             no_media_notice_after_seconds=cfg.no_media_notice_after_seconds,
+            low_runway_days=cfg.low_runway_days,
         )
         if outcome.notice is not None:
             # The library was empty AND there was no surface to say so on.
@@ -408,6 +416,17 @@ def build_registry(deps: WorkerDeps) -> dict:
             limit=cfg.stranded_alert_limit,
         )
 
+    # `own_transactions`: no provider, but each batch commits on its own, so
+    # the run must not sit inside one job session. The payload is not read.
+    @own_transactions
+    async def retention_sweep(session, job):
+        await scheduler.execute_retention_sweep(
+            lambda: sessions(job),
+            keep_seconds=cfg.rate_counters_keep_seconds,
+            batch=cfg.retention_batch,
+            budget_seconds=cfg.retention_budget_seconds,
+        )
+
     async def reap_transit(session, job):
         await scheduler.execute_reap_transit_assets(
             session,
@@ -460,8 +479,8 @@ def build_registry(deps: WorkerDeps) -> dict:
                 (
                     await reader.execute(
                         text(
-                            "SELECT external_ref, workspace_id FROM channel_bindings"
-                            " WHERE id = :b"
+                            "SELECT external_ref, workspace_id, state"
+                            " FROM channel_bindings WHERE id = :b"
                         ),
                         {"b": binding_id},
                     )
@@ -473,6 +492,22 @@ def build_registry(deps: WorkerDeps) -> dict:
             raise RuntimeError(
                 f"deliver_outbox {job['id']}: binding {binding_id} has no row"
             )
+        if row["state"] != "active":
+            # Revoked after this job was minted — an admin removed the group
+            # or the bot was kicked. The claim refuses it anyway
+            # (`outbox.claim_next`); ending here spends no hold on a chat the
+            # workspace let go of, and retiring what is left of its queue
+            # keeps a later re-bind from posting it as stale cards.
+            async with short() as writer:
+                retired = await bindings.retire_unsettled(writer, binding_id=binding_id)
+            logger.info(
+                "deliver_outbox %s: binding %s is %s — nothing sent, %d retired",
+                job["id"],
+                binding_id,
+                row["state"],
+                retired,
+            )
+            return None
         poller = outbox.OutboxPoller(
             unit_of_work.poller_session_factory(deps.engine, str(row["workspace_id"])),
             binding_id=binding_id,
@@ -538,6 +573,7 @@ def build_registry(deps: WorkerDeps) -> dict:
     registry: dict = {kind: Parked(_UNBUILT_REASON) for kind in UNBUILT_KINDS}
     registry["plan_slot"] = plan_slot
     registry["reap_expired"] = reap_expired
+    registry["retention_sweep"] = retention_sweep
     # No `deps.drive` gate: this path makes no provider call, and a fleet with
     # no adapter wired is exactly the one whose sources are stranded (#1061).
     registry["alert_stranded_sources"] = alert_stranded_sources

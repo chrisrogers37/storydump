@@ -38,7 +38,7 @@ import { SignOutButton } from "@/components/auth/sign-out-button";
  */
 export function DashboardHeader({ user }: { user: SessionUser }) {
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b bg-background px-4 lg:px-6">
+    <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b bg-card px-4 lg:px-6">
       <div className="flex min-w-0 items-center gap-3">
         <Sheet>
           <SheetTrigger asChild>

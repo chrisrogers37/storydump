@@ -300,8 +300,12 @@ class TestAgainstTheRealDocs:
         # learning 'planned' (088, #1413) makes it 43; §32's planned
         # stories served on time or missed out loud (089, #1413) make it 44;
         # §33's removal that sticks (090) makes it 45; §34's Drive granter
-        # (091) makes it 46; and §35's sign-up admission (092) makes it 47.
-        assert classes.count("normative") == 47
+        # (091) makes it 46; §35's sign-up admission (092) makes it 47; and
+        # §41's invitations admitting only while legitimate (098) make it 48;
+        # §42's Telegram unlink (099) makes it 49; and §43's waitlist
+        # written by the API (100) makes it 50; and §44's outbox failure record
+        # and its doors (101, #1482) make it 51.
+        assert classes.count("normative") == 51
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
@@ -556,6 +560,7 @@ class TestWhatTheCommentRuleChangedInTheStream:
         "CREATE FUNCTION trg_intent_guard",
         "CREATE FUNCTION trg_intent_insert_guard",
         "CREATE FUNCTION trg_intent_planned_person",
+        "CREATE OR REPLACE FUNCTION fn_invitation_accept",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",
         "CREATE OR REPLACE FUNCTION fn_reaper_sweep",

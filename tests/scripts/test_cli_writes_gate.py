@@ -126,6 +126,7 @@ def people(world):
                 owner = await sign_in(
                     client, mp, sub="sub-writes", email="writes@example.test"
                 )
+                me = await client.get("/api/v1/me/principal", headers=owner)
                 created = await client.post(
                     "/api/v1/workspaces",
                     json={"name": "Writes", "tz": "America/New_York"},
@@ -150,6 +151,7 @@ def people(world):
                 assert service.status_code == 201, service.text
                 state.update(
                     ws=ws,
+                    user=me.json()["user_id"],
                     operator=tokens["operator"],
                     readonly=tokens["readonly"],
                     service=service.json()["secret"],
@@ -370,8 +372,11 @@ def test_pause_and_resume_the_workspace(world, people, tmp_path):
 
 
 def test_health_through_the_real_cli_reports_the_three_surfaces(
-    world, people, tmp_path
+    world, people, tmp_path, monkeypatch
 ):
+    """The token's person is in `OPS_USER_IDS`, so `api` is the details."""
+    monkeypatch.setattr(api_conftest.settings, "OPS_USER_IDS", people["user"])
+
     async def main():
         async with api_client(world["ingress"]) as (client, engine):
             bridge = LoopBridge(client._transport, asyncio.get_running_loop())
@@ -381,11 +386,36 @@ def test_health_through_the_real_cli_reports_the_three_surfaces(
             data = doc["data"]
             assert data["api"]["status"] == "ok"
             assert "db_role" in data["api"] and "taps" in data["api"]
-            assert set(data) == {"ok", "api", "scheduling", "posting", "verdicts"}
+            assert data["details"] == {"read": True}
+            assert set(data) == {
+                "ok",
+                "api",
+                "scheduling",
+                "posting",
+                "details",
+                "verdicts",
+            }
             assert set(data["verdicts"]) == {"api", "scheduling", "posting", "webhook"}
             # no worker heartbeat on a replayed database: the verdict is the
             # exit code, the report is still the answer
             assert code == (EXIT_OK if data["ok"] else EXIT_API_UNREACHABLE)
+
+    _run(main())
+
+
+def test_health_outside_ops_user_ids_reports_the_public_liveness(
+    world, people, tmp_path
+):
+    async def main():
+        async with api_client(world["ingress"]) as (client, engine):
+            bridge = LoopBridge(client._transport, asyncio.get_running_loop())
+            rt = _runtime(people["operator"], bridge, tmp_path)
+            code, doc = await _cli(rt, "health")
+            data = doc["data"]
+            assert set(data["api"]) == {"status", "version", "commit"}, doc
+            assert data["details"]["reason"] == "not_ops"
+            assert data["verdicts"]["webhook"]["state"] == "not_checked"
+            assert code == EXIT_API_UNREACHABLE, "never a green it did not check"
 
     _run(main())
 

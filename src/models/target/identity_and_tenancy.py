@@ -230,6 +230,13 @@ class WorkspaceMemberRemoval(TargetBase):
     removed_at = Column(TZ, nullable=False, server_default=NOW)
 
 
+#: §35's invisible characters, which an address may not carry (092, 100).
+_NO_INVISIBLE = (
+    "email !~ '[\\u0080-\\u00a0\\u00ad\\u180e\\u2000-\\u200f\\u2028-\\u202f"
+    "\\u205f-\\u2064\\u3000\\ufeff]'"
+)
+
+
 class SignupAdmission(TargetBase):
     """An email the owner let in (092): a new Google account with this verified
     address may create its user. Global, not tenant-plane; read only through
@@ -244,10 +251,36 @@ class SignupAdmission(TargetBase):
     __table_args__ = (
         CheckConstraint(
             "email = lower(email) AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'"
-            " AND email !~ "
-            "'[\\u0080-\\u00a0\\u00ad\\u180e\\u2000-\\u200f\\u2028-\\u202f"
-            "\\u205f-\\u2064\\u3000\\ufeff]'",
+            " AND " + _NO_INVISIBLE,
             name="ck_signup_admissions_email",
+        ),
+    )
+
+
+class WaitlistEntry(TargetBase):
+    """An address that joined the marketing waitlist (100). Global, not
+    tenant-plane; the API (`svc_ingress`) may INSERT and nothing else, and the
+    owner reads the list as the database owner. `utm` is the campaign the
+    visitor came from."""
+
+    __tablename__ = "waitlist_entries"
+
+    email = Column(Text, primary_key=True)
+    joined_at = Column(TZ, nullable=False, server_default=NOW)
+    utm = Column(JSONB, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "email = lower(email) AND length(email) <= 254"
+            " AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$'"
+            " AND email !~ '[[:cntrl:]]'"
+            " AND email !~ '[\\u061c\\u2066-\\u2069\\ufff9-\\ufffb\\U000e0000-\\U000e007f]'"
+            " AND " + _NO_INVISIBLE,
+            name="ck_waitlist_entries_email",
+        ),
+        CheckConstraint(
+            "utm IS NULL OR (jsonb_typeof(utm) = 'object' AND length(utm::text) <= 2048)",
+            name="ck_waitlist_entries_utm",
         ),
     )
 
