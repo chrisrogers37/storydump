@@ -43,7 +43,7 @@ CONTAINER_EXPIRY_SECONDS = 24 * 60 * 60
 #: authoritative-negative would terminalize a still-live publish as a definite
 #: non-event, which is the one wrong answer that is worse than no answer.
 #:
-#: The second mode and the `stories_check` seam are driven by
+#: The second mode and the stories observation are driven by
 #: `tests/scripts/test_l3_permit_rail.py`; production passes neither
 #: (#1325 audit, TD-A16).
 EVIDENCE_MODES: dict[str, dict[str, frozenset]] = {
@@ -376,30 +376,40 @@ async def _record_evidence(conn, *, intent_id, checks: int, trail: list) -> None
     )
 
 
+async def observe(poll: Callable[..., Any], *, intent_id, workspace_id):
+    """Ask the provider for an ambiguous intent's container status, with NO
+    transaction open: the egress floor refuses a provider call inside one
+    (#1508). *poll* may be sync or async."""
+    status = poll(intent_id=intent_id, workspace_id=workspace_id)
+    if hasattr(status, "__await__"):
+        return await status
+    return status
+
+
 async def reconcile_intent(
     conn,
     *,
     intent_id,
     workspace_id,
-    poll: Callable[..., Any],
-    stories_check: Optional[Callable[..., Any]] = None,
+    status_code: Optional[str],
+    stories: Optional[Any] = None,
     mode: str = DEFAULT_MODE,
     checks: int = 0,
     trail: Optional[list] = None,
 ) -> str:
-    """One ladder step for one ambiguous intent. Returns the outcome reached.
+    """One ladder step for one ambiguous intent, from what was observed.
+    Returns the outcome reached.
 
     ``"posted"`` / ``"failed"`` terminalize; ``"pending"`` means the ladder
     continues; ``"review_required"`` means the ladder is spent and the intent
     is parked for the operator surface (`06` §5).
 
-    *poll* is injected rather than imported so this is drivable from stubbed
-    evidence — the L.3 gate requires exactly that, in both modes.
+    It writes, and never calls a provider: *status_code* is the container's
+    status, already observed (:func:`observe`) with no transaction open, and
+    *stories* the stories listing, when there is one. So it is drivable from
+    stubbed evidence, as the L.3 gate requires, in both modes.
     """
     trail = list(trail or [])
-    status_code = await _maybe_await(
-        poll, intent_id=intent_id, workspace_id=workspace_id
-    )
     trail.append({"status_code": status_code, "check": checks + 1})
     verdict = classify(status_code, mode)
 
@@ -416,27 +426,19 @@ async def reconcile_intent(
         )
         return "pending"
 
-    # Ladder exhausted: one final stories check, the full trail, then park.
+    # Ladder exhausted: the stories listing if one was observed, the full
+    # trail, then park.
     #
-    # The stories check is CORROBORATING, NEVER DISPOSITIVE. 0.4 confirmed the
-    # 24 h lookback and surfaced two exclusions: responses omit Live Video
+    # The stories listing is CORROBORATING, NEVER DISPOSITIVE. 0.4 confirmed
+    # the 24 h lookback and surfaced two exclusions: responses omit Live Video
     # stories, and a story created by resharing is not returned. So absence
     # from the list is not proof it was never published, and this must not be
     # read as a negative verdict on its own.
-    if stories_check is not None:
-        trail.append(
-            {"stories": await _maybe_await(stories_check, intent_id=intent_id)}
-        )
+    if stories is not None:
+        trail.append({"stories": stories})
     await _record_evidence(conn, intent_id=intent_id, checks=checks + 1, trail=trail)
     await _park_review_required(conn, intent_id=intent_id, workspace_id=workspace_id)
     return "review_required"
-
-
-async def _maybe_await(fn, **kwargs):
-    out = fn(**kwargs)
-    if hasattr(out, "__await__"):
-        return await out
-    return out
 
 
 async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:

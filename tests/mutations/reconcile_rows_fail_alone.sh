@@ -70,9 +70,9 @@ L3=tests/scripts/test_l3_permit_rail.py
 check "a failed row stops the beat (unit)" $W '            except Exception as exc:  # noqa: BLE001 — re-raised after the beat' '            except ZeroDivisionError as exc:  # noqa: BLE001 — re-raised after the beat' "$U -k 'first_failure_is_raised'"
 check "a failed row stops the beat (gate)" $W '            except Exception as exc:  # noqa: BLE001 — re-raised after the beat' '            except ZeroDivisionError as exc:  # noqa: BLE001 — re-raised after the beat' "$L3 -k 'missed_flip_fails_only_its_own_row'"
 # The bound: no transaction carries a second row, and no row nests a savepoint in its own.
-check "the rows share the sweep's transaction" $W '                    short(session, job) as row_session,' '                    nullcontext(reader) as row_session,' "$U -k 'no_transaction_carries_more_than_one_row'"
-check "a row nests a savepoint in its own transaction" $W '                    nullcontext() if session is None else session.begin_nested(),' '                    row_session.begin_nested(),' "$U -k 'no_transaction_carries_more_than_one_row'"
-check "the unit seam loses its per-row savepoint" $W '                    nullcontext() if session is None else session.begin_nested(),' '                    nullcontext(),' "$U -k 'savepoint_per_row'"
+check "the rows share the sweep's transaction" $W '                short(session, job) as row_session,' '                nullcontext(reader) as row_session,' "$U -k 'no_transaction_carries_more_than_one_row'"
+check "a row nests a savepoint in its own transaction" $W '                nullcontext() if session is None else session.begin_nested(),' '                row_session.begin_nested(),' "$U -k 'no_transaction_carries_more_than_one_row'"
+check "the unit seam loses its per-row savepoint" $W '                nullcontext() if session is None else session.begin_nested(),' '                nullcontext(),' "$U -k 'savepoint_per_row'"
 # The alarm: after the beat the FIRST failure is re-raised, so the job fails (#1438).
 check "the beat swallows its failures" $W '            raise failures[0]' '            pass' "$L3 -k 'missed_flip_fails_the_reconcile_beat'"
 check "the last failure is the one raised" $W '            raise failures[0]' '            raise failures[-1]' "$U -k 'first_failure_is_raised'"

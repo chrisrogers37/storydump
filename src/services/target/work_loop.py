@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable, Mapping, Optional
@@ -152,8 +152,7 @@ class WorkerConfig:
 #: the STEADY holders: the clock's pinned election connection, plus two
 #: periodic holders that may coincide (a clock tick's session and a
 #: heartbeat beat). The other periodic readers — the status reporter (60 s),
-#: the sender sweeper (3 s), the prompt sweeper (5 s) — and a kind that opens
-#: a second session inside its job (`reconcile_ambiguous`'s poll) are
+#: the sender sweeper (3 s), the prompt sweeper (5 s) — are
 #: transient waiters: they hold a connection for milliseconds, and when the
 #: pool is momentarily full they wait `pool_timeout`, which is not a fault
 #: (`run_once` counts a claim's pool wait apart from errors). So the ceiling
@@ -162,10 +161,9 @@ RESERVED_CONNECTIONS = 3
 #: What one task holds at its peak, per lane. An interactive task's kinds run
 #: their own transactions (the sender) or one short job transaction: one
 #: connection. A bulk task's plain kinds — a sync walk, a credential refresh —
-#: open sessions of their own UNDER the loop's job transaction, and the
-#: ambiguous reconciler's poll opens one under that row's own transaction
-#: (#1492), so a bulk task holds two at its peak (adversarial review of the 3b
-#: PR). The ceiling weighs them so, rather than pretending.
+#: open sessions of their own UNDER the loop's job transaction, so a bulk task
+#: holds two at its peak (adversarial review of the 3b PR). The ceiling weighs
+#: them so, rather than pretending.
 TASK_CONNECTIONS = {"interactive": 1, "bulk": 2}
 
 
@@ -365,6 +363,15 @@ def build_registry(deps: WorkerDeps) -> dict:
         (`reconciler.record_no_surface` says why), so a failing beat leaves
         none behind. A caller that passes its own session (the unit seam) gets
         a savepoint per row on it instead.
+
+        **The provider is asked with no transaction open** (#1508). A ladder
+        row asks the provider (`reconciler.observe`) before its transaction
+        opens, then claims its workspace, reads how far its ladder has climbed
+        and records the answer in it: the egress floor refuses a provider call
+        made inside a transaction (`02` §5), so a poll inside one could never
+        resolve an ambiguity. A verdict that changes the intent's state is a
+        compare-and-set on the state it leaves, so an intent that moved while
+        the provider was asked fails its row, loudly.
         """
         async with short(session, job) as reader:
             due = await reconciler.sweep_due(
@@ -373,38 +380,54 @@ def build_registry(deps: WorkerDeps) -> dict:
                 notify_after_seconds=cfg.reconcile_notify_after_seconds,
             )
 
-        async def reconcile_row(session, op):
+        @asynccontextmanager
+        async def row_transaction():
+            # A transaction of the row's own; on the unit seam, a savepoint.
+            async with (
+                short(session, job) as row_session,
+                nullcontext() if session is None else session.begin_nested(),
+            ):
+                yield row_session
+
+        async def reconcile_row(op):
             if op["reason"] == "notify_window":
-                return await reconciler.notify_parked_customer(
+                async with row_transaction() as session:
+                    return await reconciler.notify_parked_customer(
+                        session,
+                        intent_id=op["intent_id"],
+                        workspace_id=op["workspace_id"],
+                        web_app_origin=cfg.web_app_origin,
+                    )
+            # Asked before the row's transaction opens (#1508, the docstring).
+            status_code = await reconciler.observe(
+                deps.poll, intent_id=op["intent_id"], workspace_id=op["workspace_id"]
+            )
+            async with row_transaction() as session:
+                # Scope the ladder row too. 059 says every write from this sweep
+                # "runs tenant-scoped as svc_worker" and nothing did — the
+                # session carries `app.tenant_id = ''` because this is a system
+                # singleton, so these writes were invisible to `p_tenant`
+                # already. On the unit seam the rows share one session, and
+                # asserting the tenant per row is what keeps a ladder row from
+                # inheriting the scope of whichever row preceded it. The
+                # ladder's count is read AFTER the claim for the same reason:
+                # `post_intents` is policy-covered, and a read with no tenant
+                # answers 0 for every row — a ladder that never exhausts
+                # (#1349 review).
+                await unit_of_work.apply_gucs(
+                    session,
+                    tenant_id=str(op["workspace_id"]),
+                    actor_kind="system",
+                )
+                await reconciler.reconcile_intent(
                     session,
                     intent_id=op["intent_id"],
                     workspace_id=op["workspace_id"],
-                    web_app_origin=cfg.web_app_origin,
+                    status_code=status_code,
+                    checks=await reconciler.checks_so_far(
+                        session, intent_id=op["intent_id"]
+                    ),
                 )
-            # Scope the ladder row too. 059 says every write from this sweep
-            # "runs tenant-scoped as svc_worker" and nothing did — the session
-            # carries `app.tenant_id = ''` because this is a system singleton,
-            # so these writes were invisible to `p_tenant` already. On the unit
-            # seam the rows share one session, and asserting the tenant per row
-            # is what keeps a ladder row from inheriting the scope of whichever
-            # row preceded it. The ladder's count is read AFTER the claim for
-            # the same reason: `post_intents` is policy-covered, and a read with
-            # no tenant answers 0 for every row — a ladder that never exhausts
-            # (#1349 review).
-            await unit_of_work.apply_gucs(
-                session,
-                tenant_id=str(op["workspace_id"]),
-                actor_kind="system",
-            )
-            await reconciler.reconcile_intent(
-                session,
-                intent_id=op["intent_id"],
-                workspace_id=op["workspace_id"],
-                poll=deps.poll,
-                checks=await reconciler.checks_so_far(
-                    session, intent_id=op["intent_id"]
-                ),
-            )
 
         ladder_skipped = 0
         # The notify rows whose workspace has nowhere to receive the notice.
@@ -415,13 +438,8 @@ def build_registry(deps: WorkerDeps) -> dict:
                 ladder_skipped += 1
                 continue
             try:
-                # A transaction per row; on the unit seam, a savepoint per row.
-                async with (
-                    short(session, job) as row_session,
-                    nullcontext() if session is None else session.begin_nested(),
-                ):
-                    if await reconcile_row(row_session, op) == outbox.UNDELIVERABLE:
-                        unreachable.append(op)
+                if await reconcile_row(op) == outbox.UNDELIVERABLE:
+                    unreachable.append(op)
             except Exception as exc:  # noqa: BLE001 — re-raised after the beat
                 logger.exception(
                     "reconcile_ambiguous: the %s row of intent %s failed; its"
