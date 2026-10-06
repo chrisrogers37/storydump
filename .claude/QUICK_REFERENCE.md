@@ -134,4 +134,4 @@ Changed on the web (Settings) or through the command port (`settings_change`,
 
 ## CHANGELOG Reminder
 
-Every PR that touches code or config must update `CHANGELOG.md` under `## [Unreleased]` — CI's `changelog-check` fails without it; a docs-only PR (`documentation/`, `*.md`, `.github/`) is exempt
+Every PR that touches code or config adds a fragment in `changelog.d/`, and no PR edits `CHANGELOG.md` — the format and CI's `changelog-check` rule are in `changelog.d/README.md`

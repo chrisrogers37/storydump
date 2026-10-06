@@ -31,7 +31,7 @@ jobs:
   security:         # pip-audit -r requirements.txt               (GATES)
                     # bandit -r src/ storydump_cli/               (advisory)
   front-end:        # in landing/: npm ci, npm test, npx tsc --noEmit, npm run lint
-  changelog-check:  # pull requests only: CHANGELOG.md must change
+  changelog-check:  # pull requests only: the rule in changelog.d/README.md
 ```
 
 ### What CI Checks
@@ -41,15 +41,22 @@ jobs:
 | Linting | `ruff check .` | Code style and errors, over the whole repository — `tests/` included |
 | Formatting | `ruff format . --check` | Consistent code formatting |
 | FC-2 ratchet | `scripts/telegram_ratchet.py` | An allowlist of the modules permitted to reference Telegram: a reference outside it fails. Stdlib-only, so it runs without the app's dependencies |
-| Tests | `pytest` | The whole suite against a PostgreSQL 15 service. `REQUIRE_TEST_DATABASE=1` makes a database that failed to come up a failure instead of a silent skip ([`TEST_COVERAGE.md`](TEST_COVERAGE.md)). Coverage of `src` and `storydump_cli` is measured and uploaded to Codecov; no threshold is enforced |
+| Tests | `pytest` | The whole suite against a PostgreSQL 15 service. `REQUIRE_TEST_DATABASE=1` makes a database that failed to come up a failure instead of a silent skip ([`TEST_COVERAGE.md`](TEST_COVERAGE.md)). Coverage of `src` and `storydump_cli` is measured and uploaded to Codecov; no threshold is enforced, and the upload is advisory: it continues on error and times out after five minutes, so it never fails the job |
 | Security | `pip-audit`, `bandit` | Vulnerability scanning. `pip-audit` GATES: a known-vulnerable pin in `requirements.txt` fails the job. It did not until #1216 — it ran behind `\|\| true` *and* `continue-on-error` with a placeholder `--ignore-vuln GHSA-1234`, and was masking four live advisories the whole time. `bandit` is still advisory (`\|\| true` + `continue-on-error`): its findings on this tree have not been triaged, so read the uploaded report rather than the step's colour |
 | Front end | `npm test`, `tsc --noEmit`, `npm run lint` | The web app in `landing/` (Node 22). `next build` is left to Vercel, which builds every PR |
-| Changelog | Custom check | A pull request must change `CHANGELOG.md`, unless it touches only `documentation/`, `*.md` files or `.github/` |
+| Changelog | `scripts/changelog_fragments.py check --base` | The fragment rule in `changelog.d/README.md`: a change outside the docs adds a fragment, and no pull request but the compile edits `CHANGELOG.md`. Stdlib-only, like the ratchet |
 
-The workflow's own note (`ci.yml:195-199`) records that `main` declares no
-required status checks, so every check is advisory as far as GitHub is
-concerned. Treat a red check as blocking anyway: a red check has made Railway
-skip a deploy (below).
+`main` is guarded by a repository ruleset: no force-push, no deletion, a pull
+request for every change (no approval count, since PRs are opened under the
+owner's own account), and six required checks: Lint, FC-2 Telegram ratchet,
+Test, Security Scan, Front End and Changelog Check. "Branch up to date" is not
+required. It has no bypass list: every agent working here acts as the owner's
+GitHub account, so an admin bypass would let any of them merge red. An
+emergency merge means disabling the ruleset by hand. Vercel and GitGuardian
+report on every PR but are not
+required. Renaming a required job strands open PRs on a check that never
+arrives, so the ruleset changes with it (`ci.yml`'s note on `Front End` says
+the same). A red check also makes Railway skip a deploy (below).
 
 ### The scheduled schema-drift audit
 

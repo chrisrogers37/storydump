@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import Link from "next/link"
 import { Header } from "@/components/layout/header"
 import { Footer } from "@/components/layout/footer"
-import { bricolageSwap as bricolage } from "@/lib/fonts"
+import { buttonVariants } from "@/components/ui/button"
 
 export const metadata: Metadata = {
   title: "Page not found",
@@ -18,7 +18,7 @@ export const metadata: Metadata = {
  */
 export default function NotFound() {
   return (
-    <div className={`${bricolage.variable} flex min-h-svh flex-col font-sans`}>
+    <div className="flex min-h-svh flex-col">
       <Header />
       <main id="main" className="flex-1 bg-paper">
         <div className="mx-auto max-w-3xl px-4 py-24 md:py-32">
@@ -32,7 +32,7 @@ export default function NotFound() {
             <li>
               <Link
                 href="/"
-                className="inline-flex rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-ink/85"
+                className={buttonVariants({ size: "xl" })}
               >
                 Go to the home page
               </Link>
@@ -40,7 +40,7 @@ export default function NotFound() {
             <li>
               <Link
                 href="/blog"
-                className="inline-flex rounded-full border border-ink/20 bg-white px-5 py-3 text-sm font-semibold text-ink transition-colors hover:border-ink/40"
+                className={buttonVariants({ variant: "outline", size: "xl" })}
               >
                 Read the blog
               </Link>
@@ -48,7 +48,7 @@ export default function NotFound() {
             <li>
               <Link
                 href="/setup"
-                className="inline-flex rounded-full border border-ink/20 bg-white px-5 py-3 text-sm font-semibold text-ink transition-colors hover:border-ink/40"
+                className={buttonVariants({ variant: "outline", size: "xl" })}
               >
                 See the setup guide
               </Link>

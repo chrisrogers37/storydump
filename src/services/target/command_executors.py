@@ -114,7 +114,7 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
         "SELECT i.id, i.workspace_id, i.state, i.media_item_id, i.ig_account_id,"
         "       i.provider_account_ref, i.cancel_requested, i.published_via,"
         "       i.publish_step, i.ig_container_id, i.attempts_by_step,"
-        "       i.origin, i.schedule_slot_at,"
+        "       i.origin, i.schedule_slot_at, i.transit_asset_ref,"
         "       w.api_publishing_enabled, w.repost_ttl_days, w.skip_ttl_days,"
         "       w.dry_run_mode, w.is_paused,"
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
@@ -409,7 +409,8 @@ def _result(intent: dict[str, Any], state: str, **extra: Any) -> CommandResult:
 
 async def _mint_publish_job(session, intent: dict[str, Any], command: Command) -> None:
     """The `publish_pipeline` job for an intent entering the ladder — the one
-    mint `approve` and `resolve_review` both use.
+    mint `approve` and `resolve_review` both use. A give-up mints it too, for
+    an intent that has LEFT the ladder: see `_give_up`.
 
     It was written out in both (the tech-debt audit, 2026-09-20), and only
     `approve`'s copy carried the two reasons below, so a reader of the
@@ -742,12 +743,22 @@ async def _give_up(
     session, intent: dict[str, Any], command: Command, op: Optional[dict[str, Any]]
 ) -> CommandResult:
     """`review_required → cancelled`, the debit retained; the unresolved op
-    ends by verdict; the line reaches every card by ref, without buttons."""
+    ends by verdict; the line reaches every card by ref, without buttons.
+
+    A story that reached the transit upload carries a copy on Cloudinary,
+    and the API holds no transit credentials to destroy it. The give-up
+    mints a `publish_pipeline` job in the same transaction instead: the
+    worker meets the intent already `cancelled`, destroys the copy and
+    finalizes — the pipeline's terminal route, which never posts (the row
+    is frozen before the job is visible). Without one, the copy waited for
+    the backstop sweep, up to two days."""
     if not await publish_cap.resolve_cancel(session, intent_id=str(intent["id"])):
         raise CommandRefused("illegal_transition", _RESOLVED_BY_SOMEONE_ELSE)
     await _end_op_by_verdict(
         session, op, outcome="failed", verdict="given_up", command=command
     )
+    if intent.get("transit_asset_ref"):
+        await _mint_publish_job(session, intent, command)
     await _restate_outcome(session, intent, command, "cancelled")
     return _result(intent, "cancelled")
 
@@ -1480,12 +1491,12 @@ async def invite_member(session, command: Command) -> CommandResult:
     `token_hash` alone, and `invitations.create` writes every column its D33
     identity check reads.
 
-    **The token is returned, once.** It is the credential — possession
-    accepts — and only its hash is stored, so this return value is the single
-    opportunity to deliver it. A delivery producer (email, or a Telegram card
-    in `06` §2's other half) is what turns it into something a person
-    receives; the two share this one minting door rather than each having
-    their own.
+    **The token is returned, once,** with `join_url`, the link built from it.
+    It is the credential — possession accepts — and only its hash is stored,
+    so this return value is the single opportunity to deliver it. The inviter
+    hands `join_url` over; a delivery producer (email, or a Telegram card in
+    `06` §2's other half) could do it instead, and the producers share this
+    one minting door rather than each having their own.
 
     **`delivery_channel` is the caller's, defaulting to `email`.** It was
     pinned to `email` here while `invitations.create` accepted both, which
@@ -1497,9 +1508,10 @@ async def invite_member(session, command: Command) -> CommandResult:
     match and takes the recorded-skip path — landing as `member` with an
     elevation-pending notice. It would look like it worked. Two schema facts
     make the honest shape safe instead: `uq_invite_live` is
-    `(workspace_id, email)` and NULLs never collide there, so Telegram
-    invitations do not conflict with each other or with an email invite to the
-    same workspace; and a hint-only invitation carries no identity proof, so
+    `(workspace_id, email)` and NULLs never collide there, so a Telegram
+    invitation does not conflict with an email invite to the same workspace (a
+    second one to the same Telegram id replaces the first, `invitations.create`);
+    and a hint-only invitation carries no identity proof, so
     D33/D36 downgrades an admin invite on accept rather than elevating.
     (Raised by lane C rather than built around, which is what kept the
     broadcast shape out of the tier.)
@@ -1513,7 +1525,6 @@ async def invite_member(session, command: Command) -> CommandResult:
     it is stated rather than left for someone to find in the seam. It is
     inert in practice — no surface passes `delivery_channel` today, so nothing
     mints one — and it closes when #1188 wires the producer to this call site.
-    The `email` arm has no such gap.
 
     `role` defaults to `member` and is a CEILING, never a grant: the acceptor
     downgrades an unmatched admin invite to `member` plus an
@@ -1569,19 +1580,16 @@ async def invite_member(session, command: Command) -> CommandResult:
     # caller reads one shape whichever channel was used.
     delivery: dict[str, Any] = {"channel": channel}
     if channel == "email":
-        job_id = await invitations.deliver_by_email(
-            session,
-            workspace_id=command.workspace_id,
-            invitation_id=invitation_id,
-            token=token,
-            email=email,
-            web_app_origin=settings.web_app_origin,
+        delivery.update(
+            await invitations.deliver_by_email(
+                session,
+                workspace_id=command.workspace_id,
+                invitation_id=invitation_id,
+                token=token,
+                email=email,
+                web_app_origin=settings.web_app_origin,
+            )
         )
-        if job_id is None:
-            delivery["state"] = "not_configured"
-        else:
-            delivery["state"] = "queued"
-            delivery["job_id"] = job_id
     else:
         # The card producer is #1188 and is not wired here yet — see the BOUND
         # in the docstring. Reported as the gap it is rather than omitted,
@@ -1589,11 +1597,22 @@ async def invite_member(session, command: Command) -> CommandResult:
         delivery["state"] = "none_produced"
         delivery["cards"] = 0
 
+    expires_at = (
+        await session.execute(
+            text(
+                "SELECT expires_at FROM workspace_invitations"
+                " WHERE workspace_id = :ws AND id = :id"
+            ),
+            {"ws": str(command.workspace_id), "id": str(invitation_id)},
+        )
+    ).scalar_one()
     return CommandResult(
         "executed",
         {
             "invitation_id": invitation_id,
             "invite_token": token,
+            "join_url": invitations.join_url(settings.web_app_origin, token),
+            "expires_at": expires_at.isoformat(),
             "role": role,
             "delivery": delivery,
         },

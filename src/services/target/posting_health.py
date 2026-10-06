@@ -120,11 +120,12 @@ a real silence meanwhile. `tests/scripts/test_fleet_health_doors_gate.py`
 runs this module as `svc_ingress` against a seeded estate.
 
 **A retention door exists for the cap ledger, and nothing runs it today.**
-`059`'s `fn_retention_purge` holds a `DELETE FROM daily_post_counts`, but
-`retention_sweep` is in `work_loop.UNBUILT_KINDS` — the registry parks it
-unconditionally, so no executor has ever aged a row out. If it is ever built,
-`debited_total` and `ledger_days` become windowed rather than all-time and the
-attempt/landing contrast below weakens for old estates. `posted_ever` is
+`059`'s `fn_retention_batch` holds a `DELETE FROM daily_post_counts`, but
+the `retention_sweep` executor runs only the `rate_counters` class
+(`scheduler.execute_retention_sweep`), so no cap-ledger row has ever aged
+out. If that class is ever swept, `debited_total` and `ledger_days` become
+windowed rather than all-time and the attempt/landing contrast below weakens
+for old estates. `posted_ever` is
 unaffected: the class list does not name `post_intents`.
 
 **Nothing identifying is returned.** Counts and ages, never a workspace, an

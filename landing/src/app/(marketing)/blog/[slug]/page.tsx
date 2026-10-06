@@ -11,6 +11,7 @@ import { AutomateInstagramStories } from "./_articles/automate-instagram-stories
 import { GoogleDriveInstagramIntegration } from "./_articles/google-drive-instagram-integration"
 import { TelegramInstagramApproval } from "./_articles/telegram-instagram-approval-workflow"
 import { blogCta } from "./_articles/shared"
+import { buttonVariants } from "@/components/ui/button"
 
 const articleComponents: Record<string, React.ComponentType> = {
   "automate-instagram-stories": AutomateInstagramStories,
@@ -84,7 +85,7 @@ export default async function BlogPost({ params }: { params: Params }) {
           <span aria-hidden="true">&middot;</span>
           <span>{post.readTime}</span>
         </div>
-        <h1 className="mt-4 font-display text-4xl font-extrabold tracking-[-0.03em] text-ink md:text-5xl">
+        <h1 className="mt-4 page-title text-4xl text-ink md:text-5xl">
           {post.title}
         </h1>
         <p className="mt-4 text-lg text-muted-foreground leading-relaxed">
@@ -106,7 +107,7 @@ export default async function BlogPost({ params }: { params: Params }) {
         <TrackedLink
           href="/#waitlist"
           track={blogCta}
-          className="mt-4 inline-block rounded-md bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          className={buttonVariants({ size: "xl", className: "mt-4" })}
         >
           Join the waitlist
         </TrackedLink>

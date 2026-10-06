@@ -76,7 +76,7 @@ def hash_nonce(nonce: str) -> str:
 async def retire_live_states(
     conn,
     *,
-    provider: str,
+    provider: Optional[str] = None,
     purpose: Optional[str] = None,
     user_id=None,
     workspace_id=None,
@@ -87,12 +87,23 @@ async def retire_live_states(
     "Last issued wins" (`07` §2) is one security rule with four writers: a
     link mint, a bind mint, :func:`issue_state`'s own reconnect-target retire
     and `disable_destination`'s. Four spellings is how one of them keeps a
-    state tappable after the next is minted. Exactly one selector kwarg is
-    given besides *provider*; the statement is built from named fragments,
-    never from a caller's string.
+    state tappable after the next is minted. A removal (`07` §45) is the
+    fifth caller: it spends whatever the removed person holds for one
+    workspace, so it selects by user AND workspace and names no provider.
+    The selectors given are ANDed, and a user, a workspace or a reconnect
+    target is required: a provider or a purpose narrows a selection and is
+    never one on its own. The statement is built from named fragments, never
+    from a caller's string.
     """
-    where = ["provider = :provider", "consumed_at IS NULL"]
-    params: dict[str, Any] = {"provider": provider}
+    if user_id is None and workspace_id is None and reconnect_target is None:
+        raise ValueError(
+            "retire_live_states needs a user, a workspace or a reconnect target"
+        )
+    where = ["consumed_at IS NULL"]
+    params: dict[str, Any] = {}
+    if provider is not None:
+        where.append("provider = :provider")
+        params["provider"] = provider
     if purpose is not None:
         where.append("purpose = :purpose")
         params["purpose"] = purpose

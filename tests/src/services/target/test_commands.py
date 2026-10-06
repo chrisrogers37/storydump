@@ -522,7 +522,12 @@ class TestRemoveMemberGoesThroughTheDoor:
             ex, workspace_id="ws", user_id="u2", by_user_id="u1"
         )
         assert role == "member"
-        (sql, params), (revoke_sql, revoke_params) = ex.calls
+        (
+            (sql, params),
+            (revoke_sql, revoke_params),
+            (invites_sql, invites_params),
+            _retire,
+        ) = ex.calls
         assert "fn_member_remove(" in sql and "DELETE" not in sql.upper()
         assert params == {"ws": "ws", "u": "u2", "by": "u1"}
         # 090: the service identities the removed person minted go with them,
@@ -531,6 +536,31 @@ class TestRemoveMemberGoesThroughTheDoor:
         assert "created_by_user_id = :u" in revoke_sql
         assert "workspace_id = :ws" in revoke_sql
         assert revoke_params == {"ws": "ws", "u": "u2"}
+        # 098: so do the pending invitations they sent or were sent.
+        assert "UPDATE workspace_invitations SET state = 'revoked'" in invites_sql
+        assert "invited_by_user_id = :u" in invites_sql
+        assert "SELECT lower(primary_email) FROM users" in invites_sql
+        assert "provider = 'telegram'" in invites_sql
+        assert "workspace_id = :ws" in invites_sql
+        assert "state = 'pending'" in invites_sql
+        assert invites_params == {"ws": "ws", "u": "u2"}
+
+    async def test_a_removal_retires_the_persons_live_states_in_that_workspace(
+        self,
+    ):
+        """`07` §45: once the door answers removed, one retire selecting this
+        person AND this workspace, whatever the provider."""
+        from src.services.target import workspaces
+
+        ex = self._Exec(("removed", "member"))
+        await workspaces.remove_member(
+            ex, workspace_id="ws", user_id="u2", by_user_id="u1"
+        )
+        _door, _revoke, _invites, (sql, params) = ex.calls
+        assert sql.startswith("UPDATE oauth_states SET consumed_at = now()")
+        assert "consumed_at IS NULL" in sql and "provider" not in sql
+        assert "user_id = :uid" in sql and "workspace_id = :ws" in sql
+        assert params == {"uid": "u2", "ws": "ws"}
 
     async def test_a_refused_removal_revokes_nothing(self):
         from src.services.target import workspaces

@@ -98,7 +98,7 @@ What Meta asks for (**DOCUMENTED-FROM-META'S-DOCS**):
 | Terms of Service URL | **live** | `https://storydump.app/terms` — `landing/src/app/(marketing)/terms/page.tsx` |
 | Deauthorize Callback URL | **built, not yet registered** | `POST /webhooks/meta/deauthorize` — shipped in #1208. Still has to be entered in App settings → Basic. |
 | Data Deletion Request URL | **built, not yet registered** | `POST /webhooks/meta/data-deletion` — same PR, same remaining step. |
-| App logo | **NOT-YET-ATTEMPTED, unowned** | 1024×1024 PNG, no transparency. **Nobody owns this.** It blocks submission and it is the kind of item that is discovered at the end. |
+| App logo | **made, not yet uploaded** | [`assets/app-icon/storydump-icon-1024.png`](assets/app-icon/storydump-icon-1024.png): 1024×1024 PNG, opaque, drawn by `make-icon.py` beside it (#410). Upload it under App settings → Basic. |
 
 ### Deauthorize Callback and Data Deletion Request
 
@@ -159,7 +159,7 @@ This is the longest track and the one that gates everything else, so its inputs 
 
 > Publishing is the product. A user points Storydump at a folder of their own media and sets a posting schedule; at each scheduled slot the app publishes one item to that user's own Instagram Business account as a Story. We use the standard two-step container flow: `POST /{ig-user-id}/media` with `media_type=STORIES` and an `image_url` or `video_url` pointing at the user's own media, then `POST /{ig-user-id}/media_publish` with the returned `creation_id`, polling `GET /{container_id}?fields=status_code,status` in between until the container is ready. Every publish is initiated by a schedule the account owner configured and can pause or cancel at any time; the app never publishes to an account other than the one whose owner connected it, and never publishes content the user did not place in their own connected media source.
 
-*(Both describe what the code calls; check them against it again before submitting. The container flow is `src/services/target/instagram_graph.py` — `create_container`, `container_status`, `publish` — driven by `src/services/target/publish_pipeline.py`, and the profile read is `GET /me?fields=user_id,username` at connect (`PROFILE_URL` in `src/services/target/ig_login_oauth.py`). **The `instagram_business_basic` copy names only the profile read because that is the only call it covers:** nothing in the target tier reads the account's media or stories — the reconciler's `stories_check` seam (`src/services/target/reconciler.py`) is wired to nothing. If such a read is built, add it to the copy in the same PR: a justification that describes a call the app does not make is a rejection waiting to happen.)*
+*(Both describe what the code calls; check them against it again before submitting. The container flow is `src/services/target/instagram_graph.py` — `create_container`, `container_status`, `publish` — driven by `src/services/target/publish_pipeline.py`, and the profile read is `GET /me?fields=user_id,username` at connect (`PROFILE_URL` in `src/services/target/ig_login_oauth.py`). **The `instagram_business_basic` copy names only the profile read because that is the only call it covers:** nothing in the target tier reads the account's media or stories — the reconciler accepts a stories listing (`reconcile_intent`'s `stories`, `src/services/target/reconciler.py`), and nothing passes one. If such a read is built, add it to the copy in the same PR: a justification that describes a call the app does not make is a rejection waiting to happen.)*
 
 ### Demo video script
 
