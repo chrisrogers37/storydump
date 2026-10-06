@@ -79,11 +79,18 @@ Under **Google Auth Platform → Data Access**, make sure exactly these are list
 - `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile` (sign-in)
 - `.../auth/drive.readonly` (Drive)
 
-Google asks for a justification per sensitive or restricted scope, on Data Access or in the submission form. **`drive.readonly` is the one Google will scrutinize.** Suggested copy:
+Data Access lists `drive.readonly` under *Your restricted scopes* ("Approval required") with three fields, filled at submission. **`drive.readonly` is the one Google will scrutinize.**
 
-> Storydump turns a user's Google Drive folder into daily Instagram Stories. A workspace admin connects Google Drive once, then picks one or more existing folders of photos and videos from a folder browser inside Storydump. We call `files.list` to browse folders and to list the files under each chosen folder, reading only each file's id, name, MIME type, size, modified time and checksum (the top-level subfolder a file sits in becomes its category), `files.get` for one file's size, type and name, and with `alt=media` to download its bytes when it is posted, so it can be uploaded to Instagram. To keep two chosen folders from overlapping, we also read the parent ids of the folders above a chosen one. We never write to, modify, or delete files in the user's Drive — no `files.create`, `files.update`, or `files.delete` — and we never download files outside the chosen folders. We store each file's name, Drive id and checksum to track what has been posted; the file itself is copied to our media host only for the publish, deleted once it posts or is cancelled, and otherwise removed by a time-limited cleanup sweep. `drive.file` does not work for us: it reaches only files our app created or the user picks one at a time, and our users' media already sits in folders that keep receiving new files. `drive.metadata.readonly` cannot download file contents, which posting requires.
+- **What features will you use?** A dropdown of Google's permitted uses for restricted Drive scopes. Pick the one closest to a productivity app that works with the user's Drive files in its own interface; the labels were not confirmed from here, so if none fits, screenshot the list before choosing.
+- **How will the scopes be used?** Plain text, at most 1,000 characters (backticks paste literally). This version is 996:
 
-(Adjust wording to current implementation — the gist is: read-only, narrow folder scope, no writes, no exfiltration.)
+```text
+Storydump turns a user's Google Drive folders into daily Instagram Stories. A workspace admin connects Drive once and picks existing folders of photos and videos in a folder browser. We call files.list to browse folders and list the files in each chosen folder, files.get for a file's size, type and name, and files.get with alt=media to download it when it is posted, so it can be uploaded to Instagram. To keep chosen folders from overlapping, we read the parent ids of the folders above a chosen one. We never create, modify or delete anything in Drive, and never download files outside the chosen folders. We store each file's name, Drive id and checksum to track what was posted; the file is copied to our media host only to publish it, then deleted. drive.file does not work: it reaches only files our app created or the user picks one by one, and our users' media already sits in folders that keep receiving new files. drive.metadata.readonly cannot download files, which posting requires.
+```
+
+- **Demo video:** the link from step 5.
+
+Adjust the text if the code changes; the gist is read-only, the chosen folders only, no writes.
 
 ### 5. Submit for verification
 
@@ -97,6 +104,8 @@ Google will ask for the demo video URL. Record one that shows:
 4. Storydump listing files from the connected folder.
 5. A post going out (which reads file bytes from Drive).
 6. The user disconnecting / revoking access.
+
+Record on storydump.app with a Google account that has already connected Drive: production already requests `drive.readonly`, so this adds no new scope, and a second grant by the same account should not count again toward the user cap (inferred). The console's advice to record on staging is for scopes not yet live.
 
 YouTube unlisted is the standard hosting. Aim for under 5 minutes (convention, not a hard limit — Google will accept longer if the content justifies it).
 
