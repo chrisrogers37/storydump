@@ -117,10 +117,7 @@ export function WaitlistForm({
         const busy = data.reason === "busy"
         setStatus(busy ? "busy" : "error")
         setMessage(data.message || "Something went wrong. Please try again.")
-        trackEvent("Waitlist Error", {
-          reason: busy ? "busy" : "server_error",
-          variant,
-        })
+        trackEvent("Waitlist Error", { reason: "server_error", variant })
       }
     } catch {
       setStatus("error")

@@ -28,7 +28,7 @@ export type DemoAction = (typeof DEMO_ACTIONS)[number]
 export interface Events {
   "Waitlist Signup": { variant: Variant } & Partial<Record<UtmKey, string>>
   "Waitlist Error": {
-    reason: "invalid_email" | "busy" | "server_error" | "network_error"
+    reason: "invalid_email" | "server_error" | "network_error"
     variant: Variant
   }
   "Waitlist Start": { variant: Variant }
