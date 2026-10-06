@@ -68,6 +68,18 @@ describe("the credential", () => {
   });
 });
 
+describe("the public plane", () => {
+  it("sends neither Origin nor Sec-Fetch-Site, which the API refuses as a browser", async () => {
+    stubFetch(() => new Response("{}", { status: 202 }));
+    await targetFetch("/waitlist", null, { method: "POST", plane: "public", body: "{}" });
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/public\/waitlist$/);
+    const headers = new Headers(init.headers);
+    expect(headers.has("origin")).toBe(false);
+    expect(headers.has("sec-fetch-site")).toBe(false);
+  });
+});
+
 describe("error bodies", () => {
   it("returns a reason code, never the upstream body", async () => {
     // The API's real shape (`src/api/app.py`, `InvitationRefused`): `detail`

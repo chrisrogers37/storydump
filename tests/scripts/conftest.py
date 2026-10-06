@@ -296,22 +296,36 @@ def sweep_as_worker(dsn: str) -> int:
     return asyncio.run(go())
 
 
-async def reap_as_worker(owner_dsn: str) -> None:
-    """One `reap_expired` run exactly as the worker's registry runs it — the
-    reaper door, the stale-approved leg, the settled-card sweep, at the
-    worker's own numbers — connected as `svc_worker`, with no tenant and the
-    `system` actor. ONE spelling for every gate that reaps (its subject check
+async def run_as_worker(
+    owner_dsn: str, kind: str, *, payload: dict | None = None, config=None
+) -> None:
+    """One run of the system kind *kind* exactly as the worker's registry runs
+    it, at the worker's own numbers unless *config* says otherwise — connected
+    as `svc_worker`, with no tenant and the `system` actor. An
+    `own_transactions` executor gets no session, as the loop gives it none.
+    ONE spelling for every gate that runs a system job (its subject check
     included)."""
     from src.services.target.unit_of_work import apply_gucs
     from src.services.target.work_loop import WorkerConfig, WorkerDeps, build_registry
 
+    job = {"kind": kind, "payload": payload or {}}
     async with ingress_engine(as_user(owner_dsn, "svc_worker")) as engine:
-        registry = build_registry(WorkerDeps(engine=engine, config=WorkerConfig()))
+        registry = build_registry(
+            WorkerDeps(engine=engine, config=config or WorkerConfig())
+        )
+        executor = registry[kind]
         async with engine.begin() as conn:
             who = (await conn.execute(text("SELECT current_user"))).scalar()
             assert who == "svc_worker", who
             await apply_gucs(conn, tenant_id="", actor_kind="system")
-            await registry["reap_expired"](conn, {"kind": "reap_expired"})
+            owns = getattr(executor, "owns_transactions", False)
+            await executor(None if owns else conn, job)
+
+
+async def reap_as_worker(owner_dsn: str) -> None:
+    """One `reap_expired` run — the reaper door, the stale-approved leg, the
+    settled-card sweep — through :func:`run_as_worker`."""
+    await run_as_worker(owner_dsn, "reap_expired")
 
 
 def async_url(dsn: str) -> str:

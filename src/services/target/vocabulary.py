@@ -158,6 +158,19 @@ AUDIT_CHANNELS: tuple[str, ...] = ("telegram", "web", "cli", "system")
 #: `service_tokens.role` (060 ``ck_service_token_role``).
 TOKEN_ROLES: tuple[str, ...] = ("operator", "readonly")
 
+#: `channel_outbox.last_failure_class` (101 ``ck_outbox_failure_class``): why a
+#: row's last send failed. `rate_limited` is a 429 (a deferral, never counted as
+#: a failure); `destination_gone` and `refused` are the definitive answers;
+#: `credential_dead` is a dead token's 401; `ambiguous` is a send whose answer
+#: never came back (a timeout, a 5xx, a dead predecessor's stranded row).
+OUTBOX_FAILURE_CLASSES: tuple[str, ...] = (
+    "rate_limited",
+    "destination_gone",
+    "refused",
+    "credential_dead",
+    "ambiguous",
+)
+
 #: The bounds every adapter enforces before the table does: a token's name
 #: (`service_tokens.name`), and its expiry in whole days — the API's default
 #: and ceiling, the web form's range, the CLI's `tokens` verbs' words.
@@ -166,16 +179,24 @@ TOKEN_EXPIRY_DAYS_MIN = 1
 TOKEN_EXPIRY_DAYS_DEFAULT = 90
 TOKEN_EXPIRY_DAYS_MAX = 365
 
+#: The range of a workspace's TTL settings (`workspaces.SETTINGS_RANGES`): at
+#: least one of the setting's unit, at most a year.
+SETTINGS_TTL_MIN = 1
+SETTINGS_TTL_DAYS_MAX = 365
+SETTINGS_APPROVAL_TTL_MINUTES_MAX = SETTINGS_TTL_DAYS_MAX * 24 * 60
+
 #: Every API token starts with this; the resolver routes on it and secret
 #: scanners recognise it. The rest is 32 url-safe random bytes (43 chars).
 TOKEN_PREFIX = "sdt_"
 
 #: The refusals a token principal gets WITH a ``reason`` (403): the route is
-#: session-only, the token cannot write, or it belongs to another workspace.
+#: session-only, the token cannot write, it belongs to another workspace, or
+#: its person is not one of the deployment's operators (`OPS_USER_IDS`).
 TOKEN_REFUSALS: tuple[str, ...] = (
     "session_required",
     "readonly_token",
     "wrong_workspace",
+    "not_ops",
 )
 
 #: Why a presented token did not resolve (the API answers 401 without saying
@@ -348,6 +369,7 @@ REASON_SENTENCES: Mapping[str, str] = {
     "session_required": "this needs a signed-in web session, not a token",
     "readonly_token": "this token is read-only",
     "wrong_workspace": "this token belongs to another workspace",
+    "not_ops": "only the people in OPS_USER_IDS may read this",
     "not_authorized": "not authorized — run storydump login with a valid token",
     "not_a_member": "no such workspace for this token",
     # a member below the verb's floor: the API's bare 403 (the token is fine)
@@ -494,6 +516,14 @@ DEFAULT_MAX_CONNECTIONS = 10
 RAILWAY_ENVIRONMENT_VAR = "RAILWAY_ENVIRONMENT_NAME"
 #: The one environment that owns the bot's webhook.
 PRODUCTION_ENVIRONMENT = "production"
+
+
+def is_production(env: Mapping[str, str]) -> bool:
+    """Whether *env* is Railway's production environment."""
+    value = env.get(RAILWAY_ENVIRONMENT_VAR) or ""
+    return value.strip().lower() == PRODUCTION_ENVIRONMENT
+
+
 #: Telegram's Bot API. Spelled here because the CLI's `webhook` verb and the
 #: worker's transport both speak to it, and the CLI reaches `src` only here.
 TELEGRAM_BOT_API_BASE = "https://api.telegram.org"

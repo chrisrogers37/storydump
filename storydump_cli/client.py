@@ -206,10 +206,15 @@ class Client:
         """`/health` alone — liveness, unauthenticated, at the root."""
         return self._request("GET", "/health", root=True)
 
+    def health_details(self) -> dict[str, Any]:
+        """The API's operating details: the token's person must be listed in
+        the API's `OPS_USER_IDS`."""
+        return self._request("GET", "/ops/health")
+
     def health(self) -> dict[str, Any]:
-        """The API's three health surfaces. `/health` must answer; the two
-        dependency-touching surfaces may not (a 503 with no engine), and then
-        the report carries that surface's error rather than losing the rest."""
+        """The API's three public surfaces. `/health` must answer; the two
+        dependency-touching axes may not (a 503 with no engine), and then the
+        report carries that surface's error rather than losing the rest."""
         surfaces: dict[str, Any] = {"api": self.health_api()}
         for name, path in (
             ("scheduling", "/health/scheduling"),

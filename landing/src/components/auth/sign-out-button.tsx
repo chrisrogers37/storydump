@@ -1,7 +1,26 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+
+/** What the button says after a sign-out that did not happen. */
+export const SIGNOUT_FAILED = "Couldn't sign out. Try again";
+
+/**
+ * Where a sign-out landed. `failed` means this browser is still signed in:
+ * the request never arrived (offline) or the route refused it (a 403 from the
+ * cross-site check, a 5xx), so its cookies were not cleared. A string is the
+ * route's `?signout=` notice: this browser is signed out but the server side
+ * did not fully happen (`SIGNOUT_NOTICES` in the login page's content says
+ * which). `done` is everything else.
+ */
+export function signOutOutcome(
+  response: Pick<Response, "ok" | "redirected" | "url"> | null,
+): "done" | "failed" | { notice: string } {
+  if (!response || !response.ok || !response.redirected) return "failed";
+  const notice = new URL(response.url).searchParams.get("signout");
+  return notice ? { notice } : "done";
+}
 
 /**
  * Sign out.
@@ -22,6 +41,7 @@ export function SignOutButton({
   className,
   children = "Sign out",
   redirectTo = "/login",
+  everywhere = false,
 }: {
   className?: string;
   /** The label. Defaults to "Sign out"; the invitation page offers the same
@@ -38,12 +58,43 @@ export function SignOutButton({
    * Returning to the invitation re-enters the flow that mints a fresh one.
    */
   redirectTo?: string;
+  /**
+   * Sign out of EVERY device, not only this browser: the API revokes every
+   * live session of this person (`?everywhere=1` on the route). Settings ›
+   * General offers it; the header's plain sign-out never does.
+   */
+  everywhere?: boolean;
 }) {
   const router = useRouter();
+  // `pending` disables the button while its request is in flight: a second
+  // click would present the session the first one just ended, and its answer
+  // ("already signed out") would land last and be wrong.
+  const [status, setStatus] = useState<"idle" | "pending" | "failed">("idle");
 
   async function signOut() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.push(redirectTo);
+    setStatus("pending");
+    let response: Response | null = null;
+    try {
+      response = await fetch(
+        everywhere ? "/api/auth/logout?everywhere=1" : "/api/auth/logout",
+        { method: "POST" },
+      );
+    } catch {
+      // Offline, or the request was cut off: nothing was signed out.
+    }
+    const outcome = signOutOutcome(response);
+    // Stay put and say so: the session is still live, so landing on /login
+    // would read as a sign-out that did not happen.
+    if (outcome === "failed") {
+      setStatus("failed");
+      return;
+    }
+    // A notice says what did not happen server-side; it outranks `redirectTo`.
+    router.push(
+      outcome === "done"
+        ? redirectTo
+        : `/login?signout=${encodeURIComponent(outcome.notice)}`,
+    );
     // Needed when `redirectTo` IS the current route, which is the invitation
     // page's case: a push to the URL already showing renders from the router
     // cache and would re-display the signed-in view of a session that no
@@ -52,8 +103,15 @@ export function SignOutButton({
   }
 
   return (
-    <button type="button" onClick={signOut} className={className}>
-      {children}
+    <button
+      type="button"
+      onClick={signOut}
+      className={className}
+      disabled={status === "pending"}
+      aria-busy={status === "pending"}
+      aria-live="polite"
+    >
+      {status === "failed" ? SIGNOUT_FAILED : children}
     </button>
   );
 }

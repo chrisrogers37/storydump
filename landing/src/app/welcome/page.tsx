@@ -6,10 +6,14 @@ import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-for
 import { SignOutButton } from "@/components/auth/sign-out-button";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { INVITE_COOKIE } from "@/lib/session";
-import { siteConfig } from "@/config/site";
+import { noindexMetadata } from "@/lib/seo";
+import { Card } from "@/components/ui/card";
+import { PageHeader } from "@/design/page-header";
+import { Screen } from "@/design/screen";
 
 export const metadata = {
-  title: `Welcome — ${siteConfig.name}`,
+  title: "Welcome",
+  ...noindexMetadata,
 };
 
 /**
@@ -45,15 +49,13 @@ export default async function WelcomePage() {
     // deploy in progress, most often). Sending someone to /login here is the
     // bounce that looked like a broken sign-in on 2026-09-04.
     return (
-      <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4 py-16">
-        <div className="w-full max-w-md">
-          <RouterUnavailable
-            what="Your account"
-            detail="Storydump is restarting or briefly unreachable — nothing was lost. Try again in a moment."
-            retryHref="/welcome"
-          />
-        </div>
-      </div>
+      <Screen width="md">
+        <RouterUnavailable
+          what="Your account"
+          detail="Storydump is restarting or briefly unreachable — nothing was lost. Try again in a moment."
+          retryHref="/welcome"
+        />
+      </Screen>
     );
   }
   const session = entry.session;
@@ -74,35 +76,28 @@ export default async function WelcomePage() {
   const name = session.displayName?.trim();
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4 py-16">
-      <div className="w-full max-w-md space-y-8">
-        <div className="space-y-3">
-          <h1 className="text-3xl font-bold tracking-tight">
-            {name ? `Welcome, ${name}.` : "Welcome."}
-          </h1>
-          <p className="text-muted-foreground">
-            Storydump posts your Instagram Stories on a schedule, from a media
-            library you control. Start by naming a workspace — one brand, one
-            account, one schedule.
+    <Screen width="md" className="space-y-8">
+      <PageHeader
+        size="lg"
+        title={name ? `Welcome, ${name}.` : "Welcome."}
+        description="Storydump posts your Instagram Stories on a schedule, from a media library you control. Start by naming a workspace — one brand, one account, one schedule."
+      />
+
+      {workspaces.ok ? (
+        <>
+          <Card className="p-6">
+            <CreateWorkspaceForm autoFocus />
+          </Card>
+          <p className="text-xs text-muted-foreground">
+            You can rename it later, and add Instagram, Drive and Telegram
+            once it exists.
           </p>
-        </div>
+        </>
+      ) : (
+        <RouterUnavailable what="Creating a workspace" />
+      )}
 
-        {workspaces.ok ? (
-          <>
-            <div className="rounded-lg border bg-card p-6 shadow-sm">
-              <CreateWorkspaceForm autoFocus />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              You can rename it later, and add Instagram, Drive and Telegram
-              once it exists.
-            </p>
-          </>
-        ) : (
-          <RouterUnavailable what="Creating a workspace" />
-        )}
-
-        <SignOutButton className="inline-block text-sm text-muted-foreground transition-colors hover:text-foreground" />
-      </div>
-    </div>
+      <SignOutButton className="inline-block text-sm text-muted-foreground transition-colors hover:text-foreground" />
+    </Screen>
   );
 }

@@ -144,6 +144,69 @@ class TestPlanSlotEndToEnd:
         assert minted == [("scheduled",)]
         _assert_no_stranded_lease(sync_conn)
 
+    async def test_a_mint_whose_runway_notice_reaches_nobody_still_succeeds(
+        self, lane_db, sync_conn
+    ):
+        """The runway notice never decides the slot (#1478), end to end at the
+        worker's default level. Minting the world's one free file leaves the
+        account no content, so the notice is owed, and the workspace has no
+        push binding to hear it. The mint is the job's work, so the job
+        succeeds and counts as processed, not undeliverable; the crossing is
+        latched with nobody told, and nothing is queued to any chat."""
+        from src.services.target.content_runway import NOTICE_EVENT
+
+        chain = seed_workspace_chain(sync_conn, "w1runway")
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+                " file_name, media_kind, provider_file_ref)"
+                " VALUES (%s, %s, 'hash-w1runway-free', 'g.jpg', 'image',"
+                " 'ref-w1runway-free')",
+                (chain["ws"], chain["src"]),
+            )
+            cur.execute(
+                "SELECT count(*) FROM channel_bindings WHERE workspace_id = %s",
+                (chain["ws"],),
+            )
+            assert cur.fetchone()[0] == 0, "precondition: nobody to tell"
+        sync_conn.commit()
+        slot = datetime.now(timezone.utc) + timedelta(hours=1)
+        job_id = _insert_job(
+            sync_conn,
+            kind="plan_slot",
+            workspace_id=chain["ws"],
+            serialization_key=f"acct:{chain['iga']}",
+            payload='{"v": 1, "ig_account_id": "%s", "slot_at": "%s"}'
+            % (chain["iga"], slot.isoformat()),
+        )
+
+        wl, claimed = await _run_once(lane_db)
+
+        assert claimed is True
+        assert (wl.processed, wl.undeliverable) == (1, 0)
+        assert _job_row(sync_conn, job_id)["state"] == "succeeded"
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT state FROM post_intents WHERE ig_account_id = %s"
+                " AND schedule_slot_at = %s",
+                (chain["iga"], slot),
+            )
+            assert cur.fetchall() == [("scheduled",)], "the slot minted"
+            cur.execute(
+                "SELECT detail->>'told' FROM audit_events"
+                " WHERE workspace_id = %s AND entity_kind = 'ig_account'"
+                "   AND entity_id = %s AND detail->>'event' = %s",
+                (chain["ws"], chain["iga"], NOTICE_EVENT),
+            )
+            assert cur.fetchall() == [("0",)], "the crossing is latched, told 0"
+            cur.execute(
+                "SELECT count(*) FROM channel_outbox WHERE workspace_id = %s",
+                (chain["ws"],),
+            )
+            assert cur.fetchone()[0] == 0, "nothing was queued to any chat"
+        _assert_no_stranded_lease(sync_conn)
+
 
 class TestParkingOnTheRealMachinery:
     async def test_an_executor_less_kind_is_rescheduled_alive_with_attempt_restored(
@@ -634,7 +697,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
 
 class TestTheBackpressureSignalOnRealRows:
     """Phase 3a step 6: the four statements behind the status line and
-    `/health/scheduling`, run against seeded rows — the unit test only
+    the operating details (`/api/v1/ops/health`), run against seeded rows — the unit test only
     proves the shape."""
 
     async def test_depth_age_pending_hold_and_oldest_wait_read_true(

@@ -5,10 +5,13 @@ import { listWorkspaces } from "@/lib/workspaces";
 import { WorkspaceList } from "@/components/workspace/workspace-list";
 import { CreateWorkspaceForm } from "@/components/workspace/create-workspace-form";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
-import { siteConfig } from "@/config/site";
+import { noindexMetadata } from "@/lib/seo";
+import { PageHeader } from "@/design/page-header";
+import { Screen } from "@/design/screen";
 
 export const metadata = {
-  title: `Workspaces — ${siteConfig.name}`,
+  title: "Workspaces",
+  ...noindexMetadata,
 };
 
 /**
@@ -34,9 +37,9 @@ export default async function WorkspacesPage() {
   if (entry.kind === "signed_out") redirect("/login");
   if (entry.kind === "unavailable") {
     return (
-      <Shell>
+      <Screen width="md" align="top">
         <RouterUnavailable what="Your account" detail="Storydump is restarting or briefly unreachable — nothing was lost. Try again in a moment." retryHref="/workspaces" />
-      </Shell>
+      </Screen>
     );
   }
   const session = entry.session;
@@ -45,22 +48,20 @@ export default async function WorkspacesPage() {
 
   if (!workspaces.ok) {
     return (
-      <Shell>
+      <Screen width="md" align="top">
         <RouterUnavailable what="Your workspaces" />
-      </Shell>
+      </Screen>
     );
   }
 
   if (workspaces.data.length === 0) redirect("/welcome");
 
   return (
-    <Shell>
-      <div className="space-y-2">
-        <h1 className="text-2xl font-bold tracking-tight">Workspaces</h1>
-        <p className="text-sm text-muted-foreground">
-          Each workspace has its own media, schedule and connected accounts.
-        </p>
-      </div>
+    <Screen width="md" align="top">
+      <PageHeader
+        title="Workspaces"
+        description="Each workspace has its own media, schedule and connected accounts."
+      />
 
       <WorkspaceList
         workspaces={workspaces.data}
@@ -81,14 +82,6 @@ export default async function WorkspacesPage() {
           <CreateWorkspaceForm />
         </div>
       </details>
-    </Shell>
-  );
-}
-
-function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex min-h-svh flex-col items-center bg-background px-4 py-16">
-      <div className="w-full max-w-md space-y-6">{children}</div>
-    </div>
+    </Screen>
   );
 }

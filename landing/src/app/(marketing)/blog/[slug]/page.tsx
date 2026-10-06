@@ -3,16 +3,25 @@ import { notFound } from "next/navigation"
 import Link from "next/link"
 import { ArrowLeft } from "lucide-react"
 import { posts, getPost } from "@/lib/blog"
-import { ogMeta } from "@/lib/og"
+import { noindexMetadata, pageMetadata } from "@/lib/seo"
+import { blogPosting, breadcrumbList } from "@/lib/json-ld"
+import { TrackedLink } from "@/components/analytics/tracked-link"
+import { JsonLd } from "@/components/seo/json-ld"
 import { AutomateInstagramStories } from "./_articles/automate-instagram-stories"
 import { GoogleDriveInstagramIntegration } from "./_articles/google-drive-instagram-integration"
 import { TelegramInstagramApproval } from "./_articles/telegram-instagram-approval-workflow"
+import { blogCta } from "./_articles/shared"
+import { buttonVariants } from "@/components/ui/button"
 
 const articleComponents: Record<string, React.ComponentType> = {
   "automate-instagram-stories": AutomateInstagramStories,
   "google-drive-instagram-integration": GoogleDriveInstagramIntegration,
   "telegram-instagram-approval-workflow": TelegramInstagramApproval,
 }
+
+// An unknown slug is a 404 at routing, served by app/not-found.tsx like any
+// other unmatched URL, rather than rendered and then refused.
+export const dynamicParams = false
 
 export function generateStaticParams() {
   return posts.map((post) => ({ slug: post.slug }))
@@ -27,15 +36,16 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { slug } = await params
   const post = getPost(slug)
-  if (!post) return {}
+  if (!post) return noindexMetadata
 
-  return {
-    title: post.title,
+  return pageMetadata({
+    title: post.seoTitle ?? post.title,
     description: post.description,
-    keywords: post.keywords,
-    alternates: { canonical: `/blog/${slug}` },
-    ...ogMeta(post.title, post.description),
-  }
+    path: `/blog/${slug}`,
+    type: "article",
+    publishedTime: post.date,
+    modifiedTime: post.updated ?? post.date,
+  })
 }
 
 export default async function BlogPost({ params }: { params: Params }) {
@@ -48,6 +58,14 @@ export default async function BlogPost({ params }: { params: Params }) {
 
   return (
     <article className="mx-auto max-w-3xl px-4 py-16">
+      <JsonLd data={blogPosting(post)} />
+      <JsonLd
+        data={breadcrumbList([
+          { name: "Home", path: "/" },
+          { name: "Blog", path: "/blog" },
+          { name: post.title, path: `/blog/${post.slug}` },
+        ])}
+      />
       <Link
         href="/blog"
         className="mb-8 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
@@ -67,7 +85,7 @@ export default async function BlogPost({ params }: { params: Params }) {
           <span aria-hidden="true">&middot;</span>
           <span>{post.readTime}</span>
         </div>
-        <h1 className="mt-4 text-4xl font-bold tracking-tight">
+        <h1 className="mt-4 page-title text-4xl text-ink md:text-5xl">
           {post.title}
         </h1>
         <p className="mt-4 text-lg text-muted-foreground leading-relaxed">
@@ -82,15 +100,17 @@ export default async function BlogPost({ params }: { params: Params }) {
       <footer className="mt-16 rounded-lg border bg-muted/50 p-8 text-center">
         <h2 className="text-xl font-semibold">Ready to automate your Stories?</h2>
         <p className="mt-2 text-muted-foreground">
-          Storydump connects Google Drive, Telegram, and the Instagram API into
-          one hands-off pipeline. Free during beta.
+          Storydump picks today&apos;s Story from your own photos and videos and
+          brings it to your team on time, in Telegram or on the web. One tap
+          posts it. Free during beta.
         </p>
-        <Link
+        <TrackedLink
           href="/#waitlist"
-          className="mt-4 inline-block rounded-md bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          track={blogCta}
+          className={buttonVariants({ size: "xl", className: "mt-4" })}
         >
-          Get Early Access
-        </Link>
+          Join the waitlist
+        </TrackedLink>
       </footer>
     </article>
   )

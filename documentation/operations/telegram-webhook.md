@@ -79,8 +79,8 @@ storydump webhook register --drop-pending   # CLAUDE.md's safety block: the owne
    exported the door is `NOT CHECKED`, and that counts as a failure.
 
 **Since 2026-09-09 the API registers the webhook itself at startup** (`src/api/app.py`
-`_register_webhook`, idempotent on every deploy; `/health` reports the result under `webhook` as a startup
-snapshot; on by default only in Railway's `production` environment — `RAILWAY_ENVIRONMENT_NAME` —
+`_register_webhook`, idempotent on every deploy; the operating details (`GET /api/v1/ops/health`, for
+`OPS_USER_IDS`) report the result under `webhook` as a startup snapshot; on by default only in Railway's `production` environment — `RAILWAY_ENVIRONMENT_NAME` —
 so a laptop or a preview holding the token never re-points production's webhook;
 `TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER=1` forces it on, `0` off). This tool remains for `status`,
 `deregister` and a manual `register`. `register` calls `setWebhook` with the door URL, the secret, the served update kinds — `message` and, since the 2026-09-09 tap (W4), `callback_query`: Telegram delivers ONLY what is asked for, so a registration without it drops every button tap silently — and `max_connections` from `TARGET_TELEGRAM_WEBHOOK_MAX_CONNECTIONS` (default 10, the ingress's connection budget; 1..100). **Re-run `register` after a deploy that changes the served kinds** (the W4 deploy is one); `status` prints `allowed_updates` so the omission is visible. The ingress serves
@@ -91,15 +91,21 @@ real taps would be lost. `deregister` deletes the webhook.
 
 ## What a tap does today
 
-`/start link-…` attaches the tapping Telegram account to the user who minted
-the link; `/start bind-…` binds the group it was opened in (see *Groups*).
+`/start link-…` links nothing by itself: in the opener's private chat the bot
+names the Storydump account the link belongs to (a masked email, `a•••@example.com`)
+with **Confirm** and **Cancel**, and only a Confirm by that same Telegram user,
+within the link's 15 minutes, attaches their account to the user who minted it
+(`identity_link.handle_link` / `handle_tap`); Cancel spends the link. `/start bind-…` binds the group it was opened in (see *Groups*).
 Those are the two lanes served: `build_router` registers `link-` and `bind-`
 only (`src/services/target/telegram_dispatch.py:283-285`; the module docstring says
 the same), so an `inv-` payload reaches no
 handler — an invitation is accepted on the web. **The bot answers a handled tap in the
 chat** (since #1239) and stays silent on a refusal. A bare `/start` in a group
 is treated as speech (see *Members*), never a greeting. The person sees the
-result on the site after a reload.
+result on the site after a reload. A `/start` whose sender is a stand-in
+(`sender_chat`, an automatic forward from a channel) or a bot reaches no
+handler, and a stand-in's message in a bound group makes nobody a member (see
+*Members*), not even the people it adds: they join when next seen speaking.
 
 ## Order of operations
 

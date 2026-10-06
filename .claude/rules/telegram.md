@@ -47,7 +47,10 @@ Served (`TelegramDispatcher.__call__`, `:332`): a `callback_query` (the tap);
 a group's migration notice — Telegram retired the group's chat id for a
 supergroup's, and the binding follows it (`chat_migration.follow`, #743);
 `/start <payload>` for the prefixes `build_router` registers (`:308`) — `link-`
-(link a Telegram identity) and `bind-` (a group joins a workspace); and a
+(link a Telegram identity: the `/start` only asks, naming the account by a
+masked email; the prompt's Confirm tap, `v1:linkok:<state>:<tg-user>` from
+`callback_tokens.link_token`, links — `identity_link.handle_tap` — and only for
+the Telegram user it was offered to) and `bind-` (a group joins a workspace); and a
 message in a bound group (the people it shows become workspace members through
 `fn_group_member_seen`). Chat-typed COMMANDS are not served (#854): such an
 update is the named outcome `not_a_start`, logged — not a silent drop, and not
@@ -128,6 +131,10 @@ and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
   too — the notice normally moves the binding first; this is the backstop for
   a send that reaches the old id before it has). It is a chat-level fact,
   never the credential's.
+- A dead credential (`CredentialDead`: Telegram's 401) fails the row outright
+  too, because every resend would meet the same answer until the token is
+  replaced (#1493). The binding stays — the chat is not gone — and the
+  transport is the loud surface: one log line, and `auth_failures` counting.
 - The transport (`src/channels/telegram_transport.py`) probes `getMe` at worker
   start: a dead token, or a token for a bot other than
   `TARGET_TELEGRAM_BOT_USERNAME`, parks `deliver_outbox` with the reason. The
@@ -143,7 +150,8 @@ Telegram delivers only the update kinds a registration asks for; the one
 spelling is `vocabulary.ALLOWED_UPDATES` (`message`, `callback_query`), with the
 variable names beside it (`vocabulary.py:384`-`:398`). The API registers itself
 at startup in Railway's production environment (`app.py:401`;
-`TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` overrides), and `/health` reports the
-registration and Telegram's live backlog. `storydump webhook status` checks the
+`TARGET_TELEGRAM_WEBHOOK_AUTOREGISTER` overrides), and the operating details
+(`/api/v1/ops/health`, for `OPS_USER_IDS`) report the registration and
+Telegram's live backlog. `storydump webhook status` checks the
 bot, the webhook and the door and changes nothing; `register` and `deregister`
 re-point the production bot and are in `CLAUDE.md`'s safety block.
