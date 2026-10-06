@@ -3,9 +3,10 @@ posting axis (#1090 F1, #1268) and the delivery axis (#1482).
 
 They were the only routes in the app defined inline inside `create_app`; every
 other route in the API lives in a module here and is included as a router, and
-now so do these. `storydump health` renders the two axes and `details` (the
-`OPS_USER_IDS`-only `/api/v1/ops/health`), and two fleet monitors poll the axes, so a
-field renamed here is a renderer and two pollers broken elsewhere.
+now so do these. `storydump health` renders the scheduling and posting axes and
+`details` (the `OPS_USER_IDS`-only `/api/v1/ops/health`), and each of the three axes
+has a fleet monitor polling it (`scripts/*_monitor.py`), so a field renamed here is
+a renderer or a poller broken elsewhere.
 
 `details` reads `app.state.*` — the engine, the sampled database role, the pool
 watch, the tap counters and the two webhook reports — rather than the factory's
@@ -52,9 +53,9 @@ VERSION = __version__
 COMMIT_VAR = "RAILWAY_GIT_COMMIT_SHA"
 _START_TIME = time.time()
 
-#: How long `/health/scheduling`, `/health/posting` and the operating details'
-#: queue read reuse their last answer. The first two are unauthenticated and
-#: each answer takes a connection from the API's
+#: How long `/health/scheduling`, `/health/posting`, `/health/delivery` and the
+#: operating details' queue read reuse their last answer. The first three are
+#: unauthenticated and each answer takes a connection from the API's
 #: shared pool, so without this anyone could drain the pool the webhook needs
 #: by polling them. The fleet monitors poll far less often than this, and every
 #: number in the payloads is an age or a count that moves on a scale of minutes.
@@ -345,8 +346,12 @@ async def delivery_health_check(request: Request):
 
     async def read():
         # A direct connection, as on `/health/posting`: the read is estate-wide
-        # and has no tenant, and its cross-tenant reach is 101's doors.
-        async with engine.connect() as conn:
+        # and has no tenant, its cross-tenant reach is 101's doors, and its
+        # statements are capped the same way (`health_reads`).
+        async with health_reads.connect(engine) as conn:
+            # Exactly what `scripts/delivery_monitor.py` reads, and nothing
+            # else: its classifier needs all four keys, and the codes are the
+            # alert's text.
             return await delivery_health.outbox_failures(conn)
 
     return await request.app.state.health_cache.answer("delivery", read)

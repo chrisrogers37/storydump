@@ -774,6 +774,7 @@ class TestPostingHealthIsATHIRDSurface:
         assert TestClient(app).get("/health").status_code == 200
 
 
+@pytest.mark.usefixtures("stubbed_bound")
 class TestDeliveryHealthIsAFOURTHSurface:
     """#1482. Deliveries failing and posts not landing are independent causes,
     so the outbox's failures get their own surface rather than a key in either

@@ -1,6 +1,7 @@
-"""`/health/scheduling` and `/health/posting` reuse their last answer.
+"""`/health/scheduling`, `/health/posting` and `/health/delivery` reuse their
+last answer.
 
-Both are unauthenticated and each answer takes a connection from the API's
+All three are unauthenticated and each answer takes a connection from the API's
 shared pool, so a caller polling them could drain the pool the webhook needs.
 Each answer is kept for `HEALTH_CACHE_SECONDS`; these tests drive the window
 with an injected clock and count the connections the routes open.
@@ -20,7 +21,12 @@ from sqlalchemy.exc import DBAPIError
 
 from src.api.app import create_app
 from src.api.routes.health import HEALTH_CACHE_SECONDS, AnswerCache
-from src.services.target import health_reads, posting_health, scheduling_health
+from src.services.target import (
+    delivery_health,
+    health_reads,
+    posting_health,
+    scheduling_health,
+)
 
 from .conftest import FakeEngine
 
@@ -60,9 +66,9 @@ def clock(app):
 
 @pytest.fixture
 def seams(monkeypatch, stubbed_bound):
-    """Stub every seam of both routes, the statement cap's included; return
-    how often each route read."""
-    reads = {"scheduling": 0, "posting": 0}
+    """Stub every seam of the three routes, the statement cap's included;
+    return how often each route read."""
+    reads = {"scheduling": 0, "posting": 0, "delivery": 0}
 
     async def lag(executor):
         reads["scheduling"] += 1
@@ -81,11 +87,16 @@ def seams(monkeypatch, stubbed_bound):
     async def destinations(executor):
         return {"accounts_active": 0}
 
+    async def failures(executor):
+        reads["delivery"] += 1
+        return {"sent_in_window": reads["delivery"]}
+
     monkeypatch.setattr(scheduling_health, "scheduling_lag", lag)
     monkeypatch.setattr(scheduling_health, "worker_freshness", worker)
     monkeypatch.setattr(posting_health, "posting_freshness", freshness)
     monkeypatch.setattr(posting_health, "publish_attempts", attempts)
     monkeypatch.setattr(posting_health, "destinations", destinations)
+    monkeypatch.setattr(delivery_health, "outbox_failures", failures)
     return reads
 
 
@@ -98,6 +109,7 @@ def test_the_window_is_thirty_seconds():
     [
         ("/health/scheduling", "scheduling", "accounts_active"),
         ("/health/posting", "posting", "posted_ever"),
+        ("/health/delivery", "delivery", "sent_in_window"),
     ],
 )
 def test_a_second_hit_in_the_window_reuses_the_answer_and_opens_nothing(
@@ -250,7 +262,7 @@ def test_any_other_database_error_stays_a_500(app, engine, clock, seams, monkeyp
 def test_each_read_runs_under_the_statement_cap(
     client, engine, clock, seams, monkeypatch
 ):
-    """Both surfaces set the cap on the connection they read with, before
+    """Each surface sets the cap on the connection it reads with, before
     anything else runs on it."""
     capped = []
 
@@ -260,4 +272,5 @@ def test_each_read_runs_under_the_statement_cap(
     monkeypatch.setattr(health_reads, "bound", bound)
     assert client.get("/health/scheduling").status_code == 200
     assert client.get("/health/posting").status_code == 200
-    assert capped == [engine.session, engine.session]
+    assert client.get("/health/delivery").status_code == 200
+    assert capped == [engine.session] * 3
