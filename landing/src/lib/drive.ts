@@ -146,9 +146,9 @@ export function driveConnectControl(
  * What a person should know BEFORE the browser leaves for Google.
  *
  * Until the Drive scope is verified (#333), Google may put its own "hasn't
- * verified this app" page in front of the consent screen (an account added as
- * a test user skips it, so the copy says "if"), and the way on is Advanced,
- * then the link that page labels "Go to storydump (unsafe)": the consent
+ * verified this app" page in front of the consent screen (the page is
+ * Google's, worded and shown at its discretion, so the copy says "if"), and
+ * the way on is Advanced, then the link that page labels "Go to storydump (unsafe)": the consent
  * screen's app name, as `documentation/operations/google-oauth-verification.md`
  * records it. The page is Google's, so nothing on it says this is expected;
  * said here, it is a step rather than an alarm. Once verification lands the

@@ -1,8 +1,8 @@
 # Google OAuth Verification — Runbook
 
-**Status:** Pending submission (as of 2026-09-17, the last time this page was touched; the console is the source of truth). **Owner:** chrisrogers37. **Closes:** #333.
+**Status:** Pending submission (as of 2026-10-06, the last time this page was touched; the console is the source of truth). **Owner:** chrisrogers37. **Closes:** #333.
 
-The Google OAuth consent screen shows users a red **"Google hasn't verified this app"** warning when they connect Google Drive. They must click *Advanced → Go to storydump (unsafe)* to proceed. This blocks any tenant who isn't a developer of the project. This document walks through everything needed to clear it.
+The Google OAuth consent screen shows users a red **"Google hasn't verified this app"** warning when they connect Google Drive. They must click *Advanced → Go to storydump (unsafe)* to proceed. This blocks any tenant who isn't a developer of the project. This document walks through everything needed to clear it. Console paths use Google's current **Google Auth Platform** menu; an older console has the same fields under *APIs & Services → OAuth consent screen*.
 
 ## Why the warning fires
 
@@ -10,12 +10,16 @@ Google requires verification for **sensitive and restricted scopes** before they
 
 | Scope | File | Class |
 |---|---|---|
-| `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:90` (`SCOPE`) | **Restricted** |
-| `https://www.googleapis.com/auth/userinfo.email` (with `openid` and `userinfo.profile`) | `src/services/target/google_oidc.py:54` (`SCOPE = "openid email profile"`) — Google sign-in, not the Drive flow; the Drive leg dropped the older `userinfo.email` scope because nothing in the target schema stores the granting account's email (`google_drive_oauth.py:28`) | Standard |
+| `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:91` (`SCOPE`) | **Restricted** |
+| `https://www.googleapis.com/auth/userinfo.email` (with `openid` and `userinfo.profile`) | `src/services/target/google_oidc.py:55` (`SCOPE = "openid email profile"`) — Google sign-in, not the Drive flow; the Drive leg dropped the older `userinfo.email` scope because nothing in the target schema stores the granting account's email (`google_drive_oauth.py:28`) | Standard |
 
 The `drive.readonly` scope is what triggers the warning. Issue [#327](https://github.com/chrisrogers37/storydump/issues/327) audited the alternatives (`drive.file`, `drive.metadata.readonly`) and concluded that `drive.readonly` is the minimum viable scope — `drive.file` would break folder browsing (user media predates the app), and `drive.metadata.readonly` blocks file downloads (which we need to upload to Instagram). With scope-narrowing off the table, **verification submission is the only path to clear the warning** for non-developer users.
 
 **`drive.readonly` is a restricted scope, not a sensitive one.** Google's list of Drive scopes ([Choose Google Drive API scopes](https://developers.google.com/workspace/drive/api/guides/api-specific-auth), last updated 2026-09-03 UTC) classes it **Restricted**, beside `drive` and `drive.metadata.readonly`; `drive.file` is **Non-sensitive**. A restricted scope needs everything a sensitive one does plus a **security assessment**: the same page says an app that stores or transmits restricted-scope data on its servers must go through one, and storydump does both — each file's name, Drive id and content hash, which it stores, and the copy of the file a publish stages on Cloudinary (step 5a).
+
+## What the user cap counts
+
+Until verification clears, Google limits the app to **100 new users over its lifetime**, but only users who grant a sensitive or restricted scope count ([Unverified apps](https://support.google.com/cloud/answer/7454865)). Sign-in asks only for `openid`, `email` and `profile`, which Google exempts: no unverified-app page, no cap, no 7-day expiry ([OAuth app verification FAQ](https://support.google.com/cloud/answer/13463817)). So anyone admitted can sign in; the cap is spent by the people who **connect Google Drive**, and once it is reached the next Drive connect is refused. *Audience* shows how many of the 100 are used.
 
 ## Prerequisites checklist
 
@@ -25,8 +29,8 @@ Before opening the OAuth Brand / consent screen submission form:
 - [x] **Privacy Policy URL** — `https://storydump.app/privacy` (`landing/src/app/(marketing)/privacy/page.tsx`)
 - [x] **Terms of Service URL** — `https://storydump.app/terms` (`landing/src/app/(marketing)/terms/page.tsx`)
 - [ ] **App icon** — 120×120 PNG, no transparency: [`assets/app-icon/storydump-icon-120.png`](assets/app-icon/storydump-icon-120.png), drawn by `make-icon.py` beside it (#410). Made; still to upload.
-- [ ] **Authorized domain** — `storydump.app` verified via Google Search Console.
-- [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. With `OAUTH_REDIRECT_BASE_URL = https://api.storydump.app` (the API's public origin, `guides/cloud-deployment.md`) that is `https://api.storydump.app/auth/google-drive/callback` (`src/api/routes/auth.py:300`). Add it under **APIs & Services → Credentials → [OAuth 2.0 Client] → Authorized redirect URIs**. (`OAUTH_REDIRECT_BASE_URL` is documented in [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md).)
+- [x] **Authorized domain** — `storydump.app` verified via Google Search Console as a Domain property (2026-10-06). The Google TXT record at the registrar must stay.
+- [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. With `OAUTH_REDIRECT_BASE_URL = https://api.storydump.app` (the API's public origin, `guides/cloud-deployment.md`) that is `https://api.storydump.app/auth/google-drive/callback` (`src/api/routes/auth.py:327`). Add it under **Google Auth Platform → Clients → [the web client] → Authorized redirect URIs**, beside the sign-in callback `https://api.storydump.app/auth/google/callback`.
 - [ ] **Scope justification copy** — short text explaining why we need `drive.readonly` (see template below).
 - [ ] **Demo video** — screencast (≤ 5 min) demonstrating each requested scope in use. YouTube unlisted is fine.
 - [ ] **Security assessment** — `drive.readonly` is restricted, so verification ends with one (step 5a). Budget for the assessor's fee before submitting.
@@ -34,6 +38,8 @@ Before opening the OAuth Brand / consent screen submission form:
 ## Step-by-step submission
 
 ### 1. Verify domain ownership
+
+*Done 2026-10-06.* Kept for a re-verification.
 
 1. Open [Google Search Console](https://search.google.com/search-console).
 2. Add `storydump.app` as a property (Domain type, not URL prefix).
@@ -44,14 +50,14 @@ Before opening the OAuth Brand / consent screen submission form:
 ### 2. Promote app to Production (if not already)
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/) → pick the storydump project.
-2. **APIs & Services → OAuth consent screen.**
+2. **Google Auth Platform → Audience.**
 3. Confirm **Publishing status: In production**. If it says **Testing**, click **Publish App**. Confirm the warning ("Your app will be available to any user with a Google Account") and submit.
 
-> **Note:** Promoting to Production *without* verification keeps the unverified-app warning for non-test users. The next steps clear it.
+> **Note:** Promoting to Production *without* verification keeps the unverified-app warning for everyone who connects Drive. The next steps clear it. Staying in **Testing** is no alternative ([Operational alternative](#operational-alternative)).
 
-### 3. Fill OAuth consent screen fields
+### 3. Fill the Branding fields
 
-Still under **OAuth consent screen**:
+Under **Google Auth Platform → Branding**:
 
 | Field | Value |
 |---|---|
@@ -68,25 +74,25 @@ Save.
 
 ### 4. Justify the scopes
 
-Under **Scopes**, make sure these are listed:
+Under **Google Auth Platform → Data Access**, make sure exactly these are listed (remove any other):
 
 - `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile` (sign-in)
 - `.../auth/drive.readonly` (Drive)
 
-For each, click **Edit scope** → fill in the justification. **`drive.readonly` is the one Google will scrutinize.** Suggested copy:
+Google asks for a justification per sensitive or restricted scope, on Data Access or in the submission form. **`drive.readonly` is the one Google will scrutinize.** Suggested copy:
 
-> Storydump is an Instagram Story scheduling tool. Users connect their Google Drive once, then pick the folder(s) containing the media they want Storydump to post from a browser of that Drive. We use `files.list` to enumerate files recursively under each user-chosen folder (building a content catalog of filename, MIME type, thumbnail URL, and category from subfolder structure) and `files.get` with `alt=media` to read each file's bytes once per post for upload to Instagram. We never write to, modify, or delete files in the user's Drive — no `files.create`, `files.update`, or `files.delete`. We restrict access to the user-chosen folders via app-side filtering on the `parents` chain and never read files outside it. The `drive.file` scope was evaluated and rejected because it does not grant traversal of pre-existing user files, only files the app itself creates or the user opens via the Picker — incompatible with our "pick an existing folder" workflow, in which the folders (and the files later added to them) already exist and change without the app.
+> Storydump turns a user's Google Drive folder into daily Instagram Stories. A workspace admin connects Google Drive once, then picks one or more existing folders of photos and videos from a folder browser inside Storydump. We call `files.list` to browse folders and to list the files under each chosen folder, reading only each file's id, name, MIME type, size, modified time and checksum (the top-level subfolder a file sits in becomes its category), `files.get` for one file's size, type and name, and with `alt=media` to download its bytes when it is posted, so it can be uploaded to Instagram. To keep two chosen folders from overlapping, we also read the parent ids of the folders above a chosen one. We never write to, modify, or delete files in the user's Drive — no `files.create`, `files.update`, or `files.delete` — and we never download files outside the chosen folders. We store each file's name, Drive id and checksum to track what has been posted; the file itself is copied to our media host only for the publish, deleted once it posts or is cancelled, and otherwise removed by a time-limited cleanup sweep. `drive.file` does not work for us: it reaches only files our app created or the user picks one at a time, and our users' media already sits in folders that keep receiving new files. `drive.metadata.readonly` cannot download file contents, which posting requires.
 
 (Adjust wording to current implementation — the gist is: read-only, narrow folder scope, no writes, no exfiltration.)
 
 ### 5. Submit for verification
 
-Bottom of the consent screen → **Submit for verification**.
+**Google Auth Platform → Verification Center** → **Submit for verification** (it lists anything still missing).
 
 Google will ask for the demo video URL. Record one that shows:
 
 1. A user signing into Storydump.
-2. Reaching the **Google OAuth consent screen** — pause long enough to clearly show the requested scopes listed (reviewers commonly reject videos that skip past this; they want to see the scope list on-screen).
+2. Reaching the **Google OAuth consent screen** — pause long enough to clearly show the requested scopes listed, with the browser's address bar in view so the `client_id=` in the URL is readable (reviewers commonly reject videos that skip past this; they want to see the scope list and the client on-screen).
 3. Granting the Drive scope.
 4. Storydump listing files from the connected folder.
 5. A post going out (which reads file bytes from Drive).
@@ -104,13 +110,15 @@ Google says restricted-scope verification "can potentially take several weeks to
 
 While waiting:
 - The unverified-app warning continues to show. Users still have the "Go to storydump (unsafe)" workaround.
-- Google accounts added under **OAuth consent → Test users** (up to 100) **bypass the warning entirely** — they see a clean consent screen. Every other user sees the red "Google hasn't verified this app" page. Useful for letting beta testers in without the scary screen.
+- Each account that connects Drive for the first time counts toward the 100-user cap ([What the user cap counts](#what-the-user-cap-counts)), so beta invites are paced by the cap that is left.
+- Test users do **not** skip the warning ([Operational alternative](#operational-alternative)).
 
 ### 7. After approval
 
 - Consent screen shows the app logo and a verified badge (no red warning).
 - New tenants can complete Drive connect with a clean Google flow.
-- **No code changes needed.**
+- **One code change:** the Google Drive card's warning sentence, `driveConnectWarning` in `landing/src/lib/drive.ts`, becomes false. Remove it, its use in `landing/src/components/dashboard/settings/drive-card.tsx` (the `connectWarning` paragraph and the button's `aria-describedby`), and its pins in `landing/src/lib/drive.test.ts` and `landing/src/lib/condition-words-contract.test.ts`, then close #333.
+- Calendar the yearly security-assessment renewal (step 5a).
 
 ## If verification is rejected
 
@@ -122,10 +130,7 @@ Most common reasons:
 
 ## Operational alternative
 
-For internal/closed beta until verification clears:
-
-- Add each beta tester's Google account under **OAuth consent → Test users**. Up to 100 testers. They bypass the unverified warning entirely.
-- Stays valid even after re-submitting verification.
+For a closed beta until verification clears, stay in production; testers take the *Advanced → Go to storydump (unsafe)* way past Google's page. No list skips that page. Google's test-user list applies only while the app is in **Testing**: only listed accounts (up to 100) can grant at all, each still sees an unverified-app page (worded as "an app that's currently being tested", with a Continue link), and every grant expires after 7 days, so each Drive connection would need a reconnect weekly. In production the list is ignored.
 
 ## See also
 

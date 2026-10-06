@@ -103,7 +103,7 @@ describe("the workspace's Drive grant, said on screen", () => {
   });
   it("says what Google may show, the way past it, and what is asked for", () => {
     const warning = driveConnectWarning("none") ?? "";
-    // "If": an account added as a test user never sees Google's page.
+    // "If": the page is Google's, worded and shown at its discretion.
     expect(warning).toMatch(/^If Google says it hasn't verified this app/);
     expect(warning).toMatch(/Advanced/);
     expect(warning).toContain('"Go to storydump (unsafe)"');
