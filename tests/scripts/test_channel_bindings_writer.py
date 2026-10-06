@@ -27,6 +27,7 @@ from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    fetch_all,
     fetch_one,
     in_user_plane,
     replay_advertised_stream,
@@ -1014,6 +1015,26 @@ def _dispatch(world, payload: dict):
     )
 
 
+def _deliver(world, payload: dict):
+    """One update as the route takes it: admitted, dispatched and committed in
+    ONE transaction on a bare `svc_ingress` connection
+    (`webhooks.telegram_webhook`) — `_dispatch` plus the admission."""
+    from src.services.target.telegram_dispatch import TelegramDispatcher
+    from src.services.target.webhook_ingress import TELEGRAM_PRINCIPAL, admit
+
+    async def admit_then_dispatch(conn):
+        await admit(
+            conn,
+            channel="telegram",
+            external_ref=str(payload["update_id"]),
+            payload=payload,
+            principal=TELEGRAM_PRINCIPAL,
+        )
+        return await TelegramDispatcher()(conn, payload)
+
+    return asyncio.run(in_user_plane(world["ingress"], admit_then_dispatch))
+
+
 def _resolve(world, ref: str):
     """What every inbound update from *ref* resolves to — a tap, a member
     speaking: the one resolver, as `svc_ingress`."""
@@ -1157,6 +1178,89 @@ class TestAGroupThatBecameASupergroupKeepsItsWorkspace:
             (binding,),
         )
         assert row == ("system", None, "telegram")
+
+
+class TestARefusedJoinRollsBackAlone:
+    """A join the database refuses is the named outcome
+    `membership_sync_failed`, and the rest of its delivery stands: the
+    admission and every other join commit, listed before the refused person
+    or after them. A refused statement aborts the
+    whole transaction in Postgres, and the route's COMMIT then ends it as a
+    ROLLBACK without raising — so each join has to roll back alone. Driven
+    through the route's own transaction, with one person's membership row
+    refused by a CHECK this test adds and drops."""
+
+    def _person(self, world, name: str) -> tuple[str, int]:
+        """A fresh active user with a linked Telegram identity."""
+        user, speaker = str(uuid.uuid4()), 600_000_000 + uuid.uuid4().int % 10**8
+        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (user,))
+        _migrate(
+            world,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'telegram', %s, %s)",
+            (user, str(speaker), name),
+        )
+        return user, speaker
+
+    @pytest.mark.parametrize(
+        "refused_first", [False, True], ids=["refused-added", "refused-sender"]
+    )
+    def test_the_admission_and_the_other_join_still_commit(self, world, refused_first):
+        ref = _chat()
+        _bind(world, ref)
+        joiner, joiner_tg = self._person(world, "joiner")
+        refused, refused_tg = self._person(world, "refused")
+        # The sender is observed first, then the people the message added.
+        sender, added = (
+            (refused_tg, joiner_tg) if refused_first else (joiner_tg, refused_tg)
+        )
+        update_id = 800_000_000 + uuid.uuid4().int % 10**8
+        # The failing door: the database refuses the refused person's row, and
+        # `fn_group_member_seen` catches only a foreign-key violation, so the
+        # refusal reaches the dispatcher as the error it swallows. NOT VALID:
+        # no existing row is read.
+        _migrate(
+            world,
+            "ALTER TABLE workspace_members ADD CONSTRAINT ck_test_refuses_one_join"
+            " CHECK (user_id <> %s::uuid) NOT VALID",
+            (refused,),
+        )
+        try:
+            said = _deliver(
+                world,
+                _message(
+                    update_id,
+                    ref,
+                    "supergroup",
+                    sender=sender,
+                    new_chat_members=[
+                        {"id": added, "is_bot": False, "first_name": "added"}
+                    ],
+                ),
+            )
+        finally:
+            _migrate(
+                world,
+                "ALTER TABLE workspace_members DROP CONSTRAINT ck_test_refuses_one_join",
+            )
+
+        # Positive control: the refusal happened, and was swallowed.
+        assert said.outcome == "membership_sync_failed", said.outcome
+        assert fetch_one(
+            world["stream"],
+            "SELECT count(*) FROM command_dedup"
+            " WHERE channel = 'telegram' AND external_ref = %s",
+            (str(update_id),),
+        ) == (1,), "the delivery stays admitted"
+        members = fetch_all(
+            world["stream"],
+            "SELECT user_id::text AS user_id, role FROM workspace_members"
+            " WHERE workspace_id = %s AND user_id IN (%s, %s)",
+            (str(world["a"]["ws"]), joiner, refused),
+        )
+        assert members == [{"user_id": joiner, "role": "member"}], (
+            "the other join commits; the refused one rolls back alone"
+        )
 
 
 def _tg() -> int:
