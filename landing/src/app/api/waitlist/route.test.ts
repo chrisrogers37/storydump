@@ -75,6 +75,7 @@ describe("POST /api/waitlist", () => {
       expect(res.status).toBe(429)
       expect(await res.json()).toEqual({
         status: "error",
+        reason: "busy",
         message: "Lots of people are joining right now. Please try again in a minute.",
       })
       expect(console.error).toHaveBeenCalledWith("waitlist signup failed:", 429, error)

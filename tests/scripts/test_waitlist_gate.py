@@ -386,14 +386,16 @@ class TestTheAdminPing:
         # The signup's own ping, then one alert for the two refusals: the
         # second refusal falls inside the first's notice window.
         alert = (
-            "Waitlist signups reached the ceiling of 1 a minute:"
-            " 1 turned away as busy since the last notice."
+            "Waitlist signups hit the limit of 1 a minute that all visitors"
+            " share, and are being turned away as busy: 1 on this server so far."
         )
         assert pinged.sent == [
             ("5550001", "ping-ceiling-0@example.com", True),
             ("5550001", alert),
         ]
-        warned = [r.getMessage() for r in caplog.records if "ceiling" in r.getMessage()]
+        warned = [
+            r.getMessage() for r in caplog.records if "turned away" in r.getMessage()
+        ]
         assert warned == [f"waitlist: {alert}"]
         assert "198.51.100.90" not in caplog.text
         assert "ping-ceiling-1" not in caplog.text
@@ -680,8 +682,10 @@ class TestTheSiteSecret:
             {"email": "unset3@example.com"},
             headers=_from_site("198.51.100.1", secret="anything"),
         )
-        # The shared counter, though the call names a visitor.
+        # The shared counter, though the call names a visitor; without the
+        # secret it is the caller's own, so its 429 says no more.
         assert [r.status_code for r in responses] == [202, 202, 429]
+        assert "reason" not in responses[-1].json()
 
     @pytest.mark.parametrize("headers", [{}, _from_site("198.51.100.2", "wrong")])
     def test_set_a_call_without_it_is_refused_and_stores_nothing(
@@ -862,7 +866,9 @@ class TestTheSiteSecret:
             {"email": "novisitor2@example.com"},
             headers=_from_site("not-an-address"),
         )
+        # Every visitor without an address shares it, so it is full, not theirs.
         assert [r.status_code for r in responses] == [202, 429]
+        assert responses[-1].json()["reason"] == "full"
 
 
 class TestTheLogin:

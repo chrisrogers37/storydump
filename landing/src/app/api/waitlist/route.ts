@@ -14,6 +14,7 @@ const INVALID = { status: "error", message: "Please enter a valid email address.
 const FAILED = { status: "error", message: "Something went wrong. Please try again." }
 const BUSY = {
   status: "error",
+  reason: "busy",
   message: "Lots of people are joining right now. Please try again in a minute.",
 }
 /**
