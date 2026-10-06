@@ -95,10 +95,33 @@ describe("which actions an intent offers", () => {
     });
     expect(requestFor("resolve_posted", intent).body.resolution).toBe("posted");
     expect(requestFor("resolve_cancel", intent).body.resolution).toBe("cancel");
+    expect(requestFor("cancel", intent)).toEqual({
+      command: "cancel",
+      body: { intent_id: intent.id },
+    });
     for (const action of QUEUE_ACTIONS) {
       expect(ACTION_LABELS[action], action).toBeTruthy();
+      // Reschedule is keyed per submission and sent by its own client
+      // (`submitRescheduleItem`), so it has no intent-keyed request.
+      if (action === "reschedule") continue;
       expect(isQueueCommand(requestFor(action, intent).command), action).toBe(true);
     }
+  });
+
+  it("offers a planned story still in scheduled its two levers, and a cadence one none", () => {
+    expect(actionsFor("scheduled", true, false, null, "planned")).toEqual(["reschedule", "cancel"]);
+    expect(actionsFor("scheduled", false, false, null, "planned")).toEqual(["reschedule", "cancel"]);
+    expect(actionsFor("scheduled", true, false, null, "cadence")).toEqual([]);
+    // Once its cancel is asked for, nothing is left to press until the reaper closes it.
+    expect(actionsFor("scheduled", true, true, null, "planned")).toEqual([]);
+    // Past `scheduled` the port moves it no longer; its origin changes nothing.
+    expect(actionsFor("prompt_pending", true, false, null, "planned")).toEqual([]);
+    expect(actionsFor("awaiting_approval", true, false, null, "planned")).toEqual([
+      "approve",
+      "mark_posted",
+      "skip",
+      "reject",
+    ]);
   });
 
   it("knows the non-terminal states the page lists", () => {
@@ -120,18 +143,20 @@ describe("which actions an intent offers", () => {
 });
 
 describe("the command allowlist", () => {
-  it("admits exactly the five commands the queue fronts and nothing else the vocabulary knows", () => {
+  it("admits exactly the six commands the queue fronts and nothing else the vocabulary knows", () => {
     expect(QUEUE_COMMANDS).toEqual([
       "approve",
       "mark_posted",
       "skip",
       "reject",
       "resolve_review",
+      "cancel",
     ]);
     for (const c of QUEUE_COMMANDS) expect(isQueueCommand(c), c).toBe(true);
-    // Real vocabulary names that the queue must NOT forward: `cancel` has no
-    // audit row and `autopost_now` is unbuilt (501) — a follow-up each.
-    for (const c of ["cancel", "autopost_now", "settings_change", "", " approve", "APPROVE", undefined, 42]) {
+    // Real vocabulary names that the queue must NOT forward keyed on the
+    // intent: `autopost_now` is unbuilt (501), and `reschedule_item` is keyed
+    // per submission, sent by its own client.
+    for (const c of ["autopost_now", "reschedule_item", "settings_change", "", " approve", "APPROVE", undefined, 42]) {
       expect(isQueueCommand(c), String(c)).toBe(false);
     }
   });

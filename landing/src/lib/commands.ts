@@ -159,6 +159,9 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   mark_posted: intentCommand(),
   skip: intentCommand(),
   reject: intentCommand(),
+  // A planned story's Cancel (#1413). Keyed on the intent, like the CLI's
+  // `cancel:<intent_id>`: asking twice is one request.
+  cancel: intentCommand(),
   // The review card's resolutions (2026-09-12).
   resolve_review: resolveReviewCommand(),
 
@@ -355,6 +358,25 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
         ...(raw.override_locks === true ? { override_locks: true } : {}),
       },
     };
+  }),
+
+  /**
+   * Move a planned story to another wall time (#1413, phase 6): the Queue's
+   * Reschedule…. The same row moves; its account cannot change. `local_at`
+   * rides as typed, because the port reads it in the story's own zone.
+   *
+   * Keyed per submission, not on the intent: moving a story and then moving
+   * it back is two acts, and an intent key would replay the first as the
+   * second. The CLI mints a fresh key per run for the same reason.
+   */
+  reschedule_item: submissionCommand((raw) => {
+    if (!isUuid(raw.intent_id)) {
+      return { ok: false, error: "invalid_intent" };
+    }
+    if (typeof raw.local_at !== "string" || raw.local_at.trim() === "") {
+      return { ok: false, error: "invalid_local_at" };
+    }
+    return { ok: true, body: { intent_id: raw.intent_id, local_at: raw.local_at } };
   }),
 };
 

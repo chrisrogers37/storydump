@@ -52,7 +52,8 @@ vi.mock("react", async (importOriginal) => {
 });
 
 import { parseCommand } from "@/lib/commands";
-import { QUEUE_ACTIONS, type Intent, type QueueAction } from "@/lib/intents";
+import { submitRescheduleItem } from "@/lib/command-client";
+import { QUEUE_ACTIONS, type Intent, type IntentKeyedAction } from "@/lib/intents";
 import { QueueView } from "./queue-view";
 import { QueueList, sendQueueAction } from "./queue-list";
 
@@ -74,6 +75,11 @@ function intent(overrides: Partial<Intent> = {}): Intent {
     ig_permalink: null,
     entered_state_at: EPISODE,
     created_at: "2026-10-01T13:00:00+00:00",
+    origin: "cadence",
+    scheduled_by_user_id: null,
+    scheduled_by: null,
+    tz: "UTC",
+    miss_reason: null,
     file_name: "sample.jpg",
     media_kind: "image",
     thumbnail_url: null,
@@ -112,12 +118,13 @@ beforeEach(() => {
   hoisted.presets.length = 0;
 });
 
-/** What each action puts on the wire. Literal, on purpose. */
-const WIRE: Record<QueueAction, { command: string; body: Record<string, unknown> }> = {
+/** What each intent-keyed action puts on the wire. Literal, on purpose. */
+const WIRE: Record<IntentKeyedAction, { command: string; body: Record<string, unknown> }> = {
   approve: { command: "approve", body: { intent_id: INTENT_ID } },
   mark_posted: { command: "mark_posted", body: { intent_id: INTENT_ID } },
   skip: { command: "skip", body: { intent_id: INTENT_ID } },
   reject: { command: "reject", body: { intent_id: INTENT_ID } },
+  cancel: { command: "cancel", body: { intent_id: INTENT_ID } },
   retry: {
     command: "resolve_review",
     body: { intent_id: INTENT_ID, resolution: "retry", verdict: "not_posted", episode: EPISODE },
@@ -134,13 +141,14 @@ const WIRE: Record<QueueAction, { command: string; body: Record<string, unknown>
 
 describe("sendQueueAction: the wire", () => {
   it("names every action a row can carry", () => {
-    // A new action fails here until this table says what it sends.
-    expect(Object.keys(WIRE).sort()).toEqual([...QUEUE_ACTIONS].sort());
+    // A new action fails here until this table, or the Reschedule wire below
+    // (keyed per submission, not on the intent), says what it sends.
+    expect([...Object.keys(WIRE), "reschedule"].sort()).toEqual([...QUEUE_ACTIONS].sort());
   });
 
   it.each(Object.entries(WIRE))("%s", async (action, expected) => {
     stubFetch();
-    await sendQueueAction(WS, intent(), action as QueueAction);
+    await sendQueueAction(WS, intent(), action as IntentKeyedAction);
 
     expect(captured).toHaveLength(1);
     expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/${expected.command}`);
@@ -160,6 +168,28 @@ describe("sendQueueAction: the wire", () => {
       status: 409,
       body: { error: "illegal_transition" },
     });
+  });
+});
+
+describe("Reschedule…: the wire", () => {
+  it("sends the story and the time as typed, under a fresh submission", async () => {
+    stubFetch({ outcome: "executed" });
+    await submitRescheduleItem(WS, INTENT_ID, "2026-10-09T09:30");
+    await submitRescheduleItem(WS, INTENT_ID, "2026-10-09T09:30");
+
+    expect(captured.map((c) => c.url)).toEqual([
+      `/api/workspaces/${WS}/commands/reschedule_item`,
+      `/api/workspaces/${WS}/commands/reschedule_item`,
+    ]);
+    const [first, second] = captured.map((c) => JSON.parse(String(c.init.body)));
+    expect(first).toEqual({
+      intent_id: INTENT_ID,
+      local_at: "2026-10-09T09:30",
+      submission_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
+    // Moving a story twice is two acts: the same time twice is not a replay.
+    expect(second.submission_id).not.toBe(first.submission_id);
+    expect(parseCommand("reschedule_item", first).ok).toBe(true);
   });
 });
 
@@ -191,6 +221,29 @@ describe("QueueList: the wiring", () => {
       ),
     ).toEqual(["resolve_posted", "retry", "resolve_cancel"]);
     expect(list(true).props.actionsOf(intent({ state: "approved" }))).toEqual([]);
+    expect(
+      list(true).props.actionsOf(intent({ state: "scheduled", origin: "planned" })),
+    ).toEqual(["reschedule", "cancel"]);
+    expect(list(true).props.actionsOf(intent({ state: "scheduled" }))).toEqual([]);
+  });
+
+  it("moves a planned story, then re-reads the list", async () => {
+    stubFetch({ outcome: "executed" });
+    const answer = await list().props.onReschedule!(intent(), "2026-10-09T09:30");
+
+    expect(answer).toBeNull();
+    expect(hoisted.refresh).toHaveBeenCalledTimes(1);
+    expect(captured.map((c) => c.url)).toEqual([
+      `/api/workspaces/${WS}/commands/reschedule_item`,
+    ]);
+  });
+
+  it("answers a refused time with its sentence, for the dialog to show", async () => {
+    stubFetch({ error: "invalid_args", facts: { at_rule: "past" } }, 400);
+    const answer = await list().props.onReschedule!(intent(), "2020-01-01T09:00");
+
+    expect(answer).toBe("That time has already passed on the account's clock. Pick a later one.");
+    expect(hoisted.refresh).not.toHaveBeenCalled();
   });
 
   it("sends the tapped action for its workspace, then re-reads the list", async () => {

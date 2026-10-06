@@ -27,8 +27,8 @@ describe("the intent shape is a row, not a special case", () => {
     for (const name of Object.keys(COMMAND_SPECS)) {
       expect(isOfferedCommand(name), name).toBe(true);
     }
-    expect(isOfferedCommand("cancel")).toBe(false); // in the port's vocabulary, not offered here
-    expect(parseCommand("cancel", { intent_id: UUID })).toEqual({
+    expect(isOfferedCommand("autopost_now")).toBe(false); // in the port's vocabulary, not offered here
+    expect(parseCommand("autopost_now", { intent_id: UUID })).toEqual({
       ok: false,
       error: "unknown_command",
     });
@@ -54,6 +54,7 @@ describe("every offered command can produce an idempotency key", () => {
     mark_posted: { intent_id: UUID },
     skip: { intent_id: UUID },
     reject: { intent_id: UUID },
+    cancel: { intent_id: UUID },
     resolve_review: { intent_id: UUID, resolution: "retry", episode: "2026-09-12T10:00:00+00:00" },
     settings_change: { submission_id: UUID, settings: { posts_per_day: 3 } },
     sync_now: { submission_id: UUID, source_id: UUID2 },
@@ -77,6 +78,7 @@ describe("every offered command can produce an idempotency key", () => {
       media_item_id: UUID,
       local_at: "2026-10-03T14:30",
     },
+    reschedule_item: { submission_id: UUID, intent_id: UUID2, local_at: "2026-10-09T09:30" },
   };
 
   it("covers the whole table, so a new spec cannot skip this check", () => {
@@ -455,6 +457,55 @@ describe("schedule_item", () => {
     // the clocks skip and one past the horizon (`facts.at_rule`); a second copy
     // of those rules is one that can disagree.
     expect(spec.parse({ ...plan, local_at: "2000-01-01 00:00" }).ok).toBe(true);
+  });
+});
+
+describe("a planned story's two levers (#1413)", () => {
+  it("are both offered", () => {
+    expect(isOfferedCommand("cancel")).toBe(true);
+    expect(isOfferedCommand("reschedule_item")).toBe(true);
+  });
+
+  it("key a Cancel on the story, so asking twice is one request", () => {
+    expect(parseCommand("cancel", { intent_id: UUID })).toEqual({
+      ok: true,
+      body: { intent_id: UUID },
+      identity: UUID,
+    });
+  });
+
+  it("key a Reschedule on the submission, so moving it back is a second move", () => {
+    expect(
+      parseCommand("reschedule_item", {
+        submission_id: UUID,
+        intent_id: UUID2,
+        local_at: "2026-10-09T09:30",
+      }),
+    ).toEqual({
+      ok: true,
+      body: { intent_id: UUID2, local_at: "2026-10-09T09:30" },
+      identity: UUID,
+    });
+  });
+
+  it("refuse a Reschedule with no story or no time, by name", () => {
+    expect(
+      parseCommand("reschedule_item", { submission_id: UUID, intent_id: "x", local_at: "2026-10-09T09:30" }),
+    ).toEqual({ ok: false, error: "invalid_intent" });
+    expect(
+      parseCommand("reschedule_item", { submission_id: UUID, intent_id: UUID2, local_at: " " }),
+    ).toEqual({ ok: false, error: "invalid_local_at" });
+  });
+
+  it("leave the time rules to the port, which owns them", () => {
+    // A past time is the port's to refuse by its rule (`at_rule: past`).
+    expect(
+      parseCommand("reschedule_item", {
+        submission_id: UUID,
+        intent_id: UUID2,
+        local_at: "2001-01-01 00:00",
+      }).ok,
+    ).toBe(true);
   });
 });
 

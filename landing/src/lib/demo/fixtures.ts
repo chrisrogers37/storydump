@@ -183,6 +183,12 @@ function story(
     ig_permalink: null,
     entered_state_at: new Date(entered).toISOString(),
     created_at: new Date(slot - DAY).toISOString(),
+    // The sample's stories are its slot plan's; none was planned by a person.
+    origin: "cadence",
+    scheduled_by_user_id: null,
+    scheduled_by: null,
+    tz: SAMPLE_TZ,
+    miss_reason: null,
     file_name: input.file,
     media_kind: input.video ? "video" : "image",
     thumbnail_url: null,

@@ -16,6 +16,11 @@ function story(file: string, state: IntentState): Intent {
     ig_permalink: null,
     entered_state_at: "2026-10-14T18:00:00.000Z",
     created_at: "2026-10-13T14:00:00.000Z",
+    origin: "cadence",
+    scheduled_by_user_id: null,
+    scheduled_by: null,
+    tz: "UTC",
+    miss_reason: null,
     file_name: file,
     media_kind: "image",
     thumbnail_url: null,
@@ -56,6 +61,7 @@ describe("the sample's calendar lanes", () => {
         media_name: "approved.jpg",
         category: "Memes",
         status: "approved",
+        planned: false,
       },
     ]);
   });

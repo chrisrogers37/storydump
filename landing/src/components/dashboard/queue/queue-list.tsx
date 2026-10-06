@@ -3,14 +3,18 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { callBff, postJson, type BffResult } from "@/lib/bff";
-import { commandPath } from "@/lib/command-client";
+import {
+  commandPath,
+  rescheduleRefusalCopy,
+  submitRescheduleItem,
+} from "@/lib/command-client";
 import { QueueView } from "@/components/dashboard/queue/queue-view";
 import {
   actionsFor,
   refusalCopy,
   requestFor,
   type Intent,
-  type QueueAction,
+  type IntentKeyedAction,
 } from "@/lib/intents";
 
 /**
@@ -36,12 +40,13 @@ import {
  * unchanged would turn a double tap into an error banner. Sharing the path
  * spelling and the wire shape is the part that was pure duplication; the
  * replay rule is a real difference. Folding the two is a follow-up with its
- * own decision, not a cleanup.
+ * own decision, not a cleanup. Reschedule… is the exception that proves it:
+ * keyed per submission, it goes through `submitCommand` (`reschedule` below).
  */
 export function sendQueueAction(
   workspaceId: string,
   intent: Intent,
-  action: QueueAction,
+  action: IntentKeyedAction,
 ): Promise<BffResult> {
   const { command, body } = requestFor(action, intent);
   return callBff(commandPath(workspaceId, command), postJson(body));
@@ -67,7 +72,7 @@ export function QueueList({
   const [pending, setPending] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
 
-  async function run(intent: Intent, action: QueueAction) {
+  async function run(intent: Intent, action: IntentKeyedAction) {
     setPending(intent.id);
     setNotice(null);
 
@@ -91,6 +96,28 @@ export function QueueList({
     }
   }
 
+  /**
+   * Reschedule… moves a planned story. Its answer goes back to the dialog,
+   * which shows a refusal in place; as for a tap, a refusal about the ROW
+   * (already moved on, no longer here) also re-reads the list.
+   */
+  async function reschedule(intent: Intent, localAt: string): Promise<string | null> {
+    setPending(intent.id);
+    setNotice(null);
+
+    try {
+      const result = await submitRescheduleItem(workspaceId, intent.id, localAt);
+      if (result.ok) {
+        router.refresh();
+        return null;
+      }
+      if (result.status === 409 || result.status === 404) router.refresh();
+      return rescheduleRefusalCopy(result.error, result.status, result.facts);
+    } finally {
+      setPending(null);
+    }
+  }
+
   return (
     <QueueView
       intents={intents}
@@ -103,6 +130,7 @@ export function QueueList({
           apiPublishingEnabled,
           intent.cancel_requested,
           intent.publish_step,
+          intent.origin,
         )
       }
       noteFor={(intent) =>
@@ -111,6 +139,7 @@ export function QueueList({
           : null
       }
       onAction={(intent, action) => void run(intent, action)}
+      onReschedule={reschedule}
     />
   );
 }

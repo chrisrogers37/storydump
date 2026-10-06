@@ -9,13 +9,16 @@ import { notAuthenticatedCopy } from "./refusal-copy";
  * DOM: a wrong answer here is a button that answers 409, or no button on the
  * one state a person can act on.
  *
- * WHY THESE FOUR COMMANDS AND NOT THE VOCABULARY. The matrix admits a human
- * lever from `awaiting_approval` only: Approve (`approve`, and only where the
- * workspace can publish by API — otherwise the port refuses `manual_mode`),
- * Posted myself (`mark_posted`, the manual-mode path), Skip and Reject.
- * `cancel` sets an overlay flag the worker honours (its audit row names the
- * person), and `autopost_now` is unbuilt (501); each is a follow-up with its
- * own semantics, not a missing entry in this list.
+ * WHY THESE COMMANDS AND NOT THE VOCABULARY. The matrix admits a human lever
+ * from `awaiting_approval`: Approve (`approve`, and only where the workspace
+ * can publish by API — otherwise the port refuses `manual_mode`), Posted
+ * myself (`mark_posted`, the manual-mode path), Skip and Reject. A planned
+ * story still in `scheduled` gets two more (#1413): Reschedule
+ * (`reschedule_item`, which moves the same row) and Cancel (`cancel`, which
+ * sets an overlay flag the worker honours, so the row reads Cancelling until
+ * the reaper closes it). A cadence story in `scheduled` stays read-only: the
+ * #1413 plan offers both levers on planned stories only. `autopost_now` is
+ * unbuilt (501), a follow-up with its own semantics, not a missing entry here.
  */
 
 /** The states the queue lists: everything the reaper or worker has not yet closed. */
@@ -69,6 +72,19 @@ export type Intent = {
   ig_permalink: string | null;
   entered_state_at: string;
   created_at: string;
+  /**
+   * `planned`: a story a person scheduled for a chosen time (#1413).
+   * `cadence`: the slot plan's own. Fixed when the row is born.
+   */
+  origin: "cadence" | "planned";
+  /** Who planned it. NULL on a cadence row, and once that person is deleted. */
+  scheduled_by_user_id: string | null;
+  /** That person's display name, never an email. NULL exactly when the id is. */
+  scheduled_by: string | null;
+  /** The zone the story's time is read in: its account's, else the workspace's. */
+  tz: string;
+  /** Why the story missed its slot, when it did. */
+  miss_reason: string | null;
   file_name: string;
   media_kind: string;
   thumbnail_url: string | null;
@@ -82,11 +98,25 @@ export type Intent = {
 export type IntentsResponse = { intents: Intent[]; limit: number };
 
 /**
- * The intent-keyed commands the web adapter offers — the four the queue
- * renders a button and a refusal sentence for. `cancel` takes the same
- * `{intent_id}` shape but is not offered here (decision 3 on #1033: an
- * overlay flag the worker honours — its own follow-up). The
- * port re-validates the name, the role floor and the transition; this list
+ * The Queue's Planned view: `?origin=planned`, which the page forwards to the
+ * API's own `origin` filter. Filtering on the server keeps it exact past the
+ * page limit, where a filter over the rows already loaded would miss some.
+ */
+export const QUEUE_HREF = "/dashboard/queue";
+export const PLANNED_QUEUE_HREF = `${QUEUE_HREF}?origin=planned`;
+
+/** The origin the Queue filters to, from its `origin` search param; anything else is every row. */
+export function queueOriginFilter(param: unknown): "planned" | null {
+  return param === "planned" ? "planned" : null;
+}
+
+/**
+ * The intent-keyed commands the web adapter offers — the ones the queue
+ * renders a button and a refusal sentence for, keyed on the intent so a
+ * double-click replays. `cancel` joined them for planned stories (#1413; it
+ * was decision 3 on #1033's follow-up). `reschedule_item` is not here: moving
+ * a story twice is two acts, so it is keyed per submission (`@/lib/commands`).
+ * The port re-validates the name, the role floor and the transition; this list
  * decides what the web tier fronts, nothing more.
  */
 export const QUEUE_COMMANDS = [
@@ -95,15 +125,17 @@ export const QUEUE_COMMANDS = [
   "skip",
   "reject",
   "resolve_review",
+  "cancel",
 ] as const;
 
 export type QueueCommand = (typeof QUEUE_COMMANDS)[number];
 
 /**
- * The buttons a row can carry: the approval card's four, and the review
- * card's three (2026-09-12 — a `review_required` intent is the workspace's
- * to resolve). An action is a button; a command is what the port runs —
- * the three review actions are ONE command with the resolution in the body.
+ * The buttons a row can carry: the approval card's four, the review card's
+ * three (2026-09-12 — a `review_required` intent is the workspace's to
+ * resolve), and a planned story's two (#1413). An action is a button; a
+ * command is what the port runs — the three review actions are ONE command
+ * with the resolution in the body, and Reschedule sends `reschedule_item`.
  */
 export const QUEUE_ACTIONS = [
   "approve",
@@ -113,9 +145,14 @@ export const QUEUE_ACTIONS = [
   "retry",
   "resolve_posted",
   "resolve_cancel",
+  "reschedule",
+  "cancel",
 ] as const;
 
 export type QueueAction = (typeof QUEUE_ACTIONS)[number];
+
+/** The actions keyed on the intent; Reschedule is keyed per submission instead. */
+export type IntentKeyedAction = Exclude<QueueAction, "reschedule">;
 
 export const ACTION_LABELS: Record<QueueAction, string> = {
   approve: "Approve",
@@ -125,6 +162,8 @@ export const ACTION_LABELS: Record<QueueAction, string> = {
   retry: "Post again",
   resolve_posted: "It posted",
   resolve_cancel: "Give up",
+  reschedule: "Reschedule…",
+  cancel: "Cancel",
 };
 
 type ReviewAction = "retry" | "resolve_posted" | "resolve_cancel";
@@ -151,7 +190,7 @@ export type ActionRequest = { command: QueueCommand; body: Record<string, unknow
  * publish answer was lost — a plain retry could post the story twice.
  */
 export function requestFor(
-  action: QueueAction,
+  action: IntentKeyedAction,
   intent: Pick<Intent, "id" | "entered_state_at">,
 ): ActionRequest {
   if (isReviewAction(action)) {
@@ -181,13 +220,16 @@ export function isQueueCommand(value: unknown): value is QueueCommand {
  * only once a publish call was made (`publish_step`, on the row — before that
  * rung the port can only refuse it); Post again needs the API to publish;
  * Give up is offered even while a cancel is pending, because it IS the
- * cancel. Every other state renders read-only with its badge.
+ * cancel. A planned story still in `scheduled` can be rescheduled or
+ * cancelled (#1413) — the port allows the move nowhere else. Every other
+ * state renders read-only with its badge.
  */
 export function actionsFor(
   state: IntentState,
   apiPublishingEnabled: boolean,
   cancelRequested = false,
   publishStep: string | null = null,
+  origin: Intent["origin"] = "cadence",
 ): QueueAction[] {
   if (state === "review_required") {
     if (cancelRequested) return ["resolve_cancel"];
@@ -200,6 +242,9 @@ export function actionsFor(
   // A card whose cancellation is requested (by `cancel`, or because its
   // destination was removed) has no lever until the worker finishes it.
   if (cancelRequested) return [];
+  if (state === "scheduled") {
+    return origin === "planned" ? ["reschedule", "cancel"] : [];
+  }
   if (state !== "awaiting_approval") return [];
   return apiPublishingEnabled
     ? ["approve", "mark_posted", "skip", "reject"]

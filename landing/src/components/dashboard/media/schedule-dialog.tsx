@@ -37,7 +37,8 @@ import {
   destinationName,
   destinationStateBadge,
 } from "@/lib/destination";
-import { formatSlot } from "@/lib/intents";
+import { PLANNED_QUEUE_HREF, formatSlot } from "@/lib/intents";
+import { describedBy } from "@/lib/utils";
 import type { Destination } from "@/lib/types";
 
 /**
@@ -160,12 +161,6 @@ export function schedulePlan(
   return from === "confirm" ? { ...pick, overrideLocks: true } : { ...pick };
 }
 
-/** An `aria-describedby` from the ids of the sentences on screen, or none. */
-function describedBy(...ids: (string | false | null)[]): string | undefined {
-  const present = ids.filter((id): id is string => Boolean(id));
-  return present.length > 0 ? present.join(" ") : undefined;
-}
-
 /** The accounts and the workspace's zone, or null when they could not be read. */
 export type ScheduleTargets = { accounts: Destination[]; workspaceTz: string | null } | null;
 
@@ -277,7 +272,11 @@ export function ScheduleDialog({
           <p id={`${ids}-result`} className="text-sm">
             {phase.outcome.when
               ? `Planned for ${phase.accountName}. Approval is asked on ${phase.outcome.when}.`
-              : `Planned for ${phase.accountName}.`}
+              : `Planned for ${phase.accountName}.`}{" "}
+            <Link href={PLANNED_QUEUE_HREF} className="underline">
+              See it in the Queue
+            </Link>
+            .
           </p>
           {phase.outcome.noChat && (
             <p id={`${ids}-no-chat`} className="text-sm text-muted-foreground">

@@ -45,8 +45,10 @@ export default async function CalendarPage() {
         `intents?state=${QUEUE_STATES}&limit=${CALENDAR_QUEUE_LIMIT}`,
         workspaceId,
       ),
+      // The predicted strip is the slot plan's: a story a person planned is
+      // not a prediction, and is drawn in the queue lane as planned (#1413).
       workspaceFetch<IntentsResponse>(
-        `intents?state=${SCHEDULED_STATES}&limit=${CALENDAR_SCHEDULE_LIMIT}`,
+        `intents?state=${SCHEDULED_STATES}&origin=cadence&limit=${CALENDAR_SCHEDULE_LIMIT}`,
         workspaceId,
       ),
       workspaceFetch<StatsResponse>("stats", workspaceId),
@@ -78,7 +80,11 @@ export default async function CalendarPage() {
   // here is not hiding it — it has no date to be drawn at.
   const queueItems = (queueResult.data.intents ?? [])
     .filter((i) => i.schedule_slot_at !== null)
-    .map((i) => ({ ...laneItem(i), scheduled_for: i.schedule_slot_at as string }));
+    .map((i) => ({
+      ...laneItem(i),
+      scheduled_for: i.schedule_slot_at as string,
+      planned: i.origin === "planned",
+    }));
 
   const scheduleSlots = (scheduleResult.data.intents ?? [])
     .filter((i) => i.schedule_slot_at !== null)
