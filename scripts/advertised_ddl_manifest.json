@@ -398,7 +398,7 @@
       "ordinal": 38
     },
     {
-      "sha256": "0a9c8e5783f817633e0cdcf84ee5955846eb23128d6a2d81128e25d7ddda1014",
+      "sha256": "1f491a0e0ab71749e257a84f1c07a183ee44376ae2afb559599fcd43ad7685a4",
       "class": "normative",
       "label": "§46 every SECURITY DEFINER function pins search_path = pg_catalog, public, pg_temp, with pg_temp last (103) — one ALTER FUNCTION ... SET search_path per door, the 29 definer functions in public written out by signature, no body restated",
       "doc": "07-security-model.md",

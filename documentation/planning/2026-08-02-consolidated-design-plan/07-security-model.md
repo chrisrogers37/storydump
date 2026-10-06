@@ -3363,7 +3363,7 @@ come from a schema it chose. The doors already pin `search_path`. This section m
 `pg_catalog, public, pg_temp` everywhere: pg_temp named, and LAST, as PostgreSQL's documentation asks
 of definer functions ("Writing SECURITY DEFINER Functions Safely").
 
-**The form.** One `ALTER FUNCTION ... SET search_path` per door, written out: the 29 SECURITY DEFINER
+**The form.** One `ALTER FUNCTION ... SET search_path` per door, written out: the 33 SECURITY DEFINER
 functions in `public`, by signature. No body is restated, so a door that a later file re-creates
 keeps its own CREATE's path, and the order in which files merge does not matter.
 
@@ -3388,7 +3388,11 @@ ALTER FUNCTION fn_health_oldest_tenant_wait() SET search_path = pg_catalog, publ
 
 ALTER FUNCTION fn_health_oldest_tenant_wait_named() SET search_path = pg_catalog, public, pg_temp;
 
+ALTER FUNCTION fn_health_outbox_failures(integer) SET search_path = pg_catalog, public, pg_temp;
+
 ALTER FUNCTION fn_health_outbox_pending() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_outbox_sent(integer) SET search_path = pg_catalog, public, pg_temp;
 
 ALTER FUNCTION fn_health_posting_freshness() SET search_path = pg_catalog, public, pg_temp;
 
@@ -3397,6 +3401,8 @@ ALTER FUNCTION fn_health_publish_attempts() SET search_path = pg_catalog, public
 ALTER FUNCTION fn_health_ready_lanes() SET search_path = pg_catalog, public, pg_temp;
 
 ALTER FUNCTION fn_health_scheduling_lag() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_identity_unlink(uuid, text) SET search_path = pg_catalog, public, pg_temp;
 
 ALTER FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) SET search_path = pg_catalog, public, pg_temp;
 
@@ -3427,6 +3433,8 @@ ALTER FUNCTION fn_retention_batch(text, interval, integer) SET search_path = pg_
 ALTER FUNCTION fn_sender_sweep(text, integer, numeric, numeric, integer) SET search_path = pg_catalog, public, pg_temp;
 
 ALTER FUNCTION fn_settled_cards(text[], integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_signup_admitted(text) SET search_path = pg_catalog, public, pg_temp;
 
 ALTER FUNCTION fn_stranded_sources(numeric, integer) SET search_path = pg_catalog, public, pg_temp;
 ```
