@@ -18,7 +18,12 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.principal import COOKIE, session_delivery_gap
+from src.api.principal import (
+    COOKIE,
+    PREAUTH_LIMIT,
+    PREAUTH_SCOPE,
+    session_delivery_gap,
+)
 from src.api.routes import auth
 from src.config.settings import settings
 from src.services.target import (
@@ -54,7 +59,7 @@ def counter(monkeypatch):
     log = {"keys": [], "value": 1}
 
     async def increment(conn, *, scope, key, window_start, limit):
-        assert scope == auth.PREAUTH_SCOPE and limit == auth.PREAUTH_LIMIT
+        assert scope == PREAUTH_SCOPE and limit == PREAUTH_LIMIT
         log["keys"].append(key)
         return log["value"]
 
@@ -145,6 +150,23 @@ class TestSignin:
             follow_redirects=False,
         )
         assert counter["keys"] == ["203.0.113.9"]
+
+    def test_behind_railways_edge_the_counter_keys_on_each_visitors_64(
+        self, app, configured, counter, state_store
+    ):
+        """Behind Railway's edge (100.64.0.0/10) the key is the visitor, and
+        an IPv6 visitor's whole /64 is one key, so walking the addresses of
+        one subscriber's /64 is not a fresh limit per request."""
+        client = TestClient(app, client=("100.64.0.13", 4321))
+        for xff in ("192.0.2.50", "2001:db8:1:2::1", "2001:db8:1:2::ffff"):
+            client.get(
+                "/auth/google", headers={"X-Forwarded-For": xff}, follow_redirects=False
+            )
+        assert counter["keys"] == [
+            "192.0.2.50",
+            "2001:db8:1:2::/64",
+            "2001:db8:1:2::/64",
+        ]
 
 
 class TestCallback:
@@ -352,6 +374,41 @@ class TestSignout:
 
         monkeypatch.setattr(sessions, "revoke", revoke)
         assert client.post("/auth/signout").status_code == 200
+
+    def test_everywhere_revokes_every_session_of_the_presenting_user(
+        self, client, monkeypatch
+    ):
+        """`?everywhere=true` goes to `revoke_all_for_user` with the presented
+        hash, never to the one-row `revoke`; the cookie is cleared either way."""
+        seen = []
+
+        async def revoke(conn, *, token_hash):
+            raise AssertionError("everywhere must not revoke only this session")
+
+        async def revoke_all_for_user(conn, *, token_hash):
+            seen.append(token_hash)
+            return 3
+
+        monkeypatch.setattr(sessions, "revoke", revoke)
+        monkeypatch.setattr(sessions, "revoke_all_for_user", revoke_all_for_user)
+        resp = client.post(
+            "/auth/signout?everywhere=true",
+            headers={"Authorization": "Bearer opaque"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"signed_out": True, "revoked": 3}
+        assert seen == [hashlib.sha256(b"opaque").hexdigest()]
+        cookie = cookie_header(resp, COOKIE)
+        assert "Max-Age=0" in cookie or "expires=" in cookie.lower()
+
+    def test_everywhere_without_a_session_touches_nothing(self, client, monkeypatch):
+        async def revoke_all_for_user(conn, *, token_hash):
+            raise AssertionError("nothing to revoke")
+
+        monkeypatch.setattr(sessions, "revoke_all_for_user", revoke_all_for_user)
+        resp = client.post("/auth/signout?everywhere=true")
+        assert resp.status_code == 200
+        assert resp.json() == {"signed_out": True, "revoked": 0}
 
 
 class TestSessionDelivery:
@@ -920,9 +977,8 @@ class TestDriveCallback:
     def test_a_browser_without_a_session_is_refused_before_the_provider_is_called(
         self, client, configured, counter, drive_row, writes, monkeypatch
     ):
-        """The handed-off URL: someone else approves on Google's real screen.
-        Without the session check their Drive grant would land on the
-        minter's workspace. Refused before the code is spent."""
+        """The callback requires the state user's session; a return without
+        one is refused before the code is spent, and nothing is written."""
         called = []
 
         async def exchange_code(client_, **kw):

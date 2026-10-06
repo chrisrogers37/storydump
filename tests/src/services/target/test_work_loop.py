@@ -23,6 +23,7 @@ from src.models.target.machinery import Job
 from src.services.target import work_loop
 from src.services.target.jobs import JobFenced
 from src.services.target.work_loop import (
+    UNBUILT_KINDS,
     Parked,
     WorkerConfig,
     WorkerDeps,
@@ -54,6 +55,15 @@ def full_deps(**over):
     )
     base.update(over)
     return WorkerDeps(**base)
+
+
+def _reconcile_job():
+    return {"id": "j-rec", "kind": "reconcile_ambiguous", "workspace_id": None}
+
+
+async def _in_progress(*, intent_id, workspace_id):
+    """The reconciler's provider poll, answering a container still in flight."""
+    return "IN_PROGRESS"
 
 
 class TestEveryProviderFacingExecutorOwnsItsTransactions:
@@ -88,7 +98,12 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         # per-call client, the way ig_refresh does"
         "sync_media_source",  # deps.drive.list_changes
         "first_ingest_chunk",  # the same _run_sync, one page at a time
+        "reconcile_ambiguous",  # deps.poll, the provider's verdict on an
+        # ambiguous publish; each row commits alone (#1492)
     }
+
+    #: Marked for another reason: each of its batches commits on its own.
+    OWNS_ITS_BATCHES = {"retention_sweep"}
 
     def test_the_provider_facing_kinds_are_exactly_the_marked_ones(self):
         registry = build_registry(full_deps())
@@ -97,7 +112,7 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
             for kind, entry in registry.items()
             if getattr(entry, "owns_transactions", False)
         }
-        assert marked == self.PROVIDER_FACING, (
+        assert marked == self.PROVIDER_FACING | self.OWNS_ITS_BATCHES, (
             "an executor that reaches the egress floor must own its"
             " transactions, or the loop holds a pooled connection across the"
             " provider call — and arming the `_IN_TRANSACTION` tripwire would"
@@ -111,9 +126,9 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         its own HTTP)". Named here so the exclusion reads as a decision rather
         than an omission — it is the obvious candidate for someone to "fix".
 
-        `retention_sweep` and `reencrypt_credentials` are absent from the set
-        for a different reason: they are `UNBUILT_KINDS`, parked with no
-        executor at all, so there is nothing to reach a provider with.
+        `retention_sweep` is absent because it only deletes rows in the
+        database; `reencrypt_credentials` because it is `UNBUILT_KINDS`, parked
+        with no executor at all, so there is nothing to reach a provider with.
         """
         registry = build_registry(full_deps())
         assert "reap_transit_assets" in registry
@@ -156,6 +171,8 @@ class TestRegistryCoversTheSchema:
             # which `06` §1 already backstops with the FC-3.6 TTL sweep, so a
             # missing transit store must not park the whole workflow.
             "offboard_workspace",
+            # The `rate_counters` retention class only (05).
+            "retention_sweep",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -177,8 +194,10 @@ class TestRegistryCoversTheSchema:
             # supplies that seam like every other.
             "send_email",
             "offboard_workspace",  # #1090 H1
+            "retention_sweep",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
+        assert unbuilt == set(UNBUILT_KINDS)
         for kind in unbuilt:
             assert isinstance(registry[kind], Parked), f"{kind} should have no executor"
 
@@ -246,18 +265,13 @@ class TestReconcilerSweepBranchesOnItsReason:
     notification was ever produced.
     """
 
-    def _job(self):
-        return {"id": "j-rec", "kind": "reconcile_ambiguous", "workspace_id": None}
-
     async def _drive(self, monkeypatch, *, rows, deps):
         notified, reconciled = [], []
 
         async def fake_sweep(session, *, limit, notify_after_seconds):
             return rows
 
-        async def fake_notify(
-            session, *, intent_id, workspace_id, web_app_origin, retry_after_seconds
-        ):
+        async def fake_notify(session, *, intent_id, workspace_id, web_app_origin):
             notified.append((intent_id, web_app_origin))
             return 1
 
@@ -269,7 +283,7 @@ class TestReconcilerSweepBranchesOnItsReason:
         monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
         monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", fake_reconcile)
         registry = build_registry(deps)
-        await registry["reconcile_ambiguous"](_FakeSession(), self._job())
+        await registry["reconcile_ambiguous"](_FakeSession(), _reconcile_job())
         return notified, reconciled
 
     async def test_a_notify_row_notifies_and_is_never_polled(self, monkeypatch):
@@ -290,7 +304,7 @@ class TestReconcilerSweepBranchesOnItsReason:
         cannot tell "routes correctly" from "routes everything one way"."""
         rows = [{"intent_id": "i-2", "workspace_id": "ws-1", "reason": "ladder_due"}]
         notified, reconciled = await self._drive(
-            monkeypatch, rows=rows, deps=full_deps()
+            monkeypatch, rows=rows, deps=full_deps(poll=_in_progress)
         )
         assert reconciled == ["i-2"]
         assert notified == []
@@ -328,8 +342,8 @@ class TestReconcilerSweepBranchesOnItsReason:
         monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
         monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", fake_reconcile)
         session = _FakeSession(rows=[7])  # the evidence on the row: seven checks
-        registry = build_registry(full_deps())
-        await registry["reconcile_ambiguous"](session, self._job())
+        registry = build_registry(full_deps(poll=_in_progress))
+        await registry["reconcile_ambiguous"](session, _reconcile_job())
         assert seen == [7]
         sql = [s for s, _ in session.statements]
         claim = next(i for i, s in enumerate(sql) if "app.tenant_id" in s)
@@ -338,10 +352,9 @@ class TestReconcilerSweepBranchesOnItsReason:
             "the row's workspace is claimed before its ladder is counted"
         )
 
-    async def test_a_workspace_with_no_surface_makes_the_sweep_undeliverable(
-        self, monkeypatch
-    ):
-        """The executor must not report a delivery it could not make."""
+    async def _unheard(self, monkeypatch, session):
+        """One notify row whose workspace has nowhere to receive the notice,
+        swept on *session*: the beat's answer."""
         from src.services.target import outbox
 
         rows = [{"intent_id": "i-5", "workspace_id": "ws-1", "reason": "notify_window"}]
@@ -355,8 +368,33 @@ class TestReconcilerSweepBranchesOnItsReason:
         monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
         monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
         registry = build_registry(full_deps())
-        got = await registry["reconcile_ambiguous"](_FakeSession(), self._job())
-        assert got == outbox.UNDELIVERABLE
+        return await registry["reconcile_ambiguous"](session, _reconcile_job())
+
+    async def test_a_workspace_with_no_surface_makes_the_sweep_undeliverable(
+        self, monkeypatch
+    ):
+        """The executor must not report a delivery it could not make. The
+        attempt is recorded in the row's workspace, with the window the config
+        names."""
+        from src.services.target import outbox
+
+        session = _FakeSession(rows=[{"id": "i-5"}])  # the stamp landed: a fresh record
+        assert await self._unheard(monkeypatch, session) == outbox.UNDELIVERABLE
+        claim, stamp = session.statements
+        assert "app.tenant_id" in claim[0] and claim[1]["v0"] == "ws-1"
+        assert "notify_attempted_at" in stamp[0]
+        assert stamp[1] == {
+            "intent": "i-5",
+            "age": float(WorkerConfig().reconcile_notify_after_seconds),
+        }
+
+    async def test_inside_the_window_an_unheard_notice_is_a_clean_run(
+        self, monkeypatch
+    ):
+        """Bounded, not silenced: once recorded, the condition stands on the
+        ledger, and re-reporting it every 60 s would park a job per beat."""
+        session = _FakeSession()  # the stamp is inside the window: nothing recorded
+        assert await self._unheard(monkeypatch, session) is None
 
     async def test_the_sweep_keys_match_what_the_door_returns(self):
         """The `KeyError` that could not surface while the kind was parked.
@@ -371,6 +409,204 @@ class TestReconcilerSweepBranchesOnItsReason:
         src = inspect.getsource(work_loop.reconciler.sweep_due)
         for alias in ("AS intent_id", "AS workspace_id", "AS reason"):
             assert alias in src, f"sweep_due must alias {alias}"
+
+
+class TestReconcilerRowsFailAlone:
+    """#1492: one row of the `02` §6 sweep fails alone (the executor's
+    docstring has the why)."""
+
+    def _rows(self, n):
+        return [
+            {"intent_id": f"i-{k}", "workspace_id": "ws-1", "reason": "ladder_due"}
+            for k in range(n)
+        ]
+
+    def _own_transactions(self, monkeypatch):
+        """`make_session_for` replaced by a factory that records how each of
+        its transactions ended and, like the real one, marks the task as in a
+        transaction while it is open. A savepoint inside one fails the test:
+        in the loop's mode nothing should nest."""
+        from contextlib import asynccontextmanager
+
+        ended = []
+
+        class _NoSavepoints(_FakeSession):
+            def begin_nested(self):
+                raise AssertionError("a row nested a savepoint in its own transaction")
+
+        def make_session_for(engine):
+            def session_for(job):
+                @asynccontextmanager
+                async def ctx():
+                    token = work_loop.unit_of_work._IN_TRANSACTION.set(True)
+                    try:
+                        yield _NoSavepoints()
+                    except BaseException:
+                        ended.append("rolled_back")
+                        raise
+                    finally:
+                        work_loop.unit_of_work._IN_TRANSACTION.reset(token)
+                    ended.append("committed")
+
+                return ctx()
+
+            return session_for
+
+        monkeypatch.setattr(
+            work_loop.unit_of_work, "make_session_for", make_session_for
+        )
+        return ended
+
+    def _sweep(self, monkeypatch, rows, reconcile):
+        async def fake_sweep(session, *, limit, notify_after_seconds):
+            return rows[:limit]
+
+        monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
+        monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", reconcile)
+
+    async def test_no_transaction_carries_more_than_one_row(self, monkeypatch):
+        """The bound #1441 put on the drain, pinned with more due rows than it
+        allows: one transaction per row, so none can collect the writing
+        savepoints a batch of `MAX_WRITING_SAVEPOINTS + 1` rows would."""
+        from src.services.target.offboarding import MAX_WRITING_SAVEPOINTS
+
+        ended = self._own_transactions(monkeypatch)
+        rows = self._rows(MAX_WRITING_SAVEPOINTS + 1)
+        reconciled = []
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            reconciled.append(intent_id)
+            return "pending"
+
+        self._sweep(monkeypatch, rows, fake_reconcile)
+        registry = build_registry(
+            full_deps(poll=_in_progress, config=WorkerConfig(reconcile_limit=len(rows)))
+        )
+        assert await registry["reconcile_ambiguous"](None, _reconcile_job()) is None
+        assert reconciled == [r["intent_id"] for r in rows]
+        # The sweep's one short read, then one transaction per row.
+        assert ended == ["committed"] * (1 + len(rows))
+
+    async def test_the_provider_is_asked_with_no_transaction_open(self, monkeypatch):
+        """#1508: the egress floor refuses a provider call made inside a
+        transaction (`unit_of_work.in_transaction()` is what it reads), so a
+        ladder row asks before its transaction opens."""
+        self._own_transactions(monkeypatch)
+        asked = []
+
+        async def poll(*, intent_id, workspace_id):
+            asked.append((intent_id, work_loop.unit_of_work.in_transaction()))
+            return "IN_PROGRESS"
+
+        async def fake_reconcile(session, *, intent_id, status_code, **kw):
+            assert status_code == "IN_PROGRESS", "the verdict gets what was observed"
+            return "pending"
+
+        self._sweep(monkeypatch, self._rows(2), fake_reconcile)
+        registry = build_registry(full_deps(poll=poll))
+        await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert asked == [("i-0", False), ("i-1", False)]
+
+    async def test_a_failed_row_rolls_back_alone_and_the_first_failure_is_raised(
+        self, monkeypatch, caplog
+    ):
+        """Two rows fail and one resolves between them: the resolved row
+        commits, each failed row rolls back only itself, and the beat still
+        fails, with the FIRST failure, so the alarm is as loud as it was."""
+        ended = self._own_transactions(monkeypatch)
+        reconciled = []
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            if intent_id == "i-0":
+                raise ValueError(f"intent {intent_id} matched no row")
+            if intent_id == "i-2":
+                raise RuntimeError("the poll seam broke")
+            reconciled.append(intent_id)
+            return "posted"
+
+        self._sweep(monkeypatch, self._rows(3), fake_reconcile)
+        registry = build_registry(full_deps(poll=_in_progress))
+        with caplog.at_level("ERROR", logger=work_loop.__name__):
+            with pytest.raises(ValueError, match="intent i-0 matched no row"):
+                await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert reconciled == ["i-1"], "the row behind a failure still ran"
+        assert ended == ["committed", "rolled_back", "committed", "rolled_back"]
+        failed = [r for r in caplog.records if "NO verdict was recorded" in r.message]
+        assert [r.args[1] for r in failed] == ["i-0", "i-2"], "every failure is logged"
+        assert any("2 of 3 row(s) failed" in r.message for r in caplog.records)
+
+    def _mixed(self, monkeypatch, *, ladder_fails):
+        """A ladder row, a notice nobody can hear (n-1) and a delivered one
+        (n-2); returns the (intent, workspace) pairs the beat recorded as
+        unheard."""
+        from src.services.target import outbox
+
+        self._own_transactions(monkeypatch)
+        rows = [
+            {"intent_id": "i-0", "workspace_id": "ws-1", "reason": "ladder_due"},
+            {"intent_id": "n-1", "workspace_id": "ws-2", "reason": "notify_window"},
+            {"intent_id": "n-2", "workspace_id": "ws-3", "reason": "notify_window"},
+        ]
+        recorded = []
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            if ladder_fails:
+                raise ValueError(f"intent {intent_id} matched no row")
+            return "pending"
+
+        async def fake_notify(session, *, intent_id, **kw):
+            return outbox.UNDELIVERABLE if intent_id == "n-1" else 1
+
+        async def fake_record(session, *, intent_id, workspace_id, **kw):
+            recorded.append((intent_id, workspace_id))
+            return outbox.UNDELIVERABLE
+
+        self._sweep(monkeypatch, rows, fake_reconcile)
+        monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
+        monkeypatch.setattr(work_loop.reconciler, "record_no_surface", fake_record)
+        return recorded
+
+    async def test_a_failed_beat_stays_loud_and_records_no_unheard_notice(
+        self, monkeypatch
+    ):
+        """A beat with a failed ladder row AND a notice nobody can hear fails
+        with the row's error: `UNDELIVERABLE` never stands in for the alarm
+        (#1438). Nor is the notice recorded, so the first beat that returns
+        signals it."""
+        recorded = self._mixed(monkeypatch, ladder_fails=True)
+        registry = build_registry(full_deps(poll=_in_progress))
+        with pytest.raises(ValueError, match="intent i-0 matched no row"):
+            await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert recorded == []
+
+    async def test_a_returning_beat_records_only_its_unheard_notices(self, monkeypatch):
+        from src.services.target import outbox
+
+        recorded = self._mixed(monkeypatch, ladder_fails=False)
+        registry = build_registry(full_deps(poll=_in_progress))
+        got = await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert got == outbox.UNDELIVERABLE
+        assert recorded == [("n-1", "ws-2")], "a delivered notice is not an attempt"
+
+    async def test_a_passed_session_gets_a_savepoint_per_row(self, monkeypatch):
+        """The unit seam: a caller that passes its own session keeps it, and
+        each row nests a savepoint on it rather than opening a transaction."""
+        ended = self._own_transactions(monkeypatch)
+        nested = []
+
+        class _Counting(_FakeSession):
+            def begin_nested(self):
+                nested.append(1)
+                return super().begin_nested()
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            return "pending"
+
+        self._sweep(monkeypatch, self._rows(2), fake_reconcile)
+        registry = build_registry(full_deps(poll=_in_progress))
+        await registry["reconcile_ambiguous"](_Counting(), _reconcile_job())
+        assert len(nested) == 2
+        assert ended == [], "the seam's session is used, never a new one"
 
 
 class TestAJobThatReachedNobodyIsNotASuccess:
@@ -807,6 +1043,9 @@ class TestLaneSurvivesTransientClaimErrors:
         assert loop.consecutive_errors == 3
 
 
+ACTIVE_ROW = {"external_ref": "-777", "workspace_id": "ws-1", "state": "active"}
+
+
 class TestDeliverOutboxRetiresAGoneChat:
     """The deliverer's definitive "chat gone" ends the hold and retires the
     binding — or follows a group that became a supergroup (#1240 review)."""
@@ -856,24 +1095,55 @@ class TestDeliverOutboxRetiresAGoneChat:
         return seen
 
     async def test_a_kicked_bot_revokes_the_binding(self, gone):
-        session = _FakeSession(
-            rows=[{"external_ref": "-100777", "workspace_id": "ws-1"}]
-        )
+        session = _FakeSession(rows=[{**ACTIVE_ROW, "external_ref": "-100777"}])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["revoked"] == ["b-1"] and gone["repointed"] == []
 
     async def test_a_supergroup_upgrade_follows_the_chat(self, gone):
         gone["migrate_to"] = "-1009999"
-        session = _FakeSession(rows=[{"external_ref": "-777", "workspace_id": "ws-1"}])
+        session = _FakeSession(rows=[ACTIVE_ROW])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["repointed"] == [("b-1", "-1009999")] and gone["revoked"] == []
 
     async def test_a_successor_another_workspace_holds_revokes_instead(self, gone):
         gone["migrate_to"] = "-1009999"
         gone["repoint_ok"] = False
-        session = _FakeSession(rows=[{"external_ref": "-777", "workspace_id": "ws-1"}])
+        session = _FakeSession(rows=[ACTIVE_ROW])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["revoked"] == ["b-1"]
+
+
+class TestDeliverOutboxSkipsARevokedBinding:
+    """A job minted before an admin removed the group (or the bot was kicked)
+    sends nothing: the hold ends before a poller is built (`07` §13), and
+    what is left of the binding's queue is retired."""
+
+    async def test_no_poller_runs_for_a_revoked_binding(self, monkeypatch):
+        from types import SimpleNamespace
+
+        built = []
+
+        class _Poller:
+            def __init__(self, *a, **kw):
+                built.append(kw)
+
+        monkeypatch.setattr(work_loop.outbox, "OutboxPoller", _Poller)
+        transport = SimpleNamespace(for_chat=lambda ref: lambda row: None)
+        registry = build_registry(full_deps(transport=transport))
+        session = _FakeSession(rows=[{**ACTIVE_ROW, "state": "revoked"}])
+        job = {
+            "id": "j-r",
+            "kind": "deliver_outbox",
+            "workspace_id": "ws-1",
+            "serialization_key": "binding:b-1",
+            "payload": {"binding_id": "b-1"},
+        }
+        assert await registry["deliver_outbox"](session, job) is None
+        assert built == [], "a revoked binding got a sender"
+        retire = [sql for sql, _ in session.statements if "superseded" in sql]
+        assert len(retire) == 1 and "'sending'" in retire[0], (
+            "the revoked binding's leftover queue was not retired"
+        )
 
 
 class TestWeightedCategorySelection:
@@ -894,6 +1164,24 @@ class TestWeightedCategorySelection:
         class _S:
             def __init__(self):
                 self.statements = []
+                #: How each savepoint ended: "released", or "rolled back" by
+                #: a raise inside it. Kept apart from `statements`, whose
+                #: order the tests below pin.
+                self.savepoints = []
+
+            def begin_nested(self):
+                from contextlib import asynccontextmanager
+
+                @asynccontextmanager
+                async def savepoint():
+                    try:
+                        yield self
+                    except BaseException:
+                        self.savepoints.append("rolled back")
+                        raise
+                    self.savepoints.append("released")
+
+                return savepoint()
 
             async def execute(self, stmt, params=None):
                 self.statements.append((str(stmt), params))
@@ -905,6 +1193,9 @@ class TestWeightedCategorySelection:
 
                     def first(self_inner):
                         return rows_[0] if rows_ else None
+
+                    def __iter__(self_inner):
+                        return iter(rows_)
 
                 class _R:
                     def mappings(self_inner):
@@ -926,6 +1217,7 @@ class TestWeightedCategorySelection:
     async def _plan(self, session, rng):
         import random
 
+        from src.services.target import content_runway
         from src.services.target.scheduler import execute_plan_slot
 
         return await execute_plan_slot(
@@ -936,6 +1228,7 @@ class TestWeightedCategorySelection:
             provider_account_ref="ref",
             approval_mode="manual",
             no_media_notice_after_seconds=86400,
+            low_runway_days=content_runway.LOW_RUNWAY_DAYS,
             rng=random.Random(rng),
         )
 
@@ -1065,6 +1358,65 @@ class TestWeightedCategorySelection:
             "FROM post_locks l" in counts_sql
             and "l.ig_account_id = :acct" in counts_sql
         )
+
+    async def test_a_runway_notice_nobody_receives_does_not_ride_the_mint(
+        self, monkeypatch
+    ):
+        """The runway notice never decides the slot (#1478): owed and heard by
+        nobody, its verdict is not carried back, so the job the mint belongs
+        to succeeds. It is settled after the mint, in a savepoint."""
+        from src.services.target import content_runway, outbox
+        from src.services.target.scheduler import SlotOutcome
+
+        settled = []
+
+        async def after_mint(session, **kwargs):
+            # What the session last sent when the notice was asked for.
+            settled.append((session.statements[-1][0], kwargs))
+            return outbox.UNDELIVERABLE
+
+        monkeypatch.setattr(content_runway, "after_mint", after_mint)
+        s = self._session(
+            rows=self._rows(**{self.MEMES: 1.0}),
+            counts=[{"source_id": self.MEMES, "n": 3}],
+        )
+        assert await self._plan(s, 1) == SlotOutcome(intent_id="intent-1")
+        # Positive control: the notice was asked for, after the mint, with the
+        # pool less the minted file.
+        ((last_sent, asked),) = settled
+        assert "INSERT INTO post_intents" in last_sent
+        assert asked == {
+            "workspace_id": "ws-1",
+            "ig_account_id": "acct-1",
+            "eligible": 2,
+            "below_days": content_runway.LOW_RUNWAY_DAYS,
+        }
+        assert s.savepoints == ["released"]
+
+    async def test_a_runway_notice_that_raises_never_costs_the_mint(
+        self, monkeypatch, caplog
+    ):
+        """A failure writing the notice rolls back its savepoint alone and is
+        logged: the minted intent stands and is returned, with no notice."""
+        from src.services.target import content_runway
+        from src.services.target.scheduler import SlotOutcome
+
+        async def after_mint(session, **kwargs):
+            raise RuntimeError("the latch row could not be written")
+
+        monkeypatch.setattr(content_runway, "after_mint", after_mint)
+        s = self._session(
+            rows=self._rows(**{self.MEMES: 1.0}),
+            counts=[{"source_id": self.MEMES, "n": 3}],
+        )
+        with caplog.at_level("ERROR", logger="src.services.target.scheduler"):
+            out = await self._plan(s, 1)
+
+        assert out == SlotOutcome(intent_id="intent-1")
+        assert "INSERT INTO post_intents" in s.statements[-1][0], "the mint was sent"
+        assert s.savepoints == ["rolled back"], "and the notice failed in its own"
+        (logged,) = [r for r in caplog.records if "NOT written" in r.getMessage()]
+        assert logged.levelname == "ERROR" and logged.exc_info is not None
 
 
 class TestTheBudgetCeiling:

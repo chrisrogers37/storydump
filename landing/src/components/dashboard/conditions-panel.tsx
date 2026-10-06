@@ -78,7 +78,7 @@ export function ConditionsPanel({
   return (
     <Card className="border-amber-300">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
+        <CardTitle className="flex items-center gap-2">
           <AlertTriangle className="h-5 w-5 text-amber-600" aria-hidden="true" />
           Needs your attention
         </CardTitle>

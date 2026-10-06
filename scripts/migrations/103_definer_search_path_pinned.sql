@@ -1,4 +1,4 @@
--- Migration 095: every SECURITY DEFINER function pins its search_path with pg_temp last.
+-- Migration 103: every SECURITY DEFINER function pins its search_path with pg_temp last.
 --
 -- THE INVARIANT. A SECURITY DEFINER function runs with its owner's rights, so every name it resolves
 -- must come from a schema it chose. The doors already pin `search_path`. From this file on, the pinned

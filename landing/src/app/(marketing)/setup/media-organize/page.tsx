@@ -5,6 +5,8 @@ import { ArrowLeft, ArrowRight } from "lucide-react";
 import { StepCard } from "@/components/setup/step-card";
 import { Callout } from "@/components/setup/callout";
 import { UiTerm } from "@/components/setup/ui-term";
+import { buttonVariants } from "@/components/ui/button";
+import { SetupPager } from "@/components/setup/setup-pager"
 
 const description =
   "How to set up your Google Drive folders for Storydump. Each folder you connect gets its own share of your Instagram Stories, and you set the mix.";
@@ -18,7 +20,7 @@ export const metadata: Metadata = pageMetadata({
 export default function MediaOrganize() {
   return (
     <div>
-      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
+      <h1 className="page-title text-4xl text-ink">
         Organizing Your Media
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">
@@ -133,7 +135,7 @@ export default function MediaOrganize() {
         </StepCard>
       </div>
 
-      <div className="mt-12 flex items-center justify-between">
+      <SetupPager>
         <Link
           href="/setup/instagram"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -143,12 +145,12 @@ export default function MediaOrganize() {
         </Link>
         <Link
           href="/setup/connect"
-          className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          className={buttonVariants()}
         >
           Next: Connect Telegram (optional)
           <ArrowRight className="h-4 w-4" />
         </Link>
-      </div>
+      </SetupPager>
     </div>
   );
 }

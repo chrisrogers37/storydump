@@ -20,6 +20,7 @@ from src.api.principal import (
     TOKEN_ROUTES,
     Principal,
     current_principal,
+    require_ops,
     require_session,
 )
 from src.exceptions.tenancy import TenantResolutionError, TokenRefused
@@ -238,10 +239,26 @@ class TestTheAllowlist:
             for method in route.methods - {"HEAD", "OPTIONS"}:
                 deps = {d.call for d in route.dependant.dependencies}
                 if (method, route.path) in TOKEN_ROUTES:
-                    assert current_principal in deps, (method, route.path)
+                    assert deps & {current_principal, require_ops}, (method, route.path)
                     assert require_session not in deps, (method, route.path)
                 else:
                     assert require_session in deps, (method, route.path)
+
+    def test_every_estate_wide_token_route_is_for_ops_user_ids_alone(self, app):
+        """A token route that names no workspace and is not the caller's own
+        (`/me/…`) reads the whole estate: it takes `require_ops`, so a new one
+        cannot be open to every principal (as `/ops/posture` was)."""
+        for route in app.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            for method in route.methods - {"HEAD", "OPTIONS"}:
+                key = (method, route.path)
+                if key not in TOKEN_ROUTES or "{ws}" in route.path:
+                    continue
+                if route.path.startswith("/api/v1/me/"):
+                    continue
+                deps = {d.call for d in route.dependant.dependencies}
+                assert require_ops in deps, key
 
 
 class TestRequireSession:
@@ -272,6 +289,7 @@ class TestRequireSession:
             "session_required",
             "readonly_token",
             "wrong_workspace",
+            "not_ops",
         )
         assert tuple(vocabulary.TOKEN_REFUSALS) == tuple(TokenRefused.REASONS)
 

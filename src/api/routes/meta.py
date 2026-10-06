@@ -1,6 +1,7 @@
 """Meta's two policy callbacks, as routes. Required for Meta App Review (#410).
 
-Both doors verify a `signed_request` before doing anything at all, and both
+Both doors verify a `signed_request` before doing anything else — reading no
+more of the body than that one field needs (`_signed_request`) — and both
 refuse identically when verification fails. They then diverge, because Meta
 treats them as different events and so do we:
 
@@ -17,13 +18,73 @@ submission step, not a deploy step, and it is deliberately not done here.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from typing import NoReturn
+from urllib.parse import parse_qs
 
-from src.api.principal import require_engine
+from fastapi import APIRouter, HTTPException, Request
+
+from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length, require_engine
 from src.services.target import meta_callbacks
 from src.utils.logger import logger
 
 router = APIRouter(tags=["meta"])
+
+#: The one body type Meta posts a callback as.
+_FORM_TYPE = "application/x-www-form-urlencoded"
+#: The most of a callback body that is read. Its one field, `signed_request`,
+#: is a signature and a short base64url payload — a few hundred bytes.
+SIGNED_REQUEST_MAX_BYTES = 16 * 1024
+#: The most fields that body is parsed into; Meta sends one.
+SIGNED_REQUEST_MAX_FIELDS = 8
+
+
+def _too_large() -> NoReturn:
+    """Refuse a callback body over `SIGNED_REQUEST_MAX_BYTES` (413)."""
+    logger.warning(
+        "meta callback rejected: body over %d bytes", SIGNED_REQUEST_MAX_BYTES
+    )
+    # The unread rest of the body is not drained: the connection ends.
+    raise HTTPException(
+        status_code=413,
+        detail=BODY_TOO_LARGE_DETAIL,
+        headers={"Connection": "close"},
+    )
+
+
+async def _signed_request(request: Request) -> str:
+    """The `signed_request` field, read from a bounded urlencoded body.
+
+    Nothing has been verified yet, so the body is read on these terms only:
+    a type other than Meta's urlencoded form is refused (415) before a byte
+    of it is read; a body over `SIGNED_REQUEST_MAX_BYTES` is refused (413) —
+    by its declared length before reading, or as soon as the stream passes
+    the cap — and only the bytes within the cap are buffered and parsed. A
+    missing field reads as empty, which verification refuses like any other
+    bad value.
+    """
+    media_type = request.headers.get("content-type", "").split(";", 1)[0]
+    if media_type.strip().lower() != _FORM_TYPE:
+        logger.warning("meta callback rejected: body is not an urlencoded form")
+        raise HTTPException(status_code=415, detail="unsupported media type")
+    declared = declared_length(request.scope["headers"])
+    if declared is not None and declared > SIGNED_REQUEST_MAX_BYTES:
+        _too_large()
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > SIGNED_REQUEST_MAX_BYTES:
+            _too_large()
+        body += chunk
+    try:
+        fields = parse_qs(
+            body.decode("utf-8"),
+            strict_parsing=True,
+            max_num_fields=SIGNED_REQUEST_MAX_FIELDS,
+        )
+    except ValueError:  # UnicodeDecodeError included
+        logger.warning("meta callback rejected: malformed form body")
+        raise HTTPException(status_code=400, detail="invalid signed_request")
+    # A repeated field answers with its last value.
+    return fields.get("signed_request", [""])[-1]
 
 
 def _verified_subject(signed_request: str | None) -> tuple[str, str]:
@@ -64,7 +125,7 @@ def _verified_subject(signed_request: str | None) -> tuple[str, str]:
 
 
 @router.post("/deauthorize")
-async def deauthorize(request: Request, signed_request: str = Form(default="")):
+async def deauthorize(request: Request):
     """A person removed the app. Stop using the credential; delete nothing.
 
     Meta has already invalidated the token on their side, so this is our half
@@ -80,7 +141,7 @@ async def deauthorize(request: Request, signed_request: str = Form(default="")):
     names a person while `provider_account_ref` names an account — sometimes a
     provisional `manual:<handle>` no Meta id equals — see `resolve_ig_accounts`.
     """
-    subject, _ = _verified_subject(signed_request)
+    subject, _ = _verified_subject(await _signed_request(request))
     engine = require_engine(request)
     async with engine.begin() as conn:
         accounts = await meta_callbacks.resolve_ig_accounts(conn, subject)
@@ -96,7 +157,7 @@ async def deauthorize(request: Request, signed_request: str = Form(default="")):
 
 
 @router.post("/data-deletion")
-async def data_deletion(request: Request, signed_request: str = Form(default="")):
+async def data_deletion(request: Request):
     """Record a deletion request and return Meta's receipt. Deletes nothing.
 
     **This is deferred-with-receipt on purpose, and the shape is Meta's own.**
@@ -128,7 +189,7 @@ async def data_deletion(request: Request, signed_request: str = Form(default="")
     rather than smuggled in here. Until then the log is the record, and the
     status endpoint does not pretend otherwise.
     """
-    subject, secret = _verified_subject(signed_request)
+    subject, secret = _verified_subject(await _signed_request(request))
     code = meta_callbacks.confirmation_code(subject, secret)
     logger.info("meta data-deletion requested, receipt %s", code)
     status_url = request.url_for("data_deletion_status")

@@ -413,9 +413,26 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 092 appends §35, a new account needs a way in: the owner's
             # admissions and the door the sign-in upsert asks (2026-10-02).
             "092_signup_admissions.sql",
-            # 095 appends §38: every SECURITY DEFINER function pins its
+            # 098 appends §41, an invitation admits only while it is
+            # legitimate: the sign-up door reads the inviter and workspace
+            # live, and a removal revokes the removed member's invitations.
+            "098_invitations_admit_while_legitimate.sql",
+            # 099 appends §42, a person can unlink their own Telegram
+            # identity: the door and svc_membership's delete behind it.
+            "099_identity_unlink.sql",
+            # 100 appends §43, the waitlist written by the API: the global
+            # waitlist_entries and svc_ingress's insert-only policy.
+            "100_waitlist_entries.sql",
+            # 101 appends §44, the outbox's failure record: three columns,
+            # their index and the two doors behind /health/delivery (#1482).
+            "101_outbox_failure_record.sql",
+            # 102 appends §45, a removal holds: the remove door checks its
+            # caller, the record is the membership doors' alone, earlier
+            # removals are backfilled, and the join door pins pg_temp last.
+            "102_member_removal_holds.sql",
+            # 103 appends §46: every SECURITY DEFINER function pins its
             # search_path with pg_temp last, and a census holds the doors to it.
-            "095_definer_search_path_pinned.sql",
+            "103_definer_search_path_pinned.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
