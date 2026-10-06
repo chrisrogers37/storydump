@@ -1,5 +1,6 @@
 """Application settings and configuration management."""
 
+import ipaddress
 import re
 import uuid
 from typing import Container
@@ -315,14 +316,25 @@ class Settings(BaseSettings):
     # as narrow as the measured hops: a client holding one of these addresses
     # on a path with no hop would have its own entry removed (the middleware's
     # docstring says when that matters). Listing an address here never makes
-    # it a trusted peer. "*" is refused at load.
+    # it a trusted peer. "*", a malformed entry or a range broader than /16 (v6: /48) is
+    # refused at load.
     EDGE_HOP_HOSTS: str = "152.233.47.0/24"
 
     @field_validator("EDGE_HOP_HOSTS")
     @classmethod
-    def _no_wildcard_hop(cls, value: str) -> str:
-        if "*" in value:
-            raise ValueError("EDGE_HOP_HOSTS must list addresses, never *")
+    def _narrow_hops(cls, value: str) -> str:
+        """Refuse "*" and any range broad enough to cover callers at large:
+        a removed entry must be a hop, so the list names hops, not networks."""
+        for entry in (e.strip() for e in value.split(",")):
+            if not entry:
+                continue
+            if "*" in entry:
+                raise ValueError("EDGE_HOP_HOSTS must list addresses, never *")
+            net = ipaddress.ip_network(entry, strict=False)
+            if net.prefixlen < (16 if net.version == 4 else 48):
+                raise ValueError(
+                    "EDGE_HOP_HOSTS ranges must be /16 (v6: /48) or narrower"
+                )
         return value
 
     # The largest request body the API reads, in bytes; over it is 413

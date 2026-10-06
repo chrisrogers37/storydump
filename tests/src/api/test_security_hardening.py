@@ -405,7 +405,7 @@ class TestRailwayEdgeHop:
         got = seen_from(self.EDGE, f"{self.FORGED}, {self.FASTLY}, {self.HOP}")
         assert got == self.FASTLY
 
-    def test_an_untrusted_peer_gets_no_removal(self, seen_from):
+    def test_an_untrusted_peers_header_stays_ignored(self, seen_from):
         assert seen_from(self.CALLER, f"{self.FORGED}, {self.HOP}") == self.CALLER
 
     def test_a_hop_range_peer_is_not_trusted(self, seen_from):
@@ -414,8 +414,10 @@ class TestRailwayEdgeHop:
     def test_a_wildcard_hop_list_is_refused(self):
         from src.config.settings import Settings, SettingsError
 
-        with pytest.raises(SettingsError, match="EDGE_HOP_HOSTS"):
-            Settings(EDGE_HOP_HOSTS="*")
+        for broad in ("*", "0.0.0.0/0", "152.0.0.0/8", "::/0", "nonsense"):
+            with pytest.raises(SettingsError, match="EDGE_HOP_HOSTS"):
+                Settings(EDGE_HOP_HOSTS=broad)
+        assert Settings(EDGE_HOP_HOSTS="152.233.47.0/24, 192.0.2.7").edge_hop_hosts
 
 
 # =============================================================================
