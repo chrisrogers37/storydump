@@ -63,6 +63,11 @@ class TestTheClosedSets:
                 "060_auth_plane_tables.sql",
                 "ck_service_token_role",
             ),
+            (
+                vocabulary.OUTBOX_FAILURE_CLASSES,
+                "101_outbox_failure_record.sql",
+                "ck_outbox_failure_class",
+            ),
         ],
     )
     def test_each_set_is_its_migrations_check_list_in_order(
@@ -449,6 +454,9 @@ class TestTheBoundsEveryAdapterEnforces:
             "a literal limit beside the vocabulary's"
         )
         assert ops_views.FLOATING_LIMIT == vocabulary.FLOATING_LIMIT
+
+    def test_the_plan_horizon_is_a_year(self):
+        assert vocabulary.PLAN_HORIZON_DAYS == 365
 
 
 class TestTheAnswersAddedByTheAudit:

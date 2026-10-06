@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   addDriveFolder,
   driveConnectControl,
+  driveConnectWarning,
   driveStatusBadge,
   fetchDriveFolders,
   isGoogleAuthorizationUrl,
@@ -9,6 +10,7 @@ import {
   requestDriveConnect,
   addFolderRefusalCopy,
   connectedFolderRefs,
+  driveFoldersRefusalCopy,
   sourceFolderName,
   sourceStateLabel,
 } from "./drive";
@@ -82,6 +84,30 @@ describe("the workspace's Drive grant, said on screen", () => {
     // Google can revoke on its side without the projection knowing; the road
     // back must not be Disconnect → Connect.
     expect(driveConnectControl("active")?.kind).toBe("reconnect");
+  });
+  it("warns about Google's unverified-app page wherever the grant is not live", () => {
+    for (const status of [
+      "none",
+      "expired",
+      "revoked",
+      "weird",
+      null,
+      undefined,
+    ]) {
+      expect(driveConnectWarning(status), String(status)).not.toBeNull();
+    }
+    // A live grant's Reconnect is an optional repair, and its person has been
+    // through Google's page once: the sentence is not shown on every
+    // connected workspace.
+    expect(driveConnectWarning("active")).toBeNull();
+  });
+  it("says what Google may show, the way past it, and what is asked for", () => {
+    const warning = driveConnectWarning("none") ?? "";
+    // "If": an account added as a test user never sees Google's page.
+    expect(warning).toMatch(/^If Google says it hasn't verified this app/);
+    expect(warning).toMatch(/Advanced/);
+    expect(warning).toContain('"Go to storydump (unsafe)"');
+    expect(warning).toMatch(/read-only/);
   });
 });
 
@@ -161,6 +187,12 @@ describe("connected folders and nested picks", () => {
       { folder_ref: "D", state: "paused" },
     ]);
     expect([...refs].sort()).toEqual(["A", "C"]);
+  });
+  it("tells an admin who did not connect Drive who can browse it, at the browser and the pick", () => {
+    const copy =
+      "Only the person who connected Google Drive can browse it. Ask them to add the folder. Reconnecting Drive with your own account moves every connected folder onto your Drive, and folders you can't see there stop syncing.";
+    expect(driveFoldersRefusalCopy("drive_not_yours")).toBe(copy);
+    expect(addFolderRefusalCopy("drive_not_yours")).toBe(copy);
   });
   it("says why a nested folder pick was refused", () => {
     expect(addFolderRefusalCopy("source_nested")).toMatch(/already connected/);

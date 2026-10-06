@@ -189,6 +189,41 @@ class TestSendText:
         assert sent == [{"chat_id": "7", "text": "hi"}]
 
 
+class TestEditText:
+    """The identity link's prompt, rewritten to its outcome with its buttons
+    removed in the same call."""
+
+    async def test_edits_the_text_and_strips_the_keyboard_in_one_call(self):
+        captured = []
+
+        def handler(request):
+            captured.append((str(request.url), json.loads(request.content)))
+            return httpx.Response(200, json={"ok": True, "result": True})
+
+        await _transport(handler).edit_text("555", "77", "Cancelled.")
+        ((url, body),) = captured
+        assert url.endswith("/editMessageText")
+        assert body == {
+            "chat_id": "555",
+            "message_id": 77,
+            "text": "Cancelled.",
+            "reply_markup": {"inline_keyboard": []},
+        }
+
+    async def test_not_modified_is_success(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                json={
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message is not modified",
+                },
+            )
+
+        await _transport(handler).edit_text("555", "77", "Cancelled.")
+
+
 class TestAChatThatIsGoneIsNotADeadToken:
     """A kicked bot, a blocked bot or a deleted chat is a chat-level fact; only
     a 401 is the credential's own death (#1240 review)."""

@@ -290,15 +290,66 @@ class _RetireConn:
 class TestRetireLiveStates:
     """ "Last issued wins" (`07` §2) is one rule with four writers — the link
     mint, the bind mint, `issue_state`'s own reconnect retire and
-    `disable_destination`'s. One statement, one selector per caller."""
+    `disable_destination`'s — and a removal (`07` §45) is a fifth caller, by
+    user AND workspace. One statement per call, never an unselective one."""
 
-    async def test_provider_and_liveness_are_always_in_the_where(self):
+    async def test_liveness_is_always_in_the_where_and_provider_when_given(self):
         conn = _RetireConn()
-        await oauth_states.retire_live_states(conn, provider="telegram")
+        await oauth_states.retire_live_states(conn, provider="telegram", user_id="u-1")
         ((sql, params),) = conn.statements
         assert sql.startswith("UPDATE oauth_states SET consumed_at = now() WHERE ")
         assert "provider = :provider" in sql and "consumed_at IS NULL" in sql
-        assert params == {"provider": "telegram"}
+        assert params == {"provider": "telegram", "uid": "u-1"}
+
+    async def test_the_selectors_given_are_anded(self):
+        """Every selector given narrows the one statement: its WHERE is the
+        conjunction of liveness and each selector, in a fixed order."""
+        conn = _RetireConn()
+        await oauth_states.retire_live_states(
+            conn,
+            provider="telegram",
+            purpose="bind",
+            user_id="u-1",
+            workspace_id="ws-1",
+            reconnect_target="acct-1",
+        )
+        ((sql, params),) = conn.statements
+        assert sql == (
+            "UPDATE oauth_states SET consumed_at = now() WHERE consumed_at IS NULL"
+            " AND provider = :provider AND purpose = :purpose AND user_id = :uid"
+            " AND workspace_id = :ws AND reconnect_target = :target"
+        )
+        assert params == {
+            "provider": "telegram",
+            "purpose": "bind",
+            "uid": "u-1",
+            "ws": "ws-1",
+            "target": "acct-1",
+        }
+
+    async def test_a_removal_selects_by_user_and_workspace_across_providers(self):
+        conn = _RetireConn()
+        await oauth_states.retire_live_states(conn, user_id="u-1", workspace_id="ws-1")
+        ((sql, params),) = conn.statements
+        assert "consumed_at IS NULL" in sql and "provider" not in sql
+        assert "user_id = :uid" in sql and "workspace_id = :ws" in sql
+        assert params == {"uid": "u-1", "ws": "ws-1"}
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {},
+            {"provider": "telegram"},
+            {"purpose": "link"},
+            {"provider": "telegram", "purpose": "link"},
+        ],
+        ids=["nothing", "provider_only", "purpose_only", "provider_and_purpose"],
+    )
+    async def test_a_call_without_a_user_workspace_or_target_is_refused(self, kwargs):
+        conn = _RetireConn()
+        with pytest.raises(ValueError, match="a user, a workspace or a reconnect"):
+            await oauth_states.retire_live_states(conn, **kwargs)
+        assert conn.statements == []
 
     @pytest.mark.parametrize(
         "kwargs,fragment,params",
@@ -342,5 +393,8 @@ class TestRetireLiveStates:
     async def test_the_count_of_retired_rows_is_returned(self, rowcount):
         conn = _RetireConn(rowcount)
         assert (
-            await oauth_states.retire_live_states(conn, provider="telegram") == rowcount
+            await oauth_states.retire_live_states(
+                conn, provider="telegram", user_id="u-1"
+            )
+            == rowcount
         )

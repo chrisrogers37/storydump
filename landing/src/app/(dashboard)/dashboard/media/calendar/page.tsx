@@ -10,9 +10,10 @@ import {
 } from "@/lib/dashboard-payloads";
 import type { Intent, IntentsResponse } from "@/lib/intents";
 import { postingIntervalMinutes } from "@/lib/schedule";
+import { dateInZone } from "@/lib/zoned-dates";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/card";
 
 /** The calendar's lanes are all the intent ledger now, filtered by state. */
 const laneItem = (i: Intent) => ({
@@ -20,17 +21,6 @@ const laneItem = (i: Intent) => ({
   category: i.category ?? "uncategorised",
   status: i.state,
 });
-
-/** Today, in the WORKSPACE's timezone — `daily_post_counts.local_date` is local. */
-function todayIn(tz: string | null): string {
-  try {
-    return new Intl.DateTimeFormat("en-CA", {
-      timeZone: tz ?? "UTC",
-    }).format(new Date());
-  } catch {
-    return new Intl.DateTimeFormat("en-CA", { timeZone: "UTC" }).format(new Date());
-  }
-}
 
 /**
  * The calendar's three bounded reads (`01` H5). History and the schedule
@@ -98,7 +88,9 @@ export default async function CalendarPage() {
     }));
 
   // Counted where the rows are, not re-summed from the bounded lists above.
-  const today = todayIn(config.tz);
+  // Today is the WORKSPACE's: `daily_post_counts.local_date` is its own date.
+  const tz = config.tz ?? "UTC";
+  const today = dateInZone(new Date(), tz);
   const postsToday =
     (stats.posts_by_day ?? []).find((d) => d.local_date.startsWith(today))
       ?.count ?? 0;
@@ -129,57 +121,32 @@ export default async function CalendarPage() {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Posts Today
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{postsToday}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              In Queue
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{inFlight}</div>
-            {needsReview > 0 && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                {needsReview === 1
-                  ? "1 needs review"
-                  : `${needsReview} need review`}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Posting Rate
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {perDay === null ? "—" : `${perDay}/day`}
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {intervalMinutes === null
-                ? "interval not set"
-                : `Every ${intervalMinutes} min`}
-            </p>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+        <StatCard label="Posts Today" value={postsToday} />
+        <StatCard
+          label="In Queue"
+          value={inFlight}
+          detail={
+            needsReview > 0 &&
+            (needsReview === 1 ? "1 needs review" : `${needsReview} need review`)
+          }
+        />
+        <StatCard
+          label="Posting Rate"
+          value={perDay === null ? "—" : `${perDay}/day`}
+          detail={
+            intervalMinutes === null
+              ? "interval not set"
+              : `Every ${intervalMinutes} min`
+          }
+        />
       </div>
 
       <ContentCalendar
         history={historyItems}
         queue={queueItems}
         schedule={scheduleSlots}
+        tz={tz}
       />
     </div>
   );

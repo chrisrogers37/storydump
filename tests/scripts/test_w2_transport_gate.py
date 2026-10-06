@@ -6,8 +6,8 @@ pending binding, the interactive lane claims it, the hold drains the queue
 through the injected transport to the binding's own chat ref, rows land
 `sent` with real refs, the job finalizes, and a re-sweep on a drained outbox
 mints nothing. The dead-credential path is the shitpost-alpha lesson: an auth
-failure marks the row ambiguous (the outbox's own recovery lane) and the
-worker survives.
+failure fails its row after the one attempt, nothing resends it (#1493), and
+the worker survives.
 """
 
 import uuid
@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.channels.telegram_transport import TelegramAuthDead
 from src.services.target import unit_of_work
+from src.services.target.outbox import AMBIGUOUS_RESOLVE_AFTER_SECONDS
 from src.services.target.work_loop import WorkerConfig, ensure_sender_jobs
 from src.worker import compose
 from tests.scripts.conftest import async_url, seed_workspace_chain
@@ -94,6 +95,29 @@ async def _run_interactive_once(lane_db, engine, transport, *, config=None):
     return wl, claimed
 
 
+def _age_past_ambiguity_backoff(sync_conn, binding):
+    """Backdate a binding's outbox rows past `AMBIGUOUS_RESOLVE_AFTER_SECONDS`,
+    with the trigger that would stamp `updated_at` back to now held off for
+    the one statement."""
+    with sync_conn.cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "ALTER TABLE channel_outbox DISABLE TRIGGER tg_touch_channel_outbox"
+        )
+        try:
+            cur.execute(
+                "UPDATE channel_outbox"
+                " SET updated_at = now() - make_interval(secs => %s)"
+                " WHERE binding_id = %s",
+                (AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1, binding),
+            )
+        finally:
+            cur.execute(
+                "ALTER TABLE channel_outbox ENABLE TRIGGER tg_touch_channel_outbox"
+            )
+    sync_conn.commit()
+
+
 class TestDeliveryEndToEnd:
     async def test_sweep_mints_once_hold_drains_rows_land_sent_job_finalizes(
         self, lane_db, sync_conn
@@ -144,8 +168,6 @@ class TestDeliveryEndToEnd:
         after a backoff (#1297) — and a quiet binding has no sender, so the
         sweep must mint one for an aged `ambiguous` row, not only for pending
         ones; a fresh ambiguous row is not yet the sweep's business."""
-        from src.services.target.outbox import AMBIGUOUS_RESOLVE_AFTER_SECONDS
-
         chain, binding = _seed_binding_with_pending(sync_conn, "w2aged", rows=1)
         with sync_conn.cursor() as cur:
             cur.execute("SET app.actor_kind = 'migration'")
@@ -158,37 +180,26 @@ class TestDeliveryEndToEnd:
         engine = create_async_engine(async_url(lane_db))
         try:
             assert await _sweep(engine) == 0, "a fresh ambiguous row waits"
-            with sync_conn.cursor() as cur:
-                cur.execute("SET app.actor_kind = 'migration'")
-                cur.execute(
-                    "ALTER TABLE channel_outbox DISABLE TRIGGER tg_touch_channel_outbox"
-                )
-                try:
-                    cur.execute(
-                        "UPDATE channel_outbox"
-                        " SET updated_at = now() - make_interval(secs => %s)"
-                        " WHERE binding_id = %s",
-                        (AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1, binding),
-                    )
-                finally:
-                    cur.execute(
-                        "ALTER TABLE channel_outbox ENABLE TRIGGER tg_touch_channel_outbox"
-                    )
-            sync_conn.commit()
+            _age_past_ambiguity_backoff(sync_conn, binding)
             assert await _sweep(engine) == 1, "an aged ambiguous row needs a sender"
         finally:
             await engine.dispose()
 
 
 class TestDeadCredentialMidRun:
-    async def test_an_auth_dead_send_marks_the_row_ambiguous_and_the_worker_survives(
+    async def test_an_auth_dead_send_fails_its_row_once_and_the_worker_survives(
         self, lane_db, sync_conn
     ):
+        """Aged past the ambiguity backoff, an ambiguous row would mint a
+        sender (the test above); a failed one mints none. The binding stays
+        active: a dead token is not a gone chat."""
         chain, binding = _seed_binding_with_pending(sync_conn, "w2dead", rows=1)
         engine = create_async_engine(async_url(lane_db))
         try:
             await _sweep(engine)
-            transport = _FakeTransport(fail_with=TelegramAuthDead("getMe: 401"))
+            transport = _FakeTransport(
+                fail_with=TelegramAuthDead("sendMessage: 401 Unauthorized", code=401)
+            )
             cfg = WorkerConfig(poller_interval_seconds=0.05, sender_hold_seconds=2.0)
             wl, claimed = await _run_interactive_once(
                 lane_db, engine, transport, config=cfg
@@ -197,15 +208,22 @@ class TestDeadCredentialMidRun:
             assert claimed is True and wl.processed == 1, (
                 "the hold ends and the job finalizes; the ROW carries the state"
             )
-            assert transport.auth_failures >= 1
+            assert transport.auth_failures == 1
             with sync_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT state FROM channel_outbox WHERE binding_id = %s",
+                    "SELECT state, attempts, last_failure_class, last_error_code"
+                    " FROM channel_outbox WHERE binding_id = %s",
                     (binding,),
                 )
-                assert cur.fetchone()[0] == "ambiguous"
+                assert cur.fetchone() == ("failed", 1, "credential_dead", 401)
+                cur.execute(
+                    "SELECT state FROM channel_bindings WHERE id = %s", (binding,)
+                )
+                assert cur.fetchone()[0] == "active"
                 cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
                 assert cur.fetchone()[0] == 0
+            _age_past_ambiguity_backoff(sync_conn, binding)
+            assert await _sweep(engine) == 0, "a failed row mints no sender"
         finally:
             await engine.dispose()
 

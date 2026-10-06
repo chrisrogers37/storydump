@@ -8,6 +8,7 @@ bound observable from outside the process.
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -125,6 +126,19 @@ class TestTheCompositionRoot:
         assert application.state.ingress is None
 
 
+class _Savepoints:
+    """A connection that opens savepoints and nothing else: the membership
+    step observes each person in one of their own (`conn.begin_nested()`)."""
+
+    def __init__(self):
+        self.opened = 0
+
+    @asynccontextmanager
+    async def begin_nested(self):
+        self.opened += 1
+        yield self
+
+
 class TestGroupMessagesReachTheMembershipStep:
     """A person speaking in a group is observed (#1242); a DM, a callback
     query or a senderless message is still NOT_A_START — said, not dropped."""
@@ -144,9 +158,9 @@ class TestGroupMessagesReachTheMembershipStep:
             return StartResult(outcome="joined", handled=True)
 
         monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
-        d = telegram_dispatch.TelegramDispatcher()
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
         r = await d(
-            None,
+            conn,
             {
                 "message": {
                     "text": "hi",
@@ -230,9 +244,9 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
             return StartResult(outcome="already_member", handled=False)
 
         monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
-        d = telegram_dispatch.TelegramDispatcher()
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
         r = await d(
-            None,
+            conn,
             {
                 "message": {
                     "text": "/start@storydump_app_bot",
@@ -254,9 +268,9 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
             return StartResult(outcome="joined", handled=True)
 
         monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
-        d = telegram_dispatch.TelegramDispatcher()
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
         r = await d(
-            None,
+            conn,
             {
                 "message": {
                     "from": {"id": 1},
@@ -270,6 +284,7 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
             },
         )
         assert seen == ["1", "2", "4"] and r.outcome == "joined"
+        assert conn.opened == 3, "one savepoint per person"
 
     @pytest.mark.asyncio
     async def test_a_sync_error_is_named_and_never_raised(self, monkeypatch):
@@ -277,9 +292,9 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
             raise RuntimeError("door missing")
 
         monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
-        d = telegram_dispatch.TelegramDispatcher()
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
         r = await d(
-            None,
+            conn,
             {
                 "message": {
                     "text": "hi",
@@ -288,6 +303,35 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
                 }
             },
         )
+        assert r.outcome == telegram_dispatch.MEMBERSHIP_SYNC_FAILED and not r.handled
+
+    @pytest.mark.asyncio
+    async def test_a_failed_join_does_not_stop_the_people_after_it(self, monkeypatch):
+        """Each person rolls back alone, so the people listed after a failed
+        one are still observed; the failure is still the message's outcome."""
+        seen = []
+
+        async def observe(conn, **kw):
+            seen.append(kw["telegram_user_id"])
+            if kw["telegram_user_id"] == "1":
+                raise RuntimeError("refused")
+            from src.services.target.start_router import StartResult
+
+            return StartResult(outcome="joined", handled=True)
+
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
+        r = await d(
+            conn,
+            {
+                "message": {
+                    "from": {"id": 1},
+                    "chat": {"id": -5, "type": "supergroup"},
+                    "new_chat_members": [{"id": 2}],
+                }
+            },
+        )
+        assert seen == ["1", "2"] and conn.opened == 2
         assert r.outcome == telegram_dispatch.MEMBERSHIP_SYNC_FAILED and not r.handled
 
 
@@ -722,3 +766,76 @@ class TestTheReviewTaps:
         assert "Give up" in text and "Posted myself" not in text
         text, _ = telegram_dispatch.answer_for("manual_mode", action="post")
         assert "Posted myself" in text
+
+
+# ---------------------------------------------------------------------------
+# The identity link's Confirm / Cancel: a callback_query beside the cards'.
+# ---------------------------------------------------------------------------
+
+
+def link_tap_update(action="linkok", *, uid=4242, cid=4242, chat_type="private"):
+    from src.services.target import callback_tokens
+
+    return {
+        "update_id": 3,
+        "callback_query": {
+            "id": "q9",
+            "from": {"id": uid, "username": "ada"},
+            "data": callback_tokens.link_token(action, "St4te_x-", "4242"),
+            "message": {"message_id": 77, "chat": {"id": cid, "type": chat_type}},
+        },
+    }
+
+
+class TestTheLinkConfirmationTap:
+    @pytest.mark.asyncio
+    async def test_it_reaches_the_link_lane_not_the_command_port(
+        self, seams, monkeypatch
+    ):
+        from src.services.target import identity_link
+
+        seen = {}
+
+        async def handle_tap(conn, tap, **kw):
+            seen.update(tap=tap, **kw)
+            return identity_link.LinkTapOutcome("linked", "Linked.", edit_text="done")
+
+        monkeypatch.setattr(identity_link, "handle_tap", handle_tap)
+        r = await telegram_dispatch.TelegramDispatcher()(None, link_tap_update())
+        assert isinstance(r, telegram_dispatch.TapResult)
+        assert (r.outcome, r.answer_text, r.edit_text) == ("linked", "Linked.", "done")
+        assert (r.callback_query_id, r.chat_ref, r.message_ref) == ("q9", "4242", "77")
+        assert seen["tap"].state == "St4te_x-" and seen["tap"].action == "linkok"
+        assert (seen["from_user_id"], seen["chat_ref"], seen["chat_type"]) == (
+            "4242",
+            "4242",
+            "private",
+        )
+        assert seams["log"]["executed"] == [], "a link tap ran a command"
+        assert seams["log"]["debits"] == [] and seams["log"]["gucs"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_lane_crash_is_a_named_tap_failed(self, monkeypatch):
+        from src.services.target import identity_link
+
+        async def handle_tap(conn, tap, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(identity_link, "handle_tap", handle_tap)
+        r = await telegram_dispatch.TelegramDispatcher()(None, link_tap_update())
+        assert r.outcome == "tap_failed" and r.edit_text is None
+
+    @pytest.mark.asyncio
+    async def test_another_users_tap_is_refused_end_to_end(self, monkeypatch):
+        """Through the real lane: the button was offered to 4242."""
+        from src.services.target import identity_link
+
+        async def never(*a, **kw):
+            raise AssertionError("the state was touched for the wrong tapper")
+
+        monkeypatch.setattr(identity_link.oauth_states, "consume_state", never)
+        monkeypatch.setattr(identity_link.identity, "link_identity", never)
+        r = await telegram_dispatch.TelegramDispatcher()(
+            None, link_tap_update(uid=5555, cid=5555)
+        )
+        assert r.outcome == "tapper_mismatch" and r.show_alert is True
