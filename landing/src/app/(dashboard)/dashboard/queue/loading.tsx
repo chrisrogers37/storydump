@@ -1,10 +1,21 @@
-import { Skeleton } from "@/components/ui/skeleton";
+import { Skeleton, TextSkeleton } from "@/components/ui/skeleton";
 import { QueueHeader } from "@/components/dashboard/page-headers";
 
 export default function QueueLoading() {
   return (
     <div className="space-y-6">
-      <QueueHeader />
+      <QueueHeader
+        tz={
+          // The zone is unknown until the config loads. The bar sits between
+          // UTC, every workspace's default, and a city zone such as
+          // America/New_York, which keeps the line wrapping as the page's
+          // does on phones for both; the words are for a screen reader.
+          <>
+            <TextSkeleton className="w-16" />
+            <span className="sr-only">your time zone</span>
+          </>
+        }
+      />
 
       {/* Queue rows */}
       <div className="divide-y rounded-lg border bg-card">

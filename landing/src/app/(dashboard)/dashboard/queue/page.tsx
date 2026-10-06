@@ -41,15 +41,16 @@ export default async function QueuePage() {
 
   const config = configResult.data;
   const { intents, limit } = intentsResult.data;
+  const tz = config.tz ?? "UTC";
 
   return (
     <div className="space-y-6">
-      <QueueHeader tz={config.tz ?? "UTC"} />
+      <QueueHeader tz={tz} />
 
       <QueueList
         workspaceId={workspaceId}
         intents={intents}
-        tz={config.tz ?? "UTC"}
+        tz={tz}
         apiPublishingEnabled={config.api_publishing_enabled === true}
         truncatedAt={intents.length >= limit ? limit : null}
       />

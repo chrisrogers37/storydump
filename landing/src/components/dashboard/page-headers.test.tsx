@@ -40,31 +40,30 @@ const DASHBOARD = path.resolve(
 );
 
 const PAIRS = [
-  { name: "Queue", loading: QueueLoading, header: QueueHeader, page: "queue/page.tsx" },
-  { name: "Settings", loading: SettingsLoading, header: SettingsHeader, page: "settings/page.tsx" },
+  { name: "Queue", loading: QueueLoading, header: QueueHeader, page: "queue/page.tsx", use: /<QueueHeader tz=\{tz\} \/>/ },
+  { name: "Settings", loading: SettingsLoading, header: SettingsHeader, page: "settings/page.tsx", use: /<SettingsHeader \/>/ },
 ];
 
 describe("dashboard loading placeholders render their page's header", () => {
-  for (const { name, loading, header, page } of PAIRS) {
+  for (const { name, loading, header, page, use } of PAIRS) {
     it(`${name}: the placeholder and the page both render ${header.name}`, () => {
       expect([...walk(loading())].some((el) => el.type === header)).toBe(true);
       const source = readFileSync(path.join(DASHBOARD, page), "utf8");
-      expect(source).toMatch(new RegExp(`<${header.name}\\b`));
+      expect(source).toMatch(use);
     });
   }
 });
 
 describe("QueueHeader", () => {
-  const description = (tz?: string) =>
-    (QueueHeader({ tz }) as ReactElement<{ description: ReactNode }>).props.description;
-
   it("names the zone once the config has loaded", () => {
-    expect(textOf(description("Europe/Paris"))).toMatch(/Times are in Europe\/Paris\.$/);
+    const header = QueueHeader({ tz: "Europe/Paris" }) as ReactElement<{ description: ReactNode }>;
+    expect(textOf(header.props.description)).toMatch(/Times are in Europe\/Paris\.$/);
   });
 
-  it("holds the zone's place with an inline bar while loading", () => {
-    const placeholder = description();
-    expect([...walk(placeholder)].some((el) => el.type === TextSkeleton)).toBe(true);
-    expect(textOf(placeholder)).toMatch(/Times are in \.$/);
+  it("holds the zone's place with an inline bar, and words for a screen reader, while loading", () => {
+    const header = [...walk(QueueLoading())].find((el) => el.type === QueueHeader);
+    const tz = (header as ReactElement<{ tz: ReactNode }>).props.tz;
+    expect([...walk(tz)].some((el) => el.type === TextSkeleton)).toBe(true);
+    expect(textOf(tz)).toBe("your time zone");
   });
 });

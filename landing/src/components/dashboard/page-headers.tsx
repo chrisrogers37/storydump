@@ -1,5 +1,4 @@
 import { PageHeader } from "@/design/page-header";
-import { TextSkeleton } from "@/components/ui/skeleton";
 
 /* Each header is shared by its page and that page's loading.tsx, so the
  * placeholder's line under the title wraps exactly as the page's does. The
@@ -16,16 +15,15 @@ export function SettingsHeader() {
   );
 }
 
-/** `tz` is unknown until the config loads; the placeholder passes nothing and
- *  gets a bar about as wide as a typical zone name in its place. */
-export function QueueHeader({ tz }: { tz?: string }) {
+/** `tz` is the zone's name, or the placeholder's stand-in for it. */
+export function QueueHeader({ tz }: { tz: React.ReactNode }) {
   return (
     <PageHeader
       title="Queue"
       description={
         <>
           Every post that is not done yet, in slot order. Times are in{" "}
-          {tz ?? <TextSkeleton className="w-28" />}.
+          {tz}.
         </>
       }
     />
