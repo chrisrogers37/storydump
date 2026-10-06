@@ -430,6 +430,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # caller, the record is the membership doors' alone, earlier
             # removals are backfilled, and the join door pins pg_temp last.
             "102_member_removal_holds.sql",
+            # 103 appends §46: every SECURITY DEFINER function pins its
+            # search_path with pg_temp last, and a census holds the doors to it.
+            "103_definer_search_path_pinned.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
