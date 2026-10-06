@@ -291,6 +291,7 @@ export function sampleWorkspace(now: Date): SampleWorkspace {
           last_posted_at: history[0].entered_state_at,
           credential_status: "active",
           credential_connected_at: longAgo,
+          tz: null,
         },
       ],
     },
