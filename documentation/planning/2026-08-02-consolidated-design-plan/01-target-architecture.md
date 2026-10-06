@@ -76,8 +76,8 @@ The publish pipeline implements FC-3.1–3.6 exactly as tabled in `00-fixed-cons
 Media sources are a **pluggable adapter surface**: provider-neutral core, adapters at the edge, adding a provider costs an adapter rather than a core change — the third instance of this plan's per-provider discipline, after the interaction-layer port above and the D33/D34 auth providers. The port, justified operation-by-operation by an existing core need:
 
 - `list_changes(config, checkpoint) → (items, checkpoint')` — sync (H4); `items` carry the adapter's **canonical stable item ref** (the `02` §2 stable-ref contract — its normative home) plus name/kind/size/hash inputs.
-- `fetch_bytes(ref) → bytes` — the publish pipeline's transit fetch (implemented as `GoogleDriveAdapter` in `src/services/target/google_drive_adapter.py`: `list_changes`, `fetch_bytes`, `probe`).
-- `probe(config) → ok | error-class` — connect/repair validation (`media_sources.state` machine).
+- `fetch_bytes(ref) → bytes` — the publish pipeline's transit fetch (implemented as `GoogleDriveAdapter` in `src/services/target/google_drive_adapter.py`: `list_changes`, `fetch_bytes`).
+- `probe(config) → ok | error-class` — connect/repair validation (`media_sources.state` machine). *2026-09-21: deleted by #1343, with the rest of the Drive seam's dead half; nothing called it.*
 
 Provider-scoped shapes (`config`, `sync_checkpoint`) are versioned JSONB the core never interprets (`02` §2). **v1 implements exactly one adapter — Google Drive — through this port; there is no upload/write operation** (media ingestion is sync-only; the command vocabulary has no upload, a recorded non-goal with this port as the extension seam). The boundary is D37's core sentence: **the ruling asks for the seam, not the second implementation** — a Dropbox adapter is a drop-in when asked for, and building it unasked is out of scope.
 

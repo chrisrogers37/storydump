@@ -1168,6 +1168,28 @@ class TestDoorsAreExercisedAndExclusive:
                 f" expected exactly {sorted(allowed)}"
             )
 
+    def test_every_definer_function_pins_its_search_path_with_pg_temp_last(
+        self, target
+    ):
+        """The census of `public`'s SECURITY DEFINER functions (103): each one
+        pins `search_path = pg_catalog, public, pg_temp`, with pg_temp named
+        and last, as PostgreSQL's guidance for definer functions asks. A door
+        added later carries the path in its own CREATE, or this names it."""
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT p.oid::regprocedure::text, p.proconfig"
+            "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+            " WHERE n.nspname = 'public' AND p.prosecdef"
+            "   AND NOT EXISTS (SELECT 1 FROM pg_depend d"
+            "                    WHERE d.classid = 'pg_proc'::regclass"
+            "                      AND d.objid = p.oid AND d.deptype = 'e')",
+            fetch=True,
+        )
+        assert len(rows) >= len(DOORS), "the census must reach every registered door"
+        pinned = "search_path=pg_catalog, public, pg_temp"
+        stray = sorted(fn for fn, config in rows if pinned not in (config or []))
+        assert stray == [], f"definer functions without {pinned!r}: {stray}"
+
 
 class TestDirectPathsAreShut:
     """The grant matrix gives the logins no DELETE anywhere — asserted as a

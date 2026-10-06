@@ -305,8 +305,9 @@ class TestAgainstTheRealDocs:
         # §42's Telegram unlink (099) makes it 49; and §43's waitlist
         # written by the API (100) makes it 50; and §44's outbox failure record
         # and its doors (101, #1482) make it 51; and §45's removal that holds,
-        # the remove door checking its caller (102), makes it 52.
-        assert classes.count("normative") == 52
+        # the remove door checking its caller (102), makes it 52; and §46's
+        # definer functions pinning search_path with pg_temp last (103) make it 53.
+        assert classes.count("normative") == 53
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
