@@ -3123,7 +3123,8 @@ visitor key holds only while Vercel is the first hop: off Vercel a client sets `
 and behind another CDN every visitor of one edge shares one key. Unset on
 the API it behaves as before whatever the site sends, which is what lets the owner set the site
 first. A matched call with no usable address falls back to the peer and the shared counter, and still
-spends the ceiling; that counter's 429 is `full` too, since every such call shares it.
+spends the ceiling; that counter's 429 is `full` too, since every such call shares it, with a
+notice of its own on the same terms as the ceiling's.
 
 **What it does not adopt.** A hand-made, empty `waitlist_signups` and the NOLOGIN
 `waitlist_writer` role were created in production as a stopgap on 2026-10-02 and never served a

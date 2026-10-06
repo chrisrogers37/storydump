@@ -868,8 +868,10 @@ class TestTheSiteSecret:
         assert counted != []
 
     def test_set_without_a_usable_visitor_the_shared_counter_serves(
-        self, world, armed, monkeypatch
+        self, world, armed, monkeypatch, caplog
     ):
+        monkeypatch.setattr(public.logger, "propagate", True)
+        caplog.set_level(logging.WARNING)
         monkeypatch.setattr(public, "WAITLIST_LIMIT", 1)
         monkeypatch.setattr(public, "WAITLIST_KEY_PREFIX", "waitlist-novisitor-test:")
         monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-novisitor-test")
@@ -882,6 +884,14 @@ class TestTheSiteSecret:
         # Every visitor without an address shares it, so it is full, not theirs.
         assert [r.status_code for r in responses] == [202, 429]
         assert responses[-1].json()["reason"] == "full"
+        # Its own notice, naming its own limit, not the accepted signups'.
+        assert [r.getMessage() for r in caplog.records] == [
+            "waitlist: the site sent no usable visitor address",
+            "waitlist: the site sent no usable visitor address",
+            "waitlist: Waitlist calls without a visitor address hit their shared"
+            " limit of 1 a minute, and are being turned away as busy: 1 on this"
+            " server so far.",
+        ]
 
 
 class TestTheLogin:
