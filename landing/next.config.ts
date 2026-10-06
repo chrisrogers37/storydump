@@ -14,6 +14,10 @@ const nextConfig: NextConfig = {
   // headline sooner on a cold load, so it is worth having again only once the
   // public pages' stylesheet is small. `link-preview-head-contract.test.ts`
   // holds this.
+  experimental: {
+    // Off: on a restored .next/cache, builds intermittently mixed new utilities with stale globals.css rules (#1581).
+    turbopackFileSystemCacheForBuild: false,
+  },
   async redirects() {
     return [
       // Retired setup pages. Both walked the reader through registering their

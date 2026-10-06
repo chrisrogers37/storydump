@@ -45,6 +45,8 @@ from src.services.target import vocabulary
 from src.services.target import (
     google_drive_oauth,
     identity,
+    invitations,
+    oauth_states,
     offboarding,
     readers,
     service_tokens,
@@ -79,6 +81,17 @@ SETTINGS_COLUMNS: dict[str, type] = {
 NULLABLE_SETTINGS = frozenset(
     {"approval_ttl_minutes", "repost_ttl_days", "skip_ttl_days", "caption_style"}
 )
+
+#: The inclusive range each bounded setting accepts. The three TTL columns
+#: carry no CHECK; these are their bounds.
+SETTINGS_RANGES: dict[str, tuple[int, int]] = {
+    "approval_ttl_minutes": (
+        vocabulary.SETTINGS_TTL_MIN,
+        vocabulary.SETTINGS_APPROVAL_TTL_MINUTES_MAX,
+    ),
+    "repost_ttl_days": (vocabulary.SETTINGS_TTL_MIN, vocabulary.SETTINGS_TTL_DAYS_MAX),
+    "skip_ttl_days": (vocabulary.SETTINGS_TTL_MIN, vocabulary.SETTINGS_TTL_DAYS_MAX),
+}
 
 #: The per-account schedule overrides an `account_settings_change` may touch —
 #: `054`'s "per-account schedule overrides; NULL = inherit the workspace
@@ -293,8 +306,8 @@ async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
         "   AND c.provider = :provider"
         # A `disabled` destination is a REMOVED one (owner decision 2026-09-04):
         # it leaves this list, and connecting the account again brings it back.
-        " WHERE a.workspace_id = :ws AND a.state <> 'disabled'"
-        " ORDER BY a.created_at, a.id",
+        f" WHERE a.workspace_id = :ws AND {LISTED_ACCOUNT_SQL}"
+        f" {LISTED_ACCOUNT_ORDER_SQL}",
         ws=str(workspace_id),
         provider=IG_LOGIN_PROVIDER,
     )
@@ -333,12 +346,50 @@ async def drive_status(executor, *, workspace_id: str) -> dict:
     return {"status": row["status"], "connected_at": row["connected_at"]}
 
 
+async def may_browse_drive(executor, *, workspace_id: str, user_id: str) -> bool:
+    """Whether *user_id* may browse the workspace's Drive and pick a folder
+    from it (091, `07` §34): the grant is the workspace's, but what it reads is
+    the Drive of the person who granted it, so only they may walk it.
+
+    A grant with no recorded granter — every one made before 091, or one whose
+    granter's user was deleted (ON DELETE SET NULL) — is the owner's to browse
+    until a reconnect records one (the owner's decision, 2026-10-02: older
+    connections stay owner-only until reconnected). A granter removed or
+    demoted since fails the admin floor before this is asked, so nobody
+    browses until someone reconnects. False with no grant at all.
+    """
+    row = await readers.row(
+        executor,
+        "SELECT granted_by_user_id = :u"
+        "       OR (granted_by_user_id IS NULL AND EXISTS ("
+        "             SELECT 1 FROM workspace_members m"
+        "              WHERE m.workspace_id = :ws AND m.user_id = :u"
+        "                AND m.role = 'owner')) AS mine"
+        "  FROM oauth_credentials"
+        " WHERE " + google_drive_oauth.WORKSPACE_GRANT_WHERE,
+        ws=str(workspace_id),
+        u=str(user_id),
+        provider=GDRIVE_PROVIDER,
+    )
+    return bool(row and row["mine"])
+
+
 #: A `media_sources` row's `config.removed`, as a boolean — the flag Remove
 #: sets (#1233). Alias the table `s` wherever these are spliced.
 CONNECTED_FLAG_SQL = "COALESCE((s.config->>'removed')::boolean, false)"
 #: The predicate for a CONNECTED folder: not removed. State is not part of it
 #: — a folder whose grant died is paused, still connected, still weighted.
 CONNECTED_SQL = "NOT " + CONNECTED_FLAG_SQL
+
+#: The predicate for a LISTED destination, over `ig_accounts` aliased `a`: a
+#: `disabled` destination is a removed one, so it leaves the list, and
+#: connecting the account again brings it back. The Accounts tab
+#: (:func:`list_accounts`) and the Overview's runway (`content_runway.runway`)
+#: both list with it and :data:`LISTED_ACCOUNT_ORDER_SQL`, so the two show the
+#: same accounts in the same order.
+LISTED_ACCOUNT_SQL = "a.state <> 'disabled'"
+#: The order the destinations are listed in: oldest first, the id breaking ties.
+LISTED_ACCOUNT_ORDER_SQL = "ORDER BY a.created_at, a.id"
 
 
 async def list_sources(executor, *, workspace_id: str) -> list[dict]:
@@ -373,15 +424,32 @@ async def list_bindings(executor, *, workspace_id: str) -> list[dict]:
 
 
 async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
-    """Pending invitations only. The token is never read back — only its hash
-    is stored, and the row exposes nothing a caller could present."""
+    """Pending invitations the doors would still honour (098): the workspace
+    is active and the sender is still an owner or admin there with an active
+    account. The others are dead links that age out with their expiry, so they
+    are not listed as pending. The predicate mirrors 098's two doors by hand,
+    so it belongs in the database with the next migration that touches them.
+
+    The doors' third check, a removal newer than the invitation, is not
+    repeated: the runtime cannot read the removal record (#1546 takes that
+    read away), and it needs none. A removal revokes the invitations addressed
+    to the person in its own transaction (`invitations.revoke_on_removal`),
+    and 098 revoked the ones older removals left pending, so the state filter
+    already leaves them out. The token is never read back — only its hash is
+    stored, and the row exposes nothing a caller could present."""
     return await readers.rows(
         executor,
-        "SELECT id, delivery_channel, email, role, state, expires_at,"
-        "       invited_by_user_id, created_at"
-        "  FROM workspace_invitations"
-        " WHERE workspace_id = :ws AND state = 'pending' AND expires_at > now()"
-        " ORDER BY created_at, id",
+        "SELECT i.id, i.delivery_channel, i.email, i.role, i.state, i.expires_at,"
+        "       i.invited_by_user_id, i.created_at"
+        "  FROM workspace_invitations i"
+        "  JOIN workspaces w ON w.id = i.workspace_id AND w.state = 'active'"
+        "  JOIN workspace_members m ON m.workspace_id = i.workspace_id"
+        "                          AND m.user_id = i.invited_by_user_id"
+        "                          AND m.role IN ('owner', 'admin')"
+        "  JOIN users u ON u.id = i.invited_by_user_id AND u.state = 'active'"
+        " WHERE i.workspace_id = :ws AND i.state = 'pending'"
+        "   AND i.expires_at > now()"
+        " ORDER BY i.created_at, i.id",
         ws=str(workspace_id),
     )
 
@@ -637,8 +705,10 @@ def _validate_against(
     changes: Mapping[str, Any],
     columns: Mapping[str, type],
     nullable: frozenset[str],
+    ranges: Mapping[str, tuple[int, int]],
 ) -> dict[str, Any]:
-    """Keys and Python types only — the DB CHECKs decide the values.
+    """Keys, Python types, and the inclusive *ranges* — the DB CHECKs decide
+    every other value.
 
     `bool` is refused for int columns explicitly, because `True` IS an int in
     Python and would otherwise slip through as `posts_per_day = 1`.
@@ -664,19 +734,25 @@ def _validate_against(
             raise InvalidWorkspaceArgs(f"{key} must be an integer")
         elif not isinstance(value, expected):
             raise InvalidWorkspaceArgs(f"{key} must be {expected.__name__}")
+        elif key in ranges:
+            low, high = ranges[key]
+            if not low <= value <= high:
+                raise InvalidWorkspaceArgs(f"{key} must be {low} to {high}")
         cleaned[key] = value
     return cleaned
 
 
 def validate_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
     """The workspace's typed product configuration (`02` §1)."""
-    return _validate_against(changes, SETTINGS_COLUMNS, NULLABLE_SETTINGS)
+    return _validate_against(
+        changes, SETTINGS_COLUMNS, NULLABLE_SETTINGS, SETTINGS_RANGES
+    )
 
 
 def validate_account_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
     """One account's schedule overrides — same rules, narrower allowlist."""
     return _validate_against(
-        changes, ACCOUNT_SETTINGS_COLUMNS, ACCOUNT_NULLABLE_SETTINGS
+        changes, ACCOUNT_SETTINGS_COLUMNS, ACCOUNT_NULLABLE_SETTINGS, {}
     )
 
 
@@ -754,10 +830,15 @@ async def remove_member(
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
-    non-member is `not_found`. The removal is recorded by the door, so the
-    Telegram join path cannot re-add the person until they are invited back,
-    and the workspace service identities they minted are revoked here, in the
-    same transaction (090)."""
+    non-member is `not_found`. The door also checks its caller: the workspace
+    must be the claimed tenant and *by_user_id* an owner or admin of it, or it
+    raises (`07` §45). The door records the removal, which the Telegram join
+    path honours until the person is invited back. In the same transaction,
+    the workspace service identities they minted are revoked (090), as are the
+    pending invitations in the workspace that they sent or that are addressed
+    to them, so none of them lets anyone in and none blocks the fresh
+    invitation that brings them back, and every live link state they hold for
+    this workspace is retired (`07` §45)."""
     row = (
         await executor.execute(
             text(
@@ -769,10 +850,18 @@ async def remove_member(
     ).first()
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
-        # The door recorded the removal, so the Telegram group cannot undo it
-        # (090); the service identities this person minted go with them.
+        # The door recorded the removal, which the Telegram join path honours
+        # (090); the service identities this person minted go with them, and so
+        # do the pending invitations they sent or were sent and every bind or
+        # connect link they hold for this workspace.
         await service_tokens.revoke_minted_by(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
+        await invitations.revoke_on_removal(
+            executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
+        await oauth_states.retire_live_states(
+            executor, user_id=user_id, workspace_id=workspace_id
         )
         return str(row[1])
     if outcome == "not_found":

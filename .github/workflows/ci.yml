@@ -132,8 +132,17 @@ jobs:
         run: |
           pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing
 
+      # Test is a required check on main, and the upload gates nothing (no
+      # coverage threshold). `fail_ci_if_error: false` does not cover the
+      # action itself crashing: a TLS handshake failure to Codecov turned a
+      # 4726-passed run red on 2026-10-05. An outage at Codecov must not
+      # block every merge.
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
+        continue-on-error: true
+        # A stalled upload would otherwise hold Test, and the merge or deploy
+        # waiting on it, until the job's six-hour default timeout.
+        timeout-minutes: 5
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
@@ -199,11 +208,11 @@ jobs:
     # the wall-clock a person waits for, and a gate that costs nothing is a
     # gate nobody routes around.
     #
-    # NOT REQUIRED, deliberately: `rules/branches/main` declares no
-    # `required_status_checks` at all, so every check on this repo is advisory
-    # today. Making this one the sole required check would be an inconsistency,
-    # and whether the repo should enforce checks is a policy decision about all
-    # of them rather than something to smuggle in under a front-end ticket.
+    # REQUIRED, with the other five pull-request jobs: the `main` ruleset
+    # requires a pull request and these six checks by name (Lint, FC-2
+    # Telegram ratchet, Test, Security Scan, Front End, Changelog Check).
+    # Renaming a job here strands every open PR on a check that never
+    # arrives, so a rename changes the ruleset in the same breath.
     #
     # `next build` is deliberately ABSENT: Vercel already builds every PR, so
     # duplicating it here buys nothing but minutes.
@@ -245,26 +254,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check CHANGELOG.md was updated
-        run: |
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-          # Docs-only PRs (everything under documentation/ or root .md files
-          # other than CHANGELOG itself) don't need a CHANGELOG entry — the
-          # changelog tracks user-facing behavior changes, not docs.
-          NON_DOC=$(echo "$CHANGED" | grep -v -E '^(documentation/|.*\.md$|\.github/)' || true)
-          if [ -z "$NON_DOC" ]; then
-            echo "✅ Docs-only PR — CHANGELOG.md update not required"
-            exit 0
-          fi
-
-          if echo "$CHANGED" | grep -q "^CHANGELOG\.md$"; then
-            echo "✅ CHANGELOG.md was updated"
-          else
-            echo "⚠️ WARNING: CHANGELOG.md was not updated"
-            echo "Please add an entry under ## [Unreleased] describing your changes"
-            echo ""
-            echo "Files changed:"
-            echo "$CHANGED" | sed 's/^/  /'
-            exit 1
-          fi
+      # A PR adds its entry as a new file in changelog.d/ and never edits
+      # CHANGELOG.md, so no two PRs change the same lines; a docs-only PR needs
+      # no fragment. changelog.d/README.md states the rule; the script holds it.
+      - name: Check the changelog fragment
+        run: python scripts/changelog_fragments.py check --base "origin/${{ github.base_ref }}"

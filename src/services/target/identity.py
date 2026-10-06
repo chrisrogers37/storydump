@@ -4,10 +4,12 @@ The one writer of a human's identity row. Keyed on the provider's IMMUTABLE
 SUBJECT — `(provider, external_id)`, the Google OIDC `sub` — never on the
 email address (D32): emails are mutable and recyclable, so identity keyed on
 email is an account-takeover primitive. The verified email claim is metadata,
-refreshed at every sign-in; `users.primary_email` fills from it when NULL; a
-claim colliding with a DIFFERENT user's `primary_email` surfaces as an error
-and never merges accounts (D35 — merging two populated users is an operator
-action with an audit trail, out of v1).
+refreshed at every sign-in: `users.primary_email` follows it whenever it
+changes (#1579), so invitations and mail reach the address the person uses
+now. A claim colliding with a DIFFERENT user's `primary_email` never merges
+accounts (D35 — merging two populated users is an operator action with an
+audit trail, out of v1): a new subject is refused, and a returning one signs in
+keeping the address it had, with the clash logged.
 
 Both tables are user-plane (`058` class 3: role-scoped `USING (true)`), so
 this runs before any `app.tenant_id` exists — identity precedes tenancy.
@@ -15,12 +17,19 @@ this runs before any `app.tenant_id` exists — identity precedes tenancy.
 
 from __future__ import annotations
 
-from typing import Optional
+import logging
+from typing import Iterable, Optional
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from src.exceptions.base import StorydumpError
-from src.services.target import readers, vocabulary
+from src.services.target import _dbapi, oauth_states, readers, vocabulary
+
+logger = logging.getLogger(__name__)
+
+#: The one constraint an address clash surfaces as.
+_EMAIL_HELD = "uq_users_primary_email"
 
 PROVIDER_GOOGLE = vocabulary.PROVIDER_GOOGLE
 PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
@@ -28,6 +37,11 @@ PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
 
 class IdentityCollision(StorydumpError):
     """The verified email belongs to a different user. Refused, never merged."""
+
+
+class SignupNotAdmitted(StorydumpError):
+    """A new Google account whose verified email nobody admitted or invited
+    (092, `07` §35): no user is created. Sign-in maps it to `not_admitted`."""
 
 
 class IdentityAlreadyLinked(StorydumpError):
@@ -46,7 +60,12 @@ class IdentityAlreadyLinked(StorydumpError):
 
 
 async def upsert_google_identity(
-    executor, *, sub: str, email: Optional[str], display_name: Optional[str]
+    executor,
+    *,
+    sub: str,
+    email: Optional[str],
+    display_name: Optional[str],
+    signup_open: bool = False,
 ) -> str:
     """Find-or-create the user for a verified Google subject. Returns user_id.
 
@@ -56,6 +75,13 @@ async def upsert_google_identity(
     `uq_identity_per_provider`). *email* is the VERIFIED claim or None —
     `google_oidc.verify_id_token` already drops an unverified one, so this
     function never sees a claim it must doubt.
+
+    A subject seen before signs in whatever *signup_open* says. A NEW one
+    creates its user only when `fn_signup_admitted` admits its email — an
+    owner admission or a live invitation addressed to it (092) from an active
+    workspace whose owner or admin still sent it (098) — and is
+    refused with `SignupNotAdmitted` otherwise, a None email included.
+    *signup_open* (`TARGET_SIGNUP_OPEN`) skips that ask.
     """
     if not sub:
         raise ValueError("sub is required")
@@ -112,20 +138,27 @@ async def upsert_google_identity(
             ),
             {"dn": display_name, "p": PROVIDER_GOOGLE, "sub": sub},
         )
-        if claim is not None and held is None:
-            await _fill_primary_email(executor, user_id=user_id, email=claim)
+        if claim is not None and claim != held:
+            await _refresh_primary_email(executor, user_id=user_id, email=claim)
         return user_id
 
+    if not signup_open:
+        await _refuse_unless_admitted(executor, email=claim)
     if claim is not None:
-        await _refuse_if_held_elsewhere(executor, email=claim, user_id=None)
-    user_id = str(
-        (
-            await executor.execute(
-                text("INSERT INTO users (primary_email) VALUES (:e) RETURNING id"),
-                {"e": claim},
-            )
-        ).scalar_one()
-    )
+        await _refuse_if_email_held(executor, email=claim)
+    try:
+        inserted = await executor.execute(
+            text("INSERT INTO users (primary_email) VALUES (:e) RETURNING id"),
+            {"e": claim},
+        )
+    except IntegrityError as exc:
+        # Another sign-in took the address after the check above: the same
+        # refusal, not a 500. The transaction is aborted and rolls back whole.
+        # `from None`: the driver's detail quotes the address.
+        if _dbapi.constraint_violated(exc, _EMAIL_HELD):
+            raise IdentityCollision(_COLLISION) from None
+        raise
+    user_id = str(inserted.scalar_one())
     await executor.execute(
         text(
             "INSERT INTO user_identities"
@@ -137,31 +170,64 @@ async def upsert_google_identity(
     return user_id
 
 
-async def _refuse_if_held_elsewhere(
-    executor, *, email: str, user_id: Optional[str]
-) -> None:
-    holder = (
+async def _refuse_unless_admitted(executor, *, email: Optional[str]) -> None:
+    """The sign-up gate (092): the door answers for the owner's admissions and
+    every workspace's invitations, which this login cannot read itself. Asked
+    before the collision check, so a refused address learns nothing about
+    which accounts exist."""
+    if email is not None:
+        admitted = (
+            await executor.execute(text("SELECT fn_signup_admitted(:e)"), {"e": email})
+        ).scalar()
+        if admitted:
+            return
+    raise SignupNotAdmitted(
+        "a new account needs an admitted or invited email while sign-up is gated"
+    )
+
+
+_COLLISION = (
+    "the verified email belongs to a different account; accounts are never merged"
+)
+
+
+async def _refuse_if_email_held(executor, *, email: str) -> None:
+    held = (
         await executor.execute(
-            text("SELECT id FROM users WHERE primary_email = :e"), {"e": email}
+            text("SELECT 1 FROM users WHERE primary_email = :e"), {"e": email}
         )
     ).first()
-    if holder is not None and (user_id is None or str(holder[0]) != user_id):
-        raise IdentityCollision(
-            "the verified email belongs to a different account; accounts are never merged"
+    if held is not None:
+        raise IdentityCollision(_COLLISION)
+
+
+async def _refresh_primary_email(executor, *, user_id: str, email: str) -> None:
+    """Point a returning user's `primary_email` at their verified claim
+    (#1579). The caller asks only when the claim differs from what is stored,
+    so a clash on `uq_users_primary_email` means another user holds it: then
+    this user keeps the address they had and the clash is logged by user id,
+    never by address (the module docstring's rule). The constraint decides,
+    inside a savepoint, so a concurrent claim of the same address is a clash
+    too rather than a failed sign-in: the per-subject lock does not cover it."""
+    try:
+        async with executor.begin_nested():
+            await executor.execute(
+                text("UPDATE users SET primary_email = :e WHERE id = :u"),
+                {"e": email, "u": user_id},
+            )
+    except IntegrityError as exc:
+        if not _dbapi.constraint_violated(exc, _EMAIL_HELD):
+            raise
+        # A warning, not `logger.exception`: the driver's detail quotes the
+        # key ("Key (primary_email)=(...)"), and an address never reaches a log.
+        logger.warning(
+            "identity: user %s's verified email is held by another account"
+            " (%s); primary_email was NOT updated, the stored address is kept",
+            user_id,
+            _EMAIL_HELD,
         )
-
-
-async def _fill_primary_email(executor, *, user_id: str, email: str) -> None:
-    """Fill `primary_email` when NULL; leave a populated one alone (email is a
-    claim, not an edit); refuse the fill if another user holds it."""
-    await _refuse_if_held_elsewhere(executor, email=email, user_id=user_id)
-    await executor.execute(
-        text(
-            "UPDATE users SET primary_email = :e"
-            " WHERE id = :u AND primary_email IS NULL"
-        ),
-        {"e": email, "u": user_id},
-    )
+        return
+    logger.info("identity: user %s's primary email now follows the claim", user_id)
 
 
 async def user_for_identity(
@@ -218,6 +284,25 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
         )
     ).first()
     return None if row is None else str(row[0])
+
+
+async def telegram_ids_for(executor, user_ids: Iterable[str]) -> list[str]:
+    """The Telegram ids of those of *user_ids* who have linked Telegram, in a
+    stable order; a person who has not linked, or whose account is disabled,
+    is simply absent."""
+    user_ids = [str(u) for u in user_ids]
+    if not user_ids:
+        return []
+    rows = await executor.execute(
+        text(
+            "SELECT i.external_id FROM user_identities i"
+            " JOIN users u ON u.id = i.user_id AND u.state = 'active'"
+            " WHERE i.provider = :p AND i.user_id = ANY(CAST(:u AS uuid[]))"
+            " ORDER BY i.external_id"
+        ),
+        {"p": PROVIDER_TELEGRAM, "u": user_ids},
+    )
+    return [str(row[0]) for row in rows]
 
 
 def display_name_sql(user_id_sql: str) -> str:
@@ -329,7 +414,7 @@ async def link_identity(
     ).first()
     if mine is not None:
         # `uq_user_provider`. Replacing it would silently unlink the old
-        # account, which is an operator action with an audit trail, not a tap.
+        # account; the person unlinks it first (`unlink_telegram`, 099).
         raise IdentityAlreadyLinked("user_already_has_this_provider")
 
     await executor.execute(
@@ -341,3 +426,34 @@ async def link_identity(
         {"u": str(user_id), "p": provider, "sub": external_id, "dn": display_name},
     )
     return True
+
+
+async def unlink_telegram(executor, *, user_id: str) -> str:
+    """Remove *user_id*'s own Telegram identity — the reverse of
+    :func:`link_identity`. Returns the door's outcome: `unlinked`,
+    `not_linked` or `last_identity` (099, `07` §42).
+
+    The delete is the `fn_identity_unlink` door's (099): no runtime role
+    deletes from `user_identities`, and the door keeps the user's other
+    identity, answering `last_identity` rather than leave an account with no
+    way to sign in. The caller proves the person — this is the session's user.
+
+    Memberships are untouched: a workspace joined from a Telegram group stays
+    joined. That Telegram account now resolves to nobody, so its taps answer
+    `unlinked` and its group messages join no one until the person links
+    again. In the same transaction the user's live `link` states are retired,
+    so a link minted before the unlink cannot re-attach an account the person
+    just removed.
+    """
+    outcome = (
+        await executor.execute(
+            text("SELECT fn_identity_unlink(CAST(:u AS uuid), :p)"),
+            {"u": str(user_id), "p": PROVIDER_TELEGRAM},
+        )
+    ).scalar_one()
+    if outcome != "last_identity":
+        # "link" is `identity_link.PURPOSE`, which imports this module.
+        await oauth_states.retire_live_states(
+            executor, provider=PROVIDER_TELEGRAM, purpose="link", user_id=user_id
+        )
+    return str(outcome)

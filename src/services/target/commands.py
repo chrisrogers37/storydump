@@ -113,6 +113,9 @@ ROLE_FLOOR: dict[str, str] = {
     # person at the story's time and posts nothing by itself.
     "schedule_item": "member",
     "reschedule_item": "member",
+    # The item's link (#1413 phase 7, F11): the same floor. It changes what a
+    # story's card asks a person to add by hand, and posts nothing.
+    "set_item_link": "member",
     "autopost_now": "member",
     "sync_now": "member",
     "settings_change": "admin",
@@ -248,6 +251,8 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             # (F4); `cancel` ends one, as it ends any story.
             "schedule_item": ex.schedule_item,
             "reschedule_item": ex.reschedule_item,
+            # #1413 phase 7: the link an item's stories ask for by hand.
+            "set_item_link": ex.set_item_link,
             "sync_now": ex.sync_now,
             # gdrive epic P4 — the trio is provider-general (F1 (a)) and
             # THIN: the OAuth leg is the API route's, these initiate and record.

@@ -2,8 +2,10 @@ import { requireWorkspacePage } from "@/lib/page-guards";
 import { workspaceFetch } from "@/lib/workspaces";
 import {
   derivePoolHealth,
+  type AccountsResponse,
   type MediaResponse,
   type StatsResponse,
+  type WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { PoolHealth } from "@/components/dashboard/media/pool-health";
@@ -21,12 +23,14 @@ const MEDIA_LIMIT = 100;
 export default async function MediaLibraryPage() {
   const { workspaceId } = await requireWorkspacePage();
 
-  const [mediaResult, statsResult] = await Promise.all([
+  const [mediaResult, statsResult, accountsResult, configResult] = await Promise.all([
     workspaceFetch<MediaResponse>(
       `media?state=available&limit=${MEDIA_LIMIT}`,
       workspaceId,
     ),
     workspaceFetch<StatsResponse>("stats", workspaceId),
+    workspaceFetch<AccountsResponse>("accounts", workspaceId),
+    workspaceFetch<WorkspaceConfig>("", workspaceId),
   ]);
 
   // Both, for the same reason the overview gates on all of its own: a pool
@@ -39,11 +43,24 @@ export default async function MediaLibraryPage() {
   const items = mediaResult.data.media ?? [];
   const health = derivePoolHealth(statsResult.data);
 
+  // Scheduling needs the accounts and the workspace's zone, but the library
+  // does not: without them the grid still shows, and the Schedule dialog says
+  // they could not be read rather than offering a picker it cannot fill.
+  const targets =
+    accountsResult.ok && configResult.ok
+      ? { accounts: accountsResult.data.accounts ?? [], workspaceTz: configResult.data.tz }
+      : null;
+
   return (
     <div className="space-y-6">
       <PoolHealth health={health} />
 
-      <MediaGrid items={items} limit={MEDIA_LIMIT} />
+      <MediaGrid
+        items={items}
+        limit={MEDIA_LIMIT}
+        workspaceId={workspaceId}
+        targets={targets}
+      />
     </div>
   );
 }

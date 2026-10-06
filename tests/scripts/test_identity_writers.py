@@ -67,6 +67,7 @@ import psycopg2
 import pytest
 from sqlalchemy import text
 
+from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import identity, sessions, vocabulary, workspaces
 from src.services.target.workspaces import InvalidWorkspaceArgs
@@ -118,10 +119,12 @@ def tenant(world, ws, user, fn):
 
 
 def upsert(world, *, sub, email=None, display_name=None):
+    # Sign-up open: these pin the upsert itself; the gate in front of a new
+    # user is `test_signup_gate.py`'s.
     return user_plane(
         world,
         lambda c: identity.upsert_google_identity(
-            c, sub=sub, email=email, display_name=display_name
+            c, sub=sub, email=email, display_name=display_name, signup_open=True
         ),
     )
 
@@ -130,6 +133,55 @@ def owner(world, sql, params=None):
     """Ground truth, read back as the schema owner — outside the policies, so
     an empty read is an absent row rather than an invisible one."""
     return fetch_one(world["stream"], sql, params)
+
+
+def stored_email(world, user_id):
+    return owner(world, "SELECT primary_email FROM users WHERE id = %s", (user_id,))[0]
+
+
+def race_for_address(world, rival, email, *, sub):
+    """*rival* takes *email* in a transaction left open while *sub* signs in
+    with it; the rival commits only once that sign-in is provably blocked on
+    its row, so the wait is exercised, not raced. Returns the sign-in's user."""
+    open_txn = psycopg2.connect(world["stream"])
+    try:
+        with open_txn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET primary_email = %s WHERE id = %s", (email, rival)
+            )
+            cur.execute("SELECT pg_current_xact_id()::text")
+            rival_xid = cur.fetchone()[0]
+
+        async def race():
+            signing_in = asyncio.create_task(
+                in_user_plane(
+                    world["ingress"],
+                    lambda c: identity.upsert_google_identity(
+                        c, sub=sub, email=email, display_name=None, signup_open=True
+                    ),
+                )
+            )
+            for _ in range(100):
+                # pg_locks, not pg_stat_activity: the latter hides another
+                # role's wait columns from a non-superuser. Keyed on the
+                # rival's xid, since pg_locks is cluster-wide.
+                if owner(
+                    world,
+                    "SELECT count(*) FROM pg_locks"
+                    " WHERE NOT granted AND locktype = 'transactionid'"
+                    "   AND transactionid::text = %s",
+                    (rival_xid,),
+                )[0]:
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                pytest.fail("the sign-in never waited on the rival's row")
+            open_txn.commit()
+            return await signing_in
+
+        return asyncio.run(race())
+    finally:
+        open_txn.close()
 
 
 def _claim(cur, tenant_id, actor_kind="user", channel="web"):
@@ -245,46 +297,28 @@ class TestTheIdentityWriter:
         )
         assert after > before and display == "kept"
 
-    def test_primary_email_fills_when_empty_and_never_overwrites(self, world):
+    def test_primary_email_fills_when_empty_and_follows_the_claim(self, world):
+        """#1579: the stored address follows the verified claim at every
+        sign-in — filled when empty, rewritten when the Google address
+        changes, and left alone by a token that carries no email."""
         first = upsert(world, sub="sub-mail")
-        assert (
-            owner(world, "SELECT primary_email FROM users WHERE id = %s", (first,))[0]
-            is None
-        )
+        assert stored_email(world, first) is None
         upsert(world, sub="sub-mail", email="filled@example.com")
-        upsert(world, sub="sub-mail", email="changed@example.com")
-        # A provider changing the claim must not repoint a set account.
-        assert (
-            owner(world, "SELECT primary_email FROM users WHERE id = %s", (first,))[0]
-            == "filled@example.com"
-        )
+        assert stored_email(world, first) == "filled@example.com"
+        assert upsert(world, sub="sub-mail", email="changed@example.com") == first
+        assert stored_email(world, first) == "changed@example.com"
+        # A claim-less token says nothing about the address: no erase.
+        upsert(world, sub="sub-mail")
+        assert stored_email(world, first) == "changed@example.com"
+        # The old address is free again for whoever holds it now.
+        newcomer = upsert(world, sub="sub-mail-recycled", email="filled@example.com")
+        assert newcomer != first
 
-    def test_the_fill_itself_leaves_a_populated_address_alone(self, world):
-        """The `AND primary_email IS NULL` half of the fill, pinned directly.
-
-        `upsert_google_identity` only reaches `_fill_primary_email` when the
-        row's address is NULL, so the guard inside the UPDATE is unreachable
-        through the public writer — a mutation battery on this file found
-        that removing it changed nothing observable. It is defence in depth
-        and worth keeping, so it is driven at its own door: a user whose
-        address is already set, a fill with a different unheld address, and
-        the stored value unmoved.
-        """
-        user_id = upsert(world, sub="sub-fill-guard", email="held@example.com")
-        user_plane(
-            world,
-            lambda c: identity._fill_primary_email(
-                c, user_id=user_id, email="second@example.com"
-            ),
-        )
-        assert (
-            owner(world, "SELECT primary_email FROM users WHERE id = %s", (user_id,))[0]
-            == "held@example.com"
-        )
-
-    def test_a_colliding_email_refuses_and_never_merges(self, world):
-        """D35, on both paths that can hit it: a brand-new subject whose email
-        is taken, and a returning subject whose empty email is taken.
+    def test_a_new_subject_whose_email_is_taken_is_refused_and_never_merged(
+        self, world
+    ):
+        """D35 on the create path: a brand-new subject whose email another
+        user holds is refused.
 
         `IdentityCollision` is a plain `StorydumpError` with **no `reason`
         attribute** — the twin's `IdentityProvisioningError("email_belongs_to_
@@ -295,22 +329,14 @@ class TestTheIdentityWriter:
         with pytest.raises(identity.IdentityCollision):
             upsert(world, sub="sub-newcomer", email="shared@example.com")
 
-        later = upsert(world, sub="sub-later")
-        with pytest.raises(identity.IdentityCollision):
-            upsert(world, sub="sub-later", email="shared@example.com")
-
-        # Neither refusal merged anything, and neither left a partial row: the
-        # refusal raises inside the transaction, which rolls back whole.
+        # The refusal merged nothing and left no partial row: it raises inside
+        # the transaction, which rolls back whole.
         assert (
             owner(
                 world,
                 "SELECT user_id FROM user_identities WHERE external_id = %s",
                 ("sub-newcomer",),
             )
-            is None
-        )
-        assert (
-            owner(world, "SELECT primary_email FROM users WHERE id = %s", (later,))[0]
             is None
         )
         assert (
@@ -323,6 +349,76 @@ class TestTheIdentityWriter:
         )
         assert (
             owner(world, "SELECT id FROM users WHERE id = %s", (incumbent,)) is not None
+        )
+
+    def test_a_returning_user_whose_new_email_is_taken_signs_in_and_keeps_theirs(
+        self, world, caplog
+    ):
+        """The clash rule on #1579, for both shapes of returning user: one
+        with no stored address and one whose address changed. Each signs in
+        as themselves, keeps what they had, and the clash is logged by user id
+        with no address in the line. Nothing is merged: the holder is
+        untouched."""
+        holder = upsert(world, sub="sub-holder", email="taken@example.com")
+        empty = upsert(world, sub="sub-clash-empty")
+        moved = upsert(world, sub="sub-clash-moved", email="mine@example.com")
+
+        with caplog.at_level("WARNING", logger=identity.__name__):
+            assert (
+                upsert(world, sub="sub-clash-empty", email="taken@example.com") == empty
+            )
+            assert (
+                upsert(world, sub="sub-clash-moved", email="taken@example.com") == moved
+            )
+
+        assert stored_email(world, empty) is None
+        assert stored_email(world, moved) == "mine@example.com"
+        assert stored_email(world, holder) == "taken@example.com"
+        clashes = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert sorted(r.args[0] for r in clashes) == sorted([empty, moved])
+        assert not any("@" in r.getMessage() or r.exc_info for r in clashes)
+
+    def test_a_concurrent_claim_of_the_new_address_is_a_clash_not_a_failure(
+        self, world, caplog
+    ):
+        """The clash rule holds under a race the per-subject lock cannot see.
+
+        Another account takes the address in a transaction still open when
+        this user's sign-in runs, so the refresh's UPDATE blocks on
+        `uq_users_primary_email` and raises once the other side commits. The
+        savepoint turns that into the logged clash: the sign-in succeeds and
+        the user keeps the address they had."""
+        rival = upsert(world, sub="sub-race-rival", email="rival@example.com")
+        mover = upsert(world, sub="sub-race-mover", email="before@example.com")
+
+        with caplog.at_level("WARNING", logger=identity.__name__):
+            signed_in = race_for_address(
+                world, rival, "raced@example.com", sub="sub-race-mover"
+            )
+
+        assert signed_in == mover
+        assert stored_email(world, mover) == "before@example.com"
+        assert stored_email(world, rival) == "raced@example.com"
+        assert [r.args[0] for r in caplog.records if r.levelname == "WARNING"] == [
+            mover
+        ]
+
+    def test_a_concurrent_claim_against_a_new_subject_is_the_collision(self, world):
+        """The create path's check reads before the rival commits, so its
+        INSERT is the one that meets `uq_users_primary_email`: that is the
+        same `IdentityCollision` as the check's, not an unhandled 500."""
+        rival = upsert(world, sub="sub-race-rival-2", email="rival2@example.com")
+
+        with pytest.raises(identity.IdentityCollision):
+            race_for_address(world, rival, "raced2@example.com", sub="sub-race-new")
+
+        assert (
+            owner(
+                world,
+                "SELECT user_id FROM user_identities WHERE external_id = %s",
+                ("sub-race-new",),
+            )
+            is None
         )
 
     def test_two_concurrent_first_sign_ins_converge_on_one_user(self, world):
@@ -343,7 +439,7 @@ class TestTheIdentityWriter:
                 return await in_user_plane(
                     world["ingress"],
                     lambda c: identity.upsert_google_identity(
-                        c, sub=sub, email=None, display_name=name
+                        c, sub=sub, email=None, display_name=name, signup_open=True
                     ),
                 )
 
@@ -494,14 +590,21 @@ class TestTheSessionWriter:
         )
 
     def test_resolve_slides_the_window_and_the_throttle_holds_the_second_read(
-        self, world
+        self, world, monkeypatch
     ):
         """**There is no `touch_session` on the live lane.** `sessions.resolve`
         slides inline, throttled by `RENEW_THROTTLE_SECONDS`, so the twin's
         separate touch door becomes two assertions about one function: a read
         past the throttle slides `expires_at` and stamps `last_seen_at`; a
         read inside the window does not.
+
+        The absolute cap is lifted past the TTL here: at its default the two
+        are equal, every slide lands on `created_at` + the cap, and the third
+        read could not move the window — the cap's own test is below.
         """
+        monkeypatch.setattr(
+            settings, "SESSION_MAX_AGE_SECONDS", 3 * sessions.SESSION_TTL_SECONDS
+        )
         user_id = self._user(world, "slide")
         value = self._issue(world, user_id)
         h = sessions.token_hash(value)
@@ -552,6 +655,131 @@ class TestTheSessionWriter:
             (h,),
         )
         assert after_third > after_second and seen_third > seen_first
+
+    def _backdate(self, world, h, *, age, expires_in="1 hour", last_seen=None):
+        """Set the row's clocks as the owner: `created_at` *age* ago,
+        `expires_at` *expires_in* ahead, `last_seen_at` as given."""
+        with txn(world["stream"]) as c, c.cursor() as cur:
+            cur.execute(
+                "UPDATE session_tokens SET created_at = now() - %s::interval,"
+                " expires_at = now() + %s::interval, last_seen_at = %s"
+                " WHERE token_hash = %s",
+                (age, expires_in, last_seen, h),
+            )
+            c.commit()
+
+    def test_a_session_past_its_absolute_age_is_expired_however_fresh(self, world):
+        """`settings.SESSION_MAX_AGE_SECONDS` counts from `created_at`: a row
+        whose sliding `expires_at` is still a day out, but which was minted
+        longer ago than the cap, refuses as `expired_session` — and the read
+        does not slide it back to life."""
+        user_id = self._user(world, "aged")
+        value = self._issue(world, user_id)
+        h = sessions.token_hash(value)
+        self._backdate(
+            world,
+            h,
+            age=f"{settings.SESSION_MAX_AGE_SECONDS + 60} seconds",
+            expires_in="1 day",
+        )
+        before = owner(
+            world, "SELECT expires_at FROM session_tokens WHERE token_hash = %s", (h,)
+        )[0]
+
+        with pytest.raises(TenantResolutionError) as err:
+            self._resolve(world, value)
+        assert err.value.reason == "expired_session"
+        assert (
+            owner(
+                world,
+                "SELECT expires_at FROM session_tokens WHERE token_hash = %s",
+                (h,),
+            )[0]
+            == before
+        ), "the read slid an over-age session"
+
+    def test_the_slide_never_carries_expiry_past_the_cap(self, world):
+        """A session one day short of its cap, used now: the slide would put
+        `expires_at` 30 days out, and `LEAST` holds it at `created_at` + the
+        cap instead — one day out, not thirty."""
+        user_id = self._user(world, "capped")
+        value = self._issue(world, user_id)
+        h = sessions.token_hash(value)
+        self._backdate(
+            world, h, age=f"{settings.SESSION_MAX_AGE_SECONDS - 86400} seconds"
+        )
+
+        assert self._resolve(world, value).user_id == user_id
+        at_cap, still_live, seen = owner(
+            world,
+            "SELECT expires_at = created_at + make_interval(secs => %s),"
+            " expires_at > now(), last_seen_at IS NOT NULL"
+            " FROM session_tokens WHERE token_hash = %s",
+            (settings.SESSION_MAX_AGE_SECONDS, h),
+        )
+        assert seen is True, "the read did not slide at all"
+        assert at_cap is True and still_live is True
+
+    def test_revoke_all_kills_the_siblings_and_no_one_elses(self, world):
+        """Sign out everywhere: every live session of the presenting user,
+        that one included; an already-revoked sibling keeps its first
+        instant; another user's sessions are untouched; and a DEAD presented
+        session reaches nothing."""
+        me = self._user(world, "everywhere-me")
+        other = self._user(world, "everywhere-other")
+        here, laptop, phone = (self._issue(world, me) for _ in range(3))
+        theirs = self._issue(world, other)
+        # A pending Telegram link each: a stolen session could have minted
+        # mine, and it must not outlive the sign-out.
+        link = (
+            "INSERT INTO oauth_states (state, user_id, provider, purpose, expires_at)"
+            " VALUES (%s, %s, 'telegram', 'link', now() + interval '15 minutes')"
+            " RETURNING state"
+        )
+        owner(world, link, (f"link-{me}", me))
+        owner(world, link, (f"link-{other}", other))
+        hp = sessions.token_hash(phone)
+        assert user_plane(world, lambda c: sessions.revoke(c, token_hash=hp)) is True
+        phone_kill = owner(
+            world, "SELECT revoked_at FROM session_tokens WHERE token_hash = %s", (hp,)
+        )[0]
+
+        revoked = user_plane(
+            world,
+            lambda c: sessions.revoke_all_for_user(
+                c, token_hash=sessions.token_hash(here)
+            ),
+        )
+        assert revoked == 2, "here and the laptop; the phone was already out"
+        for value in (here, laptop, phone):
+            with pytest.raises(TenantResolutionError) as err:
+                self._resolve(world, value)
+            assert err.value.reason == "revoked_session"
+        assert (
+            owner(
+                world,
+                "SELECT revoked_at FROM session_tokens WHERE token_hash = %s",
+                (hp,),
+            )[0]
+            == phone_kill
+        )
+        assert self._resolve(world, theirs).user_id == other
+        consumed = "SELECT consumed_at IS NOT NULL FROM oauth_states WHERE state = %s"
+        assert owner(world, consumed, (f"link-{me}",)) == (True,)
+        assert owner(world, consumed, (f"link-{other}",)) == (False,)
+
+        # Their own dead session (revoked above) cannot reach a new sibling.
+        fresh = self._issue(world, me)
+        assert (
+            user_plane(
+                world,
+                lambda c: sessions.revoke_all_for_user(
+                    c, token_hash=sessions.token_hash(here)
+                ),
+            )
+            == 0
+        )
+        assert self._resolve(world, fresh).user_id == me
 
     def test_a_disabled_user_is_refused_at_the_one_ingress_gate(self, world):
         """**New coverage the live lane makes possible.** The retired
@@ -758,7 +986,11 @@ class TestTheThreeWritersCompose:
     def test_sign_up_then_sign_in_reaches_the_new_workspace(self, world):
         async def sign_in(conn):
             user_id = await identity.upsert_google_identity(
-                conn, sub="sub-e2e", email="e2e@example.com", display_name="E"
+                conn,
+                sub="sub-e2e",
+                email="e2e@example.com",
+                display_name="E",
+                signup_open=True,
             )
             return user_id, await sessions.issue(conn, user_id=user_id)
 

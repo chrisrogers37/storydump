@@ -16,7 +16,7 @@ The canonical list, with what each command does, is the safety block in
 `CLAUDE.md`; this copy is pinned to it by `tests/test_agent_docs.py`.
 
 Not on that list does not mean safe: `storydump skip`, `reject`, `posted`,
-`pause`, `resume`, `sync`, `schedule` and `reschedule` also write through the
+`pause`, `resume`, `sync`, `schedule`, `reschedule` and `link` also write through the
 command port — a skip or a reject is final for that story. Ask first.
 
 **SAFE commands** (read-only):
@@ -134,4 +134,4 @@ Changed on the web (Settings) or through the command port (`settings_change`,
 
 ## CHANGELOG Reminder
 
-Every PR that touches code or config must update `CHANGELOG.md` under `## [Unreleased]` — CI's `changelog-check` fails without it; a docs-only PR (`documentation/`, `*.md`, `.github/`) is exempt
+Every PR that touches code or config adds a fragment in `changelog.d/`, and no PR edits `CHANGELOG.md` — the format and CI's `changelog-check` rule are in `changelog.d/README.md`
