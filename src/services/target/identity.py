@@ -154,8 +154,9 @@ async def upsert_google_identity(
     except IntegrityError as exc:
         # Another sign-in took the address after the check above: the same
         # refusal, not a 500. The transaction is aborted and rolls back whole.
+        # `from None`: the driver's detail quotes the address.
         if _dbapi.constraint_violated(exc, _EMAIL_HELD):
-            raise IdentityCollision(_COLLISION) from exc
+            raise IdentityCollision(_COLLISION) from None
         raise
     user_id = str(inserted.scalar_one())
     await executor.execute(

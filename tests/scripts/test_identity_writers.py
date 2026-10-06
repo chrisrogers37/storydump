@@ -149,6 +149,8 @@ def race_for_address(world, rival, email, *, sub):
             cur.execute(
                 "UPDATE users SET primary_email = %s WHERE id = %s", (email, rival)
             )
+            cur.execute("SELECT pg_current_xact_id()::text")
+            rival_xid = cur.fetchone()[0]
 
         async def race():
             signing_in = asyncio.create_task(
@@ -161,11 +163,14 @@ def race_for_address(world, rival, email, *, sub):
             )
             for _ in range(100):
                 # pg_locks, not pg_stat_activity: the latter hides another
-                # role's wait columns from a non-superuser.
+                # role's wait columns from a non-superuser. Keyed on the
+                # rival's xid, since pg_locks is cluster-wide.
                 if owner(
                     world,
                     "SELECT count(*) FROM pg_locks"
-                    " WHERE NOT granted AND locktype = 'transactionid'",
+                    " WHERE NOT granted AND locktype = 'transactionid'"
+                    "   AND transactionid::text = %s",
+                    (rival_xid,),
                 )[0]:
                     break
                 await asyncio.sleep(0.05)
