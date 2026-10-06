@@ -25,7 +25,7 @@ import { Notice } from "@/components/ui/notice";
 import { tokenRowsFrom } from "@/lib/tokens";
 import { InviteMember } from "@/components/dashboard/settings/invite-member";
 import { pendingInvitationsFrom } from "@/lib/invitations";
-import { PageHeader } from "@/design/page-header";
+import { SettingsHeader } from "@/components/dashboard/page-headers";
 
 /**
  * Settings — every tab writes. General is the command client (P3), Accounts
@@ -205,10 +205,7 @@ export default async function SettingsPage({
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Settings"
-        description="Your posting schedule, accounts, integrations, and API tokens."
-      />
+      <SettingsHeader />
 
       {/*
         SAYS ONLY WHAT THE REDIRECT SUBSTANTIATES, which is less than it is

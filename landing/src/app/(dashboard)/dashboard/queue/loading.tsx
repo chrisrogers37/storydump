@@ -1,10 +1,10 @@
 import { Skeleton } from "@/components/ui/skeleton";
-import { PageHeaderSkeleton } from "@/design/page-header";
+import { QueueHeader } from "@/components/dashboard/page-headers";
 
 export default function QueueLoading() {
   return (
     <div className="space-y-6">
-      <PageHeaderSkeleton titleWidth="w-24" descriptionWidth="w-80" />
+      <QueueHeader />
 
       {/* Queue rows */}
       <div className="divide-y rounded-lg border bg-card">
