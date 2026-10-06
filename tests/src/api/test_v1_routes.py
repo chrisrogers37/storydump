@@ -685,6 +685,66 @@ class TestWorkspaceConnect:
         assert tenant == [] and issued == {}
 
 
+class TestTypedDestination:
+    """`POST /workspaces/{ws}/accounts` takes a handle only (`v1.create_account`):
+    a body carrying ``provider_account_ref`` is refused by name, after the
+    admin gate, and nothing is written."""
+
+    URL = f"/api/v1/workspaces/{WS}/accounts"
+
+    @pytest.fixture
+    def written(self, monkeypatch):
+        calls = []
+
+        async def create_destination(
+            session,
+            *,
+            workspace_id,
+            provider_account_ref=None,
+            handle=None,
+            schedule=True,
+        ):
+            calls.append((workspace_id, provider_account_ref, handle, schedule))
+            return ACCOUNT, True
+
+        monkeypatch.setattr(provisioning, "create_destination", create_destination)
+        return calls
+
+    def test_a_handle_reaches_the_writer_with_no_account_id(
+        self, client, signed_in, tenant, written
+    ):
+        """The control: the writer gets the handle and no reference, and
+        derives ``manual:<handle>`` from it (what lands is pinned by
+        `tests/scripts/test_provisioning_gate.py`,
+        `TestATypedHandleBecomesADestination`)."""
+        resp = client.post(self.URL, json={"handle": "@ExampleShop"})
+        assert resp.status_code == 201, resp.text
+        assert resp.json() == {
+            "account_id": ACCOUNT,
+            "created": True,
+            "scheduled": True,
+        }
+        assert written == [(WS, None, "@ExampleShop", True)]
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"provider_account_ref": "17841400000000000"},
+            {"handle": "h", "provider_account_ref": "manual:h"},
+        ],
+        ids=["account-id", "manual-ref-beside-a-handle"],
+    )
+    def test_a_provider_account_ref_is_refused_by_name_and_nothing_is_created(
+        self, client, signed_in, tenant, written, body
+    ):
+        resp = client.post(self.URL, json=body)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["reason"] == "account_ref_requires_connect"
+        assert written == []
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+
 class TestTelegramGroupBindLink:
     """`POST /workspaces/{ws}/telegram/bind-link` — the admin's one-shot link
     that opens Telegram's group picker and binds the chosen group to THIS
