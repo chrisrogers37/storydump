@@ -46,10 +46,17 @@ jobs:
 | Front end | `npm test`, `tsc --noEmit`, `npm run lint` | The web app in `landing/` (Node 22). `next build` is left to Vercel, which builds every PR |
 | Changelog | `scripts/changelog_fragments.py check --base` | The fragment rule in `changelog.d/README.md`: a change outside the docs adds a fragment, and no pull request but the compile edits `CHANGELOG.md`. Stdlib-only, like the ratchet |
 
-The workflow's own note on the `Front End` job records that `main` declares no
-required status checks, so every check is advisory as far as GitHub is
-concerned. Treat a red check as blocking anyway: a red check has made Railway
-skip a deploy (below).
+`main` is guarded by a repository ruleset: no force-push, no deletion, a pull
+request for every change (no approval count, since PRs are opened under the
+owner's own account), and six required checks: Lint, FC-2 Telegram ratchet,
+Test, Security Scan, Front End and Changelog Check. "Branch up to date" is not
+required. It has no bypass list: every agent working here acts as the owner's
+GitHub account, so an admin bypass would let any of them merge red. An
+emergency merge means disabling the ruleset by hand. Vercel and GitGuardian
+report on every PR but are not
+required. Renaming a required job strands open PRs on a check that never
+arrives, so the ruleset changes with it (`ci.yml`'s note on `Front End` says
+the same). A red check also makes Railway skip a deploy (below).
 
 ### The scheduled schema-drift audit
 

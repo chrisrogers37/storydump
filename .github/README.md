@@ -21,8 +21,9 @@ request into `main` or `develop`, six jobs:
 - **Test** — `pytest tests/ -v --cov=src --cov=storydump_cli` against a
   PostgreSQL 15 service container, with `REQUIRE_TEST_DATABASE=1` so a database
   that fails to come up fails the run instead of skipping the tests it backs
-- **Security Scan** — pip-audit and bandit, both advisory: each step is
-  `|| true` and `continue-on-error`, so the job cannot go red
+- **Security Scan** — pip-audit gates (a known-vulnerable pin in
+  `requirements.txt` fails the job); bandit is advisory (`|| true` and
+  `continue-on-error`)
 - **Front End** — in `landing/`: `npm ci`, `npm test`, `npx tsc --noEmit`,
   `npm run lint` (Node 22; `next build` is deliberately absent — Vercel builds
   every PR)
@@ -30,9 +31,12 @@ request into `main` or `develop`, six jobs:
   check --base`: the fragment rule in `changelog.d/README.md`
 
 All jobs run on **GitHub's cloud runners** (`ubuntu-latest`) — safe for public
-repositories. `main` declares no required status checks, so every check is
-advisory to GitHub; merge on green is a rule, not an enforcement (a red Test
-job has still made Railway skip a deploy — see the CI/CD guide).
+repositories. The `main` ruleset requires a pull request and six of these
+checks by name (Lint, FC-2 Telegram ratchet, Test, Security Scan, Front End,
+Changelog Check), so GitHub refuses a merge until they are green. The ruleset
+has no bypass list: every agent here works as the owner's account, so an admin
+bypass would be a bypass for all of them. Renaming one of those jobs means
+updating the ruleset too.
 
 ### Scheduled: `schema-drift.yml`
 
