@@ -12,6 +12,17 @@ const API_TIMEOUT_MS = 8000
 const JOINED = { status: "success", message: "You're on the list!" }
 const INVALID = { status: "error", message: "Please enter a valid email address." }
 const FAILED = { status: "error", message: "Something went wrong. Please try again." }
+const BUSY = {
+  status: "error",
+  reason: "busy",
+  message: "Lots of people are joining right now. Please try again in a minute.",
+}
+/**
+ * The API's refusals that say it is full for now, not that anything is wrong:
+ * `full`, the signups all visitors share a minute are spent; `busy`, no slot
+ * came free in time.
+ */
+const BUSY_REASONS = new Set(["full", "busy"])
 
 /**
  * With `WAITLIST_SITE_SECRET` set (the same value as the API's), the call says
@@ -83,9 +94,12 @@ export async function POST(req: NextRequest) {
   if (result.error === "invalid_email") {
     return NextResponse.json(INVALID, { status: 400 })
   }
-  // The visitor sees one generic sentence; the cause (the API unreachable or
-  // refusing) goes to the server log, where the deployment's function logs
-  // show it.
+  // The visitor sees one sentence, "busy" or the generic one; the cause (the
+  // API unreachable or refusing) goes to the server log, where the
+  // deployment's function logs show it.
   console.error("waitlist signup failed:", result.status, result.error)
+  if (result.status === 429 && BUSY_REASONS.has(result.error)) {
+    return NextResponse.json(BUSY, { status: 429 })
+  }
   return NextResponse.json(FAILED, { status: 500 })
 }

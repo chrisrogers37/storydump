@@ -3113,14 +3113,18 @@ it); the API compares the secret in constant time, refuses a call without it bef
 body, and keys the counter (10 a minute) and the per-address slot share on the visitor. Every
 accepted signup through the site, a repeat address too, also spends one counter shared by all
 visitors (600 a minute, spent after the insert so a refused body costs nothing; past it a
-savepoint rolls the row back and keeps the visitor's own spend), so a leaked secret, which lets a
-caller name a fresh visitor each time, still meets a ceiling on the table's growth. The waitlist
+savepoint rolls the row back and keeps the visitor's own spend, and the 429 carries `reason: full`,
+which the site shows as "busy, try again in a minute"), so a leaked secret, which lets a
+caller name a fresh visitor each time, still meets a ceiling on the table's growth. A full
+ceiling is one log line and one Telegram message to the linked operators at most every ten
+minutes per process, counting the refusals between, with no address or visitor in either. The waitlist
 counts every client, visitor or peer, by its IPv6 /64, never its single address. The
 visitor key holds only while Vercel is the first hop: off Vercel a client sets `x-real-ip` itself,
 and behind another CDN every visitor of one edge shares one key. Unset on
 the API it behaves as before whatever the site sends, which is what lets the owner set the site
 first. A matched call with no usable address falls back to the peer and the shared counter, and still
-spends the ceiling.
+spends the ceiling; that counter's 429 is `full` too, since every such call shares it, with a
+notice of its own on the same terms as the ceiling's.
 
 **What it does not adopt.** A hand-made, empty `waitlist_signups` and the NOLOGIN
 `waitlist_writer` role were created in production as a stopgap on 2026-10-02 and never served a

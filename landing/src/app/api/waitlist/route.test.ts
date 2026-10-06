@@ -50,7 +50,9 @@ describe("POST /api/waitlist", () => {
 
   it.each([
     [503, "target_router_unreachable"],
+    // One visitor's own limit: no reason of its own, so not "busy".
     [429, "http_429"],
+    [403, "full"],
     // The site deployed before the API: the route is not there yet.
     [404, "http_404"],
     [500, "http_500"],
@@ -64,6 +66,21 @@ describe("POST /api/waitlist", () => {
     })
     expect(console.error).toHaveBeenCalledWith("waitlist signup failed:", status, error)
   })
+
+  it.each(["full", "busy"])(
+    "logs the API's 429 %s and tells the visitor to try again in a minute",
+    async (error) => {
+      targetFetch.mockResolvedValue({ ok: false, status: 429, error })
+      const res = await POST(signup("someone@example.com"))
+      expect(res.status).toBe(429)
+      expect(await res.json()).toEqual({
+        status: "error",
+        reason: "busy",
+        message: "Lots of people are joining right now. Please try again in a minute.",
+      })
+      expect(console.error).toHaveBeenCalledWith("waitlist signup failed:", 429, error)
+    },
+  )
 
   it("leaves what an address is to the API, forwarding only a string", async () => {
     targetFetch.mockResolvedValue({ ok: false, status: 400, error: "invalid_email" })

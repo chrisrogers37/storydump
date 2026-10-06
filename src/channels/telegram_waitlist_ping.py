@@ -72,12 +72,18 @@ class WaitlistPing:
 
     async def __call__(self, address: str) -> None:
         """Tell each linked operator about *address*. Never raises."""
-        if self._waiting >= MAX_WAITING:
+        await self.send(message(address, datetime.now(timezone.utc)))
+
+    async def send(self, text: str, *, alert: bool = False) -> None:
+        """Send *text* to each linked operator, in turn with every other ping.
+        An *alert* is never dropped for a full queue: it is rare (its sender
+        throttles it), and it comes when signups have filled the queue.
+        Never raises."""
+        if not alert and self._waiting >= MAX_WAITING:
             # Telegram is holding us back and the queue is full: one line
             # per dropped ping, so the log counts what was not announced.
             logger.error("waitlist ping: dropped, %d already waiting", self._waiting)
             return
-        text = message(address, datetime.now(timezone.utc))
         self._waiting += 1
         queued = True
         try:

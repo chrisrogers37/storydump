@@ -15,7 +15,9 @@ interface WaitlistFormProps {
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const STORAGE_KEY = "storydump-waitlist-registered"
 
-type FormStatus = "idle" | "submitting" | "success" | "error" | "duplicate"
+// "busy": the list is full for a minute. Shown like an error, but the
+// address is fine, so the field is not marked invalid.
+type FormStatus = "idle" | "submitting" | "success" | "error" | "busy" | "duplicate"
 
 function getUtmParams(): Partial<Record<UtmKey, string>> {
   if (typeof window === "undefined") return {}
@@ -112,7 +114,8 @@ export function WaitlistForm({
         trackEvent("Waitlist Signup", { variant, ...utm })
         markRegistered()
       } else {
-        setStatus("error")
+        const busy = data.reason === "busy"
+        setStatus(busy ? "busy" : "error")
         setMessage(data.message || "Something went wrong. Please try again.")
         trackEvent("Waitlist Error", { reason: "server_error", variant })
       }
@@ -168,13 +171,15 @@ export function WaitlistForm({
           }}
           onChange={(e) => {
             setEmail(e.target.value)
-            if (status === "error") setStatus("idle")
+            if (status === "error" || status === "busy") setStatus("idle")
           }}
           disabled={status === "submitting"}
           className="h-12 rounded-full sm:flex-1 border-ink bg-white px-5 text-base sm:h-10 sm:border-0 sm:px-0 sm:shadow-none sm:focus-visible:ring-0"
           aria-invalid={status === "error" || undefined}
           aria-describedby={
-            status === "error" ? `waitlist-error-${variant}` : undefined
+            status === "error" || status === "busy"
+              ? `waitlist-error-${variant}`
+              : undefined
           }
           required
         />
@@ -187,10 +192,10 @@ export function WaitlistForm({
           {status === "submitting" ? "Joining…" : "Join the waitlist"}
         </Button>
       </div>
-      {status === "error" && (
+      {(status === "error" || status === "busy") && (
         <p
           id={`waitlist-error-${variant}`}
-          className="mt-2 text-sm font-medium text-alarm"
+          className="mt-2 text-sm font-medium text-balance text-alarm"
           role="alert"
         >
           {message}

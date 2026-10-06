@@ -16,7 +16,8 @@ break.
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from starlette.requests import ClientDisconnect
@@ -63,6 +64,9 @@ WAITLIST_VISITOR_LIMIT = 10
 WAITLIST_ACCEPTED_KEY = "waitlist:accepted"
 WAITLIST_ACCEPTED_LIMIT = 600
 TOO_MANY = "too many waitlist requests"
+#: How often, at most, one process says the ceiling is full: one log line and
+#: one message to the operators, however many signups it turns away meanwhile.
+CEILING_NOTICE_SECONDS = 600
 #: The largest body the route reads: an address and three campaign values fit
 #: many times over. Anything larger is a 413 before it is parsed.
 WAITLIST_MAX_BODY_BYTES = 8 * 1024
@@ -137,6 +141,71 @@ class WaitlistSlots:
         share.queued -= 1
         if not share.queued:
             del self.by_address[address]
+
+
+class CeilingNotice:
+    """When a limit all visitors share refuses: at most one notice each
+    :data:`CEILING_NOTICE_SECONDS`, counting the refusals in between, so a
+    flood is one line and one message, never one per request. ``create_app``
+    builds one per limit, as ``app.state.waitlist_full``, so one limit's
+    refusals never silence or swell the other's notice. *what* names whose
+    calls the limit counts."""
+
+    def __init__(self, what: str, clock: Callable[[], float] = time.monotonic) -> None:
+        self._what = what
+        self._clock = clock
+        self._last: Optional[float] = None
+        self._refused = 0
+
+    def refused(self, limit: int) -> Optional[str]:
+        """Count one refusal at *limit* a minute; the notice's text when one
+        is due, else None. The text names counts only: no address, visitor or
+        campaign. Refusals after the last notice are counted in the next one,
+        so a flood that ends within the window goes uncounted past its first."""
+        self._refused += 1
+        now = self._clock()
+        if self._last is not None and now - self._last < CEILING_NOTICE_SECONDS:
+            return None
+        since = (
+            "so far"
+            if self._last is None
+            else f"in the {round((now - self._last) / 60)} minutes since its last notice"
+        )
+        text = (
+            f"Waitlist {self._what} hit their shared limit of {limit} a minute,"
+            f" and are being turned away as busy:"
+            f" {self._refused} on this server {since}."
+        )
+        self._last, self._refused = now, 0
+        return text
+
+
+#: The limits all visitors share, by their key in ``app.state.waitlist_full``:
+#: the accepted signups, and the fallback counter of calls with no visitor.
+ACCEPTED, NO_VISITOR = "accepted", "no_visitor"
+
+
+def full_notices() -> dict[str, CeilingNotice]:
+    """One notice per shared limit, for ``app.state.waitlist_full``."""
+    return {
+        ACCEPTED: CeilingNotice("signups"),
+        NO_VISITOR: CeilingNotice("calls without a visitor address"),
+    }
+
+
+def _full(
+    request: Request, background: BackgroundTasks, which: str, limit: int
+) -> JSONResponse:
+    """The 429 for a limit all visitors share, `reason: full`, so the site can
+    say "busy" and an operator can tell it from one visitor's own limit; and
+    the notice, when one is due, to the log and to the operators."""
+    notice = request.app.state.waitlist_full[which].refused(limit)
+    if notice is not None:
+        logger.warning("waitlist: %s", notice)
+        ping = request.app.state.waitlist_ping
+        if ping is not None:
+            background.add_task(ping.send, notice, alert=True)
+    return _refusal(429, TOO_MANY, "full")
 
 
 def _client(request: Request) -> Optional[tuple[str, str, int, bool]]:
@@ -228,14 +297,22 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
         # The counter is spent before the body is judged, so a malformed or
         # refused request counts like any other.
         async with require_engine(request).begin() as conn:
-            await preauth_guard(
-                conn,
-                request,
-                detail=TOO_MANY,
-                key_prefix=key_prefix,
-                limit=limit,
-                client=address,
-            )
+            try:
+                await preauth_guard(
+                    conn,
+                    request,
+                    detail=TOO_MANY,
+                    key_prefix=key_prefix,
+                    limit=limit,
+                    client=address,
+                )
+            except HTTPException:
+                # With the secret matched, the peer's counter is the fallback
+                # every visitor without an address shares. Without it, it is
+                # one caller's own, and stays the plain 429.
+                if not (capped and key_prefix == WAITLIST_KEY_PREFIX):
+                    raise
+                return _full(request, background, NO_VISITOR, limit)
             if body is None:
                 return _refusal(400, "the body must be a JSON object", "not_json")
             # The insert and the ceiling's spend share a savepoint: past the
@@ -258,10 +335,9 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
                         )
             except waitlist.InvalidWaitlistEmail:
                 return _refusal(400, "not a valid email address", "invalid_email")
-            except HTTPException as full:  # only the ceiling raises here
-                return JSONResponse(
-                    status_code=full.status_code, content={"detail": full.detail}
-                )
+            except HTTPException:  # only the ceiling raises here
+                # The same answer for a new address and a repeat: both spent it.
+                return _full(request, background, ACCEPTED, WAITLIST_ACCEPTED_LIMIT)
     finally:
         slots.release(address)
     logger.info("waitlist: an address was received")
