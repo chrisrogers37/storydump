@@ -16,12 +16,16 @@ import { GeneralTab } from "@/components/dashboard/settings/general-tab";
 import { AccountsTab } from "@/components/dashboard/settings/accounts-tab";
 import type { BindingsResponse, MembersResponse } from "@/lib/types";
 import { MembersCard } from "@/components/dashboard/settings/members-card";
+import { hasActiveTelegramGroup } from "@/lib/members";
 import { CategoryWeightsCard } from "@/components/dashboard/settings/category-weights-card";
 import type { CategoryMixResponse } from "@/lib/category-mix";
 import { IntegrationsTab } from "@/components/dashboard/settings/integrations-tab";
 import { ApiTokensTab } from "@/components/dashboard/settings/api-tokens-tab";
 import { Notice } from "@/components/ui/notice";
 import { tokenRowsFrom } from "@/lib/tokens";
+import { InviteMember } from "@/components/dashboard/settings/invite-member";
+import { pendingInvitationsFrom } from "@/lib/invitations";
+import { PageHeader } from "@/design/page-header";
 
 /**
  * Settings — every tab writes. General is the command client (P3), Accounts
@@ -119,6 +123,7 @@ export default async function SettingsPage({
     mixResult,
     personalTokensResult,
     serviceTokensResult,
+    invitationsResult,
   ] = await Promise.all([
     workspaceFetch<WorkspaceConfig>("", workspaceId),
     workspaceFetch<AccountsResponse>("accounts", workspaceId),
@@ -139,6 +144,11 @@ export default async function SettingsPage({
     // because it is not rendered for a member.
     isAdmin
       ? workspaceFetch<{ tokens?: unknown }>("tokens", workspaceId)
+      : Promise.resolve(null),
+    // Pending invitations carry the invitees' addresses (#1571), and only an
+    // admin can invite, so a member's page never asks for them.
+    isAdmin
+      ? workspaceFetch<{ invitations?: unknown }>("invitations", workspaceId)
       : Promise.resolve(null),
   ]);
 
@@ -175,6 +185,11 @@ export default async function SettingsPage({
     drive,
   );
   const accounts = accountsResult.data.accounts ?? [];
+  // Read once for two cards: Integrations lists the bindings, and Members
+  // reminds that a removed person is still in a bound group. `null` = unread.
+  const bindings = bindingsResult.ok
+    ? (bindingsResult.data.bindings ?? [])
+    : null;
   // `tokenRowsFrom` is the same reshape the proxy applies, so the tab sees
   // one row shape whether a list came from this read or from the browser.
   // A list that is not a list is `null` — "could not be loaded" — not `[]`.
@@ -184,15 +199,16 @@ export default async function SettingsPage({
   const serviceTokens = serviceTokensResult?.ok
     ? tokenRowsFrom(serviceTokensResult.data?.tokens)
     : null;
+  const invitations = invitationsResult?.ok
+    ? pendingInvitationsFrom(invitationsResult.data?.invitations)
+    : null;
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Your posting schedule, accounts, integrations, and API tokens.
-        </p>
-      </div>
+      <PageHeader
+        title="Settings"
+        description="Your posting schedule, accounts, integrations, and API tokens."
+      />
 
       {/*
         SAYS ONLY WHAT THE REDIRECT SUBSTANTIATES, which is less than it is
@@ -274,10 +290,17 @@ export default async function SettingsPage({
                   membersResult.ok ? (membersResult.data.members ?? []) : null
                 }
                 currentUserId={session.userId}
-                canRemove={
-                  membership?.role === "owner" || membership?.role === "admin"
-                }
-              />
+                canRemove={isAdmin}
+                telegramGroupLinked={hasActiveTelegramGroup(bindings)}
+              >
+                {isAdmin && (
+                  <InviteMember
+                    workspaceId={workspaceId}
+                    invitations={invitations}
+                    tz={configResult.data.tz ?? "UTC"}
+                  />
+                )}
+              </MembersCard>
             }
           />
         </TabsContent>
@@ -298,19 +321,19 @@ export default async function SettingsPage({
           nothing left to gate: Connect, the folder picker, Sync Now, Remove
           and Disconnect all call routes that exist (069, #1165), and gating
           them would be the reads-without-writes harm inverted, hiding
-          controls that work.
+          controls that work. `isAdmin` gates one control only: removing a
+          Telegram group, which the API refuses below the admin floor.
         */}
         <TabsContent value="integrations">
           <IntegrationsTab
             settings={settings}
             sources={sourcesResult.data.sources ?? []}
             drive={drive}
-            bindings={
-              bindingsResult.ok ? (bindingsResult.data.bindings ?? []) : null
-            }
+            bindings={bindings}
             workspaceId={workspaceId}
             telegramLinked={session.telegramLinked}
             telegramDisplayName={session.telegramDisplayName}
+            isAdmin={isAdmin}
           />
         </TabsContent>
 

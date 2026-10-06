@@ -21,7 +21,7 @@ import logging
 from sqlalchemy import text
 
 from src.services.target import bindings, identity, readers
-from src.services.target.start_router import StartResult
+from src.services.target.start_router import StartResult, sent_as_a_chat
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +34,12 @@ def group_members_of(update: dict) -> list[tuple[str, str, str]]:
     group message shows the bot: the sender, and — on a `new_chat_members`
     service message — the people added (the sender of that message is the
     adder). Empty for a DM, a channel post, an edit, a message with no
-    sender, and for bots, which cannot link an identity."""
+    sender, and a message whose sender is a stand-in (`sent_as_a_chat`: an
+    anonymous admin's, a channel's, an automatic forward's — the people such a
+    message adds join when they are next seen speaking); and bots, which
+    cannot link an identity, are never observed."""
     message = update.get("message")
-    if not isinstance(message, dict):
+    if not isinstance(message, dict) or sent_as_a_chat(message):
         return []
     chat = message.get("chat") or {}
     chat_type = chat.get("type")

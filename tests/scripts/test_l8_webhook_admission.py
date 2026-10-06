@@ -470,6 +470,10 @@ class TestTheSecretToken:
     def test_an_absent_presented_token_is_refused(self):
         assert ingress.verify_secret_token(None, "s3cret") is False
 
+    def test_a_non_ascii_token_is_refused_not_raised(self):
+        assert ingress.verify_secret_token("s\xe9cret", "s3cret") is False
+        assert ingress.verify_secret_token("s\xe9cret", "s\xe9cret") is True
+
 
 class TestManyDistinctDeliveriesAtOnce:
     """Phase 2's admission gate: 200 DISTINCT updates admitted concurrently on

@@ -15,9 +15,9 @@
 # assert it; where a unit test pins what a gate already pins, the gate's check stands for both, and
 # a check of its own marks what only the unit can see. A lock set's mutation is judged by a test
 # that names its kinds, never by one parametrized over the mutated set (that test's case would vanish
-# with the mutant). The port's tenant predicates (`workspace_id = :ws`) are judged at the SQL seam:
-# the gates run as `svc_ingress`, whose policies hide another tenant's row anyway, so at the gate
-# those mutants would be equivalent.
+# with the mutant). The port's tenant predicates (`workspace_id = :ws`) are judged at the SQL seam,
+# and at the gate only by its owner arm (`AsTheTablesOwner`): as `svc_ingress` the policies hide
+# another tenant's row anyway, so there those mutants would be equivalent.
 set -u
 ROOT=${STORYDUMP_ROOT:-/Users/chris/Projects/storydump}
 PY=${STORYDUMP_PY:-/Users/chris/Projects/storydump/.venv/bin/python}
@@ -82,6 +82,7 @@ VT=tests/src/services/target/test_vocabulary.py
 # schedule_item: the account, the item, the lock and item rule (F7), the database's duplicate.
 check "a removed destination is found" $VOC 'LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required")' 'LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required", "disabled", "moved")' "$S -k 'only_a_live_account'"
 check "an account awaiting reconnection is not found" $VOC 'LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required")' 'LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active",)' "$S -k 'only_a_live_account'"
+check "the plan horizon is a day longer" $VOC 'PLAN_HORIZON_DAYS = 365' 'PLAN_HORIZON_DAYS = 366' "$VT -k 'plan_horizon_is_a_year'"
 check "a missing account is not named" $EX '"not_found", f"account {account_id}", facts={"missing": "account"}' '"not_found", f"account {account_id}", facts={}' "$S -k 'only_a_live_account'"
 check "an item that cannot post schedules" $EX "    blockers = [] if item[\"state\"] == \"available\" else [f\"item_{item['state']}\"]" "    blockers = []" "$S -k 'item_that_cannot_post'"
 check "a reject lock no longer blocks" $VOC 'BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")' 'BLOCKING_LOCKS: tuple[str, ...] = ("unsupported", "hold", "seasonal")' "$S -k 'blocker_and_a_warning'"
@@ -108,6 +109,9 @@ check "a member cannot schedule" src/services/target/commands.py '    "schedule_
 check "the account is read in any workspace" $EX '        " WHERE a.id = :acct AND a.workspace_id = :ws"' '        " WHERE a.id = :acct"' "$PE -k 'inserted_under_the_person'"
 check "the item is read in any workspace" $EX '        "  FROM media_items m WHERE m.id = :media AND m.workspace_id = :ws",' '        "  FROM media_items m WHERE m.id = :media",' "$PE -k 'inserted_under_the_person'"
 check "the story in the way is read in any workspace" $EX '            " WHERE workspace_id = :ws AND media_item_id = :media"' '            " WHERE media_item_id = :media"' "$PE -k 'duplicate_is_the_databases'"
+check "the account is read in any workspace (gate)" $EX '        " WHERE a.id = :acct AND a.workspace_id = :ws"' '        " WHERE a.id = :acct"' "$S -k 'AsTheTablesOwner and neither_their_account'"
+check "the item is read in any workspace (gate)" $EX '        "  FROM media_items m WHERE m.id = :media AND m.workspace_id = :ws",' '        "  FROM media_items m WHERE m.id = :media",' "$S -k 'AsTheTablesOwner and neither_their_account'"
+check "a story is read in any workspace (gate)" $EX '        " WHERE i.id = :id AND i.workspace_id = :ws"' '        " WHERE i.id = :id"' "$S -k 'AsTheTablesOwner and their_story'"
 check "a removal slips between the account read and the story" $EX '        " FOR SHARE OF a",' '        "",' "$PE -k 'inserted_under_the_person'"
 check "a new story is born unaudited" $EX '    await _audit_intent(
         session, born, from_state=None, to_state="scheduled", detail=detail
@@ -126,6 +130,7 @@ check "another script's digits are the shape" $EX '_LOCAL_AT = re.compile(r"[0-9
 # story. The sweeps serve or miss a planned story only at the time they read.
 check "a served story moves" $EX '    if intent["origin"] != "planned" or intent["state"] != "scheduled":' '    if intent["origin"] != "planned":' "$S -k 'served_story_no_longer_moves'"
 check "a cadence story moves" $EX '    if intent["origin"] != "planned" or intent["state"] != "scheduled":' '    if intent["state"] != "scheduled":' "$S -k 'cadence_story_does_not_move'"
+check "an approved or a publishing story moves" $EX '    if intent["origin"] != "planned" or intent["state"] != "scheduled":' '    if intent["origin"] != "planned" or intent["state"] not in ("scheduled", "approved", "publishing"):' "$PE -k 'judged_before_its_new_time'"
 check "a story being cancelled moves" $EX '    _refuse_if_cancelling(intent)
     local_at = _local_at(command)' '    local_at = _local_at(command)' "$S -k 'being_cancelled'"
 check "the time is judged before the story" $EX '    intent = await _intent_row(session, command)
@@ -171,6 +176,7 @@ check "a story left to its next reading goes unsaid" $PR '            logger.inf
 check "the miss sweep misses a moved story (unit)" $PR '                            "   AND schedule_slot_at = :slot RETURNING id"' '                            "   RETURNING id"' "$TP -k 'each_miss_is_ended'"
 check "the miss sweep misses a moved story" $PR '                            "   AND schedule_slot_at = :slot RETURNING id"' '                            "   RETURNING id"' "$S -k 'miss_sweep_leaves'"
 check "the sweeps take tied rows in the order they came" $PR '    return (str(row["workspace_id"]), row["schedule_slot_at"], str(row["id"]))' '    return (str(row["workspace_id"]), row["schedule_slot_at"])' "$TP -k 'tied_rows_by_id'"
+check "the sweeps ignore the due time" $PR '    return (str(row["workspace_id"]), row["schedule_slot_at"], str(row["id"]))' '    return (str(row["workspace_id"]), str(row["id"]))' "$TP -k 'earlier_story_before_a_lower_id'"
 check "a cancel request is who last moved it" src/services/target/intent_ledger.py "                    f\"       AND {audit.moved('e')}\"" '                    ""' "$S -k 'who_only_asked_for_a_cancel'"
 check "a cancel request is a tap" src/services/target/ops_views.py "    f\"   AND {audit.moved('a')}\"," '    "",' "$OV -k 'only_this_workspaces_rows'"
 check "a cancel request is a tap (unit)" src/services/target/ops_views.py "    f\"   AND {audit.moved('a')}\"," '    "",' "tests/src/services/target/test_ops_views.py -k 'tap_is_a_move'"
