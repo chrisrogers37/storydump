@@ -11,19 +11,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import psycopg2
 import psycopg2.errors
 import pytest
 
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from src.api import principal
 from src.api.routes import public
-from src.services.target import waitlist
+from src.channels import telegram_waitlist_ping as waitlist_ping
+from src.services.target import identity, waitlist
 from src.services.target.unit_of_work import asyncpg_url
 from tests.scripts.conftest import (
     _scratch,
@@ -203,6 +207,173 @@ class TestTheRoute:
         )
         assert [r.status_code for r in responses] == [202, 202, 429]
         assert _entry(world, "limit3@example.com") == []
+
+
+#: Before `no_real_ping` replaces it for every test.
+REAL_FROM_SETTINGS = waitlist_ping.from_settings
+
+
+@pytest.fixture(autouse=True)
+def no_real_ping(monkeypatch):
+    """A developer's shell may hold the real bot: no test here sends."""
+    monkeypatch.setattr(waitlist_ping, "from_settings", lambda *args: None)
+
+
+#: Two operators who have linked Telegram (the first also Google), one who
+#: has linked only Google, a person linked to Telegram who is no operator,
+#: and a linked operator whose account is disabled.
+LINKED_OP = "00000000-0000-4000-8000-0000000000a1"
+GOOGLE_ONLY_OP = "00000000-0000-4000-8000-0000000000a2"
+LINKED_OTHER = "00000000-0000-4000-8000-0000000000a3"
+LINKED_OP_2 = "00000000-0000-4000-8000-0000000000a4"
+DISABLED_OP = "00000000-0000-4000-8000-0000000000a5"
+
+
+@pytest.fixture
+def people(world):
+    """The five, made once per database: user-plane rows the ping reads as
+    `svc_ingress`."""
+    conn = psycopg2.connect(world["owner"])
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (id) VALUES (%s), (%s), (%s), (%s)"
+                " ON CONFLICT DO NOTHING",
+                (LINKED_OP, GOOGLE_ONLY_OP, LINKED_OTHER, LINKED_OP_2),
+            )
+            cur.execute(
+                "INSERT INTO users (id, state) VALUES (%s, 'disabled')"
+                " ON CONFLICT DO NOTHING",
+                (DISABLED_OP,),
+            )
+            cur.execute(
+                "INSERT INTO user_identities (user_id, provider, external_id)"
+                " VALUES (%s, 'telegram', '5550001'), (%s, 'google', 'g-5550001'),"
+                " (%s, 'google', 'g-5550002'), (%s, 'telegram', '5550003'),"
+                " (%s, 'telegram', '5550004'), (%s, 'telegram', '5550005')"
+                " ON CONFLICT DO NOTHING",
+                (
+                    LINKED_OP,
+                    LINKED_OP,
+                    GOOGLE_ONLY_OP,
+                    LINKED_OTHER,
+                    LINKED_OP_2,
+                    DISABLED_OP,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+class _Bot:
+    """The bot's stand-in: each send as (chat, address, whether the address's
+    row was already committed when it went)."""
+
+    def __init__(self, world):
+        self.world, self.sent = world, []
+
+    async def send_text(self, chat_id, text):
+        address = text.split("Email: ")[1].split("\n")[0]
+        self.sent.append((chat_id, address, bool(_entry(self.world, address))))
+        return "1"
+
+
+@pytest.fixture
+def ping_for(world, people, monkeypatch):
+    """The real ping and its real read of linked operators, on the route's
+    engine, with *operators* as `OPS_USER_IDS` and a stand-in bot."""
+
+    def install(*operators):
+        bot = _Bot(world)
+        monkeypatch.setattr(principal.settings, "OPS_USER_IDS", ",".join(operators))
+        monkeypatch.setattr(
+            waitlist_ping,
+            "from_settings",
+            lambda _bot, ops, recipients: REAL_FROM_SETTINGS(bot, ops, recipients),
+        )
+        return bot
+
+    return install
+
+
+@pytest.fixture
+def pinged(ping_for):
+    """The bot, with one linked operator and one linked only to Google."""
+    return ping_for(LINKED_OP, GOOGLE_ONLY_OP)
+
+
+class TestTheAdminPing:
+    """Every accepted address, a repeat too, is one message to each linked
+    operator after the commit; nothing the route refuses is."""
+
+    def test_it_goes_to_each_linked_operator_and_no_one_else(self, world, ping_for):
+        bot = ping_for(LINKED_OP, GOOGLE_ONLY_OP, LINKED_OP_2, DISABLED_OP)
+        (resp,) = _post(world, {"email": "ops-only@example.com"})
+        assert resp.status_code == 202
+        assert bot.sent == [
+            ("5550001", "ops-only@example.com", True),
+            ("5550004", "ops-only@example.com", True),
+        ]
+
+    def test_a_failed_read_costs_the_message_never_the_signup(
+        self, world, ping_for, monkeypatch, caplog
+    ):
+        bot = ping_for(LINKED_OP)
+
+        async def broken(executor, user_ids):  # a statement PostgreSQL refuses
+            await executor.execute(text("SELECT 1/0"))
+
+        monkeypatch.setattr(identity, "telegram_ids_for", broken)
+        with caplog.at_level(logging.ERROR, logger=waitlist_ping.__name__):
+            (resp,) = _post(world, {"email": "read-failed@example.com"})
+        assert resp.status_code == 202
+        assert _entry(world, "read-failed@example.com") != []
+        assert bot.sent == []
+        assert "the operators could not be read" in caplog.text
+
+    def test_no_linked_operator_sends_nothing_and_says_why(
+        self, world, ping_for, caplog
+    ):
+        bot = ping_for(GOOGLE_ONLY_OP)
+        with caplog.at_level(logging.WARNING, logger=waitlist_ping.__name__):
+            (resp,) = _post(world, {"email": "nobody-linked@example.com"})
+        assert resp.status_code == 202
+        assert bot.sent == []
+        assert "no one in OPS_USER_IDS has linked Telegram" in caplog.text
+
+    def test_an_accepted_address_is_pinged_as_stored_after_the_commit(
+        self, world, pinged
+    ):
+        (resp,) = _post(world, {"email": "  Pinged@Example.com "})
+        assert resp.status_code == 202
+        assert pinged.sent == [("5550001", "pinged@example.com", True)]
+
+    def test_a_repeat_is_pinged_again(self, world, pinged):
+        responses = _post(
+            world,
+            {"email": "ping-twice@example.com"},
+            {"email": "ping-twice@example.com"},
+        )
+        assert [r.status_code for r in responses] == [202, 202]
+        assert pinged.sent == [("5550001", "ping-twice@example.com", True)] * 2
+
+    def test_a_refused_address_is_not_pinged(self, world, pinged):
+        (resp,) = _post(world, {"email": "no-at-sign"})
+        assert resp.status_code == 400
+        assert pinged.sent == []
+
+    def test_a_full_ceiling_is_not_pinged(self, world, pinged, monkeypatch):
+        monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", SECRET)
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 1)
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-ping-test")
+        responses = _post(
+            world,
+            {"email": "ping-ceiling-0@example.com"},
+            {"email": "ping-ceiling-1@example.com"},
+            headers=_from_site("198.51.100.90"),
+        )
+        assert [r.status_code for r in responses] == [202, 429]
+        assert pinged.sent == [("5550001", "ping-ceiling-0@example.com", True)]
 
 
 class TestTheDoor:
@@ -614,7 +785,11 @@ class TestTheSiteSecret:
         self, world, monkeypatch, acquired
     ):
         monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", None)
-        monkeypatch.setattr(public, "client_ip", lambda request: "2001:db8:7:7::42")
+        # The real client_ip, as if the peer were that address: the /64 step
+        # lives there (`principal.address_key`), so the stub must not skip it.
+        peer = SimpleNamespace(client=SimpleNamespace(host="2001:db8:7:7::42"))
+        real = public.client_ip
+        monkeypatch.setattr(public, "client_ip", lambda request: real(peer))
         (resp,) = _post(world, {"email": "direct-v6@example.com"})
         assert resp.status_code == 202, resp.text
         assert acquired == ["2001:db8:7:7::/64"]

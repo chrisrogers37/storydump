@@ -54,7 +54,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import ClientDisconnect
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+# `_TrustedHosts` and `_parse_host_port` are uvicorn's private parsing, used so
+# the edge-hop removal reads entries exactly as the walk does; the tests drive
+# both through `create_app`, so a uvicorn change that moves them fails there.
+from uvicorn.middleware.proxy_headers import (
+    ProxyHeadersMiddleware,
+    _parse_host_port,
+    _TrustedHosts,
+)
 
 from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length
 from src.api.routes.auth import router as auth_router
@@ -77,6 +85,7 @@ from src.exceptions.tenancy import (
 )
 from src.services.target import oauth_states
 from src.services.target.commands import CommandNotBuilt, CommandRefused
+from src.services.target.health_reads import StatementTimedOut
 from src.services.target.invitations import InvitationRefused
 from src.services.target.category_mix import MixInvalid
 from src.services.target.provisioning import ProvisioningRefused
@@ -161,6 +170,53 @@ class DropAmbiguousForwardedForMiddleware:
             )
             scope["headers"] = [(k, v) for k, v in headers if k.lower() != self._XFF]
 
+        await self.app(scope, receive, send)
+
+
+class DropEdgeHopMiddleware:
+    """Remove the one hop Railway appends after the visitor (`EDGE_HOP_HOSTS`).
+
+    Behind Railway the edge's header reads `<visitor>, <hop>`, and the
+    trusted-proxy walk would stop at the hop: a public address, so every
+    visitor through it shared one set of limits. When the header's LAST entry
+    is in the hop ranges and something precedes it, this removes that one
+    entry and leaves the walk the rest. Once, by position: an unknown hop is
+    kept and keyed on, never skipped, and a second hop-range entry stays.
+
+    What it cannot tell apart is a hop from a client who itself holds a
+    hop-range address on a path where no hop is appended: that client's own
+    entry is removed and the walk reads the one before it. That entry is the
+    edge's own only while Railway's edge writes the header itself rather
+    than keeping a caller's value, which public reports describe but nothing
+    here has measured; were it kept, such a client could choose its address.
+    `EDGE_HOP_HOSTS` stays as narrow as the measured hops for that reason.
+
+    It needs no peer check of its own: the walk reads the header only from a
+    trusted proxy, and from anyone else ignores it, shortened or not. Runs
+    after the ambiguous-header drop, so there is at most one header to read.
+    The entry is parsed and matched by uvicorn's own helpers, as the walk
+    parses and matches it (a port or `[v6]:port` included).
+    """
+
+    _XFF = b"x-forwarded-for"
+
+    def __init__(self, app: ASGIApp, hop_hosts: list[str]) -> None:
+        self.app = app
+        self.hops = _TrustedHosts(hop_hosts)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "lifespan":
+            headers = scope.get("headers", [])
+            for i, (name, value) in enumerate(headers):
+                if name.lower() != self._XFF:
+                    continue
+                head, comma, last = value.rpartition(b",")
+                host, _ = _parse_host_port(last.decode("latin1").strip())
+                if comma and host in self.hops:
+                    headers = list(headers)
+                    headers[i] = (name, head)
+                    scope["headers"] = headers
+                break
         await self.app(scope, receive, send)
 
 
@@ -368,6 +424,16 @@ def _unmapped(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": "internal error"})
 
 
+def _busy(reason: str) -> JSONResponse:
+    """The answer to load, not a fault: a 503 naming *reason*, which the
+    caller retries after a second."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "busy — try again", "reason": reason},
+        headers={"Retry-After": "1"},
+    )
+
+
 def _reason_detail(exc, status: int) -> dict:
     """The ordinary refusal body: the message, and the machine-routable
     reason the web's `target-api.ts::readError` matches on."""
@@ -433,11 +499,15 @@ def _register_handlers(app: FastAPI) -> None:
         # told to retry rather than shown a 500 (the webhook route maps the
         # same wait itself, before admission, and never reaches this).
         logger.warning("pool saturated on %s %s", request.method, request.url.path)
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "busy — try again", "reason": "pool_saturated"},
-            headers={"Retry-After": "1"},
-        )
+        return _busy("pool_saturated")
+
+    @app.exception_handler(StatementTimedOut)
+    async def _statement_timed_out(request: Request, exc: StatementTimedOut):
+        # A health read's statement cancelled under its cap is load, as a pool
+        # wait is, so it is told to retry. Not logged here: `health_reads`
+        # logs it once, for the read, and the health cache answers every hit
+        # of its window with the same refusal.
+        return _busy("statement_timeout")
 
     app.add_exception_handler(
         TenantResolutionError, _mapped(_TENANT_STATUS, _tenant_detail)
@@ -738,8 +808,22 @@ def create_app(
     # route's honest 503 into a 500 mid-delivery.
     bot = _telegram_transport(env)
     app.state.tap_metrics = webhooks.TapMetrics()
-    # The waitlist route's per-process slots (`routes/public.py`).
+    # The waitlist route's per-process slots (`routes/public.py`), and the
+    # admin's message for each signup it accepts, sent with the same bot.
     app.state.waitlist_slots = WaitlistSlots()
+    from src.channels import telegram_waitlist_ping as waitlist_ping
+    from src.services.target import identity
+
+    operators = settings.ops_user_ids
+
+    async def operator_chats():
+        # Its own short transaction, in the ping's background task.
+        async with app.state.engine.begin() as conn:
+            return await identity.telegram_ids_for(conn, operators)
+
+    app.state.waitlist_ping = waitlist_ping.from_settings(
+        bot, operators, operator_chats
+    )
     app.state.ingress_workers = _ingress_workers(env)
     app.state.pool_watch = (
         PoolWatch(app.state.engine) if app.state.engine is not None else None
@@ -771,8 +855,9 @@ def create_app(
     _register_handlers(app)
 
     # Middleware. Starlette prepends, so the LAST added runs FIRST on the
-    # request path: CORS outermost, then the ambiguous-XFF drop (#765) ahead
-    # of the trusted-proxy walk (#726), then the body limit — after the walk,
+    # request path: CORS outermost, then the ambiguous-XFF drop (#765) and
+    # the removal of Railway's edge hop ahead of the trusted-proxy walk
+    # (#726), then the body limit — after the walk,
     # so its refusal names the attributed client, and ahead of everything
     # that could read a body — then security headers innermost.
     app.add_middleware(SecurityHeadersMiddleware)
@@ -782,6 +867,7 @@ def create_app(
     app.add_middleware(
         ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts
     )
+    app.add_middleware(DropEdgeHopMiddleware, hop_hosts=settings.edge_hop_hosts)
     app.add_middleware(DropAmbiguousForwardedForMiddleware)
     app.add_middleware(
         CORSMiddleware,

@@ -93,8 +93,13 @@ async function signOut(request: NextRequest) {
     : null;
   const notice = signOutNotice(everywhere, result);
 
+  // 303, NOT Next's default 307. A 307 keeps the method, so the browser's
+  // `fetch` followed it with a POST to `/login`, a static page Vercel answers
+  // with 405: the cookies were already cleared, but the button saw a failed
+  // response and said "Couldn't sign out". A 303 is followed with a GET.
   const response = NextResponse.redirect(
     new URL(notice ? `/login?signout=${notice}` : "/login", request.url),
+    303,
   );
   response.cookies.delete(SESSION_COOKIE);
   response.cookies.delete(WORKSPACE_COOKIE);

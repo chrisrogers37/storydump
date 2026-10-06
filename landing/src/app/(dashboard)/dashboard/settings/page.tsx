@@ -23,6 +23,8 @@ import { IntegrationsTab } from "@/components/dashboard/settings/integrations-ta
 import { ApiTokensTab } from "@/components/dashboard/settings/api-tokens-tab";
 import { Notice } from "@/components/ui/notice";
 import { tokenRowsFrom } from "@/lib/tokens";
+import { InviteMember } from "@/components/dashboard/settings/invite-member";
+import { pendingInvitationsFrom } from "@/lib/invitations";
 import { PageHeader } from "@/design/page-header";
 
 /**
@@ -121,6 +123,7 @@ export default async function SettingsPage({
     mixResult,
     personalTokensResult,
     serviceTokensResult,
+    invitationsResult,
   ] = await Promise.all([
     workspaceFetch<WorkspaceConfig>("", workspaceId),
     workspaceFetch<AccountsResponse>("accounts", workspaceId),
@@ -141,6 +144,11 @@ export default async function SettingsPage({
     // because it is not rendered for a member.
     isAdmin
       ? workspaceFetch<{ tokens?: unknown }>("tokens", workspaceId)
+      : Promise.resolve(null),
+    // Pending invitations carry the invitees' addresses (#1571), and only an
+    // admin can invite, so a member's page never asks for them.
+    isAdmin
+      ? workspaceFetch<{ invitations?: unknown }>("invitations", workspaceId)
       : Promise.resolve(null),
   ]);
 
@@ -190,6 +198,9 @@ export default async function SettingsPage({
     : null;
   const serviceTokens = serviceTokensResult?.ok
     ? tokenRowsFrom(serviceTokensResult.data?.tokens)
+    : null;
+  const invitations = invitationsResult?.ok
+    ? pendingInvitationsFrom(invitationsResult.data?.invitations)
     : null;
 
   return (
@@ -281,7 +292,15 @@ export default async function SettingsPage({
                 currentUserId={session.userId}
                 canRemove={isAdmin}
                 telegramGroupLinked={hasActiveTelegramGroup(bindings)}
-              />
+              >
+                {isAdmin && (
+                  <InviteMember
+                    workspaceId={workspaceId}
+                    invitations={invitations}
+                    tz={configResult.data.tz ?? "UTC"}
+                  />
+                )}
+              </MembersCard>
             }
           />
         </TabsContent>

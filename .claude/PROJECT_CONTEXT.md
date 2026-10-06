@@ -162,10 +162,11 @@ suggesting any of them.
 ## State of the System
 
 - The target tier is the only tier. Version: `src/__init__.py`; changes:
-  `CHANGELOG.md` under `## [Unreleased]`.
+  `CHANGELOG.md` under `## [Unreleased]`, and the fragments in `changelog.d/`
+  not yet folded into it.
 - **Outbound email does not send**: no provider is wired, by design
-  (`AGENTS.md` › What is deliberately not wired). An invitation's row and token
-  are real; the message is not delivered.
+  (`AGENTS.md` › What is deliberately not wired). An invitation's row is real;
+  nothing is emailed, and the inviter hands over the link its response returns.
 - Some vocabulary commands have no executor yet and answer 501
   (`commands.UNBUILT`); one job kind has none (`work_loop.UNBUILT_KINDS`).
 - The `legacy` schema is gone: the owner ran the window on 2026-09-19 (its
