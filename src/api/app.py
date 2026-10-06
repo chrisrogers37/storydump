@@ -185,11 +185,11 @@ class DropEdgeHopMiddleware:
 
     What it cannot tell apart is a hop from a client who itself holds a
     hop-range address on a path where no hop is appended: that client's own
-    entry is removed and the walk reads the one before it. Railway's edge
-    writes the header itself (a caller's value is dropped), so that entry is
-    the edge's too; were the edge ever to keep a caller's value, such a
-    client could choose its address. `EDGE_HOP_HOSTS` stays as narrow as the
-    measured hops for that reason.
+    entry is removed and the walk reads the one before it. That entry is the
+    edge's own only while Railway's edge writes the header itself rather
+    than keeping a caller's value, which public reports describe but nothing
+    here has measured; were it kept, such a client could choose its address.
+    `EDGE_HOP_HOSTS` stays as narrow as the measured hops for that reason.
 
     It needs no peer check of its own: the walk reads the header only from a
     trusted proxy, and from anyone else ignores it, shortened or not. Runs

@@ -121,6 +121,13 @@ def parse_ops_user_ids(raw: str) -> tuple[frozenset[str], list[int]]:
     return frozenset(ids), refused
 
 
+#: IPv6 prefixes that embed all of IPv4 (mapped, NAT64): never a hop range.
+_IPV4_IN_IPV6 = (
+    ipaddress.ip_network("::ffff:0:0/96"),
+    ipaddress.ip_network("64:ff9b::/96"),
+)
+
+
 class Settings(BaseSettings):
     """Application configuration. NO FIELD IS REQUIRED (#1222): a process needs
     only what it reads, and a field survives only while something reads it
@@ -316,25 +323,26 @@ class Settings(BaseSettings):
     # as narrow as the measured hops: a client holding one of these addresses
     # on a path with no hop would have its own entry removed (the middleware's
     # docstring says when that matters). Listing an address here never makes
-    # it a trusted peer. "*", a malformed entry or a range broader than /16 (v6: /48) is
-    # refused at load.
+    # it a trusted peer. "*", an entry uvicorn would not parse, a range broader than /16
+    # (v6: /48) or one embedding IPv4 is refused at load. Blank turns the
+    # removal off.
     EDGE_HOP_HOSTS: str = "152.233.47.0/24"
 
     @field_validator("EDGE_HOP_HOSTS")
     @classmethod
     def _narrow_hops(cls, value: str) -> str:
-        """Refuse "*" and any range broad enough to cover callers at large:
-        a removed entry must be a hop, so the list names hops, not networks."""
+        """Refuse what uvicorn would not read as an address or network (it
+        parses strictly, so `10.0.0.5/8` would be kept as a string that never
+        matches), and any range broad enough to cover callers at large: a
+        removed entry must be a hop, so the list names hops, not networks."""
         for entry in (e.strip() for e in value.split(",")):
             if not entry:
                 continue
-            if "*" in entry:
-                raise ValueError("EDGE_HOP_HOSTS must list addresses, never *")
-            net = ipaddress.ip_network(entry, strict=False)
-            if net.prefixlen < (16 if net.version == 4 else 48):
-                raise ValueError(
-                    "EDGE_HOP_HOSTS ranges must be /16 (v6: /48) or narrower"
-                )
+            net = ipaddress.ip_network(entry)
+            if net.prefixlen < (16 if net.version == 4 else 48) or any(
+                net.overlaps(n) for n in _IPV4_IN_IPV6
+            ):
+                raise ValueError("EDGE_HOP_HOSTS must name narrow hop ranges")
         return value
 
     # The largest request body the API reads, in bytes; over it is 413

@@ -414,7 +414,16 @@ class TestRailwayEdgeHop:
     def test_a_wildcard_hop_list_is_refused(self):
         from src.config.settings import Settings, SettingsError
 
-        for broad in ("*", "0.0.0.0/0", "152.0.0.0/8", "::/0", "nonsense"):
+        for broad in (
+            "*",
+            "0.0.0.0/0",
+            "152.0.0.0/8",
+            "::/0",
+            "nonsense",
+            "152.233.47.66/24",
+            "::ffff:0:0/96",
+            "64:ff9b::/96",
+        ):
             with pytest.raises(SettingsError, match="EDGE_HOP_HOSTS"):
                 Settings(EDGE_HOP_HOSTS=broad)
         assert Settings(EDGE_HOP_HOSTS="152.233.47.0/24, 192.0.2.7").edge_hop_hosts
