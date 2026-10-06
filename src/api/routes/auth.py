@@ -5,9 +5,9 @@ the Drive connect leg's callback — the same shape with a different purpose.
 to Google; `GET /auth/google/callback` consumes that state one-shot, exchanges
 the code server-side, verifies the ID token, upserts the identity keyed on the
 subject, mints the opaque session and sets the cookie; `POST /auth/signout`
-revokes it. One verifier, one credential, and no secret anywhere that could
-mint a session for an arbitrary user — the reason this lives here and not on
-the front end.
+revokes it (``?everywhere=true``: every live session of that user). One
+verifier, one credential, and no secret anywhere that could mint a session
+for an arbitrary user — the reason this lives here and not on the front end.
 
 Two transactions bracket the provider call, never one around it (`02` §5):
 the state is consumed and COMMITTED before Google is contacted, so a failed
@@ -32,7 +32,10 @@ Failures redirect to the front end's `/auth/error` with a closed ``reason``
 ``missing_params`` · ``state_refused`` (unknown, expired, consumed, minted
 for another leg, or the nonce cookie did not match) · ``exchange_failed`` ·
 ``identity_collision`` (sign-in: the verified email belongs to another
-account — D35, never merged) · ``grant_incomplete`` (Drive: Google answered
+account — D35, never merged) · ``not_admitted`` (sign-in: a new account whose
+email nobody admitted or invited, 092 — the one refusal that lands on
+`/login?error=not_admitted`, beside the waitlist, rather than on this page) ·
+``grant_incomplete`` (Drive: Google answered
 with a grant the leg will not keep; `google_drive_oauth.REDIRECT_REASON` maps
 each refusal) · ``already_connected`` (Instagram: the real account is already
 another destination in this workspace). A Drive failure also carries
@@ -48,21 +51,22 @@ inside the write transaction.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from src.api import google_client, instagram_client
 from src.api import principal as principal_mod
 from src.api.principal import (
     clear_session_cookie,
+    preauth_guard,
     presented_token,
     require_deliverable_session,
     require_engine,
+    require_same_origin,
     set_session_cookie,
 )
 from src.config.settings import settings
@@ -75,7 +79,6 @@ from src.services.target import (
     ig_login_oauth,
     media_sync,
     provisioning,
-    rate_counters,
     sessions,
     tenant_resolution,
 )
@@ -97,10 +100,8 @@ router = APIRouter(tags=["auth"])
 NONCE_COOKIE = "sd_oauth_nonce"
 NONCE_COOKIE_PATH = "/auth/google"
 
-#: `05`: pre-auth admission, 30/min per client IP, scope `preauth_ip`.
-PREAUTH_LIMIT = 30
-PREAUTH_WINDOW_SECONDS = 60
-PREAUTH_SCOPE = "preauth_ip"
+#: The pre-auth guard's 429 (`principal.preauth_guard`).
+SIGNIN_LIMITED = "too many sign-in attempts"
 
 #: The Drive leg's name on the error page (`flow=`); sign-in carries none.
 DRIVE_FLOW = "drive"
@@ -108,41 +109,20 @@ DRIVE_FLOW = "drive"
 INSTAGRAM_FLOW = "instagram"
 
 
-def _client_ip(request: Request) -> str:
-    """The attributed peer — `request.client.host` AFTER ProxyHeadersMiddleware
-    has applied the trusted-proxy walk (#726/#765), which is the `02` §6
-    client-IP source rule. Never a header read here."""
-    return request.client.host if request.client else "unknown"
-
-
-async def _preauth_guard(conn, request: Request) -> None:
-    now = datetime.now(timezone.utc)
-    count = await rate_counters.increment(
-        conn,
-        scope=PREAUTH_SCOPE,
-        key=_client_ip(request),
-        window_start=rate_counters.window_start(now, PREAUTH_WINDOW_SECONDS),
-        limit=PREAUTH_LIMIT,
-    )
-    if count is None:
-        raise HTTPException(status_code=429, detail="too many sign-in attempts")
+def _refuse(path: str, key: str, reason: str, **extra: str) -> Response:
+    """A refusal on the front end's *path* as `?<key>=<reason>` — or, without
+    a front end, JSON 400 with the reason as `detail`."""
+    origin = settings.web_app_origin
+    if origin:
+        query = urlencode({key: reason, **extra})
+        return RedirectResponse(f"{origin}{path}?{query}", status_code=302)
+    return JSONResponse(status_code=400, content={"detail": reason, **extra})
 
 
 def _fail(reason: str, *, flow: Optional[str] = None) -> Response:
     """The error page — or JSON 400 without a front end — with the leg named
     when it is not sign-in's."""
-    params = {"reason": reason}
-    if flow:
-        params["flow"] = flow
-    origin = settings.web_app_origin
-    if origin:
-        return RedirectResponse(
-            f"{origin}/auth/error?{urlencode(params)}", status_code=302
-        )
-    content = {"detail": reason}
-    if flow:
-        content["flow"] = flow
-    return JSONResponse(status_code=400, content=content)
+    return _refuse("/auth/error", "reason", reason, **({"flow": flow} if flow else {}))
 
 
 def _landing(path: str = "/welcome") -> str:
@@ -187,7 +167,7 @@ async def _consume_callback(
         flow, "google sign-in"
     )
     async with engine.begin() as conn:
-        await _preauth_guard(conn, request)
+        await preauth_guard(conn, request, detail=SIGNIN_LIMITED)
         try:
             row = await consume_state(
                 conn,
@@ -221,7 +201,7 @@ async def google_signin(request: Request) -> Response:
     engine = require_engine(request)
     cookie_nonce = new_state()
     async with engine.begin() as conn:
-        await _preauth_guard(conn, request)
+        await preauth_guard(conn, request, detail=SIGNIN_LIMITED)
         state = await issue_state(
             conn,
             purpose="signin",
@@ -292,8 +272,16 @@ async def google_callback(
     async with engine.begin() as conn:
         try:
             user_id = await identity.upsert_google_identity(
-                conn, sub=who.sub, email=who.email, display_name=who.display_name
+                conn,
+                sub=who.sub,
+                email=who.email,
+                display_name=who.display_name,
+                signup_open=settings.TARGET_SIGNUP_OPEN,
             )
+        except identity.SignupNotAdmitted:
+            logger.info("google sign-in: a new account was not admitted")
+            # Sign-up is gated (092): /login says so and points at the waitlist.
+            return _refuse("/login", "error", "not_admitted")
         except identity.IdentityCollision:
             return _fail("identity_collision")
         value = await sessions.issue(conn, user_id=user_id)
@@ -305,16 +293,36 @@ async def google_callback(
 
 
 @router.post("/signout")
-async def signout(request: Request) -> Response:
+async def signout(request: Request, everywhere: bool = False) -> Response:
     """Revocation is the logout (`session_tokens.revoked_at`); clearing the
     cookie is a courtesy. No principal required: an already-dead session is
-    signed out the same way, and nothing is disclosed either way."""
+    signed out the same way, and nothing is disclosed either way.
+
+    ``?everywhere=true`` revokes every live session of the presenting user —
+    every browser and device they are signed in on, this one included
+    (`sessions.revoke_all_for_user`). A dead presented session revokes
+    nothing, so a stale cookie cannot reach its siblings, and the answer's
+    ``revoked`` count says so: the front end shows 0 as not done.
+
+    A session carried by the COOKIE must come from an admitted origin
+    (`require_same_origin`): a forged post from a sibling host would
+    otherwise sign a person out of everything with one hidden form.
+    """
     engine = require_engine(request)
     value = presented_token(request)
+    revoked = 0
     if value is not None:
+        require_same_origin(request)
+        digest = sessions.token_hash(value)
         async with engine.begin() as conn:
-            await sessions.revoke(conn, token_hash=sessions.token_hash(value))
-    response = JSONResponse({"signed_out": True})
+            if everywhere:
+                revoked = await sessions.revoke_all_for_user(conn, token_hash=digest)
+            else:
+                await sessions.revoke(conn, token_hash=digest)
+    body = {"signed_out": True}
+    if everywhere:
+        body["revoked"] = revoked
+    response = JSONResponse(body)
     clear_session_cookie(response)
     return response
 
@@ -399,8 +407,14 @@ async def google_drive_callback(
                 str(row["user_id"]),
                 minimum_role="admin",
             )
+            # The state's user is the granter (091, `07` §34): the presenter
+            # check above proved the returning browser is theirs, so the
+            # Google account just consented is theirs, and only they browse it.
             await google_drive_oauth.store_credential(
-                session, workspace_id=row["workspace_id"], grant=grant
+                session,
+                workspace_id=row["workspace_id"],
+                grant=grant,
+                granted_by=str(row["user_id"]),
             )
             # F4 (a), in THIS transaction — `store_credential`'s contract, now
             # workspace-wide: every gdrive folder becomes eligible again beside

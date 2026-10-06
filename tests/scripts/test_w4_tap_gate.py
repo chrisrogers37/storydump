@@ -762,12 +762,12 @@ class TestTapAdmissionOnTheLedger:
             _time.sleep(3.5)
         return rate_counters.window_start(datetime.now(timezone.utc), 60)
 
-    def _count(self, world):
+    def _count(self, world, window=None):
         row = _one(
             world,
             "SELECT count FROM rate_counters WHERE scope = 'ws_admission'"
             " AND key = %s AND window_start = %s",
-            (world["ws"], self._window()),
+            (world["ws"], window or self._window()),
         )
         return None if row is None else row[0]
 
@@ -796,12 +796,16 @@ class TestTapAdmissionOnTheLedger:
 
         i = _intent(world, "adm-2")
         limit = int(settings.TARGET_TAP_ADMISSION_PER_MINUTE)
+        # The window the counter is seeded in, read back by name: a tap refused
+        # in it can return after the minute turns, and recomputing the window
+        # then reads the next one, which holds no row.
+        window = self._window()
         _write(
             world,
             "INSERT INTO rate_counters (scope, key, window_start, count)"
             " VALUES ('ws_admission', %s, %s, %s)"
             " ON CONFLICT (scope, key, window_start) DO UPDATE SET count = EXCLUDED.count",
-            (world["ws"], self._window(), limit),
+            (world["ws"], window, limit),
         )
         try:
             r = tap(world, "skip", i["id"])
@@ -810,7 +814,7 @@ class TestTapAdmissionOnTheLedger:
             # is consumed (the update_id is admitted) so a redelivery is a toast.
             assert r.outcome == "too_many" and r.show_alert is True
             assert _state(world, i["id"]) == "awaiting_approval", "nothing flipped"
-            assert self._count(world) == limit, "a refused tap spends nothing"
+            assert self._count(world, window) == limit, "a refused tap spends nothing"
             assert (
                 _one(
                     world,

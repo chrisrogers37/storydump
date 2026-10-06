@@ -105,7 +105,7 @@ Production is past that point — the owner applied 079 and 080 by hand on
 The `Procfile` names the two processes.
 
 ```bash
-# The API (the Procfile's `web` line): GET /health, /openapi.json, /api/v1
+# The API (the Procfile's `web` line): GET /health, /api/v1 (and /openapi.json under API_DOCS=1, never in production)
 export TARGET_DATABASE_URL=postgresql://<user>@localhost:5432/<database>   # the value in your .env
 uvicorn src.api.app:app --port 8000
 
@@ -234,7 +234,7 @@ storydump/
 
 Key resources:
 - **[AGENTS.md](AGENTS.md)** - The canonical developer and agent guide: safety rules, architecture, the command port, setup, commands, testing, services
-- **[CLAUDE.md](CLAUDE.md)** - Claude Code specifics, plus the safety rules repeated
+- **[CLAUDE.md](CLAUDE.md)** - Claude Code specifics, plus the rules it repeats from `AGENTS.md`
 - **[Quick Start Guide](documentation/guides/quickstart.md)** - Start here: using, developing, or operating Storydump
 - **[Reading the ledger](documentation/operations/reading-the-ledger.md)** - The `storydump` read and write verbs
 - **[Deployment Guide](documentation/guides/deployment.md)** - Production deployment checklist

@@ -43,7 +43,12 @@ function text(node: unknown): string {
   return "";
 }
 
-type LinkProps = { href: string; className?: string; children?: unknown };
+type LinkProps = {
+  href: string;
+  className?: string;
+  "aria-current"?: string;
+  children?: unknown;
+};
 
 /** Every link, the name first. */
 const links = (tree: unknown) =>
@@ -64,11 +69,11 @@ const sample = (pathname: string) => {
   return Sidebar({ items: SAMPLE, home: "/demo" }) as ReactElement;
 };
 
-/** The entries drawn as the current page. */
+/** The entries marked as the current page. */
 const active = (tree: unknown) =>
   links(tree)
     .slice(1)
-    .filter((l) => /\bbg-primary\/10\b/.test(l.className ?? ""))
+    .filter((l) => l["aria-current"] === "page")
     .map((l) => l.href);
 
 describe("Sidebar", () => {

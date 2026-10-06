@@ -653,9 +653,7 @@ def transport_from_env(token: str, env, **kwargs) -> "TelegramTransport":
     base = (env.get(API_BASE_VAR) or "").strip()
     if not base:
         return TelegramTransport(token, **kwargs)
-    if (env.get(vocabulary.RAILWAY_ENVIRONMENT_VAR) or "").strip().lower() == (
-        vocabulary.PRODUCTION_ENVIRONMENT
-    ):
+    if vocabulary.is_production(env):
         raise ApiBaseRefused(f"{API_BASE_VAR} is not honoured in production")
     host = httpx.URL(base).host
     if host not in _LOOPBACK:

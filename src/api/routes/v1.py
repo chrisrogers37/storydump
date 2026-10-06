@@ -57,6 +57,7 @@ from src.services.target.drive_adapter import (
     DriveTerminalError,
 )
 from src.services.target import (
+    bindings,
     category_mix,
     channel_bind,
     commands,
@@ -299,10 +300,12 @@ async def me(request: Request, principal: Principal = Depends(require_session)):
 async def telegram_link(
     request: Request, principal: Principal = Depends(require_session)
 ):
-    """The link a signed-in user taps to attach their Telegram identity
+    """The link a signed-in user opens to attach their Telegram identity
     (`07` §2 `link`: only from an authenticated session; the row pins the
-    user, and the bot's `/start` door attaches the tapping identity to exactly
-    that user — D35). The service half is #1180; this route is what the X.3
+    user). The bot's `/start` door names that user's account and offers
+    Confirm; only the Confirm, pressed by the person the offer was made to in
+    their own private chat with the bot, attaches their identity to exactly
+    that user — D35. The service half is #1180; this route is what the X.3
     drive was missing (#1172, #1157).
 
     Tenant-less, like `/me`: an identity belongs to a user, not a workspace.
@@ -318,6 +321,26 @@ async def telegram_link(
             conn, user_id=principal.user_id, bot_username=bot_username
         )
     return {"link": link, "expires_in_seconds": STATE_TTL_SECONDS}
+
+
+@router.delete("/me/telegram")
+async def telegram_unlink(
+    request: Request, principal: Principal = Depends(require_session)
+):
+    """The signed-in user removes their own Telegram identity (099, `07`
+    §42). Tenant-less, like the link it reverses. Idempotent: with nothing
+    linked the answer is `not_linked`, still 200. The one refusal is
+    `last_identity` (409) — the Telegram identity is the account's only one,
+    and removing it would leave no way to sign in. Memberships stay; that
+    Telegram account's taps and group messages count for nobody until the
+    person links again.
+    """
+    engine = require_engine(request)
+    async with engine.begin() as conn:
+        outcome = await identity.unlink_telegram(conn, user_id=principal.user_id)
+    if outcome == "last_identity":
+        raise HTTPException(status_code=409, detail="last_identity")
+    return {"outcome": outcome}
 
 
 @router.post("/workspaces/{ws}/telegram/bind-link")
@@ -427,13 +450,36 @@ async def list_bindings(
     )
 
 
+@router.delete("/workspaces/{ws}/bindings/{binding_id}")
+async def remove_binding(
+    ws: uuid.UUID,
+    binding_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_session),
+):
+    """Remove a Telegram group from the workspace (`07` §13) — a REVOKE,
+    never a delete (`bindings.revoke_for_workspace`): the row is kept, the
+    cards still queued for it are superseded, and a fresh bind link brings the
+    group back. Cards already posted stay in the group, and the bot is not
+    made to leave it. Admin floor, like binding one."""
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
+        revoked = await bindings.revoke_for_workspace(
+            session, workspace_id=str(ws), binding_id=str(binding_id)
+        )
+    if not revoked:
+        raise principal_mod.not_found()
+    return {"binding_id": str(binding_id), "state": "revoked"}
+
+
 @router.get("/workspaces/{ws}/invitations")
 async def list_invitations(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
-    return await _collection(
-        request, ws, principal, workspaces.list_invitations, "invitations"
-    )
+    """The pending invitations, each with its invitee's address, so admin
+    floor: the same as minting one (`commands.ROLE_FLOOR["invite_member"]`)."""
+    async with principal_mod.admin_session(request, str(ws), principal) as session:
+        items = await workspaces.list_invitations(session, workspace_id=str(ws))
+    return {"invitations": items}
 
 
 def _states(state: Optional[str]) -> list[str]:
@@ -632,9 +678,12 @@ async def create_source(
     `provisioning.get_or_create_media_source` — and, since the grant is the
     workspace's, refused by name when there is no usable grant to read it
     with (`drive_not_connected`, 409): a folder nobody can list is not a
-    source, it is a promise. With a grant the row is ARMED for its first sync
-    in this transaction (`media_sync.rearm_after_connect`), which also revives
-    a folder that was removed and picked again.
+    source, it is a promise. And only by the person who granted it
+    (`drive_not_yours`, 403; 091, `07` §34): a pick reads that person's Drive
+    and adds a folder from it, so it is the folder browser's rule, re-pick and
+    revival included. With a grant the row is ARMED for its first sync in this
+    transaction (`media_sync.rearm_after_connect`), which also revives a
+    folder that was removed and picked again.
     """
     body = await principal_mod.json_object(request)
     name = body.get("root_name")
@@ -643,6 +692,10 @@ async def create_source(
         grant = await workspaces.drive_status(session, workspace_id=str(ws))
         if grant["status"] != "active":
             raise HTTPException(status_code=409, detail="drive_not_connected")
+        if not await workspaces.may_browse_drive(
+            session, workspace_id=str(ws), user_id=principal.user_id
+        ):
+            raise _drive_not_yours()
         sources = await workspaces.list_sources(session, workspace_id=str(ws))
     # Connected folders are DISJOINT (owner ruling 2026-09-08): a folder
     # inside a connected one is already synced by its parent, and a folder
@@ -677,7 +730,13 @@ async def create_source(
     async with principal_mod.admin_session(request, str(ws), principal) as session:
         # The check above ran outside this unit of work: under the workspace's
         # sources lock, a changed set of connected folders is refused
-        # (`sources_changed`, 409) and the person retries.
+        # (`sources_changed`, 409) and the person retries. The browse check
+        # is asked again for the same reason: a reconnect in between makes
+        # someone else the granter, and this pick read their Drive.
+        if not await workspaces.may_browse_drive(
+            session, workspace_id=str(ws), user_id=principal.user_id
+        ):
+            raise _drive_not_yours()
         await provisioning.assert_sources_unchanged(
             session, workspace_id=str(ws), expected=provisioning.connected_refs(sources)
         )
@@ -837,6 +896,17 @@ def _drive_adapter(request: Request):
     )
 
 
+def _drive_not_yours() -> provisioning.ProvisioningRefused:
+    """The folder browser's and the pick's refusal of an admin who is not the
+    granter (091, `07` §34): the grant is the workspace's, the Drive it reads
+    is a person's. A `ProvisioningRefused`, not an `HTTPException`, because
+    that refusal carries its `reason` to the web (`app._reason_detail`), whose
+    picker then says who can browse instead. A function, like `not_found`."""
+    return provisioning.ProvisioningRefused(
+        "drive_not_yours", "only the person who connected Google Drive browses it"
+    )
+
+
 @router.get("/workspaces/{ws}/drive/folders")
 async def list_drive_folders(
     ws: uuid.UUID,
@@ -849,18 +919,24 @@ async def list_drive_folders(
 
     Admin floor, deliberately above `drive_status`'s: the grant is the
     workspace's, but the tree it lists is a PERSON's Drive, and members have
-    no business browsing it. The provider call sits outside the unit of work
-    (the checkpoint discipline every provider door keeps); admission and the
-    status read happen first. Refusals by name: `invalid_parent` (400) before
-    any request, `drive_not_connected` (409) when the workspace never
-    connected, `drive_reconnect_needed` (409) when its grant is expired or
-    revoked, `drive_grant_refused` (409) when Google refused a grant the
-    projection thought live, `drive_unavailable` (503) when Google gave no
-    usable answer, `drive_refused` (502) for a terminal answer. `SHARED_ROOT`
-    as the parent lists the folders shared to the account.
+    no business browsing it — nor does any admin but that person (091, `07`
+    §34). The provider call sits outside the unit of work (the checkpoint
+    discipline every provider door keeps); admission and the status read
+    happen first. Refusals by name: `invalid_parent` (400) before any request,
+    `drive_not_connected` (409) when the workspace never connected,
+    `drive_reconnect_needed` (409) when its grant is expired or revoked,
+    `drive_not_yours` (403) to an admin who did not grant it — after the
+    status refusals, because a reconnect is every admin's remedy and makes
+    them the granter — `drive_grant_refused` (409) when Google refused a
+    grant the projection thought live, `drive_unavailable` (503) when Google
+    gave no usable answer, `drive_refused` (502) for a terminal answer.
+    `SHARED_ROOT` as the parent lists the folders shared to the account.
     """
     async with principal_mod.admin_session(request, str(ws), principal) as session:
         grant = await workspaces.drive_status(session, workspace_id=str(ws))
+        mine = await workspaces.may_browse_drive(
+            session, workspace_id=str(ws), user_id=principal.user_id
+        )
     # Admission first, then the shape check: a non-admin learns nothing about
     # the parent it sent. Then the grant, by its projected status, so "never
     # connected" and "Google now refuses the grant" are different answers
@@ -876,6 +952,8 @@ async def list_drive_folders(
         raise HTTPException(status_code=409, detail="drive_not_connected")
     if grant["status"] != "active":
         raise HTTPException(status_code=409, detail="drive_reconnect_needed")
+    if not mine:
+        raise _drive_not_yours()
     async with _drive_read():
         page = await _drive_adapter(request).list_folders(
             parent=parent, workspace_id=str(ws)

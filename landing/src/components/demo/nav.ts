@@ -20,7 +20,7 @@ const ELSEWHERE = "In your workspace";
 export const DEMO_NAV: SidebarItem[] = [
   { href: DEMO_HOME, label: "Overview", icon: LayoutDashboard },
   { href: `${DEMO_HOME}/queue`, label: "Queue", icon: ListChecks },
-  { label: "Media Library", icon: ImageIcon, note: ELSEWHERE },
+  { label: "Media library", icon: ImageIcon, note: ELSEWHERE },
   { href: `${DEMO_HOME}/calendar`, label: "Calendar", icon: CalendarDays },
   { label: "Settings", icon: Settings, note: ELSEWHERE },
 ];

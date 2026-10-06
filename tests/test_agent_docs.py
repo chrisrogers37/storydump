@@ -351,18 +351,6 @@ LEGACY_NAME_EXEMPT: dict[str, dict[str, tuple[int, str]]] = {
             " --notify-command); the page says whose variable it is",
         ),
     },
-    "documentation/guides/landing-vercel-deployment.md": {
-        "TELEGRAM_BOT_TOKEN": (
-            2,
-            "the LANDING app's own server variable on Vercel"
-            " (landing/src/lib/telegram.ts:1) — not the worker's or the API's",
-        ),
-        "ADMIN_TELEGRAM_CHAT_ID": (
-            2,
-            "the landing app's waitlist-notification chat"
-            " (landing/src/lib/telegram.ts:2)",
-        ),
-    },
 }
 
 

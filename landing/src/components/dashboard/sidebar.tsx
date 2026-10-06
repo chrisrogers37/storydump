@@ -11,7 +11,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { siteConfig } from "@/config/site";
+import { Wordmark } from "@/design/brand";
 
 /**
  * One sidebar entry: a destination, or a label for a screen that is not
@@ -26,7 +26,7 @@ export type SidebarItem =
 const navItems: SidebarItem[] = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/dashboard/queue", label: "Queue", icon: ListChecks },
-  { href: "/dashboard/media", label: "Media Library", icon: ImageIcon },
+  { href: "/dashboard/media", label: "Media library", icon: ImageIcon },
   { href: "/dashboard/media/calendar", label: "Calendar", icon: CalendarDays },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
@@ -45,7 +45,7 @@ const navItems: SidebarItem[] = [
  * the screen it names.
  *
  * THE SAME RULE, APPLIED AGAIN (TD-D4). `/dashboard/analytics` was in this
- * list and its destination renders one card reading "Coming Soon … planned
+ * list and its destination renders one card reading "Coming soon … planned
  * for Phase 3". A nav item is a promise that a destination exists; a
  * destination that exists only to say it does not is the same broken promise
  * with a softer landing. The entry is gone.
@@ -67,6 +67,7 @@ export function Sidebar({
   home?: string;
 }) {
   const pathname = usePathname();
+  const current = activeHref(pathname, items, home);
 
   return (
     // `lg`, matching the header trigger's `lg:hidden`, because the two are
@@ -77,8 +78,8 @@ export function Sidebar({
     // content; a drawer is the better affordance there (#1363).
     <aside className={mobile ? "w-56 bg-card" : "hidden w-56 shrink-0 border-r bg-card lg:block"}>
       <div className="flex h-14 items-center border-b px-4">
-        <Link href={home} className="text-lg font-semibold tracking-tight">
-          {siteConfig.name}
+        <Link href={home} className="text-lg">
+          <Wordmark />
         </Link>
       </div>
       <nav className="space-y-1 p-3">
@@ -98,19 +99,17 @@ export function Sidebar({
             );
           }
 
-          const active =
-            item.href === home
-              ? pathname === home
-              : pathname === item.href || pathname.startsWith(item.href + "/");
+          const active = item.href === current;
 
           return (
             <Link
               key={item.href}
               href={item.href}
+              aria-current={active ? "page" : undefined}
               className={cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                "flex items-center gap-3 rounded-full px-3 py-2 text-sm font-medium transition-colors",
                 active
-                  ? "bg-primary/10 text-primary"
+                  ? "bg-primary text-primary-foreground"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground"
               )}
             >
@@ -122,4 +121,21 @@ export function Sidebar({
       </nav>
     </aside>
   );
+}
+
+/**
+ * The nav item for a path: the longest href it sits under, so the Calendar
+ * (/dashboard/media/calendar) is not also the Media library, and home
+ * (/dashboard, unless the caller has its own) only on its own page. A label
+ * is never the current page.
+ */
+export function activeHref(
+  pathname: string,
+  items: SidebarItem[] = navItems,
+  home = "/dashboard",
+): string | undefined {
+  return items
+    .flatMap((item) => ("href" in item ? [item.href] : []))
+    .filter((href) => pathname === href || (href !== home && pathname.startsWith(href + "/")))
+    .sort((a, b) => b.length - a.length)[0];
 }
