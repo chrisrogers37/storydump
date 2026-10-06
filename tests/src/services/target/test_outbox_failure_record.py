@@ -139,6 +139,18 @@ CASES = [
         id="a 5xx with no JSON is ambiguous with the HTTP status",
     ),
     pytest.param(
+        dict(status=404, body=_refusal(404, "Not Found")),
+        ("ambiguous", 404),
+        "ambiguous",
+        id="a 404 with Telegram's error body is ambiguous, never a dead token",
+    ),
+    pytest.param(
+        dict(status=401, text="<html>401 Authorization Required</html>"),
+        ("ambiguous", 401),
+        "ambiguous",
+        id="a 401 with no JSON is ambiguous, never a dead token",
+    ),
+    pytest.param(
         dict(exc=httpx.ConnectError("down")),
         ("ambiguous", None),
         "ambiguous",
@@ -170,12 +182,15 @@ class TestTheClassAndCodeRideTheOneCAS:
         assert params["s"] == to_state and params["i"] == "row-1"
         assert result["external_message_ref"] is None
 
-    async def test_a_dead_token_keeps_the_binding(self):
+    async def test_a_dead_tokens_failed_row_keeps_the_binding(self):
         """A 401 fails its row (#1493; the 401 case above), but it is the bot's
         credential, not the chat: the result names no gone destination, which
-        is what the sender reads before it retires a binding."""
+        is what the sender reads before it retires a binding. The failure is
+        asserted too, because a row that never failed keeps its binding
+        trivially."""
         error = await _raised_by(401, _refusal(401, "Unauthorized"))
         result = await outbox.settle(_Session(), ROW, error=error)
+        assert result["state"] == "failed"
         assert not result.get("destination_gone")
 
     async def test_a_fenced_settle_records_nothing(self):

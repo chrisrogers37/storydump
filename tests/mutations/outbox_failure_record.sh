@@ -1,6 +1,6 @@
 #!/bin/zsh
-# Mutation battery for the outbox's failure record and the delivery health surface (101, #1482), and
-# for a dead token's row failing at once (#1493): each
+# Mutation battery for the outbox's failure record and the delivery health surface (101, #1482), for
+# a dead token's row failing at once (#1493), and for the transport's dead-credential rule (#1553): each
 # behaviour has one named mutation that must make its named test FAIL ("killed"), and the test must PASS
 # on the clean tree first, or the verdict is BASELINE RED, not a kill; a selector that selects nothing
 # is NO TEST SELECTED, never a kill. Files are restored from the COMMITTED tree after each, so commit
@@ -81,9 +81,11 @@ check() {  # name file old new recipe selector
 }
 
 OUTBOX=src/services/target/outbox.py
+TRANSPORT=src/channels/telegram_transport.py
 MONITOR=scripts/delivery_monitor.py
 HEALTH=src/services/target/delivery_health.py
 RECORD=tests/src/services/target/test_outbox_failure_record.py
+SENDS=tests/src/channels/test_telegram_transport.py
 MON_TESTS=tests/scripts/test_delivery_monitor.py
 DB=tests/scripts/test_outbox_failure_record_gate.py
 LANE="tests/scripts/test_lineage_lane.py -k one_run_applies_the_whole_corpus"
@@ -92,13 +94,30 @@ LANE="tests/scripts/test_lineage_lane.py -k one_run_applies_the_whole_corpus"
 check "a dead token is filed as a lost response again" $OUTBOX '    failure_class = "credential_dead"' '    failure_class = "ambiguous"' "$UNIT" "$RECORD -k credential_dead"
 check "settle records no failure at all" $OUTBOX '    if extra.get("failure"):' '    if False:' "$UNIT" "$RECORD -k recorded_in_the_update_that_leaves_sending"
 check "the provider's code is dropped" $OUTBOX '        params["fcode"] = error_code' '        params["fcode"] = None' "$UNIT" "$RECORD -k 5xx"
-check "the transport stops carrying a 401's code" src/channels/telegram_transport.py 'raise TelegramAuthDead(f"{method}: {code} {description}", code=code)' 'raise TelegramAuthDead(f"{method}: {code} {description}")' "$UNIT" "$RECORD -k credential_dead"
-check "the transport stops carrying a 429's code" src/channels/telegram_transport.py $'scope="chat" if has_chat else "global",\n                code=code,' 'scope="chat" if has_chat else "global",' "$UNIT" "$RECORD -k rate_limited"
+check "the transport stops carrying a 401's code" $TRANSPORT 'raise TelegramAuthDead(f"{method}: {code} {description}", code=code)' 'raise TelegramAuthDead(f"{method}: {code} {description}")' "$UNIT" "$RECORD -k credential_dead"
+check "the transport stops carrying a 429's code" $TRANSPORT $'scope="chat" if has_chat else "global",\n                code=code,' 'scope="chat" if has_chat else "global",' "$UNIT" "$RECORD -k rate_limited"
 check "an error keeps a code of any type" $OUTBOX '        self.code = code if valid else None' '        self.code = code' "$UNIT" "$RECORD -k anything_else_is_none"
 check "a foreign error's code is recorded as the provider's" $OUTBOX '        if isinstance(error, ChannelSendError)' '        if hasattr(error, "code")' "$UNIT" "$RECORD -k foreign_error"
 # A dead token is definitive (#1493): its row fails after the one attempt, and nothing resends it.
-check "a dead token goes ambiguous again (unit)" $OUTBOX '    if isinstance(error, (ChannelRefused, CredentialDead)):' '    if isinstance(error, ChannelRefused):' "$UNIT" "$RECORD -k credential_dead"
-check "a dead token goes ambiguous again (gate)" $OUTBOX '    if isinstance(error, (ChannelRefused, CredentialDead)):' '    if isinstance(error, ChannelRefused):' "$GATE" "$DB -k dead_token_is_recorded_and_fails"
+DEAD_OLD='    if isinstance(error, (ChannelRefused, CredentialDead)):'
+DEAD_NEW='    if isinstance(error, ChannelRefused):'
+check "a dead token goes ambiguous again (unit)" $OUTBOX "$DEAD_OLD" "$DEAD_NEW" "$UNIT" "$RECORD -k credential_dead"
+check "a dead token goes ambiguous again (gate)" $OUTBOX "$DEAD_OLD" "$DEAD_NEW" "$GATE" "$DB -k dead_token_is_recorded_and_fails"
+check "a dead token goes ambiguous again (the binding test)" $OUTBOX "$DEAD_OLD" "$DEAD_NEW" "$UNIT" "$RECORD -k keeps_the_binding"
+# Only Telegram's own 401 is a dead token (#1553): pinned at the transport, and in the row it settles.
+CODE_OLD='        if code == 401:'
+CODE_NEW='        if code in (401, 404):'
+JSON_OLD='        except json.JSONDecodeError:'
+JSON_NEW=$'        except json.JSONDecodeError:\n            if response.status_code == 401:\n                raise TelegramAuthDead("401 without JSON", code=401) from None'
+check "a 404 reads as a dead token (transport)" $TRANSPORT "$CODE_OLD" "$CODE_NEW" "$UNIT" "$SENDS -k 'other_api_refusals and 404'"
+check "a 404 reads as a dead token (outbox)" $TRANSPORT "$CODE_OLD" "$CODE_NEW" "$UNIT" "$RECORD -k '404 and never'"
+check "a 401 with no JSON reads as a dead token (transport)" $TRANSPORT "$JSON_OLD" "$JSON_NEW" "$UNIT" "$SENDS -k 'other_api_refusals and 401'"
+check "a 401 with no JSON reads as a dead token (outbox)" $TRANSPORT "$JSON_OLD" "$JSON_NEW" "$UNIT" "$RECORD -k '401 and never'"
+# The dead token is logged once, and every rejected send is counted.
+LATCH='            if not self._auth_dead_logged:'
+check "every rejected send logs the dead token" $TRANSPORT "$LATCH" '            if True:' "$UNIT" "$SENDS -k logged_once"
+check "the dead token is never logged" $TRANSPORT "$LATCH" '            if False:' "$UNIT" "$SENDS -k logged_once"
+check "only the first rejected send is counted" $TRANSPORT '            self.auth_failures += 1' '            self.auth_failures = 1' "$UNIT" "$SENDS -k logged_once"
 # The other writer, against the real table as svc_worker.
 check "a stranded row is recorded with no time" $OUTBOX '"       last_failed_at = now()"' '"       last_failed_at = NULL"' "$GATE" "$DB -k stranded_row_is_recorded"
 # The doors, mutated in the plan's replayed block and read as svc_ingress.
