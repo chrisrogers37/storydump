@@ -512,6 +512,96 @@ class TestTheClaimIsSingleWinner:
             conn.close()
 
 
+class TestARevokedBindingIsNeverClaimed:
+    """`outbox.claim_next` takes a row only while its binding is active, so a
+    sender job minted before an admin removed the group (`07` §13) or the bot
+    was kicked sends nothing into that chat. Driven through the service as
+    `svc_worker`, with the positive control first: the same row IS claimed
+    once the binding is active again."""
+
+    @pytest.mark.asyncio
+    async def test_a_pending_row_on_a_revoked_binding_stays_pending(self, outbox_db):
+        from src.services.target.outbox import claim_next
+
+        binding = _new_binding(outbox_db)
+        outbox_id = _enqueue(outbox_db, binding=binding)
+        _owner_exec(
+            outbox_db,
+            "UPDATE channel_bindings SET state = 'revoked' WHERE id = %s",
+            (binding,),
+        )
+        engine = _engine(outbox_db)
+        try:
+            async with engine.connect() as conn:
+                await _tenant(conn, outbox_db)
+                assert await claim_next(conn, binding_id=binding) is None
+                await conn.commit()
+            assert _state(outbox_db, outbox_id)[:2] == ("pending", 0), (
+                "a revoked binding's row was claimed — its sender would post"
+                " into a group the workspace removed"
+            )
+
+            _owner_exec(
+                outbox_db,
+                "UPDATE channel_bindings SET state = 'active' WHERE id = %s",
+                (binding,),
+            )
+            async with engine.connect() as conn:
+                await _tenant(conn, outbox_db)
+                row = await claim_next(conn, binding_id=binding)
+                await conn.commit()
+        finally:
+            await engine.dispose()
+        assert row is not None and row["id"] == str(outbox_id), (
+            "positive control: the active binding's row is claimed"
+        )
+        assert _state(outbox_db, outbox_id)[0] == "sending"
+
+    @pytest.mark.asyncio
+    async def test_a_revoked_bindings_leftover_queue_is_retired(self, outbox_db):
+        """What `deliver_outbox` runs on finding its binding revoked: a row a
+        429 put back to `pending`, one a dead sender left `sending` and one
+        `ambiguous` are all superseded, so a re-bind posts no stale card. A
+        `sent` row and another binding's row are untouched."""
+        from src.services.target.bindings import retire_unsettled
+
+        binding = _new_binding(outbox_db)
+        other = _new_binding(outbox_db)
+        rows = {
+            state: _enqueue(outbox_db, binding=binding)
+            for state in ("pending", "sending", "ambiguous", "sent")
+        }
+        for state in ("sending", "ambiguous", "sent"):
+            _owner_exec(
+                outbox_db,
+                "UPDATE channel_outbox SET state = %s,"
+                " external_message_ref = CASE WHEN %s = 'sent' THEN '1' END"
+                " WHERE id = %s",
+                (state, state, rows[state]),
+            )
+        bystander = _enqueue(outbox_db, binding=other)
+        _owner_exec(
+            outbox_db,
+            "UPDATE channel_bindings SET state = 'revoked' WHERE id = %s",
+            (binding,),
+        )
+        engine = _engine(outbox_db)
+        try:
+            async with engine.connect() as conn:
+                await _tenant(conn, outbox_db)
+                moved = await retire_unsettled(conn, binding_id=binding)
+                await conn.commit()
+        finally:
+            await engine.dispose()
+        assert moved == 3
+        for state in ("pending", "sending", "ambiguous"):
+            assert _state(outbox_db, rows[state])[0] == "superseded", state
+        assert _state(outbox_db, rows["sent"])[0] == "sent"
+        assert _state(outbox_db, bystander)[0] == "pending", (
+            "another binding's queue was touched"
+        )
+
+
 class TestStoppedSenderStrandsNothing:
     """The gate's first half, driven through the service."""
 

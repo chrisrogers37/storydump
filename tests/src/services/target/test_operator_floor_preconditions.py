@@ -275,10 +275,15 @@ def test_the_publish_pipeline_has_exactly_one_producer_and_it_is_manual_mode_gat
             for call in ast.walk(node)
         )
     )
-    assert reaches_the_mint == ["approve", "resolve_review"], (
+    # `_give_up` mints it too, and parks nothing: it runs only from a row
+    # already `review_required`, and its job meets the intent `cancelled` —
+    # the pipeline's terminal route destroys the transit copy and finalizes
+    # (`publish_pipeline.run_publish_pipeline`), and `park_exhausted` parks
+    # no settled story. Reaching `review_required` still needs approve.
+    assert reaches_the_mint == ["_give_up", "approve", "resolve_review"], (
         f"the publish_pipeline job is now minted by {reaches_the_mint} — a"
-        " door other than `approve`/`resolve_review` can park an intent."
-        " See above."
+        " door other than `approve`/`resolve_review` (or the give-up's"
+        " transit destroy) can park an intent. See above."
     )
     assert '"manual_mode"' in approve, (
         "`approve` no longer refuses in manual mode — the gate that makes the"

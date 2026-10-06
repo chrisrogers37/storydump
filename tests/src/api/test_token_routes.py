@@ -172,6 +172,8 @@ class TestMintingIsSessionOnly:
         (call,) = tokens["mint"]
         assert call["workspace_id"] == WS and call.get("user_id") is None
         assert call["role"] == "readonly"
+        # 090: the minter rides along, so removing them revokes this token.
+        assert call["created_by_user_id"] == PRINCIPAL.user_id
         assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
 
     def test_the_service_role_cannot_be_raised_by_the_body(

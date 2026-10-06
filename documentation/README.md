@@ -133,6 +133,10 @@ a guide walking a reader through it contradicted a fixed constraint.
 **[landing-vercel-deployment.md](guides/landing-vercel-deployment.md)**
 - The Next.js site and dashboard in `landing/`: its Vercel environment variables (client vs server), common issues, project settings
 
+### Design System
+**[design-system.md](guides/design-system.md)**
+- The one design module the site, sign-in and the app share: tokens, fonts, the shared components, and the rules for changing them
+
 ---
 
 ## Operations & Maintenance
@@ -145,7 +149,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 ### Scheduling-Outage and Posting-Outage Monitors
 **[operations/scheduling-monitor.md](operations/scheduling-monitor.md)** · **[operations/posting-monitor.md](operations/posting-monitor.md)**
-- `scripts/scheduling_monitor.py` polls `GET /health/scheduling` and alerts when the schedule cursor stops advancing; `scripts/posting_monitor.py` polls `GET /health/posting` and alerts when no post has landed
+- `scripts/scheduling_monitor.py` polls `GET /health/scheduling` and alerts when the schedule cursor stops advancing; `scripts/posting_monitor.py` polls `GET /health/posting` and alerts when no post has landed; the API reuses each surface's answer for 30 seconds
 - Why each runs outside the app, the verdicts, the thresholds, and how they are deployed
 
 ### Worker Recovery
@@ -171,7 +175,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 ### Runtime Database Roles (F.4 rollout)
 **[operations/runtime-database-roles.md](operations/runtime-database-roles.md)**
 - Moving the API and worker off the owner login onto `svc_ingress` / `svc_worker`, one service at a time
-- Verified through `/health`'s `db_role` field and the worker's boot log line; rollback per step
+- Verified through the operating details' `db_role` field (`storydump health --json`) and the worker's boot log line; rollback per step
 
 ### Reading the Ledger
 **[operations/reading-the-ledger.md](operations/reading-the-ledger.md)**
@@ -201,7 +205,7 @@ a guide walking a reader through it contradicted a fixed constraint.
 
 ## Project Updates
 
-There is no live update note. The running record of changes is [../CHANGELOG.md](../CHANGELOG.md); an incident gets a folder under `planning/investigations/`.
+There is no live update note. The running record of changes is [../CHANGELOG.md](../CHANGELOG.md), with the entries not yet folded into it in [../changelog.d/](../changelog.d/); an incident gets a folder under `planning/investigations/`.
 
 The three notes of January 2026 — [bug fixes](archive/updates/2026-01-04-bugfixes.md), [category scheduling](archive/updates/2026-01-10-category-scheduling.md), [force posting and the queue shift](archive/updates/2026-01-11-force-posting-queue-shift.md) — describe the legacy scheduler, queue, bot and CLI, all deleted in the tear-out (#1216), and moved to `archive/updates/` on 2026-09-18. `updates/` no longer exists; the changelog and an investigation folder are where a change or an incident is recorded.
 
@@ -224,7 +228,7 @@ The three notes of January 2026 — [bug fixes](archive/updates/2026-01-04-bugfi
 
 ## API Documentation
 
-The API describes itself: a running API serves its schema at `GET /openapi.json` (FastAPI builds it from the routes; `uvicorn src.api.app:app`). What it mounts (`src/api/app.py`):
+The API describes itself: an API started with `API_DOCS=1` serves its schema at `GET /openapi.json` and `/docs` (FastAPI builds it from the routes; `API_DOCS=1 uvicorn src.api.app:app`). Without it, and in Railway's `production` environment even with it, it serves neither. What it mounts (`src/api/app.py`):
 - `/auth` — sign-in with Google, sign-out, and the OAuth callbacks (Google Drive, Instagram Login)
 - `/api/v1` — reads as resources; state changes as the command port, `POST /api/v1/workspaces/{ws}/commands/{command}`; API tokens; the `/ops` read views the `storydump` CLI reads
 - `/webhooks/telegram` and `/webhooks/meta` — the providers' deliveries
@@ -240,7 +244,7 @@ The design is the consolidated plan's `01-target-architecture.md` (the interacti
 1. Start with **[quickstart.md](guides/quickstart.md)**, then **[dev-environment-setup.md](guides/dev-environment-setup.md)** (local setup)
 2. Read **[testing-guide.md](guides/testing-guide.md)** (understand testing)
 3. Read **[../AGENTS.md](../AGENTS.md)** (architecture, the command port, setup, commands, testing) and the **[consolidated design plan](planning/2026-08-02-consolidated-design-plan/README.md)** (where the system is going)
-4. Read root **[CLAUDE.md](../CLAUDE.md)** for the safety rules (it defers to `AGENTS.md` for everything else)
+4. If you use Claude Code, also read root **[CLAUDE.md](../CLAUDE.md)**
 
 ### For Deploying to Production
 1. Follow **[deployment.md](guides/deployment.md)** step-by-step
@@ -272,7 +276,7 @@ These critical files remain in the project root for visibility:
 - **[../README.md](../README.md)** - Project overview and quick start
 - **[../CHANGELOG.md](../CHANGELOG.md)** - Version history and release notes
 - **[../AGENTS.md](../AGENTS.md)** - The canonical developer and agent guide (safety rules, architecture, the command port, setup, commands, testing, services)
-- **[../CLAUDE.md](../CLAUDE.md)** - Claude Code specifics plus the safety rules, repeated; it defers to `AGENTS.md` for everything else
+- **[../CLAUDE.md](../CLAUDE.md)** - Claude Code specifics, plus the rules it repeats from `AGENTS.md`; it defers to `AGENTS.md` for everything else
 
 ### External Documentation
 - [Telegram Bot API](https://core.telegram.org/bots/api)
@@ -291,7 +295,7 @@ When adding new documentation:
    - Planning/design → `planning/`
    - How-to guides → `guides/`
    - Operations → `operations/`
-   - Bug fixes/patches → `../CHANGELOG.md`; a production incident → a folder under `planning/investigations/`
+   - Bug fixes/patches → a fragment in `../changelog.d/`; a production incident → a folder under `planning/investigations/`
    - Completed, superseded or abandoned plans, and any page that describes something the
      tree no longer holds → `git mv` to `archive/` (same layout), add a one-line status
      banner at the top, and add a row to `archive/README.md`
@@ -320,7 +324,7 @@ When adding new documentation:
 | **Archive** | Historical | 56 Markdown files | Completed, superseded and abandoned plans and the legacy tier's pages, indexed in `archive/README.md` |
 | **Guides** | Live | 10 guides | Quick start, deployment, cloud deployment, testing, test coverage, Instagram Login, dev env, deployment options, CI/CD, landing deploy |
 | **Operations** | Live | 15 files | Monitoring, the two outage monitors, worker recovery, backup, the migration runner, the legacy window's close, the Telegram webhook, runtime database roles, reading the ledger, troubleshooting, Meta App Review + callbacks, Google OAuth verification, preview deployments |
-| **API Docs** | Served | — | `GET /openapi.json` on a running API |
+| **API Docs** | Served | — | `GET /openapi.json` on an API started with `API_DOCS=1`, never in production |
 
 Counted on 2026-09-18 (`find documentation/<area> -name '*.md'`).
 

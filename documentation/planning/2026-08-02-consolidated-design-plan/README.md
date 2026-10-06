@@ -49,7 +49,7 @@ Legend: ✅ built, gate met · 🔧 in progress · 🟡 built, never driven · �
 | S.1 Load harness + telemetry | — | ✅ | `tests/scripts/load/` (2026-09-10): the real API + worker as subprocesses against a fake Telegram, five scenarios, `reports/` committed (F2's exception pending the owner); `/health` `pool` + `ingress_workers` |
 | S.2 Admission, pg-shaped | — | 🟡 | `rate_counters` shipped at L.2; per-workspace admission built for Telegram taps (F12 = 120/min, 2026-09-10); the web route's 30/min is its own follow-up |
 | S.3 Egress hardening at scale | #871 ✓ | 🔧 | the carry-in (address pinning) ✅ (#1108); deployment-wide provider budgets and the hostile-fake battery under load 📋 |
-| S.4 Loop extraction + retention | — | 🔧 | `fn_retention_batch` exists and nothing reaches it (#1167); the published retention windows are unenforced (#1173) |
+| S.4 Loop extraction + retention | — | 🔧 | `fn_retention_batch` is reached for one class: since 2026-10-03 `retention_sweep` deletes `rate_counters` rows past 7 days, hourly (#1327); every other published retention window is unenforced (#1173) |
 | S.5 Broad enablement + pre-check measurement | — | 📋 | `usage_precheck` flag exists, default off — wired 2026-09-12 as `TARGET_USAGE_PRECHECK_ENABLED` on the worker (#1299; a dry run never reads usage, an answer without a quota total proceeds uncached); no canary measurement |
 
 **Tracker hygiene (2026-09-02):** #806, #942, #1014, #1183, #986 and #797 closed (their work had landed); #695 and #943 closed as moot under ruling 1; #806, #841, #751 and #942 retitled to their true state; #746, #790, #841 and #751 carry a current-state comment and stay open for their remainders.

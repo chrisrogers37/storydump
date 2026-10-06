@@ -240,6 +240,23 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   }),
 
   /**
+   * Invite a person by email (#1563). Only the address and the role are
+   * forwarded: the web makes email invitations, so the Telegram arm's
+   * `delivery_channel` and `invited_tg_user_id` never ride along. The port
+   * owns what a valid address and an invitable role are; this checks only
+   * that each is a string.
+   */
+  invite_member: submissionCommand((raw) => {
+    if (typeof raw.email !== "string") {
+      return { ok: false, error: "invalid_email" };
+    }
+    if (typeof raw.role !== "string") {
+      return { ok: false, error: "invalid_role" };
+    }
+    return { ok: true, body: { email: raw.email, role: raw.role } };
+  }),
+
+  /**
    * Remove a destination (owner decision 2026-09-04): the port's
    * `active → disabled` edge. The row stays for history and for the connect
    * that brings the account back, so this is not a delete.

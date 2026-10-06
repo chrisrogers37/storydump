@@ -51,13 +51,14 @@ TELEGRAM_TOKEN_PATTERN = re.compile(r"(?<![\w-])(?:bot)?\d{5,}:[A-Za-z0-9_-]{20,
 PIPE_WIDTH = 200
 
 
-#: The keys of `/health`'s pool block, as `PoolWatch.snapshot()` emits them
-#: (`src/services/target/unit_of_work.py`); a test binds the two, because the
-#: first spelling here (`in_use`, `peak`) matched nothing the API sent and
-#: rendered blank cells that looked like a quiet pool.
+#: The keys of the operating details' pool block (`/api/v1/ops/health`), as
+#: `PoolWatch.snapshot()` emits them (`src/services/target/unit_of_work.py`); a
+#: test binds the two, because the first spelling here (`in_use`, `peak`)
+#: matched nothing the API sent and rendered blank cells that looked like a
+#: quiet pool.
 POOL_FACTS = ("size", "checked_out", "checked_out_peak")
 
-#: The scalar keys of `/health`'s tap block, as `TapMetrics.snapshot()` emits
+#: The scalar keys of the operating details' tap block, as `TapMetrics.snapshot()` emits
 #: them (`src/api/routes/webhooks.py`); a test binds the two, for the same
 #: reason `POOL_FACTS` has one. The renderer read `executed` and `replayed` at
 #: the TOP level: `executed` is a real outcome but lives one level down under
@@ -729,7 +730,14 @@ def _render_health(console: Console, data: Any) -> None:
         " · ".join(
             part
             for part in (
-                _facts(api, "version", "db_role", "uptime_seconds", "ingress_workers"),
+                _facts(
+                    api,
+                    "version",
+                    "commit",
+                    "db_role",
+                    "uptime_seconds",
+                    "ingress_workers",
+                ),
                 _facts(pool, *POOL_FACTS),
                 _facts(api.get("taps"), *TAP_FACTS),
                 _tap_outcomes(api.get("taps")),
@@ -738,6 +746,9 @@ def _render_health(console: Console, data: Any) -> None:
                 else "",
                 f"live pending {_cell(live.get('pending_update_count'))}"
                 if live
+                else "",
+                f"backpressure {_cell(api.get('backpressure'))}"
+                if api.get("backpressure") is not None
                 else "",
             )
             if part
@@ -754,9 +765,6 @@ def _render_health(console: Console, data: Any) -> None:
             for part in (
                 _facts(scheduling, "stalled", "accounts_active", "max_lag_seconds"),
                 f"worker {_facts(worker, *sorted(worker))}" if worker else "",
-                f"backpressure {_cell(scheduling.get('backpressure'))}"
-                if "backpressure" in scheduling
-                else "",
             )
             if part
         ),
@@ -767,6 +775,12 @@ def _render_health(console: Console, data: Any) -> None:
         _facts(posting, *[k for k in posting if k != "status"]),
     )
     console.print(table)
+    read = health.get("details") if isinstance(health.get("details"), dict) else {}
+    if read.get("read") is False:
+        console.print(
+            f"operating details not read: {_text(read.get('detail'), '?')}"
+            f" — {_text(read.get('fix'), '')}"
+        )
 
 
 DEPLOY_COLUMNS: tuple[Column, ...] = (

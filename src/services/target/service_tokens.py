@@ -93,9 +93,12 @@ def _one_subject(user_id: Optional[str], workspace_id: Optional[str]) -> None:
 
 _MINT = text(
     "INSERT INTO service_tokens"
-    "  (name, token_hash, role, user_id, workspace_id, expires_at)"
-    " VALUES (:name, :h, :role, :uid, :ws, now() + make_interval(days => :days))"
-    " RETURNING id, name, role, user_id, workspace_id, expires_at, created_at"
+    "  (name, token_hash, role, user_id, workspace_id, created_by_user_id,"
+    "   expires_at)"
+    " VALUES (:name, :h, :role, :uid, :ws, :by,"
+    "         now() + make_interval(days => :days))"
+    " RETURNING id, name, role, user_id, workspace_id, created_by_user_id,"
+    "           expires_at, created_at"
 )
 
 
@@ -106,9 +109,14 @@ async def mint(
     role: Any,
     user_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    created_by_user_id: Optional[str] = None,
     expires_in_days: Any = DEFAULT_EXPIRY_DAYS,
 ) -> tuple[str, dict]:
     """Mint one token. Returns ``(secret, row)`` — the secret exactly once.
+
+    *created_by_user_id* names the person who minted a workspace service
+    identity (090), so removing that person can revoke it
+    (`revoke_minted_by`). A person-bound token's ``user_id`` already says it.
 
     Validation happens here, before SQL: the table's CHECKs would refuse the
     same things, but a CHECK violation is a 500 to the caller and a named
@@ -139,6 +147,7 @@ async def mint(
                     "role": role,
                     "uid": user_id,
                     "ws": workspace_id,
+                    "by": created_by_user_id,
                     "days": expires_in_days,
                 },
             )
@@ -246,7 +255,8 @@ async def resolve(executor, *, token_hash: str) -> TokenPrincipal:
 
 
 _COLUMNS = (
-    "id, name, role, workspace_id, expires_at, revoked_at, last_used_at, created_at"
+    "id, name, role, workspace_id, created_by_user_id, expires_at, revoked_at,"
+    " last_used_at, created_at"
 )
 
 
@@ -311,3 +321,18 @@ async def revoke(
         params = {"id": token_id, "ws": workspace_id}
     result = await executor.execute(statement, params)
     return result.rowcount == 1
+
+
+async def revoke_minted_by(executor, *, workspace_id: str, user_id: str) -> int:
+    """Revoke every live service identity *user_id* minted for *workspace_id*
+    — the removal's other half (090): a workspace token is revoked with the
+    membership of the person who minted it. Returns how many were revoked."""
+    result = await executor.execute(
+        text(
+            "UPDATE service_tokens SET revoked_at = now()"
+            " WHERE workspace_id = :ws AND created_by_user_id = :u"
+            "   AND revoked_at IS NULL"
+        ),
+        {"ws": workspace_id, "u": user_id},
+    )
+    return result.rowcount

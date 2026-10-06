@@ -24,7 +24,7 @@ Before opening the OAuth Brand / consent screen submission form:
 - [x] **App Homepage URL** — `https://storydump.app` (live)
 - [x] **Privacy Policy URL** — `https://storydump.app/privacy` (`landing/src/app/(marketing)/privacy/page.tsx`)
 - [x] **Terms of Service URL** — `https://storydump.app/terms` (`landing/src/app/(marketing)/terms/page.tsx`)
-- [ ] **App icon** — 120×120 PNG, no transparency. Need to design.
+- [ ] **App icon** — 120×120 PNG, no transparency: [`assets/app-icon/storydump-icon-120.png`](assets/app-icon/storydump-icon-120.png), drawn by `make-icon.py` beside it (#410). Made; still to upload.
 - [ ] **Authorized domain** — `storydump.app` verified via Google Search Console.
 - [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. With `OAUTH_REDIRECT_BASE_URL = https://api.storydump.app` (the API's public origin, `guides/cloud-deployment.md`) that is `https://api.storydump.app/auth/google-drive/callback` (`src/api/routes/auth.py:300`). Add it under **APIs & Services → Credentials → [OAuth 2.0 Client] → Authorized redirect URIs**. (`OAUTH_REDIRECT_BASE_URL` is documented in [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md).)
 - [ ] **Scope justification copy** — short text explaining why we need `drive.readonly` (see template below).
@@ -57,7 +57,7 @@ Still under **OAuth consent screen**:
 |---|---|
 | App name | `Storydump` |
 | User support email | `christophertrogers37@gmail.com` (or a team email) |
-| App logo | upload the 120×120 PNG |
+| App logo | upload `assets/app-icon/storydump-icon-120.png` |
 | Application home page | `https://storydump.app` |
 | Application privacy policy link | `https://storydump.app/privacy` |
 | Application terms of service link | `https://storydump.app/terms` |

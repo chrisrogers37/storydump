@@ -25,8 +25,8 @@ _LINE = re.compile(r"^([A-Z][A-Z0-9_]*)=", re.MULTILINE)
 
 
 def _sources() -> list[Path]:
-    """`landing/src`, and the root configs that run outside it (`drizzle.config.ts`
-    reads `DATABASE_URL` for the migration tool; `next.config.ts` could)."""
+    """`landing/src`, and the root configs that run outside it
+    (`next.config.ts` could read a variable `src/` never does)."""
     under_src = (
         p for ext in ("ts", "tsx") for p in (LANDING / "src").rglob(f"*.{ext}")
     )
@@ -46,14 +46,14 @@ def _example_names() -> set[str]:
 
 
 def test_the_finder_sees_a_known_read():
-    """Positive control: `lib/db.ts` reads `DATABASE_URL`."""
-    assert "DATABASE_URL" in _read_names()
+    """Positive control: `lib/target-api.ts` reads `TARGET_API_URL`."""
+    assert "TARGET_API_URL" in _read_names()
 
 
 def test_the_finder_scans_the_root_configs():
-    """`drizzle.config.ts` runs outside `src/`; a scan of `src/` alone would
+    """`next.config.ts` runs outside `src/`; a scan of `src/` alone would
     miss a variable only it reads."""
-    assert LANDING / "drizzle.config.ts" in _sources()
+    assert LANDING / "next.config.ts" in _sources()
 
 
 def test_every_variable_the_landing_reads_is_in_the_example():

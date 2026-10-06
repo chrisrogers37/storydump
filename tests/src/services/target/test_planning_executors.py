@@ -373,7 +373,11 @@ class TestRescheduleItem:
         "over, reason",
         [
             ({"origin": "cadence"}, "illegal_transition"),
-            ({"state": "awaiting_approval"}, "illegal_transition"),
+            *[
+                ({"state": state}, "illegal_transition")
+                for state in vocabulary.INTENT_STATES
+                if state != "scheduled"
+            ],
             ({"cancel_requested": True}, "cancelling"),
         ],
     )
