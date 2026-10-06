@@ -46,6 +46,7 @@ from src.services.target import (
     google_drive_oauth,
     identity,
     invitations,
+    oauth_states,
     offboarding,
     readers,
     service_tokens,
@@ -829,12 +830,15 @@ async def remove_member(
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
-    non-member is `not_found`. The door records the removal, which the
-    Telegram join path honours until the person is invited back, and the
-    workspace service identities they minted are revoked here, in the same
-    transaction (090), as are the pending invitations in the workspace that
-    they sent or that are addressed to them, so none of them lets anyone in and
-    none blocks the fresh invitation that brings them back."""
+    non-member is `not_found`. The door also checks its caller: the workspace
+    must be the claimed tenant and *by_user_id* an owner or admin of it, or it
+    raises (`07` §45). The door records the removal, which the Telegram join
+    path honours until the person is invited back. In the same transaction,
+    the workspace service identities they minted are revoked (090), as are the
+    pending invitations in the workspace that they sent or that are addressed
+    to them, so none of them lets anyone in and none blocks the fresh
+    invitation that brings them back, and every live link state they hold for
+    this workspace is retired (`07` §45)."""
     row = (
         await executor.execute(
             text(
@@ -848,12 +852,16 @@ async def remove_member(
     if outcome == "removed":
         # The door recorded the removal, which the Telegram join path honours
         # (090); the service identities this person minted go with them, and so
-        # do the pending invitations they sent or were sent.
+        # do the pending invitations they sent or were sent and every bind or
+        # connect link they hold for this workspace.
         await service_tokens.revoke_minted_by(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
         )
         await invitations.revoke_on_removal(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
+        await oauth_states.retire_live_states(
+            executor, user_id=user_id, workspace_id=workspace_id
         )
         return str(row[1])
     if outcome == "not_found":

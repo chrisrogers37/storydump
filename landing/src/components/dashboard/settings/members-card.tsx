@@ -131,7 +131,8 @@ export function MembersCard({
         <p className="text-xs text-muted-foreground">
           People who speak in a bound Telegram group join as members
           automatically once their Telegram is linked; leaving the group removes
-          nobody. Removing someone here revokes their access to this workspace.
+          nobody. Removing someone here revokes their access to this workspace,
+          and the group does not add them back unless you invite them again.
         </p>
       </CardContent>
     </Card>

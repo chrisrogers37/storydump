@@ -304,8 +304,9 @@ class TestAgainstTheRealDocs:
         # §41's invitations admitting only while legitimate (098) make it 48;
         # §42's Telegram unlink (099) makes it 49; and §43's waitlist
         # written by the API (100) makes it 50; and §44's outbox failure record
-        # and its doors (101, #1482) make it 51.
-        assert classes.count("normative") == 51
+        # and its doors (101, #1482) make it 51; and §45's removal that holds,
+        # the remove door checking its caller (102), makes it 52.
+        assert classes.count("normative") == 52
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
