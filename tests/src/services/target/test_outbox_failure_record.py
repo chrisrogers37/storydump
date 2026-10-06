@@ -80,7 +80,7 @@ CASES = [
     pytest.param(
         dict(status=401, body=_refusal(401, "Unauthorized")),
         ("credential_dead", 401),
-        "ambiguous",
+        "failed",
         id="a dead token is credential_dead, not a lost response",
     ),
     pytest.param(
@@ -170,13 +170,13 @@ class TestTheClassAndCodeRideTheOneCAS:
         assert params["s"] == to_state and params["i"] == "row-1"
         assert result["external_message_ref"] is None
 
-    async def test_a_dead_token_changes_no_state_until_1493_decides(self):
-        """The record is new; the behaviour is not. A 401's row still takes
-        the ambiguous path, the one it took before 101."""
+    async def test_a_dead_token_keeps_the_binding(self):
+        """A 401 fails its row (#1493; the 401 case above), but it is the bot's
+        credential, not the chat: the result names no gone destination, which
+        is what the sender reads before it retires a binding."""
         error = await _raised_by(401, _refusal(401, "Unauthorized"))
         result = await outbox.settle(_Session(), ROW, error=error)
-        assert result["state"] == "ambiguous"
-        assert set(result) == set(ROW) | {"state", "external_message_ref"}
+        assert not result.get("destination_gone")
 
     async def test_a_fenced_settle_records_nothing(self):
         """The row left `sending` under us: the CAS matches nothing, so the

@@ -232,9 +232,8 @@ class CredentialDead(ChannelSendError):
     the token is replaced. Channel-neutral so the outbox never imports a
     channel (`TelegramAuthDead` subclasses it).
 
-    Recorded as `credential_dead`, but the row still takes the ambiguous path:
-    whether it should fail at once is #1493's decision, kept out of the schema
-    change."""
+    DEFINITIVE, like :class:`ChannelRefused`: the row fails after its one
+    attempt, and the binding stays (#1493)."""
 
     failure_class = "credential_dead"
 
@@ -1324,15 +1323,14 @@ async def settle(
             "destination_gone": True,
             "migrate_to": error.migrate_to,
         }
-    if isinstance(error, ChannelRefused):
-        # Definitive, like a gone destination: the provider said this message
-        # as shaped will never land. Nothing to resend; the row fails.
+    if isinstance(error, (ChannelRefused, CredentialDead)):
+        # Definitive, like a gone destination: this message as shaped will
+        # never land, or no message will until the credential is replaced.
+        # Nothing to resend; the row fails, and the binding stays.
         await _leave_sending(session, row["id"], "failed", failure=failure)
         return {**row, "state": "failed", "external_message_ref": None}
     if error is not None:
-        # A lost response is the ambiguous case. So, for now, is a refused
-        # credential: recorded as `credential_dead`, but whether it should fail
-        # at once is #1493's decision, so no row moves differently than before.
+        # A lost response is the ambiguous case.
         await mark_ambiguous(session, outbox_id=row["id"], failure=failure)
         return {**row, "state": "ambiguous", "external_message_ref": None}
 

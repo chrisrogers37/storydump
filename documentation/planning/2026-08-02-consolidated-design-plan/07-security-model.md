@@ -3166,9 +3166,8 @@ copies), the provider's code for it (`last_error_code`: Telegram's `error_code`,
 came back) and when (`last_failed_at`). They describe the last failure, not how the row ended, so a
 later success does not clear them. `settle` writes them in the same CAS as the state change, so a
 fenced writer records nothing. `credential_dead` is a dead token's 401, which the outbox had filed
-as a lost response; this section records it and moves no row differently (#1493 decides whether it
-should fail at once). The index is partial on the rows that have ever failed, for the door's one
-predicate.
+as a lost response; this section records it and moves no row differently (#1493 then fails it at
+once). The index is partial on the rows that have ever failed, for the door's one predicate.
 
 **The doors.** §24's shape: owned by `svc_maintenance`, EXECUTE for `svc_ingress` (the
 `/health/delivery` route) and `svc_worker`, the window clamped to [60 s, 24 h], counts only.
