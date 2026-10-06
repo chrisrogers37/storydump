@@ -90,7 +90,7 @@ Under **Google Auth Platform → Data Access**, the full list at submission is e
 - `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile` (sign-in)
 - `.../auth/drive.readonly` (Drive)
 
-Data Access lists `drive.readonly` under *Your restricted scopes* ("Approval required") with three required fields, and **Save stays disabled until all three are filled**, the demo video's YouTube link included. So before the video exists, save Data Access with only the three sign-in scopes (remove `drive.readonly` with its trash icon), and add `drive.readonly` back at submission with all three fields. Removing it from the list does not change what the app asks Google for at connect. **`drive.readonly` is the one Google will scrutinize.**
+Data Access lists `drive.readonly` under *Your restricted scopes* ("Approval required") with three required fields, and **Save stays disabled until all three are filled**, the demo video's YouTube link included. So Data Access can stay as it is until submission: `drive.readonly` is saved together with the feature choice, the justification and the video link, once all three exist. Nothing needs deleting meanwhile, and the list does not change what the app asks Google for at connect. **`drive.readonly` is the one Google will scrutinize.**
 
 - **What features will you use?** A dropdown of Google's permitted uses for restricted Drive scopes. Pick the one closest to a productivity app that works with the user's Drive files in its own interface; the labels were not confirmed from here, so if none fits, screenshot the list before choosing.
 - **How will the scopes be used?** Plain text, at most 1,000 characters (backticks paste literally). This version is 996:
