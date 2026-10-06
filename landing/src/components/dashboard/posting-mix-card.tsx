@@ -22,7 +22,7 @@ export function PostingMixCard({ mix }: { mix: FolderMix }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Posting mix</CardTitle>
+        <CardTitle>Posting mix</CardTitle>
       </CardHeader>
       <CardContent>
         {folders.length === 0 ? (

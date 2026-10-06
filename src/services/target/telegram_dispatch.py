@@ -603,21 +603,30 @@ class TelegramDispatcher:
         """Every person the message showed the bot; the result is the first
         one that joined, else the last outcome, so a log reader sees the
         interesting event. Steady-state outcomes log at DEBUG — a chatty group
-        would otherwise fill the log with `already_member`."""
+        would otherwise fill the log with `already_member`. A failure is the
+        result whatever else the message held: `membership_sync_failed`.
+
+        Each person is observed in a savepoint of their own, for the reason
+        :meth:`_execute_with_debit` gives: the error is swallowed here, so it
+        must not leave the admission's transaction aborted. The failed join
+        rolls back alone, and the people after it are still observed."""
         result = StartResult(outcome=NOT_A_START, handled=False)
+        failed = False
         for chat_type, external_ref, telegram_user_id in people:
             try:
-                seen = await membership_sync.observe(
-                    conn,
-                    chat_type=chat_type,
-                    external_ref=external_ref,
-                    telegram_user_id=telegram_user_id,
-                )
+                async with conn.begin_nested():
+                    seen = await membership_sync.observe(
+                        conn,
+                        chat_type=chat_type,
+                        external_ref=external_ref,
+                        telegram_user_id=telegram_user_id,
+                    )
             except Exception:  # noqa: BLE001 — a poisoned update must not loop
                 logger.exception(
                     "ingress: membership sync failed; the delivery stays admitted"
                 )
-                return StartResult(outcome=MEMBERSHIP_SYNC_FAILED, handled=False)
+                failed = True
+                continue
             logger.log(
                 logging.INFO if seen.handled else logging.DEBUG,
                 "ingress: group message observed, outcome=%s",
@@ -629,4 +638,6 @@ class TelegramDispatcher:
             # every case the first did (the tech-debt audit, 2026-09-20).
             if not result.handled:
                 result = seen
+        if failed:
+            return StartResult(outcome=MEMBERSHIP_SYNC_FAILED, handled=False)
         return result

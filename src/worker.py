@@ -31,7 +31,6 @@ with one that cannot read a single credential; refusing keeps the old one.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Optional
 import logging
 
@@ -319,6 +318,7 @@ def compose(
         # that re-opens its mouth. Cadence is the clock's; the per-source
         # bound is `cfg.stranded_alert_after_seconds`.
         "alert_stranded_sources": 6 * 3600.0,
+        "retention_sweep": 3600.0,
         # 05: "Reconciler cadence + budget | sweep every 60 s, LIMIT 50".
         # Nothing minted this kind before, so the door shipped in 059 was never
         # walked and #1090 D4's customer notification had no beat to ride. The
@@ -633,16 +633,9 @@ async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
 async def _backpressure_snapshot(app: WorkerApp):
     """One short read for the status line; a failure is a None, never a
     reporter that stops reporting."""
-    cfg = app.config
     try:
-        async with app.engine.connect() as conn:
-            return await _backpressure.snapshot(
-                conn,
-                now=datetime.now(timezone.utc),
-                global_limit=cfg.global_limit,
-                global_window_seconds=cfg.global_window_seconds,
-                identify=True,  # the worker's own log; never the public route
-            )
+        # identify: the worker's own log, never the operating details
+        return await _backpressure.read(app.engine, app.config, identify=True)
     except Exception as exc:  # noqa: BLE001 — the line still prints
         logger.warning("status: backpressure snapshot failed: %r", exc)
         return None

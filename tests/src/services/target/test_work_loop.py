@@ -23,6 +23,7 @@ from src.models.target.machinery import Job
 from src.services.target import work_loop
 from src.services.target.jobs import JobFenced
 from src.services.target.work_loop import (
+    UNBUILT_KINDS,
     Parked,
     WorkerConfig,
     WorkerDeps,
@@ -96,6 +97,9 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         # ambiguous publish; each row commits alone (#1492)
     }
 
+    #: Marked for another reason: each of its batches commits on its own.
+    OWNS_ITS_BATCHES = {"retention_sweep"}
+
     def test_the_provider_facing_kinds_are_exactly_the_marked_ones(self):
         registry = build_registry(full_deps())
         marked = {
@@ -103,7 +107,7 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
             for kind, entry in registry.items()
             if getattr(entry, "owns_transactions", False)
         }
-        assert marked == self.PROVIDER_FACING, (
+        assert marked == self.PROVIDER_FACING | self.OWNS_ITS_BATCHES, (
             "an executor that reaches the egress floor must own its"
             " transactions, or the loop holds a pooled connection across the"
             " provider call — and arming the `_IN_TRANSACTION` tripwire would"
@@ -117,9 +121,9 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         its own HTTP)". Named here so the exclusion reads as a decision rather
         than an omission — it is the obvious candidate for someone to "fix".
 
-        `retention_sweep` and `reencrypt_credentials` are absent from the set
-        for a different reason: they are `UNBUILT_KINDS`, parked with no
-        executor at all, so there is nothing to reach a provider with.
+        `retention_sweep` is absent because it only deletes rows in the
+        database; `reencrypt_credentials` because it is `UNBUILT_KINDS`, parked
+        with no executor at all, so there is nothing to reach a provider with.
         """
         registry = build_registry(full_deps())
         assert "reap_transit_assets" in registry
@@ -162,6 +166,8 @@ class TestRegistryCoversTheSchema:
             # which `06` §1 already backstops with the FC-3.6 TTL sweep, so a
             # missing transit store must not park the whole workflow.
             "offboard_workspace",
+            # The `rate_counters` retention class only (05).
+            "retention_sweep",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -183,8 +189,10 @@ class TestRegistryCoversTheSchema:
             # supplies that seam like every other.
             "send_email",
             "offboard_workspace",  # #1090 H1
+            "retention_sweep",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
+        assert unbuilt == set(UNBUILT_KINDS)
         for kind in unbuilt:
             assert isinstance(registry[kind], Parked), f"{kind} should have no executor"
 
@@ -1006,6 +1014,9 @@ class TestLaneSurvivesTransientClaimErrors:
         assert loop.consecutive_errors == 3
 
 
+ACTIVE_ROW = {"external_ref": "-777", "workspace_id": "ws-1", "state": "active"}
+
+
 class TestDeliverOutboxRetiresAGoneChat:
     """The deliverer's definitive "chat gone" ends the hold and retires the
     binding — or follows a group that became a supergroup (#1240 review)."""
@@ -1055,24 +1066,55 @@ class TestDeliverOutboxRetiresAGoneChat:
         return seen
 
     async def test_a_kicked_bot_revokes_the_binding(self, gone):
-        session = _FakeSession(
-            rows=[{"external_ref": "-100777", "workspace_id": "ws-1"}]
-        )
+        session = _FakeSession(rows=[{**ACTIVE_ROW, "external_ref": "-100777"}])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["revoked"] == ["b-1"] and gone["repointed"] == []
 
     async def test_a_supergroup_upgrade_follows_the_chat(self, gone):
         gone["migrate_to"] = "-1009999"
-        session = _FakeSession(rows=[{"external_ref": "-777", "workspace_id": "ws-1"}])
+        session = _FakeSession(rows=[ACTIVE_ROW])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["repointed"] == [("b-1", "-1009999")] and gone["revoked"] == []
 
     async def test_a_successor_another_workspace_holds_revokes_instead(self, gone):
         gone["migrate_to"] = "-1009999"
         gone["repoint_ok"] = False
-        session = _FakeSession(rows=[{"external_ref": "-777", "workspace_id": "ws-1"}])
+        session = _FakeSession(rows=[ACTIVE_ROW])
         await self._registry()["deliver_outbox"](session, self._job())
         assert gone["revoked"] == ["b-1"]
+
+
+class TestDeliverOutboxSkipsARevokedBinding:
+    """A job minted before an admin removed the group (or the bot was kicked)
+    sends nothing: the hold ends before a poller is built (`07` §13), and
+    what is left of the binding's queue is retired."""
+
+    async def test_no_poller_runs_for_a_revoked_binding(self, monkeypatch):
+        from types import SimpleNamespace
+
+        built = []
+
+        class _Poller:
+            def __init__(self, *a, **kw):
+                built.append(kw)
+
+        monkeypatch.setattr(work_loop.outbox, "OutboxPoller", _Poller)
+        transport = SimpleNamespace(for_chat=lambda ref: lambda row: None)
+        registry = build_registry(full_deps(transport=transport))
+        session = _FakeSession(rows=[{**ACTIVE_ROW, "state": "revoked"}])
+        job = {
+            "id": "j-r",
+            "kind": "deliver_outbox",
+            "workspace_id": "ws-1",
+            "serialization_key": "binding:b-1",
+            "payload": {"binding_id": "b-1"},
+        }
+        assert await registry["deliver_outbox"](session, job) is None
+        assert built == [], "a revoked binding got a sender"
+        retire = [sql for sql, _ in session.statements if "superseded" in sql]
+        assert len(retire) == 1 and "'sending'" in retire[0], (
+            "the revoked binding's leftover queue was not retired"
+        )
 
 
 class TestWeightedCategorySelection:
@@ -1093,6 +1135,24 @@ class TestWeightedCategorySelection:
         class _S:
             def __init__(self):
                 self.statements = []
+                #: How each savepoint ended: "released", or "rolled back" by
+                #: a raise inside it. Kept apart from `statements`, whose
+                #: order the tests below pin.
+                self.savepoints = []
+
+            def begin_nested(self):
+                from contextlib import asynccontextmanager
+
+                @asynccontextmanager
+                async def savepoint():
+                    try:
+                        yield self
+                    except BaseException:
+                        self.savepoints.append("rolled back")
+                        raise
+                    self.savepoints.append("released")
+
+                return savepoint()
 
             async def execute(self, stmt, params=None):
                 self.statements.append((str(stmt), params))
@@ -1104,6 +1164,9 @@ class TestWeightedCategorySelection:
 
                     def first(self_inner):
                         return rows_[0] if rows_ else None
+
+                    def __iter__(self_inner):
+                        return iter(rows_)
 
                 class _R:
                     def mappings(self_inner):
@@ -1125,6 +1188,7 @@ class TestWeightedCategorySelection:
     async def _plan(self, session, rng):
         import random
 
+        from src.services.target import content_runway
         from src.services.target.scheduler import execute_plan_slot
 
         return await execute_plan_slot(
@@ -1135,6 +1199,7 @@ class TestWeightedCategorySelection:
             provider_account_ref="ref",
             approval_mode="manual",
             no_media_notice_after_seconds=86400,
+            low_runway_days=content_runway.LOW_RUNWAY_DAYS,
             rng=random.Random(rng),
         )
 
@@ -1264,6 +1329,65 @@ class TestWeightedCategorySelection:
             "FROM post_locks l" in counts_sql
             and "l.ig_account_id = :acct" in counts_sql
         )
+
+    async def test_a_runway_notice_nobody_receives_does_not_ride_the_mint(
+        self, monkeypatch
+    ):
+        """The runway notice never decides the slot (#1478): owed and heard by
+        nobody, its verdict is not carried back, so the job the mint belongs
+        to succeeds. It is settled after the mint, in a savepoint."""
+        from src.services.target import content_runway, outbox
+        from src.services.target.scheduler import SlotOutcome
+
+        settled = []
+
+        async def after_mint(session, **kwargs):
+            # What the session last sent when the notice was asked for.
+            settled.append((session.statements[-1][0], kwargs))
+            return outbox.UNDELIVERABLE
+
+        monkeypatch.setattr(content_runway, "after_mint", after_mint)
+        s = self._session(
+            rows=self._rows(**{self.MEMES: 1.0}),
+            counts=[{"source_id": self.MEMES, "n": 3}],
+        )
+        assert await self._plan(s, 1) == SlotOutcome(intent_id="intent-1")
+        # Positive control: the notice was asked for, after the mint, with the
+        # pool less the minted file.
+        ((last_sent, asked),) = settled
+        assert "INSERT INTO post_intents" in last_sent
+        assert asked == {
+            "workspace_id": "ws-1",
+            "ig_account_id": "acct-1",
+            "eligible": 2,
+            "below_days": content_runway.LOW_RUNWAY_DAYS,
+        }
+        assert s.savepoints == ["released"]
+
+    async def test_a_runway_notice_that_raises_never_costs_the_mint(
+        self, monkeypatch, caplog
+    ):
+        """A failure writing the notice rolls back its savepoint alone and is
+        logged: the minted intent stands and is returned, with no notice."""
+        from src.services.target import content_runway
+        from src.services.target.scheduler import SlotOutcome
+
+        async def after_mint(session, **kwargs):
+            raise RuntimeError("the latch row could not be written")
+
+        monkeypatch.setattr(content_runway, "after_mint", after_mint)
+        s = self._session(
+            rows=self._rows(**{self.MEMES: 1.0}),
+            counts=[{"source_id": self.MEMES, "n": 3}],
+        )
+        with caplog.at_level("ERROR", logger="src.services.target.scheduler"):
+            out = await self._plan(s, 1)
+
+        assert out == SlotOutcome(intent_id="intent-1")
+        assert "INSERT INTO post_intents" in s.statements[-1][0], "the mint was sent"
+        assert s.savepoints == ["rolled back"], "and the notice failed in its own"
+        (logged,) = [r for r in caplog.records if "NOT written" in r.getMessage()]
+        assert logged.levelname == "ERROR" and logged.exc_info is not None
 
 
 class TestTheBudgetCeiling:

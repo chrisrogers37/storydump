@@ -1,4 +1,4 @@
-import type { WorkspaceMember } from "./types";
+import type { ChannelBinding, WorkspaceMember } from "./types";
 
 /**
  * How a person got into the workspace, from the two facts the members row
@@ -12,4 +12,32 @@ export function memberOrigin(
   if (m.role === "owner") return "Created this workspace";
   if (m.added_by_user_id === null) return "Joined from a Telegram group";
   return "Invited";
+}
+
+/**
+ * Whether this workspace's cards go to a Telegram group right now — an
+ * ACTIVE `telegram_group` binding. A direct chat is one person's, so it is not
+ * a group anyone else sits in. `null` (the bindings read failed) is false:
+ * the removal reminder below is a nudge, and an unread list cannot claim one.
+ */
+export function hasActiveTelegramGroup(
+  bindings: Pick<ChannelBinding, "channel" | "state">[] | null,
+): boolean {
+  return (bindings ?? []).some(
+    (b) => b.channel === "telegram_group" && b.state === "active",
+  );
+}
+
+/**
+ * What the Members card says after a removal when a group is bound. Removing
+ * a membership does not take anyone out of the Telegram group, and the bot
+ * does not kick, so the person keeps seeing every card posted there until
+ * someone removes them in Telegram. Worded as an "if": we can't see who is
+ * in the group, and an email invitee may never have joined it.
+ */
+export function stillInTelegramGroupCopy(email: string | null): string {
+  return (
+    `If ${email ?? "this person"} is in your Telegram group, they'll keep ` +
+    "seeing new Stories there. Remove them from the group in Telegram too."
+  );
 }
