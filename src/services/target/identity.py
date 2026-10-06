@@ -4,10 +4,12 @@ The one writer of a human's identity row. Keyed on the provider's IMMUTABLE
 SUBJECT — `(provider, external_id)`, the Google OIDC `sub` — never on the
 email address (D32): emails are mutable and recyclable, so identity keyed on
 email is an account-takeover primitive. The verified email claim is metadata,
-refreshed at every sign-in; `users.primary_email` fills from it when NULL; a
-claim colliding with a DIFFERENT user's `primary_email` surfaces as an error
-and never merges accounts (D35 — merging two populated users is an operator
-action with an audit trail, out of v1).
+refreshed at every sign-in: `users.primary_email` follows it whenever it
+changes (#1579), so invitations and mail reach the address the person uses
+now. A claim colliding with a DIFFERENT user's `primary_email` never merges
+accounts (D35 — merging two populated users is an operator action with an
+audit trail, out of v1): a new subject is refused, and a returning one signs in
+keeping the address it had, with the clash logged.
 
 Both tables are user-plane (`058` class 3: role-scoped `USING (true)`), so
 this runs before any `app.tenant_id` exists — identity precedes tenancy.
@@ -15,12 +17,16 @@ this runs before any `app.tenant_id` exists — identity precedes tenancy.
 
 from __future__ import annotations
 
+import logging
 from typing import Iterable, Optional
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from src.exceptions.base import StorydumpError
 from src.services.target import oauth_states, readers, vocabulary
+
+logger = logging.getLogger(__name__)
 
 PROVIDER_GOOGLE = vocabulary.PROVIDER_GOOGLE
 PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
@@ -129,14 +135,23 @@ async def upsert_google_identity(
             ),
             {"dn": display_name, "p": PROVIDER_GOOGLE, "sub": sub},
         )
-        if claim is not None and held is None:
-            await _fill_primary_email(executor, user_id=user_id, email=claim)
+        if claim is not None and claim != held:
+            await _refresh_primary_email(executor, user_id=user_id, email=claim)
         return user_id
 
     if not signup_open:
         await _refuse_unless_admitted(executor, email=claim)
     if claim is not None:
-        await _refuse_if_held_elsewhere(executor, email=claim, user_id=None)
+        held_elsewhere = (
+            await executor.execute(
+                text("SELECT 1 FROM users WHERE primary_email = :e"), {"e": claim}
+            )
+        ).first()
+        if held_elsewhere is not None:
+            raise IdentityCollision(
+                "the verified email belongs to a different account;"
+                " accounts are never merged"
+            )
     user_id = str(
         (
             await executor.execute(
@@ -172,31 +187,28 @@ async def _refuse_unless_admitted(executor, *, email: Optional[str]) -> None:
     )
 
 
-async def _refuse_if_held_elsewhere(
-    executor, *, email: str, user_id: Optional[str]
-) -> None:
-    holder = (
-        await executor.execute(
-            text("SELECT id FROM users WHERE primary_email = :e"), {"e": email}
+async def _refresh_primary_email(executor, *, user_id: str, email: str) -> None:
+    """Point a returning user's `primary_email` at their verified claim
+    (#1579). The caller asks only when the claim differs from what is stored,
+    so a clash on `uq_users_primary_email` means another user holds it: then
+    this user keeps the address they had and the clash is logged by user id,
+    never by address (the module docstring's rule). The constraint decides,
+    inside a savepoint, so a concurrent claim of the same address is a clash
+    too rather than a failed sign-in: the per-subject lock does not cover it."""
+    try:
+        async with executor.begin_nested():
+            await executor.execute(
+                text("UPDATE users SET primary_email = :e WHERE id = :u"),
+                {"e": email, "u": user_id},
+            )
+    except IntegrityError:
+        logger.warning(
+            "identity: user %s's verified email is held by another account;"
+            " kept the stored address",
+            user_id,
         )
-    ).first()
-    if holder is not None and (user_id is None or str(holder[0]) != user_id):
-        raise IdentityCollision(
-            "the verified email belongs to a different account; accounts are never merged"
-        )
-
-
-async def _fill_primary_email(executor, *, user_id: str, email: str) -> None:
-    """Fill `primary_email` when NULL; leave a populated one alone (email is a
-    claim, not an edit); refuse the fill if another user holds it."""
-    await _refuse_if_held_elsewhere(executor, email=email, user_id=user_id)
-    await executor.execute(
-        text(
-            "UPDATE users SET primary_email = :e"
-            " WHERE id = :u AND primary_email IS NULL"
-        ),
-        {"e": email, "u": user_id},
-    )
+        return
+    logger.info("identity: user %s's primary email now follows the claim", user_id)
 
 
 async def user_for_identity(
