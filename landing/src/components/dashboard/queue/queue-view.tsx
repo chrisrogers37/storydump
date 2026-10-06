@@ -165,7 +165,7 @@ export function QueueView({
                   />
                 </div>
 
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 grow basis-32">
                   <p className="truncate font-medium">{intent.file_name}</p>
                   <p className="text-sm text-muted-foreground">
                     {accountLabel(intent)} ·{" "}
@@ -174,33 +174,35 @@ export function QueueView({
                   </p>
                 </div>
 
-                {intent.origin === "planned" && (
-                  <Badge variant="outline">
-                    {intent.scheduled_by ? `Planned by ${intent.scheduled_by}` : "Planned"}
-                  </Badge>
-                )}
-                <Badge
-                  variant="secondary"
-                  className={
-                    TONE_CLASS[
-                      intent.published_via === "dry_run"
-                        ? "inert"
-                        : INTENT_STATE_TONE[intent.state]
-                    ]
-                  }
-                >
-                  {intent.published_via === "dry_run"
-                    ? "dry run"
-                    : (STATE_LABELS[intent.state] ?? intent.state)}
-                </Badge>
-                {intent.cancel_requested && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {intent.origin === "planned" && (
+                    <Badge variant="outline">
+                      {intent.scheduled_by ? `Planned by ${intent.scheduled_by}` : "Planned"}
+                    </Badge>
+                  )}
                   <Badge
                     variant="secondary"
-                    className={TONE_CLASS.attention}
+                    className={
+                      TONE_CLASS[
+                        intent.published_via === "dry_run"
+                          ? "inert"
+                          : INTENT_STATE_TONE[intent.state]
+                      ]
+                    }
                   >
-                    Cancelling
+                    {intent.published_via === "dry_run"
+                      ? "dry run"
+                      : (STATE_LABELS[intent.state] ?? intent.state)}
                   </Badge>
-                )}
+                  {intent.cancel_requested && (
+                    <Badge
+                      variant="secondary"
+                      className={TONE_CLASS.attention}
+                    >
+                      Cancelling
+                    </Badge>
+                  )}
+                </div>
 
                 {actions.length > 0 && (
                   <div className="flex flex-wrap items-center gap-2">
