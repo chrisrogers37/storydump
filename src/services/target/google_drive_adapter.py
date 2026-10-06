@@ -995,10 +995,22 @@ class GoogleDriveAdapter:
 
         detail = _reason(response)
         if status in (401, 403):
-            # 403 is overloaded: quota is retryable, a dead grant is not. The
-            # reason string is the only discriminator Drive offers.
-            if status == 403 and _is_quota(detail):
+            # 403 is overloaded. Google's `errors[].reason` decides first: a
+            # limit passes and is retried, and a refusal of ONE item the app
+            # may not reach is that item gone to the app (a source's folder, a
+            # subfolder mid-walk, a file being fetched), not the grant dead —
+            # a reconnect would not help it, and no token is re-minted for it.
+            # The message is the fallback for a body without a reason.
+            code = _reason_code(response)
+            if status == 403 and (
+                code in _LIMIT_REASONS or (not code and _is_quota(detail))
+            ):
                 raise DriveRetryableError(f"drive quota/rate limited: {detail}")
+            if status == 403 and code in _ITEM_REFUSAL_REASONS:
+                raise DriveSourceGone(
+                    f"drive refuses this item to the app for source {source_id}"
+                    f" ({code}): {detail}"
+                )
             raise DriveCredentialDead(
                 f"drive refused the credential for source {source_id}"
                 f" ({status}): {detail}"
@@ -1033,6 +1045,35 @@ def _reason(response: httpx.Response) -> str:
     if isinstance(error, dict):
         return str(error.get("message") or error.get("status") or error)[:200]
     return str(body)[:200]
+
+
+#: Google's 403 `errors[].reason` values that are limits, not refusals: they
+#: pass, so the call is retried (the "Resolve errors" guide). A daily limit
+#: read as a dead grant used to flip a source to `error` and alert.
+_LIMIT_REASONS = frozenset(
+    {"dailyLimitExceeded", "userRateLimitExceeded", "rateLimitExceeded"}
+)
+
+#: Google's 403 `errors[].reason` values about ONE file or folder the app may
+#: not reach (it is not on the item's ACL, or the user lost access to it). The
+#: item is gone to the app; the credential is fine.
+_ITEM_REFUSAL_REASONS = frozenset(
+    {"appNotAuthorizedToFile", "insufficientFilePermissions"}
+)
+
+
+def _reason_code(response: httpx.Response) -> str:
+    """Google's first `errors[].reason`, or "" when the body names none. Never
+    raises."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    errors = error.get("errors") if isinstance(error, dict) else None
+    if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+        return str(errors[0].get("reason") or "")
+    return ""
 
 
 def _is_quota(detail: str) -> bool:
