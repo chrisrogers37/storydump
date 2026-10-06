@@ -455,6 +455,9 @@ class TestTheBoundsEveryAdapterEnforces:
         )
         assert ops_views.FLOATING_LIMIT == vocabulary.FLOATING_LIMIT
 
+    def test_the_plan_horizon_is_a_year(self):
+        assert vocabulary.PLAN_HORIZON_DAYS == 365
+
 
 class TestTheAnswersAddedByTheAudit:
     def test_a_rate_limited_answer_is_unreachable_not_refused(self):
