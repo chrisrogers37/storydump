@@ -98,7 +98,7 @@ What Meta asks for (**DOCUMENTED-FROM-META'S-DOCS**):
 | Terms of Service URL | **live** | `https://storydump.app/terms` — `landing/src/app/(marketing)/terms/page.tsx` |
 | Deauthorize Callback URL | **built, not yet registered** | `POST /webhooks/meta/deauthorize` — shipped in #1208. Still has to be entered in App settings → Basic. |
 | Data Deletion Request URL | **built, not yet registered** | `POST /webhooks/meta/data-deletion` — same PR, same remaining step. |
-| App logo | **NOT-YET-ATTEMPTED, unowned** | 1024×1024 PNG, no transparency. **Nobody owns this.** It blocks submission and it is the kind of item that is discovered at the end. |
+| App logo | **made, not yet uploaded** | [`assets/app-icon/storydump-icon-1024.png`](assets/app-icon/storydump-icon-1024.png): 1024×1024 PNG, opaque, drawn by `make-icon.py` beside it (#410). Upload it under App settings → Basic. |
 
 ### Deauthorize Callback and Data Deletion Request
 
