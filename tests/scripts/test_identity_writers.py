@@ -135,6 +135,55 @@ def owner(world, sql, params=None):
     return fetch_one(world["stream"], sql, params)
 
 
+def stored_email(world, user_id):
+    return owner(world, "SELECT primary_email FROM users WHERE id = %s", (user_id,))[0]
+
+
+def race_for_address(world, rival, email, *, sub):
+    """*rival* takes *email* in a transaction left open while *sub* signs in
+    with it; the rival commits only once that sign-in is provably blocked on
+    its row, so the wait is exercised, not raced. Returns the sign-in's user."""
+    open_txn = psycopg2.connect(world["stream"])
+    try:
+        with open_txn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET primary_email = %s WHERE id = %s", (email, rival)
+            )
+            cur.execute("SELECT pg_current_xact_id()::text")
+            rival_xid = cur.fetchone()[0]
+
+        async def race():
+            signing_in = asyncio.create_task(
+                in_user_plane(
+                    world["ingress"],
+                    lambda c: identity.upsert_google_identity(
+                        c, sub=sub, email=email, display_name=None, signup_open=True
+                    ),
+                )
+            )
+            for _ in range(100):
+                # pg_locks, not pg_stat_activity: the latter hides another
+                # role's wait columns from a non-superuser. Keyed on the
+                # rival's xid, since pg_locks is cluster-wide.
+                if owner(
+                    world,
+                    "SELECT count(*) FROM pg_locks"
+                    " WHERE NOT granted AND locktype = 'transactionid'"
+                    "   AND transactionid::text = %s",
+                    (rival_xid,),
+                )[0]:
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                pytest.fail("the sign-in never waited on the rival's row")
+            open_txn.commit()
+            return await signing_in
+
+        return asyncio.run(race())
+    finally:
+        open_txn.close()
+
+
 def _claim(cur, tenant_id, actor_kind="user", channel="web"):
     """Set the tenant/actor context with RAW SQL, for the positive controls.
 
@@ -248,46 +297,28 @@ class TestTheIdentityWriter:
         )
         assert after > before and display == "kept"
 
-    def test_primary_email_fills_when_empty_and_never_overwrites(self, world):
+    def test_primary_email_fills_when_empty_and_follows_the_claim(self, world):
+        """#1579: the stored address follows the verified claim at every
+        sign-in — filled when empty, rewritten when the Google address
+        changes, and left alone by a token that carries no email."""
         first = upsert(world, sub="sub-mail")
-        assert (
-            owner(world, "SELECT primary_email FROM users WHERE id = %s", (first,))[0]
-            is None
-        )
+        assert stored_email(world, first) is None
         upsert(world, sub="sub-mail", email="filled@example.com")
-        upsert(world, sub="sub-mail", email="changed@example.com")
-        # A provider changing the claim must not repoint a set account.
-        assert (
-            owner(world, "SELECT primary_email FROM users WHERE id = %s", (first,))[0]
-            == "filled@example.com"
-        )
+        assert stored_email(world, first) == "filled@example.com"
+        assert upsert(world, sub="sub-mail", email="changed@example.com") == first
+        assert stored_email(world, first) == "changed@example.com"
+        # A claim-less token says nothing about the address: no erase.
+        upsert(world, sub="sub-mail")
+        assert stored_email(world, first) == "changed@example.com"
+        # The old address is free again for whoever holds it now.
+        newcomer = upsert(world, sub="sub-mail-recycled", email="filled@example.com")
+        assert newcomer != first
 
-    def test_the_fill_itself_leaves_a_populated_address_alone(self, world):
-        """The `AND primary_email IS NULL` half of the fill, pinned directly.
-
-        `upsert_google_identity` only reaches `_fill_primary_email` when the
-        row's address is NULL, so the guard inside the UPDATE is unreachable
-        through the public writer — a mutation battery on this file found
-        that removing it changed nothing observable. It is defence in depth
-        and worth keeping, so it is driven at its own door: a user whose
-        address is already set, a fill with a different unheld address, and
-        the stored value unmoved.
-        """
-        user_id = upsert(world, sub="sub-fill-guard", email="held@example.com")
-        user_plane(
-            world,
-            lambda c: identity._fill_primary_email(
-                c, user_id=user_id, email="second@example.com"
-            ),
-        )
-        assert (
-            owner(world, "SELECT primary_email FROM users WHERE id = %s", (user_id,))[0]
-            == "held@example.com"
-        )
-
-    def test_a_colliding_email_refuses_and_never_merges(self, world):
-        """D35, on both paths that can hit it: a brand-new subject whose email
-        is taken, and a returning subject whose empty email is taken.
+    def test_a_new_subject_whose_email_is_taken_is_refused_and_never_merged(
+        self, world
+    ):
+        """D35 on the create path: a brand-new subject whose email another
+        user holds is refused.
 
         `IdentityCollision` is a plain `StorydumpError` with **no `reason`
         attribute** — the twin's `IdentityProvisioningError("email_belongs_to_
@@ -298,22 +329,14 @@ class TestTheIdentityWriter:
         with pytest.raises(identity.IdentityCollision):
             upsert(world, sub="sub-newcomer", email="shared@example.com")
 
-        later = upsert(world, sub="sub-later")
-        with pytest.raises(identity.IdentityCollision):
-            upsert(world, sub="sub-later", email="shared@example.com")
-
-        # Neither refusal merged anything, and neither left a partial row: the
-        # refusal raises inside the transaction, which rolls back whole.
+        # The refusal merged nothing and left no partial row: it raises inside
+        # the transaction, which rolls back whole.
         assert (
             owner(
                 world,
                 "SELECT user_id FROM user_identities WHERE external_id = %s",
                 ("sub-newcomer",),
             )
-            is None
-        )
-        assert (
-            owner(world, "SELECT primary_email FROM users WHERE id = %s", (later,))[0]
             is None
         )
         assert (
@@ -326,6 +349,76 @@ class TestTheIdentityWriter:
         )
         assert (
             owner(world, "SELECT id FROM users WHERE id = %s", (incumbent,)) is not None
+        )
+
+    def test_a_returning_user_whose_new_email_is_taken_signs_in_and_keeps_theirs(
+        self, world, caplog
+    ):
+        """The clash rule on #1579, for both shapes of returning user: one
+        with no stored address and one whose address changed. Each signs in
+        as themselves, keeps what they had, and the clash is logged by user id
+        with no address in the line. Nothing is merged: the holder is
+        untouched."""
+        holder = upsert(world, sub="sub-holder", email="taken@example.com")
+        empty = upsert(world, sub="sub-clash-empty")
+        moved = upsert(world, sub="sub-clash-moved", email="mine@example.com")
+
+        with caplog.at_level("WARNING", logger=identity.__name__):
+            assert (
+                upsert(world, sub="sub-clash-empty", email="taken@example.com") == empty
+            )
+            assert (
+                upsert(world, sub="sub-clash-moved", email="taken@example.com") == moved
+            )
+
+        assert stored_email(world, empty) is None
+        assert stored_email(world, moved) == "mine@example.com"
+        assert stored_email(world, holder) == "taken@example.com"
+        clashes = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert sorted(r.args[0] for r in clashes) == sorted([empty, moved])
+        assert not any("@" in r.getMessage() or r.exc_info for r in clashes)
+
+    def test_a_concurrent_claim_of_the_new_address_is_a_clash_not_a_failure(
+        self, world, caplog
+    ):
+        """The clash rule holds under a race the per-subject lock cannot see.
+
+        Another account takes the address in a transaction still open when
+        this user's sign-in runs, so the refresh's UPDATE blocks on
+        `uq_users_primary_email` and raises once the other side commits. The
+        savepoint turns that into the logged clash: the sign-in succeeds and
+        the user keeps the address they had."""
+        rival = upsert(world, sub="sub-race-rival", email="rival@example.com")
+        mover = upsert(world, sub="sub-race-mover", email="before@example.com")
+
+        with caplog.at_level("WARNING", logger=identity.__name__):
+            signed_in = race_for_address(
+                world, rival, "raced@example.com", sub="sub-race-mover"
+            )
+
+        assert signed_in == mover
+        assert stored_email(world, mover) == "before@example.com"
+        assert stored_email(world, rival) == "raced@example.com"
+        assert [r.args[0] for r in caplog.records if r.levelname == "WARNING"] == [
+            mover
+        ]
+
+    def test_a_concurrent_claim_against_a_new_subject_is_the_collision(self, world):
+        """The create path's check reads before the rival commits, so its
+        INSERT is the one that meets `uq_users_primary_email`: that is the
+        same `IdentityCollision` as the check's, not an unhandled 500."""
+        rival = upsert(world, sub="sub-race-rival-2", email="rival2@example.com")
+
+        with pytest.raises(identity.IdentityCollision):
+            race_for_address(world, rival, "raced2@example.com", sub="sub-race-new")
+
+        assert (
+            owner(
+                world,
+                "SELECT user_id FROM user_identities WHERE external_id = %s",
+                ("sub-race-new",),
+            )
+            is None
         )
 
     def test_two_concurrent_first_sign_ins_converge_on_one_user(self, world):

@@ -670,6 +670,12 @@ def _render_write(console: Console, data: Any) -> None:
         line += f" — story {story}"
     elif args.get("source_id"):
         line += f" — source {args['source_id']}"
+    elif write.get("command") == "set_item_link":
+        # One verb sets and clears an item's link, so say which the item has
+        # now, from the answer alone: a replay carries none.
+        line += f" — item {args.get('media_item_id')}"
+        if outcome == "executed":
+            line += f": {result.get('link_url') or 'no link'}"
     state = result.get("state") or result.get("to_state")
     if isinstance(state, str) and outcome != "replayed":
         line += f" (now {state})"
@@ -867,6 +873,7 @@ RENDERERS: Mapping[str, Callable[[Console, Any], None]] = {
     "sync": _render_write,
     "schedule": _render_write,
     "reschedule": _render_write,
+    "link": _render_write,
     "health": _render_health,
     "deploys": _render_deploys,
     "webhook": _render_webhook,
