@@ -266,13 +266,17 @@ def people(world):
 
 
 class _Bot:
-    """The bot's stand-in: each send as (chat, address, whether the address's
-    row was already committed when it went)."""
+    """The bot's stand-in: each signup's send as (chat, address, whether the
+    address's row was already committed when it went); any other text as
+    (chat, text)."""
 
     def __init__(self, world):
         self.world, self.sent = world, []
 
     async def send_text(self, chat_id, text):
+        if "Email: " not in text:
+            self.sent.append((chat_id, text))
+            return "1"
         address = text.split("Email: ")[1].split("\n")[0]
         self.sent.append((chat_id, address, bool(_entry(self.world, address))))
         return "1"
@@ -362,18 +366,37 @@ class TestTheAdminPing:
         assert resp.status_code == 400
         assert pinged.sent == []
 
-    def test_a_full_ceiling_is_not_pinged(self, world, pinged, monkeypatch):
+    def test_a_full_ceiling_is_not_pinged_and_alerts_once_with_no_address(
+        self, world, pinged, monkeypatch, caplog
+    ):
         monkeypatch.setattr(public.settings, "WAITLIST_SITE_SECRET", SECRET)
         monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 1)
         monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-ping-test")
+        # The route's shared logger does not propagate; caplog listens at root.
+        monkeypatch.setattr(public.logger, "propagate", True)
+        caplog.set_level(logging.INFO)
         responses = _post(
             world,
             {"email": "ping-ceiling-0@example.com"},
             {"email": "ping-ceiling-1@example.com"},
+            {"email": "ping-ceiling-2@example.com"},
             headers=_from_site("198.51.100.90"),
         )
-        assert [r.status_code for r in responses] == [202, 429]
-        assert pinged.sent == [("5550001", "ping-ceiling-0@example.com", True)]
+        assert [r.status_code for r in responses] == [202, 429, 429]
+        # The signup's own ping, then one alert for the two refusals: the
+        # second refusal falls inside the first's notice window.
+        alert = (
+            "Waitlist signups reached the ceiling of 1 a minute:"
+            " 1 turned away as busy since the last notice."
+        )
+        assert pinged.sent == [
+            ("5550001", "ping-ceiling-0@example.com", True),
+            ("5550001", alert),
+        ]
+        warned = [r.getMessage() for r in caplog.records if "ceiling" in r.getMessage()]
+        assert warned == [f"waitlist: {alert}"]
+        assert "198.51.100.90" not in caplog.text
+        assert "ping-ceiling-1" not in caplog.text
 
 
 class TestTheDoor:
@@ -742,8 +765,36 @@ class TestTheSiteSecret:
             for i, body in enumerate(refused + accepted)
         ]
         assert [r.status_code for r in responses] == [400, 400, 202, 202, 429]
+        assert responses[-1].json() == {"detail": public.TOO_MANY, "reason": "full"}
         assert _entry(world, "ceiling-1@example.com") != []
         assert _entry(world, "ceiling-2@example.com") == []
+
+    def test_set_a_full_ceiling_answers_a_repeat_as_it_answers_a_new_address(
+        self, world, armed, monkeypatch
+    ):
+        """No oracle: the ceiling is spent whether the address is new or
+        already listed, so at the ceiling both get the same answer."""
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_LIMIT", 1)
+        monkeypatch.setattr(public, "WAITLIST_ACCEPTED_KEY", "accepted-oracle-test")
+        (listed,) = _post(
+            world,
+            {"email": "oracle-0@example.com"},
+            headers=_from_site("198.51.100.40"),
+        )
+        assert listed.status_code == 202
+        (repeat,) = _post(
+            world,
+            {"email": "oracle-0@example.com"},
+            headers=_from_site("198.51.100.41"),
+        )
+        (new,) = _post(
+            world,
+            {"email": "oracle-1@example.com"},
+            headers=_from_site("198.51.100.42"),
+        )
+        assert (repeat.status_code, repeat.json()) == (new.status_code, new.json())
+        assert repeat.json() == {"detail": public.TOO_MANY, "reason": "full"}
+        assert _entry(world, "oracle-1@example.com") == []
 
     @pytest.mark.parametrize("visitor", [None, "not-an-address"])
     def test_set_the_fallback_spends_the_ceiling_too(

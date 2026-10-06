@@ -158,6 +158,30 @@ async def test_past_the_queue_a_ping_is_dropped_and_logged(caplog):
     assert not any("dropped@" in text for text in sent)
 
 
+async def test_past_the_queue_an_alert_still_waits_its_turn_and_is_sent():
+    release = asyncio.Event()
+    sent = []
+
+    async def send(chat_id, text):
+        sent.append(text)
+        await release.wait()
+        return "1"
+
+    ping = waitlist_ping.WaitlistPing(send, _to(CHAT))
+    first = asyncio.ensure_future(ping("first@example.com"))
+    await asyncio.sleep(0)
+    queued = [
+        asyncio.ensure_future(ping(f"q{i}@example.com"))
+        for i in range(waitlist_ping.MAX_WAITING)
+    ]
+    await asyncio.sleep(0)
+    alert = asyncio.ensure_future(ping.send("the ceiling is full", alert=True))
+    release.set()
+    await asyncio.gather(first, *queued, alert)
+    assert sent[-1] == "the ceiling is full"
+    assert len(sent) == 2 + waitlist_ping.MAX_WAITING
+
+
 async def test_a_ping_cancelled_in_the_queue_frees_its_place():
     release = asyncio.Event()
     sent = []

@@ -114,7 +114,11 @@ export function WaitlistForm({
       } else {
         setStatus("error")
         setMessage(data.message || "Something went wrong. Please try again.")
-        trackEvent("Waitlist Error", { reason: "server_error", variant })
+        // A 429 is the API full for now (the route's "busy" sentence).
+        trackEvent("Waitlist Error", {
+          reason: res.status === 429 ? "busy" : "server_error",
+          variant,
+        })
       }
     } catch {
       setStatus("error")

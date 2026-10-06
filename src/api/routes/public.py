@@ -16,7 +16,8 @@ break.
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from starlette.requests import ClientDisconnect
@@ -63,6 +64,9 @@ WAITLIST_VISITOR_LIMIT = 10
 WAITLIST_ACCEPTED_KEY = "waitlist:accepted"
 WAITLIST_ACCEPTED_LIMIT = 600
 TOO_MANY = "too many waitlist requests"
+#: How often, at most, one process says the ceiling is full: one log line and
+#: one message to the operators, however many signups it turns away meanwhile.
+CEILING_NOTICE_SECONDS = 600
 #: The largest body the route reads: an address and three campaign values fit
 #: many times over. Anything larger is a 413 before it is parsed.
 WAITLIST_MAX_BODY_BYTES = 8 * 1024
@@ -137,6 +141,33 @@ class WaitlistSlots:
         share.queued -= 1
         if not share.queued:
             del self.by_address[address]
+
+
+class CeilingNotice:
+    """When the all-visitors ceiling refuses: at most one notice each
+    :data:`CEILING_NOTICE_SECONDS`, counting the refusals in between, so a
+    flood is one line and one message, never one per request. ``create_app``
+    builds one per app, as ``app.state.waitlist_ceiling``."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._last = float("-inf")
+        self._refused = 0
+
+    def refused(self) -> Optional[str]:
+        """Count one refusal; the notice's text when one is due, else None.
+        The text names counts only: no address, visitor or campaign."""
+        self._refused += 1
+        now = self._clock()
+        if now - self._last < CEILING_NOTICE_SECONDS:
+            return None
+        text = (
+            f"Waitlist signups reached the ceiling of {WAITLIST_ACCEPTED_LIMIT}"
+            f" a minute: {self._refused} turned away as busy"
+            f" since the last notice."
+        )
+        self._last, self._refused = now, 0
+        return text
 
 
 def _client(request: Request) -> Optional[tuple[str, str, int, bool]]:
@@ -258,10 +289,17 @@ async def join_waitlist(request: Request, background: BackgroundTasks):
                         )
             except waitlist.InvalidWaitlistEmail:
                 return _refusal(400, "not a valid email address", "invalid_email")
-            except HTTPException as full:  # only the ceiling raises here
-                return JSONResponse(
-                    status_code=full.status_code, content={"detail": full.detail}
-                )
+            except HTTPException:  # only the ceiling raises here
+                # Its own reason, so the site can say "busy" and an operator
+                # can tell a full ceiling from one visitor's limit. The answer
+                # is the same for a new address and a repeat: both spent it.
+                notice = request.app.state.waitlist_ceiling.refused()
+                if notice is not None:
+                    logger.warning("waitlist: %s", notice)
+                    ping = request.app.state.waitlist_ping
+                    if ping is not None:
+                        background.add_task(ping.send, notice, alert=True)
+                return _refusal(429, TOO_MANY, "full")
     finally:
         slots.release(address)
     logger.info("waitlist: an address was received")
