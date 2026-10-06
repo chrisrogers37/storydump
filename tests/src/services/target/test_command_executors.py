@@ -482,6 +482,37 @@ class TestTheReviewCardIsTheTenantsToResolve:
         assert parked["cancels"] == ["i1"] and parked["supersedes"] == []
         assert "Cancelled" in parked["restates"][0][2]
 
+    @pytest.mark.parametrize("via", ["resolve_review", "cancel"])
+    async def test_a_give_up_with_a_transit_copy_mints_the_job_that_destroys_it(
+        self, parked, via
+    ):
+        """The API holds no transit credentials; the worker's pipeline job
+        meets the intent `cancelled` and destroys the copy (instead of the
+        sweep, up to two days later)."""
+        parked["row"]["transit_asset_ref"] = "ws/x/t1"
+        if via == "cancel":
+            await command_executors.cancel(_Session(), _cmd("cancel"))
+        else:
+            await command_executors.resolve_review(_Session(), _review("cancel"))
+        assert [j["kind"] for j in parked["jobs"]] == ["publish_pipeline"]
+        job = parked["jobs"][0]
+        assert job["payload"]["intent_id"] == "i1"
+        assert job["serialization_key"] == "ig:ref"
+        assert job["workspace_id"] == "ws"
+
+    async def test_a_give_up_without_a_transit_copy_mints_nothing(self, parked):
+        """Parked before the upload, or a dry run: nothing on Cloudinary."""
+        parked["row"]["transit_asset_ref"] = None
+        await command_executors.resolve_review(_Session(), _review("cancel"))
+        assert parked["jobs"] == []
+
+    async def test_a_lost_give_up_race_mints_nothing(self, parked):
+        parked["row"]["transit_asset_ref"] = "ws/x/t1"
+        parked["cancel_ok"] = False
+        with pytest.raises(commands.CommandRefused):
+            await command_executors.resolve_review(_Session(), _review("cancel"))
+        assert parked["jobs"] == []
+
     async def test_cancel_is_honoured_even_when_a_cancel_was_already_asked_for(
         self, parked
     ):

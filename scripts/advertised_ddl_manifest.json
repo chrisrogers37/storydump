@@ -347,6 +347,41 @@
       "label": "§33 a removal sticks, and a removed admin's tokens go with them (090, readiness review 2026-10-02) — workspace_member_removals (tenant plane, written only by svc_membership), service_tokens.created_by_user_id, fn_group_member_seen refusing a removed non-member, and fn_member_remove recording the removal",
       "doc": "07-security-model.md",
       "ordinal": 31
+    },
+    {
+      "sha256": "89557ca2c349312a68cbc1d0b62930a974a0987b58b0695a99f2f3b06bc5654b",
+      "class": "normative",
+      "label": "§34 the Drive grant records who granted it (091, readiness review 2026-10-02) — oauth_credentials.granted_by_user_id, written by the Drive connect callback, so only the granter browses the Drive and picks folders from it",
+      "doc": "07-security-model.md",
+      "ordinal": 32
+    },
+    {
+      "sha256": "0b6ed908a9da7dcf0bf09dd1ea640e299acd6e49ed489ccb9ac9c48ea1a5e6a6",
+      "class": "normative",
+      "label": "§35 a new account needs a way in while in beta (092, owner decision 2026-10-02) — signup_admissions (global, read only by svc_membership) and fn_signup_admitted, the door the sign-in upsert asks before it creates a user: an owner admission or a live invitation addressed to the verified email",
+      "doc": "07-security-model.md",
+      "ordinal": 33
+    },
+    {
+      "sha256": "84d51d445d574a8429a649ae6546f86c9dd952148d351fdf296af17ca083b6c8",
+      "class": "normative",
+      "label": "§41 an invitation admits only while it is legitimate (098, owner decision, PR #1560 and #1574 security reviews) — fn_signup_admitted and fn_invitation_accept counting an invitation only from an active workspace whose owner or admin, with an active account, still sent it, the accept door refusing a person removed after the invitation (read again after its membership insert), a one-time revoke of the pending invitations of removed inviters and of those addressed to a person removed after they were sent, and svc_membership's column read of users' id and state under p_member_users",
+      "doc": "07-security-model.md",
+      "ordinal": 34
+    },
+    {
+      "sha256": "2d460f16213a2bf80a29c4823616a6398a8e427ef1f374fd6ff17a3de0c2cbc1",
+      "class": "normative",
+      "label": "§42 a person can unlink their own Telegram identity (099) — fn_identity_unlink, owned by svc_membership and granted to svc_ingress, removing the user's telegram identity only while another identity remains, with svc_membership's SELECT and DELETE on user_identities under p_member_identities",
+      "doc": "07-security-model.md",
+      "ordinal": 35
+    },
+    {
+      "sha256": "6d2bfbf4e7feba0704c9718092978386236c462fda836ad7a14ad86ded3fb5c8",
+      "class": "normative",
+      "label": "§43 the waitlist is written by the API, not by the site (100, owner decision 2026-10-03) — waitlist_entries (global, RLS on, svc_ingress may INSERT and nothing else under p_ingress_waitlist), the address rule of §35 with a dot in the domain and no control, bidi-isolate, interlinear or tag characters, at most 254 characters, and a utm object bounded at 2 KB",
+      "doc": "07-security-model.md",
+      "ordinal": 36
     }
   ],
   "policy_expansion": {

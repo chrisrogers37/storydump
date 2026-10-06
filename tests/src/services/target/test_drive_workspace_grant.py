@@ -27,6 +27,7 @@ from tests.src.services.target.conftest import drive_grant
 
 WS = "11111111-1111-1111-1111-111111111111"
 SRC = "22222222-2222-2222-2222-222222222222"
+USER = "33333333-3333-3333-3333-333333333333"
 
 
 class _Exec:
@@ -101,7 +102,7 @@ class TestTheConnectLegOwnsTheWorkspaceRow:
         ex = _Exec(scalar="cred-1")
         assert (
             await google_drive_oauth.store_credential(
-                ex, workspace_id=WS, grant=drive_grant()
+                ex, workspace_id=WS, grant=drive_grant(), granted_by=USER
             )
             == "cred-1"
         )
@@ -114,6 +115,10 @@ class TestTheConnectLegOwnsTheWorkspaceRow:
         assert params["ws"] == WS and params["provider"] == "gdrive"
         assert "src" not in params
         assert params["payload"].startswith("ct:")
+        # 091: the granter is written, and a reconnect replaces it — the
+        # person who reconnected is the one who may browse now.
+        assert "granted_by_user_id" in columns and params["by"] == USER
+        assert "granted_by_user_id = EXCLUDED.granted_by_user_id" in sql
 
 
 class TestTheReadDoorResolvesByWorkspace:
@@ -456,6 +461,37 @@ class TestTheWorkspaceStatusProjection:
             "status": "expired",
             "connected_at": "2026-09-05T00:00:00+00:00",
         }
+
+
+class TestOnlyTheGranterBrowses:
+    """091 (`07` §34): the grant is the workspace's, the Drive is a person's.
+    The decision is one statement; its truth on a real row is the Drive gate's
+    (`tests/scripts/test_gdrive_oauth_gate.py`)."""
+
+    @pytest.mark.parametrize(
+        "answer, expected",
+        [(None, False), ({"mine": None}, False), ({"mine": True}, True)],
+    )
+    async def test_the_answer_is_the_row_and_no_grant_is_no(
+        self, monkeypatch, answer, expected
+    ):
+        seen = {}
+
+        async def row(executor, sql, **params):
+            seen.update(sql=sql, params=params)
+            return answer
+
+        monkeypatch.setattr(workspaces.readers, "row", row)
+        assert (
+            await workspaces.may_browse_drive(object(), workspace_id=WS, user_id=USER)
+            is expected
+        )
+        assert seen["params"] == {"ws": WS, "u": USER, "provider": "gdrive"}
+        assert "granted_by_user_id = :u" in seen["sql"]
+        # A grant from before 091 names nobody: the owner, and only the owner.
+        assert "granted_by_user_id IS NULL" in seen["sql"]
+        assert "m.role = 'owner'" in seen["sql"]
+        assert google_drive_oauth.WORKSPACE_GRANT_WHERE in seen["sql"]
 
 
 class TestRemovingAFolderPausesIt:
