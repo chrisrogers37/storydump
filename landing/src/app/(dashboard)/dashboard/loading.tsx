@@ -1,27 +1,21 @@
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, StatCard } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { PageHeaderSkeleton } from "@/design/page-header";
 
 function CardSkeleton() {
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <Skeleton className="h-4 w-24" />
-      </CardHeader>
-      <CardContent>
-        <Skeleton className="h-8 w-16" />
-        <Skeleton className="h-3 w-20 mt-2" />
-      </CardContent>
-    </Card>
+    <StatCard
+      label={<Skeleton className="h-4 w-24" />}
+      value={<Skeleton className="h-9 w-16" />}
+      detail={<Skeleton className="my-0.5 h-3 w-20" />}
+    />
   );
 }
 
 export default function DashboardLoading() {
   return (
     <div className="space-y-6">
-      <div>
-        <Skeleton className="h-8 w-32" />
-        <Skeleton className="h-4 w-56 mt-2" />
-      </div>
+      <PageHeaderSkeleton titleWidth="w-32" descriptionWidth="w-56" />
 
       {/* Condition panel — sized to its all-clear, the common case */}
       <Card className="py-4">
@@ -35,7 +29,7 @@ export default function DashboardLoading() {
       </Card>
 
       {/* Analytics cards */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         {Array.from({ length: 4 }).map((_, i) => (
           <CardSkeleton key={i} />
         ))}

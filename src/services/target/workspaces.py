@@ -45,6 +45,7 @@ from src.services.target import vocabulary
 from src.services.target import (
     google_drive_oauth,
     identity,
+    invitations,
     offboarding,
     readers,
     service_tokens,
@@ -411,15 +412,32 @@ async def list_bindings(executor, *, workspace_id: str) -> list[dict]:
 
 
 async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
-    """Pending invitations only. The token is never read back — only its hash
-    is stored, and the row exposes nothing a caller could present."""
+    """Pending invitations the doors would still honour (098): the workspace
+    is active and the sender is still an owner or admin there with an active
+    account. The others are dead links that age out with their expiry, so they
+    are not listed as pending. The predicate mirrors 098's two doors by hand,
+    so it belongs in the database with the next migration that touches them.
+
+    The doors' third check, a removal newer than the invitation, is not
+    repeated: the runtime cannot read the removal record (#1546 takes that
+    read away), and it needs none. A removal revokes the invitations addressed
+    to the person in its own transaction (`invitations.revoke_on_removal`),
+    and 098 revoked the ones older removals left pending, so the state filter
+    already leaves them out. The token is never read back — only its hash is
+    stored, and the row exposes nothing a caller could present."""
     return await readers.rows(
         executor,
-        "SELECT id, delivery_channel, email, role, state, expires_at,"
-        "       invited_by_user_id, created_at"
-        "  FROM workspace_invitations"
-        " WHERE workspace_id = :ws AND state = 'pending' AND expires_at > now()"
-        " ORDER BY created_at, id",
+        "SELECT i.id, i.delivery_channel, i.email, i.role, i.state, i.expires_at,"
+        "       i.invited_by_user_id, i.created_at"
+        "  FROM workspace_invitations i"
+        "  JOIN workspaces w ON w.id = i.workspace_id AND w.state = 'active'"
+        "  JOIN workspace_members m ON m.workspace_id = i.workspace_id"
+        "                          AND m.user_id = i.invited_by_user_id"
+        "                          AND m.role IN ('owner', 'admin')"
+        "  JOIN users u ON u.id = i.invited_by_user_id AND u.state = 'active'"
+        " WHERE i.workspace_id = :ws AND i.state = 'pending'"
+        "   AND i.expires_at > now()"
+        " ORDER BY i.created_at, i.id",
         ws=str(workspace_id),
     )
 
@@ -795,7 +813,9 @@ async def remove_member(
     non-member is `not_found`. The removal is recorded by the door, so the
     Telegram join path cannot re-add the person until they are invited back,
     and the workspace service identities they minted are revoked here, in the
-    same transaction (090)."""
+    same transaction (090), as are the pending invitations in the workspace
+    that they sent or that are addressed to them, so none of them lets anyone
+    in and none blocks the fresh invitation that brings them back."""
     row = (
         await executor.execute(
             text(
@@ -808,8 +828,12 @@ async def remove_member(
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
         # The door recorded the removal, so the Telegram group cannot undo it
-        # (090); the service identities this person minted go with them.
+        # (090); the service identities this person minted go with them, and so
+        # do the pending invitations they sent or were sent.
         await service_tokens.revoke_minted_by(
+            executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
+        await invitations.revoke_on_removal(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
         )
         return str(row[1])

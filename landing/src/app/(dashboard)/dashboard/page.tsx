@@ -19,6 +19,7 @@ import { PostingChart } from "@/components/dashboard/posting-chart";
 import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
 import { RunwayCard } from "@/components/dashboard/runway-card";
+import { PageHeader } from "@/design/page-header";
 
 /**
  * The overview's history strip. Ten is a glance, not a log — the full list
@@ -100,12 +101,10 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Last 30 days of posting activity.
-        </p>
-      </div>
+      <PageHeader
+        title="Overview"
+        description="Last 30 days of posting activity."
+      />
 
       <ConditionsPanel conditions={conditions} setupStep={setupStep} />
 

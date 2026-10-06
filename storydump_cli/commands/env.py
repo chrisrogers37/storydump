@@ -183,22 +183,31 @@ def _details(runtime: Any) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
     try:
         return runtime.client(token).health_details(), {"read": True}
     except Unreachable as exc:
-        # first: `Unreachable` is an `ApiError`, and no answer is not an answer
-        return None, {
-            "read": False,
-            "detail": f"the details did not answer: {exc.detail}",
-            "fix": FIXES.get(exc.reason or "", UNREACHABLE_FIX),
-        }
+        # first, `Unreachable` being an `ApiError`: a 5xx is an answer (the API
+        # failed); anything else under it (a transport failure, an answer
+        # that was not the API's JSON) is none
+        if exc.status < 500:
+            return None, {
+                "read": False,
+                "detail": f"the details did not answer: {exc.detail}",
+                "fix": UNREACHABLE_FIX,
+            }
+        return None, _refused(exc, "failed")
     except ApiError as exc:
         if exc.status == 401:
             raise
-        reason = exc.reason or ""
-        return None, {
-            "read": False,
-            "reason": reason or None,
-            "detail": f"the details answered {exc.status}: {exc.detail}",
-            "fix": FIXES.get(reason, "see storydump doctor"),
-        }
+        return None, _refused(exc, "answered")
+
+
+def _refused(exc: ApiError, verb: str) -> dict[str, Any]:
+    """`_details`' account of an answer that was not the details."""
+    reason = exc.reason or ""
+    return {
+        "read": False,
+        "reason": reason or None,
+        "detail": f"the details {verb} ({exc.status}): {exc.detail}",
+        "fix": FIXES.get(reason, "see storydump doctor"),
+    }
 
 
 @click.command()

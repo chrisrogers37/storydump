@@ -14,6 +14,7 @@ import pytest
 
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
+    bindings,
     category_mix,
     channel_bind,
     commands,
@@ -27,6 +28,7 @@ from src.services.target import (
     oauth_states,
     provisioning,
     sessions,
+    tenant_resolution,
     webhook_ingress,
     workspaces,
 )
@@ -278,6 +280,35 @@ class TestWorkspaceReads:
         }
         assert seen == {"ws": str(WS), "below_days": 5}
         assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
+
+    @pytest.fixture
+    def pending(self, monkeypatch):
+        async def list_invitations(session, *, workspace_id):
+            return [{"email": "invitee@example.com"}]
+
+        monkeypatch.setattr(workspaces, "list_invitations", list_invitations)
+
+    def test_an_admin_gets_the_pending_invitations(
+        self, client, signed_in, tenant, pending
+    ):
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 200
+        assert resp.json()["invitations"][0]["email"] == "invitee@example.com"
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_member_gets_no_pending_invitation(
+        self, client, signed_in, tenant, pending, monkeypatch
+    ):
+        """A member: the gate passes the member floor and refuses any higher."""
+
+        async def as_a_member(session, workspace_id, user_id, minimum_role="member"):
+            if minimum_role != "member":
+                raise TenantResolutionError("insufficient_role")
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", as_a_member)
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 403
+        assert "invitee@example.com" not in resp.text
 
 
 @pytest.fixture
@@ -739,6 +770,50 @@ class TestTelegramGroupBindLink:
         }
 
 
+class TestRemoveTelegramGroup:
+    """`DELETE /workspaces/{ws}/bindings/{binding_id}` — an admin removes a
+    group (`07` §13): a revoke, never a delete, at the admin floor like the
+    bind link."""
+
+    BINDING = "44444444-4444-4444-8444-444444444444"
+    URL = f"/api/v1/workspaces/{WS}/bindings/{BINDING}"
+
+    @pytest.fixture
+    def revoked(self, monkeypatch):
+        seen = {"moved": True}
+
+        async def revoke_for_workspace(session, *, workspace_id, binding_id):
+            seen["asked"] = (workspace_id, binding_id)
+            return seen["moved"]
+
+        monkeypatch.setattr(bindings, "revoke_for_workspace", revoke_for_workspace)
+        return seen
+
+    def test_requires_a_session(self, client, revoked):
+        assert client.delete(self.URL).status_code == 401
+        assert "asked" not in revoked
+
+    def test_revokes_at_the_admin_floor(self, client, signed_in, tenant, revoked):
+        resp = client.delete(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"binding_id": self.BINDING, "state": "revoked"}
+        assert revoked["asked"] == (WS, self.BINDING)
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_binding_that_is_not_here_or_already_revoked_is_404(
+        self, client, signed_in, tenant, revoked
+    ):
+        revoked["moved"] = False
+        assert client.delete(self.URL).status_code == 404
+
+    def test_a_binding_id_that_is_not_a_uuid_never_reaches_the_service(
+        self, client, signed_in, tenant, revoked
+    ):
+        resp = client.delete(f"/api/v1/workspaces/{WS}/bindings/nope")
+        assert resp.status_code == 422
+        assert "asked" not in revoked
+
+
 class TestTelegramLink:
     """`POST /me/telegram/link` — the link a signed-in user taps to attach
     their Telegram identity (`07` §2 `link`: only from an authenticated
@@ -830,6 +905,45 @@ class TestTelegramLink:
             "user_id": PRINCIPAL.user_id,
             "bot_username": "storydump_app_bot",
         }
+
+
+class TestTelegramUnlink:
+    """`DELETE /me/telegram` — the signed-in user removes their own Telegram
+    identity (099, `07` §42). Tenant-less; the door's outcome is the answer,
+    and `last_identity` is the one refusal."""
+
+    URL = "/api/v1/me/telegram"
+
+    @pytest.fixture
+    def unlink(self, monkeypatch):
+        seen = {"outcome": "unlinked"}
+
+        async def unlink_telegram(conn, *, user_id):
+            seen["user_id"] = user_id
+            return seen["outcome"]
+
+        monkeypatch.setattr(identity, "unlink_telegram", unlink_telegram)
+        return seen
+
+    def test_requires_a_session(self, client, unlink):
+        assert client.delete(self.URL).status_code == 401
+        assert "user_id" not in unlink
+
+    @pytest.mark.parametrize("outcome", ["unlinked", "not_linked"])
+    def test_unlinks_the_signed_in_users_own_identity(
+        self, client, signed_in, unlink, outcome
+    ):
+        unlink["outcome"] = outcome
+        resp = client.delete(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"outcome": outcome}
+        assert unlink["user_id"] == PRINCIPAL.user_id
+
+    def test_the_last_identity_is_refused_by_name(self, client, signed_in, unlink):
+        unlink["outcome"] = "last_identity"
+        resp = client.delete(self.URL)
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "last_identity"
 
 
 SRC = "33333333-3333-4333-8333-333333333333"

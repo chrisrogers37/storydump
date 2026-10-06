@@ -21,10 +21,11 @@ THE THREE FACTS THE RULING RESTS ON
 
 3. **The namespaces are disjoint**, which is what makes two widths safe at all.
    `identity:` is hashed only at 32 bits; `case_mix:`, `sources:`,
-   `media_source:` and `runway:` only at 64. No key string is hashed both
-   ways, so no two callers can take "the same" lock through different
-   functions and fail to exclude each other. THIS is the property that would
-   break if someone half-unified them, and it is the one asserted below.
+   `media_source:`, `runway:` and `invite:` only at 64. No key string is
+   hashed both ways, so no two callers can take "the same" lock through
+   different functions and fail to exclude each other. THIS is the property
+   that would break if someone half-unified them, and it is the one asserted
+   below.
 
 WHY UNIFYING IS A DEPLOY PLAN, NOT A PATCH
 ------------------------------------------
@@ -52,6 +53,8 @@ EXPECTED_WIDTH = {
     "media_source:": "hashtextextended",
     # Per account: keyed on a tenant's rows, as the three above are.
     "runway:": "hashtextextended",
+    # `invitations.create` serializes sends per workspace and addressee (#1574).
+    "invite:": "hashtextextended",
 }
 
 #: `(module, hash function, key expression)` for every hashed advisory lock.

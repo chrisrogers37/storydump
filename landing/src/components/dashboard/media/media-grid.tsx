@@ -5,6 +5,7 @@ import { ImageOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import { TONE_CLASS } from "@/components/dashboard/tone";
 import { Card, CardContent } from "@/components/ui/card";
 import type { MediaRow } from "@/lib/dashboard-payloads";
 
@@ -47,7 +48,7 @@ function postingBadge(times: number) {
   if (times === 1)
     return <Badge variant="secondary" className="text-xs">Posted once</Badge>;
   return (
-    <Badge className="bg-green-600 text-xs hover:bg-green-700">
+    <Badge variant="secondary" className={`${TONE_CLASS.active} text-xs`}>
       {times}x posted
     </Badge>
   );

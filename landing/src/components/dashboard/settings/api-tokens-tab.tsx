@@ -357,7 +357,7 @@ function TokenCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">{title}</CardTitle>
+        <CardTitle>{title}</CardTitle>
         <CardDescription>{description}</CardDescription>
         <CardAction>{mintDialog}</CardAction>
       </CardHeader>
