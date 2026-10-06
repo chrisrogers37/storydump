@@ -152,3 +152,14 @@ class TestADisabledAccountIsRefusedByTheCaller:
         )
         assert result.outcome == "user_inactive" and not result.handled
         assert conn.statements == [], "the door is never asked"
+
+
+class TestASenderThatIsNotAPersonDrivesNoJoin:
+    """A message sent on behalf of a chat (`sender_chat`: an anonymous admin, a
+    post sent as a channel) carries a stand-in sender, not a person, so the
+    message observes nobody."""
+
+    def test_a_sender_chat_message_observes_nobody(self):
+        update = _update(sender=42)
+        update["message"]["sender_chat"] = {"id": -100777, "type": "supergroup"}
+        assert membership_sync.group_members_of(update) == []

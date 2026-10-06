@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,13 +10,14 @@ import {
   removeMemberRefusalCopy,
   submitRemoveMember,
 } from "@/lib/command-client";
-import { memberOrigin } from "@/lib/members";
+import { memberOrigin, stillInTelegramGroupCopy } from "@/lib/members";
 import type { WorkspaceMember } from "@/lib/types";
+import { TONE_CLASS } from "@/components/dashboard/tone";
 
 const ROLE_CLASS: Record<string, string> = {
-  owner: "bg-purple-100 text-purple-900",
-  admin: "bg-blue-100 text-blue-900",
-  member: "bg-muted text-muted-foreground",
+  owner: "bg-ink text-white",
+  admin: "border-ink/10 bg-paper text-ink",
+  member: TONE_CLASS.inert,
 };
 
 /**
@@ -24,30 +25,46 @@ const ROLE_CLASS: Record<string, string> = {
  * admin removes membership explicitly"). A member who joined from a bound
  * Telegram group (`07` §14) is labelled as such: that grant outlives the
  * group, so the person who can undo it must be able to see it.
+ *
+ * Removing someone revokes their MEMBERSHIP only: they stay in any bound
+ * Telegram group, and the bot does not kick. So when a group is bound, a
+ * successful removal leaves a reminder to remove them in Telegram too.
  */
 export function MembersCard({
   workspaceId,
   members,
   currentUserId,
   canRemove,
+  telegramGroupLinked,
+  children,
 }: {
   workspaceId: string;
   members: WorkspaceMember[] | null;
   currentUserId: string;
   canRemove: boolean;
+  /** An active Telegram group is bound here (`hasActiveTelegramGroup`). */
+  telegramGroupLinked: boolean;
+  /** What the page adds for an admin above the list: inviting (#1563). */
+  children?: ReactNode;
 }) {
   const router = useRouter();
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Client state, so it outlives `router.refresh()` dropping the removed row.
+  const [stillInGroup, setStillInGroup] = useState<string | null>(null);
 
-  async function remove(userId: string) {
+  async function remove(member: WorkspaceMember) {
     setError(null);
-    setPending(userId);
+    setStillInGroup(null);
+    setPending(member.user_id);
     try {
-      const result = await submitRemoveMember(workspaceId, userId);
+      const result = await submitRemoveMember(workspaceId, member.user_id);
       if (!result.ok) {
         setError(removeMemberRefusalCopy(result.error, result.status));
         return;
+      }
+      if (telegramGroupLinked) {
+        setStillInGroup(stillInTelegramGroupCopy(member.primary_email));
       }
       router.refresh();
     } finally {
@@ -58,12 +75,14 @@ export function MembersCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Members</CardTitle>
+        <CardTitle>Members</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {error && (
           <Notice tone="error">{error}</Notice>
         )}
+        {stillInGroup && <Notice>{stillInGroup}</Notice>}
+        {children}
         {members === null ? (
           <p className="text-sm text-muted-foreground">
             Members could not be loaded just now. Reload to try again.
@@ -97,7 +116,7 @@ export function MembersCard({
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => remove(m.user_id)}
+                        onClick={() => remove(m)}
                         disabled={pending !== null}
                       >
                         {pending === m.user_id ? "Removing..." : "Remove"}
@@ -112,7 +131,8 @@ export function MembersCard({
         <p className="text-xs text-muted-foreground">
           People who speak in a bound Telegram group join as members
           automatically once their Telegram is linked; leaving the group removes
-          nobody. Removing someone here revokes their access to this workspace.
+          nobody. Removing someone here revokes their access to this workspace,
+          and the group does not add them back unless you invite them again.
         </p>
       </CardContent>
     </Card>

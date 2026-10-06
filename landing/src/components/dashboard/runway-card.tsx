@@ -1,0 +1,70 @@
+import { Hourglass } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/dashboard/empty-state";
+import { TONE_CLASS } from "@/components/dashboard/tone";
+import type { RunwayRow } from "@/lib/runway";
+
+/**
+ * Days of content left, per account (#1478) — how long each account can keep
+ * posting from what its library holds now (`deriveRunway`).
+ *
+ * An account below the warning level is marked, and the sentence under the
+ * list says who is told and when, so the mark is never the only place the
+ * rule lives. It names this workspace's Telegram chats, where the notice goes,
+ * rather than the reader: a workspace with none bound is told nothing. The
+ * empty card has no list and so no sentence, and no call to action: the
+ * Overview's setup step, which knows the reader's role, is the one. The
+ * figure is a floor: a posted file comes back once its repost window
+ * passes, which this does not count ahead of time.
+ */
+export function RunwayCard({
+  rows,
+  belowDays,
+}: {
+  rows: RunwayRow[];
+  belowDays: number;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Content left</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {rows.length === 0 ? (
+          <EmptyState
+            icon={Hourglass}
+            title="No Instagram account connected yet"
+            description="Days of content left show here once an account is connected."
+          />
+        ) : (
+          <>
+            <ul className="divide-y">
+              {rows.map((row) => (
+                <li
+                  key={row.key}
+                  className="flex flex-wrap items-center justify-between gap-3 py-2 text-sm"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate font-medium">{row.name}</span>
+                    {row.low && (
+                      <Badge variant="secondary" className={TONE_CLASS.attention}>
+                        Running low
+                      </Badge>
+                    )}
+                  </div>
+                  <span className="text-muted-foreground">
+                    {row.headline} · {row.detail}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-xs text-muted-foreground">
+              {`This workspace's Telegram chats are told once when an account drops below ${belowDays} days of content.`}
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}

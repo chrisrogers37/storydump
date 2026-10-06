@@ -10,8 +10,8 @@ Google requires verification for **sensitive and restricted scopes** before they
 
 | Scope | File | Class |
 |---|---|---|
-| `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:90` (`SCOPE`) | **Restricted** |
-| `https://www.googleapis.com/auth/userinfo.email` (with `openid` and `userinfo.profile`) | `src/services/target/google_oidc.py:54` (`SCOPE = "openid email profile"`) — Google sign-in, not the Drive flow; the Drive leg dropped the older `userinfo.email` scope because nothing in the target schema stores the granting account's email (`google_drive_oauth.py:28`) | Standard |
+| `https://www.googleapis.com/auth/drive.readonly` | `src/services/target/google_drive_oauth.py:91` (`SCOPE`) | **Restricted** |
+| `https://www.googleapis.com/auth/userinfo.email` (with `openid` and `userinfo.profile`) | `src/services/target/google_oidc.py:55` (`SCOPE = "openid email profile"`) — Google sign-in, not the Drive flow; the Drive leg dropped the older `userinfo.email` scope because nothing in the target schema stores the granting account's email (`google_drive_oauth.py:28`) | Standard |
 
 The `drive.readonly` scope is what triggers the warning. Issue [#327](https://github.com/chrisrogers37/storydump/issues/327) audited the alternatives (`drive.file`, `drive.metadata.readonly`) and concluded that `drive.readonly` is the minimum viable scope — `drive.file` would break folder browsing (user media predates the app), and `drive.metadata.readonly` blocks file downloads (which we need to upload to Instagram). With scope-narrowing off the table, **verification submission is the only path to clear the warning** for non-developer users.
 
@@ -24,7 +24,7 @@ Before opening the OAuth Brand / consent screen submission form:
 - [x] **App Homepage URL** — `https://storydump.app` (live)
 - [x] **Privacy Policy URL** — `https://storydump.app/privacy` (`landing/src/app/(marketing)/privacy/page.tsx`)
 - [x] **Terms of Service URL** — `https://storydump.app/terms` (`landing/src/app/(marketing)/terms/page.tsx`)
-- [ ] **App icon** — 120×120 PNG, no transparency. Need to design.
+- [ ] **App icon** — 120×120 PNG, no transparency: [`assets/app-icon/storydump-icon-120.png`](assets/app-icon/storydump-icon-120.png), drawn by `make-icon.py` beside it (#410). Made; still to upload.
 - [ ] **Authorized domain** — `storydump.app` verified via Google Search Console.
 - [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. With `OAUTH_REDIRECT_BASE_URL = https://api.storydump.app` (the API's public origin, `guides/cloud-deployment.md`) that is `https://api.storydump.app/auth/google-drive/callback` (`src/api/routes/auth.py:300`). Add it under **APIs & Services → Credentials → [OAuth 2.0 Client] → Authorized redirect URIs**. (`OAUTH_REDIRECT_BASE_URL` is documented in [`documentation/guides/cloud-deployment.md`](../guides/cloud-deployment.md).)
 - [ ] **Scope justification copy** — short text explaining why we need `drive.readonly` (see template below).
@@ -57,7 +57,7 @@ Still under **OAuth consent screen**:
 |---|---|
 | App name | `Storydump` |
 | User support email | `christophertrogers37@gmail.com` (or a team email) |
-| App logo | upload the 120×120 PNG |
+| App logo | upload `assets/app-icon/storydump-icon-120.png` |
 | Application home page | `https://storydump.app` |
 | Application privacy policy link | `https://storydump.app/privacy` |
 | Application terms of service link | `https://storydump.app/terms` |

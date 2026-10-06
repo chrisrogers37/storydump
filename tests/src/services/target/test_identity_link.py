@@ -106,9 +106,7 @@ async def tapped(action=callback_tokens.LINK_CONFIRM, *, by="4242", **kw):
 
 
 class TestOpeningTheLinkOnlyAsks:
-    """The fix for link-by-tap: opening the link attached the opener's
-    Telegram to whoever minted it. Now it names the account and links
-    nothing."""
+    """Opening the link names the account it belongs to and links nothing."""
 
     @pytest.mark.asyncio
     async def test_opening_the_link_shows_a_confirmation_and_links_nothing(
@@ -220,8 +218,8 @@ class TestCancellingAndRefusing:
 
     @pytest.mark.asyncio
     async def test_a_confirm_from_another_telegram_user_is_refused(self, patched):
-        """A forwarded prompt tapped by someone else: the button names the
-        user it was offered to, and that is not them."""
+        """The button names the Telegram user it was offered to; a tap by any
+        other user is refused and leaves the state live."""
         r = await tapped(by="5555")
         assert r.outcome == "tapper_mismatch"
         assert r.answer_text == identity_link.REFUSAL and r.edit_text is None

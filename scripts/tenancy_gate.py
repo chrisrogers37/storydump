@@ -115,6 +115,12 @@ _TENANCY_IRRELEVANT: tuple[str, ...] = (
     # exactly as CREATE FUNCTION above; the `OR REPLACE` form is a new prefix,
     # not a new kind.
     "CREATE OR REPLACE FUNCTION ",
+    # 098 revokes the pending invitations of inviters removed before it. An
+    # UPDATE of a user table writes rows, not a table, a policy or an RLS bit:
+    # inert on the four facts exactly as INSERT INTO above. Allowlisted for that
+    # one table, not as a bare "UPDATE ", which would also admit a catalog
+    # write such as `UPDATE pg_class SET relrowsecurity = false`.
+    "UPDATE workspace_invitations ",
 )
 
 
@@ -358,6 +364,21 @@ def expected_tenancy(statements) -> dict:
                 sig[m.group(1)]["policies"] += 1
             continue
 
+        # DROP POLICY is HANDLED, not allowlisted, because it moves a fact: it
+        # takes a policy off its table. Only the plain form is read, one
+        # unquoted name and no IF EXISTS, matched to the end of the statement:
+        # a replay that got past it dropped exactly one policy, so the count
+        # falls by one. `IF EXISTS` may drop nothing, which a count cannot
+        # tell, so it falls through to the refusal below with every other
+        # spelling. (102 is the first member.)
+        m = re.match(
+            r"DROP POLICY \w+ ON (?:public\.)?(\w+)(?: RESTRICT| CASCADE)?$", stmt
+        )
+        if m:
+            if m.group(1) in sig:
+                sig[m.group(1)]["policies"] -= 1
+            continue
+
         # ADD COLUMN is HANDLED, not allowlisted, because one spelling of it
         # moves a fact: adding the tenant key itself flips tenant_keyed. Any
         # other column provably moves none of the four facts. A blanket
@@ -431,9 +452,10 @@ def expected_tenancy(statements) -> dict:
         # being silently skipped — the derivation would then claim a policy or
         # a table is present that the replay has since dropped, and the lane
         # comparison would fail against the catalog for a reason nobody can
-        # find. `DROP POLICY` is only the obvious member; `DROP TABLE`,
-        # `ALTER TABLE … DROP COLUMN workspace_id`, `ALTER TABLE … RENAME TO`
-        # and `DROP SCHEMA … CASCADE` all do it too.
+        # find. A `DROP POLICY` the branch above does not read is only the
+        # obvious member; `DROP TABLE`, `ALTER TABLE … DROP COLUMN
+        # workspace_id`, `ALTER TABLE … RENAME TO` and `DROP SCHEMA … CASCADE`
+        # all do it too.
         #
         # An earlier version named two of those and let everything else fall
         # through to a silent ignore — which is a claim about today's corpus

@@ -8,6 +8,7 @@ bound observable from outside the process.
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -125,6 +126,19 @@ class TestTheCompositionRoot:
         assert application.state.ingress is None
 
 
+class _Savepoints:
+    """A connection that opens savepoints and nothing else: the membership
+    step observes each person in one of their own (`conn.begin_nested()`)."""
+
+    def __init__(self):
+        self.opened = 0
+
+    @asynccontextmanager
+    async def begin_nested(self):
+        self.opened += 1
+        yield self
+
+
 class TestGroupMessagesReachTheMembershipStep:
     """A person speaking in a group is observed (#1242); a DM, a callback
     query or a senderless message is still NOT_A_START — said, not dropped."""
@@ -144,9 +158,9 @@ class TestGroupMessagesReachTheMembershipStep:
             return StartResult(outcome="joined", handled=True)
 
         monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
-        d = telegram_dispatch.TelegramDispatcher()
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
         r = await d(
-            None,
+            conn,
             {
                 "message": {
                     "text": "hi",
@@ -230,9 +244,9 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
             return StartResult(outcome="already_member", handled=False)
 
         monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
-        d = telegram_dispatch.TelegramDispatcher()
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
         r = await d(
-            None,
+            conn,
             {
                 "message": {
                     "text": "/start@storydump_app_bot",
@@ -254,9 +268,9 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
             return StartResult(outcome="joined", handled=True)
 
         monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
-        d = telegram_dispatch.TelegramDispatcher()
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
         r = await d(
-            None,
+            conn,
             {
                 "message": {
                     "from": {"id": 1},
@@ -270,6 +284,7 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
             },
         )
         assert seen == ["1", "2", "4"] and r.outcome == "joined"
+        assert conn.opened == 3, "one savepoint per person"
 
     @pytest.mark.asyncio
     async def test_a_sync_error_is_named_and_never_raised(self, monkeypatch):
@@ -277,9 +292,9 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
             raise RuntimeError("door missing")
 
         monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
-        d = telegram_dispatch.TelegramDispatcher()
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
         r = await d(
-            None,
+            conn,
             {
                 "message": {
                     "text": "hi",
@@ -288,6 +303,35 @@ class TestABareStartInAGroupIsSpeechNotAGreeting:
                 }
             },
         )
+        assert r.outcome == telegram_dispatch.MEMBERSHIP_SYNC_FAILED and not r.handled
+
+    @pytest.mark.asyncio
+    async def test_a_failed_join_does_not_stop_the_people_after_it(self, monkeypatch):
+        """Each person rolls back alone, so the people listed after a failed
+        one are still observed; the failure is still the message's outcome."""
+        seen = []
+
+        async def observe(conn, **kw):
+            seen.append(kw["telegram_user_id"])
+            if kw["telegram_user_id"] == "1":
+                raise RuntimeError("refused")
+            from src.services.target.start_router import StartResult
+
+            return StartResult(outcome="joined", handled=True)
+
+        monkeypatch.setattr(telegram_dispatch.membership_sync, "observe", observe)
+        d, conn = telegram_dispatch.TelegramDispatcher(), _Savepoints()
+        r = await d(
+            conn,
+            {
+                "message": {
+                    "from": {"id": 1},
+                    "chat": {"id": -5, "type": "supergroup"},
+                    "new_chat_members": [{"id": 2}],
+                }
+            },
+        )
+        assert seen == ["1", "2"] and conn.opened == 2
         assert r.outcome == telegram_dispatch.MEMBERSHIP_SYNC_FAILED and not r.handled
 
 

@@ -977,3 +977,23 @@ def test_the_reaper_cadence_and_budget_are_the_documented_numbers():
     app = compose(engine=object(), config=config, env={})
     assert app.recurring["reap_expired"] == seconds
     assert config.reap_limit == budget
+
+
+def test_the_rate_counter_retention_is_the_documented_numbers():
+    """`05`'s `rate_counters` row (7 d) and its sweep's batch (5,000) and time
+    budget (5 s) are pinned TO the doc, like the reaper's: the rows hold client
+    addresses, so the keep window is a promise about how long one is kept."""
+    (days,) = _documented_numbers("| `rate_counters` |", r"\|\s*(\d+) d\s*\|")
+    (batch,) = _documented_numbers(
+        "Retention sweep cadence", r"batches of ([\d,]+) per class"
+    )
+    (budget,) = _documented_numbers("Retention sweep cadence", r"or (\d+) s is spent")
+    config = WorkerConfig()
+    assert config.rate_counters_keep_seconds == days * 24 * 3600
+    assert config.retention_batch == batch
+    assert config.retention_budget_seconds == budget
+
+
+def test_the_clock_mints_the_retention_sweep_every_hour():
+    app = compose(engine=object(), config=WorkerConfig(), env={})
+    assert app.recurring["retention_sweep"] == 3600.0

@@ -240,6 +240,23 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   }),
 
   /**
+   * Invite a person by email (#1563). Only the address and the role are
+   * forwarded: the web makes email invitations, so the Telegram arm's
+   * `delivery_channel` and `invited_tg_user_id` never ride along. The port
+   * owns what a valid address and an invitable role are; this checks only
+   * that each is a string.
+   */
+  invite_member: submissionCommand((raw) => {
+    if (typeof raw.email !== "string") {
+      return { ok: false, error: "invalid_email" };
+    }
+    if (typeof raw.role !== "string") {
+      return { ok: false, error: "invalid_role" };
+    }
+    return { ok: true, body: { email: raw.email, role: raw.role } };
+  }),
+
+  /**
    * Remove a destination (owner decision 2026-09-04): the port's
    * `active → disabled` edge. The row stays for history and for the connect
    * that brings the account back, so this is not a delete.
@@ -301,6 +318,42 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     return {
       ok: true,
       body: { ig_account_id: raw.ig_account_id, settings: raw.settings },
+    };
+  }),
+
+  /**
+   * Plan one item onto one account at a wall time (#1413, phases 5 and 6):
+   * the Media Library's Schedule…. `local_at` is the date and time a person
+   * picked, with no offset; the port reads it in the ACCOUNT's zone, so it
+   * rides as typed.
+   *
+   * Shape only, as everywhere here. The port owns the time rules (a past time,
+   * one the clocks skip, one past the horizon) and the lock rule, and refuses
+   * each by name; a second copy of either here is one that could disagree.
+   * `override_locks` is forwarded only when it is `true`, which is how the CLI
+   * sends it.
+   */
+  schedule_item: submissionCommand((raw) => {
+    if (!isUuid(raw.ig_account_id)) {
+      return { ok: false, error: "invalid_ig_account_id" };
+    }
+    if (!isUuid(raw.media_item_id)) {
+      return { ok: false, error: "invalid_media_item_id" };
+    }
+    if (typeof raw.local_at !== "string" || raw.local_at.trim() === "") {
+      return { ok: false, error: "invalid_local_at" };
+    }
+    if (raw.override_locks !== undefined && typeof raw.override_locks !== "boolean") {
+      return { ok: false, error: "invalid_override_locks" };
+    }
+    return {
+      ok: true,
+      body: {
+        ig_account_id: raw.ig_account_id,
+        media_item_id: raw.media_item_id,
+        local_at: raw.local_at,
+        ...(raw.override_locks === true ? { override_locks: true } : {}),
+      },
     };
   }),
 };

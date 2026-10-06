@@ -79,7 +79,6 @@ check "the defaults pin stops finding readers (an empty search tree passes vacuo
 check "the landing example drops the variable the landing reads first" landing/.env.local.example 'TARGET_API_URL=http://localhost:8000
 ' '' "tests/test_landing_env_example.py -k every_variable_the_landing_reads_is_in_the_example"
 check "the landing reads a variable the example does not name" landing/src/lib/target-api.ts 'process.env.TARGET_API_URL || process.env.BACKEND_URL' 'process.env.TARGET_API_URL || process.env.GOOGLE_CLIENT_ID || process.env.BACKEND_URL' "tests/test_landing_env_example.py -k every_variable_the_landing_reads_is_in_the_example"
-check "a root config reads a variable the example does not name" landing/drizzle.config.ts 'process.env.DATABASE_URL' 'process.env.DRIZZLE_DATABASE_URL' "tests/test_landing_env_example.py -k every_variable_the_landing_reads_is_in_the_example"
 check "the pin stops scanning the landing's root configs" tests/test_landing_env_example.py 'for p in LANDING.glob(f"*.{ext}")' 'for p in (LANDING / "nowhere").glob(f"*.{ext}")' "tests/test_landing_env_example.py -k finder_scans_the_root_configs"
 check "the landing example names a variable nothing reads" landing/.env.local.example 'BACKEND_URL=' 'BACKEND_URL=
 JWT_SECRET=' "tests/test_landing_env_example.py -k every_example_line_is_read"

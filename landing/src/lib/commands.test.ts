@@ -65,10 +65,17 @@ describe("every offered command can produce an idempotency key", () => {
     disconnect_account: { submission_id: UUID },
     disable_account: { submission_id: UUID, ig_account_id: UUID2 },
     remove_member: { submission_id: UUID, user_id: UUID2 },
+    invite_member: { submission_id: UUID, email: "partner@example.com", role: "member" },
     account_settings_change: {
       submission_id: UUID,
       ig_account_id: UUID2,
       settings: { posts_per_day: 3 },
+    },
+    schedule_item: {
+      submission_id: UUID,
+      ig_account_id: UUID2,
+      media_item_id: UUID,
+      local_at: "2026-10-03T14:30",
     },
   };
 
@@ -369,6 +376,88 @@ describe("account_settings_change", () => {
   });
 });
 
+describe("schedule_item", () => {
+  // #1413 phase 6: the Media Library's Schedule…. The port reads the wall
+  // time in the account's zone and owns every rule about it; this tier
+  // checks shape.
+  const spec = COMMAND_SPECS.schedule_item;
+  const ITEM = "5d6e7f80-91a2-4b3c-8d4e-5f6a7b8c9d0e";
+  const plan = {
+    submission_id: UUID,
+    ig_account_id: UUID2,
+    media_item_id: ITEM,
+    local_at: "2026-10-03T14:30",
+  };
+
+  it("is offered", () => {
+    expect(isOfferedCommand("schedule_item")).toBe(true);
+  });
+
+  it("carries the account, the item and the wall time as typed, keyed on the submission", () => {
+    expect(spec.parse({ ...plan, extra: "ignored" })).toEqual({
+      ok: true,
+      body: { ig_account_id: UUID2, media_item_id: ITEM, local_at: "2026-10-03T14:30" },
+      identity: UUID,
+    });
+  });
+
+  it("forwards override_locks only when it is true, as the CLI sends it", () => {
+    expect(spec.parse({ ...plan, override_locks: true })).toEqual({
+      ok: true,
+      body: {
+        ig_account_id: UUID2,
+        media_item_id: ITEM,
+        local_at: "2026-10-03T14:30",
+        override_locks: true,
+      },
+      identity: UUID,
+    });
+    expect(spec.parse({ ...plan, override_locks: false })).toEqual({
+      ok: true,
+      body: { ig_account_id: UUID2, media_item_id: ITEM, local_at: "2026-10-03T14:30" },
+      identity: UUID,
+    });
+  });
+
+  it("refuses a non-id account or item by its own name", () => {
+    for (const bad of ["", "not-a-uuid", 7, null, undefined]) {
+      expect(spec.parse({ ...plan, ig_account_id: bad }), String(bad)).toEqual({
+        ok: false,
+        error: "invalid_ig_account_id",
+      });
+      expect(spec.parse({ ...plan, media_item_id: bad }), String(bad)).toEqual({
+        ok: false,
+        error: "invalid_media_item_id",
+      });
+    }
+  });
+
+  it("refuses a missing or blank wall time", () => {
+    for (const bad of ["", "   ", 7, null, undefined]) {
+      expect(spec.parse({ ...plan, local_at: bad }), String(bad)).toEqual({
+        ok: false,
+        error: "invalid_local_at",
+      });
+    }
+  });
+
+  it("refuses an override that is not a boolean", () => {
+    for (const bad of ["true", 1, null]) {
+      expect(spec.parse({ ...plan, override_locks: bad }), String(bad)).toEqual({
+        ok: false,
+        error: "invalid_override_locks",
+      });
+    }
+  });
+
+  it("does NOT re-validate the time rules the port owns", () => {
+    // A past time passes HERE. The port refuses it by name, as it does a time
+    // the clocks skip and one past the horizon (`facts.at_rule`); a second copy
+    // of those rules is one that can disagree.
+    expect(spec.parse({ ...plan, local_at: "2000-01-01 00:00" }).ok).toBe(true);
+  });
+});
+
 describe("offboard_workspace", () => {
   // #1127: the executor has been built and owner-gated at the port since the
   // X.3 work landed, and NO adapter could issue it. This row is the web
@@ -485,5 +574,45 @@ describe("resolve_review — the review card's three resolutions (2026-09-12)", 
       ok: false,
       error: "invalid_intent",
     });
+  });
+});
+
+describe("invite_member — the web's invitation is an email invitation, and only that", () => {
+  it("passes the address and the role through as typed: the port validates both", () => {
+    expect(
+      parseCommand("invite_member", {
+        submission_id: UUID,
+        email: "Partner@Example.com",
+        role: "admin",
+      }),
+    ).toEqual({
+      ok: true,
+      body: { email: "Partner@Example.com", role: "admin" },
+      identity: UUID,
+    });
+  });
+
+  it("sends nothing else, so the browser cannot pick the Telegram arm or name a Telegram user", () => {
+    const parsed = parseCommand("invite_member", {
+      submission_id: UUID,
+      email: "partner@example.com",
+      role: "member",
+      delivery_channel: "telegram",
+      invited_tg_user_id: 42,
+    });
+    expect(parsed.ok && Object.keys(parsed.body).sort()).toEqual(["email", "role"]);
+  });
+
+  it("refuses an address or a role that is not a string before any round trip", () => {
+    for (const bad of [undefined, null, 3, ["a@b.co"]]) {
+      expect(
+        parseCommand("invite_member", { submission_id: UUID, email: bad, role: "member" }),
+        String(bad),
+      ).toEqual({ ok: false, error: "invalid_email" });
+      expect(
+        parseCommand("invite_member", { submission_id: UUID, email: "a@b.co", role: bad }),
+        String(bad),
+      ).toEqual({ ok: false, error: "invalid_role" });
+    }
   });
 });
