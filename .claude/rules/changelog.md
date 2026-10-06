@@ -1,13 +1,14 @@
 ---
 paths:
   - "CHANGELOG.md"
+  - "changelog.d/**"
 ---
 
 # Changelog Maintenance
 
 **Format**: [Keep a Changelog](https://keepachangelog.com/) with [Semantic Versioning](https://semver.org/).
 
-**Every PR that touches code or config** must include an entry under `## [Unreleased]` — CI's `changelog-check` (`.github/workflows/ci.yml`) fails without it; a docs-only PR (`documentation/`, `*.md`, `.github/`) is exempt.
+**Every PR that touches code or config** adds its entry as one new fragment in `changelog.d/`, and no PR edits `CHANGELOG.md`. Naming, the rule CI's `changelog-check` (`.github/workflows/ci.yml`) applies, and the compile that folds the fragments into `CHANGELOG.md`: `changelog.d/README.md`.
 
 ## Version Bump Rules
 
@@ -17,9 +18,10 @@ paths:
 
 ## Entry Format
 
-```markdown
-## [Unreleased]
+A fragment holds exactly this: one or more `### <Section>` headings, each with
+its entries, and nothing before the first heading.
 
+```markdown
 ### Added
 
 - **A sentence naming the change, with its refs (#NNNN).** Prose in the same bullet: what it does, why, what a reader must know.
@@ -34,12 +36,11 @@ inside the bold, then prose — no ` - ` separator and no nested bullets.
 
 Categories: `Added`, `Changed`, `Removed`, `Fixed`, `Security` (and `Deprecated`
 when it applies); `Documentation` and `Tests` are in use for changes with no
-user-facing behaviour.
+user-facing behaviour. These are a fragment's only headings: the check refuses
+any other, so affected files and migrations go in the entry's prose.
 
 ## Best Practices
 
 - Write from the user's perspective
 - Include enough detail to understand the change without reading code
 - Reference issue/PR numbers when relevant: `(#123)`
-- Group related changes under descriptive subheadings
-- For significant changes, add a `### Technical Details` section listing affected files and migrations

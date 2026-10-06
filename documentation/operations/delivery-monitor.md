@@ -9,7 +9,7 @@ step, taken after the API that serves `/health/delivery` has been deployed (see 
 
 ## What it watches
 
-Migration 093 records, on every outbox row, the class of its last failed send:
+Migration 101 records, on every outbox row, the class of its last failed send:
 
 | Class | Meaning |
 |---|---|
@@ -19,7 +19,7 @@ Migration 093 records, on every outbox row, the class of its last failed send:
 | `credential_dead` | the bot token was refused (401) |
 | `ambiguous` | no answer came back: a timeout or a 5xx |
 
-093 also records the provider's code and the time. `/health/delivery` counts, estate-wide, the rows whose last
+101 also records the provider's code and the time. `/health/delivery` counts, estate-wide, the rows whose last
 failure fell in the last hour, by class and code. It gives two numbers:
 
 - **`failed_or_ambiguous`:** the rows that ended `failed` or sit `ambiguous`. This is the number that alerts.

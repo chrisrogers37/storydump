@@ -20,19 +20,26 @@ deployed ones rather than a fixture's idea of them.
 
 from __future__ import annotations
 
+import logging
 import uuid
+from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 import psycopg2
 import pytest
+from psycopg2 import sql
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from src.config.settings import settings
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import commands, invitations, sessions
 from src.services.target.commands import Command, CommandRefused
 from tests.scripts.conftest import (
     _scratch,
     actor_lacks_createrole,
     async_url,
+    fetch_all,
     run_bootstrap,
     seed_workspace_chain,
 )
@@ -122,6 +129,59 @@ class _Round:
 
     async def close(self):
         await self.engine.dispose()
+
+
+#: The web origin the invite tests' deployment is configured with.
+ORIGIN = "https://app.example.test"
+
+
+async def _execute_invite(world, args, *, origin=ORIGIN, actor=None):
+    """`invite_member` through `commands.execute`, the executor the web's
+    command route dispatches to, on a deployment whose web origin is *origin*."""
+    engine = create_async_engine(async_url(world["dsn"]))
+    try:
+        with mock.patch.object(settings, "WEB_APP_URL", origin):
+            async with engine.begin() as conn:
+                return await commands.execute(
+                    conn,
+                    Command(
+                        kind="invite_member",
+                        workspace_id=world["ws"],
+                        actor_user_id=actor or world["user"],
+                        channel="web",
+                        args=args,
+                    ),
+                )
+    finally:
+        await engine.dispose()
+
+
+def _rows_holding(dsn, needle):
+    """Every base table whose rows, read as text, contain *needle*, as
+    ``{"schema.table": rows}``. A scan rather than a list of known writers, so
+    it also catches the next one."""
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_schema, table_name FROM information_schema.tables"
+                " WHERE table_type = 'BASE TABLE'"
+                " AND table_schema NOT IN ('pg_catalog', 'information_schema')"
+            )
+            hits = {}
+            for schema, table in cur.fetchall():
+                cur.execute(
+                    sql.SQL(
+                        "SELECT count(*) FROM {}.{} AS t WHERE strpos(t::text, %s) > 0"
+                    ).format(sql.Identifier(schema), sql.Identifier(table)),
+                    (needle,),
+                )
+                rows = cur.fetchone()[0]
+                if rows:
+                    hits[f"{schema}.{table}"] = rows
+            return hits
+    finally:
+        conn.close()
 
 
 class TestTheCreateHalfMatchesTheAcceptor:
@@ -227,14 +287,98 @@ class TestTheCreateHalfMatchesTheAcceptor:
 
 
 class TestTheRefusalsAreNamedRatherThanConstraintNames:
-    async def test_a_second_live_invitation_to_one_address_is_refused(self, world):
+    async def test_re_inviting_an_address_replaces_its_pending_invitation(self, world):
+        """A second send to one address revokes the first: its link stops
+        working, the new one is the only live invitation, and it is the new
+        send's role that is granted. Without the revoke `uq_invite_live` would
+        refuse the send, and an invitation the accept door now refuses (098)
+        would keep refusing it until the reaper expired it."""
         r = _Round(world)
         try:
             addr = f"{uuid.uuid4().hex[:8]}@example.com"
-            await r.create(email=addr)
+            first, old_token = await r.create(email=addr, role="member")
+            second, new_token = await r.create(email=addr, role="admin")
+            assert second != first
+
             with pytest.raises(invitations.InvitationRefused) as exc:
-                await r.create(email=addr)
-            assert exc.value.reason == "already_invited"
+                await r.accept(old_token, email=addr)
+            assert exc.value.reason == "not_acceptable"
+            out = await r.accept(new_token, email=addr)
+            assert out["role"] == "admin"
+
+            async with r.engine.begin() as conn:
+                states = (
+                    await conn.execute(
+                        text(
+                            "SELECT id, state FROM workspace_invitations"
+                            " WHERE id IN (:a, :b)"
+                        ),
+                        {"a": first, "b": second},
+                    )
+                ).all()
+            assert dict((str(i), st) for i, st in states) == {
+                first: "revoked",
+                second: "accepted",
+            }
+        finally:
+            await r.close()
+
+    async def test_re_inviting_a_telegram_id_replaces_its_pending_invitation(
+        self, world
+    ):
+        """The addressee of a Telegram invitation is its Telegram id, so a
+        second send to that id revokes the first exactly as an email one does;
+        no index forces it, so without the revoke both would stay live."""
+        r = _Round(world)
+        try:
+            kw = {"delivery_channel": "telegram", "invited_tg_user_id": 555000111}
+            first, _ = await r.create(**kw)
+            second, _ = await r.create(**kw)
+            async with r.engine.begin() as conn:
+                states = (
+                    await conn.execute(
+                        text(
+                            "SELECT id, state FROM workspace_invitations"
+                            " WHERE id IN (:a, :b)"
+                        ),
+                        {"a": first, "b": second},
+                    )
+                ).all()
+            assert dict((str(i), st) for i, st in states) == {
+                first: "revoked",
+                second: "pending",
+            }
+        finally:
+            await r.close()
+
+    async def test_a_re_invite_leaves_another_workspaces_invitation_alone(self, world):
+        """The revoke is this workspace's: the same addressee's pending
+        invitation to another workspace stays live."""
+        conn = psycopg2.connect(world["dsn"])
+        try:
+            other = seed_workspace_chain(conn, f"invite-other-{uuid.uuid4().hex[:8]}")
+        finally:
+            conn.close()
+        r = _Round(world)
+        try:
+            addr = f"{uuid.uuid4().hex[:8]}@example.com"
+            tg = {"delivery_channel": "telegram", "invited_tg_user_id": 555000222}
+            theirs = [
+                (
+                    await r.create(
+                        **kw, workspace_id=other["ws"], invited_by_user_id=other["user"]
+                    )
+                )[0]
+                for kw in ({"email": addr}, tg)
+            ]
+            await r.create(email=addr)
+            await r.create(**tg)
+            states = fetch_all(
+                world["dsn"],
+                "SELECT state FROM workspace_invitations WHERE id IN (%s, %s)",
+                tuple(theirs),
+            )
+            assert [row["state"] for row in states] == ["pending", "pending"]
         finally:
             await r.close()
 
@@ -391,34 +535,16 @@ class TestTheEmailProducer:
     the whole channel was unreachable. These drive `commands.execute`, so they
     cover the producer AND the wiring, which is the pair the delivery_channel
     defect showed can disagree.
+
+    They pin the arm as built, and as built its job holds the accept URL, the
+    raw token. That is why the arm is off in every deployment
+    (`EMAIL_DELIVERY_ENABLED`). Whoever switches it on replaces the accept URL
+    test with one for a path that does not store the token.
     """
 
-    async def _invite(self, world, args, *, origin="https://app.example.test"):
-        engine = create_async_engine(async_url(world["dsn"]))
-        try:
-            import src.services.target.command_executors as ce
-
-            class _Settings:
-                web_app_origin = origin
-
-            original = ce.settings
-            ce.settings = _Settings()
-            try:
-                async with engine.begin() as conn:
-                    return await commands.execute(
-                        conn,
-                        Command(
-                            kind="invite_member",
-                            workspace_id=world["ws"],
-                            actor_user_id=world["user"],
-                            channel="web",
-                            args=args,
-                        ),
-                    )
-            finally:
-                ce.settings = original
-        finally:
-            await engine.dispose()
+    @pytest.fixture(autouse=True)
+    def _the_arm_switched_on(self, monkeypatch):
+        monkeypatch.setattr(invitations, "EMAIL_DELIVERY_ENABLED", True)
 
     async def _job(self, world, job_id):
         engine = create_async_engine(async_url(world["dsn"]))
@@ -440,7 +566,7 @@ class TestTheEmailProducer:
 
     async def test_an_email_invitation_enqueues_a_send_email_job(self, world):
         """The gap this closes, stated as the row that never existed."""
-        result = await self._invite(world, {"email": "Invitee@Example.com"})
+        result = await _execute_invite(world, {"email": "Invitee@Example.com"})
         delivery = result.data["delivery"]
         assert delivery["channel"] == "email"
         assert delivery["state"] == "queued"
@@ -459,10 +585,10 @@ class TestTheEmailProducer:
         """The link is the whole credential, so it has to be THE token — not a
         second one, and not the invitation id. Asserted by round-tripping the
         value out of the URL through the real accept door."""
-        result = await self._invite(world, {"email": "roundtrip@example.com"})
+        result = await _execute_invite(world, {"email": "roundtrip@example.com"})
         job = await self._job(world, result.data["delivery"]["job_id"])
         accept_url = job["payload"]["params"]["accept_url"]
-        assert accept_url.startswith("https://app.example.test/join/")
+        assert accept_url.startswith(f"{ORIGIN}/join/")
 
         from_url = accept_url.rsplit("/", 1)[-1]
         assert from_url == result.data["invite_token"]
@@ -484,7 +610,7 @@ class TestTheEmailProducer:
         or a state nothing claims — which is the shape the entire email channel
         was already in.
         """
-        result = await self._invite(world, {"email": "claimable@example.com"})
+        result = await _execute_invite(world, {"email": "claimable@example.com"})
         engine = create_async_engine(async_url(world["dsn"]))
         try:
             async with engine.begin() as conn:
@@ -513,7 +639,7 @@ class TestTheEmailProducer:
         by hand — so this is a delivery outcome, not a reason to refuse the
         command. What it must never be is silent.
         """
-        result = await self._invite(
+        result = await _execute_invite(
             world, {"email": "noorigin@example.com"}, origin=None
         )
         assert result.data["delivery"] == {
@@ -540,3 +666,115 @@ class TestTheEmailProducer:
         finally:
             await engine.dispose()
         assert count == 0, "a job was enqueued that could never render"
+
+
+class TestTheLinkIsShownOnce:
+    """#1563/#1564: an admin mints an invitation from the web and is shown its
+    link once. The token reaches the database only as its SHA-256, so the
+    command's response is the only place it appears.
+
+    An origin is configured unless a test says otherwise, so an email arm that
+    ran would have written its accept URL.
+    """
+
+    @staticmethod
+    def _address():
+        return f"{uuid.uuid4().hex[:8]}@example.com"
+
+    async def test_the_response_carries_the_join_link_and_its_expiry(self, world):
+        result = await _execute_invite(world, {"email": self._address()})
+        token = result.data["invite_token"]
+        assert result.data["join_url"] == f"{ORIGIN}/join/{token}"
+        left = datetime.fromisoformat(result.data["expires_at"]) - datetime.now(
+            timezone.utc
+        )
+        assert timedelta(days=7) - timedelta(minutes=5) < left <= timedelta(days=7)
+        [row] = fetch_all(
+            world["dsn"],
+            "SELECT expires_at FROM workspace_invitations WHERE id = %s",
+            (result.data["invitation_id"],),
+        )
+        assert datetime.fromisoformat(result.data["expires_at"]) == row["expires_at"]
+
+    async def test_with_no_web_origin_there_is_no_link(self, world):
+        result = await _execute_invite(world, {"email": self._address()}, origin=None)
+        assert result.data["join_url"] is None
+        assert result.data["invite_token"]
+
+    async def test_the_email_arm_is_withheld(self, world):
+        result = await _execute_invite(world, {"email": self._address()})
+        assert result.data["delivery"] == {"channel": "email", "state": "withheld"}
+
+    async def test_the_token_reaches_the_database_only_as_its_hash(self, world):
+        result = await _execute_invite(world, {"email": self._address()})
+        token = result.data["invite_token"]
+        assert _rows_holding(world["dsn"], token) == {}
+        # The scan's own control: it finds the hash, in the one row that holds it.
+        assert _rows_holding(world["dsn"], sessions.token_hash(token)) == {
+            "public.workspace_invitations": 1
+        }
+
+    async def test_the_token_is_logged_nowhere(self, world, caplog):
+        with caplog.at_level(logging.DEBUG):
+            result = await _execute_invite(world, {"email": self._address()})
+        token = result.data["invite_token"]
+        assert [r.name for r in caplog.records if token in r.getMessage()] == []
+
+    async def test_a_member_below_admin_cannot_mint_one(self, world):
+        r = _Round(world)
+        try:
+            address = self._address()
+            _id, token = await r.create(email=address)
+            await r.accept(token, email=address)
+            assert await r.role_of() == "member"
+        finally:
+            await r.close()
+        with pytest.raises(TenantResolutionError) as refused:
+            await _execute_invite(
+                world, {"email": self._address()}, actor=world["invitee"]
+            )
+        assert refused.value.reason == "insufficient_role"
+
+    async def test_the_link_is_refused_once_it_has_expired(self, world):
+        address = self._address()
+        result = await _execute_invite(world, {"email": address})
+        token = result.data["invite_token"]
+        r = _Round(world)
+
+        async def expire_at(moment):
+            async with r.engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE workspace_invitations SET expires_at = "
+                        + moment
+                        + " WHERE id = :i"
+                    ),
+                    {"i": result.data["invitation_id"]},
+                )
+
+        try:
+            await expire_at("now() - interval '1 second'")
+            with pytest.raises(invitations.InvitationRefused) as refused:
+                await r.accept(token, email=address)
+            assert refused.value.reason == "not_acceptable"
+            # The control: the same link with its expiry back in the future is
+            # accepted, so the refusal above was the expiry's.
+            await expire_at("now() + interval '1 hour'")
+            joined = await r.accept(token, email=address)
+            assert joined["workspace_id"] == str(world["ws"])
+        finally:
+            await r.close()
+
+    async def test_the_link_works_once(self, world):
+        address = self._address()
+        result = await _execute_invite(world, {"email": address})
+        token = result.data["join_url"].rsplit("/", 1)[-1]
+        r = _Round(world)
+        try:
+            joined = await r.accept(token, email=address)
+            assert joined["workspace_id"] == str(world["ws"])
+            with pytest.raises(invitations.InvitationRefused) as again:
+                await r.accept(token, email=address)
+            assert again.value.reason == "not_acceptable"
+        finally:
+            await r.close()

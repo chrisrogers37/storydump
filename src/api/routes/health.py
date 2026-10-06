@@ -3,16 +3,17 @@ posting axis (#1090 F1, #1268) and the delivery axis (#1482).
 
 They were the only routes in the app defined inline inside `create_app`; every
 other route in the API lives in a module here and is included as a router, and
-now so do these. Nothing about the payloads moved with them: `storydump health`
-renders these three and two fleet monitors poll them, so a field renamed here is
-a renderer and two pollers broken elsewhere.
+now so do these. `storydump health` renders the two axes and `details` (the
+`OPS_USER_IDS`-only `/api/v1/ops/health`), and two fleet monitors poll the axes, so a
+field renamed here is a renderer and two pollers broken elsewhere.
 
-Each handler reads `request.app.state.*` — the engine, the sampled database
-role, the pool watch, the tap counters and the two webhook reports — rather than
-the factory's closure, which is the whole reason they can live outside it. None
-of them opens a connection for `/health` itself: see its docstring.
-`/health/scheduling`, `/health/posting` and `/health/delivery` do, so each
-reuses its last answer for `HEALTH_CACHE_SECONDS` (`AnswerCache`, one per app on `app.state`).
+`details` reads `app.state.*` — the engine, the sampled database role, the pool
+watch, the tap counters and the two webhook reports — rather than the factory's
+closure, which is the whole reason these can live outside it. Neither it nor
+`/health` opens a connection: see `/health`'s docstring. `/health/scheduling`,
+`/health/posting`, `/health/delivery` and the operating details' queue read
+(`queue_pressure`) do, so each reuses its last answer for `HEALTH_CACHE_SECONDS`
+(`AnswerCache`, one per app on `app.state`).
 
 The router carries no `tags=`: these operations have never had one, and
 `/openapi.json` is a response body like any other.
@@ -21,16 +22,18 @@ The router carries no `tags=`: these operations have never had one, and
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from datetime import datetime, timezone
 from types import TracebackType
 
 from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy.exc import SQLAlchemyError
 
 from src import __version__
 from src.services.target import (
     backpressure,
     delivery_health,
+    health_reads,
     posting_health,
     scheduling_health,
 )
@@ -45,16 +48,25 @@ from src.services.target.work_loop import WorkerConfig
 #: prints it — all reported a version the deployment had not been for months.
 #: A number that has to be remembered in two places is a number that drifts.
 VERSION = __version__
+#: The commit Railway deployed, which it sets on every Git-triggered deploy.
+COMMIT_VAR = "RAILWAY_GIT_COMMIT_SHA"
 _START_TIME = time.time()
 
-#: How long `/health/scheduling` and `/health/posting` reuse their last answer.
-#: Both are unauthenticated and each answer takes a connection from the API's
+#: How long `/health/scheduling`, `/health/posting` and the operating details'
+#: queue read reuse their last answer. The first two are unauthenticated and
+#: each answer takes a connection from the API's
 #: shared pool, so without this anyone could drain the pool the webhook needs
 #: by polling them. The fleet monitors poll far less often than this, and every
 #: number in the payloads is an age or a count that moves on a scale of minutes.
 HEALTH_CACHE_SECONDS = 30.0
 
+#: How long the operating details wait for the queue's read before naming it a
+#: `TimeoutError`: a database that stops answering hangs a connect for the
+#: driver's own minute, and the rest of the details need no database at all.
+QUEUE_READ_TIMEOUT_S = 3.0
+
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class AnswerCache:
@@ -102,13 +114,25 @@ class AnswerCache:
 
 @router.get("/health")
 async def health_check(request: Request):
-    """Railway's probe. No auth. `target_database` is configuration
-    presence, not liveness — a probe that opened a connection would take
-    the service down for a database blip no restart repairs."""
-    state = request.app.state
+    """Railway's probe. No auth, so it says ok, and which version and commit
+    answer (what a deploy is verified by), and nothing else. It opens no
+    connection — a probe that did would take the service down for a database
+    blip no restart repairs — and the operating details it used to carry
+    (usage counts, the database login, the pool, the bot's webhook) are
+    `details` below, behind `GET /api/v1/ops/health`."""
+    return _public(request.app.state)
+
+
+def _public(state) -> dict:
+    return {"status": "ok", "version": VERSION, "commit": state.commit}
+
+
+def details(state) -> dict:
+    """What the API knows about itself, for the people in `OPS_USER_IDS`
+    (`routes/ops.py`). Read from `app.state`, so it opens no connection either;
+    `target_database` is configuration presence, not liveness."""
     return {
-        "status": "ok",
-        "version": VERSION,
+        **_public(state),
         "uptime_seconds": int(time.time() - _START_TIME),
         "target_database": state.engine is not None,
         "db_role": state.db_role,
@@ -123,6 +147,34 @@ async def health_check(request: Request):
         "webhook": state.webhook,
         "webhook_live": state.webhook_live,
     }
+
+
+async def operating_details(state) -> dict:
+    """`details`, and the queue's backpressure (phase 3a step 6): the ready
+    lanes, the pending outbox and the Telegram pacing, without the waiting
+    workspace's id. The queue is the one part that opens a connection, so it
+    reuses its last answer like the public axes (`health_cache`), is None
+    without an engine, and names a failed or slow read (`QUEUE_READ_TIMEOUT_S`)
+    rather than failing or holding up the rest."""
+    return {**details(state), "backpressure": await queue_pressure(state)}
+
+
+async def queue_pressure(state) -> dict | None:
+    if state.engine is None:
+        return None
+
+    async def read():
+        try:
+            return await asyncio.wait_for(
+                backpressure.read(state.engine, WorkerConfig()), QUEUE_READ_TIMEOUT_S
+            )
+        except (SQLAlchemyError, OSError, asyncio.TimeoutError, TimeoutError) as exc:
+            # a database that refused, failed or did not answer: a report,
+            # never a failed read; anything else is a bug and raises
+            logger.warning("queue pressure not read: %r", exc)
+            return {"error": type(exc).__name__}
+
+    return await state.health_cache.answer("backpressure", read)
 
 
 @router.get("/health/scheduling")
@@ -175,7 +227,10 @@ async def scheduling_health_check(request: Request):
         # The first switch to `svc_ingress` (2026-09-20, #751) is why: with
         # the reads still direct, every policy-covered table read empty and
         # this surface said `no-signal` for a live estate.
-        async with engine.connect() as conn:
+        #
+        # Each statement is capped (`health_reads`): a statement past the cap is
+        # cancelled, which the app answers as a 503, and frees its connection.
+        async with health_reads.connect(engine) as conn:
             # TWO AXES, ONE PAYLOAD (#1120). The cursor axis is empty whenever
             # no destination is active, and `no-signal` is then the answer
             # whether the worker is healthy or DEAD — so the one monitored axis
@@ -189,17 +244,10 @@ async def scheduling_health_check(request: Request):
             # predating this change reads the payload exactly as before.
             lag = await scheduling_health.scheduling_lag(conn)
             worker = await scheduling_health.worker_freshness(conn)
-            # The backpressure signal (phase 3a step 6): the same numbers the
-            # worker's status line prints, for the poller that watches this —
-            # without the waiting workspace's id (this route is public and
-            # promises nothing identifying; `identify` stays False).
-            pressure = await backpressure.snapshot(
-                conn,
-                now=datetime.now(timezone.utc),
-                global_limit=WorkerConfig().global_limit,
-                global_window_seconds=WorkerConfig().global_window_seconds,
-            )
-            return {**lag, "worker": worker, "backpressure": pressure}
+            # Exactly what `scripts/scheduling_monitor.py` reads, and nothing
+            # else: the queue's backpressure moved to the operating details
+            # (`queue_pressure`), which no monitor has ever read.
+            return {**lag, "worker": worker}
 
     return await request.app.state.health_cache.answer("scheduling", read)
 
@@ -257,8 +305,8 @@ async def posting_health_check(request: Request):
         # above records: `UnitOfWork.__init__` refuses a blank tenant at
         # construction, and this aggregate is estate-wide and has no tenant.
         # Its cross-tenant reach is 081's doors, the same footing as the route
-        # above.
-        async with engine.connect() as conn:
+        # above, and its statements are capped the same way.
+        async with health_reads.connect(engine) as conn:
             posting = await posting_health.posting_freshness(conn)
             attempts = await posting_health.publish_attempts(conn)
             # `accounts_active` is CONTEXT for the alert text and never a gate:
@@ -284,7 +332,7 @@ async def delivery_health_check(request: Request):
 
     The last hour's outbox rows whose last failure fell in it, by class and the
     provider's code, how many of them ended `failed` or sit `ambiguous`, and how
-    many rows were sent in the same hour (`delivery_health`, through 093's
+    many rows were sent in the same hour (`delivery_health`, through 101's
     doors). NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: the
     alert is `scripts/delivery_monitor.py`, run outside the app. Unauthenticated,
     so AGGREGATES ONLY: counts and codes, never a workspace, a chat or a message.
@@ -297,7 +345,7 @@ async def delivery_health_check(request: Request):
 
     async def read():
         # A direct connection, as on `/health/posting`: the read is estate-wide
-        # and has no tenant, and its cross-tenant reach is 093's doors.
+        # and has no tenant, and its cross-tenant reach is 101's doors.
         async with engine.connect() as conn:
             return await delivery_health.outbox_failures(conn)
 

@@ -146,7 +146,7 @@ class ChannelOutbox(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'pending'"))
     attempts = Column(Integer, nullable=False, server_default=text("0"))
     external_message_ref = Column(Text, nullable=True)
-    # The row's LAST failed attempt, not how it ended (093, #1482): the class
+    # The row's LAST failed attempt, not how it ended (101, #1482): the class
     # (`vocabulary.OUTBOX_FAILURE_CLASSES`), the provider's own code for it
     # (Telegram's `error_code`; NULL when no answer came back) and when. A later
     # success does not clear them; `state` says how the row ended.

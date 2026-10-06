@@ -1,8 +1,8 @@
 """The fleet health surfaces read the whole estate under the ingress role (#751).
 
 `/health/scheduling` and `/health/posting` count across every workspace —
-stalled cursors, active destinations, landings, the debited cap ledger, the
-ready lanes, the pending outbox — and the fleet monitors take their verdicts
+stalled cursors, active destinations, landings, the debited cap ledger — and
+the operating details read the ready lanes and the pending outbox; and the fleet monitors take their verdicts
 from those counts. Until 081 the reads behind them went straight at the tenant
 tables with no tenant set, which the owner login could do because it bypasses
 row-level security. The runtime login cannot: the first switch of the API to

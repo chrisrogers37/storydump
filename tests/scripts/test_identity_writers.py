@@ -67,6 +67,7 @@ import psycopg2
 import pytest
 from sqlalchemy import text
 
+from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import identity, sessions, vocabulary, workspaces
 from src.services.target.workspaces import InvalidWorkspaceArgs
@@ -496,14 +497,21 @@ class TestTheSessionWriter:
         )
 
     def test_resolve_slides_the_window_and_the_throttle_holds_the_second_read(
-        self, world
+        self, world, monkeypatch
     ):
         """**There is no `touch_session` on the live lane.** `sessions.resolve`
         slides inline, throttled by `RENEW_THROTTLE_SECONDS`, so the twin's
         separate touch door becomes two assertions about one function: a read
         past the throttle slides `expires_at` and stamps `last_seen_at`; a
         read inside the window does not.
+
+        The absolute cap is lifted past the TTL here: at its default the two
+        are equal, every slide lands on `created_at` + the cap, and the third
+        read could not move the window — the cap's own test is below.
         """
+        monkeypatch.setattr(
+            settings, "SESSION_MAX_AGE_SECONDS", 3 * sessions.SESSION_TTL_SECONDS
+        )
         user_id = self._user(world, "slide")
         value = self._issue(world, user_id)
         h = sessions.token_hash(value)
@@ -554,6 +562,131 @@ class TestTheSessionWriter:
             (h,),
         )
         assert after_third > after_second and seen_third > seen_first
+
+    def _backdate(self, world, h, *, age, expires_in="1 hour", last_seen=None):
+        """Set the row's clocks as the owner: `created_at` *age* ago,
+        `expires_at` *expires_in* ahead, `last_seen_at` as given."""
+        with txn(world["stream"]) as c, c.cursor() as cur:
+            cur.execute(
+                "UPDATE session_tokens SET created_at = now() - %s::interval,"
+                " expires_at = now() + %s::interval, last_seen_at = %s"
+                " WHERE token_hash = %s",
+                (age, expires_in, last_seen, h),
+            )
+            c.commit()
+
+    def test_a_session_past_its_absolute_age_is_expired_however_fresh(self, world):
+        """`settings.SESSION_MAX_AGE_SECONDS` counts from `created_at`: a row
+        whose sliding `expires_at` is still a day out, but which was minted
+        longer ago than the cap, refuses as `expired_session` — and the read
+        does not slide it back to life."""
+        user_id = self._user(world, "aged")
+        value = self._issue(world, user_id)
+        h = sessions.token_hash(value)
+        self._backdate(
+            world,
+            h,
+            age=f"{settings.SESSION_MAX_AGE_SECONDS + 60} seconds",
+            expires_in="1 day",
+        )
+        before = owner(
+            world, "SELECT expires_at FROM session_tokens WHERE token_hash = %s", (h,)
+        )[0]
+
+        with pytest.raises(TenantResolutionError) as err:
+            self._resolve(world, value)
+        assert err.value.reason == "expired_session"
+        assert (
+            owner(
+                world,
+                "SELECT expires_at FROM session_tokens WHERE token_hash = %s",
+                (h,),
+            )[0]
+            == before
+        ), "the read slid an over-age session"
+
+    def test_the_slide_never_carries_expiry_past_the_cap(self, world):
+        """A session one day short of its cap, used now: the slide would put
+        `expires_at` 30 days out, and `LEAST` holds it at `created_at` + the
+        cap instead — one day out, not thirty."""
+        user_id = self._user(world, "capped")
+        value = self._issue(world, user_id)
+        h = sessions.token_hash(value)
+        self._backdate(
+            world, h, age=f"{settings.SESSION_MAX_AGE_SECONDS - 86400} seconds"
+        )
+
+        assert self._resolve(world, value).user_id == user_id
+        at_cap, still_live, seen = owner(
+            world,
+            "SELECT expires_at = created_at + make_interval(secs => %s),"
+            " expires_at > now(), last_seen_at IS NOT NULL"
+            " FROM session_tokens WHERE token_hash = %s",
+            (settings.SESSION_MAX_AGE_SECONDS, h),
+        )
+        assert seen is True, "the read did not slide at all"
+        assert at_cap is True and still_live is True
+
+    def test_revoke_all_kills_the_siblings_and_no_one_elses(self, world):
+        """Sign out everywhere: every live session of the presenting user,
+        that one included; an already-revoked sibling keeps its first
+        instant; another user's sessions are untouched; and a DEAD presented
+        session reaches nothing."""
+        me = self._user(world, "everywhere-me")
+        other = self._user(world, "everywhere-other")
+        here, laptop, phone = (self._issue(world, me) for _ in range(3))
+        theirs = self._issue(world, other)
+        # A pending Telegram link each: a stolen session could have minted
+        # mine, and it must not outlive the sign-out.
+        link = (
+            "INSERT INTO oauth_states (state, user_id, provider, purpose, expires_at)"
+            " VALUES (%s, %s, 'telegram', 'link', now() + interval '15 minutes')"
+            " RETURNING state"
+        )
+        owner(world, link, (f"link-{me}", me))
+        owner(world, link, (f"link-{other}", other))
+        hp = sessions.token_hash(phone)
+        assert user_plane(world, lambda c: sessions.revoke(c, token_hash=hp)) is True
+        phone_kill = owner(
+            world, "SELECT revoked_at FROM session_tokens WHERE token_hash = %s", (hp,)
+        )[0]
+
+        revoked = user_plane(
+            world,
+            lambda c: sessions.revoke_all_for_user(
+                c, token_hash=sessions.token_hash(here)
+            ),
+        )
+        assert revoked == 2, "here and the laptop; the phone was already out"
+        for value in (here, laptop, phone):
+            with pytest.raises(TenantResolutionError) as err:
+                self._resolve(world, value)
+            assert err.value.reason == "revoked_session"
+        assert (
+            owner(
+                world,
+                "SELECT revoked_at FROM session_tokens WHERE token_hash = %s",
+                (hp,),
+            )[0]
+            == phone_kill
+        )
+        assert self._resolve(world, theirs).user_id == other
+        consumed = "SELECT consumed_at IS NOT NULL FROM oauth_states WHERE state = %s"
+        assert owner(world, consumed, (f"link-{me}",)) == (True,)
+        assert owner(world, consumed, (f"link-{other}",)) == (False,)
+
+        # Their own dead session (revoked above) cannot reach a new sibling.
+        fresh = self._issue(world, me)
+        assert (
+            user_plane(
+                world,
+                lambda c: sessions.revoke_all_for_user(
+                    c, token_hash=sessions.token_hash(here)
+                ),
+            )
+            == 0
+        )
+        assert self._resolve(world, fresh).user_id == me
 
     def test_a_disabled_user_is_refused_at_the_one_ingress_gate(self, world):
         """**New coverage the live lane makes possible.** The retired

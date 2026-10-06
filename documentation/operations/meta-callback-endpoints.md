@@ -112,7 +112,7 @@ secret configured at all still refuses everything.
 
 ## Signature verification
 
-`meta_callbacks.parse_signed_request` verifies HMAC-SHA256 over the **raw
+`meta_callbacks.verify_signed_request` verifies HMAC-SHA256 over the **raw
 base64 payload string**, not the re-encoded JSON — re-serialising would produce
 different bytes for the same logical payload and break honest requests.
 
