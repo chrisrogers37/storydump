@@ -406,8 +406,9 @@ class TestD4TheParkedIntentNotice:
         return str(rows[0][0])
 
     async def _sweep_and_notify(self, notice_db, *, origin="https://app.example"):
-        """Drive the REAL door and the REAL producer, in that order — the same
-        two calls `work_loop.reconcile_ambiguous` makes for a notify row.
+        """Drive the REAL door, the REAL producer and the REAL record of an
+        unheard notice, in that order — the calls `work_loop.reconcile_ambiguous`
+        makes for its notify rows on a beat that returns.
 
         **The session opens with an EMPTY tenant id, and that is the whole
         point.** `reconcile_ambiguous` is a system singleton (`workspace_id
@@ -421,7 +422,7 @@ class TestD4TheParkedIntentNotice:
         from src.services.target import outbox, reconciler, unit_of_work
 
         engine = create_async_engine(async_url(notice_db["dsn"]))
-        served, unreachable = [], []
+        served, unheard, unreachable = [], [], []
         try:
             async with engine.connect() as conn:
                 await unit_of_work.apply_gucs(conn, tenant_id="", actor_kind="system")
@@ -447,17 +448,25 @@ class TestD4TheParkedIntentNotice:
                         intent_id=op["intent_id"],
                         workspace_id=op["workspace_id"],
                         web_app_origin=origin,
-                        retry_after_seconds=NOTIFY_AFTER_S,
                     )
                     # str(): the door hands back UUID objects and `_park`
                     # returns str, so comparing raw would fail on type while
                     # the behaviour is right.
-                    if not mine:
-                        continue
                     if sent == outbox.UNDELIVERABLE:
-                        unreachable.append(str(op["intent_id"]))
-                    elif sent:
+                        unheard.append((op, mine))
+                    elif sent and mine:
                         served.append(str(op["intent_id"]))
+                # An unheard notice counts once its attempt is recorded, which
+                # is once per window: the signal the job's end would carry.
+                for op, mine in unheard:
+                    recorded = await reconciler.record_no_surface(
+                        conn,
+                        intent_id=op["intent_id"],
+                        workspace_id=op["workspace_id"],
+                        retry_after_seconds=NOTIFY_AFTER_S,
+                    )
+                    if mine and recorded == outbox.UNDELIVERABLE:
+                        unreachable.append(str(op["intent_id"]))
                 await conn.commit()
             return served, unreachable
         finally:

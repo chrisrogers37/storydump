@@ -161,10 +161,11 @@ class WorkerConfig:
 RESERVED_CONNECTIONS = 3
 #: What one task holds at its peak, per lane. An interactive task's kinds run
 #: their own transactions (the sender) or one short job transaction: one
-#: connection. A bulk task's plain kinds — a sync walk, a credential refresh,
-#: the ambiguous reconciler's poll — open sessions of their own UNDER the
-#: loop's job transaction, so a bulk task holds two at its peak (adversarial
-#: review of the 3b PR). The ceiling weighs them so, rather than pretending.
+#: connection. A bulk task's plain kinds — a sync walk, a credential refresh —
+#: open sessions of their own UNDER the loop's job transaction, and the
+#: ambiguous reconciler's poll opens one under that row's own transaction
+#: (#1492), so a bulk task holds two at its peak (adversarial review of the 3b
+#: PR). The ceiling weighs them so, rather than pretending.
 TASK_CONNECTIONS = {"interactive": 1, "bulk": 2}
 
 
@@ -249,6 +250,12 @@ def build_registry(deps: WorkerDeps) -> dict:
     """kind → adapter | Parked, for every kind in the `02` §5 registry."""
 
     cfg = deps.config
+    sessions = unit_of_work.make_session_for(deps.engine)
+
+    def short(session, job):
+        # The loop hands a marked executor no session (phase 3b); a caller
+        # that DOES pass one (the unit seam) keeps it for every write.
+        return sessions(job) if session is None else nullcontext(session)
 
     async def plan_slot(session, job):
         payload = job.get("payload") or {}
@@ -326,6 +333,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         # and gain the terminal line — phase 1 of the 2026-09-09 tap plan.
         await prompts.sweep_settled_cards(session, limit=cfg.reap_limit)
 
+    @own_transactions
     async def reconcile_ambiguous(session, job):
         """The `02` §6 sweep. TWO reasons, and only one of them needs a poll.
 
@@ -341,42 +349,48 @@ def build_registry(deps: WorkerDeps) -> dict:
         **The poll seam parks the LADDER half, not the kind.** The module
         docstring's rule is that a missing seam parks its *dependent* kind; the
         notify half depends on nothing the deployment lacks, so parking it with
-        the ladder over-parks. This matters concretely rather than in
-        principle: production runs `poll=None` (`worker.py`), so under the old
-        registration the whole kind was `Parked` and the customer notification
-        could not fire even once the producer existed.
+        the ladder over-parks: a deployment with no poll seam would lose the
+        customer notification too.
+
+        **A failed row fails alone** (#1492). The sweep reads in one short
+        transaction and each row runs in a transaction of its own, so a row
+        that raises — a verdict whose flip matched no row is #1438's alarm —
+        rolls back alone, and the rows behind it still land rather than wait
+        behind it (an unresolved ambiguity holds its account's next publish,
+        `uq_publish_exclusive`). Not a savepoint per row in one transaction: a
+        batch larger than `offboarding.MAX_WRITING_SAVEPOINTS` overflows the
+        backend's subtransaction cache (#1441). After the beat the first
+        failure is re-raised, so the job still fails and retries. A notice
+        nobody can hear is recorded only by a beat that returns
+        (`reconciler.record_no_surface` says why), so a failing beat leaves
+        none behind. A caller that passes its own session (the unit seam) gets
+        a savepoint per row on it instead.
         """
-        due = await reconciler.sweep_due(
-            session,
-            limit=cfg.reconcile_limit,
-            notify_after_seconds=cfg.reconcile_notify_after_seconds,
-        )
-        ladder_skipped = unreachable = 0
-        for op in due:
+        async with short(session, job) as reader:
+            due = await reconciler.sweep_due(
+                reader,
+                limit=cfg.reconcile_limit,
+                notify_after_seconds=cfg.reconcile_notify_after_seconds,
+            )
+
+        async def reconcile_row(session, op):
             if op["reason"] == "notify_window":
-                sent = await reconciler.notify_parked_customer(
+                return await reconciler.notify_parked_customer(
                     session,
                     intent_id=op["intent_id"],
                     workspace_id=op["workspace_id"],
                     web_app_origin=cfg.web_app_origin,
-                    retry_after_seconds=cfg.reconcile_notify_after_seconds,
                 )
-                if sent == outbox.UNDELIVERABLE:
-                    unreachable += 1
-                continue
-            if deps.poll is None:
-                ladder_skipped += 1
-                continue
             # Scope the ladder row too. 059 says every write from this sweep
             # "runs tenant-scoped as svc_worker" and nothing did — the session
             # carries `app.tenant_id = ''` because this is a system singleton,
-            # so these writes were invisible to `p_tenant` already. Reading the
-            # reason tag also makes the tenant VARY across one sweep, so
-            # asserting it per row is what keeps a ladder row from inheriting
-            # the scope of whichever notify row preceded it. The ladder's
-            # count is read AFTER the claim for the same reason: `post_intents`
-            # is policy-covered, and a read with no tenant answers 0 for every
-            # row — a ladder that never exhausts (#1349 review).
+            # so these writes were invisible to `p_tenant` already. On the unit
+            # seam the rows share one session, and asserting the tenant per row
+            # is what keeps a ladder row from inheriting the scope of whichever
+            # row preceded it. The ladder's count is read AFTER the claim for
+            # the same reason: `post_intents` is policy-covered, and a read with
+            # no tenant answers 0 for every row — a ladder that never exhausts
+            # (#1349 review).
             await unit_of_work.apply_gucs(
                 session,
                 tenant_id=str(op["workspace_id"]),
@@ -391,6 +405,32 @@ def build_registry(deps: WorkerDeps) -> dict:
                     session, intent_id=op["intent_id"]
                 ),
             )
+
+        ladder_skipped = 0
+        # The notify rows whose workspace has nowhere to receive the notice.
+        unreachable = []
+        failures = []
+        for op in due:
+            if op["reason"] == "ladder_due" and deps.poll is None:
+                ladder_skipped += 1
+                continue
+            try:
+                # A transaction per row; on the unit seam, a savepoint per row.
+                async with (
+                    short(session, job) as row_session,
+                    nullcontext() if session is None else session.begin_nested(),
+                ):
+                    if await reconcile_row(row_session, op) == outbox.UNDELIVERABLE:
+                        unreachable.append(op)
+            except Exception as exc:  # noqa: BLE001 — re-raised after the beat
+                logger.exception(
+                    "reconcile_ambiguous: the %s row of intent %s failed; its"
+                    " writes rolled back and NO verdict was recorded for it —"
+                    " the beat goes on",
+                    op["reason"],
+                    op["intent_id"],
+                )
+                failures.append(exc)
         if ladder_skipped:
             # Loud, per the module docstring: the deployment cannot do this
             # half and says so every beat it has work for it.
@@ -400,12 +440,33 @@ def build_registry(deps: WorkerDeps) -> dict:
                 " it); the notify half ran",
                 ladder_skipped,
             )
+        if failures:
+            # Loud, as #1438 asks: the job fails and retries. The rows that
+            # resolved have committed, so only the failed rows come round again.
+            logger.error(
+                "reconcile_ambiguous: %d of %d row(s) failed this beat; the"
+                " rest committed",
+                len(failures),
+                len(due),
+            )
+            raise failures[0]
         if unreachable:
-            # One workspace with nowhere to receive its notice makes the WHOLE
-            # sweep not-a-delivery. The rows that did land are already written
-            # in this transaction; what must not happen is the run reading as
-            # clean when somebody was owed a message and got none.
-            return outbox.UNDELIVERABLE
+            async with short(session, job) as writer:
+                recorded = [
+                    await reconciler.record_no_surface(
+                        writer,
+                        intent_id=op["intent_id"],
+                        workspace_id=op["workspace_id"],
+                        retry_after_seconds=cfg.reconcile_notify_after_seconds,
+                    )
+                    for op in unreachable
+                ]
+            if outbox.UNDELIVERABLE in recorded:
+                # One workspace with nowhere to receive its notice makes the
+                # WHOLE sweep not-a-delivery. The rows that did land have
+                # committed; what must not happen is the run reading as clean
+                # when somebody was owed a message and got none.
+                return outbox.UNDELIVERABLE
 
     async def alert_stranded_sources(session, job):
         # Alert-only: nothing here re-arms a source or enqueues a sync. The
@@ -452,8 +513,6 @@ def build_registry(deps: WorkerDeps) -> dict:
         # transactions; the loop must not finalize again.
         return jobs.SELF_FINALIZED
 
-    sessions = unit_of_work.make_session_for(deps.engine)
-
     @own_transactions
     async def deliver_outbox(session, job):
         # The bounded sender hold: while THIS lease serializes the binding's
@@ -469,12 +528,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             payload.get("binding_id") or job["serialization_key"].split(":", 1)[1]
         )
 
-        def short():
-            # The loop hands a marked executor no session (phase 3b); a caller
-            # that DOES pass one (the unit seam) keeps it for every write.
-            return sessions(job) if session is None else nullcontext(session)
-
-        async with short() as reader:
+        async with short(session, job) as reader:
             row = (
                 (
                     await reader.execute(
@@ -498,7 +552,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             # (`outbox.claim_next`); ending here spends no hold on a chat the
             # workspace let go of, and retiring what is left of its queue
             # keeps a later re-bind from posting it as stale cards.
-            async with short() as writer:
+            async with short(session, job) as writer:
                 retired = await bindings.retire_unsettled(writer, binding_id=binding_id)
             logger.info(
                 "deliver_outbox %s: binding %s is %s — nothing sent, %d retired",
@@ -528,7 +582,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # became a supergroup) or retire the binding; either way this
                 # hold ends — the sweep will not mint for a revoked binding.
                 moved = result.get("migrate_to")
-                async with short() as writer:
+                async with short(session, job) as writer:
                     followed = await bindings.follow_or_retire(
                         writer, binding_id=binding_id, successor=moved
                     )
@@ -545,7 +599,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # sender yields its lane now and comes back when Telegram said
                 # to — its own reschedule, no attempt spent (phase 3a step 2).
                 wait = float(result.get("retry_after_s") or cfg.poller_interval_seconds)
-                async with short() as writer:
+                async with short(session, job) as writer:
                     await jobs.reschedule_job(
                         writer,
                         job["id"],
