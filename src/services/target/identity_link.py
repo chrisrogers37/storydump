@@ -12,13 +12,12 @@ Clause 1's *"one Telegram identity managing both workspaces"* half. The flow:
    one-shot and attaches that Telegram account to the pinned user. Cancel
    consumes it and links nothing; so does the state's expiry, by lapse.
 
-**Why two steps.** With one, the link was a bearer of the minter's identity
-slot: anyone could mint one and send it to someone in a bound group who had
-not linked yet, and the opener's Telegram became the minter's — their next
-word in the group made the minter a member (`membership_sync`) and their card
-taps ran as the minter. The confirmation names the account so the opener can
-see it is not theirs, and the button carries the opener's Telegram id so a
-forwarded copy confirms nothing for anyone else.
+**Why two steps.** A linked Telegram identity speaks for its Storydump
+account — its message in a bound group makes that account a member
+(`membership_sync`) and its card taps run as that account — so a link
+attaches an identity only on the opener's own Confirm. The confirmation names
+the account so the opener can see whose it is, and the button carries the
+opener's Telegram id, so a Confirm counts only for the user it was offered to.
 
 **The state value IS the start token.** `07` §2: *"the state value is the
 one-shot start token (unguessable, stored, CAS-consumed; a stateless signed
@@ -174,13 +173,9 @@ def confirmation_keyboard(state: str, telegram_user_id: str) -> dict:
 async def handle_link(conn, ctx: StartContext) -> StartResult:
     """Step one of a `link-` payload: ASK, link nothing.
 
-    Opening the link used to attach the opener's Telegram account to the
-    minting user on the spot — so anyone could mint a link, send it to a
-    person in a bound group who had not linked yet, and become them: their
-    next word in the group made the minter a member of that workspace and
-    their taps ran as the minter. Now the opener is shown whose account the
-    link belongs to (a masked email) with Confirm and Cancel, and only
-    :func:`handle_tap`'s Confirm, by the same Telegram user, links.
+    The opener is shown whose account the link belongs to (a masked email)
+    with Confirm and Cancel, and only :func:`handle_tap`'s Confirm, by the
+    same Telegram user, links.
 
     The state is PEEKED, not consumed: consumption is the Confirm's, one-shot.
     Only a private chat is served — the confirmation names an account, and a
@@ -253,13 +248,12 @@ async def handle_tap(
     - the prompt is in a private chat, and the chat is the tapper's own
       (in a private chat the chat id IS the user id);
     - the tapper is the Telegram user the prompt was offered to — the id the
-      bot minted into the button, so a forwarded copy tapped by someone else
-      confirms nothing.
+      bot minted into the button, so the prompt confirms for that user only.
 
     Then Confirm consumes the state one-shot (:func:`oauth_states.consume_state`
     — a second Confirm, or a Confirm after Cancel or after expiry, is refused
-    by the CAS) and links; Cancel consumes it too, so a link someone sent you
-    is dead once you have said no.
+    by the CAS) and links; Cancel consumes it too, so a cancelled link can
+    never be confirmed.
     """
     if (
         chat_type != "private"
