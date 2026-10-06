@@ -102,7 +102,7 @@ _UPLOAD_BUDGET_S = 120.0
 
 class TelegramSendError(ChannelSendError):
     """The transport could not produce an external ref for this row. Telegram's
-    own code, when it answered with one, rides as ``code`` (093, #1482)."""
+    own code, when it answered with one, rides as ``code`` (101, #1482)."""
 
 
 class TelegramChatGone(DestinationGone, TelegramSendError):
@@ -146,7 +146,7 @@ class MediaTransient(Exception):
 class TelegramAuthDead(CredentialDead, TelegramSendError):
     """Telegram rejected the credential itself (401; a 403 is the chat's,
     `_chat_gone`) — the loud class. For the outbox it is a `CredentialDead`,
-    recorded as `credential_dead` rather than as a lost response (093, #1482)."""
+    recorded as `credential_dead` rather than as a lost response (101, #1482)."""
 
 
 class SendReceipt(str):
@@ -665,9 +665,7 @@ def transport_from_env(token: str, env, **kwargs) -> "TelegramTransport":
     base = (env.get(API_BASE_VAR) or "").strip()
     if not base:
         return TelegramTransport(token, **kwargs)
-    if (env.get(vocabulary.RAILWAY_ENVIRONMENT_VAR) or "").strip().lower() == (
-        vocabulary.PRODUCTION_ENVIRONMENT
-    ):
+    if vocabulary.is_production(env):
         raise ApiBaseRefused(f"{API_BASE_VAR} is not honoured in production")
     host = httpx.URL(base).host
     if host not in _LOOPBACK:

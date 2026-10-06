@@ -1,6 +1,20 @@
-# Storydump - Instagram Story Automation System
+# Storydump
 
-A hosted, multi-tenant Instagram Story scheduling service with Telegram-based team collaboration.
+Storydump turns a Google Drive folder into a daily Instagram Stories queue. On
+the schedule you set, it picks an item from your connected folders and asks your
+team to approve it, as a card in your Telegram group and a row in the web Queue.
+An approved Story is published through the Instagram API where a workspace has
+API publishing on; otherwise a teammate posts it by hand and taps *Posted
+myself*.
+
+**Storydump is in early access.** To try it,
+[join the waitlist at storydump.app](https://storydump.app/#waitlist). Already
+have an account? [Sign in](https://storydump.app/login).
+
+The rest of this page is for developers working on the service itself: a
+hosted, multi-tenant Instagram Story scheduling service with Telegram-based team
+collaboration. It runs as one deployment that we operate, so nobody installs it
+to use Storydump.
 
 ## Features
 
@@ -105,7 +119,7 @@ Production is past that point — the owner applied 079 and 080 by hand on
 The `Procfile` names the two processes.
 
 ```bash
-# The API (the Procfile's `web` line): GET /health, /openapi.json, /api/v1
+# The API (the Procfile's `web` line): GET /health, /api/v1 (and /openapi.json under API_DOCS=1, never in production)
 export TARGET_DATABASE_URL=postgresql://<user>@localhost:5432/<database>   # the value in your .env
 uvicorn src.api.app:app --port 8000
 
@@ -234,7 +248,7 @@ storydump/
 
 Key resources:
 - **[AGENTS.md](AGENTS.md)** - The canonical developer and agent guide: safety rules, architecture, the command port, setup, commands, testing, services
-- **[CLAUDE.md](CLAUDE.md)** - Claude Code specifics, plus the safety rules repeated
+- **[CLAUDE.md](CLAUDE.md)** - Claude Code specifics, plus the rules it repeats from `AGENTS.md`
 - **[Quick Start Guide](documentation/guides/quickstart.md)** - Start here: using, developing, or operating Storydump
 - **[Reading the ledger](documentation/operations/reading-the-ledger.md)** - The `storydump` read and write verbs
 - **[Deployment Guide](documentation/guides/deployment.md)** - Production deployment checklist

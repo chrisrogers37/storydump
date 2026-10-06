@@ -103,7 +103,7 @@ export function DangerZoneCard({
     return (
       <Card className="border-red-200">
         <CardHeader>
-          <CardTitle className="text-base">This workspace is being deleted</CardTitle>
+          <CardTitle>This workspace is being deleted</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">
@@ -127,7 +127,7 @@ export function DangerZoneCard({
   return (
     <Card className="border-red-200">
       <CardHeader>
-        <CardTitle className="text-base">Delete workspace</CardTitle>
+        <CardTitle>Delete workspace</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">

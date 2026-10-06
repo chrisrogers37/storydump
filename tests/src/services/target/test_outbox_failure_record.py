@@ -1,4 +1,4 @@
-"""Why a delivery failed, recorded on the outbox row (093, #1482).
+"""Why a delivery failed, recorded on the outbox row (101, #1482).
 
 `settle` maps what the transport raised to a class and the provider's code, and
 writes both, with the time, in the SAME CAS update that moves the row out of

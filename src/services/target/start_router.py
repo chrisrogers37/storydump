@@ -161,8 +161,8 @@ class StartRouter:
             return StartResult(outcome="not_a_start", handled=False)
         ctx_base = _context_from(update)
         if ctx_base is None:
-            # A /start we cannot attribute to a Telegram user is not routable:
-            # every handler here binds something to an identity.
+            # A /start we cannot attribute to a person is not routable: every
+            # handler here binds something to an identity.
             logger.warning("start router: /start with no attributable sender")
             return StartResult(outcome="unattributable", handled=False)
         if payload == "":
@@ -185,12 +185,25 @@ class StartRouter:
 _GREETING = "Welcome to Storydump."
 
 
+def sent_as_a_chat(message: dict) -> bool:
+    """True when a message's `from` is a stand-in rather than the person who
+    sent it: a message sent on behalf of a chat (`sender_chat`: an anonymous
+    group admin, a post sent as a channel), or a channel post Telegram
+    forwarded into its discussion group (`is_automatic_forward`). Such a
+    `from` names no person, so it is never treated as one."""
+    return bool(message.get("sender_chat") or message.get("is_automatic_forward"))
+
+
 def _context_from(update: dict) -> Optional[StartContext]:
+    """The person a `/start` came from, or None when it names none: no sender
+    or chat id, a stand-in sender (:func:`sent_as_a_chat`), or a bot."""
     message = update.get("message") or {}
+    if sent_as_a_chat(message):
+        return None
     sender = message.get("from") or {}
     chat = message.get("chat") or {}
     uid, cid = sender.get("id"), chat.get("id")
-    if uid is None or cid is None:
+    if uid is None or cid is None or sender.get("is_bot"):
         return None
     name = sender.get("username") or sender.get("first_name")
     return StartContext(

@@ -1,4 +1,4 @@
-"""093 against PostgreSQL (#1482): the outbox's failure record and its doors.
+"""101 against PostgreSQL (#1482): the outbox's failure record and its doors.
 
 What only the database can say, each against the replayed schema as the
 production roles:

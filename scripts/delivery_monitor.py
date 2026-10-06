@@ -1,7 +1,7 @@
 """The check that alarms when the outbox's deliveries start failing (#1482).
 
 `/health/delivery` counts, estate-wide, the outbox rows whose last failure fell
-in the last hour, by class and the provider's code (migration 093). This polls
+in the last hour, by class and the provider's code (migration 101). This polls
 it and says so when the count is high, the way `posting_monitor.py` beside it
 polls `/health/posting`. It runs outside the app for the reason that one gives:
 an alert whose sending is done by the system it watches cannot fire when that
@@ -72,6 +72,11 @@ ABOVE = "above"
 BAND = "band"
 BELOW = "below"
 
+#: What `classify` reads, and so all `/health/delivery` publishes (a test holds
+#: the route to these): the window's counts and its breakdown by class.
+_COUNTS = ("failed_or_ambiguous", "sent_in_window", "window_seconds")
+_BY_CLASS = "by_class"
+
 
 def _summary(by_class: dict) -> str:
     """`destination_gone ×5 (403 ×5), refused ×2 (400 ×2)`: the classes that
@@ -106,10 +111,8 @@ def classify(status: int, body: str, *, raise_at: int, clear_at: int) -> Verdict
         return Verdict(UNREACHABLE, "response was not JSON")
     if not isinstance(data, dict):
         return Verdict(UNREACHABLE, "response was not an object")
-    n, sent, window = (
-        data.get(k) for k in ("failed_or_ambiguous", "sent_in_window", "window_seconds")
-    )
-    by_class = data.get("by_class")
+    n, sent, window = (data.get(k) for k in _COUNTS)
+    by_class = data.get(_BY_CLASS)
     if not (
         _is_count(n)
         and _is_count(sent)

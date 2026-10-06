@@ -10,7 +10,9 @@ through the API; add `--json` for one envelope `{"v": 1, "kind", "data", "error"
 
 Exit codes: 0 ok · 1 not found · 3 not authorized · 4 API unreachable or not
 well · 64 usage. Exit 3 means no usable token (`storydump whoami` shows which
-workspaces a token can read): stop and say so — minting one is the user's.
+workspaces a token can read), or, from `storydump posture`, a token whose
+person is not in the API's `OPS_USER_IDS` (`not_ops`): stop and say so —
+minting one, and listing a person, are the user's.
 
 ## 1. Is Telegram reaching the API?
 
@@ -18,7 +20,12 @@ workspaces a token can read): stop and say so — minting one is the user's.
 storydump health --json
 ```
 
-Needs no token. Read three things from it:
+The webhook and the taps come from the API's operating details, which answer
+only a token whose person is in the API's `OPS_USER_IDS`. `data.details` says
+whether they were read: `{"read": false, "detail", "fix"}` means they were not,
+and then the webhook is `not_checked` — **not a green light**: report that
+Telegram was not checked, with `detail` and `fix`, never that it is reachable.
+Read three things from it:
 
 - `data.verdicts.webhook` — `registered` is well. `unregistered` (the startup
   registration failed; `detail` says why), `undelivered` (Telegram holds a
@@ -26,7 +33,8 @@ Needs no token. Read three things from it:
   (the API could not ask Telegram) are not well. `skipped` (this API chose not
   to register: not the production environment, autoregister switched off, or no
   token or secret) and `unsampled` (the API reports no webhook at all) are
-  facts for the report, not outages.
+  facts for the report, not outages. `not_checked` (the details were not read)
+  is not well, and says nothing about Telegram either way.
 - `data.api.webhook` is the registration this API made at startup (`bot`, `url`,
   `allowed_updates` — it must include `callback_query`, or every button tap is
   dropped before it reaches the route); `data.api.webhook_live` is what Telegram
@@ -92,7 +100,8 @@ changed). Without `TARGET_TELEGRAM_BOT_TOKEN` it exits 64 naming it; without
 `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` the door check reports NOT CHECKED and
 the verb exits 4; `TARGET_TELEGRAM_BOT_USERNAME` lets it confirm the bot is the
 configured one. Do not ask the user to paste a token or a secret into the
-conversation — step 1 answers the same question from `/health`.
+conversation — step 1 answers the same question from the API's operating
+details, when the token may read them.
 The runbook is `documentation/operations/telegram-webhook.md`.
 
 ## What no verb answers

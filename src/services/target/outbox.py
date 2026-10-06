@@ -127,7 +127,7 @@ MAX_NOTIFICATION_RESENDS = 1
 class ChannelSendError(StorydumpError):
     """What a channel's transport raises instead of a receipt.
 
-    ``failure_class`` is what the outbox records the attempt as (093, #1482):
+    ``failure_class`` is what the outbox records the attempt as (101, #1482):
     each definitive answer below names its own, and anything else is a lost
     answer, ``ambiguous``. ``code`` is the provider's own code when it answered
     with one: an int or nothing, never invented."""
@@ -370,6 +370,13 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
     verification belongs at S.1 scale — on a gate-sized table Postgres will
     seq-scan whatever the index says, so an EXPLAIN assertion here would prove
     nothing.
+
+    **Only a binding the push predicate still admits is claimed**
+    (`bindings.push_binding_where`). A `deliver_outbox` job minted before an
+    admin removed the group (`bindings.revoke_for_workspace`) or before the
+    bot was kicked would otherwise still drain the queue into a chat the
+    workspace let go of; the sweep stops minting for a revoked binding, and
+    this is the same rule at the sender.
     """
     row = (
         await session.execute(
@@ -377,6 +384,10 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
                 "UPDATE channel_outbox SET state = 'sending', attempts = attempts + 1"
                 " WHERE id = (SELECT id FROM channel_outbox"
                 "             WHERE binding_id = :b AND state = 'pending'"
+                "               AND EXISTS (SELECT 1 FROM channel_bindings b"
+                "                 WHERE b.id = :b"
+                "                   AND b.workspace_id = channel_outbox.workspace_id"
+                f"                  AND {bindings.push_binding_where('b')})"
                 "             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)"
                 "   AND state = 'pending'"
                 " RETURNING id, kind, payload, attempts, intent_id, workspace_id,"
@@ -409,7 +420,7 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
     two independent statements (#890).
 
     ``failure=(class, code)`` records why the attempt failed in the SAME
-    statement (093, #1482): the record is written exactly when, and only if, the
+    statement (101, #1482): the record is written exactly when, and only if, the
     state change is, so a fenced writer records nothing.
     """
     sets = ["state = :s"]
@@ -1242,7 +1253,7 @@ async def settle(
     on the pacing rows (phase 3a step 2): the chat's row for the whole
     `retry_after` when the 429 is chat-scoped (with a short brake on the
     global row), the global row for up to a minute otherwise."""
-    # What a failed attempt is recorded as (093): the transport's own class and
+    # What a failed attempt is recorded as (101): the transport's own class and
     # code, or a lost answer with no code for anything else.
     failure = (
         (error.failure_class, error.code)
@@ -1285,7 +1296,7 @@ async def settle(
             )
         # The row goes back to `pending` with the attempt the claim consumed
         # restored: the provider's limit is not this row's failure. It is
-        # still RECORDED (a deferral, never counted as a failure — 093).
+        # still RECORDED (a deferral, never counted as a failure — 101).
         await _leave_sending(
             session,
             row["id"],
