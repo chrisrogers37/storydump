@@ -382,6 +382,13 @@
       "label": "§43 the waitlist is written by the API, not by the site (100, owner decision 2026-10-03) — waitlist_entries (global, RLS on, svc_ingress may INSERT and nothing else under p_ingress_waitlist), the address rule of §35 with a dot in the domain and no control, bidi-isolate, interlinear or tag characters, at most 254 characters, and a utm object bounded at 2 KB",
       "doc": "07-security-model.md",
       "ordinal": 36
+    },
+    {
+      "sha256": "d427a1d276d93d0854cebf9382fabbca23b90993a3ea757a85c901e48f73d700",
+      "class": "normative",
+      "label": "§44 the outbox records why a delivery failed (101, #1482) — channel_outbox gains last_failure_class (checked against the five classes), last_error_code and last_failed_at with a partial index on the time, and two svc_maintenance doors: fn_health_outbox_failures counting the window's failures by class and code with their alerting subset, and fn_health_outbox_sent counting the window's sends",
+      "doc": "07-security-model.md",
+      "ordinal": 37
     }
   ],
   "policy_expansion": {

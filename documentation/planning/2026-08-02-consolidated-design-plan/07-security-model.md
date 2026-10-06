@@ -3151,3 +3151,82 @@ GRANT INSERT ON waitlist_entries TO svc_ingress;
 
 CREATE POLICY p_ingress_waitlist ON waitlist_entries FOR INSERT TO svc_ingress WITH CHECK (true);
 ```
+
+### §44. The outbox records why a delivery failed (101, #1482)
+
+**Why:** `settle` sorts a failed send by type: a 429 goes back to `pending`, a gone destination and
+a refused message end `failed`, anything else is `ambiguous`. Then it writes the state and nothing
+else, so a burst of failures leaves no cause in the database. Production's 21 failed rows of
+2026-09-12 (all card edits, 16 of them in one hour) cannot say whether the chat was gone, the
+message refused or the token dead. And nothing counted failures, so nothing could alert on them.
+
+**The record.** Three nullable columns on `channel_outbox`, one fact each: the class of the row's
+LAST failed attempt (`last_failure_class`, the closed list `vocabulary.OUTBOX_FAILURE_CLASSES`
+copies), the provider's code for it (`last_error_code`: Telegram's `error_code`, NULL when no answer
+came back) and when (`last_failed_at`). They describe the last failure, not how the row ended, so a
+later success does not clear them. `settle` writes them in the same CAS as the state change, so a
+fenced writer records nothing. `credential_dead` is a dead token's 401, which the outbox had filed
+as a lost response; this section records it and moves no row differently (#1493 decides whether it
+should fail at once). The index is partial on the rows that have ever failed, for the door's one
+predicate.
+
+**The doors.** §24's shape: owned by `svc_maintenance`, EXECUTE for `svc_ingress` (the
+`/health/delivery` route) and `svc_worker`, the window clamped to [60 s, 24 h], counts only.
+`fn_health_outbox_failures` counts the rows whose last failure falls in the window, by class and
+code, and how many of them ended `failed` or sit `ambiguous`. That is the alerting count; a 429 is a
+deferral and only context. `fn_health_outbox_sent` counts the rows sent in the same window, so an
+hour with no failures and no traffic cannot read as an hour that delivered.
+
+```sql
+-- [§44 the outbox records why a delivery failed]
+
+ALTER TABLE channel_outbox ADD COLUMN last_failure_class TEXT NULL
+  CONSTRAINT ck_outbox_failure_class
+  CHECK (last_failure_class IN ('rate_limited','destination_gone','refused','credential_dead','ambiguous'));
+
+ALTER TABLE channel_outbox ADD COLUMN last_error_code INTEGER NULL;
+
+ALTER TABLE channel_outbox ADD COLUMN last_failed_at TIMESTAMPTZ NULL;
+
+CREATE INDEX ix_outbox_last_failed ON channel_outbox (last_failed_at) WHERE last_failed_at IS NOT NULL;
+
+GRANT CREATE ON SCHEMA public TO svc_maintenance;
+
+CREATE FUNCTION fn_health_outbox_failures(p_window_seconds integer)
+RETURNS TABLE (o_failure_class text, o_error_code integer, o_rows bigint, o_alerting_rows bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT last_failure_class, last_error_code, count(*),
+         count(*) FILTER (WHERE state IN ('failed', 'ambiguous'))
+    FROM channel_outbox
+   WHERE last_failed_at >= now() - make_interval(secs => LEAST(GREATEST(p_window_seconds, 60), 86400))
+   GROUP BY last_failure_class, last_error_code
+$$;
+
+COMMENT ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) IS
+  'Outbox rows whose last failure falls in the window, every tenant''s included, by class and code; o_alerting_rows ended failed or sit ambiguous. Counts only. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (101, #1482).';
+
+ALTER FUNCTION fn_health_outbox_failures(p_window_seconds integer) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) TO svc_ingress, svc_worker;
+
+CREATE FUNCTION fn_health_outbox_sent(p_window_seconds integer)
+RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT count(*) FROM channel_outbox
+   WHERE state = 'sent'
+     AND updated_at >= now() - make_interval(secs => LEAST(GREATEST(p_window_seconds, 60), 86400))
+$$;
+
+COMMENT ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) IS
+  'Outbox rows sent in the window, every tenant''s included: the traffic the failure count is read against. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (101, #1482).';
+
+ALTER FUNCTION fn_health_outbox_sent(p_window_seconds integer) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) TO svc_ingress, svc_worker;
+
+REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
+```

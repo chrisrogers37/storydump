@@ -1,21 +1,22 @@
-"""The three health surfaces — Railway's probe, the scheduling axis and the
-posting axis (#1090 F1, #1268).
+"""The four health surfaces — Railway's probe, the scheduling axis, the
+posting axis (#1090 F1, #1268) and the delivery axis (#1482).
 
 They were the only routes in the app defined inline inside `create_app`; every
 other route in the API lives in a module here and is included as a router, and
-now so do these. `storydump health` renders the two axes and `details` (the
-`OPS_USER_IDS`-only `/api/v1/ops/health`), and two fleet monitors poll the axes, so a
-field renamed here is a renderer and two pollers broken elsewhere.
+now so do these. `storydump health` renders the scheduling and posting axes and
+`details` (the `OPS_USER_IDS`-only `/api/v1/ops/health`), and each axis has a fleet
+monitor polling it (`scripts/*_monitor.py`), so a field renamed here is a renderer
+or a poller broken elsewhere.
 
 `details` reads `app.state.*` — the engine, the sampled database role, the pool
 watch, the tap counters and the two webhook reports — rather than the factory's
 closure, which is the whole reason these can live outside it. Neither it nor
 `/health` opens a connection: see `/health`'s docstring. `/health/scheduling`,
-`/health/posting` and the operating details' queue read (`queue_pressure`) do,
-so each reuses its last answer for `HEALTH_CACHE_SECONDS` (`AnswerCache`, one
-per app on `app.state`).
+`/health/posting`, `/health/delivery` and the operating details' queue read
+(`queue_pressure`) do, so each reuses its last answer for `HEALTH_CACHE_SECONDS`
+(`AnswerCache`, one per app on `app.state`).
 
-The router carries no `tags=`: these three operations have never had one, and
+The router carries no `tags=`: these operations have never had one, and
 `/openapi.json` is a response body like any other.
 """
 
@@ -32,6 +33,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from src import __version__
 from src.services.target import (
     backpressure,
+    delivery_health,
     health_reads,
     posting_health,
     scheduling_health,
@@ -51,9 +53,9 @@ VERSION = __version__
 COMMIT_VAR = "RAILWAY_GIT_COMMIT_SHA"
 _START_TIME = time.time()
 
-#: How long `/health/scheduling`, `/health/posting` and the operating details'
-#: queue read reuse their last answer. The first two are unauthenticated and
-#: each answer takes a connection from the API's
+#: How long `/health/scheduling`, `/health/posting`, `/health/delivery` and the
+#: operating details' queue read reuse their last answer. The `/health/*` axes
+#: are unauthenticated and each answer takes a connection from the API's
 #: shared pool, so without this anyone could drain the pool the webhook needs
 #: by polling them. The fleet monitors poll far less often than this, and every
 #: number in the payloads is an age or a count that moves on a scale of minutes.
@@ -319,3 +321,34 @@ async def posting_health_check(request: Request):
             return {**posting, **attempts, **dests}
 
     return await request.app.state.health_cache.answer("posting", read)
+
+
+@router.get("/health/delivery")
+async def delivery_health_check(request: Request):
+    """Are the messages the product sends getting through? (#1482)
+
+    A FOURTH health surface, by `/health/posting`'s own rule. Deliveries failing
+    and posts not landing are independent causes, so folding this axis into
+    either payload would rank one against the other, and ranking is what masks.
+
+    The last hour's outbox rows whose last failure fell in it, by class and the
+    provider's code, how many of them ended `failed` or sit `ambiguous`, and how
+    many rows were sent in the same hour (`delivery_health`, through 101's
+    doors). NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: the
+    alert is `scripts/delivery_monitor.py`, run outside the app. Unauthenticated,
+    so AGGREGATES ONLY: counts and codes, never a workspace, a chat or a message.
+
+    503 when the engine is absent, never a reassuring zero.
+    """
+    engine = request.app.state.engine
+    if engine is None:
+        raise HTTPException(status_code=503, detail="target database not configured")
+
+    async def read():
+        # A direct connection, as on `/health/posting`: the read is estate-wide
+        # and has no tenant, its cross-tenant reach is 101's doors, and its
+        # statements are capped the same way (`health_reads`).
+        async with health_reads.connect(engine) as conn:
+            return await delivery_health.outbox_failures(conn)
+
+    return await request.app.state.health_cache.answer("delivery", read)

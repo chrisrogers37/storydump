@@ -43,7 +43,13 @@ import httpx
 
 from src.services.target import egress, vocabulary
 from src.services.target.egress import EgressPolicy
-from src.services.target.outbox import ChannelPaced, ChannelRefused, DestinationGone
+from src.services.target.outbox import (
+    ChannelPaced,
+    ChannelRefused,
+    ChannelSendError,
+    CredentialDead,
+    DestinationGone,
+)
 
 logger = logging.getLogger("channels.telegram")
 
@@ -94,8 +100,9 @@ def _method_for(kind: str, mime: Optional[str]) -> tuple[str, str]:
 _UPLOAD_BUDGET_S = 120.0
 
 
-class TelegramSendError(Exception):
-    """The transport could not produce an external ref for this row."""
+class TelegramSendError(ChannelSendError):
+    """The transport could not produce an external ref for this row. Telegram's
+    own code, when it answered with one, rides as ``code`` (101, #1482)."""
 
 
 class TelegramChatGone(DestinationGone, TelegramSendError):
@@ -136,8 +143,10 @@ class MediaTransient(Exception):
     is loud: ERROR, counted, and the text card goes."""
 
 
-class TelegramAuthDead(TelegramSendError):
-    """Telegram rejected the credential itself (401/403) — the loud class."""
+class TelegramAuthDead(CredentialDead, TelegramSendError):
+    """Telegram rejected the credential itself (401; a 403 is the chat's,
+    `_chat_gone`) — the loud class. For the outbox it is a `CredentialDead`,
+    recorded as `credential_dead` rather than as a lost response (101, #1482)."""
 
 
 class SendReceipt(str):
@@ -263,7 +272,8 @@ class TelegramTransport:
             body = response.json()
         except json.JSONDecodeError:
             raise TelegramSendError(
-                f"{method}: non-JSON response (HTTP {response.status_code})"
+                f"{method}: non-JSON response (HTTP {response.status_code})",
+                code=response.status_code,
             ) from None
         if body.get("ok") is True:
             return body.get("result") or {}
@@ -275,6 +285,7 @@ class TelegramTransport:
             raise TelegramChatGone(
                 f"{method}: {code} {description}",
                 migrate_to=None if migrate_to is None else str(migrate_to),
+                code=code,
             )
         if code == 401:
             self.auth_failures += 1
@@ -288,12 +299,12 @@ class TelegramTransport:
                     method,
                     description,
                 )
-            raise TelegramAuthDead(f"{method}: {code} {description}")
+            raise TelegramAuthDead(f"{method}: {code} {description}", code=code)
         if code in (400, 413):
             # Bad Request / Payload Too Large: the message as shaped will
             # never be accepted. 429 and 5xx are NOT this — the card may have
             # landed, and only the outbox's policy may decide.
-            raise TelegramRefused(f"{method}: {code} {description}")
+            raise TelegramRefused(f"{method}: {code} {description}", code=code)
         if code == 429:
             retry_after = (body.get("parameters") or {}).get("retry_after")
             try:
@@ -307,8 +318,9 @@ class TelegramTransport:
                 f"{method}: 429 retry_after={retry_after_s:g}s {description}",
                 retry_after_s=retry_after_s,
                 scope="chat" if has_chat else "global",
+                code=code,
             )
-        raise TelegramSendError(f"{method}: {code} {description}")
+        raise TelegramSendError(f"{method}: {code} {description}", code=code)
 
     async def answer_callback(
         self, callback_query_id: str, text: str, show_alert: bool = False

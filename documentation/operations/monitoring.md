@@ -49,6 +49,7 @@ The three surfaces, by key (`storydump health --json` prints them verbatim):
 | `/api/v1/ops/health` | `/health`'s three, plus `uptime_seconds`, `target_database` (the variable is set — presence, not liveness), `db_role`, `pool`, `ingress_workers`, `taps`, `webhook`, `webhook_live`, and `backpressure` (the ready lanes, the pending outbox, the Telegram pacing; the one part that opens a connection) — for `OPS_USER_IDS` alone | `src/api/routes/health.py::operating_details` |
 | `/health/scheduling` | `stalled`, `accounts_active`, `max_lag_seconds`, `worker{succeeded_ever, last_success_age_seconds, overdue_ready, max_overdue_seconds}` — exactly what `scripts/scheduling_monitor.py` reads | `src/services/target/scheduling_health.py` |
 | `/health/posting` | `posted_ever`, `last_post_age_seconds`, `intents_ever`, `oldest_intent_age_seconds`, `debited_total`, `ledger_days`, `accounts_active`, `oldest_active_destination_age_seconds` — every one read by `scripts/posting_monitor.py` | `src/services/target/posting_health.py` |
+| `/health/delivery` | `window_seconds`, `sent_in_window`, `failed_or_ambiguous`, `by_class{<class>: {rows, alerting, codes}}` | `src/services/target/delivery_health.py` |
 
 The **worker** has a `/health` of its own on `PORT` — the one Railway's probe
 hits on the worker service; it answers 503 only when the clock has stopped
@@ -139,8 +140,9 @@ and page on the same verdicts `storydump health` prints:
 |---|---|---|
 | `scripts/scheduling_monitor.py` | `/health/scheduling` | a cursor stalled past 10 min, the worker down, the API unreachable |
 | `scripts/posting_monitor.py` | `/health/posting` | 48 h of silence, a first post overdue past its grace, unreachable |
+| `scripts/delivery_monitor.py` (not installed yet) | `/health/delivery` | 5 or more failed or ambiguous deliveries in an hour, clearing after two polls at 1 or fewer; unreachable |
 
-See `scheduling-monitor.md` and `posting-monitor.md` beside this page for the
+See `scheduling-monitor.md`, `posting-monitor.md` and `delivery-monitor.md` beside this page for the
 thresholds and the pollers' two extra rules (a watch clock; two unreachable
 readings before paging) that a single `storydump health` reading does not have.
 `storydump health` also judges the bot's webhook from the operating details

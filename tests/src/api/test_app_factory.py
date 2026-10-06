@@ -23,11 +23,13 @@ from src.api.routes.health import AnswerCache
 from src.config.settings import settings
 from src.services.target import (
     backpressure,
+    delivery_health,
     health_reads,
     posting_health,
     scheduling_health,
 )
 from tests.src.api.conftest import FakeEngine
+from tests.src.services.target.test_delivery_health import _Doors
 
 
 #: An operator, for the details `/health` used to publish (`/api/v1/ops/health`);
@@ -770,6 +772,116 @@ class TestPostingHealthIsATHIRDSurface:
         down for a fault no restart repairs."""
         app = create_app(env={})
         assert TestClient(app).get("/health").status_code == 200
+
+
+@pytest.mark.usefixtures("stubbed_bound")
+class TestDeliveryHealthIsAFOURTHSurface:
+    """#1482. Deliveries failing and posts not landing are independent causes,
+    so the outbox's failures get their own surface rather than a key in either
+    of the other two payloads, which would rank one cause against the other."""
+
+    def test_it_is_its_own_route_beside_the_other_three(self):
+        paths = {r.path for r in create_app(env={}).routes}
+        assert {
+            "/health",
+            "/health/scheduling",
+            "/health/posting",
+            "/health/delivery",
+        } <= paths
+
+    def test_it_refuses_rather_than_reassures_when_it_cannot_look(self):
+        """No engine is a 503, never an hour of zero failures."""
+        app = create_app(env={})
+        assert app.state.engine is None
+        assert TestClient(app).get("/health/delivery").status_code == 503
+
+    def test_it_reaches_its_seam(self, client, monkeypatch):
+        seen = []
+
+        async def fake(executor):
+            seen.append(executor)
+            return {
+                "window_seconds": 3600,
+                "sent_in_window": 3,
+                "failed_or_ambiguous": 0,
+                "by_class": {},
+            }
+
+        monkeypatch.setattr(delivery_health, "outbox_failures", fake)
+        resp = client.get("/health/delivery")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["sent_in_window"] == 3
+        (executor,) = seen
+        assert hasattr(executor, "execute")
+
+    @staticmethod
+    def _get(engine, client, failures, sent=40):
+        """The REAL `delivery_health` behind the route, over 101's doors
+        scripted on the conftest engine's connection."""
+        engine.session = doors = _Doors(failures, sent)
+        resp = client.get("/health/delivery")
+        assert resp.status_code == 200, resp.text
+        return resp, doors
+
+    def test_the_body_is_aggregates_only(self, engine, client):
+        """The route is unauthenticated: counts and codes, and nothing that
+        names a workspace, a chat or a message."""
+        resp, doors = self._get(
+            engine,
+            client,
+            [("destination_gone", 403, 5, 5), ("rate_limited", 429, 9, 0)],
+        )
+        body = resp.json()
+        assert body["window_seconds"] == 3600 and body["sent_in_window"] == 40
+        assert body["failed_or_ambiguous"] == 5
+        assert body["by_class"]["destination_gone"] == {
+            "rows": 5,
+            "alerting": 5,
+            "codes": {"403": 5},
+        }
+        assert body["by_class"]["rate_limited"]["alerting"] == 0
+        for word in ("workspace", "chat", "binding", "payload", "external"):
+            assert word not in resp.text
+        assert len(doors.statements) == 2
+
+    def test_the_public_payload_is_exactly_what_the_monitor_reads(self, engine, client):
+        """Public because the fleet monitor polls it, so it carries what
+        `scripts/delivery_monitor.py` reads and nothing more: a key added here
+        is published to anyone, and a key dropped here is lost to the monitor.
+        The REAL service answers behind the route, which passes its dict on."""
+        from scripts import delivery_monitor as dm
+
+        resp, _ = self._get(engine, client, [("destination_gone", 403, 5, 5)])
+        assert set(resp.json()) == {*dm._COUNTS, dm._BY_CLASS}
+
+    @pytest.mark.parametrize(
+        "failures, reading",
+        [
+            ([("destination_gone", 403, 5, 5)], "above"),
+            ([("refused", 400, 4, 4)], "band"),
+            ([("rate_limited", 429, 30, 0), ("ambiguous", None, 1, 1)], "below"),
+        ],
+        ids=["five fires", "four holds", "a 429 storm is context"],
+    )
+    def test_the_payload_satisfies_the_pollers_strictness(
+        self, engine, client, failures, reading
+    ):
+        """The REAL classifier over the REAL body: a key the route drops or
+        mistypes reads as `unreachable` there, and fails here."""
+        from scripts.delivery_monitor import (
+            DEFAULT_CLEAR_AT,
+            DEFAULT_RAISE_AT,
+            classify,
+        )
+
+        resp, _ = self._get(engine, client, failures)
+        verdict = classify(
+            resp.status_code,
+            resp.text,
+            raise_at=DEFAULT_RAISE_AT,
+            clear_at=DEFAULT_CLEAR_AT,
+        )
+        assert verdict.state == reading
 
 
 class _RoleResult:

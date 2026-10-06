@@ -38,8 +38,8 @@ def floor(monkeypatch):
     async def _leave_sending(session, outbox_id, to_state, **extra):
         seen["left"].append((outbox_id, to_state, extra))
 
-    async def mark_ambiguous(session, *, outbox_id):
-        seen["ambiguous"].append(outbox_id)
+    async def mark_ambiguous(session, *, outbox_id, failure):
+        seen["ambiguous"].append((outbox_id, failure))
 
     async def write_pacing_hold(session, **kw):
         seen["holds"].append(kw)
@@ -72,7 +72,13 @@ class TestSettleOnAFloodLimit:
         )
         assert result["state"] == "paced" and result["retry_after_s"] == 7.0
         assert result["external_message_ref"] is None
-        assert floor["left"] == [("row-1", "pending", {"restore_attempt": True})]
+        assert floor["left"] == [
+            (
+                "row-1",
+                "pending",
+                {"restore_attempt": True, "failure": ("rate_limited", None)},
+            )
+        ]
         assert floor["ambiguous"] == [], "a 429 is not a lost response"
         scopes = {(h["scope"], h["key"]) for h in floor["holds"]}
         assert scopes == {("tg_global", ""), ("tg_chat", "b-1")}
@@ -165,7 +171,13 @@ class TestSettleOnAFloodLimit:
             object(), ROW, error=outbox.ChannelPaced("429", retry_after_s=3)
         )
         assert result["state"] == "paced"
-        assert floor["left"] == [("row-1", "pending", {"restore_attempt": True})]
+        assert floor["left"] == [
+            (
+                "row-1",
+                "pending",
+                {"restore_attempt": True, "failure": ("rate_limited", None)},
+            )
+        ]
         assert floor["holds"] == [], "no budget was named, so nothing is held"
 
 
@@ -185,7 +197,13 @@ class TestDeliverOnAFloodLimit:
             global_window_seconds=1,
         )
         assert result["state"] == "paced" and result["retry_after_s"] == 4.0
-        assert floor["left"] == [("row-1", "pending", {"restore_attempt": True})]
+        assert floor["left"] == [
+            (
+                "row-1",
+                "pending",
+                {"restore_attempt": True, "failure": ("rate_limited", None)},
+            )
+        ]
         assert len(floor["holds"]) == 2
 
 
@@ -299,7 +317,7 @@ class TestARefusalIsDefinitive:
             global_window_seconds=1,
         )
         assert result["state"] == "failed" and result["external_message_ref"] is None
-        assert floor["left"] == [("row-1", "failed", {})]
+        assert floor["left"] == [("row-1", "failed", {"failure": ("refused", None)})]
         assert floor["ambiguous"] == [] and floor["holds"] == []
 
 

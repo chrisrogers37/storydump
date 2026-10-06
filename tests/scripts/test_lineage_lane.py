@@ -423,6 +423,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 100 appends §43, the waitlist written by the API: the global
             # waitlist_entries and svc_ingress's insert-only policy.
             "100_waitlist_entries.sql",
+            # 101 appends §44, the outbox's failure record: three columns,
+            # their index and the two doors behind /health/delivery (#1482).
+            "101_outbox_failure_record.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
