@@ -731,6 +731,9 @@ class _FakeSession:
             def scalar(self_inner):
                 return rows[0] if rows else None
 
+            def fetchone(self_inner):
+                return rows[0] if rows else None
+
         return _R()
 
 
@@ -1431,7 +1434,7 @@ class TestTheBudgetCeiling:
     `failed`, and a tenant kind the sweeps do not re-mint tells the workspace
     in its own words."""
 
-    def _loop(self, monkeypatch, *, executor, bindings=("b-1",)):
+    def _loop(self, monkeypatch, *, executor, bindings=("b-1",), rows=None):
         from datetime import datetime, timezone
 
         from src.services.target import outbox, prompts
@@ -1483,7 +1486,7 @@ class TestTheBudgetCeiling:
 
         @asynccontextmanager
         async def _ctx(job):
-            session = _FakeSession()
+            session = _FakeSession(rows)
             calls["sessions"].append(session)
             yield session
 
@@ -1576,14 +1579,15 @@ class TestTheBudgetCeiling:
         )
 
     SRC = "5c0f2e8a-0b1d-4c3e-9f00-00000000c001"
+    INTENT = "5c0f2e8a-0b1d-4c3e-9f00-00000000c0a1"
 
     @staticmethod
-    def _rearms(calls):
+    def _statements(calls, needle):
         return [
             (sql, params)
             for session in calls["sessions"]
             for sql, params in session.statements
-            if "UPDATE media_sources" in sql
+            if needle in sql
         ]
 
     async def test_a_spent_sync_re_arms_its_source_for_tomorrow(self, monkeypatch):
@@ -1600,7 +1604,7 @@ class TestTheBudgetCeiling:
             self._job(attempts=5, payload={"v": 1, "source_id": self.SRC})
         )
         assert calls["finalized"] == ["failed"] and len(calls["notices"]) == 1
-        ((sql, params),) = self._rearms(calls)
+        ((sql, params),) = self._statements(calls, "UPDATE media_sources")
         assert "next_sync_at IS NULL" in sql and "state = 'active'" in sql
         assert params["s"] == self.SRC and params["ws"] == "ws-1"
         assert params["secs"] == work_loop.REARM_AFTER_SECONDS
@@ -1622,7 +1626,7 @@ class TestTheBudgetCeiling:
         loop, calls = self._loop(monkeypatch, executor=executor)
         await loop._run_job(self._job(attempts=5, payload=payload))
         assert calls["finalized"] == ["failed"]
-        assert self._rearms(calls) == []
+        assert self._statements(calls, "UPDATE media_sources") == []
 
     async def test_a_publish_job_the_loop_fails_parks_its_story_for_review(
         self, monkeypatch
@@ -1634,22 +1638,96 @@ class TestTheBudgetCeiling:
         the generic exhausted notice is not the answer for a story."""
         from src.services.target import publish_pipeline
 
-        parked = []
+        flipped, told = [], []
 
-        async def park_exhausted(session, job):
-            parked.append(job["id"])
-            return True
+        async def flip_exhausted(session, job):
+            flipped.append(job["id"])
+            return {
+                "workspace_id": "ws-1",
+                "intent_id": "it-1",
+                "tz": "UTC",
+                "notice": "n",
+            }
+
+        async def tell_review(session, **parked):
+            told.append(parked["intent_id"])
 
         async def executor(session, job):
             raise RuntimeError("pool timeout")
 
-        monkeypatch.setattr(publish_pipeline, "park_exhausted", park_exhausted)
+        monkeypatch.setattr(publish_pipeline, "flip_exhausted", flip_exhausted)
+        monkeypatch.setattr(publish_pipeline, "tell_review", tell_review)
         loop, calls = self._loop(monkeypatch, executor=executor)
         loop._registry["publish_pipeline"] = executor
         job = self._job(kind="publish_pipeline", attempts=5)
         await loop._run_job(job)
         assert calls["finalized"] == ["failed"]
-        assert parked == [job["id"]] and calls["notices"] == []
+        assert flipped == [job["id"]] and told == ["it-1"] and calls["notices"] == []
+
+    async def test_a_failed_courtesy_does_not_undo_a_dead_publish_job_s_park(
+        self, monkeypatch
+    ):
+        """A publish job that spends its budget parks its story for review. The
+        flip is the state change; the card restated and the notice are the
+        courtesy, which rides the savepoint. A courtesy that fails must not take
+        the flip with it: a story left `publishing` keeps its account's publish
+        slot, and nothing moves a plain `publishing` row once its job has ended."""
+        from src.services.target import publish_pipeline
+
+        async def executor(session, job):
+            raise RuntimeError("the fifth untyped crash")
+
+        refused = []
+
+        async def courtesy_fails(session, **kwargs):
+            refused.append(kwargs["intent_id"])
+            raise RuntimeError("the outbox refused the card")
+
+        loop, calls = self._loop(
+            monkeypatch,
+            executor=executor,
+            rows=[{"state": "publishing", "workspace_id": "ws-1", "tz": "UTC"}],
+        )
+        loop._registry["publish_pipeline"] = executor
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", courtesy_fails)
+        await loop._run_job(
+            self._job(
+                kind="publish_pipeline",
+                attempts=5,
+                payload={"v": 1, "intent_id": self.INTENT},
+            )
+        )
+
+        assert calls["finalized"] == ["failed"] and loop.exhausted == 1
+        assert refused == [self.INTENT], "the courtesy fault never fired"
+        flips = [
+            params
+            for _, params in self._statements(calls, "SET state = 'review_required'")
+        ]
+        assert flips == [{"intent": self.INTENT, "from_state": "publishing"}], (
+            "the courtesy's rollback took the park's flip with it"
+        )
+
+    async def test_a_dead_publish_job_with_a_malformed_intent_parks_nothing(
+        self, monkeypatch
+    ):
+        """A malformed `intent_id` is refused before the cast: the flip runs in
+        the finalize's own transaction, where a raise would abort the finalize."""
+
+        async def executor(session, job):
+            raise RuntimeError("the fifth untyped crash")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        loop._registry["publish_pipeline"] = executor
+        await loop._run_job(
+            self._job(
+                kind="publish_pipeline",
+                attempts=5,
+                payload={"v": 1, "intent_id": "not-a-uuid"},
+            )
+        )
+        assert calls["finalized"] == ["failed"] and loop.exhausted == 1
+        assert self._statements(calls, "post_intents") == []
 
     async def test_a_failed_notice_stops_neither_the_finalize_nor_the_re_arm(
         self, monkeypatch
@@ -1672,9 +1750,9 @@ class TestTheBudgetCeiling:
         )
         assert calls["finalized"] == ["failed"] and calls["notices"] == []
         assert loop.exhausted == 1
-        assert [params["s"] for _, params in self._rearms(calls)] == [self.SRC], (
-            "the re-arm went down with the notice"
-        )
+        assert [
+            params["s"] for _, params in self._statements(calls, "UPDATE media_sources")
+        ] == [self.SRC], "the re-arm went down with the notice"
 
     async def test_a_workspace_with_no_binding_gets_the_log_line_only(
         self, monkeypatch
@@ -2102,23 +2180,25 @@ class TestADeadPublishJobParksItsStory:
     ):
         from src.services.target import publish_pipeline
 
-        parked, fanned = [], []
+        told, fanned = [], []
 
-        async def park_exhausted(session, job):
-            parked.append(job["id"])
+        async def tell_review(session, **parked):
+            told.append(parked)
 
         async def fanout_notification(*a, **k):  # pragma: no cover — must not run
             fanned.append(k)
 
-        monkeypatch.setattr(publish_pipeline, "park_exhausted", park_exhausted)
+        monkeypatch.setattr(publish_pipeline, "tell_review", tell_review)
         monkeypatch.setattr(
             work_loop.outbox, "fanout_notification", fanout_notification
         )
-        await work_loop._notify_exhausted(
-            _FakeSession(),
-            {"id": "j1", "kind": "publish_pipeline", "workspace_id": "ws"},
+        parked = {"workspace_id": "ws", "intent_id": "it", "tz": "UTC", "notice": "n"}
+        job = {"id": "j1", "kind": "publish_pipeline", "workspace_id": "ws"}
+        await work_loop._notify_exhausted(_FakeSession(), job, parked)
+        await work_loop._notify_exhausted(_FakeSession(), job, None)
+        assert told == [parked] and fanned == [], (
+            "a parked story gets its courtesy; nothing parked, no generic notice either"
         )
-        assert parked == ["j1"] and fanned == []
 
 
 class TestTheSenderMintReadsItsOwners:
