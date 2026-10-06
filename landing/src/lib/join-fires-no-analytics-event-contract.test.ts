@@ -1,18 +1,20 @@
 /**
  * Nothing the invitation page loads can fire an analytics event.
  *
- * An invite link's path is the invitation token. Plausible's exclusions build
- * (`app/layout.tsx`, `data-exclude="/join/**"`) suppresses the PAGEVIEW on
- * that path, but not a custom event, and every event carries
- * `location.href`: an event fired by any module the join route renders would
- * send the token to a third party.
+ * An invite link's path is the invitation token, and every event carries the
+ * page's address: an event fired by any module the join route renders would
+ * send the token to a third party. The root layout sends pageviews on every
+ * route through `lib/posthog.ts`, which sends nothing from a path under /join
+ * (`posthog.test.ts` holds that). Custom events get a second line of defence.
  *
  * So this walks the join route's module graph (its page and route handler,
  * the root layout that wraps them, and everything they import, transitively)
- * and fails when it reaches `lib/analytics.ts`, the one module that calls
- * `window.plausible`, or any module that calls it directly. The marketing home
- * page is walked as the positive control: its FAQ tracks an event, so a walker
- * that could not follow an import fails there first.
+ * and fails when it reaches `lib/analytics.ts`, the module custom events go
+ * through, or any module but the pageview sender (`lib/posthog.ts`,
+ * `components/analytics/pageviews.tsx`) that imports posthog-js or
+ * `lib/posthog.ts`, by whatever path. The marketing home page is walked as the
+ * positive control: its FAQ tracks an event, so a walker that could not follow an
+ * import fails there first.
  *
  * WHAT THIS CANNOT SEE: a module loaded through a computed path.
  *
@@ -28,6 +30,9 @@ import { describe, expect, it } from "vitest";
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const APP = path.join(SRC, "app");
 const ANALYTICS = path.join(SRC, "lib", "analytics.ts");
+/** The pageview sender every route loads, and the module it goes through. */
+const POSTHOG = path.join(SRC, "lib", "posthog.ts");
+const PAGEVIEWS = [POSTHOG, path.join(SRC, "components", "analytics", "pageviews.tsx")];
 
 /** `import … from "x"`, `export … from "x"`, `import "x"` and `import("x")`. */
 const IMPORT =
@@ -51,6 +56,14 @@ function resolveImport(from: string, spec: string): string | null {
   throw new Error(`cannot resolve ${JSON.stringify(spec)} from ${path.relative(SRC, from)}`);
 }
 
+/** Each import in a file: its specifier, and the source file it names (null for a package). */
+function importsOf(file: string): { spec: string; target: string | null }[] {
+  return [...readFileSync(file, "utf8").matchAll(IMPORT)].map((m) => {
+    const spec = m[1] ?? m[2] ?? m[3];
+    return { spec, target: resolveImport(file, spec) };
+  });
+}
+
 /** Every TypeScript module reachable from `entries`. */
 function moduleGraph(entries: string[]): Set<string> {
   const seen = new Set<string>();
@@ -59,8 +72,7 @@ function moduleGraph(entries: string[]): Set<string> {
     const file = queue.pop()!;
     if (seen.has(file)) continue;
     seen.add(file);
-    for (const m of readFileSync(file, "utf8").matchAll(IMPORT)) {
-      const target = resolveImport(file, m[1] ?? m[2] ?? m[3]);
+    for (const { target } of importsOf(file)) {
       if (target && /\.tsx?$/.test(target)) queue.push(target);
     }
   }
@@ -78,7 +90,12 @@ function sourcesUnder(dir: string): string[] {
 /** The modules in a graph that can send an analytics event. */
 function eventSenders(graph: Set<string>): string[] {
   return [...graph]
-    .filter((file) => file === ANALYTICS || /\bwindow\.plausible\b/.test(readFileSync(file, "utf8")))
+    .filter(
+      (file) =>
+        file === ANALYTICS ||
+        (!PAGEVIEWS.includes(file) &&
+          importsOf(file).some(({ spec, target }) => target === POSTHOG || /^posthog-js(\/|$)/.test(spec))),
+    )
     .map((file) => path.relative(SRC, file));
 }
 
@@ -93,6 +110,7 @@ describe("the join route", () => {
         "components/workspace/accept-invitation.tsx",
         "components/auth/sign-out-button.tsx",
         "lib/bff.ts",
+        "lib/posthog.ts",
       ]),
     );
   });

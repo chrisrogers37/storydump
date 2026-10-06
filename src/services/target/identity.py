@@ -15,12 +15,12 @@ this runs before any `app.tenant_id` exists — identity precedes tenancy.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import readers, vocabulary
+from src.services.target import oauth_states, readers, vocabulary
 
 PROVIDER_GOOGLE = vocabulary.PROVIDER_GOOGLE
 PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
@@ -69,7 +69,8 @@ async def upsert_google_identity(
 
     A subject seen before signs in whatever *signup_open* says. A NEW one
     creates its user only when `fn_signup_admitted` admits its email — an
-    owner admission or a live invitation addressed to it (092) — and is
+    owner admission or a live invitation addressed to it (092) from an active
+    workspace whose owner or admin still sent it (098) — and is
     refused with `SignupNotAdmitted` otherwise, a None email included.
     *signup_open* (`TARGET_SIGNUP_OPEN`) skips that ask.
     """
@@ -254,6 +255,25 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
     return None if row is None else str(row[0])
 
 
+async def telegram_ids_for(executor, user_ids: Iterable[str]) -> list[str]:
+    """The Telegram ids of those of *user_ids* who have linked Telegram, in a
+    stable order; a person who has not linked, or whose account is disabled,
+    is simply absent."""
+    user_ids = [str(u) for u in user_ids]
+    if not user_ids:
+        return []
+    rows = await executor.execute(
+        text(
+            "SELECT i.external_id FROM user_identities i"
+            " JOIN users u ON u.id = i.user_id AND u.state = 'active'"
+            " WHERE i.provider = :p AND i.user_id = ANY(CAST(:u AS uuid[]))"
+            " ORDER BY i.external_id"
+        ),
+        {"p": PROVIDER_TELEGRAM, "u": user_ids},
+    )
+    return [str(row[0]) for row in rows]
+
+
 def display_name_sql(user_id_sql: str) -> str:
     """The name a shared chat may see for the person *user_id_sql* names (an
     SQL operand: a column or a bind, never user input) as one SQL expression:
@@ -363,7 +383,7 @@ async def link_identity(
     ).first()
     if mine is not None:
         # `uq_user_provider`. Replacing it would silently unlink the old
-        # account, which is an operator action with an audit trail, not a tap.
+        # account; the person unlinks it first (`unlink_telegram`, 099).
         raise IdentityAlreadyLinked("user_already_has_this_provider")
 
     await executor.execute(
@@ -375,3 +395,34 @@ async def link_identity(
         {"u": str(user_id), "p": provider, "sub": external_id, "dn": display_name},
     )
     return True
+
+
+async def unlink_telegram(executor, *, user_id: str) -> str:
+    """Remove *user_id*'s own Telegram identity — the reverse of
+    :func:`link_identity`. Returns the door's outcome: `unlinked`,
+    `not_linked` or `last_identity` (099, `07` §42).
+
+    The delete is the `fn_identity_unlink` door's (099): no runtime role
+    deletes from `user_identities`, and the door keeps the user's other
+    identity, answering `last_identity` rather than leave an account with no
+    way to sign in. The caller proves the person — this is the session's user.
+
+    Memberships are untouched: a workspace joined from a Telegram group stays
+    joined. That Telegram account now resolves to nobody, so its taps answer
+    `unlinked` and its group messages join no one until the person links
+    again. In the same transaction the user's live `link` states are retired,
+    so a link minted before the unlink cannot re-attach an account the person
+    just removed.
+    """
+    outcome = (
+        await executor.execute(
+            text("SELECT fn_identity_unlink(CAST(:u AS uuid), :p)"),
+            {"u": str(user_id), "p": PROVIDER_TELEGRAM},
+        )
+    ).scalar_one()
+    if outcome != "last_identity":
+        # "link" is `identity_link.PURPOSE`, which imports this module.
+        await oauth_states.retire_live_states(
+            executor, provider=PROVIDER_TELEGRAM, purpose="link", user_id=user_id
+        )
+    return str(outcome)

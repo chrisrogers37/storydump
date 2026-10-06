@@ -1,5 +1,5 @@
 """The backpressure signal (phase 3a step 6): one read, rendered for the
-status line and served on `/health/scheduling`."""
+status line and served on the operating details (`/api/v1/ops/health`)."""
 
 from __future__ import annotations
 

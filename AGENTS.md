@@ -2,8 +2,9 @@
 
 Guidance for any coding agent working in this repository. This is the
 vendor-neutral file the wider tool ecosystem reads; `CLAUDE.md` carries the
-Claude Code specifics and defers to this document for everything shared, so the
-two cannot disagree about the substance.
+Claude Code specifics, repeats the safety rules and the rules every PR follows,
+and defers to this document for everything else. A PR that adds or changes one
+of those rules here makes the same change in `CLAUDE.md`.
 
 **The safety rules below are not advisory.** This system posts to Instagram and
 Telegram on behalf of paying tenants.
@@ -94,9 +95,9 @@ Each layer is isolated. Do not violate the boundaries:
   (`tests/storydump_cli/test_import_boundary.py` pins that in a fresh
   interpreter).
 - **UI** (`landing/`) → calls the API through its server-side client
-  (`landing/src/lib/target-api.ts`), never a service. The one table it owns
-  is the marketing waitlist (`landing/src/lib/schema.ts`, Drizzle), which no
-  Python migration manages.
+  (`landing/src/lib/target-api.ts`), never a service, and holds no database
+  credential: the waitlist form posts to the API's `POST /public/waitlist`
+  (migration 100).
 - **API** (`src/api/`) → authenticates a principal (`src/api/principal.py`:
   a web session or an API token), then calls a module under
   `src/services/target/`. Reads are resources; state changes are commands
@@ -328,7 +329,7 @@ The `Procfile` names the two deployed processes; both run the one tier.
   not read it. It receives nothing from Telegram: nothing in `src` polls.
 - **API:** `uvicorn src.api.app:app` → health at `GET /health`, which says ok
   and the version and commit that answer, nothing else (the details — usage
-  counts, the database login, the pool, the webhook — are
+  counts, the database login, the pool, the webhook, the queue — are
   `GET /api/v1/ops/health`, for `OPS_USER_IDS` alone; plus
   `/health/scheduling` and `/health/posting`, the surfaces the fleet monitors
   poll), schema at `/openapi.json` (and `/docs`) only when started with
@@ -360,9 +361,11 @@ inert by design: `sender_from_env` returns `None` unless `RESEND_API_KEY` and
 the sender address (`EMAIL_FROM`) are both set, and the job registry parks
 `send_email` with a reason naming what is missing. The provider choice is a
 flagged decision that has not been ratified, and deferring it is deliberate.
-An invitation created today therefore reports
-`delivery: {"channel": "email", "state": "not_configured"}` — the row and its
-token are real, the message is never delivered.
+An email invitation reports `delivery: {"channel": "email", "state": "withheld"}`:
+the email arm is off (`invitations.EMAIL_DELIVERY_ENABLED`) until it can send
+without storing the token, so nothing is queued. The row is real, and the
+inviter hands over the response's `join_url` (`{WEB_APP_URL}/join/{token}`),
+which is returned once.
 
 Do not describe email as working, and do not wire a provider without the owner
 acknowledgement the design calls for.
@@ -395,20 +398,20 @@ the tree daily.
 a PR is really ready — it catches a check that was never scheduled, which a
 green rollup hides (`documentation/guides/ci-cd-pipeline.md`).
 
-**Always update `CHANGELOG.md`** when opening a PR — CI fails without it (the
-`changelog-check` job of `.github/workflows/ci.yml`; a PR that touches only
-`documentation/`, `.md` files or `.github/` is exempt).
-[Keep a Changelog](https://keepachangelog.com/) format, entries under
-`## [Unreleased]`.
+**A PR that touches code or config adds a changelog fragment, and no PR edits
+`CHANGELOG.md`**: one new file in `changelog.d/`. `changelog.d/README.md` has
+the format and the rule the `changelog-check` job of `.github/workflows/ci.yml`
+holds every PR to.
 
 ## Documentation
 
 - Full docs: `documentation/README.md`
 - New docs go in `documentation/` subdirectories: `planning/` (plans and
   specs), `guides/` (how-to), `operations/` (runbooks)
-- Bug fixes and patches: `CHANGELOG.md`; a production incident gets a folder
-  under `documentation/planning/investigations/` (`documentation/updates/` was
-  emptied into `archive/updates/` on 2026-09-18 and no longer exists)
+- Bug fixes and patches: a changelog fragment (`changelog.d/`); a production
+  incident gets a folder under `documentation/planning/investigations/`
+  (`documentation/updates/` was emptied into `archive/updates/` on 2026-09-18
+  and no longer exists)
 - A finished, superseded or abandoned document moves to
   `documentation/archive/` with a status banner and a row in
   `documentation/archive/README.md`. `CLAUDE.md`, `AGENTS.md`, `README.md`,

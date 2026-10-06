@@ -30,3 +30,47 @@ class TestTheGroupChatTypesDeriveFromTheMapping:
     def test_the_two_re_derivations_are_now_the_same_object(self):
         assert channel_bind.GROUP_CHAT_TYPES is bindings.GROUP_CHAT_TYPES
         assert membership_sync.GROUP_CHAT_TYPES is bindings.GROUP_CHAT_TYPES
+
+
+class _Recorder:
+    """A scripted executor: records each statement and reports *rowcounts*
+    in order."""
+
+    def __init__(self, *rowcounts):
+        self.rowcounts = list(rowcounts)
+        self.statements = []
+
+    async def execute(self, stmt, params=None):
+        self.statements.append((str(stmt), params))
+        result = type("_Result", (), {})()
+        result.rowcount = self.rowcounts.pop(0)
+        return result
+
+
+class TestRevokeForWorkspace:
+    """An admin removes a group (`07` §13). The database half — RLS, the
+    cross-tenant refusal, the queue really ending superseded — is the gate's
+    (`tests/scripts/test_channel_bindings_writer.py`)."""
+
+    async def test_revokes_then_supersedes_the_queue_in_one_transaction(self):
+        session = _Recorder(1, 3)
+        moved = await bindings.revoke_for_workspace(
+            session, workspace_id="ws-1", binding_id="b-1"
+        )
+        assert moved is True
+        (revoke_sql, p1), (supersede_sql, p2) = session.statements
+        assert "UPDATE channel_bindings SET state = 'revoked'" in revoke_sql
+        assert "workspace_id = :ws" in revoke_sql
+        assert "state <> 'revoked'" in revoke_sql
+        assert "UPDATE channel_outbox SET state = 'superseded'" in supersede_sql
+        assert "workspace_id = :ws" in supersede_sql
+        assert "state IN ('pending', 'ambiguous')" in supersede_sql
+        assert p1 == p2 == {"ws": "ws-1", "b": "b-1"}
+
+    async def test_nothing_moved_touches_no_queue(self):
+        session = _Recorder(0)
+        moved = await bindings.revoke_for_workspace(
+            session, workspace_id="ws-1", binding_id="b-1"
+        )
+        assert moved is False
+        assert len(session.statements) == 1, "a queue was touched for no binding"

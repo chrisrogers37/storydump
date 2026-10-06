@@ -4,6 +4,7 @@ import { Clock } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import type { Intent } from "@/lib/intents";
 
 /**
@@ -26,25 +27,18 @@ type ActivityItem = Pick<
   "id" | "state" | "file_name" | "category" | "entered_state_at"
 >;
 
-const statusVariant: Record<string, string> = {
-  posted: "bg-green-100 text-green-800",
-  skipped: "bg-yellow-100 text-yellow-800",
-  rejected: "bg-red-100 text-red-800",
-  failed: "bg-red-100 text-red-800",
-};
-
 export function RecentActivity({ items }: { items: ActivityItem[] }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Recent Activity</CardTitle>
+        <CardTitle>Recent activity</CardTitle>
       </CardHeader>
       <CardContent>
         {items.length === 0 ? (
           <EmptyState
             icon={Clock}
-            title="No activity yet"
-            description="Posts will appear here once your scheduler starts running."
+            title="Quiet so far"
+            description="Your Stories show up here once your schedule starts running."
             action={{ label: "Go to Settings", href: "/dashboard/settings" }}
           />
         ) : (
@@ -56,7 +50,7 @@ export function RecentActivity({ items }: { items: ActivityItem[] }) {
               >
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{item.file_name}</p>
-                  <p className="text-xs text-muted-foreground capitalize">
+                  <p className="text-xs text-muted-foreground">
                     {item.category ? `${item.category} · ` : ""}
                     {new Date(item.entered_state_at).toLocaleDateString("en-US", {
                       month: "short",
@@ -68,7 +62,7 @@ export function RecentActivity({ items }: { items: ActivityItem[] }) {
                 </div>
                 <Badge
                   variant="secondary"
-                  className={statusVariant[item.state] || ""}
+                  className={TONE_CLASS[INTENT_STATE_TONE[item.state]]}
                 >
                   {item.state}
                 </Badge>
