@@ -301,6 +301,21 @@ class Settings(BaseSettings):
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.1,::1,fd00::/8"
     )
 
+    # The addresses of the hop Railway puts between its edge and the app.
+    #
+    # Railway's edge sees the visitor (its Network Logs' `srcIp`), then the
+    # request reaches the app from 100.64.0.x with one more entry after the
+    # visitor's: `X-Forwarded-For: <visitor>, 152.233.47.x` (measured
+    # 2026-10-06: .66, .67 and .69, from one edge region). When the header
+    # ENDS in one of these, `DropEdgeHopMiddleware` removes exactly that one
+    # entry, so the walk lands on the visitor rather than on a hop every
+    # visitor shares. Never more than one, and never the only entry: a client
+    # inside this range is still attributed to itself, and a hop outside it
+    # (another region's, say) is kept, so its visitors share that hop's limits
+    # rather than anyone choosing their own. Listing an address here never
+    # makes it a trusted peer. Never "*".
+    EDGE_HOP_HOSTS: str = "152.233.47.0/24"
+
     # The largest request body the API reads, in bytes; over it is 413
     # (`app.py::BodySizeLimitMiddleware`). No route takes an upload: the
     # largest body anything reads is one Telegram update, and every other is
@@ -344,6 +359,11 @@ class Settings(BaseSettings):
     def trusted_proxy_hosts(self) -> list[str]:
         """`TRUSTED_PROXY_HOSTS` as the list uvicorn's middleware expects."""
         return [h.strip() for h in self.TRUSTED_PROXY_HOSTS.split(",") if h.strip()]
+
+    @property
+    def edge_hop_hosts(self) -> list[str]:
+        """`EDGE_HOP_HOSTS` as a list, like `trusted_proxy_hosts`."""
+        return [h.strip() for h in self.EDGE_HOP_HOSTS.split(",") if h.strip()]
 
     @property
     def ops_user_ids(self) -> frozenset[str]:
