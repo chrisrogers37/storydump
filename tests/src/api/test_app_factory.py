@@ -7,7 +7,9 @@ means a 503 that NAMES the variable (never the settings-built URL), and no
 
 from __future__ import annotations
 
+import asyncio
 import time
+from types import SimpleNamespace
 from contextlib import asynccontextmanager
 
 import pytest
@@ -16,8 +18,18 @@ from fastapi.testclient import TestClient
 from src import __version__
 from src.api.app import create_app
 from src.api.principal import Principal, current_principal
+from src.api.routes import health as health_routes
+from src.api.routes.health import AnswerCache
 from src.config.settings import settings
-from src.services.target import backpressure, posting_health, scheduling_health
+from src.services.target import (
+    backpressure,
+    delivery_health,
+    health_reads,
+    posting_health,
+    scheduling_health,
+)
+from tests.src.api.conftest import FakeEngine
+from tests.src.services.target.test_delivery_health import _Doors
 
 
 #: An operator, for the details `/health` used to publish (`/api/v1/ops/health`);
@@ -26,11 +38,17 @@ OPERATOR = Principal(session_id="s-op", user_id="00000000-0000-4000-8000-0000000
 
 
 def details(client: TestClient) -> dict:
-    """The API's operating details, read as an operator."""
+    """The API's operating details, read as an operator, the queue stubbed out:
+    the engines these tests pass (`_RoleEngine`) cannot answer its SQL."""
     client.app.dependency_overrides[current_principal] = lambda: OPERATOR
+
+    async def no_queue(state):
+        return None
+
     try:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(settings, "OPS_USER_IDS", OPERATOR.user_id)
+            mp.setattr(health_routes, "queue_pressure", no_queue)
             return client.get("/api/v1/ops/health").json()
     finally:
         client.app.dependency_overrides.pop(current_principal, None)
@@ -307,6 +325,13 @@ class TestRefusalMappingsAreTotal:
 
         assert set(module._TOKEN_STATUS) == set(TokenRefused.REASONS)
 
+    def test_cross_site_reasons(self):
+        """The cookie origin check's one reason answers 403 with its name."""
+        from src.api import app as module
+        from src.exceptions.tenancy import CrossSiteRefused
+
+        assert set(module._CROSS_SITE_STATUS) == set(CrossSiteRefused.REASONS)
+
     def test_tenant_reasons_are_a_subset_of_the_closed_vocabulary(self):
         from src.api import app as module
         from src.exceptions.tenancy import TenantResolutionError
@@ -371,10 +396,29 @@ class TestRefusalMappingsAreTotal:
         }
         assert resp.json()["detail"] != "the service's own wording"
 
+    @pytest.mark.usefixtures("stubbed_bound")
+    def test_a_cancelled_health_statement_is_the_busy_answer(self, client, monkeypatch):
+        """`health_reads.StatementTimedOut` is load, not a fault: the 503 a
+        pool wait gets, under its own reason, retried after a second."""
+
+        async def cancelled(executor):
+            raise health_reads.StatementTimedOut(
+                "canceling statement due to statement timeout"
+            )
+
+        monkeypatch.setattr(posting_health, "posting_freshness", cancelled)
+        resp = client.get("/health/posting")
+        assert resp.status_code == 503
+        assert resp.json() == {
+            "detail": "busy — try again",
+            "reason": "statement_timeout",
+        }
+        assert resp.headers["retry-after"] == "1"
+
 
 async def _fake_snapshot(executor, **kwargs):
-    """The third seam on `/health/scheduling` (phase 3a): stubbed so a route
-    unit test never reaches SQL."""
+    """The queue's backpressure seam (phase 3a), now the operating details':
+    stubbed so a unit test never reaches SQL."""
     return {
         "lanes": {
             "interactive": {"ready": 0, "oldest_age_s": 0.0},
@@ -386,6 +430,7 @@ async def _fake_snapshot(executor, **kwargs):
     }
 
 
+@pytest.mark.usefixtures("stubbed_bound")
 class TestSchedulingHealthIsASecondSurface:
     """#1090 F1. `/health` is Railway's liveness gate and must not open a
     connection; this is the dependency-touching check #1026 asked for, and the
@@ -451,7 +496,6 @@ class TestSchedulingHealthIsASecondSurface:
 
         monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
         monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
-        monkeypatch.setattr(backpressure, "snapshot", _fake_snapshot)
         resp = client.get("/health/scheduling")
 
         assert resp.status_code == 200, resp.text
@@ -490,46 +534,113 @@ class TestSchedulingHealthIsASecondSurface:
 
         monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
         monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
-        monkeypatch.setattr(backpressure, "snapshot", _fake_snapshot)
         resp = client.get("/health/scheduling")
 
         assert resp.status_code == 200, resp.text
         payload = resp.json()
         # The cursor axis is unchanged — the poller's existing contract.
         assert payload["accounts_active"] == 0
-        # Phase 3a: the backpressure signal rides the same payload — a third
-        # seam, stubbed like the other two, and asserted present.
-        assert payload["backpressure"]["outbox_pending"] == 4
         assert payload["worker"]["succeeded_ever"] == 78
         assert payload["worker"]["last_success_age_seconds"] == 3600
 
-    def test_the_route_calls_the_snapshot_without_identification(
+    def test_the_public_payloads_are_exactly_what_the_fleet_monitors_read(
         self, client, monkeypatch
     ):
-        """The route is public and promises nothing identifying (`scheduling_health`,
-        `posting_health`): the snapshot must be asked WITHOUT `identify`, and the
-        payload must carry no workspace id at any depth."""
-        seen = {}
+        """Both axes are public because the fleet monitors poll them, so they
+        carry what `scripts/scheduling_monitor.py` and
+        `scripts/posting_monitor.py` read and nothing more. This is both
+        directions: a key added here is published to anyone, and a key dropped
+        here is lost to the monitor. Most missing keys read as `unreachable`
+        and page someone, but not all: the scheduling monitor reads a missing
+        `max_lag_seconds` as null and a missing `worker` block as absent
+        (healthy, or worker-unknown), so for those two this test is the only
+        guard."""
+        from scripts import posting_monitor, scheduling_monitor as sm
 
         async def fake_lag(executor):
-            return {"stalled": 0, "accounts_active": 0, "max_lag_seconds": None}
+            return {"stalled": 0, "accounts_active": 1, "max_lag_seconds": 3}
 
         async def fake_worker(executor):
-            return {"succeeded_ever": 0, "last_success_age_seconds": None}
+            return {
+                "succeeded_ever": 1,
+                "last_success_age_seconds": 30,
+                "overdue_ready": 0,
+                "max_overdue_seconds": None,
+            }
+
+        async def fake_freshness(executor):
+            return {
+                "posted_ever": 1,
+                "last_post_age_seconds": 60,
+                "intents_ever": 2,
+                "oldest_intent_age_seconds": 600,
+            }
+
+        async def fake_attempts(executor):
+            return {"debited_total": 1, "ledger_days": 1}
+
+        async def fake_destinations(executor):
+            return {"accounts_active": 1, "oldest_active_destination_age_seconds": 9}
+
+        async def no_queue(executor, **kwargs):
+            raise AssertionError("the public axes no longer read the queue")
+
+        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
+        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
+        monkeypatch.setattr(backpressure, "snapshot", no_queue)
+        monkeypatch.setattr(posting_health, "posting_freshness", fake_freshness)
+        monkeypatch.setattr(posting_health, "publish_attempts", fake_attempts)
+        monkeypatch.setattr(posting_health, "destinations", fake_destinations)
+
+        scheduling = client.get("/health/scheduling").json()
+        assert set(scheduling) == {*sm._COUNTS, sm._LAG, sm._WORKER}
+        assert set(scheduling[sm._WORKER]) == {*sm._WORKER_COUNTS, *sm._WORKER_AGES}
+        posting = client.get("/health/posting").json()
+        assert set(posting) == set(posting_monitor._COUNTS + posting_monitor._AGES)
+
+
+class TestTheQueueMovedToTheDetails:
+    """The backpressure signal (the ready lanes, the pending outbox, the
+    Telegram pacing) rode public `/health/scheduling`, which no monitor ever
+    read; it is the operating details' now."""
+
+    @staticmethod
+    def state(engine):
+        return SimpleNamespace(engine=engine, health_cache=AnswerCache())
+
+    def test_the_details_carry_it_asked_without_identification(self, monkeypatch):
+        seen = {}
 
         async def fake_snapshot(executor, **kwargs):
             seen.update(kwargs)
             return await _fake_snapshot(executor, **kwargs)
 
-        monkeypatch.setattr(scheduling_health, "scheduling_lag", fake_lag)
-        monkeypatch.setattr(scheduling_health, "worker_freshness", fake_worker)
         monkeypatch.setattr(backpressure, "snapshot", fake_snapshot)
-        resp = client.get("/health/scheduling")
-        assert resp.status_code == 200, resp.text
+        body = asyncio.run(health_routes.queue_pressure(self.state(FakeEngine())))
+        assert body["outbox_pending"] == 4
         assert not seen.get("identify"), seen
-        assert "workspace_id" not in resp.text
+        assert "workspace_id" not in str(body)
+
+    def test_no_engine_is_none_and_a_failed_read_is_named(self, monkeypatch):
+        async def broken(executor, **kwargs):
+            raise TimeoutError("pool")
+
+        monkeypatch.setattr(backpressure, "snapshot", broken)
+        assert asyncio.run(health_routes.queue_pressure(self.state(None))) is None
+        failed = asyncio.run(health_routes.queue_pressure(self.state(FakeEngine())))
+        assert failed == {"error": "TimeoutError"}
+
+    def test_a_database_that_stops_answering_is_named_not_waited_on(self, monkeypatch):
+        async def hangs(executor, **kwargs):
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(backpressure, "snapshot", hangs)
+        monkeypatch.setattr(health_routes, "QUEUE_READ_TIMEOUT_S", 0.01)
+        slow = asyncio.run(health_routes.queue_pressure(self.state(FakeEngine())))
+        assert slow == {"error": "TimeoutError"}
 
 
+@pytest.mark.usefixtures("stubbed_bound")
 class TestPostingHealthIsATHIRDSurface:
     """#1268. `/health/scheduling` reads the clock and the worker, and both
     stayed true through a sixteen-day silence in which nothing posted — 1936
@@ -661,6 +772,116 @@ class TestPostingHealthIsATHIRDSurface:
         down for a fault no restart repairs."""
         app = create_app(env={})
         assert TestClient(app).get("/health").status_code == 200
+
+
+@pytest.mark.usefixtures("stubbed_bound")
+class TestDeliveryHealthIsAFOURTHSurface:
+    """#1482. Deliveries failing and posts not landing are independent causes,
+    so the outbox's failures get their own surface rather than a key in either
+    of the other two payloads, which would rank one cause against the other."""
+
+    def test_it_is_its_own_route_beside_the_other_three(self):
+        paths = {r.path for r in create_app(env={}).routes}
+        assert {
+            "/health",
+            "/health/scheduling",
+            "/health/posting",
+            "/health/delivery",
+        } <= paths
+
+    def test_it_refuses_rather_than_reassures_when_it_cannot_look(self):
+        """No engine is a 503, never an hour of zero failures."""
+        app = create_app(env={})
+        assert app.state.engine is None
+        assert TestClient(app).get("/health/delivery").status_code == 503
+
+    def test_it_reaches_its_seam(self, client, monkeypatch):
+        seen = []
+
+        async def fake(executor):
+            seen.append(executor)
+            return {
+                "window_seconds": 3600,
+                "sent_in_window": 3,
+                "failed_or_ambiguous": 0,
+                "by_class": {},
+            }
+
+        monkeypatch.setattr(delivery_health, "outbox_failures", fake)
+        resp = client.get("/health/delivery")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["sent_in_window"] == 3
+        (executor,) = seen
+        assert hasattr(executor, "execute")
+
+    @staticmethod
+    def _get(engine, client, failures, sent=40):
+        """The REAL `delivery_health` behind the route, over 101's doors
+        scripted on the conftest engine's connection."""
+        engine.session = doors = _Doors(failures, sent)
+        resp = client.get("/health/delivery")
+        assert resp.status_code == 200, resp.text
+        return resp, doors
+
+    def test_the_body_is_aggregates_only(self, engine, client):
+        """The route is unauthenticated: counts and codes, and nothing that
+        names a workspace, a chat or a message."""
+        resp, doors = self._get(
+            engine,
+            client,
+            [("destination_gone", 403, 5, 5), ("rate_limited", 429, 9, 0)],
+        )
+        body = resp.json()
+        assert body["window_seconds"] == 3600 and body["sent_in_window"] == 40
+        assert body["failed_or_ambiguous"] == 5
+        assert body["by_class"]["destination_gone"] == {
+            "rows": 5,
+            "alerting": 5,
+            "codes": {"403": 5},
+        }
+        assert body["by_class"]["rate_limited"]["alerting"] == 0
+        for word in ("workspace", "chat", "binding", "payload", "external"):
+            assert word not in resp.text
+        assert len(doors.statements) == 2
+
+    def test_the_public_payload_is_exactly_what_the_monitor_reads(self, engine, client):
+        """Public because the fleet monitor polls it, so it carries what
+        `scripts/delivery_monitor.py` reads and nothing more: a key added here
+        is published to anyone, and a key dropped here is lost to the monitor.
+        The REAL service answers behind the route, which passes its dict on."""
+        from scripts import delivery_monitor as dm
+
+        resp, _ = self._get(engine, client, [("destination_gone", 403, 5, 5)])
+        assert set(resp.json()) == {*dm._COUNTS, dm._BY_CLASS}
+
+    @pytest.mark.parametrize(
+        "failures, reading",
+        [
+            ([("destination_gone", 403, 5, 5)], "above"),
+            ([("refused", 400, 4, 4)], "band"),
+            ([("rate_limited", 429, 30, 0), ("ambiguous", None, 1, 1)], "below"),
+        ],
+        ids=["five fires", "four holds", "a 429 storm is context"],
+    )
+    def test_the_payload_satisfies_the_pollers_strictness(
+        self, engine, client, failures, reading
+    ):
+        """The REAL classifier over the REAL body: a key the route drops or
+        mistypes reads as `unreachable` there, and fails here."""
+        from scripts.delivery_monitor import (
+            DEFAULT_CLEAR_AT,
+            DEFAULT_RAISE_AT,
+            classify,
+        )
+
+        resp, _ = self._get(engine, client, failures)
+        verdict = classify(
+            resp.status_code,
+            resp.text,
+            raise_at=DEFAULT_RAISE_AT,
+            clear_at=DEFAULT_CLEAR_AT,
+        )
+        assert verdict.state == reading
 
 
 class _RoleResult:

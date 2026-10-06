@@ -425,8 +425,9 @@ class TestTheDerivedAdoptionProbesReadBothWays:
     # names `post_intents`, and its door and grant probes name roles a
     # database before the lineage lacks. 094 is here because both its probes
     # read a door from `pg_proc` by name, its body and its `proconfig`: false,
-    # not an error, where neither door exists.
-    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89, 94])
+    # not an error, where neither door exists. 101 likewise: its probes name
+    # `channel_outbox` and the service roles, read from the catalogs by name.
+    @pytest.mark.parametrize("version", [62, 84, 86, 87, 88, 89, 94, 101])
     def test_probes_read_false_without_raising_before_the_target_lineage(
         self, version, at49_db, owner_actor
     ):

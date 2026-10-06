@@ -621,6 +621,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
 
     @pytest.mark.asyncio
     async def test_running_the_executor_twice_mints_one_intent(self, clock_db):
+        from src.services.target import content_runway
         from src.services.target.scheduler import execute_plan_slot
 
         account = _new_account(clock_db)
@@ -639,6 +640,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                     provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
                     approval_mode="manual",
                     no_media_notice_after_seconds=24 * 3600,
+                    low_runway_days=content_runway.LOW_RUNWAY_DAYS,
                 )
                 await conn.commit()
             assert first.intent_id is not None, "positive control: the first run minted"
@@ -653,6 +655,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                     provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
                     approval_mode="manual",
                     no_media_notice_after_seconds=24 * 3600,
+                    low_runway_days=content_runway.LOW_RUNWAY_DAYS,
                 )
                 await conn.commit()
         finally:
@@ -1179,6 +1182,7 @@ async def _plan_slot(clock_db, account, seed, *, slot_at=None):
     from sqlalchemy import text as _t
     from sqlalchemy.ext.asyncio import create_async_engine
 
+    from src.services.target import content_runway
     from src.services.target.scheduler import execute_plan_slot
 
     slot = (
@@ -1206,6 +1210,7 @@ async def _plan_slot(clock_db, account, seed, *, slot_at=None):
                 provider_account_ref=f"ref-{uuid.uuid4().hex[:8]}",
                 approval_mode="manual",
                 no_media_notice_after_seconds=24 * 3600,
+                low_runway_days=content_runway.LOW_RUNWAY_DAYS,
                 rng=random.Random(seed),
             )
             await conn.commit()

@@ -70,6 +70,7 @@ HEALTH = {
         "max_connections": 40,
         "allowed_updates": ["message", "callback_query"],
     },
+    "backpressure": {"lanes": {"interactive": {"ready": 0}, "bulk": {"ready": 2}}},
 }
 #: The real shapes (`src/api/app.py`'s three routes): the two dependency
 #: surfaces carry aggregates, never a `status` — `health` hands them to the
@@ -84,7 +85,6 @@ SCHEDULING = {
         "overdue_ready": 0,
         "max_overdue_seconds": None,
     },
-    "backpressure": {"lanes": {"interactive": {"ready": 0}, "bulk": {"ready": 2}}},
 }
 POSTING = {
     "posted_ever": 13,
@@ -230,6 +230,7 @@ def test_health_reads_the_three_surfaces_and_is_ok(tmp_path):
         "2.1.0",
         "svc_ingress",
         "storydump_app_bot",
+        "backpressure",
         "healthy",
         "posting",
     ):
@@ -601,11 +602,15 @@ def test_health_whose_details_fail_reports_the_webhook_not_checked(tmp_path, ans
     data = one_envelope(result)["data"]
     assert data["verdicts"]["api"]["state"] == "ok", "public /health still answered"
     assert data["verdicts"]["webhook"]["state"] == "not_checked"
-    if isinstance(answer, Exception) or answer[0] >= 500:
+    if isinstance(answer, Exception):
         assert data["details"]["detail"].startswith("the details did not answer")
         assert data["details"]["fix"] == UNREACHABLE_FIX
+    elif answer[0] >= 500:
+        # the API answered: a server failure, not the network
+        assert data["details"]["detail"].startswith("the details failed (503)")
+        assert data["details"]["fix"] != UNREACHABLE_FIX
     else:
-        assert data["details"]["detail"].startswith("the details answered 404")
+        assert data["details"]["detail"].startswith("the details answered (404)")
 
 
 def test_health_without_a_token_store_names_the_stores_own_fix(tmp_path):

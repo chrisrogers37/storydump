@@ -27,8 +27,8 @@ composition root, `src.worker` (`src/main.py:18-22`). `src.worker.main()` (`src/
 - composes the registry of job kinds and **parks** any kind whose seam it cannot build, by name
   (`src/services/target/work_loop.py:524-616`): no `TARGET_TELEGRAM_BOT_TOKEN` parks
   `deliver_outbox`; an incomplete `CLOUDINARY_*` trio parks `publish_pipeline` and
-  `reap_transit_assets`; no email provider parks `send_email`; `retention_sweep` and
-  `reencrypt_credentials` have no executor at all. A parked job is rescheduled every 900 s
+  `reap_transit_assets`; no email provider parks `send_email`; `reencrypt_credentials` has
+  no executor at all, and `retention_sweep` deletes only `rate_counters` rows older than 7 days. A parked job is rescheduled every 900 s
   (`park_seconds`) with a `parked kind <kind> (job <id>): <reason>` warning, and the rest of the
   worker runs — a parked kind is a degraded worker, not a dead one;
 - refuses a lane concurrency the pool cannot hold — `K_interactive × 1 + K_bulk × 2 + 3 ≤ 10`

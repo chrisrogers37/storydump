@@ -176,6 +176,7 @@ railway logs --service storydump | grep -iE 'pool|connect'
 | `TARGET_DATABASE_URL` absent on the API | every data route answers 503 and the operating details (`storydump health --json`, `OPS_USER_IDS`) report `"target_database": false`; set it on the `storydump` service |
 | Neon endpoint suspended | The first connection wakes it |
 | The pool saturated (a 503 naming `pool_saturated`, with `Retry-After: 1`) | Wait; a watch retries three times before giving up |
+| A statement of a health read ran past its 3 s cap (a 503 naming `statement_timeout`, with `Retry-After: 1`) | Wait; the `/health/*` axes keep that answer for 30 s, then read again. If it repeats, the database itself is slow. |
 | Wrong credentials | Check the database variables in the Railway dashboard |
 | The Neon plan's compute limit | the Neon console |
 
@@ -192,6 +193,7 @@ railway logs --service storydump | grep -iE 'exception|traceback|refused'
 |---------|---------|
 | `refused <METHOD> <path>: …` | the API refused a request (the reason follows) |
 | `pool_saturated` | the API is shedding load |
+| `health read cancelled (statement cap 3000 ms): …` | a statement of a `/health/*` axis was cancelled (the server's reason follows); logged once per read, not per cached answer |
 | `telegram webhook not registered` | the startup registration failed; `storydump webhook status` |
 | `status: interactive[…] bulk[…] clock[…] heartbeat[…]` | the worker's one-a-minute status line; counters that stop moving are a stuck worker (`worker-recovery.md`); its `ws_oldest_wait=` and `tg_global_paced=` are [tenant fairness's trigger](../archive/2026-09-09-telegram-interaction-at-throughput/04_tenant-fairness.md) |
 | `clock tick failed (N consecutive) — NO JOBS WERE MINTED` | a clock tick raised and minted nothing. Once is a blip; on every tick it is a row the schema refuses — the deployed code ahead of the migration ledger (`worker-recovery.md`) |

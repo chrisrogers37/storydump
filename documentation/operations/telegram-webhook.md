@@ -102,7 +102,10 @@ the same), so an `inv-` payload reaches no
 handler — an invitation is accepted on the web. **The bot answers a handled tap in the
 chat** (since #1239) and stays silent on a refusal. A bare `/start` in a group
 is treated as speech (see *Members*), never a greeting. The person sees the
-result on the site after a reload.
+result on the site after a reload. A `/start` whose sender is a stand-in
+(`sender_chat`, an automatic forward from a channel) or a bot reaches no
+handler, and a stand-in's message in a bound group makes nobody a member (see
+*Members*), not even the people it adds: they join when next seen speaking.
 
 ## Order of operations
 

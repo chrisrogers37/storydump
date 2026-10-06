@@ -13,7 +13,7 @@ import pytest
 from src.api.principal import TOKEN_ROUTES, current_principal
 from src.api.routes import ops as ops_routes
 from src.config.settings import settings
-from src.services.target import ops_views
+from src.services.target import backpressure, ops_views
 from tests.src.api.conftest import INTENT, PRINCIPAL, WS
 from tests.src.api.test_token_principal import PERSON_TOKEN, SERVICE_TOKEN
 
@@ -186,7 +186,21 @@ class TestTheOperatingDetails:
 
         return name
 
-    def test_an_operator_reads_the_details(self, client, as_principal, operators):
+    @pytest.fixture
+    def queue(self, monkeypatch):
+        """The queue's read, stubbed: what it was asked, and its answer."""
+        asked = {}
+
+        async def snapshot(executor, **kwargs):
+            asked.update(kwargs)
+            return {"outbox_pending": 4}
+
+        monkeypatch.setattr(backpressure, "snapshot", snapshot)
+        return asked
+
+    def test_an_operator_reads_the_details(
+        self, client, as_principal, operators, queue
+    ):
         operators(f" {PRINCIPAL.user_id.upper()} , someone-else")
         as_principal(PERSON_TOKEN)
         resp = client.get("/api/v1/ops/health")
@@ -195,10 +209,17 @@ class TestTheOperatingDetails:
         assert "kind" not in body, "bare, not the envelope: the CLI judges it so"
         assert body["status"] == "ok"
         assert {"version", "db_role", "pool", "taps", "webhook"} <= set(body)
+        # the queue's backpressure, moved here from public /health/scheduling
+        assert body["backpressure"] == {"outbox_pending": 4}
+        assert not queue.get("identify"), queue
 
-    def test_a_session_operator_reads_them_too(self, client, signed_in, operators):
+    def test_a_session_operator_reads_them_too(
+        self, client, signed_in, operators, queue
+    ):
         operators(PRINCIPAL.user_id)
-        assert client.get("/api/v1/ops/health").status_code == 200
+        resp = client.get("/api/v1/ops/health")
+        assert resp.status_code == 200
+        assert resp.json()["backpressure"] == {"outbox_pending": 4}
 
     @pytest.mark.parametrize("configured", ["", "33333333-3333-3333-3333-333333333333"])
     def test_anyone_else_is_refused_with_the_reason(
@@ -210,6 +231,7 @@ class TestTheOperatingDetails:
         assert resp.status_code == 403
         assert resp.json()["reason"] == "not_ops"
         assert "taps" not in resp.text
+        assert "outbox_pending" not in resp.text
 
     def test_a_service_identity_has_no_person_and_is_refused(
         self, client, as_principal, operators

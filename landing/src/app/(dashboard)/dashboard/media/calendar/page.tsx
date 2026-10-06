@@ -12,7 +12,7 @@ import type { Intent, IntentsResponse } from "@/lib/intents";
 import { postingIntervalMinutes } from "@/lib/schedule";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/card";
 
 /** The calendar's lanes are all the intent ledger now, filtered by state. */
 const laneItem = (i: Intent) => ({
@@ -129,51 +129,25 @@ export default async function CalendarPage() {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Posts Today
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{postsToday}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              In Queue
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{inFlight}</div>
-            {needsReview > 0 && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                {needsReview === 1
-                  ? "1 needs review"
-                  : `${needsReview} need review`}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Posting Rate
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {perDay === null ? "—" : `${perDay}/day`}
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {intervalMinutes === null
-                ? "interval not set"
-                : `Every ${intervalMinutes} min`}
-            </p>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+        <StatCard label="Posts Today" value={postsToday} />
+        <StatCard
+          label="In Queue"
+          value={inFlight}
+          detail={
+            needsReview > 0 &&
+            (needsReview === 1 ? "1 needs review" : `${needsReview} need review`)
+          }
+        />
+        <StatCard
+          label="Posting Rate"
+          value={perDay === null ? "—" : `${perDay}/day`}
+          detail={
+            intervalMinutes === null
+              ? "interval not set"
+              : `Every ${intervalMinutes} min`
+          }
+        />
       </div>
 
       <ContentCalendar

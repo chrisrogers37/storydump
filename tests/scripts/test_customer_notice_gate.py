@@ -36,9 +36,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from tests.scripts.conftest import (
     _scratch,
     actor_lacks_createrole,
+    as_user,
     async_url,
+    in_tenant,
     run_bootstrap,
     seed_workspace_chain,
+    set_test_passwords,
 )
 from tests.scripts.test_lineage_lane import run_lane
 
@@ -81,7 +84,9 @@ def notice_lane(admin_conn, owner_actor):
 
     Not built on `bootstrapped_db`: that fixture is function-scoped, so
     depending on it would pin this to function scope too. Same two steps,
-    taken directly.
+    taken directly — then the LOGIN roles' test passwords, so a scenario can
+    act as the production roles (`svc_worker`, `svc_ingress`) the bootstrap
+    created.
     """
     reason = actor_lacks_createrole(admin_conn)
     if reason:
@@ -92,6 +97,7 @@ def notice_lane(admin_conn, owner_actor):
     try:
         run_bootstrap(admin_conn, dsn)
         run_lane(dsn)
+        set_test_passwords(admin_conn)
         yield dsn
     finally:
         gen.close()
@@ -109,6 +115,10 @@ def notice_db(notice_lane):
     A fresh workspace per test is what makes the shared schema safe: every
     assertion below counts outbox rows for ITS OWN workspace, so a notice one
     scenario provokes cannot be counted by the next.
+
+    `worker` connects to the same database as `svc_worker`, the role the
+    worker runs `plan_slot` as: what the executor reads and writes is held to
+    that role's grants and to the tenant its session claims.
     """
     conn = psycopg2.connect(notice_lane)
     try:
@@ -125,7 +135,12 @@ def notice_db(notice_lane):
         conn.commit()
     finally:
         conn.close()
-    return {"dsn": notice_lane, "binding": str(binding), **chain}
+    return {
+        "dsn": notice_lane,
+        "worker": as_user(notice_lane, "svc_worker"),
+        "binding": str(binding),
+        **chain,
+    }
 
 
 def _sql(notice_db, sql, params=None, fetch=False):
@@ -155,35 +170,49 @@ def _notices(notice_db, *, like: str):
     )
 
 
+async def _plan(notice_db, *, window=NO_MEDIA_WINDOW_S):
+    """One `plan_slot` for the chain's account at a fresh slot, as the worker
+    runs it: the executor, as `svc_worker` under the job's tenant, at the
+    production level, committed."""
+    from sqlalchemy import text
+
+    from src.services.target import content_runway, unit_of_work
+    from src.services.target.scheduler import execute_plan_slot
+
+    engine = create_async_engine(async_url(notice_db["worker"]))
+    try:
+        async with engine.connect() as conn:
+            # The role is asserted rather than assumed: a session that quietly
+            # connected as the owner would bypass RLS, and every tenant claim
+            # below would hold vacuously.
+            who = (await conn.execute(text("SELECT current_user"))).scalar()
+            assert who == "svc_worker", who
+            # `plan_slot` is a TENANT kind, so the worker's session carries
+            # the job's own workspace — the opposite of D4's singleton
+            # below, and the same `apply_gucs` call in both.
+            await unit_of_work.apply_gucs(
+                conn, tenant_id=notice_db["ws"], actor_kind="system"
+            )
+            out = await execute_plan_slot(
+                conn,
+                workspace_id=notice_db["ws"],
+                ig_account_id=notice_db["iga"],
+                slot_at=_unique_slot(),
+                provider_account_ref="ref-d3",
+                approval_mode="manual",
+                no_media_notice_after_seconds=window,
+                low_runway_days=content_runway.LOW_RUNWAY_DAYS,
+            )
+            await conn.commit()
+        return out
+    finally:
+        await engine.dispose()
+
+
 class TestD3TheNoMediaNotice:
     """D3 — "you are told once, not silently nothing"."""
 
-    async def _plan(self, notice_db, *, window=NO_MEDIA_WINDOW_S):
-        from src.services.target import unit_of_work
-        from src.services.target.scheduler import execute_plan_slot
-
-        engine = create_async_engine(async_url(notice_db["dsn"]))
-        try:
-            async with engine.connect() as conn:
-                # `plan_slot` is a TENANT kind, so the worker's session carries
-                # the job's own workspace — the opposite of D4's singleton
-                # below, and the same `apply_gucs` call in both.
-                await unit_of_work.apply_gucs(
-                    conn, tenant_id=notice_db["ws"], actor_kind="system"
-                )
-                out = await execute_plan_slot(
-                    conn,
-                    workspace_id=notice_db["ws"],
-                    ig_account_id=notice_db["iga"],
-                    slot_at=_unique_slot(),
-                    provider_account_ref="ref-d3",
-                    approval_mode="manual",
-                    no_media_notice_after_seconds=window,
-                )
-                await conn.commit()
-            return out
-        finally:
-            await engine.dispose()
+    _plan = staticmethod(_plan)
 
     async def test_an_empty_selection_tells_the_workspace_once(self, notice_db):
         """THE D3 OBSERVATION. The seeded chain's only media item is already
@@ -554,3 +583,452 @@ class TestD4TheParkedIntentNotice:
         await self._sweep_and_notify(notice_db, origin=None)
         rows = _notices(notice_db, like="%post needs attention%")
         assert len(rows) == 1 and "http" not in rows[0][0]
+
+
+# --- #1478: the runway — the figure, and the one notice when it runs low ---
+
+
+def _files(notice_db, n, *, source=None, state="available"):
+    """*n* more files in *source* (the chain's own folder by default)."""
+    rows = _sql(
+        notice_db,
+        "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name,"
+        " media_kind, provider_file_ref, state)"
+        " SELECT %s, %s, 'hash-' || gen_random_uuid(), 'r.jpg', 'image',"
+        "        'ref-' || gen_random_uuid(), %s"
+        "   FROM generate_series(1, %s) RETURNING id",
+        (notice_db["ws"], source or notice_db["src"], state, n),
+        fetch=True,
+    )
+    return [str(r[0]) for r in rows]
+
+
+def _folder(notice_db, *, state="active", removed=False):
+    config = {"v": 1, "removed": True} if removed else {"v": 1}
+    return str(
+        _sql(
+            notice_db,
+            "INSERT INTO media_sources (workspace_id, provider, config, state)"
+            " VALUES (%s, 'gdrive', %s, %s) RETURNING id",
+            (notice_db["ws"], json.dumps(config), state),
+            fetch=True,
+        )[0][0]
+    )
+
+
+def _cadence(notice_db, posts_per_day):
+    """The account's own posts per day (None inherits the workspace's) and a
+    slot cursor, so the clock posts for it (`fn_clock_tick`, 084)."""
+    _sql(
+        notice_db,
+        "UPDATE ig_accounts SET posts_per_day = %s, next_slot_at = now() WHERE id = %s",
+        (posts_per_day, notice_db["iga"]),
+    )
+
+
+def _runway_told(notice_db):
+    """Every runway notice queued for the workspace: "… of content left" and,
+    for the mint that took the last file, "no content left"."""
+    return _notices(notice_db, like="%content left%")
+
+
+async def _mint(notice_db):
+    """One `plan_slot` that must mint. A slot that minted nothing says nothing
+    about the runway either, so a silence is evidence only beside a mint."""
+    out = await _plan(notice_db)
+    assert out.intent_id is not None, "the slot minted"
+    return out
+
+
+def _advisory_locks(notice_db, pid, *, granted):
+    """The advisory locks backend *pid* holds (*granted*) or waits on."""
+    return _sql(
+        notice_db,
+        "SELECT classid, objid, objsubid FROM pg_locks"
+        " WHERE locktype = 'advisory' AND pid = %s AND granted = %s",
+        (pid, granted),
+        fetch=True,
+    )
+
+
+async def _waits_on_an_advisory_lock(notice_db, pid, task, *, within_s=30.0):
+    """Whether backend *pid* queues on an advisory lock while *task* runs on
+    it, within *within_s*: polled, because the wait begins when its statement
+    reaches the server, which the caller cannot otherwise see. False as soon
+    as *task* finishes, since a task that finished did not wait."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + within_s
+    while not task.done() and loop.time() < deadline:
+        if _advisory_locks(notice_db, pid, granted=False):
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+def _latch(notice_db):
+    """The account's runway audit rows, oldest first: the latch's history."""
+    from src.services.target.content_runway import NOTICE_EVENT, REARM_EVENT
+
+    return [
+        row[0]
+        for row in _sql(
+            notice_db,
+            "SELECT detail->>'event' FROM audit_events"
+            " WHERE workspace_id = %s AND entity_kind = 'ig_account'"
+            "   AND entity_id = %s AND detail->>'event' IN (%s, %s) ORDER BY id",
+            (notice_db["ws"], notice_db["iga"], NOTICE_EVENT, REARM_EVENT),
+            fetch=True,
+        )
+    ]
+
+
+class TestTheRunwayNotice:
+    """#1478 — told BEFORE the library runs dry: once, when a mint leaves the
+    account under a week of content, through the empty library's own path (the
+    push bindings' outbox), by the executor running as `svc_worker`. The
+    chain's own file is held by its seeded intent, so every file below is one
+    the test added."""
+
+    async def test_the_mint_that_crosses_a_week_tells_the_workspace_once(
+        self, notice_db
+    ):
+        from src.services.target.content_runway import NOTICE_EVENT
+
+        _cadence(notice_db, 1)
+        _files(notice_db, 8)
+        await _mint(notice_db)
+        assert _runway_told(notice_db) == [], "seven days left is not below a week"
+
+        await _mint(notice_db)
+        rows = _runway_told(notice_db)
+        assert len(rows) == 1, rows
+        assert "about 6 days of content left (6 files at 1 a day)" in rows[0][0]
+        assert "Drive source" in rows[0][0]
+
+        await _mint(notice_db)
+        assert len(_runway_told(notice_db)) == 1, "once per crossing, not per slot"
+        assert _latch(notice_db) == [NOTICE_EVENT]
+
+    async def test_a_library_hovering_at_the_line_is_told_once(self, notice_db):
+        """The gap between the two levels: back above a week, but not by a
+        day's posts, re-arms nothing — a file coming off its `recent` lock
+        must not buy a second notice."""
+        from src.services.target.content_runway import NOTICE_EVENT
+
+        _cadence(notice_db, 1)
+        _files(notice_db, 7)
+        await _mint(notice_db)  # 6 left: told
+        _files(notice_db, 2)
+        await _mint(notice_db)  # 7 left: above the line, below the re-arm
+        await _mint(notice_db)  # 6 left again
+        assert len(_runway_told(notice_db)) == 1
+        assert _latch(notice_db) == [NOTICE_EVENT]
+
+    async def test_a_library_that_refills_rearms_and_the_next_drop_is_told(
+        self, notice_db
+    ):
+        from src.services.target.content_runway import NOTICE_EVENT, REARM_EVENT
+
+        _cadence(notice_db, 1)
+        _files(notice_db, 7)
+        await _mint(notice_db)  # 6 left: told
+        fresh = _files(notice_db, 10)
+        await _mint(notice_db)  # 15 left: re-armed, and nothing said
+        assert len(_runway_told(notice_db)) == 1
+        assert _latch(notice_db) == [NOTICE_EVENT, REARM_EVENT]
+
+        # The next drop is not a mint's doing: eight still-eligible files leave
+        # the library. The next mint reads it, wherever it came from.
+        _sql(
+            notice_db,
+            "UPDATE media_items SET state = 'removed' WHERE id IN ("
+            "  SELECT m.id FROM media_items m WHERE m.id = ANY(%s::uuid[])"
+            "     AND NOT EXISTS (SELECT 1 FROM post_intents p"
+            "                     WHERE p.media_item_id = m.id)"
+            "   ORDER BY m.id LIMIT 8)",
+            (fresh,),
+        )
+        await _mint(notice_db)  # 7 eligible, 6 left: told again
+        assert len(_runway_told(notice_db)) == 2
+        assert _latch(notice_db) == [NOTICE_EVENT, REARM_EVENT, NOTICE_EVENT]
+
+    async def test_an_edit_to_the_account_is_not_the_latch(self, notice_db):
+        """The latch is the newest of its OWN two rows. An admin's edit to the
+        account (its display name here) writes the account's governance audit
+        row after the notice; it must not re-arm it, or the next low mint is
+        told again."""
+        from src.services.target.content_runway import NOTICE_EVENT
+
+        _cadence(notice_db, 1)
+        _files(notice_db, 7)
+        await _mint(notice_db)  # 6 left: told
+        _sql(
+            notice_db,
+            "UPDATE ig_accounts SET display_name = 'Renamed by an admin' WHERE id = %s",
+            (notice_db["iga"],),
+        )
+        await _mint(notice_db)  # 5 left: still the same crossing
+        assert len(_runway_told(notice_db)) == 1, "an edit is not a re-arm"
+        assert _latch(notice_db) == [NOTICE_EVENT]
+
+    async def test_the_workspace_cadence_divides_when_the_account_has_none(
+        self, notice_db
+    ):
+        _cadence(notice_db, None)  # the workspace's 3 a day (053's default)
+        _files(notice_db, 22)
+        await _mint(notice_db)  # 21 left: exactly a week at 3 a day
+        assert _runway_told(notice_db) == []
+        await _mint(notice_db)  # 20 left
+        rows = _runway_told(notice_db)
+        assert len(rows) == 1, rows
+        assert "about 6 days of content left (20 files at 3 a day)" in rows[0][0]
+
+    async def test_no_binding_still_mints_and_latches_the_crossing(self, notice_db):
+        """The notice never decides the slot. With no push binding the mint
+        stands and carries no notice back, so its job finalizes succeeded; the
+        crossing is latched with nobody told (`told` 0), so the next slot
+        writes no second row, and the Overview's card is that workspace's
+        channel."""
+        from src.services.target.content_runway import NOTICE_EVENT
+
+        _sql(
+            notice_db,
+            "UPDATE channel_bindings SET state = 'revoked' WHERE workspace_id = %s",
+            (notice_db["ws"],),
+        )
+        _cadence(notice_db, 1)
+        _files(notice_db, 7)
+        out = await _mint(notice_db)
+        assert out.notice is None, "a runway notice nobody heard rides on nothing"
+        assert _runway_told(notice_db) == []
+        assert _latch(notice_db) == [NOTICE_EVENT], "the crossing is spoken for"
+        told = _sql(
+            notice_db,
+            "SELECT detail->>'told' FROM audit_events"
+            " WHERE workspace_id = %s AND entity_kind = 'ig_account'"
+            "   AND entity_id = %s AND detail->>'event' = %s",
+            (notice_db["ws"], notice_db["iga"], NOTICE_EVENT),
+            fetch=True,
+        )
+        assert told == [("0",)], "and nobody was told"
+
+        out = await _mint(notice_db)
+        assert out.notice is None
+        assert _latch(notice_db) == [NOTICE_EVENT], "once per crossing, not per slot"
+
+    async def test_a_full_library_says_nothing(self, notice_db):
+        """THE POSITIVE CONTROL: a producer that fired on every mint would pass
+        the once-only tests' first halves; it fails here."""
+        _cadence(notice_db, 1)
+        _files(notice_db, 20)
+        await _mint(notice_db)
+        assert _runway_told(notice_db) == []
+        assert _latch(notice_db) == []
+
+    async def test_a_second_writer_waits_on_the_accounts_lock(self, notice_db):
+        """Two transactions settle one account's crossing at once, both as
+        `svc_worker`. The first tells and keeps its transaction open; the
+        second queues on the account's `runway:` lock, the very one the first
+        holds, until the first commits, then reads the latch the first wrote
+        and says nothing. Without the lock the second reads no latch (the
+        first's row is not yet visible) and tells again."""
+        import asyncio
+
+        from sqlalchemy import text
+
+        from src.services.target import content_runway, unit_of_work
+        from src.services.target.content_runway import NOTICE_EVENT
+
+        _cadence(notice_db, 1)
+
+        async def settle(conn):
+            return await content_runway.after_mint(
+                conn,
+                workspace_id=notice_db["ws"],
+                ig_account_id=notice_db["iga"],
+                eligible=3,
+                below_days=content_runway.LOW_RUNWAY_DAYS,
+            )
+
+        engine = create_async_engine(async_url(notice_db["worker"]))
+        try:
+            async with engine.connect() as first, engine.connect() as second:
+                pids = []
+                for conn in (first, second):
+                    await unit_of_work.apply_gucs(
+                        conn, tenant_id=notice_db["ws"], actor_kind="system"
+                    )
+                    pids.append(
+                        (await conn.execute(text("SELECT pg_backend_pid()"))).scalar()
+                    )
+                assert await settle(first) == 1, "the first tells its one binding"
+                held = _advisory_locks(notice_db, pids[0], granted=True)
+                assert len(held) == 1, "positive control: the first holds the lock"
+
+                waiting = asyncio.create_task(settle(second))
+                try:
+                    assert await _waits_on_an_advisory_lock(
+                        notice_db, pids[1], waiting
+                    ), "the second did not wait on an advisory lock"
+                    assert not waiting.done()
+                    assert _advisory_locks(notice_db, pids[1], granted=False) == held
+                    await first.commit()
+                    assert await asyncio.wait_for(waiting, timeout=30) is None
+                finally:
+                    # Never leave the second blocked on a lock the first holds,
+                    # or its connection busy when the context closes it.
+                    if not waiting.done():
+                        await first.rollback()
+                    await asyncio.wait_for(
+                        asyncio.gather(waiting, return_exceptions=True), timeout=30
+                    )
+                await second.commit()
+        finally:
+            await engine.dispose()
+
+        assert _latch(notice_db) == [NOTICE_EVENT], "one crossing, one row"
+        assert len(_runway_told(notice_db)) == 1
+
+
+class TestTheRunwayRead:
+    """#1478 — the Overview's figure is the planner's own pool, read as the API
+    reads it: `svc_ingress`, under the member's tenant."""
+
+    @pytest.fixture()
+    def ingress(self, notice_db):
+        return as_user(notice_db["dsn"], "svc_ingress")
+
+    async def _read(self, notice_db, ingress, *, workspace=None):
+        from src.services.target import content_runway
+
+        async def read(session):
+            return await content_runway.runway(
+                session,
+                workspace_id=str(workspace or notice_db["ws"]),
+                below_days=content_runway.LOW_RUNWAY_DAYS,
+            )
+
+        return await in_tenant(ingress, notice_db["ws"], notice_db["user"], read)
+
+    async def test_the_count_is_the_planners_pool(self, notice_db, ingress):
+        _cadence(notice_db, 1)
+        _files(notice_db, 3)
+        aged, held = _files(notice_db, 2)
+        (skipped,) = _files(notice_db, 1)
+        _files(notice_db, 1, state="unsupported")
+        _sql(
+            notice_db,
+            "INSERT INTO post_locks"
+            " (workspace_id, media_item_id, ig_account_id, kind, expires_at)"
+            " VALUES (%s, %s, %s, 'recent', now() - interval '1 day'),"
+            "        (%s, %s, %s, 'recent', now() + interval '30 days'),"
+            "        (%s, %s, NULL, 'skip', now() + interval '45 days')",
+            (
+                notice_db["ws"],
+                aged,
+                notice_db["iga"],
+                notice_db["ws"],
+                held,
+                notice_db["iga"],
+                notice_db["ws"],
+                skipped,
+            ),
+        )
+        off = _folder(notice_db)
+        _files(notice_db, 2, source=off)
+        _sql(
+            notice_db,
+            "INSERT INTO category_post_case_mix (workspace_id, source_id, category,"
+            " ratio) VALUES (%s, %s, 'off', 0)",
+            (notice_db["ws"], off),
+        )
+        _files(notice_db, 1, source=_folder(notice_db, state="error"))
+        _files(notice_db, 1, source=_folder(notice_db, removed=True))
+
+        # Three plain files and the one whose `recent` lock has expired; not
+        # the chain's own (held by its intent), the live lock, the skip, the
+        # unsupported file, nor anything in an Off, error or removed folder.
+        (row,) = (await self._read(notice_db, ingress))["accounts"]
+        assert (row["eligible"], row["posts_per_day"], row["days_left"]) == (4, 1, 4)
+        assert row["posting"] is True and row["low"] is True
+
+        # The planner agrees: it can mint exactly those four, and then nothing.
+        for _ in range(4):
+            assert (await _plan(notice_db)).intent_id is not None
+        assert (await _plan(notice_db)).intent_id is None
+        (row,) = (await self._read(notice_db, ingress))["accounts"]
+        assert (row["eligible"], row["days_left"]) == (0, 0)
+
+    async def test_a_terminal_intent_releases_its_file(self, notice_db, ingress):
+        """An intent that ended holds nothing (`intent_ledger.TERMINAL_STATES`):
+        a file whose only intent for this account is `skipped`, under no live
+        lock, is counted by the read and minted by the planner. The chain's own
+        file, held by its live `scheduled` intent, is the contrast: neither
+        counts it."""
+        from src.services.target.intent_ledger import TERMINAL_STATES
+
+        assert "skipped" in TERMINAL_STATES
+        _cadence(notice_db, 1)
+        (released,) = _files(notice_db, 1)
+        _sql(
+            notice_db,
+            "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+            " provider_account_ref, approval_mode, schedule_slot_at, state)"
+            " VALUES (%s, %s, %s, %s, 'manual', %s, 'skipped')",
+            (notice_db["ws"], notice_db["iga"], released, "ref-d3", _unique_slot()),
+        )
+        locks = _sql(
+            notice_db,
+            "SELECT count(*) FROM post_locks WHERE media_item_id = %s",
+            (released,),
+            fetch=True,
+        )
+        assert locks == [(0,)], "precondition: no lock on it, live or not"
+
+        (row,) = (await self._read(notice_db, ingress))["accounts"]
+        assert row["eligible"] == 1, "the skipped one's file, not the chain's own"
+
+        minted = (await _mint(notice_db)).intent_id
+        drawn = _sql(
+            notice_db,
+            "SELECT media_item_id FROM post_intents WHERE id = %s",
+            (minted,),
+            fetch=True,
+        )
+        assert [str(r[0]) for r in drawn] == [released]
+        assert (await _plan(notice_db)).intent_id is None, "and then nothing is left"
+
+    async def test_an_account_the_clock_does_not_post_for_has_no_runway(
+        self, notice_db, ingress
+    ):
+        _files(notice_db, 3)
+        # No slot cursor: the clock mints nothing for this account.
+        (row,) = (await self._read(notice_db, ingress))["accounts"]
+        assert row["eligible"] == 3, "its files are still counted"
+        assert (row["posting"], row["days_left"], row["low"]) == (False, None, False)
+
+        _cadence(notice_db, 1)
+        (row,) = (await self._read(notice_db, ingress))["accounts"]
+        assert (row["posting"], row["days_left"]) == (True, 3), "positive control"
+
+        _sql(
+            notice_db,
+            "UPDATE workspaces SET is_paused = true WHERE id = %s",
+            (notice_db["ws"],),
+        )
+        (row,) = (await self._read(notice_db, ingress))["accounts"]
+        assert (row["posting"], row["days_left"], row["low"]) == (False, None, False)
+
+    async def test_another_workspaces_runway_reads_nothing(self, notice_db, ingress):
+        conn = psycopg2.connect(notice_db["dsn"])
+        try:
+            other = seed_workspace_chain(conn, f"rw-{uuid.uuid4().hex[:8]}")
+        finally:
+            conn.close()
+        assert (await self._read(notice_db, ingress, workspace=other["ws"])) == {
+            "below_days": 7,
+            "accounts": [],
+        }
+        assert len((await self._read(notice_db, ingress))["accounts"]) == 1

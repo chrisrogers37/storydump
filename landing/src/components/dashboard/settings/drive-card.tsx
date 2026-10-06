@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import {
   connectedFolderRefs,
   driveConnectControl,
   driveConnectRefusalCopy,
+  driveConnectWarning,
   driveConnectedSince,
   driveStatusBadge,
   removeDriveFolder,
@@ -56,6 +57,7 @@ export function DriveCard({
   const [disconnecting, setDisconnecting] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const hintId = useId();
 
   // A removed folder is a PAUSED source (nothing is deleted); it leaves the
   // list and comes back when picked again.
@@ -64,6 +66,7 @@ export function DriveCard({
   );
   const grant = driveStatusBadge(drive?.status);
   const connectControl = drive ? driveConnectControl(drive.status) : null;
+  const connectWarning = drive ? driveConnectWarning(drive.status) : null;
   const driveActive = drive?.status === "active";
 
   /** Folders that are sources here already: the picker greys them. */
@@ -174,57 +177,65 @@ export function DriveCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Google Drive</CardTitle>
+        <CardTitle>Google Drive</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        {drive === null ? (
-          <p className="text-sm text-muted-foreground">
-            The Google Drive connection could not be loaded just now. Reload to
-            try again.
-          </p>
-        ) : (
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              {/* GREEN BELONGS TO THE GRANT ALONE: `driveStatusBadge` is
-                  pinned so only `active` ever carries this tone. The map is
-                  `components/dashboard/tone.ts` now — this was the third
-                  copy, and the only one written as a ternary, which is how
-                  it could have disagreed without a compile error. */}
-              <Badge variant="secondary" className={TONE_CLASS[grant.tone]}>
-                {grant.label}
-              </Badge>
-              <p className="text-sm text-muted-foreground">
-                {driveActive
-                  ? `Connected${driveConnectedSince(drive) ? ` since ${driveConnectedSince(drive)}` : ""}. The folders below sync from this Google account.`
-                  : drive.status === "none"
-                    ? "Connect the Google account whose Drive holds your media, then pick the folders to sync."
-                    : "Google no longer accepts this workspace's access. Reconnect to resume syncing."}
-              </p>
+        <div className="space-y-2">
+          {drive === null ? (
+            <p className="text-sm text-muted-foreground">
+              The Google Drive connection could not be loaded just now. Reload to
+              try again.
+            </p>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {/* GREEN BELONGS TO THE GRANT ALONE: `driveStatusBadge` is
+                    pinned so only `active` ever carries this tone. The map is
+                    `components/dashboard/tone.ts` now — this was the third
+                    copy, and the only one written as a ternary, which is how
+                    it could have disagreed without a compile error. */}
+                <Badge variant="secondary" className={TONE_CLASS[grant.tone]}>
+                  {grant.label}
+                </Badge>
+                <p className="text-sm text-muted-foreground">
+                  {driveActive
+                    ? `Connected${driveConnectedSince(drive) ? ` since ${driveConnectedSince(drive)}` : ""}. The folders below sync from this Google account.`
+                    : drive.status === "none"
+                      ? "Connect the Google account whose Drive holds your media, then pick the folders to sync."
+                      : "Google no longer accepts this workspace's access. Reconnect to resume syncing."}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {connectControl && (
+                  <Button
+                    size="sm"
+                    variant={driveActive ? "outline" : "default"}
+                    onClick={connectDrive}
+                    disabled={connecting}
+                    aria-describedby={connectWarning ? hintId : undefined}
+                  >
+                    {connecting ? "Opening Google..." : connectControl.label}
+                  </Button>
+                )}
+                {drive.status !== "none" && (
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={disconnectDrive}
+                    disabled={disconnecting}
+                  >
+                    {disconnecting ? "Disconnecting..." : "Disconnect"}
+                  </Button>
+                )}
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              {connectControl && (
-                <Button
-                  size="sm"
-                  variant={driveActive ? "outline" : "default"}
-                  onClick={connectDrive}
-                  disabled={connecting}
-                >
-                  {connecting ? "Opening Google..." : connectControl.label}
-                </Button>
-              )}
-              {drive.status !== "none" && (
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={disconnectDrive}
-                  disabled={disconnecting}
-                >
-                  {disconnecting ? "Disconnecting..." : "Disconnect"}
-                </Button>
-              )}
-            </div>
-          </div>
-        )}
+          )}
+          {connectWarning && (
+            <p id={hintId} className="text-xs text-muted-foreground">
+              {connectWarning}
+            </p>
+          )}
+        </div>
 
         <div className="space-y-2 border-t pt-4">
           <div className="flex items-center justify-between gap-3">

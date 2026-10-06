@@ -158,6 +158,19 @@ AUDIT_CHANNELS: tuple[str, ...] = ("telegram", "web", "cli", "system")
 #: `service_tokens.role` (060 ``ck_service_token_role``).
 TOKEN_ROLES: tuple[str, ...] = ("operator", "readonly")
 
+#: `channel_outbox.last_failure_class` (101 ``ck_outbox_failure_class``): why a
+#: row's last send failed. `rate_limited` is a 429 (a deferral, never counted as
+#: a failure); `destination_gone` and `refused` are the definitive answers;
+#: `credential_dead` is a dead token's 401; `ambiguous` is a send whose answer
+#: never came back (a timeout, a 5xx, a dead predecessor's stranded row).
+OUTBOX_FAILURE_CLASSES: tuple[str, ...] = (
+    "rate_limited",
+    "destination_gone",
+    "refused",
+    "credential_dead",
+    "ambiguous",
+)
+
 #: The bounds every adapter enforces before the table does: a token's name
 #: (`service_tokens.name`), and its expiry in whole days — the API's default
 #: and ceiling, the web form's range, the CLI's `tokens` verbs' words.

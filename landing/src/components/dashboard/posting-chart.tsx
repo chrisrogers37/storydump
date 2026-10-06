@@ -40,14 +40,14 @@ export function PostingChart({ data }: { data: DayCount[] }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Daily Posting Activity</CardTitle>
+        <CardTitle>Daily posting activity</CardTitle>
       </CardHeader>
       <CardContent>
         {formatted.length === 0 ? (
           <EmptyState
             icon={BarChart3}
-            title="No posting data yet"
-            description="Chart data will appear once your first posts go out."
+            title="No Stories out yet"
+            description="This chart fills in as your Stories go out."
           />
         ) : (
           <ResponsiveContainer width="100%" height={300}>
@@ -65,7 +65,7 @@ export function PostingChart({ data }: { data: DayCount[] }) {
                   name === "count" ? "posted" : "capacity",
                 ]}
               />
-              <Bar dataKey="count" fill="hsl(142, 76%, 36%)" radius={[2, 2, 0, 0]} />
+              <Bar dataKey="count" fill="var(--chart-1)" radius={[2, 2, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         )}

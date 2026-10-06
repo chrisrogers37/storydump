@@ -142,6 +142,33 @@ export function driveConnectControl(
   return { label: "Connect Google Drive", kind: "connect" };
 }
 
+/**
+ * What a person should know BEFORE the browser leaves for Google.
+ *
+ * Until the Drive scope is verified (#333), Google may put its own "hasn't
+ * verified this app" page in front of the consent screen (an account added as
+ * a test user skips it, so the copy says "if"), and the way on is Advanced,
+ * then the link that page labels "Go to storydump (unsafe)": the consent
+ * screen's app name, as `documentation/operations/google-oauth-verification.md`
+ * records it. The page is Google's, so nothing on it says this is expected;
+ * said here, it is a step rather than an alarm. Once verification lands the
+ * sentence is false, and it goes.
+ *
+ * Shown wherever the card's main action leads to Google's consent: before the
+ * first grant, and for an expired or revoked one, which must reconnect to sync
+ * again. Not for a live grant: its Reconnect is an optional repair, the person
+ * has been through Google's page once already, and a permanent sentence on
+ * every connected workspace would cost more than it saves. "Read-only" is the
+ * scope's own meaning: `drive.readonly`
+ * (`src/services/target/google_drive_oauth.py`).
+ */
+export function driveConnectWarning(
+  status: string | null | undefined,
+): string | null {
+  if (status === "active") return null;
+  return "If Google says it hasn't verified this app, choose Advanced, then \"Go to storydump (unsafe)\". Storydump asks for read-only access to your Drive.";
+}
+
 /** The picker's second root — the folders shared TO the connected account. */
 export const SHARED_ROOT = "shared-with-me";
 
