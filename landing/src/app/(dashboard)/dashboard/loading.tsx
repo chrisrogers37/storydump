@@ -35,6 +35,20 @@ export default function DashboardLoading() {
         ))}
       </div>
 
+      {/* Content left: one account, the common case */}
+      <Card>
+        <CardHeader>
+          <Skeleton className="h-5 w-28" />
+        </CardHeader>
+        <CardContent>
+          <div className="flex justify-between py-2">
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-4 w-40" />
+          </div>
+          <Skeleton className="mt-3 h-3 w-full max-w-md" />
+        </CardContent>
+      </Card>
+
       {/* Chart + Category breakdown */}
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>

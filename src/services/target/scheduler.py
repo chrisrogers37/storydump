@@ -82,10 +82,9 @@ from sqlalchemy import text
 
 from src.services.target import (
     category_mix,
-    intent_ledger,
+    content_runway,
     outbox,
     prompts,
-    workspaces,
 )
 
 
@@ -300,29 +299,36 @@ async def execute_plan_slot(
     provider_account_ref: str,
     approval_mode: str,
     no_media_notice_after_seconds: int,
+    low_runway_days: int,
     rng: Optional[random.Random] = None,
 ) -> "SlotOutcome":
     """The `plan_slot` executor: mint the intent for one slot, or nothing.
 
-    Returns a :class:`SlotOutcome`. Its `intent_id` is None when the slot
-    already had one or no media was available — both ordinary outcomes, not
-    failures — and its `notice` reports whether an empty library went
-    unreported for want of a delivery surface.
+    Returns a :class:`SlotOutcome`; its docstring says what `intent_id` and
+    `notice` each report. A None `intent_id` — the slot already had one, or
+    no media was available — is an ordinary outcome, not a failure.
 
     **The two Nones are not the same fact, and only one of them speaks.** A
     slot that already had an intent is the idempotency guard doing its job and
     the customer has nothing to learn from it; a slot that found no media is
     `06` §5's "slot missed" row, which the customer is owed a notice about
-    ("you are told once — not silently nothing", #1090 D3). The return value
-    stays `Optional[str]` because no caller needs to tell them apart — the
-    notice is emitted here, where the empty case already lives — and its
-    fate rides back on `SlotOutcome.notice`, because the caller finalizes the
-    job and a notice nobody received must not finalize as a success.
+    ("you are told once — not silently nothing", #1090 D3). That notice is
+    emitted here, where the empty case already lives.
 
     *no_media_notice_after_seconds* is `05`'s dedup window (24 h) and is
     **required, not defaulted**: a dedup window that can be silently omitted is
     how a once-a-day notice becomes either a flood or a silence, and there is
     exactly one production caller to pass it.
+
+    *low_runway_days* is the runway notice's level (#1478,
+    `content_runway.after_mint`): a mint that leaves the account with fewer
+    days of eligible content than this tells the workspace once, and the next
+    drop is told only after the account has climbed back
+    `content_runway.REARM_MARGIN_DAYS` above it. Required for the same reason
+    as the dedup window. **That notice never decides the slot**: it is said
+    in a savepoint after the mint and its verdict is not carried back, so a
+    slot that minted returns the intent alone, whether the notice reached
+    nobody or could not be written at all.
 
     **Idempotent by key 1, not by checking first.** The insert carries
     ``ON CONFLICT … DO NOTHING`` against `uq_intent_slot`, so a duplicate
@@ -361,79 +367,20 @@ async def execute_plan_slot(
     least-recently-posted file goes first so a small folder rotates
     (review of #1251)."""
     draw = rng if rng is not None else random.SystemRandom()
-    # `06` §3's rule in full: available, not already live for this account,
-    # minus the workspace-wide locks (skip/reject/hold/seasonal/unsupported)
-    # and minus THIS account's own `recent` locks — a live lock is one with no
-    # expiry or an expiry still ahead. Ordered least-recently-posted first, so
-    # a small category rotates through its files instead of repeating the
-    # oldest one (review of #1251).
-    eligible = (
-        " WHERE m.workspace_id = :ws AND m.state = 'available'"
-        "   AND NOT EXISTS (SELECT 1 FROM post_intents p"
-        "                   WHERE p.workspace_id = m.workspace_id"
-        "                     AND p.media_item_id = m.id"
-        "                     AND p.ig_account_id = :acct"
-        "                     AND p.state <> ALL(CAST(:terminal AS text[])))"
-        "   AND NOT EXISTS (SELECT 1 FROM post_locks l"
-        "                   WHERE l.workspace_id = m.workspace_id"
-        "                     AND l.media_item_id = m.id"
-        "                     AND (l.expires_at IS NULL OR l.expires_at > now())"
-        "                     AND (l.ig_account_id IS NULL OR l.ig_account_id = :acct))"
-    )
     # Never-posted first, in the folder's shuffled order: `m.id` is a random
     # UUID, a stable per-file shuffle key — index time put a batch exported
-    # together in a row (2026-09-12: four look-alike cards in a morning).
+    # together in a row (2026-09-12: four look-alike cards in a morning). Once
+    # everything has posted, least-recently-posted first, so a small folder
+    # rotates through its files instead of repeating the oldest one (review of
+    # #1251).
     order = " ORDER BY m.last_posted_at NULLS FIRST, m.id LIMIT 1"
-    # The connected folders and their current weights (owner ruling
-    # 2026-09-08: the mix is keyed on the source; a name is a label). A row
-    # without a source_id — set before 071 — is not joined and shapes nothing.
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT s.id AS source_id, x.ratio"
-                    "  FROM media_sources s"
-                    "  LEFT JOIN category_post_case_mix x"
-                    "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
-                    "   AND x.effective_to IS NULL"
-                    " WHERE s.workspace_id = :ws AND s.state <> 'error'"
-                    "   AND " + workspaces.CONNECTED_SQL
-                ),
-                {"ws": workspace_id},
-            )
-        )
-        .mappings()
-        .all()
+    # `06` §3's rule and the connected folders' weights, read as the runway
+    # reads them (#1478): the files this draws from and the count the Overview
+    # shows are one pool, so they cannot disagree.
+    drawn = await category_mix.pool(
+        session, workspace_id=workspace_id, ig_account_id=ig_account_id
     )
-    counts = (
-        (
-            await session.execute(
-                text(
-                    "SELECT m.source_id, count(*) AS n FROM media_items m"
-                    + eligible
-                    + " GROUP BY m.source_id"
-                ),
-                {
-                    "ws": workspace_id,
-                    "acct": ig_account_id,
-                    "terminal": list(intent_ledger.TERMINAL_STATES),
-                },
-            )
-        )
-        .mappings()
-        .all()
-    )
-    have = {str(row["source_id"]): int(row["n"]) for row in counts}
-    shaped = [
-        {
-            "source_id": str(row["source_id"]),
-            "ratio": None if row["ratio"] is None else float(row["ratio"]),
-            "n": have.get(str(row["source_id"]), 0),
-        }
-        for row in rows
-    ]
-    share = category_mix.weights(shaped)
-    weighted = [(sid, w) for sid, w in share.items() if w > 0]
+    weighted = drawn.drawable
     # No pool behind the weighted set: every connected folder that may post
     # is in `weighted` once it has eligible media, so anything left would
     # belong to a removed folder or an Off one — the two things that must
@@ -461,16 +408,11 @@ async def execute_plan_slot(
             await session.execute(
                 text(
                     "SELECT m.id FROM media_items m"
-                    + eligible
+                    + category_mix.ELIGIBLE_SQL
                     + "   AND m.source_id = CAST(:source_id AS uuid)"
                     + order
                 ),
-                {
-                    "ws": workspace_id,
-                    "acct": ig_account_id,
-                    "source_id": chosen,
-                    "terminal": list(intent_ledger.TERMINAL_STATES),
-                },
+                {"ws": workspace_id, "acct": ig_account_id, "source_id": chosen},
             )
         ).first()
     if media is None:
@@ -504,7 +446,31 @@ async def execute_plan_slot(
             },
         )
     ).first()
-    return SlotOutcome(intent_id=None if row is None else str(row[0]))
+    if row is None:
+        return SlotOutcome()
+    # The runway notice is said beside the mint and never decides the slot
+    # (`content_runway`, "The notice never decides the slot"): its verdict is
+    # not carried back, so a notice nobody could receive still finalizes the
+    # job succeeded. It rides a savepoint, so a failure writing it rolls back
+    # alone and the mint stands.
+    try:
+        async with session.begin_nested():
+            # Nothing in this transaction moved the pool between its read and
+            # the mint, so what is left is the pool less the minted file.
+            await content_runway.after_mint(
+                session,
+                workspace_id=workspace_id,
+                ig_account_id=ig_account_id,
+                eligible=drawn.eligible_after_a_mint,
+                below_days=low_runway_days,
+            )
+    except Exception:  # noqa: BLE001 — logged; the mint stands
+        logger.exception(
+            "plan_slot: the runway notice for account %s was NOT written;"
+            " the mint stands",
+            ig_account_id,
+        )
+    return SlotOutcome(intent_id=str(row[0]))
 
 
 async def execute_reap_expired(

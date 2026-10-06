@@ -936,6 +936,24 @@ class TestWeightedCategorySelection:
         class _S:
             def __init__(self):
                 self.statements = []
+                #: How each savepoint ended: "released", or "rolled back" by
+                #: a raise inside it. Kept apart from `statements`, whose
+                #: order the tests below pin.
+                self.savepoints = []
+
+            def begin_nested(self):
+                from contextlib import asynccontextmanager
+
+                @asynccontextmanager
+                async def savepoint():
+                    try:
+                        yield self
+                    except BaseException:
+                        self.savepoints.append("rolled back")
+                        raise
+                    self.savepoints.append("released")
+
+                return savepoint()
 
             async def execute(self, stmt, params=None):
                 self.statements.append((str(stmt), params))
@@ -947,6 +965,9 @@ class TestWeightedCategorySelection:
 
                     def first(self_inner):
                         return rows_[0] if rows_ else None
+
+                    def __iter__(self_inner):
+                        return iter(rows_)
 
                 class _R:
                     def mappings(self_inner):
@@ -968,6 +989,7 @@ class TestWeightedCategorySelection:
     async def _plan(self, session, rng):
         import random
 
+        from src.services.target import content_runway
         from src.services.target.scheduler import execute_plan_slot
 
         return await execute_plan_slot(
@@ -978,6 +1000,7 @@ class TestWeightedCategorySelection:
             provider_account_ref="ref",
             approval_mode="manual",
             no_media_notice_after_seconds=86400,
+            low_runway_days=content_runway.LOW_RUNWAY_DAYS,
             rng=random.Random(rng),
         )
 
@@ -1107,6 +1130,65 @@ class TestWeightedCategorySelection:
             "FROM post_locks l" in counts_sql
             and "l.ig_account_id = :acct" in counts_sql
         )
+
+    async def test_a_runway_notice_nobody_receives_does_not_ride_the_mint(
+        self, monkeypatch
+    ):
+        """The runway notice never decides the slot (#1478): owed and heard by
+        nobody, its verdict is not carried back, so the job the mint belongs
+        to succeeds. It is settled after the mint, in a savepoint."""
+        from src.services.target import content_runway, outbox
+        from src.services.target.scheduler import SlotOutcome
+
+        settled = []
+
+        async def after_mint(session, **kwargs):
+            # What the session last sent when the notice was asked for.
+            settled.append((session.statements[-1][0], kwargs))
+            return outbox.UNDELIVERABLE
+
+        monkeypatch.setattr(content_runway, "after_mint", after_mint)
+        s = self._session(
+            rows=self._rows(**{self.MEMES: 1.0}),
+            counts=[{"source_id": self.MEMES, "n": 3}],
+        )
+        assert await self._plan(s, 1) == SlotOutcome(intent_id="intent-1")
+        # Positive control: the notice was asked for, after the mint, with the
+        # pool less the minted file.
+        ((last_sent, asked),) = settled
+        assert "INSERT INTO post_intents" in last_sent
+        assert asked == {
+            "workspace_id": "ws-1",
+            "ig_account_id": "acct-1",
+            "eligible": 2,
+            "below_days": content_runway.LOW_RUNWAY_DAYS,
+        }
+        assert s.savepoints == ["released"]
+
+    async def test_a_runway_notice_that_raises_never_costs_the_mint(
+        self, monkeypatch, caplog
+    ):
+        """A failure writing the notice rolls back its savepoint alone and is
+        logged: the minted intent stands and is returned, with no notice."""
+        from src.services.target import content_runway
+        from src.services.target.scheduler import SlotOutcome
+
+        async def after_mint(session, **kwargs):
+            raise RuntimeError("the latch row could not be written")
+
+        monkeypatch.setattr(content_runway, "after_mint", after_mint)
+        s = self._session(
+            rows=self._rows(**{self.MEMES: 1.0}),
+            counts=[{"source_id": self.MEMES, "n": 3}],
+        )
+        with caplog.at_level("ERROR", logger="src.services.target.scheduler"):
+            out = await self._plan(s, 1)
+
+        assert out == SlotOutcome(intent_id="intent-1")
+        assert "INSERT INTO post_intents" in s.statements[-1][0], "the mint was sent"
+        assert s.savepoints == ["rolled back"], "and the notice failed in its own"
+        (logged,) = [r for r in caplog.records if "NOT written" in r.getMessage()]
+        assert logged.levelname == "ERROR" and logged.exc_info is not None
 
 
 class TestTheBudgetCeiling:
