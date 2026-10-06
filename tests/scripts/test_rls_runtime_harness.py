@@ -280,6 +280,49 @@ POLICY_CENSUS = {
     ("p_auth_ingress_states", "oauth_states", "ALL", ("svc_ingress",)): "auth",
     ("p_auth_sweep_states", "oauth_states", "ALL", ("svc_maintenance",)): "auth",
     ("p_auth_ingress_svctok", "service_tokens", "ALL", ("svc_ingress",)): "auth",
+    # 090: the removals record — read-only for the logins, written only by
+    # the membership doors.
+    (
+        "p_tenant_read",
+        "workspace_member_removals",
+        "SELECT",
+        T,
+    ): "matrix-read",
+    (
+        "p_member_removals",
+        "workspace_member_removals",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_member_remove",
+    # 092: the owner's sign-up admissions — global, and read only by the door.
+    (
+        "p_member_admissions",
+        "signup_admissions",
+        "SELECT",
+        ("svc_membership",),
+    ): "door:fn_signup_admitted",
+    # 100: the marketing waitlist — the API may add an address, nothing else.
+    (
+        "p_ingress_waitlist",
+        "waitlist_entries",
+        "INSERT",
+        ("svc_ingress",),
+    ): "machinery",
+    # 099: a person's own Telegram unlink — the door's read and delete.
+    (
+        "p_member_identities",
+        "user_identities",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_identity_unlink",
+    # 098: the doors read an inviter's account state — users' id and state
+    # only, by column grant.
+    (
+        "p_member_users",
+        "users",
+        "SELECT",
+        ("svc_membership",),
+    ): "door:fn_invitation_accept",
 }
 
 #: The tenant-GUC tables (policies whose predicate reads app.tenant_id),
@@ -296,8 +339,11 @@ GUC_TABLES = sorted(
 )
 
 #: Tables whose ALL-policy rows the matrix WRITE leg drives (self-assign
-#: UPDATE). audit_events is INSERT/SELECT-only for the logins by grant.
-MATRIX_WRITE_TABLES = sorted(set(GUC_TABLES) - {"audit_events"})
+#: UPDATE). audit_events is INSERT/SELECT-only for the logins by grant, and
+#: workspace_member_removals SELECT-only (090: the doors write it).
+MATRIX_WRITE_TABLES = sorted(
+    set(GUC_TABLES) - {"audit_events", "workspace_member_removals"}
+)
 
 #: Governance tables (055's tg_audit_* attach list): mutations need actors.
 GOVERNANCE = {
@@ -379,6 +425,19 @@ DOORS = {
     "fn_memberships_for_caller": (
         "svc_ingress",
         "SELECT * FROM fn_memberships_for_caller()",
+    ),
+    # 092 (`07` §35): may a new Google account create its user? One boolean
+    # for one address — an address nobody admitted or invited answers false.
+    "fn_signup_admitted": (
+        "svc_ingress",
+        "SELECT fn_signup_admitted('nobody@example.com')",
+    ),
+    # 099 (`07` §42): a person unlinks their own Telegram identity. A uuid
+    # that names nobody answers not_linked, never a raise.
+    "fn_identity_unlink": (
+        "svc_ingress",
+        "SELECT fn_identity_unlink('00000000-4000-4000-8000-000000000099'::uuid,"
+        " 'telegram')",
     ),
     # The fleet-health doors (081, `07` §24, #751): the estate-wide reads behind
     # /health/posting and /health/scheduling, each the module's former query.
@@ -496,10 +555,12 @@ def _seed_tenant(conn, name: str) -> dict:
     ids["invite_hash"] = hashlib.sha256(f"invite-{name}".encode()).hexdigest()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO workspace_invitations"
-            " (workspace_id, token_hash, delivery_channel, expires_at, role)"
-            " VALUES (%s, %s, 'telegram', now() + interval '7 days', 'member')",
-            (ws, ids["invite_hash"]),
+            # 098: an invitation admits only while its inviter is still an
+            # owner or admin there, so the seeded one is the owner's.
+            "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+            " delivery_channel, expires_at, role, invited_by_user_id)"
+            " VALUES (%s, %s, 'telegram', now() + interval '7 days', 'member', %s)",
+            (ws, ids["invite_hash"], ids["user"]),
         )
         cur.execute(
             "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
@@ -523,6 +584,12 @@ def _seed_tenant(conn, name: str) -> dict:
             "INSERT INTO post_locks (workspace_id, media_item_id, kind)"
             " VALUES (%s, %s, 'hold')",
             (ws, mi),
+        )
+        cur.execute(
+            # 090: a removed person, so the read matrix has a row per tenant.
+            "INSERT INTO workspace_member_removals (workspace_id, user_id)"
+            " VALUES (%s, %s)",
+            (ws, ids["user"]),
         )
         cur.execute(
             "INSERT INTO category_post_case_mix (workspace_id, category, ratio)"
@@ -752,7 +819,8 @@ class TestRuntimeTenantIsolationMatrix:
         """The `true`-predicate login policies, driven at their grants:
         user-plane reads as both logins; rate_counters as both; command_dedup
         as ingress only — svc_worker holds no grant there, which is asserted
-        as the denial it is."""
+        as the denial it is. waitlist_entries (100) is ingress's to add to and
+        no one's to read: the INSERT lands and a read back is refused."""
         for login in LOGINS:
             dsn = _login_dsn(target, login)
             assert _scalar(dsn, "SELECT count(*) FROM users") >= 2
@@ -782,6 +850,19 @@ class TestRuntimeTenantIsolationMatrix:
                 " (channel, principal, external_ref, fingerprint)"
                 " VALUES ('web', 'f4-worker', 'x', 'fp')",
             )
+        assert (
+            _exec(
+                target["ingress"],
+                "INSERT INTO waitlist_entries (email) VALUES (%s)",
+                params=(f"f4-{uuid.uuid4().hex[:8]}@example.com",),
+            )
+            == 1
+        )
+        for login in LOGINS:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _scalar(
+                    _login_dsn(target, login), "SELECT count(*) FROM waitlist_entries"
+                )
 
     def test_the_census_matches_the_catalog_exactly(self, target):
         """THE completeness gate, at (policy, table, cmd, roles) grain — a
@@ -800,7 +881,7 @@ class TestRuntimeTenantIsolationMatrix:
             f"policy census drift: only-in-catalog={sorted(catalog - census)},"
             f" only-in-census={sorted(census - catalog)}"
         )
-        assert len(POLICY_CENSUS) == 63
+        assert len(POLICY_CENSUS) == 69
 
     def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
         by_kind = {}
@@ -818,8 +899,9 @@ class TestRuntimeTenantIsolationMatrix:
         # Exact split, so a re-tagged disposition is a visible diff:
         assert len(by_kind["matrix"]) == 16
         # 081: p_maint_accts; 082: the three maintenance reads; 086: the
-        # reaper's source re-arm.
-        assert len(by_kind["door"]) == 34
+        # reaper's source re-arm; 090: the removals record; 092: the sign-up
+        # admissions; 098: the inviter's account state; 099: the Telegram unlink.
+        assert len(by_kind["door"]) == 38
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():

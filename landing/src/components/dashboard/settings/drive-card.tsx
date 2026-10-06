@@ -174,7 +174,7 @@ export function DriveCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Google Drive</CardTitle>
+        <CardTitle>Google Drive</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         {drive === null ? (

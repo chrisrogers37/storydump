@@ -276,6 +276,16 @@ def _seed_world(dsn: str, ws: str, tag: str) -> dict:
             open_story = seed_intent_chain(
                 cur, ws, f"{tag}-open", state="awaiting_approval"
             )
+            # a row that moved nothing — a cancel request records the story's
+            # own state on both sides — is never a tap
+            cur.execute(
+                "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
+                " from_state, to_state, actor_kind, channel, detail)"
+                " VALUES (%s, 'post_intent', %s, 'awaiting_approval',"
+                " 'awaiting_approval', 'system', 'system',"
+                " jsonb_build_object('v', 1, 'event', 'cancel_requested'))",
+                (ws, str(open_story["intent"])),
+            )
         conn.commit()
         return {
             "iga": iga,
@@ -318,6 +328,7 @@ def seeded(world):
                         sub=f"sub-ops-{who}",
                         email=f"ops-{who}@example.test",
                     )
+                    me = await client.get("/api/v1/me/principal", headers=owner)
                     created = await client.post(
                         "/api/v1/workspaces",
                         json={"name": f"Ops {who.upper()}", "tz": "America/New_York"},
@@ -342,6 +353,7 @@ def seeded(world):
                     )
                     state[who] = {
                         "ws": ws,
+                        "user": me.json()["user_id"],
                         "session": owner,
                         "token": minted.json()["secret"],
                         "readonly": readonly.json()["secret"],
@@ -372,6 +384,12 @@ def seeded(world):
     return state
 
 
+@pytest.fixture
+def operator_a(seeded, monkeypatch):
+    """`a`'s person is the deployment's operator: `posture` is theirs alone."""
+    monkeypatch.setattr(api_conftest.settings, "OPS_USER_IDS", seeded["a"]["user"])
+
+
 def _view(client, ws: str, view: str, headers: dict, suffix: str = ""):
     return client.get(f"/api/v1/ops/workspaces/{ws}/{view}{suffix}", headers=headers)
 
@@ -396,7 +414,7 @@ def _foreign(other: dict) -> set:
 
 
 def test_every_view_returns_only_this_workspaces_rows_as_svc_ingress(
-    world, google_configured, seeded
+    world, google_configured, seeded, operator_a
 ):
     a, b = seeded["a"], seeded["b"]
 
@@ -461,6 +479,8 @@ def test_every_view_returns_only_this_workspaces_rows_as_svc_ingress(
                 assert account.status_code == 200, (key, account.text)
                 (acct,) = account.json()["data"]["rows"]
                 assert acct["id"] == a["iga"] and acct["posts_per_day"] == 5
+                # the CLI resolves a handle to a live account by this state
+                assert acct["state"] == "active"
                 assert acct["tz"] == "America/New_York"
                 assert acct["today"] == {
                     "local_date": acct["today"]["local_date"],
@@ -575,7 +595,7 @@ def test_every_view_returns_only_this_workspaces_rows_as_svc_ingress(
 
 
 def test_the_routes_admit_tokens_by_their_scope_and_refuse_strangers(
-    world, google_configured, seeded
+    world, google_configured, seeded, operator_a
 ):
     a, b = seeded["a"], seeded["b"]
 
@@ -607,7 +627,33 @@ def test_the_routes_admit_tokens_by_their_scope_and_refuse_strangers(
             svc_posture = await client.get(
                 "/api/v1/ops/posture", headers=_bearer(b["service"])
             )
-            assert svc_posture.status_code == 200
+            assert (svc_posture.status_code, svc_posture.json()["reason"]) == (
+                403,
+                "not_ops",
+            ), "a service identity has no person, so it is no operator"
+            not_operator = await client.get(
+                "/api/v1/ops/posture", headers=_bearer(b["token"])
+            )
+            assert not_operator.json()["reason"] == "not_ops"
+
+            # the Queue read, the CLI's `planned`, admits tokens the same way
+            queue = f"/api/v1/workspaces/{a['ws']}/intents"
+            assert (await client.get(queue)).status_code == 401
+            mine = await client.get(queue, headers=_bearer(a["readonly"]))
+            assert mine.status_code == 200, mine.text
+            assert a["floating"] in {r["id"] for r in mine.json()["intents"]}
+            not_mine = await client.get(queue, headers=_bearer(b["token"]))
+            assert not_mine.status_code == 404, "not a member reads as not found"
+            own = await client.get(
+                f"/api/v1/workspaces/{b['ws']}/intents", headers=_bearer(b["service"])
+            )
+            assert own.status_code == 200, own.text
+            assert b["floating"] in {r["id"] for r in own.json()["intents"]}
+            elsewhere = await client.get(queue, headers=_bearer(b["service"]))
+            assert (elsewhere.status_code, elsewhere.json()["reason"]) == (
+                403,
+                "wrong_workspace",
+            )
 
             bad_since = await _view(
                 client, a["ws"], "jobs", _bearer(a["token"]), "?since=yesterday"
@@ -656,6 +702,13 @@ def test_the_predicates_confine_rows_even_without_row_level_security(
                     assert row["workspace_id"] == a["ws"], (view, row)
                     dumped = json.dumps(row)
                     assert not any(f in dumped for f in _foreign(b)), (view, row)
+            queue = await client.get(
+                f"/api/v1/workspaces/{a['ws']}/intents", headers=token
+            )
+            assert queue.status_code == 200, queue.text
+            intents = queue.json()["intents"]
+            assert a["floating"] in {r["id"] for r in intents}
+            assert not any(f in json.dumps(intents) for f in _foreign(b))
             crossed = await _view(client, a["ws"], f"story/{b['floating']}", token)
             assert crossed.json()["data"]["rows"] == []
             crossed = await _view(client, a["ws"], f"cards/{b['floating']}", token)
@@ -677,7 +730,7 @@ def test_the_predicates_confine_rows_even_without_row_level_security(
 
 
 def test_posture_shows_rls_drift_and_every_ledger_state(
-    world, google_configured, seeded
+    world, google_configured, seeded, operator_a
 ):
     """`posture` exists for two facts: a tenant table whose RLS was dropped,
     and the runner's ledger under the runner's grant (F7). A replayed

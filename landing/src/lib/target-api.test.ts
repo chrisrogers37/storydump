@@ -68,6 +68,18 @@ describe("the credential", () => {
   });
 });
 
+describe("the public plane", () => {
+  it("sends neither Origin nor Sec-Fetch-Site, which the API refuses as a browser", async () => {
+    stubFetch(() => new Response("{}", { status: 202 }));
+    await targetFetch("/waitlist", null, { method: "POST", plane: "public", body: "{}" });
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/public\/waitlist$/);
+    const headers = new Headers(init.headers);
+    expect(headers.has("origin")).toBe(false);
+    expect(headers.has("sec-fetch-site")).toBe(false);
+  });
+});
+
 describe("error bodies", () => {
   it("returns a reason code, never the upstream body", async () => {
     // The API's real shape (`src/api/app.py`, `InvitationRefused`): `detail`
@@ -132,5 +144,74 @@ describe("a command refusal", () => {
     if (odd.ok) throw new Error("unreachable");
     expect(odd.error).toBe("http_409");
     expect(JSON.stringify(odd)).not.toContain("eyJhbGciOi");
+  });
+});
+
+describe("a command refusal's facts (#1413 phase 6)", () => {
+  // The port's real envelope (`src/api/app.py`, `_command_body`): a sentence,
+  // a code, and the facts a person needs to act on the refusal.
+  const LOCKED = {
+    detail: "item 5: recent — override_locks schedules it anyway",
+    reason: "locked",
+    facts: { in_the_way: ["recent"], overridable: true, note: "Bearer eyJhbGciOi..." },
+  };
+
+  function refuse(body: unknown) {
+    stubFetch(async () => new Response(JSON.stringify(body), {
+      status: 409,
+      headers: { "Content-Type": "application/json" },
+    }));
+  }
+
+  it("cross only when the caller asks, and only through the allow-list", async () => {
+    refuse(LOCKED);
+    const result = await targetFetch("/workspaces/ws/commands/schedule_item", "tok", {
+      method: "POST",
+      refusalFacts: true,
+    });
+    if (result.ok) throw new Error("unreachable");
+    expect(result.facts).toEqual({ in_the_way: ["recent"], overridable: true });
+    // The sentence stays behind, and so does anything the list does not name.
+    expect(JSON.stringify(result)).not.toContain("eyJhbGciOi");
+    expect(JSON.stringify(result)).not.toContain("override_locks schedules");
+  });
+
+  it("leave every other caller's result exactly as it was", async () => {
+    refuse(LOCKED);
+    const result = await targetFetch("/workspaces/ws/commands/schedule_item", "tok", {
+      method: "POST",
+    });
+    expect(result).toStrictEqual({ ok: false, status: 409, error: "locked" });
+  });
+
+  it("never change the reason readError derives, which is the value that reaches logs", async () => {
+    const bodies = [
+      LOCKED,
+      { ...LOCKED, facts: "free text where facts belong" },
+      { detail: "x", reason: "Bearer eyJhbGciOi...", facts: { overridable: true } },
+      { detail: "x", facts: { overridable: true } },
+    ];
+    for (const body of bodies) {
+      refuse(body);
+      const plain = await targetFetch("/x", "tok");
+      refuse(body);
+      const asked = await targetFetch("/x", "tok", { refusalFacts: true });
+      if (plain.ok || asked.ok) throw new Error("unreachable");
+      expect(asked.error, JSON.stringify(body)).toBe(plain.error);
+      expect(asked.status).toBe(plain.status);
+      expect(JSON.stringify(asked)).not.toContain("eyJhbGciOi");
+    }
+  });
+
+  it("are none when the body carries nothing the list admits", async () => {
+    refuse({ detail: "x", reason: "locked", facts: { note: "free text" } });
+    const result = await targetFetch("/x", "tok", { refusalFacts: true });
+    expect(result).toStrictEqual({ ok: false, status: 409, error: "locked" });
+  });
+
+  it("are none when the body is not JSON", async () => {
+    stubFetch(async () => new Response("<html>bad gateway</html>", { status: 502 }));
+    const result = await targetFetch("/x", "tok", { refusalFacts: true });
+    expect(result).toStrictEqual({ ok: false, status: 502, error: "http_502" });
   });
 });

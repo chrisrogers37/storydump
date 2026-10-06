@@ -1,4 +1,5 @@
 import { callBff, postJson } from "./bff";
+import { refusalFacts, type RefusalFacts } from "./refusal-facts";
 import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 /**
  * The browser's one door to the command route (#1057/#1063, epic P3).
@@ -45,7 +46,7 @@ import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
 
 export type SubmitResult =
   | { ok: true; data: Record<string, unknown> }
-  | { ok: false; error: string; status: number };
+  | { ok: false; error: string; status: number; facts?: RefusalFacts };
 
 /**
  * The reason string for a `replayed` answer. Its own code, not folded into a
@@ -100,7 +101,12 @@ export async function submitCommand(
         : typeof result.body.reason === "string"
           ? result.body.reason
           : result.error;
-    return { ok: false, error, status: result.status };
+    // Re-checked with the route's own allow-list, so the browser holds nothing
+    // the list would not pass, whatever arrived.
+    const facts = refusalFacts(result.body.facts);
+    return facts
+      ? { ok: false, error, status: result.status, facts }
+      : { ok: false, error, status: result.status };
   }
 
   if (result.data.outcome === "replayed") {
@@ -270,4 +276,43 @@ export function removeMemberRefusalCopy(reason: unknown, status?: number): strin
       return notAuthenticatedCopy("Nothing changed.");
   }
   return "Could not remove that member. Nothing changed — try again shortly.";
+}
+
+/**
+ * Invite a person by email (#1563). The answer is the only place the
+ * invitation's join link exists in full — the port keeps a hash of its
+ * token — so the caller shows it once and keeps it nowhere else.
+ */
+export function submitInviteMember(
+  workspaceId: string,
+  invite: { email: string; role: string },
+): Promise<SubmitResult> {
+  return submitCommand(workspaceId, "invite_member", {
+    email: invite.email,
+    role: invite.role,
+  });
+}
+
+export function inviteMemberRefusalCopy(reason: unknown, status?: number): string {
+  if (status === 403 || reason === "insufficient_role") {
+    return "You need to be an admin of this workspace to invite someone.";
+  }
+  switch (reason) {
+    // The route refuses a non-string address; the port gives every invitation
+    // refusal `invalid_args`, and the form's role select cannot send a bad role.
+    case "invalid_email":
+    case "invalid_args":
+      return "Check the email address and try again. Nothing was created.";
+    case "invalid_role":
+      return "Choose Member or Admin. Nothing was created.";
+    case REPLAYED_ERROR:
+      return "That invitation was already made, and its link cannot be shown again. Invite them again for a new link.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing was created.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing was created");
+  }
+  return "That invitation did not go through. Nothing was created — try again shortly.";
 }

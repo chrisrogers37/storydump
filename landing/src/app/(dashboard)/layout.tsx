@@ -2,9 +2,11 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { DashboardHeader } from "@/components/dashboard/header";
+import { noindexMetadata } from "@/lib/seo";
 
 export const metadata = {
-  title: "Dashboard — Storydump",
+  title: "Dashboard",
+  ...noindexMetadata,
 };
 
 export default async function DashboardLayout({
@@ -41,7 +43,7 @@ export default async function DashboardLayout({
   // navigation spent on a boolean nobody can act on.
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="surface-app flex h-screen">
       <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
         <DashboardHeader user={session} />

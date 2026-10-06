@@ -1,5 +1,5 @@
 """The read views: ``story``, ``cards``, ``floating``, ``account``, ``jobs``,
-``outbox``, ``burst`` and ``posture``.
+``outbox``, ``burst``, ``posture`` and ``planned``.
 
 Every view answers for ONE workspace — the API's envelope carries that
 workspace's rows — and the CLI does the looping. ``--workspace`` names one:
@@ -9,8 +9,9 @@ a workspace the principal cannot see is its 404), a name is resolved through
 Without it, every workspace the principal lists is read in turn. Whatever
 was read, ``data`` has one shape — ``{"workspaces": [{"workspace_id",
 "rows"}]}`` — so an agent parses one document whether the token sees one
-workspace or ten. ``posture`` is the exception: not a workspace's rows but
-the deployment's own, so its ``data`` is the view's object.
+workspace or ten (``planned``'s also carries the page size it asked for,
+``limit``). ``posture`` is the exception: not a workspace's rows but the
+deployment's own, so its ``data`` is the view's object.
 
 A key (``story``, ``cards``, ``account``) that resolves to nothing in every
 workspace is an answer, not a traceback: exit 1 with the CLI's sentence.
@@ -29,6 +30,9 @@ import click
 from src.services.target.vocabulary import (
     DEFAULT_WINDOW,
     EXIT_NOT_FOUND,
+    INTENT_STATES,
+    LIST_LIMIT_DEFAULT,
+    LIST_LIMIT_MAX,
     envelope,
     window_start,
 )
@@ -100,17 +104,21 @@ def workspace_targets(client: Client, workspace: Optional[str]) -> list[str]:
     )
 
 
-def _unwrap(answer: Any, workspace_id: str) -> dict[str, Any]:
+def unwrap(answer: Any, workspace_id: str) -> dict[str, Any]:
     """The rows of one workspace out of the API's envelope."""
     data = answer.get("data") if isinstance(answer, dict) else None
     rows = data.get("rows") if isinstance(data, dict) else None
     if not isinstance(rows, list):
         raise Unreachable(200, None, "the answer was not the view's envelope")
     ws = data.get("workspace_id")
-    return {
+    entry: dict[str, Any] = {
         "workspace_id": ws if isinstance(ws, str) and ws else workspace_id,
         "rows": rows,
     }
+    if isinstance(data.get("limit"), int):
+        # a bounded list says how far it went, so a full page reads as one
+        entry["limit"] = data["limit"]
+    return entry
 
 
 def _run_view(
@@ -133,7 +141,7 @@ def _run_view(
     targets = workspace_targets(client, workspace)
 
     def read() -> Reading:
-        return [_unwrap(call(client, target), target) for target in targets]
+        return [unwrap(call(client, target), target) for target in targets]
 
     if watch_mode:
         return watch(
@@ -157,6 +165,15 @@ def _run_view(
 # --- the options every view shares ----------------------------------------------
 
 
+def workspace_option(command: Callable[..., Any]) -> Callable[..., Any]:
+    """``--workspace``: one workspace, else every one this token can read."""
+    return click.option(
+        "--workspace",
+        metavar="ID|NAME",
+        help="One workspace, by id or exact name (default: every workspace this token can read).",
+    )(command)
+
+
 def view_options(command: Callable[..., Any]) -> Callable[..., Any]:
     """``--workspace``, ``--watch``, ``--every`` and the global two."""
     command = click.option(
@@ -172,11 +189,7 @@ def view_options(command: Callable[..., Any]) -> Callable[..., Any]:
         is_flag=True,
         help="Re-read on an interval and print only the rows that changed.",
     )(command)
-    command = click.option(
-        "--workspace",
-        metavar="ID|NAME",
-        help="One workspace, by id or exact name (default: every workspace this token can read).",
-    )(command)
+    command = workspace_option(command)
     return global_options(command)
 
 
@@ -442,4 +455,87 @@ def posture(ctx: click.Context) -> None:
     emit(envelope("posture", data), json_mode=runtime.json_mode)
 
 
-COMMANDS = (story, cards, floating, account, jobs, outbox, burst, posture)
+def _intent_states(
+    ctx: click.Context, param: click.Parameter, value: str
+) -> tuple[str, ...]:
+    """``--state a,b`` → the closed set's members, or a usage error naming it."""
+    wanted = tuple(s.strip() for s in value.split(",") if s.strip())
+    if not wanted or any(s not in INTENT_STATES for s in wanted):
+        raise click.BadParameter(
+            f"each state is one of {', '.join(INTENT_STATES)}", ctx=ctx, param=param
+        )
+    return wanted
+
+
+def _as_view(answer: Any) -> dict[str, Any]:
+    """The Queue read's answer in the views' envelope, so it renders as one."""
+    answer = answer if isinstance(answer, dict) else {}
+    return {"data": {"rows": answer.get("intents"), "limit": answer.get("limit")}}
+
+
+@click.command()
+@global_options
+@workspace_option
+@click.option(
+    "--state",
+    "states",
+    default="scheduled",
+    show_default=True,
+    metavar="STATE[,STATE]",
+    callback=_intent_states,
+    help=(
+        "The states to list: `scheduled` is still to come; a served story waits"
+        " in `awaiting_approval`."
+    ),
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(1, LIST_LIMIT_MAX),
+    default=None,
+    metavar="N",
+    help=(
+        f"At most N stories per workspace (default {LIST_LIMIT_DEFAULT},"
+        f" at most {LIST_LIMIT_MAX})."
+    ),
+)
+@click.option(
+    "--newest-first",
+    is_flag=True,
+    help="Latest first, for a history: the most recent misses, not the oldest.",
+)
+@click.pass_context
+def planned(
+    ctx: click.Context,
+    workspace: Optional[str],
+    states: tuple[str, ...],
+    limit: Optional[int],
+    newest_first: bool,
+) -> Optional[int]:
+    """The planned stories, soonest first: when each is due, its account and
+    item, and who planned it. By default what is still to come.
+
+    \b
+    Examples:
+      storydump planned --workspace "Chris's studio"
+      storydump planned --state scheduled,awaiting_approval
+      storydump planned --state expired --newest-first
+    """
+    return _run_view(
+        ctx,
+        "planned",
+        lambda client, ws: _as_view(
+            client.intents(
+                ws,
+                origin="planned",
+                states=states,
+                limit=limit,
+                newest_first=newest_first,
+            )
+        ),
+        workspace=workspace,
+        watch_mode=False,
+        every=None,
+    )
+
+
+COMMANDS = (story, cards, floating, account, jobs, outbox, burst, posture, planned)

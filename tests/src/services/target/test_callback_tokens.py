@@ -10,7 +10,7 @@ import uuid
 
 import pytest
 
-from src.services.target import callback_tokens, prompts
+from src.services.target import callback_tokens, oauth_states, prompts
 
 INTENT = str(uuid.uuid4())
 
@@ -55,3 +55,46 @@ class TestRefusals:
             prompts.REVIEW_ACTIONS
         )
         assert not set(prompts._ACTIONS_API) & set(prompts.REVIEW_ACTIONS)
+
+
+class TestTheLinkConfirmationTokens:
+    """The identity link's Confirm and Cancel: minted and parsed here too, so
+    every button the bot sends has one mint and one parse."""
+
+    STATE = oauth_states.new_state()
+
+    @pytest.mark.parametrize("action", callback_tokens.LINK_ACTIONS)
+    def test_round_trip_and_the_64_byte_bound_at_the_longest_user_id(self, action):
+        uid = "9" * 20  # longer than any Telegram user id
+        data = callback_tokens.link_token(action, self.STATE, uid)
+        assert len(data.encode()) <= 64
+        assert callback_tokens.parse_link(data) == callback_tokens.LinkTap(
+            action=action, state=self.STATE, telegram_user_id=uid
+        )
+
+    def test_a_link_token_is_not_a_card_tap_and_a_card_tap_is_not_a_link(self):
+        link = callback_tokens.link_token("linkok", self.STATE, "42")
+        assert callback_tokens.parse(link) is None
+        assert callback_tokens.parse_link(prompts._token("post", INTENT)) is None
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            None,
+            "",
+            "v1:linkok:STATE",  # no user
+            "v2:linkok:STATE:42",
+            "v1:linkmaybe:STATE:42",
+            "v1:linkok:STATE:not-digits",
+            "v1:linkok:ST@TE:42",
+            "v1:linkok:STATE:42:extra",
+        ],
+    )
+    def test_anything_else_is_none_never_a_raise(self, data):
+        assert callback_tokens.parse_link(data) is None
+
+    def test_minting_a_malformed_token_raises(self):
+        with pytest.raises(ValueError):
+            callback_tokens.link_token("linkok", "a:b", "42")
+        with pytest.raises(ValueError):
+            callback_tokens.link_token("post", self.STATE, "42")

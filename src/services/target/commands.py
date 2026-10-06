@@ -108,6 +108,11 @@ ROLE_FLOOR: dict[str, str] = {
     "reject": "member",
     "mark_posted": "member",
     "cancel": "member",
+    # A planned story (#1413, F11): the floor of `approve` and `cancel`, the
+    # two levers a member already holds on the same row. Scheduling asks a
+    # person at the story's time and posts nothing by itself.
+    "schedule_item": "member",
+    "reschedule_item": "member",
     "autopost_now": "member",
     "sync_now": "member",
     "settings_change": "admin",
@@ -187,12 +192,24 @@ class CommandResult:
 
 
 class CommandRefused(StorydumpError):
-    """A command the port will not run, with a reason from :data:`REASONS`."""
+    """A command the port will not run, with a reason from :data:`REASONS`.
 
-    def __init__(self, reason: str, detail: str = ""):
+    *facts* are what a front end needs to act on the refusal without parsing
+    its prose — `locked` names what is in the way and whether an override
+    would get past it. They ride the refusal's body under ``facts``, beside
+    ``reason``."""
+
+    def __init__(
+        self,
+        reason: str,
+        detail: str = "",
+        *,
+        facts: Optional[Mapping[str, Any]] = None,
+    ):
         if reason not in REASONS:
             raise ValueError(f"not a refusal reason: {reason!r}")
         self.reason = reason
+        self.facts: dict[str, Any] = dict(facts or {})
         super().__init__(
             f"command refused: {reason}" + (f" — {detail}" if detail else "")
         )
@@ -227,6 +244,10 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "reject": ex.reject,
             "mark_posted": ex.mark_posted,
             "cancel": ex.cancel,
+            # #1413 phase 5: a planned story, created and moved in place
+            # (F4); `cancel` ends one, as it ends any story.
+            "schedule_item": ex.schedule_item,
+            "reschedule_item": ex.reschedule_item,
             "sync_now": ex.sync_now,
             # gdrive epic P4 — the trio is provider-general (F1 (a)) and
             # THIN: the OAuth leg is the API route's, these initiate and record.

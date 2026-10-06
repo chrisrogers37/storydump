@@ -14,6 +14,7 @@ import pytest
 
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
+    bindings,
     category_mix,
     channel_bind,
     commands,
@@ -26,6 +27,7 @@ from src.services.target import (
     oauth_states,
     provisioning,
     sessions,
+    tenant_resolution,
     webhook_ingress,
     workspaces,
 )
@@ -140,7 +142,15 @@ class TestWorkspaceReads:
     ):
         seen = {}
 
-        async def list_intents(session, *, workspace_id, states=(), limit=50):
+        async def list_intents(
+            session,
+            *,
+            workspace_id,
+            states=(),
+            origin=None,
+            newest_first=False,
+            limit=50,
+        ):
             seen.update(states=list(states), limit=limit)
             return []
 
@@ -161,6 +171,42 @@ class TestWorkspaceReads:
         assert resp.status_code == 200
         assert seen == {"states": ["posted", "skipped", "rejected"], "limit": 50}
         assert resp.json() == {"intents": [], "limit": 50}
+
+    def test_the_origin_is_a_closed_list_and_reaches_the_read(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        """What is coming is the Queue read filtered to planned stories: no
+        endpoint of its own (#1413 phase 5)."""
+        seen = {}
+
+        async def list_intents(
+            session,
+            *,
+            workspace_id,
+            states=(),
+            origin=None,
+            newest_first=False,
+            limit=50,
+        ):
+            seen.update(states=list(states), origin=origin, newest_first=newest_first)
+            return []
+
+        monkeypatch.setattr(workspaces, "list_intents", list_intents)
+        for bad, word in (("origin=someday", "someday"), ("order=up", "up")):
+            resp = client.get(f"/api/v1/workspaces/{WS}/intents?{bad}")
+            assert resp.status_code == 422 and word in resp.json()["detail"]
+        assert seen == {}
+        resp = client.get(
+            f"/api/v1/workspaces/{WS}/intents?origin=planned&state=scheduled"
+        )
+        assert resp.status_code == 200
+        assert seen == {
+            "states": ["scheduled"],
+            "origin": "planned",
+            "newest_first": False,
+        }
+        client.get(f"/api/v1/workspaces/{WS}/intents?state=expired&order=desc")
+        assert seen["origin"] is None and seen["newest_first"] is True
 
     def test_media_reads_pass_the_gate_and_validate_the_state(
         self, client, signed_in, tenant, monkeypatch
@@ -204,6 +250,35 @@ class TestWorkspaceReads:
         assert resp.status_code == 200
         assert resp.json()["intents_by_state"] == {"posted": 2}
         assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
+
+    @pytest.fixture
+    def pending(self, monkeypatch):
+        async def list_invitations(session, *, workspace_id):
+            return [{"email": "invitee@example.com"}]
+
+        monkeypatch.setattr(workspaces, "list_invitations", list_invitations)
+
+    def test_an_admin_gets_the_pending_invitations(
+        self, client, signed_in, tenant, pending
+    ):
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 200
+        assert resp.json()["invitations"][0]["email"] == "invitee@example.com"
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_member_gets_no_pending_invitation(
+        self, client, signed_in, tenant, pending, monkeypatch
+    ):
+        """A member: the gate passes the member floor and refuses any higher."""
+
+        async def as_a_member(session, workspace_id, user_id, minimum_role="member"):
+            if minimum_role != "member":
+                raise TenantResolutionError("insufficient_role")
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", as_a_member)
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 403
+        assert "invitee@example.com" not in resp.text
 
 
 @pytest.fixture
@@ -326,6 +401,7 @@ class TestCommands:
             ("not_found", 404),
             ("illegal_transition", 409),
             ("manual_mode", 409),
+            ("locked", 409),
         ],
     )
     def test_each_port_refusal_maps_to_its_status(
@@ -335,6 +411,26 @@ class TestCommands:
         resp = client.post(self.URL, json={"intent_id": INTENT}, headers=KEY)
         assert resp.status_code == status
         assert resp.json()["reason"] == reason
+        assert "facts" not in resp.json(), "a refusal with no facts carries no key"
+
+    def test_a_refusals_facts_ride_its_body_under_their_own_key(
+        self, client, signed_in, tenant, port
+    ):
+        """`locked` names what is in the way and whether an override gets past
+        it, beside the reason — a front end acts on them without parsing the
+        prose — under one key, so no fact can stand in for `reason`."""
+        port["outcome"] = CommandRefused(
+            "locked",
+            "item x: skip",
+            facts={"in_the_way": ["skip"], "overridable": True, "reason": "forged"},
+        )
+        resp = client.post(self.URL, json={"intent_id": INTENT}, headers=KEY)
+        assert resp.status_code == 409
+        assert resp.json() == {
+            "reason": "locked",
+            "detail": "command refused: locked — item x: skip",
+            "facts": {"in_the_way": ["skip"], "overridable": True, "reason": "forged"},
+        }
 
     def test_a_member_below_the_floor_is_403(self, client, signed_in, tenant, port):
         port["outcome"] = TenantResolutionError("insufficient_role", "member < admin")
@@ -644,6 +740,50 @@ class TestTelegramGroupBindLink:
         }
 
 
+class TestRemoveTelegramGroup:
+    """`DELETE /workspaces/{ws}/bindings/{binding_id}` — an admin removes a
+    group (`07` §13): a revoke, never a delete, at the admin floor like the
+    bind link."""
+
+    BINDING = "44444444-4444-4444-8444-444444444444"
+    URL = f"/api/v1/workspaces/{WS}/bindings/{BINDING}"
+
+    @pytest.fixture
+    def revoked(self, monkeypatch):
+        seen = {"moved": True}
+
+        async def revoke_for_workspace(session, *, workspace_id, binding_id):
+            seen["asked"] = (workspace_id, binding_id)
+            return seen["moved"]
+
+        monkeypatch.setattr(bindings, "revoke_for_workspace", revoke_for_workspace)
+        return seen
+
+    def test_requires_a_session(self, client, revoked):
+        assert client.delete(self.URL).status_code == 401
+        assert "asked" not in revoked
+
+    def test_revokes_at_the_admin_floor(self, client, signed_in, tenant, revoked):
+        resp = client.delete(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"binding_id": self.BINDING, "state": "revoked"}
+        assert revoked["asked"] == (WS, self.BINDING)
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_binding_that_is_not_here_or_already_revoked_is_404(
+        self, client, signed_in, tenant, revoked
+    ):
+        revoked["moved"] = False
+        assert client.delete(self.URL).status_code == 404
+
+    def test_a_binding_id_that_is_not_a_uuid_never_reaches_the_service(
+        self, client, signed_in, tenant, revoked
+    ):
+        resp = client.delete(f"/api/v1/workspaces/{WS}/bindings/nope")
+        assert resp.status_code == 422
+        assert "asked" not in revoked
+
+
 class TestTelegramLink:
     """`POST /me/telegram/link` — the link a signed-in user taps to attach
     their Telegram identity (`07` §2 `link`: only from an authenticated
@@ -735,6 +875,45 @@ class TestTelegramLink:
             "user_id": PRINCIPAL.user_id,
             "bot_username": "storydump_app_bot",
         }
+
+
+class TestTelegramUnlink:
+    """`DELETE /me/telegram` — the signed-in user removes their own Telegram
+    identity (099, `07` §42). Tenant-less; the door's outcome is the answer,
+    and `last_identity` is the one refusal."""
+
+    URL = "/api/v1/me/telegram"
+
+    @pytest.fixture
+    def unlink(self, monkeypatch):
+        seen = {"outcome": "unlinked"}
+
+        async def unlink_telegram(conn, *, user_id):
+            seen["user_id"] = user_id
+            return seen["outcome"]
+
+        monkeypatch.setattr(identity, "unlink_telegram", unlink_telegram)
+        return seen
+
+    def test_requires_a_session(self, client, unlink):
+        assert client.delete(self.URL).status_code == 401
+        assert "user_id" not in unlink
+
+    @pytest.mark.parametrize("outcome", ["unlinked", "not_linked"])
+    def test_unlinks_the_signed_in_users_own_identity(
+        self, client, signed_in, unlink, outcome
+    ):
+        unlink["outcome"] = outcome
+        resp = client.delete(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"outcome": outcome}
+        assert unlink["user_id"] == PRINCIPAL.user_id
+
+    def test_the_last_identity_is_refused_by_name(self, client, signed_in, unlink):
+        unlink["outcome"] = "last_identity"
+        resp = client.delete(self.URL)
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "last_identity"
 
 
 SRC = "33333333-3333-4333-8333-333333333333"
@@ -830,6 +1009,7 @@ class TestDriveFolders:
             "raise": None,
             "asked": None,
             "status": "active",
+            "mine": True,
         }
 
         class _Adapter:
@@ -849,8 +1029,13 @@ class TestDriveFolders:
         async def list_sources(session, *, workspace_id):
             return []
 
+        async def may_browse_drive(session, *, workspace_id, user_id):
+            holder["browser"] = (workspace_id, user_id)
+            return holder["mine"]
+
         monkeypatch.setattr(workspaces, "drive_status", drive_status)
         monkeypatch.setattr(workspaces, "list_sources", list_sources)
+        monkeypatch.setattr(workspaces, "may_browse_drive", may_browse_drive)
         return holder
 
     def test_lists_the_root_at_the_admin_floor(
@@ -928,6 +1113,31 @@ class TestDriveFolders:
         browser["truncated"] = True
         assert client.get(self.URL).json()["truncated"] is True
 
+    def test_an_admin_who_did_not_grant_it_is_403_drive_not_yours(
+        self, client, signed_in, tenant, browser
+    ):
+        """091: the tree is the granter's Drive. Another admin passes the
+        admin floor and is refused by name — with `reason`, the web's one
+        code carrier — before any request reaches Google."""
+        browser["mine"] = False
+        resp = client.get(self.URL)
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["reason"] == "drive_not_yours"
+        assert browser["asked"] is None
+        assert browser["browser"] == (WS, PRINCIPAL.user_id)
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_dead_grant_says_reconnect_even_to_an_admin_who_did_not_grant_it(
+        self, client, signed_in, tenant, browser
+    ):
+        """Reconnecting is every admin's remedy, and it makes them the
+        granter, so the status refusal comes first."""
+        browser["mine"] = False
+        browser["status"] = "expired"
+        resp = client.get(self.URL)
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "drive_reconnect_needed"
+
 
 class TestDriveStatus:
     """`GET /workspaces/{ws}/drive` — the workspace's grant, projected as the
@@ -959,7 +1169,7 @@ class TestSourcesUnderTheWorkspaceGrant:
 
     @pytest.fixture
     def grant(self, monkeypatch):
-        holder = {"status": "active"}
+        holder = {"status": "active", "mine": True}
 
         async def drive_status(session, *, workspace_id):
             return {"status": holder["status"], "connected_at": None}
@@ -967,8 +1177,14 @@ class TestSourcesUnderTheWorkspaceGrant:
         async def list_sources(session, *, workspace_id):
             return []
 
+        async def may_browse_drive(session, *, workspace_id, user_id):
+            holder["browser"] = (workspace_id, user_id)
+            answers = holder.get("answers")
+            return answers.pop(0) if answers else holder["mine"]
+
         monkeypatch.setattr(workspaces, "drive_status", drive_status)
         monkeypatch.setattr(workspaces, "list_sources", list_sources)
+        monkeypatch.setattr(workspaces, "may_browse_drive", may_browse_drive)
         return holder
 
     @pytest.fixture
@@ -1015,6 +1231,29 @@ class TestSourcesUnderTheWorkspaceGrant:
         assert (
             resp.status_code == 409 and resp.json()["detail"] == "drive_not_connected"
         )
+        assert created == {}
+
+    def test_an_admin_who_did_not_grant_it_adds_nothing(
+        self, client, signed_in, tenant, grant, created
+    ):
+        """091: a pick reads the granter's Drive and adds a folder from it, so
+        it is the folder browser's rule — refused by name, nothing created."""
+        grant["mine"] = False
+        resp = client.post(self.URL, json={"folder_ref": "f1", "folder_name": "Trips"})
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["reason"] == "drive_not_yours"
+        assert grant["browser"] == (WS, PRINCIPAL.user_id)
+        assert created == {}
+
+    def test_a_reconnect_by_someone_else_mid_pick_is_403_drive_not_yours(
+        self, client, signed_in, tenant, grant, created
+    ):
+        """The browse check is asked again in the writing unit of work: a
+        reconnect between the two makes someone else the granter."""
+        grant["answers"] = [True, False]
+        resp = client.post(self.URL, json={"folder_ref": "f1", "folder_name": "Trips"})
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["reason"] == "drive_not_yours"
         assert created == {}
 
     @pytest.fixture

@@ -12,7 +12,7 @@ and a client closed deterministically is one that never warns at exit.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -30,12 +30,21 @@ class ApiError(Exception):
     carried one (a refusal does — 403 token refusals, the command port's
     409/404 — while 401 and a tenant 404 say nothing), and its *detail*."""
 
-    def __init__(self, status: int, reason: Optional[str], detail: str) -> None:
+    def __init__(
+        self,
+        status: int,
+        reason: Optional[str],
+        detail: str,
+        facts: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         suffix = f" ({reason})" if reason else ""
         super().__init__(f"{status}: {detail}{suffix}")
         self.status = status
         self.reason = reason
         self.detail = detail
+        #: what the refusal says beside its reason (the port's `locked`
+        #: names what is in the way and whether an override gets past it)
+        self.facts: dict[str, Any] = dict(facts or {})
 
 
 class Unreachable(ApiError):
@@ -143,7 +152,10 @@ class Client:
             reason = None
         if status >= 500:
             raise Unreachable(status, reason, detail)
-        raise ApiError(status, reason, detail)
+        facts = body.get("facts") if isinstance(body, dict) else None
+        raise ApiError(
+            status, reason, detail, facts if isinstance(facts, dict) else None
+        )
 
     def principal(self) -> dict[str, Any]:
         return self._request("GET", "/me/principal")
@@ -165,14 +177,44 @@ class Client:
             headers={IDEMPOTENCY_HEADER: idempotency_key},
         )
 
+    def intents(
+        self,
+        workspace_id: str,
+        *,
+        origin: Optional[str] = None,
+        states: Sequence[str] = (),
+        limit: Optional[int] = None,
+        newest_first: bool = False,
+    ) -> dict[str, Any]:
+        """The workspace's stories — the web's Queue read, which a token may
+        make: ``origin`` narrows to the planned stories or the cadence's, and
+        ``newest_first`` reads a history latest first."""
+        params: dict[str, Any] = {}
+        if origin is not None:
+            params["origin"] = origin
+        if states:
+            params["state"] = ",".join(states)
+        if limit is not None:
+            params["limit"] = limit
+        if newest_first:
+            params["order"] = "desc"
+        return self._request(
+            "GET", f"/workspaces/{_segment(workspace_id)}/intents", params=params
+        )
+
     def health_api(self) -> dict[str, Any]:
         """`/health` alone — liveness, unauthenticated, at the root."""
         return self._request("GET", "/health", root=True)
 
+    def health_details(self) -> dict[str, Any]:
+        """The API's operating details: the token's person must be listed in
+        the API's `OPS_USER_IDS`."""
+        return self._request("GET", "/ops/health")
+
     def health(self) -> dict[str, Any]:
-        """The API's three health surfaces. `/health` must answer; the two
-        dependency-touching surfaces may not (a 503 with no engine), and then
-        the report carries that surface's error rather than losing the rest."""
+        """The API's three public surfaces. `/health` must answer; the two
+        dependency-touching axes may not (a 503 with no engine), and then the
+        report carries that surface's error rather than losing the rest."""
         surfaces: dict[str, Any] = {"api": self.health_api()}
         for name, path in (
             ("scheduling", "/health/scheduling"),

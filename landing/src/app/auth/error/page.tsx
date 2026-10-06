@@ -1,6 +1,10 @@
 import Link from "next/link";
 import { siteConfig } from "@/config/site";
 import { resolveContent, resolveFlow } from "./content";
+import { noindexMetadata } from "@/lib/seo";
+import { buttonVariants } from "@/components/ui/button";
+import { PageHeader } from "@/design/page-header";
+import { Screen } from "@/design/screen";
 
 /**
  * The three sign-in failure states, which are not interchangeable.
@@ -31,7 +35,11 @@ export async function generateMetadata({
       : resolved === "instagram"
         ? "Instagram connection problem"
         : "Sign-in problem";
-  return { title: `${what} — ${siteConfig.name}` };
+  return {
+    title: what,
+    description: `${siteConfig.name} couldn’t finish connecting your account.`,
+    ...noindexMetadata,
+  };
 }
 
 export default async function AuthErrorPage({
@@ -43,29 +51,26 @@ export default async function AuthErrorPage({
   const content = resolveContent(resolveFlow(flow), reason);
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
-      <div className="w-full max-w-sm space-y-6 text-center">
-        <h1 className="text-2xl font-bold tracking-tight">{content.heading}</h1>
-        <p className="text-sm text-muted-foreground">{content.body}</p>
+    <Screen className="text-center">
+      <PageHeader title={content.heading} description={content.body} />
 
-        <Link
-          href={content.href}
-          className="inline-flex items-center justify-center rounded-md bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-        >
-          {content.primary}
-        </Link>
+      <Link
+        href={content.href}
+        className={buttonVariants({ size: "lg" })}
+      >
+        {content.primary}
+      </Link>
 
-        {content.secondary && (
-          <div>
-            <a
-              href={`mailto:${siteConfig.contact.email}`}
-              className="text-sm text-muted-foreground underline underline-offset-4 transition-colors hover:text-foreground"
-            >
-              {content.secondary}
-            </a>
-          </div>
-        )}
-      </div>
-    </div>
+      {content.secondary && (
+        <div>
+          <a
+            href={`mailto:${siteConfig.contact.email}`}
+            className="text-sm text-muted-foreground underline underline-offset-4 transition-colors hover:text-foreground"
+          >
+            {content.secondary}
+          </a>
+        </div>
+      )}
+    </Screen>
   );
 }

@@ -15,12 +15,12 @@ this runs before any `app.tenant_id` exists — identity precedes tenancy.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlalchemy import text
 
 from src.exceptions.base import StorydumpError
-from src.services.target import readers, vocabulary
+from src.services.target import oauth_states, readers, vocabulary
 
 PROVIDER_GOOGLE = vocabulary.PROVIDER_GOOGLE
 PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
@@ -28,6 +28,11 @@ PROVIDER_TELEGRAM = vocabulary.PROVIDER_TELEGRAM
 
 class IdentityCollision(StorydumpError):
     """The verified email belongs to a different user. Refused, never merged."""
+
+
+class SignupNotAdmitted(StorydumpError):
+    """A new Google account whose verified email nobody admitted or invited
+    (092, `07` §35): no user is created. Sign-in maps it to `not_admitted`."""
 
 
 class IdentityAlreadyLinked(StorydumpError):
@@ -46,7 +51,12 @@ class IdentityAlreadyLinked(StorydumpError):
 
 
 async def upsert_google_identity(
-    executor, *, sub: str, email: Optional[str], display_name: Optional[str]
+    executor,
+    *,
+    sub: str,
+    email: Optional[str],
+    display_name: Optional[str],
+    signup_open: bool = False,
 ) -> str:
     """Find-or-create the user for a verified Google subject. Returns user_id.
 
@@ -56,6 +66,13 @@ async def upsert_google_identity(
     `uq_identity_per_provider`). *email* is the VERIFIED claim or None —
     `google_oidc.verify_id_token` already drops an unverified one, so this
     function never sees a claim it must doubt.
+
+    A subject seen before signs in whatever *signup_open* says. A NEW one
+    creates its user only when `fn_signup_admitted` admits its email — an
+    owner admission or a live invitation addressed to it (092) from an active
+    workspace whose owner or admin still sent it (098) — and is
+    refused with `SignupNotAdmitted` otherwise, a None email included.
+    *signup_open* (`TARGET_SIGNUP_OPEN`) skips that ask.
     """
     if not sub:
         raise ValueError("sub is required")
@@ -116,6 +133,8 @@ async def upsert_google_identity(
             await _fill_primary_email(executor, user_id=user_id, email=claim)
         return user_id
 
+    if not signup_open:
+        await _refuse_unless_admitted(executor, email=claim)
     if claim is not None:
         await _refuse_if_held_elsewhere(executor, email=claim, user_id=None)
     user_id = str(
@@ -135,6 +154,22 @@ async def upsert_google_identity(
         {"u": user_id, "p": PROVIDER_GOOGLE, "sub": sub, "dn": display_name},
     )
     return user_id
+
+
+async def _refuse_unless_admitted(executor, *, email: Optional[str]) -> None:
+    """The sign-up gate (092): the door answers for the owner's admissions and
+    every workspace's invitations, which this login cannot read itself. Asked
+    before the collision check, so a refused address learns nothing about
+    which accounts exist."""
+    if email is not None:
+        admitted = (
+            await executor.execute(text("SELECT fn_signup_admitted(:e)"), {"e": email})
+        ).scalar()
+        if admitted:
+            return
+    raise SignupNotAdmitted(
+        "a new account needs an admitted or invited email while sign-up is gated"
+    )
 
 
 async def _refuse_if_held_elsewhere(
@@ -220,19 +255,50 @@ async def identity_for_user(executor, *, user_id: str, provider: str) -> Optiona
     return None if row is None else str(row[0])
 
 
+async def telegram_ids_for(executor, user_ids: Iterable[str]) -> list[str]:
+    """The Telegram ids of those of *user_ids* who have linked Telegram, in a
+    stable order; a person who has not linked, or whose account is disabled,
+    is simply absent."""
+    user_ids = [str(u) for u in user_ids]
+    if not user_ids:
+        return []
+    rows = await executor.execute(
+        text(
+            "SELECT i.external_id FROM user_identities i"
+            " JOIN users u ON u.id = i.user_id AND u.state = 'active'"
+            " WHERE i.provider = :p AND i.user_id = ANY(CAST(:u AS uuid[]))"
+            " ORDER BY i.external_id"
+        ),
+        {"p": PROVIDER_TELEGRAM, "u": user_ids},
+    )
+    return [str(row[0]) for row in rows]
+
+
+def display_name_sql(user_id_sql: str) -> str:
+    """The name a shared chat may see for the person *user_id_sql* names (an
+    SQL operand: a column or a bind, never user input) as one SQL expression:
+    the Telegram identity's display name first (the group already sees it),
+    else another identity's, else "a teammate" — never an email, since an
+    address in a group chat is a disclosure (phase 1 of the 2026-09-09 tap
+    plan, F3). A read that names many people joins this instead of asking
+    once per person."""
+    return (
+        "COALESCE((SELECT ui.display_name FROM user_identities ui"
+        f" WHERE ui.user_id = {user_id_sql}"
+        "   AND ui.display_name IS NOT NULL AND ui.display_name <> ''"
+        " ORDER BY (ui.provider = 'telegram') DESC, ui.created_at LIMIT 1),"
+        " 'a teammate')"
+    )
+
+
 async def display_name_for(executor, *, user_id: str) -> str:
-    """The name a shared chat may see for *user_id*: the Telegram identity's
-    display name first (the group already sees it), else another identity's,
-    never an email — an address in a group chat is a disclosure (phase 1 of the
-    2026-09-09 tap plan, F3)."""
-    rows = await readers.rows(
+    """:func:`display_name_sql` for one person."""
+    found = await readers.row(
         executor,
-        "SELECT provider, display_name FROM user_identities"
-        " WHERE user_id = :u AND display_name IS NOT NULL AND display_name <> ''"
-        " ORDER BY (provider = 'telegram') DESC, created_at",
+        f"SELECT {display_name_sql('CAST(:u AS uuid)')} AS name",
         u=str(user_id),
     )
-    return str(rows[0]["display_name"]) if rows else "a teammate"
+    return str(found["name"])
 
 
 async def get_user(executor, *, user_id: str) -> Optional[dict]:
@@ -317,7 +383,7 @@ async def link_identity(
     ).first()
     if mine is not None:
         # `uq_user_provider`. Replacing it would silently unlink the old
-        # account, which is an operator action with an audit trail, not a tap.
+        # account; the person unlinks it first (`unlink_telegram`, 099).
         raise IdentityAlreadyLinked("user_already_has_this_provider")
 
     await executor.execute(
@@ -329,3 +395,34 @@ async def link_identity(
         {"u": str(user_id), "p": provider, "sub": external_id, "dn": display_name},
     )
     return True
+
+
+async def unlink_telegram(executor, *, user_id: str) -> str:
+    """Remove *user_id*'s own Telegram identity — the reverse of
+    :func:`link_identity`. Returns the door's outcome: `unlinked`,
+    `not_linked` or `last_identity` (099, `07` §42).
+
+    The delete is the `fn_identity_unlink` door's (099): no runtime role
+    deletes from `user_identities`, and the door keeps the user's other
+    identity, answering `last_identity` rather than leave an account with no
+    way to sign in. The caller proves the person — this is the session's user.
+
+    Memberships are untouched: a workspace joined from a Telegram group stays
+    joined. That Telegram account now resolves to nobody, so its taps answer
+    `unlinked` and its group messages join no one until the person links
+    again. In the same transaction the user's live `link` states are retired,
+    so a link minted before the unlink cannot re-attach an account the person
+    just removed.
+    """
+    outcome = (
+        await executor.execute(
+            text("SELECT fn_identity_unlink(CAST(:u AS uuid), :p)"),
+            {"u": str(user_id), "p": PROVIDER_TELEGRAM},
+        )
+    ).scalar_one()
+    if outcome != "last_identity":
+        # "link" is `identity_link.PURPOSE`, which imports this module.
+        await oauth_states.retire_live_states(
+            executor, provider=PROVIDER_TELEGRAM, purpose="link", user_id=user_id
+        )
+    return str(outcome)

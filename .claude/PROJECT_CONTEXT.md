@@ -64,9 +64,9 @@ Telegram.
 
 ## Key Database Tables
 
-Twenty-six tables in `public`, every one under row-level security; nineteen
-are keyed on the workspace, the rest are the user plane, the machinery counters
-and reference data (`.claude/rules/database.md` › Tenancy). The ones a
+Twenty-eight tables in `public`, every one under row-level security; twenty
+are keyed on the workspace, the rest are the user plane, the machinery counters,
+reference data and the owner's sign-up admissions (`.claude/rules/database.md` › Tenancy). The ones a
 conversation usually needs:
 
 | Table | Purpose |
@@ -146,12 +146,13 @@ The canonical list is the safety block in `CLAUDE.md`; this copy is pinned to
 it by `tests/test_agent_docs.py`.
 
 Not on that list does not mean safe: `storydump skip`, `reject`, `posted`,
-`pause`, `resume` and `sync` also write through the command port, and a skip or
-a reject is final for that story. Ask before suggesting any of them.
+`pause`, `resume`, `sync`, `schedule` and `reschedule` also write through the
+command port, and a skip or a reject is final for that story. Ask before
+suggesting any of them.
 
 **SAFE to suggest:**
 - `storydump whoami` / `storydump story <id>` / `storydump cards <id>` / `storydump floating` / `storydump account <handle>` (reads)
-- `storydump jobs` / `storydump outbox` / `storydump burst` / `storydump posture` (reads)
+- `storydump jobs` / `storydump outbox` / `storydump burst` / `storydump posture` / `storydump planned` (reads)
 - `storydump health` / `storydump deploys` / `storydump doctor` / `storydump webhook status` (the deployment; nothing changes)
 - `pytest tests/`
 - A read-only `psql` probe through Railway, when no verb answers the question (`documentation/operations/reading-the-ledger.md` › The escape hatch)
@@ -161,12 +162,13 @@ a reject is final for that story. Ask before suggesting any of them.
 ## State of the System
 
 - The target tier is the only tier. Version: `src/__init__.py`; changes:
-  `CHANGELOG.md` under `## [Unreleased]`.
+  `CHANGELOG.md` under `## [Unreleased]`, and the fragments in `changelog.d/`
+  not yet folded into it.
 - **Outbound email does not send**: no provider is wired, by design
-  (`AGENTS.md` › What is deliberately not wired). An invitation's row and token
-  are real; the message is not delivered.
+  (`AGENTS.md` › What is deliberately not wired). An invitation's row is real;
+  nothing is emailed, and the inviter hands over the link its response returns.
 - Some vocabulary commands have no executor yet and answer 501
-  (`commands.UNBUILT`); two job kinds have none (`work_loop.UNBUILT_KINDS`).
+  (`commands.UNBUILT`); one job kind has none (`work_loop.UNBUILT_KINDS`).
 - The `legacy` schema is gone: the owner ran the window on 2026-09-19 (its
   record: `documentation/archive/2026-09-16-legacy-tear-out/legacy-window-close.md`
   — 079 dropped it, 080 stood the window down; both `applied` in the ledger).

@@ -19,13 +19,13 @@ production's schemas are `archive`, `public` and `runner`. Nothing under
 
 ## The tables
 
-Twenty-six, in five model modules named after the migrations that create them
-(`src/models/target/__init__.py`; the count and the nineteen tenant-keyed are
-pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
+Twenty-nine, in five model modules named after the migrations that create them
+(`src/models/target/__init__.py`; the count and the twenty tenant-keyed are
+pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
 
 | Models (migration) | Tables |
 |---|---|
-| `identity_and_tenancy.py` (053) | `users`, `user_identities`, `workspaces`, `workspace_members`, `workspace_invitations`, `channel_bindings`, `onboarding_sessions` |
+| `identity_and_tenancy.py` (053, 090, 092, 100) | `users`, `user_identities`, `workspaces`, `workspace_members`, `workspace_member_removals` (090), `signup_admissions` (092), `waitlist_entries` (100), `workspace_invitations`, `channel_bindings`, `onboarding_sessions` |
 | `accounts_sources_media.py` (054) | `ig_accounts`, `provider_quarantine`, `media_sources`, `oauth_credentials`, `media_items`, `post_locks` |
 | `intent_ledger.py` (055) | `post_intents`, `post_intent_transitions`, `audit_events`, `daily_post_counts`, `category_post_case_mix` |
 | `machinery.py` (056) | `jobs`, `channel_outbox`, `provider_operations`, `command_dedup`, `rate_counters` |
@@ -74,7 +74,13 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
   unset GUC reads nothing. The exceptions are deliberate classes: `jobs` also
   exposes system rows (`workspace_id IS NULL`, `:159`), the user plane and the
   machinery counters are row-open to the runtime roles (`:169`-`:178`),
-  `post_intent_transitions` is read-only reference data (`:182`).
+  `post_intent_transitions` is read-only reference data (`:182`), and
+  `signup_admissions` (092) is global and readable only through
+  `fn_signup_admitted`: the runtime roles hold no grant on it.
+  `waitlist_entries` (100) is global too: `svc_ingress` may INSERT and
+  nothing else, so the public waitlist route cannot read the list. A
+  `user_identities` row is deleted only by `fn_identity_unlink` (099), a
+  person removing their own Telegram identity.
 - The runtime roles are `svc_ingress` (API) and `svc_worker`; cross-tenant work
   goes through `SECURITY DEFINER` doors owned by `svc_claim`, `svc_clock`,
   `svc_maintenance` and `svc_membership` (059 onward) — `fn_claim_job`,
@@ -86,7 +92,7 @@ pinned at `tests/scripts/test_tenancy_gate.py:377`-`:378`):
   fleet health surfaces read the tenant tables directly and went blind under
   the policies. 081 gives those reads doors; the switch is repeated after it
   (`documentation/operations/runtime-database-roles.md`). `storydump posture`
-  and `/health`'s `db_role` report the live answer. So every query names its
+  and the operating details' `db_role` (`storydump health --json`) report the live answer. So every query names its
   tenant: an explicit `workspace_id = :ws` predicate on each table it touches,
   as `ops_views.py` and `command_executors._intent_row` do — and an
   estate-wide read that has no tenant is a door (081's fleet-health doors,
