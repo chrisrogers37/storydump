@@ -7,15 +7,14 @@ const nextConfig: NextConfig = {
   // instructions, so a framework-written one would be instructions this
   // repository never wrote.
   agentRules: false,
+  // The stylesheet stays a `<link>`; `experimental.inlineCss` stays off. React
+  // writes every `<title>` and `<meta>` after the stylesheets, so an inlined
+  // stylesheet (about 96 KB) pushes a page's link-preview tags that far into
+  // the HTML, past what a link preview reads. Inlining would paint the
+  // headline sooner on a cold load, so it is worth having again only once the
+  // public pages' stylesheet is small. `link-preview-head-contract.test.ts`
+  // holds this.
   experimental: {
-    // The stylesheet goes inside the HTML instead of a second request the
-    // browser must wait for before it paints. Most visits are one page from a
-    // search or a link, so the headline paints sooner (use-case page LCP 1.85
-    // -> 1.0 s, home 2.0 -> 1.2 s, Lighthouse with Slow 4G throttling). The
-    // CSP already allows inline styles (`src/lib/csp.ts`). The flag is
-    // app-wide, so a full load of a dashboard page carries the ~18 KB
-    // (gzipped) stylesheet too; navigations inside the app don't.
-    inlineCss: true,
     // Off: on a restored .next/cache, builds intermittently mixed new utilities with stale globals.css rules (#1581).
     turbopackFileSystemCacheForBuild: false,
   },
