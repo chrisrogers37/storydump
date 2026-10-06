@@ -4,6 +4,7 @@ import type { WorkspaceConfig } from "@/lib/dashboard-payloads";
 import { NON_TERMINAL_STATES, type IntentsResponse } from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { QueueList } from "@/components/dashboard/queue/queue-list";
+import { PageHeader } from "@/design/page-header";
 
 /**
  * `01` H5: every list is bounded. This asks for the API's ceiling
@@ -43,12 +44,10 @@ export default async function QueuePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Queue</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Every post that is not done yet, in slot order. Times are in {config.tz ?? "UTC"}.
-        </p>
-      </div>
+      <PageHeader
+        title="Queue"
+        description={`Every post that is not done yet, in slot order. Times are in ${config.tz ?? "UTC"}.`}
+      />
 
       <QueueList
         workspaceId={workspaceId}

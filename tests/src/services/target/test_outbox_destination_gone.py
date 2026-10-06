@@ -34,8 +34,8 @@ def floor(monkeypatch):
     async def _leave_sending(session, outbox_id, to_state, **extra):
         seen["left"].append((outbox_id, to_state, extra))
 
-    async def mark_ambiguous(session, *, outbox_id):
-        seen["ambiguous"].append(outbox_id)
+    async def mark_ambiguous(session, *, outbox_id, failure):
+        seen["ambiguous"].append((outbox_id, failure))
 
     monkeypatch.setattr(outbox, "recover_stranded", recover_stranded)
     monkeypatch.setattr(outbox, "resolve_aged_ambiguous", resolve_aged_ambiguous)
@@ -65,7 +65,9 @@ async def test_a_gone_destination_fails_the_row_and_says_so(floor):
     result = await outbox.deliver(object(), **_kwargs(transport))
     assert result["state"] == "failed" and result["destination_gone"] is True
     assert result["migrate_to"] is None
-    assert floor["left"] == [("row-1", "failed", {})]
+    assert floor["left"] == [
+        ("row-1", "failed", {"failure": ("destination_gone", None)})
+    ]
     assert floor["ambiguous"] == []
 
 
@@ -83,4 +85,5 @@ async def test_a_lost_response_is_still_the_ambiguous_case(floor):
 
     result = await outbox.deliver(object(), **_kwargs(transport))
     assert result["state"] == "ambiguous"
-    assert floor["ambiguous"] == ["row-1"] and floor["left"] == []
+    assert floor["ambiguous"] == [("row-1", ("ambiguous", None))]
+    assert floor["left"] == []

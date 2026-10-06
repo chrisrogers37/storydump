@@ -24,8 +24,8 @@ CREATE TRIGGER tg_touch_session_tokens BEFORE UPDATE ON session_tokens
 
 - **The flow (server-side confidential client — X.3):** `GET /auth/google` issues an anonymous `oauth_states` row (`purpose='signin'`, §2) and redirects to Google's authorization endpoint; the callback exchanges the code server-side (the client secret never leaves the server), verifies the `id_token` — `iss`, `aud`, `exp`, the `nonce` binding stated in §2 and the presence of `sub` — and signs the user in. **As built (`src/services/target/google_oidc.py`): the token is verified by its claims, not by signature — deliberately** (OIDC Core §3.1.3.7: a token received directly from the token endpoint over the egress-validated TLS may be accepted without signature validation), so there is no JWKS fetch and no discovery call; the design's JWKS path (`https://www.googleapis.com/oauth2/v3/certs`, verified against the live discovery document 2026-08-04 — R4 finding) was not taken. The egress allow-list holds `oauth2.googleapis.com` (token, revoke) and `www.googleapis.com` (Drive), **not** `accounts.google.com`, which is only the browser's authorize redirect. The OIDC verification utility is the only genuinely new code class in this ruling, and it is small.
 - **Identity (D32 — `sub`, never email):** success upserts `user_identities(provider='google', external_id = <OIDC sub>, verified_at = now())`, creating the `users` row on first sign-in. `external_id` is the provider's immutable subject — **never the email address**: emails are mutable and recyclable, so keying identity on email is an account-takeover primitive. The verified email claim is metadata, refreshed at each sign-in; `users.primary_email` fills from it when NULL; a claim colliding with a *different* user's `primary_email` surfaces as an error — it never merges accounts (D35).
-- **Sessions:** opaque random 256-bit value in an httpOnly/SameSite=Lax/secure cookie; only the hash is stored; verification is one indexed lookup + expiry/revocation check; sliding renewal. Sign-out and admin revoke set `revoked_at`. There is no JWT for human web sessions — and none exists anywhere on `main` today (pass-4 anchor: the legacy tier's HMAC WebApp credential, `src/utils/webapp_auth.py`, was deleted in #1216); the machine/consumer surfaces carry `workspace_id` in their signed payloads (born workspace-aware at X.2 — the pass-4 dual-shape migration window died with FC-7), and first-party service auth is §6's `service_tokens`.
-- **API tokens — the second credential (plan `2026-09-15-cli-v2`, phase 01; §6, §23):** a bearer value that starts with `sdt_` is an API token, never a session — the prefix routes it to the token resolver, every other bearer value and the cookie stay on the session path byte for byte. Two principal kinds on one table: a **person-bound** token (`user_id`) acts as that person across their memberships, never above the membership role, over the `cli` channel, and leaves one direct `cli_command` audit row (the token's id and name, the command's idempotency reference) beside the port's own transition row — the two share the transaction's `now()`; a **workspace service identity** (`workspace_id`) reads its one workspace under its own name and never writes in this release (F10). Tokens are admitted to an explicit route allowlist (`src/api/principal.py` `TOKEN_ROUTES`: `/me/principal`, own-token list and revoke, a workspace's token list and revoke, the command route, the Queue read (`GET /workspaces/{ws}/intents`, the CLI's `planned`, gated as the `/ops` views are by `principal.reader_session`), and the eight `/ops` read views — `src/api/routes/ops.py`, each one bounded tenant-scoped query proven as `svc_ingress` and as a role that bypasses RLS; `posture` alone is not tenant data and discloses deployment internals — the migration ledger, the RLS state of every tenant table, the SECURITY DEFINER census, the connected role — to any authenticated principal, by design and per fork F7) — every other route depends on `require_session` and refuses a token with `reason: session_required`, so a token can never mint a token, accept an invitation, or drive an OAuth leg. Minting is a signed-in session's act on the web (Settings › API tokens): the secret is shown once and stored as its SHA-256; default expiry 90 days, ceiling a year; revocation sets `revoked_at`; every authenticated use stamps `last_used_at` (throttled like the session slide; a refused attempt rolls back); a revoked, expired or unknown token and a disabled person's token all answer 401 without saying which; a live token asking for what it may not have answers 403 **with** its reason (`readonly_token`, `wrong_workspace`, `session_required`) so the CLI says the right sentence. The client keeps the secret in the OS keychain by default, failing closed (fork F2).
+- **Sessions:** opaque random 256-bit value in an httpOnly/SameSite=Lax/secure cookie; only the hash is stored; verification is one indexed lookup + expiry/revocation check; sliding renewal, **capped by an absolute lifetime** — `settings.SESSION_MAX_AGE_SECONDS` (30 days, the cookie's Max-Age) counted from `created_at`: an older session is refused as expired however recently it was used, and the slide never carries `expires_at` past `created_at` + the cap (`sessions._RESOLVE`). Sign-out and admin revoke set `revoked_at`; **sign out everywhere** (`POST /auth/signout?everywhere=true`, Settings › General) sets it on every live session of the presenting user (`sessions.revoke_all_for_user`), keyed on the presented session so a dead one reaches nothing. **A cookie on a state-changing request must show its origin:** any method but GET/HEAD/OPTIONS carried by the cookie (no bearer) needs an `Origin` — else a `Referer` origin — equal to `WEB_APP_URL`'s origin or the API's own, or it answers 403 `cross_site` before the session is read (`principal.require_same_origin`), because `SameSite=Lax` admits every sibling host of the registrable domain; bearer credentials are not ambient and are not checked. There is no JWT for human web sessions — and none exists anywhere on `main` today (pass-4 anchor: the legacy tier's HMAC WebApp credential, `src/utils/webapp_auth.py`, was deleted in #1216); the machine/consumer surfaces carry `workspace_id` in their signed payloads (born workspace-aware at X.2 — the pass-4 dual-shape migration window died with FC-7), and first-party service auth is §6's `service_tokens`.
+- **API tokens — the second credential (plan `2026-09-15-cli-v2`, phase 01; §6, §23):** a bearer value that starts with `sdt_` is an API token, never a session — the prefix routes it to the token resolver, every other bearer value and the cookie stay on the session path byte for byte. Two principal kinds on one table: a **person-bound** token (`user_id`) acts as that person across their memberships, never above the membership role, over the `cli` channel, and leaves one direct `cli_command` audit row (the token's id and name, the command's idempotency reference) beside the port's own transition row — the two share the transaction's `now()`; a **workspace service identity** (`workspace_id`) reads its one workspace under its own name and never writes in this release (F10). Tokens are admitted to an explicit route allowlist (`src/api/principal.py` `TOKEN_ROUTES`: `/me/principal`, own-token list and revoke, a workspace's token list and revoke, the command route, the Queue read (`GET /workspaces/{ws}/intents`, the CLI's `planned`, gated as the `/ops` views are by `principal.reader_session`), and the nine `/ops` read views — `src/api/routes/ops.py`, seven of them each one bounded tenant-scoped query proven as `svc_ingress` and as a role that bypasses RLS; `posture` and `health` are not tenant data and disclose deployment internals — the migration ledger, the RLS state of every tenant table, the SECURITY DEFINER census, the connected role; the pool, the tap counts, the webhook — so they answer only a person listed in the deployment's `OPS_USER_IDS`, on a session or a person-bound token, and refuse a service identity and everyone else with `reason: not_ops` (#1570, reversing fork F7's "any authenticated principal"; public `/health` keeps only status, version and commit) — every other route depends on `require_session` and refuses a token with `reason: session_required`, so a token can never mint a token, accept an invitation, or drive an OAuth leg. Minting is a signed-in session's act on the web (Settings › API tokens): the secret is shown once and stored as its SHA-256; default expiry 90 days, ceiling a year; revocation sets `revoked_at`; every authenticated use stamps `last_used_at` (throttled like the session slide; a refused attempt rolls back); a revoked, expired or unknown token and a disabled person's token all answer 401 without saying which; a live token asking for what it may not have answers 403 **with** its reason (`readonly_token`, `wrong_workspace`, `session_required`, `not_ops`) so the CLI says the right sentence. The client keeps the secret in the OS keychain by default, failing closed (fork F2).
 - **Pre-auth rate limiting:** the sign-in endpoints ride the `preauth_ip` scope (`rate_counters`, `02` §6; the `05` pre-auth row; the client-IP source rule is stated once at the `02` §6 table) — a mechanism deliberately distinct from the per-workspace S.2 admission, which is fail-closed on tenant context and structurally cannot serve unauthenticated requests. The OTP-specific scopes died with OTP.
 - **Recovery:** account recovery is Google's problem — a strictly stronger posture than pass 3's "losing the mailbox loses the account". Email *change* ceases to exist as a flow: email is a provider claim, not stored credential material. Telegram-identity users are unaffected (different provider row).
 - **Linking (D35 — explicit-only, stated once here):** identities attach to a user only through an action performed inside that user's authenticated session — §2's `link` purpose covers both directions (Telegram-first → Google via OAuth redirect; Google-first → Telegram via the start-token transport). No email auto-merge exists, in any direction; a (provider, subject) already attached to another user rejects with "already linked elsewhere" (`uq_identity_per_provider`); merging two populated users is an operator action with an audit trail, explicitly out of v1.
@@ -85,7 +85,7 @@ RLS class: `session_tokens`, `oauth_states`, and `service_tokens` are **auth-pla
 ## §4. Audit integrity and retention (review A §5.13)
 
 - **Append-only in the database:** no role holds UPDATE on `audit_events`; DELETE only via `svc_maintenance`'s retention sweep (`02` §7). The `02` §4 audit trigger's GUC requirement means every state change carries a named actor — including break-glass psql sessions (below).
-- **Retention:** `05` table — audit rows kept 400 days, then swept via `fn_retention_batch` (`02` §7). **Not running as of 2026-09-20:** the `retention_sweep` executor is unbuilt (`work_loop.UNBUILT_KINDS`) and the clock never mints it, so nothing ages out of `audit_events`, `jobs`, `channel_outbox` or `archive` today — including 078's snapshots, whose 90-day clock the same class owns. Before each sweep batch is deleted it is COPY-exported **into the in-database `archive` schema** as a batch table (`05` §DR names the location; the rationale and the properties that decided it are `03` D30); **the sweep aborts if the export fails — export-or-abort, never delete-then-hope**. No login role holds any grant on the `archive` schema: writes happen only inside `svc_maintenance`-owned door bodies and `svc_migration` contract migrations; reads are the break-glass runbook (§5). Aged archive tables are dropped *as tables* per their `05` retention rows. Queryability of archives is explicitly not a v1 feature.
+- **Retention:** `05` table — audit rows kept 400 days, then swept via `fn_retention_batch` (`02` §7). **Not running for this class:** the `retention_sweep` executor runs only the `rate_counters` class (7 days, since 2026-10-03), so nothing ages out of `audit_events`, `jobs`, `channel_outbox` or `archive` today — including 078's snapshots, whose 90-day clock the same class owns. Before each sweep batch is deleted it is COPY-exported **into the in-database `archive` schema** as a batch table (`05` §DR names the location; the rationale and the properties that decided it are `03` D30); **the sweep aborts if the export fails — export-or-abort, never delete-then-hope**. No login role holds any grant on the `archive` schema: writes happen only inside `svc_maintenance`-owned door bodies and `svc_migration` contract migrations; reads are the break-glass runbook (§5). Aged archive tables are dropped *as tables* per their `05` retention rows. Queryability of archives is explicitly not a v1 feature.
 - **Redaction rule:** `detail` JSONB never contains secrets, tokens, invitation-token values, or `provider_account_ref` (internal UUIDs only); enforced by the writer helper everything routes through + a test that greps captured audit output in the harness. Tamper evidence beyond grants (hash chains, signed exports) is explicitly not v1 — the stated integrity level is "no role can rewrite history without leaving a grant violation," which is what the grant matrix delivers.
 
 ## §5. Existence-oracle and log hygiene (review A §5.14)
@@ -724,6 +724,18 @@ chat id resolves through `fn_resolve_binding`, that binding's workspace becomes
 the tenant claim with `system` as the actor — nobody commanded the move — and
 the same writer re-points the row, or revokes it when the new id is already
 another binding's (`uq_binding_external`).
+
+An admin can also remove a group from Settings (`DELETE
+/workspaces/{ws}/bindings/{binding_id}`, admin floor). It is a revoke, never a
+delete: `bindings.revoke_for_workspace` flips the workspace's own row to
+`revoked` under the tenant's RLS and, in the same transaction, supersedes the
+cards still queued for it (`pending` and `ambiguous`), so a later re-bind sends
+no backlog. The sender holds the same line: `outbox.claim_next` claims only for
+an active binding, so a sender job minted before the revoke sends nothing.
+Cards already posted stay in the group's history and the bot is not made to
+leave; a fresh bind link re-activates the same row. No migration —
+`ck_bindings_state` (053) and `ck_outbox_state` (056) already carry both
+states.
 
 ```sql
 -- The bind purpose (#1175 D-3, owner ruling 2026-09-05): an admin's one-shot
@@ -2122,8 +2134,10 @@ and the outbox records what happened to a row the same way. It ends only the clo
 singletons, its slot, refresh and reauth legs, the sender sweep's `deliver_outbox`, and the two
 sync kinds, whose source it re-arms for tomorrow, as `work_loop._rearm_source` does, because a
 sync's mint disarms it. Nothing re-mints the others (`publish_pipeline`, `send_email`,
-`offboard_workspace`, `revoke_workspace_credentials`, `retention_sweep`, `reencrypt_credentials`),
-so ending one would unblock no successor and only lose its work; they are left as they were. For
+`offboard_workspace`, `revoke_workspace_credentials`, `reencrypt_credentials`), so ending one
+would unblock no successor and only lose its work; they are left as they were. The leg also
+leaves `retention_sweep`, which nothing minted when it was written: since 2026-10-03 the clock
+mints it hourly, and a late one still runs, since `fn_claim_job` reads no deadline. For
 the kinds it ends, the leg is the worker's spent-budget path without the tenant notice, which that
 path calls a courtesy, not the record.
 
@@ -2729,4 +2743,489 @@ COMMENT ON FUNCTION fn_member_remove(uuid, uuid, uuid) IS
   'svc_membership with EXECUTE granted to svc_ingress.';
 
 REVOKE CREATE ON SCHEMA public FROM svc_membership;
+```
+
+### §34. The Drive grant records who granted it, and only they browse it (091)
+
+**Why:** the real-user readiness review (2026-10-02). The `gdrive` credential is the workspace's
+(§15), but what it carries is `drive.readonly` over the whole Drive of the person who connected it,
+Shared with me included. The folder browser and the folder pick sat at the admin floor, so every
+admin could walk that person's Drive and connect any folder in it.
+
+**The granter is recorded.** `oauth_credentials.granted_by_user_id` names the person whose Google
+account the grant is. The Drive connect callback writes it — the state's user, whom the callback has
+already checked is the returning browser — and a reconnect replaces it, so reconnecting with your own
+account is how another admin takes the browse over. The folder browser and the folder pick admit the
+granter alone and refuse everyone else by name (`drive_not_yours`); the grant's status, the connected
+folders and their sync stay at their floors. NULL for an `ig_login` credential and for every Drive
+grant made before this file: such a grant is browsable by the workspace's owner only, until a
+reconnect records a granter. `ON DELETE SET NULL` drops a deleted user's grant to that rule. A
+granter who is removed or demoted fails the admin floor first, so nobody browses until a reconnect.
+
+```sql
+-- [§34 the Drive grant records who granted it]
+
+ALTER TABLE oauth_credentials
+  ADD COLUMN granted_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL;
+```
+
+### §35. A new account needs a way in while in beta (092)
+
+**Why:** the owner's decision (2026-10-02): "Limit sign-in to emails you've let in from the
+waitlist." The sign-in callback's identity upsert (§1) created a `users` row for every verified
+Google subject it had not seen, and a user may create workspaces, so any Google account could sign
+up.
+
+**The gate.** A person who already has an identity signs in as before. A NEW subject creates its
+user only when `fn_signup_admitted` says its verified email may: the owner admitted the address (a
+`signup_admissions` row), or a pending, unexpired invitation is addressed to it, so an invitee can
+still sign up and accept. A refused subject creates nothing and lands on the sign-in page with a
+named refusal (`not_admitted`); so does a new subject with no verified email. The door is asked only
+on the new-user branch, before the `INSERT INTO users`, and `TARGET_SIGNUP_OPEN` switches the ask
+off for a local stack (default: gated).
+
+**Admitting someone** is one line as the database owner:
+`INSERT INTO signup_admissions (email) VALUES ('person@example.com');`. The table is global (no
+workspace): RLS is on, its one policy is `svc_membership`'s read, and the runtime roles hold no
+grant on it, so the door is its only reader and owner-bypass is how the owner writes it. The CHECK
+keeps the stored address one lower-case word with an @ and no whitespace or invisible character
+anywhere (a tab, a newline, a no-break or zero-width space, or a CSV's byte-order mark included), so
+such an admission is refused at the INSERT rather than silently never matching. The door compares `lower()` on both sides, as
+`fn_invitation_accept` does, and answers one boolean, never which workspace invited the address.
+
+```sql
+-- [§35 a new account needs a way in while in beta]
+
+CREATE TABLE signup_admissions (
+  email       text PRIMARY KEY CONSTRAINT ck_signup_admissions_email CHECK (
+                email = lower(email) AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'
+                AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
+  admitted_at timestamptz NOT NULL DEFAULT now(),
+  note        text
+);
+
+ALTER TABLE signup_admissions ENABLE ROW LEVEL SECURITY;
+
+GRANT SELECT ON signup_admissions TO svc_membership;
+
+CREATE POLICY p_member_admissions ON signup_admissions FOR SELECT TO svc_membership USING (true);
+
+GRANT CREATE ON SCHEMA public TO svc_membership;
+
+CREATE FUNCTION fn_signup_admitted(p_email text)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM signup_admissions a WHERE a.email = lower(p_email))
+      OR EXISTS (SELECT 1 FROM workspace_invitations i
+                  WHERE lower(i.email) = lower(p_email)
+                    AND i.state = 'pending' AND i.expires_at > now())
+$$;
+
+COMMENT ON FUNCTION fn_signup_admitted(text) IS
+  'May a new Google account with this verified email create its user (092)? True when the owner '
+  'admitted the address (signup_admissions) or a pending, unexpired invitation is addressed to it; '
+  'false for NULL. Compares lower() on both sides. Answers one boolean, never which workspace '
+  'invited the address. SECURITY DEFINER owned by svc_membership with EXECUTE granted to '
+  'svc_ingress.';
+
+ALTER FUNCTION fn_signup_admitted(text) OWNER TO svc_membership;
+
+REVOKE CREATE ON SCHEMA public FROM svc_membership;
+
+REVOKE ALL ON FUNCTION fn_signup_admitted(text) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_signup_admitted(text) TO svc_ingress;
+```
+
+### §41. An invitation admits only while it is legitimate (098)
+
+**Why:** the owner's decision, "removed people stay removed", on the PR #1560 security review's
+first finding and the PR #1574 review's first, second and fourth. `fn_signup_admitted` (§35)
+counted any pending, unexpired invitation addressed to an email, and `fn_invitation_accept`
+(`02` §7-DDL) checked only the token, its state and expiry and the identity proof. An admin could
+mint an invitation for a second address of their own, be removed, and still bring that address
+back in, as an admin, on a new account or an existing one; a suspended workspace's invitations
+still let people in; and an invitation addressed to a member who was later removed brought them
+back.
+
+**An invitation is legitimate** while its workspace is `active` and its inviter is still an owner
+or admin member of that workspace, with an active account. Both doors read that live:
+`fn_signup_admitted` counts only a legitimate invitation, and `fn_invitation_accept` refuses any
+other with the same `no_data_found` it answers for a used, revoked or expired one. A removed,
+demoted or disabled inviter, a suspended or offboarding workspace, and an invitation with no
+recorded inviter let nobody in. Workspace service identities never write in this release (§1,
+F10), so no live invitation lacks an inviter by design.
+
+**A removal outranks an earlier invitation.** `fn_invitation_accept` also refuses a person whose
+removal from the workspace (§33's `workspace_member_removals`) is newer than the invitation, so
+an invitation sent before the removal cannot undo it; a fresh invitation after it still can. The
+first read takes no lock, so the door reads the removal again after its membership insert: an
+acceptance that waited on the removed member's row while the removal committed is refused rather
+than re-adding them.
+
+**A removal revokes the invitations the removed member sent or was sent.** `workspaces.remove_member`
+sets the pending invitations in that workspace that they sent, or that are addressed to their
+email or Telegram identity, to `revoked` (`invitations.revoke_on_removal`) in the
+transaction that calls `fn_member_remove` (§33); `svc_ingress` holds UPDATE on
+`workspace_invitations` under the tenant policy, so the door's body is left as it is. What
+removals before this section left pending is revoked by it once: an invitation whose inviter has
+a removal record in its workspace and is not a member there again, and one addressed (by email or
+Telegram id) to a person removed from its workspace after it was sent. The doors refuse both
+anyway; revoking them lets the runtime's invitation listing filter on state alone, without
+reading the removal record.
+`workspace_invitations` carries no governance trigger, so that UPDATE needs no actor.
+
+`svc_membership` reads `users`' `id` and `state` (a column grant under a SELECT policy) to see an
+inviter's account state; the doors are replaced in place inside the CREATE bracket, as §33's and
+§35's are.
+
+```sql
+-- [§41 an invitation admits only while it is legitimate]
+
+GRANT SELECT (id, state) ON users TO svc_membership;
+
+CREATE POLICY p_member_users ON users FOR SELECT TO svc_membership USING (true);
+
+UPDATE workspace_invitations i SET state = 'revoked'
+ WHERE i.state = 'pending'
+   AND (EXISTS (SELECT 1 FROM workspace_member_removals r
+                 WHERE r.workspace_id = i.workspace_id AND r.user_id = i.invited_by_user_id
+                   AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                                    WHERE m.workspace_id = i.workspace_id
+                                      AND m.user_id = i.invited_by_user_id))
+        OR EXISTS (SELECT 1 FROM workspace_member_removals r
+                     JOIN users u ON u.id = r.user_id
+                    WHERE r.workspace_id = i.workspace_id AND r.removed_at >= i.created_at
+                      AND (lower(u.primary_email) = lower(i.email)
+                           OR i.invited_tg_user_id::text IN
+                              (SELECT x.external_id FROM user_identities x
+                                WHERE x.user_id = r.user_id AND x.provider = 'telegram'))));
+
+GRANT CREATE ON SCHEMA public TO svc_membership;
+
+CREATE OR REPLACE FUNCTION fn_signup_admitted(p_email text)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM signup_admissions a WHERE a.email = lower(p_email))
+      OR EXISTS (SELECT 1 FROM workspace_invitations i
+                   JOIN workspaces w ON w.id = i.workspace_id AND w.state = 'active'
+                   JOIN workspace_members m ON m.workspace_id = i.workspace_id
+                                           AND m.user_id = i.invited_by_user_id
+                                           AND m.role IN ('owner', 'admin')
+                   JOIN users u ON u.id = i.invited_by_user_id AND u.state = 'active'
+                  WHERE lower(i.email) = lower(p_email)
+                    AND i.state = 'pending' AND i.expires_at > now())
+$$;
+
+COMMENT ON FUNCTION fn_signup_admitted(text) IS
+  'May a new Google account with this verified email create its user (092)? True when the owner '
+  'admitted the address (signup_admissions) or a pending, unexpired invitation is addressed to it '
+  'from an active workspace by someone still its owner or an admin, with an active account (098); '
+  'false for NULL. Compares lower() on both sides. Answers one boolean, never which workspace '
+  'invited the address. SECURITY DEFINER owned by svc_membership with EXECUTE granted to '
+  'svc_ingress.';
+
+CREATE OR REPLACE FUNCTION fn_invitation_accept(p_token_hash text, p_user uuid, p_provider text,
+                                                p_verified_email text, p_tg_user_id bigint,
+                                                p_channel text)
+RETURNS TABLE (o_workspace_id uuid, o_granted_role text, o_matched boolean)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE inv record; m boolean; grant_role text; bind uuid;
+BEGIN
+  PERFORM set_config('app.actor_kind', 'user', true);
+  PERFORM set_config('app.actor_user_id', p_user::text, true);
+  PERFORM set_config('app.channel', COALESCE(p_channel, 'web'), true);
+  SELECT * INTO inv FROM workspace_invitations i
+   WHERE i.token_hash = p_token_hash AND i.state = 'pending' AND i.expires_at > now()
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'invitation not acceptable (used, revoked, expired, or unknown)'
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM workspaces w
+                     WHERE w.id = inv.workspace_id AND w.state = 'active')
+     OR NOT EXISTS (SELECT 1 FROM workspace_members a
+                      JOIN users u ON u.id = a.user_id AND u.state = 'active'
+                     WHERE a.workspace_id = inv.workspace_id
+                       AND a.user_id = inv.invited_by_user_id
+                       AND a.role IN ('owner', 'admin'))
+     OR EXISTS (SELECT 1 FROM workspace_member_removals r
+                 WHERE r.workspace_id = inv.workspace_id AND r.user_id = p_user
+                   AND r.removed_at >= inv.created_at) THEN
+    RAISE EXCEPTION 'invitation not acceptable (no longer legitimate)'
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  -- D33 per-provider acceptance constraint, evaluated in-body:
+  IF p_provider = 'google' THEN
+    IF inv.email IS NOT NULL THEN
+      IF lower(p_verified_email) IS DISTINCT FROM lower(inv.email) THEN
+        RAISE EXCEPTION 'identity proof mismatch' USING ERRCODE = 'check_violation';
+      END IF;
+      m := true;
+    ELSE m := false;                             -- no comparable proof: recorded skip
+    END IF;
+  ELSIF p_provider = 'telegram' THEN
+    IF inv.invited_tg_user_id IS NOT NULL THEN
+      IF p_tg_user_id IS DISTINCT FROM inv.invited_tg_user_id THEN
+        RAISE EXCEPTION 'identity proof mismatch' USING ERRCODE = 'check_violation';
+      END IF;
+      m := true;
+    ELSE m := false;                             -- hint-only or bare token: recorded skip (D36)
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'unknown acceptance provider %', p_provider;
+  END IF;
+  UPDATE workspace_invitations
+     SET state = 'accepted', accepted_by_user_id = p_user, accepted_email_matched = m
+   WHERE id = inv.id;
+  grant_role := CASE WHEN inv.role = 'admin' AND m THEN 'admin' ELSE 'member' END;
+  INSERT INTO workspace_members (workspace_id, user_id, role, added_by_user_id)
+  VALUES (inv.workspace_id, p_user, grant_role, inv.invited_by_user_id)
+  ON CONFLICT (workspace_id, user_id) DO NOTHING;  -- already a member: invite consumed, the
+                                                    -- existing role stands (role changes go
+                                                    -- through the 06 §2 gate)
+  -- The removal check above read without a lock: a removal that committed while this INSERT
+  -- waited on the member row it deleted would be undone. Under READ COMMITTED each statement
+  -- takes a fresh snapshot, so read it again now and refuse the whole acceptance if it landed.
+  IF EXISTS (SELECT 1 FROM workspace_member_removals r
+              WHERE r.workspace_id = inv.workspace_id AND r.user_id = p_user
+                AND r.removed_at >= inv.created_at) THEN
+    RAISE EXCEPTION 'invitation not acceptable (no longer legitimate)'
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  IF inv.role = 'admin' AND NOT m THEN             -- D36 elevation-pending, same transaction
+    SELECT b.id INTO bind FROM channel_bindings b
+     WHERE b.workspace_id = inv.workspace_id AND b.state = 'active'
+     ORDER BY b.created_at LIMIT 1;
+    IF bind IS NOT NULL THEN
+      INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload)
+      VALUES (inv.workspace_id, bind, 'notification',
+              jsonb_build_object('v', 1, 'template', 'elevation_pending',
+                                 'invitation_id', inv.id, 'accepted_by', p_user));
+    END IF;                                        -- zero-binding workspace: the pending
+  END IF;                                          -- elevation is visible on the web surface
+  RETURN QUERY SELECT inv.workspace_id, grant_role, m;
+END $$;
+
+COMMENT ON FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) IS
+  'The pre-membership door (059): accept a pending, unexpired invitation by its token hash, with '
+  'the D33 identity proof computed here. Refuses (no_data_found) an invitation that is no longer '
+  'legitimate (098): its workspace is not active, its inviter is no longer an owner or admin '
+  'there with an active account, or the acceptor was removed from the workspace after it was '
+  'sent. SECURITY DEFINER owned by svc_membership with EXECUTE granted to svc_ingress.';
+
+REVOKE CREATE ON SCHEMA public FROM svc_membership;
+```
+
+### §42. A person can unlink their own Telegram identity (099)
+
+**Why:** a user links Telegram from Settings (§2's `link` state), and `uq_user_provider` then holds
+one Telegram identity per user. A person who linked the wrong Telegram account, or stopped using
+one, could neither replace nor remove it: no runtime role holds DELETE on `user_identities` (`02`
+§7's grant matrix), and linking refuses a second Telegram account by name.
+
+**The door.** `fn_identity_unlink(p_user, p_provider)` removes the user's Telegram identity, and
+only while the user keeps another identity, so an account is never left with no way to sign in.
+It refuses any provider but `telegram` by raising: the Google identity is the sign-in identity.
+Outcomes: `unlinked`, `not_linked` (nothing to remove) and `last_identity` (the Telegram identity
+is the user's only one; nothing is removed). The caller proves the person: `p_user` is the
+session's user, from `DELETE /api/v1/me/telegram`, which in the same transaction retires the
+user's live `link` states so an earlier link cannot re-attach an account the person just removed.
+`svc_membership` receives SELECT and DELETE on `user_identities` under a row-open policy, as §14
+gave it DELETE on `workspace_members` for `fn_member_remove`; EXECUTE is `svc_ingress`'s alone.
+The table carries no audit trigger, so the door sets no actor.
+
+**What unlinking does not touch.** Memberships stay. A workspace joined from a Telegram group
+stays joined: unlinking an identity is not leaving a workspace, and removal is
+`fn_member_remove`'s. What changes is that the Telegram account resolves to no Storydump user, so
+its card taps are refused as `unlinked` and its group messages join nobody until the person links
+again, which works as a first link does.
+
+```sql
+-- [§42 a person can unlink their own Telegram identity]
+
+GRANT SELECT, DELETE ON user_identities TO svc_membership;
+
+CREATE POLICY p_member_identities ON user_identities FOR ALL TO svc_membership
+  USING (true) WITH CHECK (true);
+
+GRANT CREATE ON SCHEMA public TO svc_membership;
+
+CREATE FUNCTION fn_identity_unlink(p_user uuid, p_provider text)
+RETURNS text
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  v_deleted int;
+BEGIN
+  IF p_provider IS DISTINCT FROM 'telegram' THEN
+    RAISE EXCEPTION 'only a telegram identity is unlinked here, not %', p_provider
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  DELETE FROM user_identities i
+   WHERE i.user_id = p_user AND i.provider = p_provider
+     AND EXISTS (SELECT 1 FROM user_identities o
+                  WHERE o.user_id = p_user AND o.provider <> p_provider);
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  IF v_deleted > 0 THEN
+    RETURN 'unlinked';
+  END IF;
+  IF EXISTS (SELECT 1 FROM user_identities i
+              WHERE i.user_id = p_user AND i.provider = p_provider) THEN
+    RETURN 'last_identity';
+  END IF;
+  RETURN 'not_linked';
+END $$;
+
+COMMENT ON FUNCTION fn_identity_unlink(uuid, text) IS
+  'A person unlinks their own Telegram identity (099). Removes the user''s telegram row in '
+  'user_identities only while the user keeps another identity; refuses any other provider by '
+  'raising. Memberships are untouched. p_user is the caller''s session user — the caller proves '
+  'the person, this door trusts it. Outcomes: unlinked, not_linked, last_identity. SECURITY '
+  'DEFINER owned by svc_membership with EXECUTE granted to svc_ingress.';
+
+ALTER FUNCTION fn_identity_unlink(uuid, text) OWNER TO svc_membership;
+
+REVOKE CREATE ON SCHEMA public FROM svc_membership;
+
+REVOKE ALL ON FUNCTION fn_identity_unlink(uuid, text) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_identity_unlink(uuid, text) TO svc_ingress;
+```
+
+### §43. The waitlist is written by the API, not by the site (100)
+
+**Why:** the landing site's waitlist form inserted into a Drizzle-managed `waitlist_signups` table
+through its own `DATABASE_URL`, the one write in the system that did not go through the API, with
+a credential that reached every table. Production never had that table, so the form failed every
+signup. The owner ruled "one system, one writer" (2026-10-03): the API owns the write, and the
+site holds no database credential.
+
+**The table.** `waitlist_entries` is global, not tenant-plane: a visitor joining the waitlist has
+no user and no workspace. Its address rule is §35's, with a dot in the domain, no control, bidi-isolate, interlinear or tag characters, and at most 254 characters, and `utm`
+records the campaign the visitor came from, an object bounded at 2 KB. RLS is on and the one
+policy is `svc_ingress`'s INSERT, which is the route's only statement (`POST /public/waitlist`):
+the API can add an address and cannot read, change or remove one, so the public endpoint is no
+oracle for who is on the list. The owner reads the list as the database owner and admits people
+through `signup_admissions` (§35).
+
+**The site's secret.** The API sees only the site's server, so without more a limit keyed on the
+caller is one counter shared by every visitor, and one script spends it for everyone. With
+`WAITLIST_SITE_SECRET` set on both tiers, the site sends the secret and the visitor's address as
+Vercel reports it (Vercel overwrites `x-real-ip` and `x-forwarded-for`, so a visitor cannot choose
+it); the API compares the secret in constant time, refuses a call without it before reading the
+body, and keys the counter (10 a minute) and the per-address slot share on the visitor. Every
+accepted signup through the site, a repeat address too, also spends one counter shared by all
+visitors (600 a minute, spent after the insert so a refused body costs nothing; past it a
+savepoint rolls the row back and keeps the visitor's own spend), so a leaked secret, which lets a
+caller name a fresh visitor each time, still meets a ceiling on the table's growth. The waitlist
+counts every client, visitor or peer, by its IPv6 /64, never its single address. The
+visitor key holds only while Vercel is the first hop: off Vercel a client sets `x-real-ip` itself,
+and behind another CDN every visitor of one edge shares one key. Unset on
+the API it behaves as before whatever the site sends, which is what lets the owner set the site
+first. A matched call with no usable address falls back to the peer and the shared counter, and still
+spends the ceiling.
+
+**What it does not adopt.** A hand-made, empty `waitlist_signups` and the NOLOGIN
+`waitlist_writer` role were created in production as a stopgap on 2026-10-02 and never served a
+signup. The new name keeps this CREATE from meeting that table at the predeploy; the owner drops
+both by hand once the API serves the form.
+
+```sql
+-- [§43 the waitlist is written by the API, not by the site]
+
+CREATE TABLE waitlist_entries (
+  email     text PRIMARY KEY CONSTRAINT ck_waitlist_entries_email CHECK (
+              email = lower(email) AND length(email) <= 254
+              AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
+              AND email !~ '[[:cntrl:]]'
+              AND email !~ '[\u061c\u2066-\u2069\ufff9-\ufffb\U000e0000-\U000e007f]'
+              AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
+  joined_at timestamptz NOT NULL DEFAULT now(),
+  utm       jsonb CONSTRAINT ck_waitlist_entries_utm CHECK (
+              utm IS NULL OR (jsonb_typeof(utm) = 'object' AND length(utm::text) <= 2048))
+);
+
+ALTER TABLE waitlist_entries ENABLE ROW LEVEL SECURITY;
+
+GRANT INSERT ON waitlist_entries TO svc_ingress;
+
+CREATE POLICY p_ingress_waitlist ON waitlist_entries FOR INSERT TO svc_ingress WITH CHECK (true);
+```
+
+### §44. The outbox records why a delivery failed (101, #1482)
+
+**Why:** `settle` sorts a failed send by type: a 429 goes back to `pending`, a gone destination and
+a refused message end `failed`, anything else is `ambiguous`. Then it writes the state and nothing
+else, so a burst of failures leaves no cause in the database. Production's 21 failed rows of
+2026-09-12 (all card edits, 16 of them in one hour) cannot say whether the chat was gone, the
+message refused or the token dead. And nothing counted failures, so nothing could alert on them.
+
+**The record.** Three nullable columns on `channel_outbox`, one fact each: the class of the row's
+LAST failed attempt (`last_failure_class`, the closed list `vocabulary.OUTBOX_FAILURE_CLASSES`
+copies), the provider's code for it (`last_error_code`: Telegram's `error_code`, NULL when no answer
+came back) and when (`last_failed_at`). They describe the last failure, not how the row ended, so a
+later success does not clear them. `settle` writes them in the same CAS as the state change, so a
+fenced writer records nothing. `credential_dead` is a dead token's 401, which the outbox had filed
+as a lost response; this section records it and moves no row differently (#1493 then fails it at
+once). The index is partial on the rows that have ever failed, for the door's one predicate.
+
+**The doors.** §24's shape: owned by `svc_maintenance`, EXECUTE for `svc_ingress` (the
+`/health/delivery` route) and `svc_worker`, the window clamped to [60 s, 24 h], counts only.
+`fn_health_outbox_failures` counts the rows whose last failure falls in the window, by class and
+code, and how many of them ended `failed` or sit `ambiguous`. That is the alerting count; a 429 is a
+deferral and only context. `fn_health_outbox_sent` counts the rows sent in the same window, so an
+hour with no failures and no traffic cannot read as an hour that delivered.
+
+```sql
+-- [§44 the outbox records why a delivery failed]
+
+ALTER TABLE channel_outbox ADD COLUMN last_failure_class TEXT NULL
+  CONSTRAINT ck_outbox_failure_class
+  CHECK (last_failure_class IN ('rate_limited','destination_gone','refused','credential_dead','ambiguous'));
+
+ALTER TABLE channel_outbox ADD COLUMN last_error_code INTEGER NULL;
+
+ALTER TABLE channel_outbox ADD COLUMN last_failed_at TIMESTAMPTZ NULL;
+
+CREATE INDEX ix_outbox_last_failed ON channel_outbox (last_failed_at) WHERE last_failed_at IS NOT NULL;
+
+GRANT CREATE ON SCHEMA public TO svc_maintenance;
+
+CREATE FUNCTION fn_health_outbox_failures(p_window_seconds integer)
+RETURNS TABLE (o_failure_class text, o_error_code integer, o_rows bigint, o_alerting_rows bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT last_failure_class, last_error_code, count(*),
+         count(*) FILTER (WHERE state IN ('failed', 'ambiguous'))
+    FROM channel_outbox
+   WHERE last_failed_at >= now() - make_interval(secs => LEAST(GREATEST(p_window_seconds, 60), 86400))
+   GROUP BY last_failure_class, last_error_code
+$$;
+
+COMMENT ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) IS
+  'Outbox rows whose last failure falls in the window, every tenant''s included, by class and code; o_alerting_rows ended failed or sit ambiguous. Counts only. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (101, #1482).';
+
+ALTER FUNCTION fn_health_outbox_failures(p_window_seconds integer) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) TO svc_ingress, svc_worker;
+
+CREATE FUNCTION fn_health_outbox_sent(p_window_seconds integer)
+RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT count(*) FROM channel_outbox
+   WHERE state = 'sent'
+     AND updated_at >= now() - make_interval(secs => LEAST(GREATEST(p_window_seconds, 60), 86400))
+$$;
+
+COMMENT ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) IS
+  'Outbox rows sent in the window, every tenant''s included: the traffic the failure count is read against. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (101, #1482).';
+
+ALTER FUNCTION fn_health_outbox_sent(p_window_seconds integer) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) TO svc_ingress, svc_worker;
+
+REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 ```
