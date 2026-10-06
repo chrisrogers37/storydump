@@ -12,11 +12,13 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { isValidElement, type ReactElement } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DialogDescription } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/dashboard/empty-state";
 import type { Intent } from "@/lib/intents";
 import { QueueView, type RowNote } from "./queue-view";
+import { RescheduleDialog } from "./reschedule-dialog";
 
 function intent(overrides: Partial<Intent> = {}): Intent {
   return {
@@ -32,6 +34,11 @@ function intent(overrides: Partial<Intent> = {}): Intent {
     ig_permalink: null,
     entered_state_at: "2026-10-01T14:00:00+00:00",
     created_at: "2026-10-01T13:00:00+00:00",
+    origin: "cadence",
+    scheduled_by_user_id: null,
+    scheduled_by: null,
+    tz: "UTC",
+    miss_reason: null,
     file_name: "sample.jpg",
     media_kind: "image",
     thumbnail_url: null,
@@ -153,5 +160,66 @@ describe("QueueView", () => {
 
   it("says nothing is waiting when there are no rows", () => {
     expect(view({ intents: [] }).type).toBe(EmptyState);
+  });
+});
+
+describe("QueueView: a planned story (#1413)", () => {
+  const badges = (tree: ReactElement) =>
+    [...walk(tree)].filter((el) => el.type === Badge).map((el) => text(el));
+
+  it("says who planned it, and marks a cadence story not at all", () => {
+    const planned = view({ intents: [intent({ origin: "planned", scheduled_by: "Robin" })] });
+    expect(badges(planned)).toContain("Planned by Robin");
+
+    // A planned story whose person was deleted still reads as planned.
+    const orphan = view({ intents: [intent({ origin: "planned", scheduled_by: null })] });
+    expect(badges(orphan)).toContain("Planned");
+
+    expect(badges(view()).some((b) => b.startsWith("Planned"))).toBe(false);
+  });
+
+  it("hands Reschedule to its dialog, with the caller's mover", () => {
+    const onReschedule = vi.fn(async () => null);
+    const row = intent({ origin: "planned", state: "scheduled" });
+    const tree = view({ intents: [row], actionsOf: () => ["reschedule"], onReschedule });
+
+    const dialog = [...walk(tree)].find((el) => el.type === RescheduleDialog) as ReactElement<
+      Parameters<typeof RescheduleDialog>[0]
+    >;
+    expect(dialog.props.intent).toBe(row);
+    expect(dialog.props.onSubmit).toBe(onReschedule);
+    expect(dialog.props.label).toBe("Reschedule…");
+    expect(dialog.props.disabled).toBe(false);
+  });
+
+  it("offers no Reschedule to a caller that cannot move a story", () => {
+    // The sample workspace passes no mover, whatever a row would allow.
+    const tree = view({ actionsOf: () => ["reschedule"] });
+    expect([...walk(tree)].some((el) => el.type === RescheduleDialog)).toBe(false);
+    expect(levers(tree)).toEqual([]);
+  });
+
+  it("asks before Cancel, which is not permanent, so its button is not red", () => {
+    const onAction = vi.fn();
+    const tree = view({ actionsOf: () => ["cancel"], onAction });
+
+    const [trigger] = levers(tree);
+    expect(text(trigger.props.children)).toBe("Cancel");
+    expect((trigger.props as { variant?: string }).variant).toBe("outline");
+
+    const description = [...walk(tree)].find((el) => el.type === DialogDescription);
+    expect(text(description)).toBe(
+      "sample.jpg won't post to example.brand. The item stays in your Media library.",
+    );
+
+    const confirm = [...walk(tree)].find(
+      (el) =>
+        el.type === Button &&
+        (el.props as { variant?: string }).variant === "destructive" &&
+        (el.props as ButtonProps).size === undefined,
+    ) as ReactElement<ButtonProps>;
+    expect(text(confirm.props.children)).toBe("Cancel story");
+    confirm.props.onClick!();
+    expect(onAction).toHaveBeenCalledWith(intent(), "cancel");
   });
 });

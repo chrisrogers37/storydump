@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dateInZone, formatCalendarDate, formatInZone } from "./zoned-dates";
+import { dateInZone, formatCalendarDate, formatInZone, wallTimeInZone } from "./zoned-dates";
 
 /**
  * 01:30 UTC on Oct 2 is 9:30 PM on Oct 1 in New York: the evening hour at
@@ -33,5 +33,13 @@ describe("dates on a named clock", () => {
     // A shown time says which clock it fell back to, as formatSlot does.
     const shape = { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" } as const;
     expect(spaced(formatInZone(EVENING, "Not/AZone", shape))).toBe("Oct 2, 1:30 AM UTC");
+  });
+
+  it("gives an instant's wall time on a zone's clock, as a datetime-local input takes it", () => {
+    // Reschedule… opens on the story's own time, in the story's own zone (#1413).
+    expect(wallTimeInZone(EVENING, "America/New_York")).toBe("2026-10-01T21:30");
+    expect(wallTimeInZone(EVENING, "UTC")).toBe("2026-10-02T01:30");
+    // Midnight is 00, never the 24 an hour12:false clock can print.
+    expect(wallTimeInZone("2026-10-02T04:00:00+00:00", "America/New_York")).toBe("2026-10-02T00:00");
   });
 });

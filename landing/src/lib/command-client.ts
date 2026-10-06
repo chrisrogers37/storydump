@@ -240,6 +240,14 @@ export const AT_RULE_COPY: Record<string, string> = {
   not_a_date: "Enter a date and a time.",
 };
 
+/** A refused time, scheduling or rescheduling: the rule it broke, else what a usable one is. */
+function atRuleCopy(facts: RefusalFacts | undefined): string {
+  const rule = facts?.at_rule;
+  return rule && Object.hasOwn(AT_RULE_COPY, rule)
+    ? AT_RULE_COPY[rule]
+    : `That time can't be used. Pick one later than now and within ${PLAN_HORIZON_DAYS} days.`;
+}
+
 function lockClauses(inTheWay: readonly string[] | undefined): string[] {
   const clauses: string[] = [];
   for (const kind of inTheWay ?? []) {
@@ -294,12 +302,8 @@ export function scheduleRefusalCopy(
       }
       return "This item is already waiting to post on that account.";
     }
-    case "invalid_args": {
-      const rule = facts?.at_rule;
-      return rule && Object.hasOwn(AT_RULE_COPY, rule)
-        ? AT_RULE_COPY[rule]
-        : `That time can't be used. Pick one later than now and within ${PLAN_HORIZON_DAYS} days.`;
-    }
+    case "invalid_args":
+      return atRuleCopy(facts);
     case "not_found":
       if (facts?.missing === "account") return "That account is no longer here. Reload the page.";
       if (facts?.missing === "item") return "That item is no longer in the library. Reload the page.";
@@ -314,6 +318,52 @@ export function scheduleRefusalCopy(
       return unreachableCopy("Nothing was scheduled");
   }
   return "Could not schedule that. Nothing was scheduled — try again shortly.";
+}
+
+/**
+ * Move a planned story to another wall time (#1413 phase 6). As when
+ * scheduling, the time rides as typed: the port reads it in the story's own
+ * zone, never the browser's.
+ */
+export function submitRescheduleItem(workspaceId: string, intentId: string, localAt: string) {
+  return submitCommand(workspaceId, "reschedule_item", {
+    intent_id: intentId,
+    local_at: localAt,
+  });
+}
+
+/**
+ * A sentence for a `reschedule_item` refusal. A refused time names the rule it
+ * broke, as scheduling does; the rest say why this story cannot move now.
+ */
+export function rescheduleRefusalCopy(
+  reason: unknown,
+  status?: number,
+  facts?: RefusalFacts,
+): string {
+  if (status === 403 || reason === "insufficient_role") {
+    return "You need to be a member of this workspace to reschedule a story.";
+  }
+  switch (reason) {
+    case "invalid_args":
+      return atRuleCopy(facts);
+    case "illegal_transition":
+      // The port moves only a planned story still in `scheduled`.
+      return "This story has moved on and can't be rescheduled now. Reload the page to see where it is.";
+    case "cancelling":
+      return "This story is being cancelled, so it can't be moved.";
+    case "not_found":
+      return "This story is no longer in the queue. Reload the page.";
+    case REPLAYED_ERROR:
+      return "That did not go through — the app sent it under a key the server had already seen. Reload and try again; report this if it repeats.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing was moved");
+  }
+  return "Could not move that story. Nothing changed — try again shortly.";
 }
 
 /**

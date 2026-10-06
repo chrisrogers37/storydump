@@ -14,12 +14,14 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import { RescheduleDialog } from "@/components/dashboard/queue/reschedule-dialog";
 import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import {
   ACTION_LABELS,
   accountLabel,
   formatSlot,
   type Intent,
+  type IntentKeyedAction,
   type IntentState,
   type QueueAction,
 } from "@/lib/intents";
@@ -41,6 +43,10 @@ import { cn } from "@/lib/utils";
  * who can see the story on Instagram should choose It posted instead. Post
  * again asks the review's own question — is it on your story? — because the
  * answer travels with the command as the member's verdict.
+ *
+ * A planned story (#1413) says who planned it, and while it waits in
+ * `scheduled` it can be rescheduled or cancelled. Cancel asks first; it is not
+ * permanent, as Reject is, so its button is not red.
  */
 
 /** Labels that differ from the state's own name; the badge falls back to the name. */
@@ -62,6 +68,8 @@ const ACTION_VARIANT: Record<
   retry: "default",
   resolve_posted: "outline",
   resolve_cancel: "destructive",
+  reschedule: "outline",
+  cancel: "outline",
 };
 
 /** The actions that ask first, and what the dialog says. */
@@ -88,6 +96,12 @@ const CONFIRM: Partial<
       `Check Instagram first. If ${intent.file_name} is already there, choose It posted — posting again would show it twice. If it is not there, post it again.`,
     verb: "Not there — post again",
   },
+  cancel: {
+    title: "Cancel this planned story?",
+    body: (intent) =>
+      `${intent.file_name} won't post to ${accountLabel(intent)}. The item stays in your Media library.`,
+    verb: "Cancel story",
+  },
 };
 
 /**
@@ -104,6 +118,7 @@ export function QueueView({
   actionsOf,
   noteFor,
   onAction,
+  onReschedule,
 }: {
   intents: Intent[];
   tz: string;
@@ -115,7 +130,12 @@ export function QueueView({
   actionsOf: (intent: Intent) => QueueAction[];
   /** The line under a row, if it has one. */
   noteFor: (intent: Intent) => RowNote | null;
-  onAction: (intent: Intent, action: QueueAction) => void;
+  onAction: (intent: Intent, action: IntentKeyedAction) => void;
+  /**
+   * Moves a planned story; answers the refusal's sentence, or null once it
+   * moved. A caller without it offers no Reschedule, whatever `actionsOf` says.
+   */
+  onReschedule?: (intent: Intent, localAt: string) => Promise<string | null>;
 }) {
   if (intents.length === 0) {
     return (
@@ -154,6 +174,11 @@ export function QueueView({
                   </p>
                 </div>
 
+                {intent.origin === "planned" && (
+                  <Badge variant="outline">
+                    {intent.scheduled_by ? `Planned by ${intent.scheduled_by}` : "Planned"}
+                  </Badge>
+                )}
                 <Badge
                   variant="secondary"
                   className={
@@ -186,6 +211,17 @@ export function QueueView({
                       />
                     )}
                     {actions.map((action) => {
+                      if (action === "reschedule") {
+                        return onReschedule ? (
+                          <RescheduleDialog
+                            key={action}
+                            intent={intent}
+                            label={ACTION_LABELS[action]}
+                            disabled={pending !== null}
+                            onSubmit={onReschedule}
+                          />
+                        ) : null;
+                      }
                       const confirm = CONFIRM[action];
                       return confirm ? (
                         <Dialog key={action}>

@@ -38,6 +38,7 @@ import {
   scheduleOverrideCopy,
   submitInviteMember,
   inviteMemberRefusalCopy,
+  rescheduleRefusalCopy,
 } from "./command-client";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -594,5 +595,29 @@ describe("inviting a person — invite_member (#1563)", () => {
     expect(inviteMemberRefusalCopy("unreachable", 0)).toMatch(/cannot reach the server.*nothing was created/i);
     expect(inviteMemberRefusalCopy("http_401", 401)).toMatch(/not signed in.*nothing was created/i);
     expect(inviteMemberRefusalCopy("something_new", 500)).toMatch(/nothing was created/i);
+  });
+});
+
+describe("rescheduleRefusalCopy (#1413 phase 6)", () => {
+  it("names the rule a refused time broke, in the words scheduling uses", () => {
+    expect(rescheduleRefusalCopy("invalid_args", 400, { at_rule: "past" })).toBe(
+      scheduleRefusalCopy("invalid_args", 400, { at_rule: "past" }),
+    );
+    expect(rescheduleRefusalCopy("invalid_args", 400, { at_rule: "skipped" })).toMatch(/daylight/i);
+    expect(rescheduleRefusalCopy("invalid_args", 400)).toMatch(/time/i);
+  });
+
+  it("says why the story can no longer move", () => {
+    // The port moves only a planned story still in `scheduled`.
+    expect(rescheduleRefusalCopy("illegal_transition", 409)).toMatch(/moved on.*reload/i);
+    expect(rescheduleRefusalCopy("cancelling", 409)).toMatch(/being cancelled/i);
+    expect(rescheduleRefusalCopy("not_found", 404)).toMatch(/no longer.*reload/i);
+  });
+
+  it("tells a permission refusal and a lost session apart from a blip", () => {
+    expect(rescheduleRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+    expect(rescheduleRefusalCopy("http_401", 401)).toMatch(/not signed in/i);
+    expect(rescheduleRefusalCopy("unreachable", 0)).toMatch(/nothing was moved/i);
+    expect(rescheduleRefusalCopy("something_new", 500)).toMatch(/nothing changed/i);
   });
 });

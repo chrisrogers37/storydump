@@ -32,11 +32,22 @@ describe("the calendar on the workspace's clock", () => {
 
   it("places posted and queued stories by the workspace's day too", () => {
     const posted = { posted_at: "2026-10-01T23:45:00Z", media_name: "a.jpg", category: "Memes", status: "posted" };
-    const queued = { scheduled_for: "2026-10-02T03:00:00Z", media_name: "b.jpg", category: "Memes", status: "approved" };
+    const queued = { scheduled_for: "2026-10-02T03:00:00Z", media_name: "b.jpg", category: "Memes", status: "approved", planned: false };
     const { days } = buildCalendarDays([posted], [queued], [], "America/New_York", EVENING);
     expect(days.find((d) => d.date === "2026-10-01")!.posts.map((p) => p.label)).toEqual([
       "a.jpg",
       "b.jpg",
+    ]);
+  });
+
+  it("draws a story a person planned as planned, apart from the slot plan's (#1413)", () => {
+    const at = "2026-10-01T14:00:00Z";
+    const planned = { scheduled_for: at, media_name: "p.jpg", category: "Memes", status: "scheduled", planned: true };
+    const queued = { scheduled_for: at, media_name: "q.jpg", category: "Memes", status: "approved", planned: false };
+    const { days } = buildCalendarDays([], [planned, queued], [], "UTC", EVENING);
+    expect(days.find((d) => d.date === "2026-10-01")!.posts.map((p) => [p.label, p.type])).toEqual([
+      ["p.jpg", "planned"],
+      ["q.jpg", "queued"],
     ]);
   });
 

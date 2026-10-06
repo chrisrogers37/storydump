@@ -38,7 +38,11 @@ const OWNED_DIRS = [
   path.join("components", "demo"),
   path.join("lib", "demo"),
 ];
-const SHARED_FILES = [path.join("components", "dashboard", "queue", "queue-view.tsx")];
+const SHARED_FILES = [
+  path.join("components", "dashboard", "queue", "queue-view.tsx"),
+  // QueueView draws Reschedule… with it, so the sample imports it too.
+  path.join("components", "dashboard", "queue", "reschedule-dialog.tsx"),
+];
 
 const BANNED_MODULES = ["bff", "workspaces", "page-guards", "target-api", "db"].map(
   (name) => path.join("lib", `${name}.ts`),

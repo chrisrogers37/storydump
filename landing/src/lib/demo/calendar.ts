@@ -37,6 +37,7 @@ export function demoCalendarLanes(queue: Intent[], history: Intent[]): CalendarL
         media_name: i.file_name,
         category: category(i),
         status: i.state,
+        planned: i.origin === "planned",
       })),
     schedule: queue
       .filter((i) => i.state === "awaiting_approval" || i.state === "scheduled")

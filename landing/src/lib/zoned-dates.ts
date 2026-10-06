@@ -54,6 +54,25 @@ export function dateInZone(value: string | Date, tz: string): string {
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
+const WALL_PARTS: Intl.DateTimeFormatOptions = {
+  ...DAY_PARTS,
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+};
+
+/**
+ * An instant's wall time on `tz`'s clock as `YYYY-MM-DDTHH:MM`, the value a
+ * `datetime-local` input takes. It seeds a time a person edits and the port
+ * reads back in the same zone; an unknown zone means UTC, as above.
+ */
+export function wallTimeInZone(value: string | Date, tz: string): string {
+  const parts = formatter(tz, WALL_PARTS).format.formatToParts(instant(value));
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`;
+}
+
 /**
  * An instant, formatted on `tz`'s clock. A zone Intl does not know renders
  * in UTC and says so, as the Queue's `formatSlot` does.

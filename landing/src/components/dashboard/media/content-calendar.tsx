@@ -28,6 +28,8 @@ interface QueueItem {
   media_name: string;
   category: string;
   status: string;
+  /** A story a person planned for a chosen time (#1413), not one the slot plan placed. */
+  planned: boolean;
 }
 
 interface CalendarDay {
@@ -35,7 +37,11 @@ interface CalendarDay {
   dayOfMonth: number;
   isToday: boolean;
   isCurrentMonth: boolean;
-  posts: { label: string; category: string; type: "past" | "queued" | "predicted" }[];
+  posts: {
+    label: string;
+    category: string;
+    type: "past" | "queued" | "planned" | "predicted";
+  }[];
 }
 
 /** A UTC calendar date as `YYYY-MM-DD`. */
@@ -79,7 +85,11 @@ export function buildCalendarDays(
     add(item.posted_at, { label: item.media_name, category: item.category, type: "past" });
   }
   for (const item of queue) {
-    add(item.scheduled_for, { label: item.media_name, category: item.category, type: "queued" });
+    add(item.scheduled_for, {
+      label: item.media_name,
+      category: item.category,
+      type: item.planned ? "planned" : "queued",
+    });
   }
   for (const slot of schedule) {
     add(slot.slot_time, {
@@ -113,6 +123,18 @@ const typeTone = {
   predicted: "inert",
 } as const satisfies Record<string, BadgeTone>;
 
+/**
+ * A planned story is upcoming, as a queued one is, so it keeps the queue's
+ * colour; it is drawn as an outline rather than filled, which is what sets it
+ * apart. One mark, not a new tone: the badge vocabulary stays as it is.
+ */
+const PLANNED_CHIP = "ring-1 ring-inset ring-tap text-tap-ink";
+const PLANNED_DOT = "ring-1 ring-inset ring-tap";
+
+function chipClass(type: CalendarDay["posts"][number]["type"]): string {
+  return type === "planned" ? PLANNED_CHIP : TONE_CLASS[typeTone[type]];
+}
+
 export function ContentCalendar({
   history,
   queue,
@@ -145,6 +167,9 @@ export function ContentCalendar({
           </span>
           <span className="flex items-center gap-1">
             <span className={cn("h-2 w-2 rounded-full", TONE_DOT[typeTone.queued])} /> In Queue
+          </span>
+          <span className="flex items-center gap-1">
+            <span className={cn("h-2 w-2 rounded-full", PLANNED_DOT)} /> Planned
           </span>
           <span className="flex items-center gap-1">
             <span className={cn("h-2 w-2 rounded-full", TONE_DOT[typeTone.predicted])} /> Predicted
@@ -189,10 +214,11 @@ export function ContentCalendar({
                     key={i}
                     className={cn(
                       "truncate rounded px-1 py-0.5 text-[10px]",
-                      TONE_CLASS[typeTone[post.type]]
+                      chipClass(post.type)
                     )}
                     title={post.label}
                   >
+                    {post.type === "planned" && <span className="sr-only">Planned: </span>}
                     {post.label}
                   </div>
                 ))}
