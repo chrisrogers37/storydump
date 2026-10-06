@@ -302,10 +302,10 @@ class TestAgainstTheRealDocs:
         # §33's removal that sticks (090) makes it 45; §34's Drive granter
         # (091) makes it 46; §35's sign-up admission (092) makes it 47; and
         # §41's invitations admitting only while legitimate (098) make it 48;
-        # §42's Telegram unlink (099) makes it 49; §43's waitlist written by
-        # the API (100) makes it 50; §44's outbox failure record and its doors
-        # (101, #1482) make it 51; and §37's removal that holds, the remove
-        # door checking its caller (094), makes it 52.
+        # §42's Telegram unlink (099) makes it 49; and §43's waitlist
+        # written by the API (100) makes it 50; and §44's outbox failure record
+        # and its doors (101, #1482) make it 51; and §45's removal that holds,
+        # the remove door checking its caller (102), makes it 52.
         assert classes.count("normative") == 52
         assert classes.count("illustrative") == 4
 

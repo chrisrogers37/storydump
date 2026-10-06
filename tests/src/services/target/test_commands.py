@@ -536,7 +536,7 @@ class TestRemoveMemberGoesThroughTheDoor:
     async def test_a_removal_retires_the_persons_live_states_in_that_workspace(
         self,
     ):
-        """`07` §37: once the door answers removed, one retire selecting this
+        """`07` §45: once the door answers removed, one retire selecting this
         person AND this workspace, whatever the provider."""
         from src.services.target import workspaces
 

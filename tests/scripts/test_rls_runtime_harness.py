@@ -280,7 +280,7 @@ POLICY_CENSUS = {
     ("p_auth_ingress_states", "oauth_states", "ALL", ("svc_ingress",)): "auth",
     ("p_auth_sweep_states", "oauth_states", "ALL", ("svc_maintenance",)): "auth",
     ("p_auth_ingress_svctok", "service_tokens", "ALL", ("svc_ingress",)): "auth",
-    # 090: the removals record, the membership doors' alone (094 revoked the
+    # 090: the removals record, the membership doors' alone (102 revoked the
     # logins' read and dropped their policy).
     (
         "p_member_removals",
@@ -406,7 +406,7 @@ DOORS = {
     # carries no arguments — the caller is app.actor_user_id, read inside the
     # body, and an unclaimed session reads zero rows rather than anyone's.
     # The thirteenth door (068, #1242): the revoke for every join edge. Three
-    # uuids that name nobody. Since 094 the door checks its caller first, so
+    # uuids that name nobody. Since 102 the door checks its caller first, so
     # in an unclaimed session the body raises (by message); the call only runs
     # as the denied login, whose missing EXECUTE refuses it before the body.
     "fn_member_remove": (
@@ -591,7 +591,7 @@ def _seed_tenant(conn, name: str) -> dict:
         )
         cur.execute(
             # 090: a removed person per tenant — the rows the logins are
-            # denied (094), so that denial is not an empty table read.
+            # denied (102), so that denial is not an empty table read.
             "INSERT INTO workspace_member_removals (workspace_id, user_id)"
             " VALUES (%s, %s)",
             (ws, ids["user"]),
@@ -1098,8 +1098,8 @@ class TestDoorsAreExercisedAndExclusive:
         assert unclaimed == [], "an unclaimed session must read nothing"
 
     def test_the_membership_doors_name_pg_temp_last_on_their_path(self, target):
-        """`07` §37: both membership doors run under `search_path = pg_catalog,
-        public, pg_temp` — the join door by 094's ALTER, the remove door by the
+        """`07` §45: both membership doors run under `search_path = pg_catalog,
+        public, pg_temp` — the join door by 102's ALTER, the remove door by the
         SET clause its CREATE OR REPLACE restates (a replace without one would
         clear it). Read off `proconfig`, the setting each door runs under."""
         rows = _exec(
@@ -1196,7 +1196,7 @@ class TestDirectPathsAreShut:
             )
 
     def test_the_removal_record_is_the_membership_doors_alone(self, target):
-        """`07` §37: no login holds a grant on `workspace_member_removals`, so
+        """`07` §45: no login holds a grant on `workspace_member_removals`, so
         only the svc_membership doors read or write it. Each login's denial is
         live and paired with its own read of `workspace_members` under the same
         claim, beside the records it is denied (one per tenant, seeded by the

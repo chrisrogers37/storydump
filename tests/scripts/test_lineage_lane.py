@@ -426,10 +426,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 101 appends §44, the outbox's failure record: three columns,
             # their index and the two doors behind /health/delivery (#1482).
             "101_outbox_failure_record.sql",
-            # 094 appends §37, a removal holds: the remove door checks its
+            # 102 appends §45, a removal holds: the remove door checks its
             # caller, the record is the membership doors' alone, earlier
             # removals are backfilled, and the join door pins pg_temp last.
-            "094_member_removal_holds.sql",
+            "102_member_removal_holds.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

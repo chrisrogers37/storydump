@@ -793,7 +793,7 @@ class TestTheJoinPathThroughTheDoors:
     connection with no GUCs (the door sets its own): a linked person speaking
     in a bound group becomes a member; nothing else writes. Beside it the
     revoke, `remove_member`, in a real unit of work: its door checks its caller,
-    and the removal spends the person's live link states (`07` §37)."""
+    and the removal spends the person's live link states (`07` §45)."""
 
     def _link(self, world, user_id, tg_user_id):
         _migrate(
@@ -1000,7 +1000,7 @@ class TestTheJoinPathThroughTheDoors:
         assert self._role(world, world["a"]["ws"], joiner) == "member"
         assert self._remove(world, joiner) == "member"
         assert self._role(world, world["a"]["ws"], joiner) is None
-        # An admin passes the door's caller check (`07` §37) and meets the
+        # An admin passes the door's caller check (`07` §45) and meets the
         # owner refusal: the owner is never removed here.
         admin = self._person(world, role="admin")
         with pytest.raises(ValueError, match="owner"):
@@ -1008,7 +1008,7 @@ class TestTheJoinPathThroughTheDoors:
         assert self._role(world, world["a"]["ws"], world["a"]["user"]) == "owner"
 
     def test_the_remove_door_refuses_another_workspace_and_a_non_admin(self, world):
-        """`07` §37: the door checks its caller itself. The workspace must be
+        """`07` §45: the door checks its caller itself. The workspace must be
         the claimed tenant and the remover an owner or admin of it; each clause
         refuses alone, as a RAISE known by its message (P0001, never the 42501
         of a grant or a policy), and nothing is removed or recorded."""
@@ -1030,7 +1030,7 @@ class TestTheJoinPathThroughTheDoors:
         assert not self._recorded(world, person)
 
     def test_a_session_claiming_no_tenant_cannot_remove_even_as_the_owner(self, world):
-        """`07` §37: an unset claim is no tenant, and no workspace is the
+        """`07` §45: an unset claim is no tenant, and no workspace is the
         caller's. A session whose actor is set, as a unit of work sets it, but
         whose `app.tenant_id` is unset is refused, the workspace's own owner
         included, by the door's message, and nothing is removed or recorded."""
@@ -1056,7 +1056,7 @@ class TestTheJoinPathThroughTheDoors:
         assert not self._recorded(world, person)
 
     def test_a_removal_retires_the_persons_live_states_in_that_workspace(self, world):
-        """`07` §37: the bind, Drive and Instagram states the removed person
+        """`07` §45: the bind, Drive and Instagram states the removed person
         holds for the workspace are spent with the removal. Their state for
         the other workspace, and another person's here, stay live."""
         person = self._person(world, role="member")
@@ -1098,18 +1098,18 @@ class TestTheJoinPathThroughTheDoors:
 
 
 class TestTheRemovalBackfill:
-    """094's backfill, the file's own statement, run over a crafted audit trail
-    in a transaction that is rolled back: for whoever is not a member again,
-    the latest removal is recorded when another person made it, a record the
-    door already wrote is kept, and nothing else is recorded."""
+    """102's backfill and the invitation revoke after it, the file's own
+    statements, run over a crafted audit trail in a transaction that is rolled
+    back: for whoever is not a member again, the latest removal is recorded
+    when another person made it, a record the door already wrote is kept, and
+    nothing else is recorded; an invitation such a record outranks ends
+    revoked."""
 
-    def _backfill_sql(self):
-        sql = (MIGRATIONS_DIR / "094_member_removal_holds.sql").read_text()
-        return next(
-            st
-            for st in split_statements(sql)
-            if st.lstrip().startswith("INSERT INTO workspace_member_removals")
-        )
+    def _statements(self, *openings):
+        """The file's own statements that open with one of *openings*, in the
+        order the file runs them."""
+        sql = (MIGRATIONS_DIR / "102_member_removal_holds.sql").read_text()
+        return [st for st in split_statements(sql) if st.lstrip().startswith(openings)]
 
     def test_the_latest_removal_is_recorded_when_another_person_made_it(self, world):
         ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
@@ -1173,7 +1173,8 @@ class TestTheRemovalBackfill:
                 (ws, people["kept"]),
             )
 
-            cur.execute(self._backfill_sql())
+            (backfill,) = self._statements("INSERT INTO workspace_member_removals")
+            cur.execute(backfill)
             cur.execute(
                 "SELECT user_id::text, removed_by_user_id::text, now() - removed_at"
                 "  FROM workspace_member_removals"
@@ -1186,6 +1187,77 @@ class TestTheRemovalBackfill:
             people["unnamed"]: (None, timedelta(days=2)),
             people["orphaned"]: (None, timedelta(days=2)),
             people["kept"]: (None, timedelta(0)),
+        }
+
+    def test_an_invitation_to_a_person_it_records_ends_revoked(self, world):
+        """The file's invitation revoke, run after its backfill as the file
+        runs them: an invitation sent to a person before the removal the
+        backfill records ends revoked. One sent to them after that removal, and
+        one to a person the backfill leaves unrecorded (a member again), stay
+        pending."""
+        ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
+        run_id = uuid.uuid4().hex[:8]
+        emails = {name: f"{name}-{run_id}@example.com" for name in ("removed", "back")}
+        with txn(world["stream"]) as conn, conn.cursor() as cur:
+            cur.execute("SET LOCAL app.actor_kind = 'migration'")
+            people = {}
+            for name, email in emails.items():
+                cur.execute(
+                    "INSERT INTO users (primary_email) VALUES (%s) RETURNING id::text",
+                    (email,),
+                )
+                people[name] = cur.fetchone()[0]
+                # The owner removed them two days ago.
+                cur.execute(
+                    "INSERT INTO audit_events (workspace_id, entity_kind,"
+                    " entity_id, from_state, actor_kind, actor_user_id,"
+                    " channel, detail, created_at)"
+                    " VALUES (%s, 'member', %s, 'member', 'user', %s, 'web',"
+                    " jsonb_build_object('v', 1, 'op', 'DELETE'),"
+                    " now() - interval '2 days')",
+                    (ws, people[name], owner),
+                )
+            cur.execute(
+                "INSERT INTO workspace_members (workspace_id, user_id, role)"
+                " VALUES (%s, %s, 'member')",
+                (ws, people["back"]),
+            )
+            # Pending invitations from the owner, sent that many days ago. The
+            # second is the first's address in capitals: the live-invitation
+            # key compares the address as written, the revoke by lower().
+            sent = {
+                "before": (emails["removed"], 3),
+                "after": (emails["removed"].upper(), 1),
+                "back": (emails["back"], 3),
+            }
+            tokens = {key: f"{key}-{run_id}" for key in sent}
+            for key, (email, ago) in sent.items():
+                cur.execute(
+                    "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+                    " delivery_channel, email, expires_at, invited_by_user_id,"
+                    " created_at)"
+                    " VALUES (%s, %s, 'email', %s, now() + interval '7 days', %s,"
+                    " now() - %s * interval '1 day')",
+                    (ws, tokens[key], email, owner, ago),
+                )
+
+            # The file's order is the point: the revoke reads the records the
+            # backfill writes.
+            backfill, revoke = self._statements(
+                "INSERT INTO workspace_member_removals", "UPDATE workspace_invitations"
+            )
+            cur.execute(backfill)
+            cur.execute(revoke)
+            cur.execute(
+                "SELECT token_hash, state FROM workspace_invitations"
+                " WHERE token_hash = ANY(%s)",
+                (list(tokens.values()),),
+            )
+            states = dict(cur.fetchall())
+        assert states == {
+            tokens["before"]: "revoked",
+            tokens["after"]: "pending",
+            tokens["back"]: "pending",
         }
 
 

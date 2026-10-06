@@ -76,7 +76,7 @@ pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
   machinery counters are row-open to the runtime roles (`:169`-`:178`),
   `post_intent_transitions` is read-only reference data (`:182`),
   `workspace_member_removals` grants the runtime roles nothing: only the
-  membership doors read or write it (094), and `signup_admissions` (092) is
+  membership doors read or write it (102), and `signup_admissions` (092) is
   global and readable only through `fn_signup_admitted`: the runtime roles
   hold no grant on it.
   `waitlist_entries` (100) is global too: `svc_ingress` may INSERT and

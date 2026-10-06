@@ -290,7 +290,7 @@ class _RetireConn:
 class TestRetireLiveStates:
     """ "Last issued wins" (`07` §2) is one rule with four writers — the link
     mint, the bind mint, `issue_state`'s own reconnect retire and
-    `disable_destination`'s — and a removal (`07` §37) is a fifth caller, by
+    `disable_destination`'s — and a removal (`07` §45) is a fifth caller, by
     user AND workspace. One statement per call, never an unselective one."""
 
     async def test_liveness_is_always_in_the_where_and_provider_when_given(self):

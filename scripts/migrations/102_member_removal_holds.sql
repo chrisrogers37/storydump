@@ -1,6 +1,6 @@
--- Migration 094: a removal holds. The remove door checks its own caller, the removal record is
+-- Migration 102: a removal holds. The remove door checks its own caller, the removal record is
 -- the membership doors' alone, earlier removals are recorded, and the join door names pg_temp
--- last on its search_path. Appended to the advertised stream as `07` §37.
+-- last on its search_path. Appended to the advertised stream as `07` §45.
 --
 -- THE INVARIANT. A member is removed only by an owner or admin of their workspace, acting in that
 -- workspace, and the removal record (`workspace_member_removals`, 090) is read and written by the
@@ -30,6 +30,13 @@
 -- person made it (actor_kind 'user', not the member themselves), naming the remover where that
 -- account still exists. A record the door already wrote is kept.
 --
+-- THE INVITATIONS THEY OUTRANK. After the backfill, 098's one-time revoke statement runs again,
+-- unchanged: a pending invitation whose inviter has a removal record in its workspace and is not
+-- a member there again, and one addressed (by email or Telegram id) to a person removed from its
+-- workspace after it was sent, are revoked. The doors refuse both (098); revoking them keeps the
+-- invitation listing filtering on state alone. workspace_invitations carries no governance
+-- trigger, so the UPDATE needs no actor.
+--
 -- OUTSIDE THIS FILE. `workspaces.remove_member` retires the removed person's live link states for
 -- the workspace in the same unit of work (`oauth_states.retire_live_states`, by person and
 -- workspace, whatever the provider).
@@ -40,8 +47,8 @@
 -- no code.
 --
 -- Adoption evidence (#997): the remove door's body by the claim it now reads, and the join door's
--- pinned path, both catalog state this file creates. The revoke and the dropped policy are
--- absences and the backfill is data, so neither is probed.
+-- pinned path, both catalog state this file creates. The revoked grant and the dropped policy
+-- are absences, and the backfill and the invitation revoke are data, so none is probed.
 --
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'fn_member_remove' AND position('app.tenant_id' IN p.prosrc) > 0)
 -- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'fn_group_member_seen' AND 'search_path=pg_catalog, public, pg_temp' = ANY (p.proconfig))
@@ -66,6 +73,21 @@ SELECT latest.workspace_id, latest.entity_id, u.id, latest.created_at
    AND NOT EXISTS (SELECT 1 FROM workspace_members m
                     WHERE m.workspace_id = latest.workspace_id AND m.user_id = latest.entity_id)
 ON CONFLICT (workspace_id, user_id) DO NOTHING;
+
+UPDATE workspace_invitations i SET state = 'revoked'
+ WHERE i.state = 'pending'
+   AND (EXISTS (SELECT 1 FROM workspace_member_removals r
+                 WHERE r.workspace_id = i.workspace_id AND r.user_id = i.invited_by_user_id
+                   AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                                    WHERE m.workspace_id = i.workspace_id
+                                      AND m.user_id = i.invited_by_user_id))
+        OR EXISTS (SELECT 1 FROM workspace_member_removals r
+                     JOIN users u ON u.id = r.user_id
+                    WHERE r.workspace_id = i.workspace_id AND r.removed_at >= i.created_at
+                      AND (lower(u.primary_email) = lower(i.email)
+                           OR i.invited_tg_user_id::text IN
+                              (SELECT x.external_id FROM user_identities x
+                                WHERE x.user_id = r.user_id AND x.provider = 'telegram'))));
 
 GRANT CREATE ON SCHEMA public TO svc_membership;
 
@@ -107,7 +129,7 @@ COMMENT ON FUNCTION fn_member_remove(uuid, uuid, uuid) IS
   'The revoke for every join edge (06): an admin removes a member explicitly, and the removal is '
   'recorded so the Telegram join path cannot undo it (090). The one DELETE on workspace_members '
   'in the system lives here (057: no login role deletes). The door checks its caller itself '
-  '(094): p_workspace must be the claimed tenant (app.tenant_id) and p_by_user an owner or admin '
+  '(102): p_workspace must be the claimed tenant (app.tenant_id) and p_by_user an owner or admin '
   'of it, or it raises. Outcomes: removed, not_found, owner (never removable here), self (never '
   'through this door). SECURITY DEFINER owned by svc_membership with EXECUTE granted to '
   'svc_ingress.';

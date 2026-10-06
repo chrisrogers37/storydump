@@ -813,13 +813,13 @@ async def remove_member(
     (`transfer_ownership` is that edge), nobody removes themselves, a
     non-member is `not_found`. The door also checks its caller: the workspace
     must be the claimed tenant and *by_user_id* an owner or admin of it, or it
-    raises (`07` §37). The removal is recorded by the door, so the Telegram
+    raises (`07` §45). The removal is recorded by the door, so the Telegram
     join path cannot re-add the person until they are invited back. In the
     same transaction, the workspace service identities they minted are revoked
     (090), as are the pending invitations in the workspace that they sent or
     that are addressed to them, so none of them lets anyone in and none blocks
     the fresh invitation that brings them back, and every live link state they
-    hold for this workspace is retired (`07` §37)."""
+    hold for this workspace is retired (`07` §45)."""
     row = (
         await executor.execute(
             text(

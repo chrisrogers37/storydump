@@ -370,7 +370,7 @@ def expected_tenancy(statements) -> dict:
         # a replay that got past it dropped exactly one policy, so the count
         # falls by one. `IF EXISTS` may drop nothing, which a count cannot
         # tell, so it falls through to the refusal below with every other
-        # spelling. (094 is the first member.)
+        # spelling. (102 is the first member.)
         m = re.match(
             r"DROP POLICY \w+ ON (?:public\.)?(\w+)(?: RESTRICT| CASCADE)?$", stmt
         )

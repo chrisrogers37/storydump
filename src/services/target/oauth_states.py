@@ -87,7 +87,7 @@ async def retire_live_states(
     "Last issued wins" (`07` §2) is one security rule with four writers: a
     link mint, a bind mint, :func:`issue_state`'s own reconnect-target retire
     and `disable_destination`'s. Four spellings is how one of them keeps a
-    state tappable after the next is minted. A removal (`07` §37) is the
+    state tappable after the next is minted. A removal (`07` §45) is the
     fifth caller: it spends whatever the removed person holds for one
     workspace, so it selects by user AND workspace and names no provider.
     The selectors given are ANDed, and a user, a workspace or a reconnect
