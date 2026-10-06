@@ -1,13 +1,11 @@
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SettingsHeader } from "@/components/dashboard/page-headers";
 
 export default function SettingsLoading() {
   return (
     <div className="space-y-6">
-      <div>
-        <Skeleton className="h-8 w-28" />
-        <Skeleton className="h-4 w-72 mt-2" />
-      </div>
+      <SettingsHeader />
 
       {/* Tab bar */}
       <div className="flex gap-2">

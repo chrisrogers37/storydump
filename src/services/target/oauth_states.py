@@ -76,7 +76,7 @@ def hash_nonce(nonce: str) -> str:
 async def retire_live_states(
     conn,
     *,
-    provider: str,
+    provider: Optional[str] = None,
     purpose: Optional[str] = None,
     user_id=None,
     workspace_id=None,
@@ -87,12 +87,23 @@ async def retire_live_states(
     "Last issued wins" (`07` §2) is one security rule with four writers: a
     link mint, a bind mint, :func:`issue_state`'s own reconnect-target retire
     and `disable_destination`'s. Four spellings is how one of them keeps a
-    state tappable after the next is minted. Exactly one selector kwarg is
-    given besides *provider*; the statement is built from named fragments,
-    never from a caller's string.
+    state tappable after the next is minted. A removal (`07` §45) is the
+    fifth caller: it spends whatever the removed person holds for one
+    workspace, so it selects by user AND workspace and names no provider.
+    The selectors given are ANDed, and a user, a workspace or a reconnect
+    target is required: a provider or a purpose narrows a selection and is
+    never one on its own. The statement is built from named fragments, never
+    from a caller's string.
     """
-    where = ["provider = :provider", "consumed_at IS NULL"]
-    params: dict[str, Any] = {"provider": provider}
+    if user_id is None and workspace_id is None and reconnect_target is None:
+        raise ValueError(
+            "retire_live_states needs a user, a workspace or a reconnect target"
+        )
+    where = ["consumed_at IS NULL"]
+    params: dict[str, Any] = {}
+    if provider is not None:
+        where.append("provider = :provider")
+        params["provider"] = provider
     if purpose is not None:
         where.append("purpose = :purpose")
         params["purpose"] = purpose
@@ -244,6 +255,36 @@ async def consume_state(
                 "matching nonce cookie for this state"
             )
     return row
+
+
+async def peek_live_state(
+    conn, *, state: str, expected_provider: str, expected_purpose: str
+) -> dict[str, Any]:
+    """The live row for *state* WITHOUT consuming it, or a NAMED refusal.
+
+    For a flow whose state must survive a first look and be consumed by a
+    later, deliberate act — the Telegram identity link shows the tapper whose
+    account the link belongs to and consumes the state only on their Confirm
+    (:func:`consume_state` then decides, one-shot, as ever). A peek is never
+    an authorization: nothing may be written on its strength alone.
+
+    The provider and purpose are part of the lookup rather than checked
+    after it, so a state minted for another leg reads exactly as an unknown
+    one does — and, unlike :func:`consume_state`, is not burned by the look.
+    """
+    result = await conn.execute(
+        text(
+            "SELECT state, user_id, workspace_id, provider, purpose"
+            "  FROM oauth_states"
+            " WHERE state = :state AND provider = :provider AND purpose = :purpose"
+            "   AND consumed_at IS NULL AND expires_at > now()"
+        ),
+        {"state": state, "provider": expected_provider, "purpose": expected_purpose},
+    )
+    row = result.mappings().first()
+    if row is None:
+        raise OAuthStateRefused(_why_not_live(await _peek(conn, state)))
+    return dict(row)
 
 
 async def _peek(conn, state: str) -> Optional[dict]:

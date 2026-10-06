@@ -4,6 +4,7 @@ import type { WorkspaceConfig } from "@/lib/dashboard-payloads";
 import { NON_TERMINAL_STATES, type IntentsResponse } from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { QueueList } from "@/components/dashboard/queue/queue-list";
+import { QueueHeader } from "@/components/dashboard/page-headers";
 
 /**
  * `01` H5: every list is bounded. This asks for the API's ceiling
@@ -40,20 +41,16 @@ export default async function QueuePage() {
 
   const config = configResult.data;
   const { intents, limit } = intentsResult.data;
+  const tz = config.tz ?? "UTC";
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Queue</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Every post that is not done yet, in slot order. Times are in {config.tz ?? "UTC"}.
-        </p>
-      </div>
+      <QueueHeader tz={tz} />
 
       <QueueList
         workspaceId={workspaceId}
         intents={intents}
-        tz={config.tz ?? "UTC"}
+        tz={tz}
         apiPublishingEnabled={config.api_publishing_enabled === true}
         truncatedAt={intents.length >= limit ? limit : null}
       />

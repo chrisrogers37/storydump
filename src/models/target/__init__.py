@@ -62,11 +62,14 @@ from src.models.target.intent_ledger import (
 from src.models.target.identity_and_tenancy import (
     ChannelBinding,
     OnboardingSession,
+    SignupAdmission,
     User,
     UserIdentity,
+    WaitlistEntry,
     Workspace,
     WorkspaceInvitation,
     WorkspaceMember,
+    WorkspaceMemberRemoval,
 )
 
 __all__ = [
@@ -92,9 +95,12 @@ __all__ = [
     "RateCounter",
     "ServiceToken",
     "SessionToken",
+    "SignupAdmission",
     "User",
     "UserIdentity",
+    "WaitlistEntry",
     "Workspace",
     "WorkspaceInvitation",
     "WorkspaceMember",
+    "WorkspaceMemberRemoval",
 ]

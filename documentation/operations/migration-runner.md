@@ -27,7 +27,7 @@ at first contact. It lives in the dedicated `runner` schema — never `public`
 ride into `legacy` mid-run. It supersedes the legacy lineage's own version
 table — the one the 001–050 files stamp themselves into, with known gaps; a
 replay still stamps it and the runner never reads it
-(`scripts/migration_runner.py:758`). In production that table rode into
+(`adopt`'s docstring, `scripts/migration_runner.py`). In production that table rode into
 `legacy` with the rest at the 051 move, is snapshotted as
 `archive.schema_version_pre_cutover_20260917` (078), and was dropped with
 `legacy` by 079 in the owner's window on 2026-09-19
@@ -94,6 +94,33 @@ with the new checksum).
   works exactly as it did by hand.
 - New files (051+) should own no `BEGIN`/`COMMIT` — the runner wraps them,
   and the ledger row commits atomically with the DDL.
+
+## Lock waits (#1515)
+
+A wrapped file's lock waits are bounded. The runner sets `lock_timeout` to `LOCK_TIMEOUT` (1 s)
+inside the file's own transaction (`set_config(..., true)`, gone at its commit). An `ALTER TABLE`
+that cannot take ACCESS EXCLUSIVE within the bound fails with SQLSTATE 55P03. Without the bound it
+would hold its place in the lock queue, and every later statement on the table, readers included,
+would wait behind it for as long as the holder ran.
+
+1 s keeps that stall under the app's own lock bound (the tap path's 2 s), so a statement queued
+behind a waiting migration does not fail on its own.
+
+The runner tries that failure again, and no other, after 1, 2, 4 and then 8 s
+(`LOCK_RETRY_DELAYS_S`, about 20 s in all). Each retry is announced on stderr, as
+`migration NNN (file): a lock was held past 1s; trying again in 1s`. A file that runs out of
+attempts fails the apply like any failure: no ledger row, no partial change, and the deploy aborts
+with the old version serving.
+
+A retry re-runs the whole file. A file whose heavy work precedes its contended lock repeats that work,
+so take the lock first.
+
+The bound is transaction-local on purpose. A session-wide one would also bound the advisory lock
+that the two services' predeploys queue on during a deploy.
+
+A self-managed or no-transaction file runs without the bound, because its statements commit as they
+go and a retry could not start clean. A file sets no `lock_timeout` of its own; the tenancy gate
+refuses `SET`.
 
 ## Adoption — the 45-or-49 design
 

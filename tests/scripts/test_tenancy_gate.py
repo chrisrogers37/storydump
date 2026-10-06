@@ -368,15 +368,15 @@ class TestExpectedTenancyDerivation:
         """CALIBRATION, and the reason this is not circular reasoning.
 
         `test_advertised_ddl_replay` executes the whole stream into a real
-        database and observes 26 tables, 19 of them tenant-keyed. This parses
+        database and observes 29 tables, 20 of them tenant-keyed. This parses
         the same stream as TEXT and must land on the same two numbers. Agreement
         between a catalog read and a text parse is what licenses using the parse
         as an expectation elsewhere; without it the derivation would only ever
         be self-consistent.
         """
         sig = expected_tenancy(self._stream())
-        assert len(sig) == 26
-        assert len(tenant_keyed_tables(sig)) == 19
+        assert len(sig) == 29
+        assert len(tenant_keyed_tables(sig)) == 20
 
     def test_the_completed_stream_satisfies_the_invariant_it_will_be_judged_by(self):
         """At the end of the stream — and only there — the plan's own tenancy
@@ -458,6 +458,24 @@ class TestExpectedTenancyDerivation:
         assert sig["t"]["policies"] == 2
         assert tenancy_violations(sig) == []
 
+    def test_a_plain_drop_policy_takes_one_policy_off_its_table(self):
+        """The plain form is read exactly, because a replay that got past it
+        dropped exactly one policy: the count falls by one. A drop naming a
+        table the prefix has not created records nothing, as a create does."""
+        sig = expected_tenancy(
+            [
+                f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )",
+                "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+                "CREATE POLICY p_one ON t FOR ALL TO svc_ingress USING (true)",
+                "CREATE POLICY p_two ON t FOR SELECT TO svc_ingress USING (true)",
+                "DROP POLICY p_two ON t",
+                "DROP POLICY p_any ON not_yet",
+            ]
+        )
+        assert sig == {
+            "t": _tenancy_entry(tenant_keyed=True, rls_enabled=True, policies=1)
+        }
+
     def test_statements_about_a_table_the_prefix_has_not_created_are_ignored(self):
         """A prefix can legitimately mention nothing about a later table. What it
         must never do is invent one — a phantom entry would diverge from the
@@ -470,7 +488,7 @@ class TestExpectedTenancyDerivation:
     @pytest.mark.parametrize(
         "reducing",
         [
-            "DROP POLICY p_one ON t",
+            "DROP POLICY IF EXISTS p_one ON t",
             "DROP TABLE t",
             f"ALTER TABLE t DROP COLUMN {TENANT_KEY}",
             "ALTER TABLE t RENAME TO t_old",
@@ -481,9 +499,11 @@ class TestExpectedTenancyDerivation:
     def test_a_state_reducing_statement_refuses_rather_than_deriving_a_wrong_state(
         self, reducing
     ):
-        """The derivation only ever ADDS. A statement that takes something away
-        would leave it claiming a table or policy is present that the replay has
-        since dropped — the quiet direction — so it refuses.
+        """A statement that takes something away, in any form the derivation
+        does not read exactly, would leave it claiming a table or policy is
+        present that the replay has since dropped — the quiet direction — so it
+        refuses. The one it reads is the plain DROP POLICY, above; `IF EXISTS`
+        may drop nothing, so that spelling is here.
 
         Parametrized deliberately: an earlier version named `DROP POLICY` and
         `DISABLE ROW LEVEL SECURITY` by regex and let every other reducing form
@@ -502,7 +522,7 @@ class TestExpectedTenancyDerivation:
         actually covers the corpus it has to run against, so the refusal is
         discriminating rather than merely strict.
         """
-        assert len(expected_tenancy(self._stream())) == 26
+        assert len(expected_tenancy(self._stream())) == 29
 
     def test_an_unclassified_statement_kind_refuses(self):
         """The allowlist's other direction: a statement kind nobody has judged
@@ -512,6 +532,34 @@ class TestExpectedTenancyDerivation:
         """
         with pytest.raises(AssertionError, match="does not classify"):
             expected_tenancy(["CREATE SEQUENCE s START 1"])
+
+
+class TestADataUpdateIsInert:
+    """098 is the first migration on the target lineage to UPDATE rows (its
+    one-time revoke of a removed inviter's invitations). Rows are none of the
+    four facts, so that table's UPDATE is allowlisted beside INSERT INTO; this
+    is the control that proves the entry is reachable, and that it admits no
+    other UPDATE."""
+
+    def test_update_of_the_invitations_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE workspace_invitations ( id uuid, workspace_id uuid )",
+                "UPDATE workspace_invitations i SET id = NULL"
+                " WHERE workspace_id IS NULL",
+            ]
+        )
+        assert sig["workspace_invitations"]["tenant_keyed"] is True
+        assert sig["workspace_invitations"]["policies"] == 0
+
+    def test_a_catalog_update_is_not_waved_through(self):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(
+                [
+                    "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                    "UPDATE pg_class SET relrowsecurity = false WHERE relname = 't'",
+                ]
+            )
 
 
 class TestDroppingAnIndexIsInert:

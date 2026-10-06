@@ -64,8 +64,10 @@ directory is the better guide — the database lives in `tests/scripts/`.
   without asking. `--no-cov` turns it off.
 - **CI measures `src` and `storydump_cli`**:
   `pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing`
-  (`.github/workflows/ci.yml:134`), and uploads `coverage.xml` to Codecov with
-  `fail_ci_if_error: false` (`ci.yml:136-140`).
+  (the `Run tests with coverage` step of `.github/workflows/ci.yml`), and uploads
+  `coverage.xml` to Codecov in the `Upload coverage to Codecov` step, which is
+  advisory: it continues on error and times out after five minutes, so an upload
+  never fails `Test`.
 - **No threshold is enforced.** Nothing sets `--cov-fail-under`, and the
   repository has no `.coveragerc` or `codecov.yml`. A percentage is reported,
   never gated.

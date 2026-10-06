@@ -5,6 +5,7 @@ import { ArrowRight } from "lucide-react"
 import { Checklist } from "@/components/setup/checklist"
 import { StepCard } from "@/components/setup/step-card"
 import { UiTerm } from "@/components/setup/ui-term"
+import { buttonVariants } from "@/components/ui/button"
 
 export const metadata: Metadata = pageMetadata({
   title: "Getting Started",
@@ -23,7 +24,7 @@ const prerequisites = [
 export default function SetupOverview() {
   return (
     <div>
-      <h1 className="font-display text-4xl font-extrabold tracking-[-0.03em] text-ink">
+      <h1 className="page-title text-4xl text-ink">
         Getting Started with Storydump
       </h1>
       <p className="mt-4 text-lg text-muted-foreground">
@@ -95,7 +96,7 @@ export default function SetupOverview() {
         </p>
         <Link
           href="/setup/instagram"
-          className="mt-4 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          className={buttonVariants({ className: "mt-4" })}
         >
           Start with Instagram
           <ArrowRight className="h-4 w-4" />

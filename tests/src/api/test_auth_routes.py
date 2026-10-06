@@ -18,7 +18,12 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.principal import COOKIE, session_delivery_gap
+from src.api.principal import (
+    COOKIE,
+    PREAUTH_LIMIT,
+    PREAUTH_SCOPE,
+    session_delivery_gap,
+)
 from src.api.routes import auth
 from src.config.settings import settings
 from src.services.target import (
@@ -54,7 +59,7 @@ def counter(monkeypatch):
     log = {"keys": [], "value": 1}
 
     async def increment(conn, *, scope, key, window_start, limit):
-        assert scope == auth.PREAUTH_SCOPE and limit == auth.PREAUTH_LIMIT
+        assert scope == PREAUTH_SCOPE and limit == PREAUTH_LIMIT
         log["keys"].append(key)
         return log["value"]
 
@@ -83,6 +88,26 @@ def state_store(monkeypatch):
     monkeypatch.setattr(auth, "issue_state", issue_state)
     monkeypatch.setattr(auth, "consume_state", consume_state)
     return store
+
+
+@pytest.fixture
+def browser(client, monkeypatch):
+    """The returning browser carries the session cookie of `holder` (the
+    connect legs' callbacks require it to be the state's user)."""
+    holder = {"user_id": USER}
+
+    async def resolve(conn, *, token_hash):
+        if holder["user_id"] is None:
+            from src.exceptions.tenancy import TenantResolutionError
+
+            raise TenantResolutionError("invalid_session", "no such session")
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id="sess-1", user_id=holder["user_id"])
+
+    monkeypatch.setattr(sessions, "resolve", resolve)
+    client.cookies.set(COOKIE, "opaque-session-value")
+    return holder
 
 
 class TestSignin:
@@ -125,6 +150,23 @@ class TestSignin:
             follow_redirects=False,
         )
         assert counter["keys"] == ["203.0.113.9"]
+
+    def test_behind_railways_edge_the_counter_keys_on_each_visitors_64(
+        self, app, configured, counter, state_store
+    ):
+        """Behind Railway's edge (100.64.0.0/10) the key is the visitor, and
+        an IPv6 visitor's whole /64 is one key, so walking the addresses of
+        one subscriber's /64 is not a fresh limit per request."""
+        client = TestClient(app, client=("100.64.0.13", 4321))
+        for xff in ("192.0.2.50", "2001:db8:1:2::1", "2001:db8:1:2::ffff"):
+            client.get(
+                "/auth/google", headers={"X-Forwarded-For": xff}, follow_redirects=False
+            )
+        assert counter["keys"] == [
+            "192.0.2.50",
+            "2001:db8:1:2::/64",
+            "2001:db8:1:2::/64",
+        ]
 
 
 class TestCallback:
@@ -187,8 +229,9 @@ class TestCallback:
             seen["exchange"] = (code, redirect_uri, client_id)
             return unsigned_id_token(state)
 
-        async def upsert(conn, *, sub, email, display_name):
+        async def upsert(conn, *, sub, email, display_name, signup_open):
             seen["upsert"] = (sub, email, display_name)
+            seen["signup_open"] = signup_open
             return "user-uuid"
 
         async def issue(conn, *, user_id):
@@ -208,6 +251,7 @@ class TestCallback:
         assert resp.headers["location"] == f"{FRONT}/welcome"
         assert seen["exchange"] == ("c0de", f"{API}/auth/google/callback", "cid")
         assert seen["upsert"] == ("sub-1", "p@example.com", "P")
+        assert seen["signup_open"] is False, "sign-up is gated by default (092)"
         assert seen["issue"] == "user-uuid"
         cookie = cookie_header(resp, COOKIE)
         assert "opaque-value" in cookie
@@ -253,6 +297,57 @@ class TestCallback:
             resp.headers["location"] == f"{FRONT}/auth/error?reason=identity_collision"
         )
 
+    def _refused_signup(self, client, monkeypatch):
+        state, nonce = self._signin(client)
+        seen = {}
+
+        async def exchange_code(client_, **kw):
+            return unsigned_id_token(state)
+
+        async def upsert(conn, **kw):
+            seen["signup_open"] = kw["signup_open"]
+            raise identity.SignupNotAdmitted("not admitted")
+
+        async def issue(conn, *, user_id):
+            raise AssertionError("a refused sign-up mints no session")
+
+        monkeypatch.setattr(google_oidc, "exchange_code", exchange_code)
+        monkeypatch.setattr(identity, "upsert_google_identity", upsert)
+        monkeypatch.setattr(sessions, "issue", issue)
+        resp = client.get(
+            f"/auth/google/callback?state={state}&code=c",
+            cookies={auth.NONCE_COOKIE: nonce},
+            follow_redirects=False,
+        )
+        return resp, seen
+
+    def test_a_new_account_nobody_admitted_lands_on_the_sign_in_page(
+        self, client, configured, counter, state_store, monkeypatch
+    ):
+        """092: the refusal is named, lands where the waitlist is, and sets no
+        session cookie."""
+        resp, _ = self._refused_signup(client, monkeypatch)
+        assert resp.status_code == 302
+        assert resp.headers["location"] == f"{FRONT}/login?error=not_admitted"
+        assert COOKIE not in resp.headers.get("set-cookie", "")
+
+    def test_without_a_front_end_the_refusal_is_a_named_400(
+        self, client, configured, counter, state_store, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "WEB_APP_URL", None, raising=False)
+        monkeypatch.setattr(settings, "SESSION_COOKIE_DOMAIN", None, raising=False)
+        resp, _ = self._refused_signup(client, monkeypatch)
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": "not_admitted"}
+
+    @pytest.mark.parametrize("value", [False, True])
+    def test_the_open_switch_reaches_the_upsert(
+        self, client, configured, counter, state_store, monkeypatch, value
+    ):
+        monkeypatch.setattr(settings, "TARGET_SIGNUP_OPEN", value, raising=False)
+        _, seen = self._refused_signup(client, monkeypatch)
+        assert seen["signup_open"] is value
+
 
 class TestSignout:
     def test_revokes_the_presented_session_and_clears_the_cookie(
@@ -279,6 +374,41 @@ class TestSignout:
 
         monkeypatch.setattr(sessions, "revoke", revoke)
         assert client.post("/auth/signout").status_code == 200
+
+    def test_everywhere_revokes_every_session_of_the_presenting_user(
+        self, client, monkeypatch
+    ):
+        """`?everywhere=true` goes to `revoke_all_for_user` with the presented
+        hash, never to the one-row `revoke`; the cookie is cleared either way."""
+        seen = []
+
+        async def revoke(conn, *, token_hash):
+            raise AssertionError("everywhere must not revoke only this session")
+
+        async def revoke_all_for_user(conn, *, token_hash):
+            seen.append(token_hash)
+            return 3
+
+        monkeypatch.setattr(sessions, "revoke", revoke)
+        monkeypatch.setattr(sessions, "revoke_all_for_user", revoke_all_for_user)
+        resp = client.post(
+            "/auth/signout?everywhere=true",
+            headers={"Authorization": "Bearer opaque"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"signed_out": True, "revoked": 3}
+        assert seen == [hashlib.sha256(b"opaque").hexdigest()]
+        cookie = cookie_header(resp, COOKIE)
+        assert "Max-Age=0" in cookie or "expires=" in cookie.lower()
+
+    def test_everywhere_without_a_session_touches_nothing(self, client, monkeypatch):
+        async def revoke_all_for_user(conn, *, token_hash):
+            raise AssertionError("nothing to revoke")
+
+        monkeypatch.setattr(sessions, "revoke_all_for_user", revoke_all_for_user)
+        resp = client.post("/auth/signout?everywhere=true")
+        assert resp.status_code == 200
+        assert resp.json() == {"signed_out": True, "revoked": 0}
 
 
 class TestSessionDelivery:
@@ -428,24 +558,6 @@ class TestInstagramCallback:
         monkeypatch.setattr(auth, "consume_state", consume_state)
         row["seen"] = seen
         return row
-
-    @pytest.fixture
-    def browser(self, client, monkeypatch):
-        """The returning browser carries the session cookie of `holder`."""
-        holder = {"user_id": USER}
-
-        async def resolve(conn, *, token_hash):
-            if holder["user_id"] is None:
-                from src.exceptions.tenancy import TenantResolutionError
-
-                raise TenantResolutionError("invalid_session", "no such session")
-            from types import SimpleNamespace
-
-            return SimpleNamespace(id="sess-1", user_id=holder["user_id"])
-
-        monkeypatch.setattr(sessions, "resolve", resolve)
-        client.cookies.set(COOKIE, "opaque-session-value")
-        return holder
 
     @pytest.fixture
     def writes(self, monkeypatch):
@@ -741,9 +853,11 @@ class TestInstagramCallback:
 class TestDriveCallback:
     """`GET /auth/google-drive/callback` — the return half of the WORKSPACE's
     Drive connect (069, `07` §15). The state row is trusted for what it pins,
-    which is now the workspace itself; the provider call sits between the two
-    transactions; the grant lands as the workspace's and every folder is
-    re-armed beside it."""
+    which is now the workspace itself; the returning browser must carry the
+    state user's session and that user must still be admin (the Instagram
+    leg's two checks); the provider call sits between the two transactions;
+    the grant lands as the workspace's and every folder is re-armed beside
+    it."""
 
     URL = "/auth/google-drive/callback"
 
@@ -799,8 +913,14 @@ class TestDriveCallback:
 
                 return _cm()
 
-        async def store_credential(session, *, workspace_id, grant):
-            log.append(("store", workspace_id, grant.access_token))
+        async def authorize_member(
+            session, workspace_id, user_id, minimum_role="member"
+        ):
+            log.append(("gate", workspace_id, user_id, minimum_role))
+            return "owner"
+
+        async def store_credential(session, *, workspace_id, grant, granted_by):
+            log.append(("store", workspace_id, grant.access_token, granted_by))
             return "cred-1"
 
         async def rearm(session, *, workspace_id, source_id=None):
@@ -808,12 +928,13 @@ class TestDriveCallback:
             return 2
 
         monkeypatch.setattr(auth, "unit_of_work", _Uow)
+        monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
         monkeypatch.setattr(google_drive_oauth, "store_credential", store_credential)
         monkeypatch.setattr(media_sync, "rearm_after_connect", rearm)
         return log
 
     def test_the_grant_lands_on_the_workspace_and_every_folder_is_rearmed(
-        self, client, configured, counter, drive_row, exchanged, writes
+        self, client, configured, counter, drive_row, browser, exchanged, writes
     ):
         resp = client.get(
             self.URL,
@@ -824,13 +945,16 @@ class TestDriveCallback:
         assert resp.headers["location"].endswith("/dashboard/settings?connected=gdrive")
         assert writes == [
             ("uow", WS, USER, "web"),
-            ("store", WS, "ya29.access"),
+            ("gate", WS, USER, "admin"),
+            # 091: the state's user — the returning browser, checked — is
+            # the granter, the one person who may browse this Drive.
+            ("store", WS, "ya29.access", USER),
             ("rearm", WS, None),
         ]
 
     @pytest.mark.parametrize("target", [ACCOUNT, None])
     def test_a_state_that_pins_anything_but_the_workspace_is_refused(
-        self, client, configured, counter, drive_row, exchanged, writes, target
+        self, client, configured, counter, drive_row, browser, exchanged, writes, target
     ):
         drive_row["reconnect_target"] = target
         resp = client.get(
@@ -842,3 +966,104 @@ class TestDriveCallback:
         assert "state_refused" in resp.headers["location"]
         assert "flow=drive" in resp.headers["location"]
         assert writes == []
+
+    def _return(self, client):
+        return client.get(
+            self.URL,
+            params={"state": "st-drive", "code": "c0de"},
+            follow_redirects=False,
+        )
+
+    def test_a_browser_without_a_session_is_refused_before_the_provider_is_called(
+        self, client, configured, counter, drive_row, writes, monkeypatch
+    ):
+        """The callback requires the state user's session; a return without
+        one is refused before the code is spent, and nothing is written."""
+        called = []
+
+        async def exchange_code(client_, **kw):
+            called.append(True)
+
+        monkeypatch.setattr(google_drive_oauth, "exchange_code", exchange_code)
+        resp = self._return(client)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=drive"
+        )
+        assert called == [] and writes == []
+
+    @pytest.mark.parametrize(
+        "presented", ["99999999-9999-4999-8999-999999999999", None]
+    )
+    def test_a_browser_signed_in_as_someone_else_is_refused(
+        self,
+        client,
+        configured,
+        counter,
+        drive_row,
+        browser,
+        exchanged,
+        writes,
+        presented,
+    ):
+        browser["user_id"] = presented
+        resp = self._return(client)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=drive"
+        )
+        assert writes == []
+
+    def test_a_user_no_longer_admin_at_callback_time_is_refused(
+        self,
+        client,
+        configured,
+        counter,
+        drive_row,
+        browser,
+        exchanged,
+        writes,
+        monkeypatch,
+    ):
+        from src.exceptions.tenancy import TenantResolutionError
+
+        async def authorize_member(
+            session, workspace_id, user_id, minimum_role="member"
+        ):
+            raise TenantResolutionError("insufficient_role")
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
+        resp = self._return(client)
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=drive"
+        )
+        assert not any(w[0] == "store" for w in writes)
+
+
+def test_an_open_sign_up_is_said_at_startup(monkeypatch):
+    """TARGET_SIGNUP_OPEN is a local stack's switch (092); a process that runs
+    with it says so, so production never has it on unnoticed. The app logger
+    does not propagate, so a handler on it records the lines."""
+    import logging
+
+    from src.api.app import create_app
+    from src.utils.logger import logger as app_logger
+    from tests.src.api.conftest import FakeEngine
+
+    lines: list[str] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = _Grab(level=logging.WARNING)
+    app_logger.addHandler(handler)
+    try:
+        create_app(engine=FakeEngine())
+        assert not [m for m in lines if "TARGET_SIGNUP_OPEN" in m]
+        monkeypatch.setattr(settings, "TARGET_SIGNUP_OPEN", True)
+        create_app(engine=FakeEngine())
+        assert [m for m in lines if "TARGET_SIGNUP_OPEN is on" in m]
+    finally:
+        app_logger.removeHandler(handler)
