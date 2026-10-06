@@ -6,7 +6,11 @@ through the one gate, a service identity for its own workspace and no
 membership to gate on — calls one view from `ops_views`, and answers the
 phase-01 envelope. The routes are admitted to tokens (`TOKEN_ROUTES`), read
 only, and bounded: `floating` by a clamped limit, the others by a window.
-`posture` is not tenant data and opens no tenant.
+`posture` (the catalogs and the runner's ledger) and `health` (the API's own
+operating details) are not tenant data, open no tenant, and answer the people
+`OPS_USER_IDS` names alone. `health` alone answers bare, not in the envelope:
+it is the payload public `/health` carried, and `storydump health` judges it
+as such (pinned in `test_ops_routes.py`).
 """
 
 from __future__ import annotations
@@ -22,8 +26,10 @@ from src.api.principal import (
     Principal,
     current_principal,
     require_engine,
+    require_ops,
 )
 from src.api import principal as principal_mod
+from src.api.routes import health
 from src.services.target import ops_views, vocabulary
 
 router = APIRouter(tags=["ops"])
@@ -142,9 +148,18 @@ async def burst(
 
 
 @router.get("/ops/posture")
-async def posture(request: Request, principal: Principal = Depends(current_principal)):
-    """Catalogs and the runner's ledger — any principal, no tenant."""
+async def posture(request: Request, principal: Principal = Depends(require_ops)):
+    """Catalogs and the runner's ledger — the people in `OPS_USER_IDS`, no
+    tenant: the RLS table, the doors and the ledger map the whole estate."""
     engine = require_engine(request)
     async with engine.connect() as conn:
         data = await ops_views.posture(conn)
     return jsonable_encoder(vocabulary.envelope("posture", data))
+
+
+@router.get("/ops/health")
+async def ops_health(request: Request, principal: Principal = Depends(require_ops)):
+    """The details public `/health` no longer carries: usage counts, the
+    database login, the pool and the bot's webhook, and the queue's
+    backpressure. Operators only."""
+    return await health.operating_details(request.app.state)

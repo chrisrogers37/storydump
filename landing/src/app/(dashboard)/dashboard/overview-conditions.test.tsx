@@ -4,6 +4,10 @@
  * `ConditionsPanel`). The page, an async server component, is called directly
  * with its two doors mocked — the session guard and the target fetch — and the
  * returned element tree is read without rendering it (`environment: "node"`).
+ *
+ * Every test of the overview page uses this one harness: `answer()` is the
+ * single table of the reads the page makes, so a read the page adds is answered
+ * in one place rather than in copies that drift apart.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,9 +31,11 @@ import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
 import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
+import { RunwayCard } from "@/components/dashboard/runway-card";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import type { Condition, SetupStep } from "@/lib/conditions";
 import type { FolderMix } from "@/lib/dashboard-payloads";
+import type { RunwayRow } from "@/lib/runway";
 
 /** Depth-first walk of a returned tree, children flattened. */
 function* walk(node: ReactNode): Generator<ReactElement> {
@@ -46,7 +52,22 @@ function* walk(node: ReactNode): Generator<ReactElement> {
 const ok = (data: unknown) => ({ ok: true, data });
 const DOWN = { ok: false, status: 503, error: "http_503" };
 
-type Read = "stats" | "intents" | "accounts" | "sources" | "category-mix" | "config";
+/**
+ * Every read the page makes, by the first segment of its path (the
+ * workspace's own config is its empty path). `answer()`'s table must answer
+ * each (a `Record` over them) and the failed-read cases run over all of them,
+ * so a read listed here is both answered and failed.
+ */
+const READS = [
+  "stats",
+  "intents",
+  "accounts",
+  "sources",
+  "category-mix",
+  "runway",
+  "config",
+] as const;
+type Read = (typeof READS)[number];
 
 const STATS = {
   intents_by_state: { review_required: 2, scheduled: 3 },
@@ -57,6 +78,25 @@ const STATS = {
   posts_by_day: [],
   accounts: 1,
   sources: 1,
+};
+
+const RUNWAY = {
+  // Not the server's default, so a level hardcoded in the page cannot pass.
+  below_days: 5,
+  accounts: [
+    {
+      id: "a1",
+      handle: "storyco",
+      display_name: null,
+      state: "active",
+      posting: true,
+      posts_per_day: 3,
+      eligible: 14,
+      // Whole days of 14 files at 3 a day, counted down on the server.
+      days_left: 4,
+      low: true,
+    },
+  ],
 };
 
 /** Answer each read by the first segment of its path; `overrides` replaces one. */
@@ -81,6 +121,7 @@ function answer(overrides: Partial<Record<Read, unknown>> = {}) {
       ],
     }),
     sources: ok({ sources: [] }),
+    runway: ok({ below_days: 5, accounts: [] }),
     config: ok({ tz: "America/New_York" }),
     ...overrides,
   };
@@ -161,13 +202,14 @@ describe("the overview's condition panel", () => {
     expect((panel!.props as { setupStep: SetupStep | null }).setupStep).toBeNull();
   });
 
-  it.each<Read>(["accounts", "sources", "stats", "category-mix", "config"])(
+  it.each(READS)(
     "a failed %s read is the unavailable state — never an all-clear",
     async (read) => {
       answer({ [read]: DOWN });
       const elements = [...walk(await DashboardPage())];
       expect(elements.some((el) => el.type === RouterUnavailable)).toBe(true);
       expect(elements.some((el) => el.type === ConditionsPanel)).toBe(false);
+      expect(elements.some((el) => el.type === RunwayCard)).toBe(false);
     },
   );
 });
@@ -213,5 +255,40 @@ describe("the overview's recent activity", () => {
   it("reads them in UTC for a workspace with no zone set", async () => {
     answer({ config: ok({ tz: null }) });
     expect(await zoneOf()).toBe("UTC");
+  });
+});
+
+describe("the overview's runway card", () => {
+  it("renders each account's days left, below the analytics", async () => {
+    answer({ runway: ok(RUNWAY) });
+    const elements = [...walk(await DashboardPage())];
+
+    const card = elements.find((el) => el.type === RunwayCard);
+    expect(card, "the overview renders no runway card").toBeDefined();
+    const { rows, belowDays } = card!.props as {
+      rows: RunwayRow[];
+      belowDays: number;
+    };
+    expect(belowDays).toBe(5);
+    expect(rows).toEqual([
+      {
+        key: "a1",
+        name: "storyco",
+        headline: "About 4 days",
+        detail: "14 files at 3 a day",
+        low: true,
+      },
+    ]);
+
+    const cards = elements.findIndex((el) => el.type === AnalyticsCards);
+    expect(cards).toBeGreaterThan(-1);
+    expect(elements.indexOf(card!)).toBeGreaterThan(cards);
+  });
+
+  it("reads the runway once, by its own path", async () => {
+    answer({ runway: ok(RUNWAY) });
+    await DashboardPage();
+    const paths = workspaceFetch.mock.calls.map(([path]) => path);
+    expect(paths.filter((path) => path === "runway")).toHaveLength(1);
   });
 });

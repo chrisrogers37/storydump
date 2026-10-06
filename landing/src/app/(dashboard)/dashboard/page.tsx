@@ -12,12 +12,15 @@ import {
 import type { CategoryMixResponse } from "@/lib/category-mix";
 import { deriveConditions, nextSetupStep } from "@/lib/conditions";
 import type { IntentsResponse } from "@/lib/intents";
+import { deriveRunway, type RunwayResponse } from "@/lib/runway";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { PostingChart } from "@/components/dashboard/posting-chart";
 import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
+import { RunwayCard } from "@/components/dashboard/runway-card";
+import { PageHeader } from "@/design/page-header";
 
 /**
  * The overview's history strip. Ten is a glance, not a log — the full list
@@ -36,9 +39,20 @@ export default async function DashboardPage() {
   // bounded list, which is what made the old figures wrong on any workspace
   // past the page size. History is the intent ledger filtered to its terminal
   // states, which is one call rather than a separate endpoint.
-  const [statsResult, historyResult, accountsResult, sourcesResult, mixResult, configResult] =
+  const [
+    statsResult,
+    runwayResult,
+    historyResult,
+    accountsResult,
+    sourcesResult,
+    mixResult,
+    configResult,
+  ] =
     await Promise.all([
       workspaceFetch<StatsResponse>("stats", workspaceId),
+      // Days of content left per account (#1478), counted on the server by
+      // the planner's own rule.
+      workspaceFetch<RunwayResponse>("runway", workspaceId),
       workspaceFetch<IntentsResponse>(
         `intents?state=${HISTORY_STATES}&limit=${HISTORY_LIMIT}`,
         workspaceId,
@@ -60,6 +74,7 @@ export default async function DashboardPage() {
   // unread list would state the worst such fact: that nothing needs attention.
   if (
     !statsResult.ok ||
+    !runwayResult.ok ||
     !historyResult.ok ||
     !accountsResult.ok ||
     !sourcesResult.ok ||
@@ -77,6 +92,7 @@ export default async function DashboardPage() {
     sources: sourcesResult.data.sources,
     intentsByState: stats.intents_by_state,
   });
+  const runway = deriveRunway(runwayResult.data);
   // A member is told an admin connects things; an unknown role (the list
   // was unreachable) gets the button, which the API refuses if it must.
   const role = session.workspaces?.find((w) => w.id === workspaceId)?.role;
@@ -90,16 +106,16 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Last 30 days of posting activity.
-        </p>
-      </div>
+      <PageHeader
+        title="Overview"
+        description="Last 30 days of posting activity."
+      />
 
       <ConditionsPanel conditions={conditions} setupStep={setupStep} />
 
       <AnalyticsCards summary={summary} />
+
+      <RunwayCard rows={runway} belowDays={runwayResult.data.below_days} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <PostingChart data={stats.posts_by_day ?? []} />

@@ -16,7 +16,7 @@ export function UseCaseLink({ slug, children }: { slug: UseCaseSlug; children: R
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="mt-14 first:mt-0">
-      <h2 className="font-display text-3xl font-extrabold tracking-[-0.03em] text-ink md:text-4xl">
+      <h2 className="page-title text-3xl text-ink md:text-4xl">
         {title}
       </h2>
       <div className="mt-4 space-y-4 text-lg leading-relaxed text-ink/80">{children}</div>
