@@ -47,7 +47,10 @@ export default function DemoOverviewPage() {
         <PostingMixCard mix={deriveFolderMix(stats, workspace.mix)} />
       </div>
 
-      <RecentActivity items={workspace.history.slice(0, HISTORY_LIMIT)} />
+      <RecentActivity
+        items={workspace.history.slice(0, HISTORY_LIMIT)}
+        tz={workspace.config.tz ?? "UTC"}
+      />
     </div>
   );
 }

@@ -10,6 +10,7 @@ import {
 } from "@/lib/dashboard-payloads";
 import type { Intent, IntentsResponse } from "@/lib/intents";
 import { postingIntervalMinutes } from "@/lib/schedule";
+import { dateInZone } from "@/lib/zoned-dates";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import { StatCard } from "@/components/ui/card";
@@ -20,17 +21,6 @@ const laneItem = (i: Intent) => ({
   category: i.category ?? "uncategorised",
   status: i.state,
 });
-
-/** Today, in the WORKSPACE's timezone — `daily_post_counts.local_date` is local. */
-function todayIn(tz: string | null): string {
-  try {
-    return new Intl.DateTimeFormat("en-CA", {
-      timeZone: tz ?? "UTC",
-    }).format(new Date());
-  } catch {
-    return new Intl.DateTimeFormat("en-CA", { timeZone: "UTC" }).format(new Date());
-  }
-}
 
 /**
  * The calendar's three bounded reads (`01` H5). History and the schedule
@@ -98,7 +88,9 @@ export default async function CalendarPage() {
     }));
 
   // Counted where the rows are, not re-summed from the bounded lists above.
-  const today = todayIn(config.tz);
+  // Today is the WORKSPACE's: `daily_post_counts.local_date` is its own date.
+  const tz = config.tz ?? "UTC";
+  const today = dateInZone(new Date(), tz);
   const postsToday =
     (stats.posts_by_day ?? []).find((d) => d.local_date.startsWith(today))
       ?.count ?? 0;
@@ -154,6 +146,7 @@ export default async function CalendarPage() {
         history={historyItems}
         queue={queueItems}
         schedule={scheduleSlots}
+        tz={tz}
       />
     </div>
   );

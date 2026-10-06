@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/dashboard/empty-state";
 import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import type { Intent } from "@/lib/intents";
+import { formatInZone } from "@/lib/zoned-dates";
 
 /**
  * Recent activity, from the intent ledger (#1044: a history tab is
@@ -27,7 +28,34 @@ type ActivityItem = Pick<
   "id" | "state" | "file_name" | "category" | "entered_state_at"
 >;
 
-export function RecentActivity({ items }: { items: ActivityItem[] }) {
+const WHEN: Intl.DateTimeFormatOptions = {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+};
+
+/**
+ * When a row reached its state, read on the workspace's clock as the Queue's
+ * times are (#1511). Without a zone it reads the clock the code runs on, which
+ * the server (UTC) and a browser elsewhere disagree about: React rejects the
+ * server's HTML (React error 418). Every page that has the workspace's zone
+ * passes it.
+ */
+function when(iso: string, tz: string | undefined): string {
+  return tz
+    ? formatInZone(iso, tz, WHEN)
+    : new Date(iso).toLocaleDateString("en-US", WHEN);
+}
+
+export function RecentActivity({
+  items,
+  tz,
+}: {
+  items: ActivityItem[];
+  /** The workspace's zone, which every time in the list is read in (see `when`). */
+  tz?: string;
+}) {
   return (
     <Card>
       <CardHeader>
@@ -52,12 +80,7 @@ export function RecentActivity({ items }: { items: ActivityItem[] }) {
                   <p className="truncate font-medium">{item.file_name}</p>
                   <p className="text-xs text-muted-foreground">
                     {item.category ? `${item.category} · ` : ""}
-                    {new Date(item.entered_state_at).toLocaleDateString("en-US", {
-                      month: "short",
-                      day: "numeric",
-                      hour: "numeric",
-                      minute: "2-digit",
-                    })}
+                    {when(item.entered_state_at, tz)}
                   </p>
                 </div>
                 <Badge

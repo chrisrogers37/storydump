@@ -8,6 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { dateInZone, formatCalendarDate } from "@/lib/zoned-dates";
 import { TONE_CLASS, TONE_DOT, type BadgeTone } from "@/components/dashboard/tone";
 
 interface HistoryItem {
@@ -37,77 +38,73 @@ interface CalendarDay {
   posts: { label: string; category: string; type: "past" | "queued" | "predicted" }[];
 }
 
-function buildCalendarDays(
+/** A UTC calendar date as `YYYY-MM-DD`. */
+const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+
+/**
+ * The month on the workspace's own calendar (#1511). Today, the month shown
+ * and the day each item falls on are all read in `tz`, the zone the Queue's
+ * times already use. Read on whatever clock the code ran on, the server (UTC)
+ * and an evening browser in New York disagreed about which day was today and
+ * which day a slot fell on. The grid itself is calendar arithmetic on UTC
+ * dates, which has no zone to disagree about.
+ */
+export function buildCalendarDays(
   history: HistoryItem[],
   queue: QueueItem[],
-  schedule: ScheduleSlot[]
-): CalendarDay[] {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth();
+  schedule: ScheduleSlot[],
+  tz: string,
+  now: Date = new Date()
+): { month: string; days: CalendarDay[] } {
+  const today = dateInZone(now, tz);
+  const [year, month] = today.split("-").map(Number);
 
-  // Start from beginning of the month, pad to Monday
-  const firstOfMonth = new Date(year, month, 1);
-  const startDay = firstOfMonth.getDay();
-  const start = new Date(firstOfMonth);
-  start.setDate(start.getDate() - ((startDay + 6) % 7)); // Monday start
+  // The month's first and last days, padded out to whole Monday-first weeks.
+  const first = new Date(Date.UTC(year, month - 1, 1));
+  const last = new Date(Date.UTC(year, month, 0));
+  const start = new Date(first);
+  start.setUTCDate(start.getUTCDate() - ((first.getUTCDay() + 6) % 7));
+  const end = new Date(last);
+  end.setUTCDate(end.getUTCDate() + ((7 - last.getUTCDay()) % 7));
 
-  // End at end of month, pad to Sunday
-  const lastOfMonth = new Date(year, month + 1, 0);
-  const endDay = lastOfMonth.getDay();
-  const end = new Date(lastOfMonth);
-  end.setDate(end.getDate() + (7 - endDay) % 7);
-
-  // Index events by date string
+  // Index events by the workspace's day.
   const postsByDate = new Map<string, CalendarDay["posts"]>();
+  const add = (instant: string, post: CalendarDay["posts"][number]) => {
+    const date = dateInZone(instant, tz);
+    if (!postsByDate.has(date)) postsByDate.set(date, []);
+    postsByDate.get(date)!.push(post);
+  };
 
   for (const item of history) {
-    const date = item.posted_at.split("T")[0];
-    if (!postsByDate.has(date)) postsByDate.set(date, []);
-    postsByDate.get(date)!.push({
-      label: item.media_name,
-      category: item.category,
-      type: "past",
-    });
+    add(item.posted_at, { label: item.media_name, category: item.category, type: "past" });
   }
-
   for (const item of queue) {
-    const date = item.scheduled_for.split("T")[0];
-    if (!postsByDate.has(date)) postsByDate.set(date, []);
-    postsByDate.get(date)!.push({
-      label: item.media_name,
-      category: item.category,
-      type: "queued",
-    });
+    add(item.scheduled_for, { label: item.media_name, category: item.category, type: "queued" });
   }
-
   for (const slot of schedule) {
-    const date = slot.slot_time.split("T")[0];
-    if (!postsByDate.has(date)) postsByDate.set(date, []);
-    postsByDate.get(date)!.push({
+    add(slot.slot_time, {
       label: slot.predicted_category || "any",
       category: slot.predicted_category || "any",
       type: "predicted",
     });
   }
 
-  const today = now.toISOString().split("T")[0];
   const days: CalendarDay[] = [];
-  const current = new Date(start);
-
-  while (current <= end) {
-    const dateStr = current.toISOString().split("T")[0];
+  for (const current = new Date(start); current <= end; current.setUTCDate(current.getUTCDate() + 1)) {
+    const date = isoDay(current);
     days.push({
-      date: dateStr,
-      dayOfMonth: current.getDate(),
-      isToday: dateStr === today,
-      isCurrentMonth: current.getMonth() === month,
-      posts: postsByDate.get(dateStr) || [],
+      date,
+      dayOfMonth: current.getUTCDate(),
+      isToday: date === today,
+      isCurrentMonth: current.getUTCMonth() === month - 1,
+      posts: postsByDate.get(date) || [],
     });
-    current.setDate(current.getDate() + 1);
   }
 
-  return days;
+  return {
+    month: formatCalendarDate(isoDay(first), { month: "long", year: "numeric" }),
+    days,
+  };
 }
 
 const typeTone = {
@@ -120,21 +117,23 @@ export function ContentCalendar({
   history,
   queue,
   schedule,
+  tz = "UTC",
 }: {
   history: HistoryItem[];
   queue: QueueItem[];
   schedule: ScheduleSlot[];
+  /**
+   * The workspace's zone, which today, the month and each item's day are read
+   * in. Without one it reads UTC, the zone the API writes its timestamps in.
+   */
+  tz?: string;
 }) {
-  const days = useMemo(
-    () => buildCalendarDays(history, queue, schedule),
-    [history, queue, schedule]
+  const { month: monthName, days } = useMemo(
+    () => buildCalendarDays(history, queue, schedule, tz),
+    [history, queue, schedule, tz]
   );
 
   const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-  const monthName = new Date().toLocaleDateString("en-US", {
-    month: "long",
-    year: "numeric",
-  });
 
   return (
     <Card>
