@@ -74,12 +74,12 @@ Save.
 
 ### 4. Justify the scopes
 
-Under **Google Auth Platform → Data Access**, make sure exactly these are listed (remove any other):
+Under **Google Auth Platform → Data Access**, the full list at submission is exactly these (remove any other):
 
 - `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile` (sign-in)
 - `.../auth/drive.readonly` (Drive)
 
-Data Access lists `drive.readonly` under *Your restricted scopes* ("Approval required") with three fields, filled at submission. **`drive.readonly` is the one Google will scrutinize.**
+Data Access lists `drive.readonly` under *Your restricted scopes* ("Approval required") with three required fields, and **Save stays disabled until all three are filled**, the demo video's YouTube link included. So before the video exists, save Data Access with only the three sign-in scopes (remove `drive.readonly` with its trash icon), and add `drive.readonly` back at submission with all three fields. Removing it from the list does not change what the app asks Google for at connect. **`drive.readonly` is the one Google will scrutinize.**
 
 - **What features will you use?** A dropdown of Google's permitted uses for restricted Drive scopes. Pick the one closest to a productivity app that works with the user's Drive files in its own interface; the labels were not confirmed from here, so if none fits, screenshot the list before choosing.
 - **How will the scopes be used?** Plain text, at most 1,000 characters (backticks paste literally). This version is 996:
@@ -104,6 +104,8 @@ Google will ask for the demo video URL. Record one that shows:
 4. Storydump listing files from the connected folder.
 5. A post going out (which reads file bytes from Drive).
 6. The user disconnecting / revoking access.
+
+Google's form adds two rules: the video "must include all OAuth clients that you assigned to this project" (if *Clients* lists more than the web client, settle what each one is for before recording), and "the unverified app screen will appear for your test account. This is expected and must be shown in the video", so film Google's warning page and the *Advanced → Go to storydump (unsafe)* click before the consent screen.
 
 Record on storydump.app with a Google account that has already connected Drive: production already requests `drive.readonly`, so this adds no new scope, and a second grant by the same account should not count again toward the user cap (inferred). The console's advice to record on staging is for scopes not yet live.
 
