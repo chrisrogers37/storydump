@@ -386,10 +386,13 @@ class TestRailwayEdgeHop:
         assert got == self.CALLER
 
     def test_only_one_hop_is_ever_removed(self, seen_from):
-        """A client holding a hop-range address, on a path without the hop, is
-        that address: what precedes it is never reached."""
+        """A client holding a hop-range address, behind the hop, is that
+        address: the second hop-range entry stays and the walk stops there."""
         got = seen_from(self.EDGE, f"{self.FORGED}, {self.HOP}, {self.HOP}")
         assert got == self.HOP
+
+    def test_a_hop_with_a_port_is_removed(self, seen_from):
+        assert seen_from(self.EDGE, f"{self.CALLER}, {self.HOP}:443") == self.CALLER
 
     def test_the_only_entry_is_never_removed(self, seen_from):
         assert seen_from(self.EDGE, self.HOP) == self.HOP
@@ -408,8 +411,11 @@ class TestRailwayEdgeHop:
     def test_a_hop_range_peer_is_not_trusted(self, seen_from):
         assert seen_from(self.HOP, self.FORGED) == self.HOP
 
-    def test_no_wildcard_in_the_hop_list(self):
-        assert "*" not in settings.edge_hop_hosts
+    def test_a_wildcard_hop_list_is_refused(self):
+        from src.config.settings import Settings, SettingsError
+
+        with pytest.raises(SettingsError, match="EDGE_HOP_HOSTS"):
+            Settings(EDGE_HOP_HOSTS="*")
 
 
 # =============================================================================

@@ -54,7 +54,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import ClientDisconnect
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware, _TrustedHosts
+
+# `_TrustedHosts` and `_parse_host_port` are uvicorn's private parsing, used so
+# the edge-hop removal reads entries exactly as the walk does; the tests drive
+# both through `create_app`, so a uvicorn change that moves them fails there.
+from uvicorn.middleware.proxy_headers import (
+    ProxyHeadersMiddleware,
+    _parse_host_port,
+    _TrustedHosts,
+)
 
 from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length
 from src.api.routes.auth import router as auth_router
@@ -172,16 +180,22 @@ class DropEdgeHopMiddleware:
     trusted-proxy walk would stop at the hop: a public address, so every
     visitor through it shared one set of limits. When the header's LAST entry
     is in the hop ranges and something precedes it, this removes that one
-    entry and leaves the walk the rest. Removing by position, once, means a
-    client who holds a hop-range address on a path without the hop is still
-    attributed to itself, never to whatever precedes it; an unknown hop is
-    kept and keyed on, never skipped.
+    entry and leaves the walk the rest. Once, by position: an unknown hop is
+    kept and keyed on, never skipped, and a second hop-range entry stays.
+
+    What it cannot tell apart is a hop from a client who itself holds a
+    hop-range address on a path where no hop is appended: that client's own
+    entry is removed and the walk reads the one before it. Railway's edge
+    writes the header itself (a caller's value is dropped), so that entry is
+    the edge's too; were the edge ever to keep a caller's value, such a
+    client could choose its address. `EDGE_HOP_HOSTS` stays as narrow as the
+    measured hops for that reason.
 
     It needs no peer check of its own: the walk reads the header only from a
     trusted proxy, and from anyone else ignores it, shortened or not. Runs
     after the ambiguous-header drop, so there is at most one header to read.
-    uvicorn's own `_TrustedHosts` parses the list, as the walk parses
-    `TRUSTED_PROXY_HOSTS`.
+    The entry is parsed and matched by uvicorn's own helpers, as the walk
+    parses and matches it (a port or `[v6]:port` included).
     """
 
     _XFF = b"x-forwarded-for"
@@ -196,10 +210,11 @@ class DropEdgeHopMiddleware:
             for i, (name, value) in enumerate(headers):
                 if name.lower() != self._XFF:
                     continue
-                entries = [e.strip() for e in value.decode("latin1").split(",")]
-                if len(entries) > 1 and entries[-1] in self.hops:
+                head, comma, last = value.rpartition(b",")
+                host, _ = _parse_host_port(last.decode("latin1").strip())
+                if comma and host in self.hops:
                     headers = list(headers)
-                    headers[i] = (name, ", ".join(entries[:-1]).encode("latin1"))
+                    headers[i] = (name, head)
                     scope["headers"] = headers
                 break
         await self.app(scope, receive, send)

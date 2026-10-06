@@ -4,7 +4,7 @@ import re
 import uuid
 from typing import Container
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ALIASED ON PURPOSE, and the collision is not hypothetical: the class directly
@@ -309,12 +309,21 @@ class Settings(BaseSettings):
     # 2026-10-06: .66, .67 and .69, from one edge region). When the header
     # ENDS in one of these, `DropEdgeHopMiddleware` removes exactly that one
     # entry, so the walk lands on the visitor rather than on a hop every
-    # visitor shares. Never more than one, and never the only entry: a client
-    # inside this range is still attributed to itself, and a hop outside it
-    # (another region's, say) is kept, so its visitors share that hop's limits
-    # rather than anyone choosing their own. Listing an address here never
-    # makes it a trusted peer. Never "*".
+    # visitor shares. Never more than one, and never the only entry; a hop
+    # outside this range (another region's, say) is kept, so its visitors
+    # share that hop's limits rather than anyone choosing their own. Keep it
+    # as narrow as the measured hops: a client holding one of these addresses
+    # on a path with no hop would have its own entry removed (the middleware's
+    # docstring says when that matters). Listing an address here never makes
+    # it a trusted peer. "*" is refused at load.
     EDGE_HOP_HOSTS: str = "152.233.47.0/24"
+
+    @field_validator("EDGE_HOP_HOSTS")
+    @classmethod
+    def _no_wildcard_hop(cls, value: str) -> str:
+        if "*" in value:
+            raise ValueError("EDGE_HOP_HOSTS must list addresses, never *")
+        return value
 
     # The largest request body the API reads, in bytes; over it is 413
     # (`app.py::BodySizeLimitMiddleware`). No route takes an upload: the
