@@ -54,7 +54,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import ClientDisconnect
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+# `_TrustedHosts` and `_parse_host_port` are uvicorn's private parsing, used so
+# the edge-hop removal reads entries exactly as the walk does; the tests drive
+# both through `create_app`, so a uvicorn change that moves them fails there.
+from uvicorn.middleware.proxy_headers import (
+    ProxyHeadersMiddleware,
+    _parse_host_port,
+    _TrustedHosts,
+)
 
 from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length
 from src.api.routes.auth import router as auth_router
@@ -162,6 +170,53 @@ class DropAmbiguousForwardedForMiddleware:
             )
             scope["headers"] = [(k, v) for k, v in headers if k.lower() != self._XFF]
 
+        await self.app(scope, receive, send)
+
+
+class DropEdgeHopMiddleware:
+    """Remove the one hop Railway appends after the visitor (`EDGE_HOP_HOSTS`).
+
+    Behind Railway the edge's header reads `<visitor>, <hop>`, and the
+    trusted-proxy walk would stop at the hop: a public address, so every
+    visitor through it shared one set of limits. When the header's LAST entry
+    is in the hop ranges and something precedes it, this removes that one
+    entry and leaves the walk the rest. Once, by position: an unknown hop is
+    kept and keyed on, never skipped, and a second hop-range entry stays.
+
+    What it cannot tell apart is a hop from a client who itself holds a
+    hop-range address on a path where no hop is appended: that client's own
+    entry is removed and the walk reads the one before it. That entry is the
+    edge's own only while Railway's edge writes the header itself rather
+    than keeping a caller's value, which public reports describe but nothing
+    here has measured; were it kept, such a client could choose its address.
+    `EDGE_HOP_HOSTS` stays as narrow as the measured hops for that reason.
+
+    It needs no peer check of its own: the walk reads the header only from a
+    trusted proxy, and from anyone else ignores it, shortened or not. Runs
+    after the ambiguous-header drop, so there is at most one header to read.
+    The entry is parsed and matched by uvicorn's own helpers, as the walk
+    parses and matches it (a port or `[v6]:port` included).
+    """
+
+    _XFF = b"x-forwarded-for"
+
+    def __init__(self, app: ASGIApp, hop_hosts: list[str]) -> None:
+        self.app = app
+        self.hops = _TrustedHosts(hop_hosts)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "lifespan":
+            headers = scope.get("headers", [])
+            for i, (name, value) in enumerate(headers):
+                if name.lower() != self._XFF:
+                    continue
+                head, comma, last = value.rpartition(b",")
+                host, _ = _parse_host_port(last.decode("latin1").strip())
+                if comma and host in self.hops:
+                    headers = list(headers)
+                    headers[i] = (name, head)
+                    scope["headers"] = headers
+                break
         await self.app(scope, receive, send)
 
 
@@ -800,8 +855,9 @@ def create_app(
     _register_handlers(app)
 
     # Middleware. Starlette prepends, so the LAST added runs FIRST on the
-    # request path: CORS outermost, then the ambiguous-XFF drop (#765) ahead
-    # of the trusted-proxy walk (#726), then the body limit — after the walk,
+    # request path: CORS outermost, then the ambiguous-XFF drop (#765) and
+    # the removal of Railway's edge hop ahead of the trusted-proxy walk
+    # (#726), then the body limit — after the walk,
     # so its refusal names the attributed client, and ahead of everything
     # that could read a body — then security headers innermost.
     app.add_middleware(SecurityHeadersMiddleware)
@@ -811,6 +867,7 @@ def create_app(
     app.add_middleware(
         ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts
     )
+    app.add_middleware(DropEdgeHopMiddleware, hop_hosts=settings.edge_hop_hosts)
     app.add_middleware(DropAmbiguousForwardedForMiddleware)
     app.add_middleware(
         CORSMiddleware,

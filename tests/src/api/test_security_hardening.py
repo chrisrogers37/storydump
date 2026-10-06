@@ -361,6 +361,74 @@ class TestRailwayEdgeAttribution:
         assert got == self.FASTLY
 
 
+class TestRailwayEdgeHop:
+    """The one hop Railway appends after the visitor (`EDGE_HOP_HOSTS`).
+
+    Measured 2026-10-06: the edge's Network Logs saw the visitor, and the app
+    logged 152.233.47.69, an entry after the visitor's in the header the edge
+    sends from 100.64.0.x. Driven through `create_app`, like the class above.
+    """
+
+    EDGE = TestRailwayEdgeAttribution.EDGE
+    CALLER = TestRailwayEdgeAttribution.CALLER
+    FORGED = TestRailwayEdgeAttribution.FORGED
+    FASTLY = TestRailwayEdgeAttribution.FASTLY
+    HOP = "152.233.47.69"
+    OTHER_HOP = "152.233.48.10"  # outside the measured range
+
+    seen_from = TestRailwayEdgeAttribution.seen_from
+
+    def test_the_hop_is_removed_and_the_visitor_read(self, seen_from):
+        assert seen_from(self.EDGE, f"{self.CALLER}, {self.HOP}") == self.CALLER
+
+    def test_a_forged_entry_left_of_the_visitor_still_loses(self, seen_from):
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.CALLER}, {self.HOP}")
+        assert got == self.CALLER
+
+    def test_only_one_hop_is_ever_removed(self, seen_from):
+        """A client holding a hop-range address, behind the hop, is that
+        address: the second hop-range entry stays and the walk stops there."""
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.HOP}, {self.HOP}")
+        assert got == self.HOP
+
+    def test_a_hop_with_a_port_is_removed(self, seen_from):
+        assert seen_from(self.EDGE, f"{self.CALLER}, {self.HOP}:443") == self.CALLER
+
+    def test_the_only_entry_is_never_removed(self, seen_from):
+        assert seen_from(self.EDGE, self.HOP) == self.HOP
+
+    def test_an_unknown_hop_is_kept_and_keyed_on(self, seen_from):
+        got = seen_from(self.EDGE, f"{self.CALLER}, {self.OTHER_HOP}")
+        assert got == self.OTHER_HOP
+
+    def test_the_cdn_hop_is_still_not_skipped(self, seen_from):
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.FASTLY}, {self.HOP}")
+        assert got == self.FASTLY
+
+    def test_an_untrusted_peers_header_stays_ignored(self, seen_from):
+        assert seen_from(self.CALLER, f"{self.FORGED}, {self.HOP}") == self.CALLER
+
+    def test_a_hop_range_peer_is_not_trusted(self, seen_from):
+        assert seen_from(self.HOP, self.FORGED) == self.HOP
+
+    def test_a_wildcard_hop_list_is_refused(self):
+        from src.config.settings import Settings, SettingsError
+
+        for broad in (
+            "*",
+            "0.0.0.0/0",
+            "152.0.0.0/8",
+            "::/0",
+            "nonsense",
+            "152.233.47.66/24",
+            "::ffff:0:0/96",
+            "64:ff9b::/96",
+        ):
+            with pytest.raises(SettingsError, match="EDGE_HOP_HOSTS"):
+                Settings(EDGE_HOP_HOSTS=broad)
+        assert Settings(EDGE_HOP_HOSTS="152.233.47.0/24, 192.0.2.7").edge_hop_hosts
+
+
 # =============================================================================
 # Request body limit
 # =============================================================================

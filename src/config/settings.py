@@ -1,10 +1,11 @@
 """Application settings and configuration management."""
 
+import ipaddress
 import re
 import uuid
 from typing import Container
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ALIASED ON PURPOSE, and the collision is not hypothetical: the class directly
@@ -118,6 +119,13 @@ def parse_ops_user_ids(raw: str) -> tuple[frozenset[str], list[int]]:
         except ValueError:
             refused.append(position)
     return frozenset(ids), refused
+
+
+#: IPv6 prefixes that embed all of IPv4 (mapped, NAT64): never a hop range.
+_IPV4_IN_IPV6 = (
+    ipaddress.ip_network("::ffff:0:0/96"),
+    ipaddress.ip_network("64:ff9b::/96"),
+)
 
 
 class Settings(BaseSettings):
@@ -301,6 +309,42 @@ class Settings(BaseSettings):
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.1,::1,fd00::/8"
     )
 
+    # The addresses of the hop Railway puts between its edge and the app.
+    #
+    # Railway's edge sees the visitor (its Network Logs' `srcIp`), then the
+    # request reaches the app from 100.64.0.x with one more entry after the
+    # visitor's: `X-Forwarded-For: <visitor>, 152.233.47.x` (measured
+    # 2026-10-06: .66, .67 and .69, from one edge region). When the header
+    # ENDS in one of these, `DropEdgeHopMiddleware` removes exactly that one
+    # entry, so the walk lands on the visitor rather than on a hop every
+    # visitor shares. Never more than one, and never the only entry; a hop
+    # outside this range (another region's, say) is kept, so its visitors
+    # share that hop's limits rather than anyone choosing their own. Keep it
+    # as narrow as the measured hops: a client holding one of these addresses
+    # on a path with no hop would have its own entry removed (the middleware's
+    # docstring says when that matters). Listing an address here never makes
+    # it a trusted peer. "*", an entry uvicorn would not parse, a range broader than /16
+    # (v6: /48) or one embedding IPv4 is refused at load. Blank turns the
+    # removal off.
+    EDGE_HOP_HOSTS: str = "152.233.47.0/24"
+
+    @field_validator("EDGE_HOP_HOSTS")
+    @classmethod
+    def _narrow_hops(cls, value: str) -> str:
+        """Refuse what uvicorn would not read as an address or network (it
+        parses strictly, so `10.0.0.5/8` would be kept as a string that never
+        matches), and any range broad enough to cover callers at large: a
+        removed entry must be a hop, so the list names hops, not networks."""
+        for entry in (e.strip() for e in value.split(",")):
+            if not entry:
+                continue
+            net = ipaddress.ip_network(entry)
+            if net.prefixlen < (16 if net.version == 4 else 48) or any(
+                net.overlaps(n) for n in _IPV4_IN_IPV6
+            ):
+                raise ValueError("EDGE_HOP_HOSTS must name narrow hop ranges")
+        return value
+
     # The largest request body the API reads, in bytes; over it is 413
     # (`app.py::BodySizeLimitMiddleware`). No route takes an upload: the
     # largest body anything reads is one Telegram update, and every other is
@@ -344,6 +388,11 @@ class Settings(BaseSettings):
     def trusted_proxy_hosts(self) -> list[str]:
         """`TRUSTED_PROXY_HOSTS` as the list uvicorn's middleware expects."""
         return [h.strip() for h in self.TRUSTED_PROXY_HOSTS.split(",") if h.strip()]
+
+    @property
+    def edge_hop_hosts(self) -> list[str]:
+        """`EDGE_HOP_HOSTS` as a list, like `trusted_proxy_hosts`."""
+        return [h.strip() for h in self.EDGE_HOP_HOSTS.split(",") if h.strip()]
 
     @property
     def ops_user_ids(self) -> frozenset[str]:
