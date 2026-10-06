@@ -17,15 +17,19 @@ the owner. The roles exist in production (created by the step-0 bootstrap,
 granted by `057`, exercised by the F.4 harness as those exact logins). What is
 missing is operational: passwords, and the two services' connection strings.
 
-`/health` reports which login the API actually holds — `"db_role": {"user":
-..., "bypassrls": ...}` — and the worker logs the same at boot. That is how
+The API's operating details report which login it actually holds —
+`"db_role": {"user": ..., "bypassrls": ...}`, read with `storydump health
+--json` (`data.api.db_role`; it needs a token whose person is in the API's
+`OPS_USER_IDS`, and `data.details.read` must be true) or `storydump posture`
+(`data.role`) — and the worker logs the same at boot. Public `/health` no
+longer carries it (#1570). That is how
 each step below is verified rather than assumed.
 
 ## Preconditions
 
-- The deploy that added `db_role` to `/health` is live:
-  `curl -s https://api.storydump.app/health` shows the field (today it reads
-  `neondb_owner` / `bypassrls: true`).
+- `OPS_USER_IDS` on the API names you, so `storydump health --json` shows
+  `data.api.db_role` (before the switch it reads `neondb_owner` /
+  `bypassrls: true`).
 - Migration 081 is applied (`storydump doctor` reads the ledger head at 81 or
   above): the fleet health surfaces and the Meta deauthorize callback read the
   estate through its doors. Before it, `/health/scheduling` and
@@ -73,8 +77,9 @@ each step below is verified rather than assumed.
 
 3. **Switch the API.** Railway → the API service → Variables →
    `TARGET_DATABASE_URL` = the `svc_ingress` string. Redeploy. Then:
-   - `curl -s https://api.storydump.app/health` →
-     `"db_role": {"user": "svc_ingress", "bypassrls": false}`.
+   - `storydump health --json` → `data.api.db_role` is
+     `{"user": "svc_ingress", "bypassrls": false}` (or `storydump posture` →
+     `role`).
    - `storydump health`: the `scheduling` and `posting` lines report the SAME
      verdicts and counts as before the switch (`accounts_active`,
      `posted_ever`, `intents_ever`). A `no-signal` or `never-posted` that was
@@ -101,7 +106,8 @@ each step below is verified rather than assumed.
 
 ## Done when
 
-- `/health` on production reads `svc_ingress` / `bypassrls: false` and the
+- The API's operating details on production read `svc_ingress` /
+  `bypassrls: false` and the
   worker's boot line reads `svc_worker` / `False`. The worker's half: observed
   2026-09-21 15:52 UTC (deployment `c33ec782`). The API's: observed 2026-09-21
   19:47 UTC (deployment `0a554321`, `db_role user=svc_ingress bypassrls=no`).

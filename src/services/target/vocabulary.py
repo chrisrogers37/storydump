@@ -177,11 +177,13 @@ SETTINGS_APPROVAL_TTL_MINUTES_MAX = SETTINGS_TTL_DAYS_MAX * 24 * 60
 TOKEN_PREFIX = "sdt_"
 
 #: The refusals a token principal gets WITH a ``reason`` (403): the route is
-#: session-only, the token cannot write, or it belongs to another workspace.
+#: session-only, the token cannot write, it belongs to another workspace, or
+#: its person is not one of the deployment's operators (`OPS_USER_IDS`).
 TOKEN_REFUSALS: tuple[str, ...] = (
     "session_required",
     "readonly_token",
     "wrong_workspace",
+    "not_ops",
 )
 
 #: Why a presented token did not resolve (the API answers 401 without saying
@@ -354,6 +356,7 @@ REASON_SENTENCES: Mapping[str, str] = {
     "session_required": "this needs a signed-in web session, not a token",
     "readonly_token": "this token is read-only",
     "wrong_workspace": "this token belongs to another workspace",
+    "not_ops": "only the people in OPS_USER_IDS may read this",
     "not_authorized": "not authorized — run storydump login with a valid token",
     "not_a_member": "no such workspace for this token",
     # a member below the verb's floor: the API's bare 403 (the token is fine)
@@ -500,6 +503,14 @@ DEFAULT_MAX_CONNECTIONS = 10
 RAILWAY_ENVIRONMENT_VAR = "RAILWAY_ENVIRONMENT_NAME"
 #: The one environment that owns the bot's webhook.
 PRODUCTION_ENVIRONMENT = "production"
+
+
+def is_production(env: Mapping[str, str]) -> bool:
+    """Whether *env* is Railway's production environment."""
+    value = env.get(RAILWAY_ENVIRONMENT_VAR) or ""
+    return value.strip().lower() == PRODUCTION_ENVIRONMENT
+
+
 #: Telegram's Bot API. Spelled here because the CLI's `webhook` verb and the
 #: worker's transport both speak to it, and the CLI reaches `src` only here.
 TELEGRAM_BOT_API_BASE = "https://api.telegram.org"

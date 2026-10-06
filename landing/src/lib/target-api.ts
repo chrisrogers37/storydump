@@ -29,20 +29,22 @@ export const TARGET_API_URL =
   process.env.TARGET_API_URL || process.env.BACKEND_URL || "http://localhost:8000";
 
 /**
- * The API mounts TWO prefixes and they are not interchangeable.
+ * The API mounts THREE prefixes and they are not interchangeable.
  *
  * `/api/v1` is the authenticated resource + command surface. `/auth` is the
  * sign-in plane, which is deliberately outside it because two of its endpoints
  * are PRE-authentication — there is no principal yet to scope them to.
+ * `/public` serves a visitor with no account at all: the marketing waitlist.
  *
  * Callers name the plane rather than the prefix, so a path can never silently
  * be assembled against the wrong one.
  */
-export type ApiPlane = "v1" | "auth";
+export type ApiPlane = "v1" | "auth" | "public";
 
 const PREFIX: Record<ApiPlane, string> = {
   v1: "/api/v1",
   auth: "/auth",
+  public: "/public",
 };
 
 export type TargetResult<T> =

@@ -47,7 +47,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 
 from src.models.target.base import TargetBase
-from src.models.target.columns import TZ, fk, pk, timestamps
+from src.models.target.columns import NOW, TZ, fk, pk, timestamps
 
 
 class User(TargetBase):
@@ -212,6 +212,76 @@ class WorkspaceMember(TargetBase):
             "workspace_id",
             unique=True,
             postgresql_where=text("role = 'owner'"),
+        ),
+    )
+
+
+class WorkspaceMemberRemoval(TargetBase):
+    """The record that an admin removed a person (090), so the Telegram join
+    path (`fn_group_member_seen`) does not undo the removal the next time the
+    person speaks in the bound group. Written only by `fn_member_remove`; an
+    invitation accepted later makes it inert, and a second removal stamps it
+    again."""
+
+    __tablename__ = "workspace_member_removals"
+
+    workspace_id = fk("workspaces.id", "CASCADE", primary_key=True)
+    user_id = fk("users.id", "CASCADE", primary_key=True)
+    removed_by_user_id = fk("users.id", "SET NULL", nullable=True)
+    removed_at = Column(TZ, nullable=False, server_default=NOW)
+
+
+#: §35's invisible characters, which an address may not carry (092, 100).
+_NO_INVISIBLE = (
+    "email !~ '[\\u0080-\\u00a0\\u00ad\\u180e\\u2000-\\u200f\\u2028-\\u202f"
+    "\\u205f-\\u2064\\u3000\\ufeff]'"
+)
+
+
+class SignupAdmission(TargetBase):
+    """An email the owner let in (092): a new Google account with this verified
+    address may create its user. Global, not tenant-plane; read only through
+    `fn_signup_admitted`, written by the owner as the database owner."""
+
+    __tablename__ = "signup_admissions"
+
+    email = Column(Text, primary_key=True)
+    admitted_at = Column(TZ, nullable=False, server_default=NOW)
+    note = Column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "email = lower(email) AND email ~ '^[^[:space:]@]+@[^[:space:]@]+$'"
+            " AND " + _NO_INVISIBLE,
+            name="ck_signup_admissions_email",
+        ),
+    )
+
+
+class WaitlistEntry(TargetBase):
+    """An address that joined the marketing waitlist (100). Global, not
+    tenant-plane; the API (`svc_ingress`) may INSERT and nothing else, and the
+    owner reads the list as the database owner. `utm` is the campaign the
+    visitor came from."""
+
+    __tablename__ = "waitlist_entries"
+
+    email = Column(Text, primary_key=True)
+    joined_at = Column(TZ, nullable=False, server_default=NOW)
+    utm = Column(JSONB, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "email = lower(email) AND length(email) <= 254"
+            " AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$'"
+            " AND email !~ '[[:cntrl:]]'"
+            " AND email !~ '[\\u061c\\u2066-\\u2069\\ufff9-\\ufffb\\U000e0000-\\U000e007f]'"
+            " AND " + _NO_INVISIBLE,
+            name="ck_waitlist_entries_email",
+        ),
+        CheckConstraint(
+            "utm IS NULL OR (jsonb_typeof(utm) = 'object' AND length(utm::text) <= 2048)",
+            name="ck_waitlist_entries_utm",
         ),
     )
 

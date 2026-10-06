@@ -114,6 +114,12 @@ def test_a_missing_header_is_refused(client, armed):
     assert _post(client, {"update_id": 1}, secret=None).status_code == 403
 
 
+def test_a_non_ascii_secret_is_refused_not_a_500(client, armed):
+    """A header byte of 0x80 or above reaches the check as a non-ASCII str,
+    which `compare_digest` refuses to compare as text."""
+    assert _post(client, {"update_id": 1}, secret=b"s\xe9cret").status_code == 403
+
+
 def test_the_secret_is_checked_before_the_body_is_parsed(client, armed):
     """A bad secret with an unparseable body must still be 403, not 400.
 
@@ -333,6 +339,97 @@ def test_a_runtime_without_a_sender_is_silent_by_construction(client, armed, rep
     assert replying["replies"] == []
 
 
+def test_the_link_confirmation_is_sent_with_its_buttons(client, armed, replying):
+    """The `link-` lane's prompt rides `reply_markup` to the sender; a reply
+    without a keyboard is still the two-argument call it always was."""
+    markup = {"inline_keyboard": [[{"text": "Confirm", "callback_data": "x"}]]}
+    sent = []
+
+    async def reply(chat_id, text, **kw):
+        sent.append((chat_id, text, kw, replying["conn"].commits))
+
+    replying["result"] = replying["StartResult"](
+        outcome="confirmation_offered",
+        handled=True,
+        reply="Link this Telegram account?",
+        reply_markup=markup,
+    )
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: replying["conn"],
+        dispatch=app.state.ingress.dispatch,
+        reply=reply,
+    )
+    assert _post(client, START_UPDATE).status_code == 200
+    assert sent == [("555", "Link this Telegram account?", {"reply_markup": markup}, 1)]
+
+
+def _link_prompt_tap_result(edit_text):
+    from src.services.target.telegram_dispatch import TapResult
+
+    return TapResult(
+        outcome="linked",
+        handled=True,
+        callback_query_id="q-7",
+        chat_ref="555",
+        message_ref="77",
+        answer_text="Linked.",
+        edit_text=edit_text,
+    )
+
+
+@pytest.mark.parametrize("edit_text", ["✅ Linked.", None])
+def test_a_link_prompt_tap_is_answered_then_the_prompt_is_edited(
+    client, armed, monkeypatch, edit_text
+):
+    calls = []
+    conn = FakeConn()
+
+    async def fake_admit(c, **kw):
+        return {"admitted": True}
+
+    async def dispatch(c, payload):
+        return _link_prompt_tap_result(edit_text)
+
+    async def answer(qid, text, alert):
+        calls.append(("answer", qid, text, conn.commits))
+        return True
+
+    async def edit(chat_id, message_id, text):
+        calls.append(("edit", chat_id, message_id, text, conn.commits))
+
+    monkeypatch.setattr(webhooks, "admit", fake_admit)
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: conn, dispatch=dispatch, answer_callback=answer, edit=edit
+    )
+    update = {"update_id": 9, "callback_query": {"id": "q-7", "data": "v1:linkok"}}
+    assert _post(client, update).status_code == 200
+    expected = [("answer", "q-7", "Linked.", 1)]
+    if edit_text:
+        expected.append(("edit", "555", "77", edit_text, 1))
+    assert calls == expected
+
+
+def test_a_failed_prompt_edit_does_not_fail_the_delivery(client, armed, monkeypatch):
+    conn = FakeConn()
+
+    async def fake_admit(c, **kw):
+        return {"admitted": True}
+
+    async def dispatch(c, payload):
+        return _link_prompt_tap_result("✅ Linked.")
+
+    async def edit(chat_id, message_id, text):
+        raise RuntimeError("telegram is down")
+
+    monkeypatch.setattr(webhooks, "admit", fake_admit)
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: conn, dispatch=dispatch, edit=edit
+    )
+    update = {"update_id": 9, "callback_query": {"id": "q-7", "data": "v1:linkok"}}
+    r = _post(client, update)
+    assert r.status_code == 200 and conn.commits == 1
+
+
 class TestTheAcknowledgementIsWiredFromTheBotToken:
     """`create_app` arms the reply sender from `TARGET_TELEGRAM_BOT_TOKEN` —
     the worker's variable and transport — and leaves the door silent without it."""
@@ -347,10 +444,12 @@ class TestTheAcknowledgementIsWiredFromTheBotToken:
     def test_with_the_token_the_runtime_can_reply(self):
         built = self._app({"TARGET_TELEGRAM_BOT_TOKEN": "123:abc"})
         assert built.state.ingress is not None and built.state.ingress.reply is not None
+        assert built.state.ingress.edit is not None
 
     def test_without_the_token_the_door_is_silent(self):
         built = self._app({})
         assert built.state.ingress is not None and built.state.ingress.reply is None
+        assert built.state.ingress.edit is None
 
 
 # --- the tap is answered through the REAL transport --------------------------
@@ -484,6 +583,59 @@ def test_a_replayed_tap_is_toasted_after_the_connection_is_released(
     assert seen["released_at_call"] is True, "the toast must not hold the pool slot"
     assert seen["json"]["callback_query_id"] == "q-again"
     assert conn.commits == 0
+
+
+# --- §5: no provider call inside the delivery's transaction ----------------
+
+
+def test_a_provider_call_inside_the_delivery_transaction_is_refused(
+    client, armed, replying
+):
+    """The route enters `unit_of_work.transaction_discipline()` around
+    admission, dispatch and commit, so the egress floor refuses a provider
+    call the dispatcher makes, and the same call made by the acknowledgement,
+    after the commit, goes out. The floor is the real one over a scripted
+    transport. With no arm both calls go out (`["sent", "sent"]`); a flag
+    that outlived the transaction would refuse both (`["refused", "refused"]`).
+    """
+    import httpx
+
+    from src.services.target.egress import EgressPolicy
+    from src.services.target.egress import request as egress_request
+    from src.services.target.unit_of_work import TransactionDisciplineError
+
+    outcomes = []
+
+    async def provider_call():
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as http:
+            try:
+                await egress_request(
+                    http,
+                    "GET",
+                    "https://graph.instagram.com/v1/me",
+                    policy=EgressPolicy(),
+                    resolver=lambda h: ["93.184.216.34"],
+                )
+            except TransactionDisciplineError:
+                outcomes.append("refused")
+            else:
+                outcomes.append("sent")
+
+    async def dispatch(conn, payload):
+        await provider_call()  # inside the delivery's transaction
+        return replying["StartResult"](outcome="linked", handled=True, reply="Linked.")
+
+    async def reply(chat_id, text):
+        await provider_call()  # after the commit, behind the 200
+
+    app.state.ingress = webhooks.IngressRuntime(
+        connect=lambda: replying["conn"], dispatch=dispatch, reply=reply
+    )
+    resp = _post(client, START_UPDATE)
+
+    assert resp.status_code == 200 and resp.json()["status"] == "admitted"
+    assert outcomes == ["refused", "sent"]
 
 
 # --- the boundary (phase 2 of the 2026-09-09 tap plan, step 2) ---------------

@@ -19,10 +19,12 @@ describe("the badge tone vocabulary", () => {
     expect(green("active")).toBe(true);
     expect(green("attention")).toBe(false);
     expect(green("inert")).toBe(false);
+    expect(green("progress")).toBe(false);
+    expect(green("problem")).toBe(false);
   });
 
   it("has a class for every tone", () => {
-    for (const tone of ["active", "attention", "inert"] as const) {
+    for (const tone of ["active", "attention", "inert", "progress", "problem"] as const) {
       expect(TONE_CLASS[tone], tone).toBeTruthy();
     }
   });
