@@ -28,9 +28,9 @@ Before opening the OAuth Brand / consent screen submission form:
 - [x] **App Homepage URL** — `https://storydump.app` (live)
 - [x] **Privacy Policy URL** — `https://storydump.app/privacy` (`landing/src/app/(marketing)/privacy/page.tsx`)
 - [x] **Terms of Service URL** — `https://storydump.app/terms` (`landing/src/app/(marketing)/terms/page.tsx`)
-- [ ] **App icon** — 120×120 PNG, no transparency: [`assets/app-icon/storydump-icon-120.png`](assets/app-icon/storydump-icon-120.png), drawn by `make-icon.py` beside it (#410). Made; still to upload.
+- [x] **App icon** — 120×120 PNG, no transparency: [`assets/app-icon/storydump-icon-120.png`](assets/app-icon/storydump-icon-120.png), drawn by `make-icon.py` beside it (#410). Uploaded (Branding, seen 2026-10-06).
 - [x] **Authorized domain** — `storydump.app` verified via Google Search Console as a Domain property (2026-10-06). The Google TXT record at the registrar must stay.
-- [ ] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. With `OAUTH_REDIRECT_BASE_URL = https://api.storydump.app` (the API's public origin, `guides/cloud-deployment.md`) that is `https://api.storydump.app/auth/google-drive/callback` (`src/api/routes/auth.py:327`). Add it under **Google Auth Platform → Clients → [the web client] → Authorized redirect URIs**, beside the sign-in callback `https://api.storydump.app/auth/google/callback`.
+- [x] **OAuth Redirect URI registered** — `${OAUTH_REDIRECT_BASE_URL}/auth/google-drive/callback`. With `OAUTH_REDIRECT_BASE_URL = https://api.storydump.app` (the API's public origin, `guides/cloud-deployment.md`) that is `https://api.storydump.app/auth/google-drive/callback` (`src/api/routes/auth.py:327`). Add it under **Google Auth Platform → Clients → [the web client] → Authorized redirect URIs**, beside the sign-in callback `https://api.storydump.app/auth/google/callback`.
 - [ ] **Scope justification copy** — short text explaining why we need `drive.readonly` (see template below).
 - [ ] **Demo video** — screencast (≤ 5 min) demonstrating each requested scope in use. YouTube unlisted is fine.
 - [ ] **Security assessment** — `drive.readonly` is restricted, so verification ends with one (step 5a). Budget for the assessor's fee before submitting.
@@ -71,6 +71,17 @@ Under **Google Auth Platform → Branding**:
 | Developer contact information | `christophertrogers37@gmail.com` |
 
 Save.
+
+*As of 2026-10-06 Branding was already complete*: app name `storydump` (lowercase, as entered), both contact emails, the logo, the three storydump.app links, and authorized domains `storydump.app` and `storyline-ai-production.up.railway.app` (the second goes in step 3a).
+
+### 3a. Clean up before submitting
+
+The production API builds every Google redirect URI as `OAUTH_REDIRECT_BASE_URL` plus a fixed path (`src/api/oauth_client.py`, `src/api/google_client.py:16-17`); the setting has no default, and without it both legs answer 503. With it set to `https://api.storydump.app`, the only URIs the app sends are `https://api.storydump.app/auth/google/callback` and `https://api.storydump.app/auth/google-drive/callback`. The landing app has no `/auth/google/callback` route, so `https://storydump.app/auth/google/callback` is never used.
+
+1. **Confirm the base.** Railway → the `storydump` service → Variables → `OAUTH_REDIRECT_BASE_URL` must read exactly `https://api.storydump.app`. (The worker makes no OAuth redirects.)
+2. **Remove unused redirect URIs.** *Clients* → the web client → Authorized redirect URIs: keep the two `api.storydump.app` ones and remove `https://storydump.app/auth/google/callback` and both `https://storyline-ai-production.up.railway.app/...` URIs (left from the legacy deployment). Save.
+3. **Remove the Railway authorized domain.** *Branding* → Authorized domains: remove `storyline-ai-production.up.railway.app`. Google checks ownership of every authorized domain, and Railway's subdomain cannot be verified as ours. Save.
+4. **One client only, or show each.** The demo video "must include all OAuth clients that you assigned to this project". If *Clients* lists any client besides the web client whose ID is `GOOGLE_CLIENT_ID` on Railway, delete it once nothing uses it, or show its consent flow in the video too.
 
 ### 4. Justify the scopes
 
