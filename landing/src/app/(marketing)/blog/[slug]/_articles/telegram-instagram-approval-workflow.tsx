@@ -1,6 +1,6 @@
 import Link from "next/link"
 import { TrackedLink } from "@/components/analytics/tracked-link"
-import { blogCta } from "./shared"
+import { blogCta, blogDemo } from "./shared"
 
 export function TelegramInstagramApproval() {
   return (
@@ -69,9 +69,9 @@ export function TelegramInstagramApproval() {
         </li>
         <li>
           Someone taps. <strong>Post now</strong> publishes it to your Story
-          through Instagram&apos;s official API. Without it, someone posts
-          the Story (<strong>Open Instagram</strong> is the shortcut) and
-          taps <strong>Posted myself</strong>. <strong>Skip</strong> puts it
+          through Instagram&apos;s official API. Without that button,
+          someone posts the Story by hand (<strong>Open Instagram</strong> is
+          the shortcut) and taps <strong>Posted myself</strong>. <strong>Skip</strong> puts it
           back for later, and <strong>Reject</strong> means it won&apos;t
           come up again.
         </li>
@@ -92,10 +92,9 @@ export function TelegramInstagramApproval() {
 
       <h2>Several accounts</h2>
       <p>
-        A workspace is one brand: one Instagram account, one schedule, one
-        rotation. A team with several accounts keeps a workspace for each,
-        each with its own group, and every card names the account it&apos;s
-        for.
+        Every card names the Instagram account it&apos;s for. A workspace has
+        one schedule and one posting mix, so a brand that needs its own
+        schedule gets its own workspace, and its own Telegram group.
       </p>
 
       <h2>Not on Telegram?</h2>
@@ -109,11 +108,15 @@ export function TelegramInstagramApproval() {
         .
       </p>
       <p>
-        Want the cards on your phone? Telegram is free: get it from{" "}
-        <a href="https://telegram.org/apps" target="_blank" rel="noopener noreferrer">
+        Want the cards on your phone? Get the free app from{" "}
+        <a
+          href="https://telegram.org/apps"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
           Telegram&apos;s apps page
         </a>
-        . You create your account inside the app, then link it to Storydump.
+        , create your account in it, then link it to Storydump.
       </p>
       <p>
         <Link href="/">Storydump</Link> is in a free beta and invites people
@@ -121,8 +124,11 @@ export function TelegramInstagramApproval() {
         <TrackedLink href="/#waitlist" track={blogCta}>
           join the waitlist
         </TrackedLink>{" "}
-        to get a spot, or <Link href="/demo">see a sample workspace</Link>{" "}
-        first, where nothing is real and nothing posts.
+        to get a spot, or{" "}
+        <TrackedLink href="/demo" track={blogDemo}>
+          see a sample workspace
+        </TrackedLink>{" "}
+        first. Nothing in it is real, and nothing posts.
       </p>
     </>
   )

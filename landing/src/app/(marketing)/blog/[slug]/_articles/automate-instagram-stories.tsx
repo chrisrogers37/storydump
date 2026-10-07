@@ -1,6 +1,6 @@
 import Link from "next/link"
 import { TrackedLink } from "@/components/analytics/tracked-link"
-import { blogCta } from "./shared"
+import { blogCta, blogDemo } from "./shared"
 
 export function AutomateInstagramStories() {
   return (
@@ -116,21 +116,22 @@ export function AutomateInstagramStories() {
       <p>
         In Storydump you connect your account with Instagram&apos;s own
         login, and no Facebook Page is needed. When direct posting is
-        switched on for your workspace, Storydump makes those calls for you.
-        Until then, your team posts the Story itself and taps{" "}
-        <strong>Posted myself</strong>, so the record stays straight.
+        switched on for your workspace, Storydump makes these calls for you.
       </p>
 
       <h2>Putting it together</h2>
       <p>
-        The whole loop: your library in Google Drive, which Storydump checks
-        about every six hours (Sync in the dashboard checks right away); a
-        schedule you set (how many Stories a day, the hours they can go out,
-        your time zone); a card for your team when each one is due; and one
-        tap to settle it. Want a particular Story at a particular time? Pick
-        it in the Media library and choose the time, and it still waits for
-        a tap. The Queue lists what is coming in slot order, and the
-        Calendar shows what has posted and what is planned.
+        The whole loop: your library in Google Drive; a schedule you set (how
+        many Stories a day, the hours they can go out, your time zone); a
+        card for your team when each one is due; and one tap to settle it.
+      </p>
+      <p>
+        Storydump checks Drive about every six hours, and{" "}
+        <strong>Sync Now</strong> in the dashboard checks right away. Want a
+        particular Story at a particular time? Pick it in the Media library
+        and choose the time; it still waits for a tap. The Queue lists what
+        is coming in slot order, and the Calendar shows what has posted and
+        what is planned.
       </p>
       <p>
         That is what <Link href="/">Storydump</Link> does. It is in a free
@@ -138,8 +139,11 @@ export function AutomateInstagramStories() {
         <TrackedLink href="/#waitlist" track={blogCta}>
           join the waitlist
         </TrackedLink>{" "}
-        to get a spot, or <Link href="/demo">see a sample workspace</Link>{" "}
-        first, where nothing is real and nothing posts.
+        to get a spot, or{" "}
+        <TrackedLink href="/demo" track={blogDemo}>
+          see a sample workspace
+        </TrackedLink>{" "}
+        first. Nothing in it is real, and nothing posts.
       </p>
     </>
   )

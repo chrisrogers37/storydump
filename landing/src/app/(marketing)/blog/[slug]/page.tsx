@@ -96,7 +96,7 @@ export default async function BlogPost({ params }: { params: Params }) {
         <p className="mt-2 text-muted-foreground">
           Storydump picks today&apos;s Story from your own photos and videos and
           brings it to your team on time, in Telegram or on the web. One tap
-          posts it. Free during beta.
+          settles it. Free during beta.
         </p>
         <TrackedLink
           href="/#waitlist"

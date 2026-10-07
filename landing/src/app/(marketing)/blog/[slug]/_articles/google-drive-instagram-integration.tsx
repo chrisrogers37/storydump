@@ -1,6 +1,6 @@
 import Link from "next/link"
 import { TrackedLink } from "@/components/analytics/tracked-link"
-import { blogCta } from "./shared"
+import { blogCta, blogDemo } from "./shared"
 
 export function GoogleDriveInstagramIntegration() {
   return (
@@ -46,10 +46,12 @@ export function GoogleDriveInstagramIntegration() {
 └── seasonal/`}</code>
       </pre>
       <p>
-        Then give each folder a share of the posting mix, say 50% product
-        shots, 30% behind-the-scenes and 20% memes. The mix decides which
-        folder is up next, and within that folder anything never posted goes
-        first, then whatever has gone longest without a turn.
+        Then connect each of those folders on its own. Each folder you
+        connect is a group with its own share of the posting mix, say 50%
+        product shots, 30% behind-the-scenes and 20% memes; folders inside
+        it are just structure. The mix decides which folder is up next, and
+        within that folder anything never posted goes first, then whatever
+        has gone longest without a turn.
       </p>
       <p>
         See the{" "}
@@ -67,26 +69,26 @@ export function GoogleDriveInstagramIntegration() {
         in your Drive.
       </p>
       <p>
-        A folder brings its subfolders with it. Storydump takes the photos
-        and videos it finds (an image up to 8 MB, a video up to 40 MB),
-        checks your folders about every six hours, and Sync in the dashboard
-        checks right away.
+        Storydump checks your folders about every six hours, and{" "}
+        <strong>Sync Now</strong> in the dashboard checks right away.
       </p>
 
       <h2>From Drive to Instagram</h2>
       <p>
         When a Story is due, Storydump picks it from your folders and brings
         it to your team: in the Queue on the web and, if you use Telegram, as
-        a card in your group. Your team posts it and taps{" "}
-        <strong>Posted myself</strong>, or, when direct posting is switched
-        on for your workspace, one tap (<strong>Post now</strong> on the
-        card, <strong>Approve</strong> in the Queue) puts it on your Story
-        through Instagram&apos;s official API. For that step a private,
-        temporary copy, framed to the 9:16 Story size, sits on Cloudinary
-        until the Story posts, fails or is cancelled, and is then deleted;
-        any copy left over is deleted once it is 48 hours old. A Telegram
-        card carries a copy of the photo too, and it stays in the chat. For
-        how your data is handled, see the{" "}
+        a card in your group. When direct posting is switched on for your
+        workspace, one tap puts it on your Story through Instagram&apos;s
+        official API: <strong>Post now</strong> on the card,{" "}
+        <strong>Approve</strong> in the Queue. Otherwise your team posts it
+        and taps <strong>Posted myself</strong>.
+      </p>
+      <p>
+        For the API step, a private, temporary copy, framed to the 9:16 Story
+        size, sits on Cloudinary until the Story posts, fails or is
+        cancelled, and is then deleted; any copy left over is deleted once it
+        is 48 hours old. A Telegram card carries a copy of the photo too, and
+        it stays in the chat. For how your data is handled, see the{" "}
         <Link href="/privacy">Privacy page</Link>.
       </p>
       <p>
@@ -103,8 +105,11 @@ export function GoogleDriveInstagramIntegration() {
         <TrackedLink href="/#waitlist" track={blogCta}>
           join the waitlist
         </TrackedLink>{" "}
-        to get a spot, or <Link href="/demo">see a sample workspace</Link>{" "}
-        first, where nothing is real and nothing posts.
+        to get a spot, or{" "}
+        <TrackedLink href="/demo" track={blogDemo}>
+          see a sample workspace
+        </TrackedLink>{" "}
+        first. Nothing in it is real, and nothing posts.
       </p>
     </>
   )

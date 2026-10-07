@@ -69,6 +69,6 @@ export function getPost(slug: string): BlogPost | undefined {
 
 /** The date a reader sees: "Updated …" once a post has been revised, or else when it was first published. */
 export function postDateLabel(post: BlogPost): string {
-  const day = (date: string) => formatCalendarDate(date, { year: "numeric", month: "long", day: "numeric" })
-  return post.updated ? `Updated ${day(post.updated)}` : day(post.date)
+  const date = formatCalendarDate(post.updated ?? post.date, { year: "numeric", month: "long", day: "numeric" })
+  return post.updated ? `Updated ${date}` : date
 }
