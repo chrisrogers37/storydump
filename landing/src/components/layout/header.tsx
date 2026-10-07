@@ -23,13 +23,11 @@ export function Header() {
         </Link>
         <div className="flex items-center gap-2 sm:gap-4">
           {/*
-            The wordmark, Blog, Sign in and the waitlist button fit a 360px
-            phone with nothing hidden, deliberately: at 390px the wordmark
-            collided with Blog and "Sign in" wrapped onto two lines (#1090 A1),
-            so they were tightened until all four fit rather than hiding Blog.
-            Demo is the one link that waits for sm: a fifth item overflows a
-            360px or a 390px phone, and there the hero's link to the sample
-            workspace sits just below this header.
+            Only Demo is hidden at a breakpoint here, deliberately. At 390px the
+            wordmark collided with Blog and "Sign in" wrapped onto two lines
+            (#1090 A1); tightened until all four fit rather than hiding Blog
+            on a phone. A fifth item overflows even a 390px phone, so Demo
+            waits for sm.
           */}
           <TrackedLink
             href="/demo"

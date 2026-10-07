@@ -90,7 +90,7 @@ describe("the events the site sends", () => {
     ]);
   });
 
-  it("track every Sign in, CTA and sample workspace location somewhere", () => {
+  it("track every listed location somewhere", () => {
     const all = SOURCES.join("\n");
     const pairs = [
       ...SIGN_IN_LOCATIONS.map((location) => ["Sign In Click", location]),

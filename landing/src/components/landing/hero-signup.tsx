@@ -1,10 +1,7 @@
 import { TextLink } from "@/components/landing/text-link"
 import { WaitlistForm } from "@/components/landing/waitlist-form"
 
-/**
- * The top-of-page signup: the form, the locked price line and Sign in, then
- * the sample workspace, the secondary path for a visitor not ready to join.
- */
+/** The top-of-page signup: the form, the locked price line, Sign in and the sample workspace. */
 export function HeroSignup() {
   return (
     <>
