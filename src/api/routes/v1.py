@@ -863,9 +863,9 @@ async def connect_drive(
     folders picked under it).
 
     An OAuth leg is a browser redirect, which the command port cannot express,
-    so it lives here as a resource route at the admin floor — the floor
-    `commands.ROLE_FLOOR["connect_account"]` names — and the executor stays
-    the thin chat-side door (F1 (a)). The state pins the workspace as its own
+    so it lives here as a resource route at the floor of the command its
+    purpose stands for (`commands.connect_floor`), and the executor stays the
+    thin chat-side door (F1 (a)). The state pins the workspace as its own
     `reconnect_target`: `connect` for a workspace that has never held a grant
     and `reconnect` after that, so a stale state is retired by the next one
     (last issued wins, per workspace).
@@ -873,9 +873,15 @@ async def connect_drive(
     client_id, _, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )
-    async with principal_mod.admin_session(request, str(ws), principal) as session:
+    passed = commands.lowest_connect_floor()
+    async with principal_mod.floor_session(
+        request, str(ws), principal, passed
+    ) as session:
         purpose = await google_drive_oauth.connect_purpose(
             session, workspace_id=str(ws)
+        )
+        await principal_mod.require_floor(
+            session, str(ws), principal, commands.connect_floor(purpose), passed=passed
         )
         state = await issue_state(
             session,
@@ -1002,10 +1008,13 @@ async def connect_workspace_account(
     the identity Instagram returns (`provisioning.connect_destination`).
     `connect` always — with no row to be credentialed there is no reconnect
     to name, and an untargeted state retires nothing (states with no target
-    are independent one-shots).
+    are independent one-shots) — so its floor is `connect`'s
+    (`commands.connect_floor`).
     """
     app_id, _, redirect_uri = instagram_client.configured()
-    async with principal_mod.admin_session(request, str(ws), principal) as session:
+    async with principal_mod.floor_session(
+        request, str(ws), principal, commands.connect_floor("connect")
+    ) as session:
         return await _instagram_grant(
             session,
             principal=principal,
@@ -1050,8 +1059,8 @@ async def connect_account(
     #1041). The Drive connect route's shape, exactly.
 
     An OAuth leg is a browser redirect, which the command port cannot express,
-    so it lives here as a resource route at the admin floor — the floor
-    `commands.ROLE_FLOOR["connect_account"]` names. Per-DESTINATION: the state
+    so it lives here as a resource route at the floor of the command its
+    purpose stands for (`commands.connect_floor`). Per-DESTINATION: the state
     pins the `ig_accounts` row in `reconnect_target`, `connect` for a row that
     has never been credentialed and `reconnect` after that, so a stale
     reconnect state is retired by the next one (last issued wins). The
@@ -1059,12 +1068,18 @@ async def connect_account(
     `manual:<handle>` reference to the real Meta id.
     """
     app_id, _, redirect_uri = instagram_client.configured()
-    async with principal_mod.admin_session(request, str(ws), principal) as session:
+    passed = commands.lowest_connect_floor()
+    async with principal_mod.floor_session(
+        request, str(ws), principal, passed
+    ) as session:
         purpose = await ig_login_oauth.connect_purpose(
             session, workspace_id=str(ws), ig_account_id=str(account_id)
         )
         if purpose is None:
             raise principal_mod.not_found()
+        await principal_mod.require_floor(
+            session, str(ws), principal, commands.connect_floor(purpose), passed=passed
+        )
         return await _instagram_grant(
             session,
             principal=principal,

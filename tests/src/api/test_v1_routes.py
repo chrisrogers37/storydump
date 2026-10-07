@@ -617,6 +617,51 @@ class TestDestinationConnect:
         assert issued["workspace_id"] == WS
         assert issued["user_id"] == PRINCIPAL.user_id
 
+    @pytest.mark.parametrize(
+        "minted,kind",
+        [("connect", "connect_account"), ("reconnect", "reconnect_account")],
+    )
+    def test_the_floor_is_the_minted_purposes(
+        self,
+        client,
+        signed_in,
+        tenant,
+        instagram_configured,
+        purpose,
+        issued,
+        monkeypatch,
+        minted,
+        kind,
+    ):
+        purpose["value"] = minted
+        monkeypatch.setitem(commands.ROLE_FLOOR, kind, "owner")
+        resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
+        assert resp.status_code == 200, resp.text
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "admin"),
+            ("gate", WS, PRINCIPAL.user_id, "owner"),
+        ]
+
+    def test_the_first_gate_is_the_lowest_connect_floor(
+        self,
+        client,
+        signed_in,
+        tenant,
+        instagram_configured,
+        purpose,
+        issued,
+        monkeypatch,
+    ):
+        monkeypatch.setitem(commands.ROLE_FLOOR, "connect_account", "member")
+        monkeypatch.setitem(commands.ROLE_FLOOR, "reconnect_account", "member")
+        resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
+        assert resp.status_code == 200, resp.text
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "member"),
+        ]
+
     def test_a_credentialed_account_mints_a_reconnect(
         self, client, signed_in, tenant, instagram_configured, purpose, issued
     ):
@@ -682,6 +727,28 @@ class TestWorkspaceConnect:
         assert issued["reconnect_target"] is None
         assert issued["workspace_id"] == WS
         assert issued["user_id"] == PRINCIPAL.user_id
+
+    @pytest.mark.parametrize(
+        "moved,floor", [("connect_account", "owner"), ("reconnect_account", "admin")]
+    )
+    def test_the_floor_is_connects_alone(
+        self,
+        client,
+        signed_in,
+        tenant,
+        instagram_configured,
+        issued,
+        monkeypatch,
+        moved,
+        floor,
+    ):
+        monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, floor),
+        ]
 
     def test_unconfigured_instagram_refuses_503_before_any_seam(
         self, client, signed_in, tenant, issued, monkeypatch
@@ -1067,6 +1134,44 @@ class TestDriveConnect:
         assert issued["provider"] == google_drive_oauth.PROVIDER
         assert issued["reconnect_target"] == WS
         assert issued["workspace_id"] == WS and issued["user_id"] == PRINCIPAL.user_id
+
+    @pytest.mark.parametrize(
+        "minted,kind",
+        [("connect", "connect_account"), ("reconnect", "reconnect_account")],
+    )
+    def test_the_floor_is_the_minted_purposes(
+        self,
+        client,
+        signed_in,
+        tenant,
+        drive_configured,
+        purpose,
+        issued,
+        monkeypatch,
+        minted,
+        kind,
+    ):
+        purpose["value"] = minted
+        monkeypatch.setitem(commands.ROLE_FLOOR, kind, "owner")
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "admin"),
+            ("gate", WS, PRINCIPAL.user_id, "owner"),
+        ]
+
+    def test_the_first_gate_is_the_lowest_connect_floor(
+        self, client, signed_in, tenant, drive_configured, purpose, issued, monkeypatch
+    ):
+        monkeypatch.setitem(commands.ROLE_FLOOR, "connect_account", "member")
+        monkeypatch.setitem(commands.ROLE_FLOOR, "reconnect_account", "member")
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "member"),
+        ]
 
     def test_a_workspace_that_holds_a_grant_mints_a_reconnect(
         self, client, signed_in, tenant, drive_configured, purpose, issued

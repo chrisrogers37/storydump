@@ -385,3 +385,27 @@ class TestTheTenantSeamsResolveThroughTheModule:
                 f"src.api.routes.{router} binds `{name}` at import time; reach it"
                 " as `principal_mod.{name}` so the conftest's patch lands"
             )
+
+
+class TestAStricterFloorInsideAGatedSession:
+    @pytest.fixture
+    def gate(self, monkeypatch):
+        from src.services.target import tenant_resolution
+
+        seen = []
+
+        async def fake_gate(
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+        ):
+            seen.append((session, workspace_id, user_id, minimum_role, tenant_bound))
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", fake_gate)
+        return seen
+
+    async def test_the_floor_already_passed_needs_no_second_read(self, gate):
+        await principal.require_floor("session", WS, PRINCIPAL, "admin", passed="admin")
+        assert gate == []
+
+    async def test_a_different_floor_is_checked_in_the_same_session(self, gate):
+        await principal.require_floor("session", WS, PRINCIPAL, "owner", passed="admin")
+        assert gate == [("session", WS, PRINCIPAL.user_id, "owner", True)]

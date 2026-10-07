@@ -73,6 +73,7 @@ from src.config.settings import settings
 from src.exceptions.base import StorydumpError
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
+    commands,
     google_drive_oauth,
     google_oidc,
     identity,
@@ -344,7 +345,7 @@ async def google_drive_callback(
         code=code,
         error=error,
         expected_provider=google_drive_oauth.PROVIDER,
-        expected_purpose={"connect", "reconnect"},
+        expected_purpose=set(commands.CONNECT_PURPOSE_KIND),
         flow=DRIVE_FLOW,
         require_presenter=True,
     )
@@ -395,13 +396,14 @@ async def google_drive_callback(
     )
     try:
         async with uow.begin() as session:
-            # Admin+ at issue AND at callback, as the Instagram leg: a demoted
-            # admin's pending state must not land a grant.
+            # The floor of the command the state's purpose stands for, at issue
+            # AND at callback, as the Instagram leg: a demoted admin's pending
+            # state must not land a grant.
             await tenant_resolution.authorize_member(
                 session,
                 str(row["workspace_id"]),
                 str(row["user_id"]),
-                minimum_role="admin",
+                minimum_role=commands.connect_floor(row["purpose"]),
             )
             # The state's user is the granter (091, `07` §34): the presenter
             # check above proved the returning browser is theirs, so the
@@ -448,7 +450,7 @@ async def instagram_login_callback(
         code=code,
         error=error,
         expected_provider=ig_login_oauth.PROVIDER,
-        expected_purpose={"connect", "reconnect"},
+        expected_purpose=set(commands.CONNECT_PURPOSE_KIND),
         flow=INSTAGRAM_FLOW,
         require_presenter=True,
     )
@@ -485,12 +487,15 @@ async def instagram_login_callback(
     )
     try:
         async with uow.begin() as session:
-            # `07` §2: admin+ checked at issue AND at callback. The row pins
-            # the workspace and the user; what can change between the two is
-            # the membership, and a demoted admin's pending state must not
-            # land a credential.
+            # `07` §2: the floor of the command the state's purpose stands for,
+            # checked at issue AND at callback. The row pins the workspace and
+            # the user; what can change between the two is the membership,
+            # and a demoted admin's pending state must not land a credential.
             await tenant_resolution.authorize_member(
-                session, workspace_id, str(row["user_id"]), minimum_role="admin"
+                session,
+                workspace_id,
+                str(row["user_id"]),
+                minimum_role=commands.connect_floor(row["purpose"]),
             )
             account_id, _ = await provisioning.connect_destination(
                 session,

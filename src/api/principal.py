@@ -449,6 +449,24 @@ async def floor_session(
         yield session
 
 
+async def require_floor(
+    session, workspace_id: str, principal: Principal, floor: str, *, passed: str
+) -> None:
+    """Inside a session that already passed the gate at *passed*, require
+    *floor* too: the check a route makes once it has read what decides its
+    floor (an OAuth connect leg's purpose). A floor equal to the one passed
+    needs no second read."""
+    if floor == passed:
+        return
+    await tenant_resolution.authorize_member(
+        session,
+        workspace_id,
+        principal.user_id,
+        minimum_role=floor,
+        tenant_bound=True,
+    )
+
+
 def member_session(request: Request, workspace_id: str, principal: Principal):
     """Open the tenant's unit of work and run the ONE gate — every read."""
     return floor_session(request, workspace_id, principal, "member")

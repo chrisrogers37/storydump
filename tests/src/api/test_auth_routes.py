@@ -27,6 +27,7 @@ from src.api.principal import (
 from src.api.routes import auth
 from src.config.settings import settings
 from src.services.target import (
+    commands,
     google_drive_oauth,
     google_oidc,
     identity,
@@ -795,6 +796,35 @@ class TestInstagramCallback:
             ("store", WS, ACCOUNT, "IGQVJ-long"),
         ]
 
+    @pytest.mark.parametrize(
+        "carried,moved,floor",
+        [
+            ("connect", "connect_account", "owner"),
+            ("reconnect", "reconnect_account", "owner"),
+            ("connect", "reconnect_account", "admin"),
+            ("reconnect", "connect_account", "admin"),
+        ],
+    )
+    def test_the_floor_is_the_carried_purposes(
+        self,
+        client,
+        instagram,
+        state_row,
+        browser,
+        writes,
+        grant,
+        monkeypatch,
+        carried,
+        moved,
+        floor,
+    ):
+        state_row["purpose"] = carried
+        monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
+        self._return(client)
+        assert [e for e in writes["log"] if e[0] == "gate"] == [
+            ("gate", WS, USER, floor)
+        ]
+
     def test_reconnect_takes_the_same_single_write_as_connect(
         self, client, instagram, state_row, browser, writes, grant
     ):
@@ -951,6 +981,38 @@ class TestDriveCallback:
             ("store", WS, "ya29.access", USER),
             ("rearm", WS, None),
         ]
+
+    @pytest.mark.parametrize(
+        "carried,moved,floor",
+        [
+            ("connect", "connect_account", "owner"),
+            ("reconnect", "reconnect_account", "owner"),
+            ("connect", "reconnect_account", "admin"),
+            ("reconnect", "connect_account", "admin"),
+        ],
+    )
+    def test_the_floor_is_the_carried_purposes(
+        self,
+        client,
+        configured,
+        counter,
+        drive_row,
+        browser,
+        exchanged,
+        writes,
+        monkeypatch,
+        carried,
+        moved,
+        floor,
+    ):
+        drive_row["purpose"] = carried
+        monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
+        client.get(
+            self.URL,
+            params={"state": "st-drive", "code": "c0de"},
+            follow_redirects=False,
+        )
+        assert [e for e in writes if e[0] == "gate"] == [("gate", WS, USER, floor)]
 
     @pytest.mark.parametrize("target", [ACCOUNT, None])
     def test_a_state_that_pins_anything_but_the_workspace_is_refused(
