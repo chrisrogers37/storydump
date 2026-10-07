@@ -245,6 +245,23 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # This step GATES, like pip-audit in Security Scan: a known advisory
+      # against a runtime dependency, direct or transitive, fails the job.
+      # `--omit=dev` scopes it to a production install; the devDependencies
+      # it skips include the build's Tailwind toolchain and the CSS it
+      # bundles, not just test and lint tooling. There is no `--audit-level`:
+      # npm audit cannot suppress one advisory, so a severity floor would hide
+      # every advisory below it. Clear one with a bump or an `overrides` pin
+      # in landing/package.json; one with no fixed release is silenced only by
+      # an edit here, under pip-audit's suppression rule above. It lives here,
+      # not in Security Scan, because Node and landing/ are set up here.
+      #
+      # It runs whether or not the lockfile changed, so a newly published
+      # advisory turns every PR red until a bump lands. It runs last so a
+      # PR's own tests, typecheck and lint still report.
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev
+
   changelog-check:
     name: Changelog Check
     runs-on: ubuntu-latest

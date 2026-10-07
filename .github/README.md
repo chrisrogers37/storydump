@@ -26,7 +26,8 @@ request into `main` or `develop`, six jobs:
   `continue-on-error`)
 - **Front End** — in `landing/`: `npm ci`, `npm test`, `npx tsc --noEmit`,
   `npm run lint` (Node 22; `next build` is deliberately absent — Vercel builds
-  every PR)
+  every PR), then `npm audit --omit=dev`, which gates: a known advisory
+  against the runtime dependencies fails the job
 - **Changelog Check** — pull requests only, `scripts/changelog_fragments.py
   check --base`: the fragment rule in `changelog.d/README.md`
 
@@ -93,6 +94,17 @@ The local recipe for a throwaway PostgreSQL is in `AGENTS.md` › Testing.
 ### Missing changelog fragment
 Every PR that changes behaviour adds one fragment in `changelog.d/` and leaves
 `CHANGELOG.md` alone; `changelog.d/README.md` has the format and the rule.
+
+### Front End: npm audit
+A newly published advisory against a runtime dependency fails every PR's
+Front End, including PRs that change nothing in `landing/`, until a bump lands.
+```bash
+# The step, locally; it reads only the lockfile, so no install is needed
+cd landing && npm audit --omit=dev
+```
+
+Clear it with a bump, or an `overrides` pin in `landing/package.json`. For an
+advisory with no fixed release, see the note on the step in `ci.yml`.
 
 ---
 
