@@ -97,7 +97,7 @@ logger.exception("sender-job sweep failed; retrying on cadence")
   `video/*` → `video` (`google_drive_adapter._kind_for`, `:204`). A Drive name
   need not carry an extension at all.
 - Byte caps are per use: a story on its way to Meta is 8 MiB for an image and
-  40 MB for a video (`worker.PUBLISH_MAX_BYTES`; the video cap is Cloudinary's
+  40 MB for a video (`vocabulary.PUBLISH_MAX_BYTES`; the video cap is Cloudinary's
   synchronous-transform limit), a Telegram card's preview 10 MiB and 50 MiB
   (`google_drive_adapter.MEDIA_CARD_MAX_BYTES`). Oversize is refused from
   metadata, before a download.

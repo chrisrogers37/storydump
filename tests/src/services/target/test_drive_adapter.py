@@ -130,3 +130,41 @@ class TestTheSeamParksLoudly:
         assert not blaming, (
             f"the seam is wired and these kinds still blame it: {blaming}"
         )
+
+
+class TestOnlyAWalkThatSaysWholeIsJudged:
+    """#1545: the sync tombstones what a walk did not list, so the one fact it
+    acts on is positive: an adapter that does not say `whole` (a fake, an
+    adapter that predates the key, a lister that returns only changes) reads
+    as partial, and nothing is judged."""
+
+    def test_a_completed_walk_that_says_whole_is_whole(self):
+        from src.services.target.drive_adapter import walk_saw_whole_tree
+
+        assert walk_saw_whole_tree({"v": 2, "walk": "w", "whole": True}) is True
+
+    @pytest.mark.parametrize(
+        "checkpoint",
+        [
+            None,
+            {},
+            {"v": 2, "walk": "w"},
+            {"v": 2, "walk": "w", "whole": "yes"},
+            {"v": 2, "walk": "w", "whole": True, "truncated": True},
+            {"v": 2, "walk": "w", "whole": True, "partial": True},
+            {"v": 2, "walk": "w", "whole": True, "page_token": "p2"},
+        ],
+        ids=[
+            "none",
+            "empty",
+            "silent",
+            "not-true",
+            "truncated",
+            "partial",
+            "unfinished",
+        ],
+    )
+    def test_anything_else_is_not(self, checkpoint):
+        from src.services.target.drive_adapter import walk_saw_whole_tree
+
+        assert walk_saw_whole_tree(checkpoint) is False

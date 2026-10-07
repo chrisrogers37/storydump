@@ -410,6 +410,13 @@
       "label": "§47 the activation funnel door (104, #1481) — svc_maintenance's SELECT and a USING (true) policy on users and workspace_members, and fn_activation_funnel: five stage rows of reached and stalled counts for the active users created since p_since, owned by svc_maintenance, EXECUTE for svc_worker only",
       "doc": "07-security-model.md",
       "ordinal": 40
+    },
+    {
+      "sha256": "6828e9fdd18d002f75c032a792c252adb9131e732dffc4e38c3c1e4e23362d9a",
+      "class": "normative",
+      "label": "§48 the sync retires what the publish can never fetch (105, #1545) — media_items.last_listed_at, the stamp a walk leaves on every file it lists, missing added to ck_media_state for a file a walk that saw the whole tree no longer lists, and fn_planned_misses replaced to name it item_missing",
+      "doc": "07-security-model.md",
+      "ordinal": 41
     }
   ],
   "policy_expansion": {

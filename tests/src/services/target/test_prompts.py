@@ -745,6 +745,20 @@ def _notice(**over):
     return prompts.missed_notice(**kw)
 
 
+def _door_body(name: str) -> str:
+    """Door `name`'s body as it stands: the last migration that defines it. A
+    door is re-created by a later file, never edited in place (089 created
+    `fn_planned_misses`; 105 re-created it with `item_missing`)."""
+    import re
+
+    from scripts.migration_runner import MIGRATIONS_DIR
+
+    head = re.compile(rf"CREATE (?:OR REPLACE )?FUNCTION {name}\(")
+    texts = [p.read_text() for p in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    ddl = [text for text in texts if head.search(text)][-1]
+    return head.split(ddl, 1)[1].split("$$;", 1)[0]
+
+
 class TestTheMissNotice:
     @pytest.mark.parametrize("reason", sorted(prompts.MISS_REASONS))
     def test_each_reason_says_what_happened_and_that_nothing_was_posted(self, reason):
@@ -759,10 +773,7 @@ class TestTheMissNotice:
         does: `account_removed` comes from the door and from a removal."""
         import re
 
-        from scripts.migration_runner import MIGRATIONS_DIR
-
-        ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
-        body = ddl.split("CREATE FUNCTION fn_planned_misses(", 1)[1].split("$$;", 1)[0]
+        body = _door_body("fn_planned_misses")
         returned = set(re.findall(r"(?:THEN|ELSE) '([a-z_]+)'", body))
         assert returned == set(prompts.MISS_REASONS), returned
 
@@ -782,11 +793,7 @@ class TestTheMissNotice:
         import inspect
         import re
 
-        from scripts.migration_runner import MIGRATIONS_DIR
-
-        ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
-        body = ddl.split("CREATE FUNCTION fn_planned_misses(", 1)[1].split("$$;", 1)[0]
-        body = " ".join(body.split())
+        body = " ".join(_door_body("fn_planned_misses").split())
         columns, joins = prompts._NOTICE_SELECT.split("FROM", 1)
         assert " ".join(columns.split()) in body
         assert " ".join(f"FROM{joins}".split()) in body

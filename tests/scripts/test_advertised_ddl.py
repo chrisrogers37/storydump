@@ -307,8 +307,9 @@ class TestAgainstTheRealDocs:
         # and its doors (101, #1482) make it 51; and §45's removal that holds,
         # the remove door checking its caller (102), makes it 52; and §46's
         # definer functions pinning search_path with pg_temp last (103) make it 53;
-        # and §47's activation funnel door (104, #1481) makes it 54.
-        assert classes.count("normative") == 54
+        # and §47's activation funnel door (104, #1481) makes it 54; and §48's
+        # tombstone for a file a whole walk no longer lists (105, #1545) makes it 55.
+        assert classes.count("normative") == 55
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
