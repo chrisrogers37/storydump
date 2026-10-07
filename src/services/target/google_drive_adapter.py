@@ -413,7 +413,8 @@ class GoogleDriveAdapter:
         is skipped and the cut is SAID (one warning) and carried to completion
         as `truncated`, never absorbed. Every other skip — a folder past
         `FOLDER_LIST_CAP`, a subfolder listing that repeats its page token, a
-        folder that vanished before or during its listing — is said where it
+        folder that vanished before or during its listing, a listing Drive
+        marks `incompleteSearch` — is said where it
         happens and carried to completion as `partial`. A walk carrying either
         did not see the whole tree. Only a walk that skipped nothing ends
         `whole`, and only after one does the sync tombstone what it did not
@@ -641,8 +642,9 @@ class GoogleDriveAdapter:
         `FOLDER_LIST_CAP` and the cut is SAID (one warning), never absorbed: a
         folder past the cap would otherwise quietly never sync. A provider
         handing the same page token back forever (a stub, or a Drive bug) ends
-        the listing, said once. Either cut is the page's `truncated`, and
-        makes the walk `partial`."""
+        the listing, said once, and so does a listing Drive marks
+        `incompleteSearch`. Any cut is the page's `truncated`, and makes the
+        walk `partial`."""
         params = {
             "q": _subfolder_query(parent),
             "fields": "nextPageToken,incompleteSearch,files(id,name,mimeType)",
