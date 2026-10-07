@@ -436,10 +436,15 @@ async def floor_session(
 
     A route whose floor is by design a command's passes that command's
     `commands.ROLE_FLOOR` entry rather than a role name, so the route and the
-    command cannot drift apart."""
+    command cannot drift apart. The unit of work already binds *workspace_id*
+    as the tenant, so the gate does not set it again (`tenant_bound`)."""
     async with open_tenant(request, workspace_id, principal) as session:
         await tenant_resolution.authorize_member(
-            session, workspace_id, principal.user_id, minimum_role=floor
+            session,
+            workspace_id,
+            principal.user_id,
+            minimum_role=floor,
+            tenant_bound=True,
         )
         yield session
 

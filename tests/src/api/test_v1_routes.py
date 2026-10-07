@@ -301,7 +301,9 @@ class TestWorkspaceReads:
     ):
         """A member: the gate passes the member floor and refuses any higher."""
 
-        async def as_a_member(session, workspace_id, user_id, minimum_role="member"):
+        async def as_a_member(
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+        ):
             if minimum_role != "member":
                 raise TenantResolutionError("insufficient_role")
 
