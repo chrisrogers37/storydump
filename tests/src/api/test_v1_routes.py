@@ -301,7 +301,9 @@ class TestWorkspaceReads:
     ):
         """A member: the gate passes the member floor and refuses any higher."""
 
-        async def as_a_member(session, workspace_id, user_id, minimum_role="member"):
+        async def as_a_member(
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+        ):
             if minimum_role != "member":
                 raise TenantResolutionError("insufficient_role")
 
@@ -309,6 +311,14 @@ class TestWorkspaceReads:
         resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
         assert resp.status_code == 403
         assert "invitee@example.com" not in resp.text
+
+    def test_the_listing_floor_is_the_minting_floor(
+        self, client, signed_in, tenant, pending, monkeypatch
+    ):
+        monkeypatch.setitem(commands.ROLE_FLOOR, "invite_member", "owner")
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 200
+        assert ("gate", WS, PRINCIPAL.user_id, "owner") in tenant
 
 
 @pytest.fixture
