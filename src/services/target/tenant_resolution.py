@@ -17,9 +17,10 @@ Privilege reality, measured in the tests rather than assumed (`02` §7):
   apart on purpose (a principal with no workspace is a normal state):
   `sessions.resolve` authenticates on the auth-plane (``session_tokens`` —
   "the door tenant context walks through", readable before any
-  ``app.tenant_id`` exists), then :func:`authorize_member` sets the claimed
-  tenant with ``SET LOCAL`` before reading ``workspace_members``, so an
-  absent membership is an empty read → refusal, fail-closed under RLS.
+  ``app.tenant_id`` exists), then the session gate's unit of work binds the
+  claimed tenant as its transaction opens and :func:`authorize_member` reads
+  ``workspace_members`` under it, so an absent membership is an empty read →
+  refusal, fail-closed under RLS.
 - The CHAT half CANNOT run as ``svc_ingress`` under the printed policies:
   ``channel_bindings`` is tenant-RLS'd with no pre-context read path, and
   the §7 door list is closed at nine. The resolver still fail-closes there
@@ -127,9 +128,10 @@ async def authorize_member(
     empty and refuses. Fail-closed by construction, and safe to call on a
     privileged connection too (the read is then unfiltered but the WHERE
     still binds both keys). *tenant_bound*: the caller already set the claim
-    as this transaction's tenant context (the tap's dispatch does, with the
-    actor GUCs, in one statement), so setting it again would only be a round
-    trip (#1286) — the WHERE still binds both keys either way.
+    as this transaction's tenant context (the web session gates' unit of work
+    does as it opens; the tap's dispatch does, with the actor GUCs, in one
+    statement), so setting it again would only be a round trip (#1286) — the
+    WHERE still binds both keys either way.
     """
     if minimum_role not in ROLE_ORDER:
         raise TenantResolutionError("insufficient_role", f"unknown role {minimum_role}")

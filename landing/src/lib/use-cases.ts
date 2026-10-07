@@ -37,7 +37,7 @@ export const useCases = [
     title: "From Google Drive to Instagram Stories, one tap at a time",
     navLabel: "Google Drive",
     closing: "Your next Story is already in your Drive.",
-    lastModified: "2026-10-02",
+    lastModified: "2026-10-07",
   },
   {
     slug: "evergreen-instagram-stories",
@@ -50,7 +50,7 @@ export const useCases = [
     title: "Recycle your evergreen content into Instagram Stories",
     navLabel: "Evergreen content",
     closing: "Put your archive back on your Story.",
-    lastModified: "2026-10-02",
+    lastModified: "2026-10-07",
   },
   {
     slug: "approve-instagram-stories-in-telegram",
@@ -63,7 +63,7 @@ export const useCases = [
     title: "Approve Instagram Stories in your team’s Telegram group",
     navLabel: "Team approvals",
     closing: "One card. Anyone on the team can take it.",
-    lastModified: "2026-10-02",
+    lastModified: "2026-10-07",
   },
   {
     slug: "instagram-stories-for-online-stores",
@@ -76,7 +76,7 @@ export const useCases = [
     title: "Daily Instagram Stories for your online store",
     navLabel: "Online stores",
     closing: "Your product shots are tomorrow’s Stories.",
-    lastModified: "2026-10-02",
+    lastModified: "2026-10-07",
   },
 ] as const satisfies readonly UseCase[]
 
