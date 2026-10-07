@@ -26,6 +26,9 @@ describe("httpsHref: when an item's link may become an anchor", () => {
   it("refuses a link that carries a user name or password", () => {
     expect(httpsHref("https://user@example.com/menu")).toBeNull();
     expect(httpsHref("https://user:secret@example.com/menu")).toBeNull();
+    // A password with no user name: refused on the password alone, so a guard
+    // that checked only the user name would hand this out as an anchor.
+    expect(httpsHref("https://:secret@example.com/menu")).toBeNull();
   });
 
   it("refuses what does not parse as a URL, an https URL with no host among them", () => {
