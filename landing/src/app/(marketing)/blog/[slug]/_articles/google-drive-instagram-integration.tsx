@@ -1,6 +1,6 @@
 import Link from "next/link"
 import { TrackedLink } from "@/components/analytics/tracked-link"
-import { blogCta, blogDemo } from "./shared"
+import { blogCta } from "./shared"
 
 export function GoogleDriveInstagramIntegration() {
   return (
@@ -106,9 +106,7 @@ export function GoogleDriveInstagramIntegration() {
           join the waitlist
         </TrackedLink>{" "}
         to get a spot, or{" "}
-        <TrackedLink href="/demo" track={blogDemo}>
-          see a sample workspace
-        </TrackedLink>{" "}
+        <Link href="/demo">see a sample workspace</Link>{" "}
         first. Nothing in it is real, and nothing posts.
       </p>
     </>

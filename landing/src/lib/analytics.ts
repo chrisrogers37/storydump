@@ -8,7 +8,7 @@ export const CTA_LOCATIONS = ["header", "blog_post", "use_case"] as const
 /** Where a "Sign in" link sits. */
 export const SIGN_IN_LOCATIONS = ["header", "hero", "closing", "footer"] as const
 /** Where a link to the sample workspace (`/demo`) sits. */
-export const SAMPLE_WORKSPACE_LOCATIONS = ["header", "hero", "blog_post"] as const
+export const SAMPLE_WORKSPACE_LOCATIONS = ["header", "hero"] as const
 /** The home page demo's buttons. */
 export const DEMO_ACTIONS = [
   "post_now",
