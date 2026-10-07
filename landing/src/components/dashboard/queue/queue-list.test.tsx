@@ -228,6 +228,12 @@ describe("QueueList: the wiring", () => {
     expect(list(true).props.actionsOf(intent({ state: "scheduled" }))).toEqual([]);
   });
 
+  it("hands QueueView no Approve for a story whose item has a link (fork F10 (a))", () => {
+    const linked = intent({ link_url: "https://example.com/menu" });
+    expect(list(true).props.actionsOf(linked)).toEqual(["mark_posted", "skip", "reject"]);
+    expect(list(true).props.actionsOf(intent())).toContain("approve");
+  });
+
   it("moves a planned story, then re-reads the list", async () => {
     stubFetch({ outcome: "executed" });
     const answer = await list().props.onReschedule!(intent(), "2026-10-09T09:30");
