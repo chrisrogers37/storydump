@@ -191,6 +191,7 @@ async def _dispatch(
             external_ref=key,
             principal=principal.dedup_principal,
             payload=body,
+            tenant_bound=command.workspace_id == tenant,
         )
         if principal.is_token:
             await _audit_cli_command(

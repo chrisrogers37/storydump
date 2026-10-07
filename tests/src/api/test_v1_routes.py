@@ -327,6 +327,7 @@ def port(monkeypatch):
     log = {
         "admit": [],
         "execute": [],
+        "execute_kw": [],
         "outcome": CommandResult("executed", {"state": "approved"}),
     }
 
@@ -335,6 +336,7 @@ def port(monkeypatch):
 
     async def execute(session, command, **kw):
         log["execute"].append(command)
+        log["execute_kw"].append(kw)
         result = log["outcome"]
         if isinstance(result, Exception):
             raise result
@@ -390,6 +392,7 @@ class TestCommands:
         )
         assert cmd.args == {"intent_id": INTENT}
         assert tenant[0] == ("uow", WS, PRINCIPAL.user_id)
+        assert port["execute_kw"] == [{"tenant_bound": True}]
 
     def test_an_enqueued_outcome_is_202(self, client, signed_in, tenant, port):
         port["outcome"] = CommandResult("enqueued", {"job": "publish_pipeline"})
@@ -505,6 +508,8 @@ class TestCreateWorkspace:
             ("uow", preassigned, PRINCIPAL.user_id)
         ]  # no gate: no membership yet
         assert port["admit"][0][1] == "k-1"
+        # The workspace is not the tenant, so the port does not vouch for it.
+        assert port["execute_kw"] == [{"tenant_bound": False}]
 
     def test_a_client_supplied_id_is_ignored(self, client, signed_in, tenant, port):
         port["outcome"] = CommandResult("executed", {"workspace_id": "x"})

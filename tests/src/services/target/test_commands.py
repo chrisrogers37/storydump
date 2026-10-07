@@ -202,9 +202,11 @@ def gate(monkeypatch):
         role = "owner"
 
     log = Log()
+    log.kw = []
 
     async def authorize_member(session, ws, user, minimum_role="member", **kw):
         log.append((ws, user, minimum_role))
+        log.kw.append(kw)
         if log.refuse is not None:
             raise log.refuse
         return log.role
@@ -351,7 +353,21 @@ class TestIngestOwnsTheOrder:
         )
         assert admission == [("web", "k-1", {"intent_id": "i-1"}, "sess-1")]
         assert gate == [("ws-1", "user-1", "member")]
+        assert gate.kw == [{"tenant_bound": False}]
         assert out.outcome == "executed"
+
+    async def test_ingest_forwards_a_bound_tenant_to_the_gate(
+        self, admission, gate, executor
+    ):
+        await ingest(
+            _Session(),
+            _cmd(intent_id="i-1"),
+            external_ref="k-1",
+            principal="sess-1",
+            payload={},
+            tenant_bound=True,
+        )
+        assert gate.kw == [{"tenant_bound": True}]
 
     async def test_a_replay_propagates_and_nothing_executes(
         self, admission, gate, executor
