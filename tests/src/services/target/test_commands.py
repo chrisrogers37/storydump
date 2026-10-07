@@ -353,6 +353,32 @@ class TestIngestOwnsTheOrder:
         assert gate == [("ws-1", "user-1", "member")]
         assert out.outcome == "executed"
 
+    @pytest.mark.parametrize(
+        "kw,bound",
+        [({}, False), ({"tenant_bound": False}, False), ({"tenant_bound": True}, True)],
+    )
+    async def test_ingest_forwards_the_bound_tenant_to_the_gate(
+        self, admission, executor, monkeypatch, kw, bound
+    ):
+        seen = []
+
+        async def authorize_member(
+            session, ws, user, minimum_role="member", *, tenant_bound=False
+        ):
+            seen.append(tenant_bound)
+            return "owner"
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
+        await ingest(
+            _Session(),
+            _cmd(intent_id="i-1"),
+            external_ref="k-1",
+            principal="sess-1",
+            payload={},
+            **kw,
+        )
+        assert seen == [bound]
+
     async def test_a_replay_propagates_and_nothing_executes(
         self, admission, gate, executor
     ):

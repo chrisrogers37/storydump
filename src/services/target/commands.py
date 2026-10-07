@@ -371,7 +371,13 @@ async def execute(
 
 
 async def ingest(
-    session, command: Command, *, external_ref: str, principal: str, payload: Any
+    session,
+    command: Command,
+    *,
+    external_ref: str,
+    principal: str,
+    payload: Any,
+    tenant_bound: bool = False,
 ) -> CommandResult:
     """Refuse cold → admit → execute, in the caller's one transaction.
 
@@ -380,7 +386,8 @@ async def ingest(
     what the fingerprint is taken over — the adapter's raw body, so a replay
     of the same request matches regardless of what the adapter added to
     ``command.args``. Admission's own refusals (`DeliveryReplayed`,
-    `AdmissionConflict`) propagate for the adapter to answer.
+    `AdmissionConflict`) propagate for the adapter to answer. *tenant_bound*
+    is `execute`'s, forwarded.
     """
     if command.kind not in ROLE_FLOOR:
         raise UnknownCommand(command.kind)
@@ -391,4 +398,4 @@ async def ingest(
         payload=payload,
         principal=principal,
     )
-    return await execute(session, command)
+    return await execute(session, command, tenant_bound=tenant_bound)

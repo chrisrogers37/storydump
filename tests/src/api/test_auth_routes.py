@@ -593,7 +593,7 @@ class TestInstagramCallback:
                 return _cm()
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
             log.append(("gate", workspace_id, user_id, minimum_role))
             return "owner"
@@ -826,6 +826,21 @@ class TestInstagramCallback:
             ("gate", WS, USER, floor)
         ]
 
+    def test_the_gate_trusts_the_unit_of_works_tenant(
+        self, client, instagram, state_row, browser, writes, grant, monkeypatch
+    ):
+        bound = []
+
+        async def authorize_member(
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+        ):
+            bound.append(tenant_bound)
+            return "owner"
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
+        self._return(client)
+        assert bound == [True]
+
     def test_reconnect_takes_the_same_single_write_as_connect(
         self, client, instagram, state_row, browser, writes, grant
     ):
@@ -841,7 +856,7 @@ class TestInstagramCallback:
         from src.exceptions.tenancy import TenantResolutionError
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
             raise TenantResolutionError("insufficient_role")
 
@@ -945,7 +960,7 @@ class TestDriveCallback:
                 return _cm()
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
             log.append(("gate", workspace_id, user_id, minimum_role))
             return "owner"
@@ -1002,6 +1017,29 @@ class TestDriveCallback:
         monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
         self._return(client)
         assert [e for e in writes if e[0] == "gate"] == [("gate", WS, USER, floor)]
+
+    def test_the_gate_trusts_the_unit_of_works_tenant(
+        self,
+        client,
+        configured,
+        counter,
+        drive_row,
+        browser,
+        exchanged,
+        writes,
+        monkeypatch,
+    ):
+        bound = []
+
+        async def authorize_member(
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+        ):
+            bound.append(tenant_bound)
+            return "owner"
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
+        self._return(client)
+        assert bound == [True]
 
     @pytest.mark.parametrize("target", [ACCOUNT, None])
     def test_a_state_that_pins_anything_but_the_workspace_is_refused(
@@ -1079,7 +1117,7 @@ class TestDriveCallback:
         from src.exceptions.tenancy import TenantResolutionError
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
             raise TenantResolutionError("insufficient_role")
 
