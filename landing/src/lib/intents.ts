@@ -98,6 +98,13 @@ export type Intent = {
 export type IntentsResponse = { intents: Intent[]; limit: number };
 
 /**
+ * The API's ceiling on one list read (`vocabulary.LIST_LIMIT_MAX`): a larger
+ * `limit` is refused, and a page that guards on its reads renders unavailable.
+ * `intent-states-contract.test.ts` holds the two equal.
+ */
+export const LIST_LIMIT_MAX = 200;
+
+/**
  * The Queue's Planned view: `?origin=planned`, which the page forwards to the
  * API's own `origin` filter. Filtering on the server keeps it exact past the
  * page limit, where a filter over the rows already loaded would miss some.
