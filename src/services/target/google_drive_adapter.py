@@ -561,6 +561,15 @@ class GoogleDriveAdapter:
             return [], cursor(current=current, queue=queue)
 
         items = self._page_items(payload, current)
+        if payload.get("incompleteSearch"):
+            # Drive says the page may leave files out: what it did not list
+            # is not known to be gone, so the walk is not whole (#1545).
+            logger.warning(
+                "drive source %s: listing of folder %r is incomplete",
+                source_id,
+                current.get("path"),
+            )
+            partial = True
 
         next_token = payload.get("nextPageToken")
         if next_token:
@@ -586,7 +595,7 @@ class GoogleDriveAdapter:
         """
         params = {
             "q": _listing_query(folder_id),
-            "fields": f"nextPageToken,files({FILE_FIELDS})",
+            "fields": f"nextPageToken,incompleteSearch,files({FILE_FIELDS})",
             "pageSize": str(self._page_size),
             "spaces": "drive",
             "supportsAllDrives": "true",
@@ -636,7 +645,7 @@ class GoogleDriveAdapter:
         makes the walk `partial`."""
         params = {
             "q": _subfolder_query(parent),
-            "fields": "nextPageToken,files(id,name,mimeType)",
+            "fields": "nextPageToken,incompleteSearch,files(id,name,mimeType)",
             "pageSize": "200",
             "orderBy": "name_natural",
             "spaces": "drive",
@@ -646,6 +655,7 @@ class GoogleDriveAdapter:
         folders: list[dict] = []
         page: Optional[str] = None
         seen_tokens: set[str] = set()
+        incomplete = False
         while True:
             if page:
                 if page in seen_tokens:
@@ -686,6 +696,14 @@ class GoogleDriveAdapter:
                     # Stripped: the label the sync stores is trimmed, as the
                     # mix service trims what it compares against.
                     folders.append({"id": fid, "name": name.strip()})
+            if payload.get("incompleteSearch") and not incomplete:
+                # Drive says the listing may leave folders out: said once, a cut.
+                logger.warning(
+                    "drive source %s: subfolder listing under %s is incomplete",
+                    source_id,
+                    parent,
+                )
+                incomplete = True
             page = payload.get("nextPageToken")
             if len(folders) > FOLDER_LIST_CAP or (
                 len(folders) == FOLDER_LIST_CAP and page
@@ -700,7 +718,7 @@ class GoogleDriveAdapter:
                 )
                 return FolderPage(folders[:FOLDER_LIST_CAP], truncated=True)
             if not page:
-                return FolderPage(folders, truncated=False)
+                return FolderPage(folders, truncated=incomplete)
 
     async def fetch_bytes(
         self,

@@ -1241,6 +1241,24 @@ class TestTheWalkGoesToAnyDepth:
         assert [r for r, _, _ in seen] == ["fa"]
         assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("listing", ["media", "subfolders"])
+    async def test_an_incomplete_search_leaves_the_walk_partial(self, listing):
+        # Drive's `incompleteSearch`: the page may leave files out, so what it
+        # did not list is not known to be gone.
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            is_folders = "vnd.google-apps.folder" in q
+            assert "incompleteSearch" in request.url.params["fields"]
+            body: dict = {"files": [] if is_folders else [_file("fa")]}
+            if is_folders == (listing == "subfolders"):
+                body["incompleteSearch"] = True
+            return httpx.Response(200, json=body)
+
+        seen, cursors = await self._walk(_adapter(handler))
+        assert [r for r, _, _ in seen] == ["fa"]
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
+
 
 class TestFetchBytes:
     """The media bytes for the approval card (owner, 2026-09-08 — legacy

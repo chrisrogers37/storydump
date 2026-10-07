@@ -650,7 +650,7 @@ async def _land_page(
     reason,
 ) -> str:
     """Phase 3 — checkpoint CAS + upsert + chain-or-rearm, one transaction."""
-    kept = skipped_kind = refreshed = tombstoned = 0
+    kept = skipped_kind = relisted = tombstoned = 0
     async with factory() as s:
         # The cursor advances by compare-and-swap against what THIS carrier
         # read. A re-pick that nulled it, a persistent failure that reset it,
@@ -768,7 +768,7 @@ async def _land_page(
             )
             outcomes = [inserted for (inserted,) in result.all()]
             kept += sum(1 for inserted in outcomes if inserted)
-            refreshed += sum(1 for inserted in outcomes if not inserted)
+            relisted += sum(1 for inserted in outcomes if not inserted)
         if checkpoint_incomplete(new_checkpoint):
             # More pages: chain the next chunk and do NOT re-arm — the chain
             # is the carrier. The serialized key orders it after this job.
@@ -808,21 +808,22 @@ async def _land_page(
                 {"secs": BASELINE_SECONDS + jitter, "s": source_id, "ws": workspace_id},
             )
         await s.commit()
+    cp = new_checkpoint or {}
     logger.info(
-        "sync %s: source %s reason=%s walk=%s kept=%d refreshed=%d skipped_kind=%d"
+        "sync %s: source %s reason=%s walk=%s kept=%d relisted=%d skipped_kind=%d"
         " tombstoned=%d chained=%s folders_seen=%s truncated=%s partial=%s",
         job["id"],
         source_id,
         reason,
         walk,
         kept,
-        refreshed,
+        relisted,
         skipped_kind,
         tombstoned,
         checkpoint_incomplete(new_checkpoint),
-        (new_checkpoint or {}).get("seen", 0),
-        bool((new_checkpoint or {}).get("truncated")),
-        bool((new_checkpoint or {}).get("partial")),
+        cp.get("seen", 0),
+        bool(cp.get("truncated")),
+        bool(cp.get("partial")),
     )
     return "chained" if checkpoint_incomplete(new_checkpoint) else "synced"
 
