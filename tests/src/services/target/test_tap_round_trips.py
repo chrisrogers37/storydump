@@ -177,7 +177,7 @@ class TestTheGateIsOneRead:
         assert refused == refusal
         assert got == (None if refusal else role)
         assert len(ex.statements) == 1, "the gate sets no tenant: it only reads"
-        ((sql, params),) = ex.statements
+        sql, params = ex.statements[0]
         assert "FROM workspace_members WHERE workspace_id = :ws AND user_id = :u" in sql
         assert params == {"ws": "ws-1", "u": "u-1"}
 

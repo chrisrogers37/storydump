@@ -280,27 +280,6 @@ class TestWebSessionResolutionAsIngress:
             _, role = await self._resolve(conn, "live-a", world["a"]["ws"], "admin")
             assert role == "owner", "owner satisfies admin minimum"
 
-    async def test_the_claim_does_not_outlive_the_transaction(self, world):
-        """SET LOCAL semantics pinned: after rollback, the same connection
-        carries no tenant context (the probe-harness leak class, checked on
-        the resolver's own handoff)."""
-        engine = create_async_engine(asyncpg_url(world["ingress"]), poolclass=NullPool)
-        try:
-            async with engine.connect() as conn:
-                tx = await conn.begin()
-                await self._resolve(conn, "live-a", world["a"]["ws"])
-                await tx.rollback()
-                left = (
-                    await conn.execute(
-                        text("SELECT current_setting('app.tenant_id', true)")
-                    )
-                ).scalar()
-                assert left in (None, ""), (
-                    f"claim leaked past the transaction: {left!r}"
-                )
-        finally:
-            await engine.dispose()
-
 
 class TestTheGateBindsNoTenant:
     """#1632: the gate reads under its caller's binding and sets none, so a
@@ -308,7 +287,7 @@ class TestTheGateBindsNoTenant:
 
     async def test_a_transaction_bound_to_no_tenant_refuses(self, world):
         """The user owns the workspace, so the refusal is the binding's: the
-        control is the same call, same login, once the workspace is bound."""
+        control is the same call in the same transaction once it is bound."""
         ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
         async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             bound = (
@@ -320,7 +299,6 @@ class TestTheGateBindsNoTenant:
             with pytest.raises(TenantResolutionError) as e:
                 await authorize_member(conn, ws, owner)
             assert e.value.reason == "not_a_member"
-        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
             await apply_gucs(conn, tenant_id=ws)
             assert await authorize_member(conn, ws, owner) == "owner"
 

@@ -324,8 +324,8 @@ async def execute(session, command: Command) -> CommandResult:
 
     *session* is the caller's open unit of work (tenant + actor GUCs already
     applied — `02` §0's writer-identity rule, enforced by the audit triggers),
-    on `command.workspace_id` for any command the gate checks: the gate reads
-    under that binding and sets none.
+    bound to `command.workspace_id` for any command the gate checks
+    (`tenant_resolution.authorize_member`).
 
     Order is load-bearing: unknown → refused cold (no gate, nothing to
     authorize against); then the gate; then not-built; then the executor. A

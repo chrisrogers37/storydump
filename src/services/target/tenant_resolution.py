@@ -37,8 +37,7 @@ This module was written against sync DB-API cursors and had no caller in
 second async copy of "the one central authorization gate" would be two
 gates. Every function takes the caller's async executor (an `AsyncConnection`
 or `AsyncSession`) and runs in the caller's transaction. The tenant claim is
-the caller's to bind, through `unit_of_work.apply_gucs` (the one spelling of
-the GUC statement, for the reason that module states); nothing here sets it.
+the caller's to bind (`unit_of_work.apply_gucs`); nothing here sets it.
 """
 
 from __future__ import annotations
@@ -119,8 +118,8 @@ async def authorize_member(
     """The one central authorization gate (`01` §1): workspace_members role
     check, in one place, never per handler.
 
-    Called inside the caller's unit of work, which binds *workspace_id* as
-    the transaction's tenant; the gate reads under that binding and never
+    Called in a transaction the caller has already bound to *workspace_id*
+    (`unit_of_work.apply_gucs`); the gate reads under that binding and never
     sets one. Under RLS the membership row is visible iff the bound tenant is
     the row's own workspace, so a transaction bound to no tenant, or to
     another, reads empty and refuses. Fail-closed by construction, and safe
