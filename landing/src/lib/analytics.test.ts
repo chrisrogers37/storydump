@@ -12,7 +12,13 @@ import { readdirSync, readFileSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { describe, expect, it, vi } from "vitest";
-import { CTA_LOCATIONS, DEMO_ACTIONS, SIGN_IN_LOCATIONS, trackEvent } from "./analytics";
+import {
+  CTA_LOCATIONS,
+  DEMO_ACTIONS,
+  SAMPLE_WORKSPACE_LOCATIONS,
+  SIGN_IN_LOCATIONS,
+  trackEvent,
+} from "./analytics";
 import { capture } from "./posthog";
 
 vi.mock("./posthog", () => ({ capture: vi.fn() }));
@@ -50,7 +56,7 @@ const uses = SOURCES.flatMap((source) =>
 );
 
 describe("the events the site sends", () => {
-  it("are the seven goals, spelled as the PR's manual steps spell them", () => {
+  it("are the eight goals, spelled as the PR's manual steps spell them", () => {
     expect(new Set(uses.map((u) => u.name))).toEqual(
       new Set([
         "Waitlist Signup",
@@ -59,6 +65,7 @@ describe("the events the site sends", () => {
         "FAQ Expanded",
         "CTA Click",
         "Sign In Click",
+        "Sample Workspace Click",
         "Demo Tap",
       ]),
     );
@@ -72,6 +79,7 @@ describe("the events the site sends", () => {
   it("take their locations and demo actions from fixed lists", () => {
     expect(CTA_LOCATIONS).toEqual(["header", "blog_post", "use_case"]);
     expect(SIGN_IN_LOCATIONS).toEqual(["header", "hero", "closing", "footer"]);
+    expect(SAMPLE_WORKSPACE_LOCATIONS).toEqual(["header", "hero"]);
     expect(DEMO_ACTIONS).toEqual([
       "post_now",
       "posted_myself",
@@ -82,11 +90,12 @@ describe("the events the site sends", () => {
     ]);
   });
 
-  it("track every Sign in location and every CTA location somewhere", () => {
+  it("track every Sign in, CTA and sample workspace location somewhere", () => {
     const all = SOURCES.join("\n");
     const pairs = [
       ...SIGN_IN_LOCATIONS.map((location) => ["Sign In Click", location]),
       ...CTA_LOCATIONS.map((location) => ["CTA Click", location]),
+      ...SAMPLE_WORKSPACE_LOCATIONS.map((location) => ["Sample Workspace Click", location]),
     ];
     for (const [event, location] of pairs) {
       expect(all).toMatch(new RegExp(`event: "${event}", props: \\{ location: "${location}" \\}`));
