@@ -256,6 +256,18 @@ describe("the overview's recent activity", () => {
     answer({ config: ok({ tz: null }) });
     expect(await zoneOf()).toBe("UTC");
   });
+
+  it("asks for the newest outcomes first (#1633)", async () => {
+    // The API sorts soonest first unless asked, and the strip draws rows in
+    // the order they come: without this it showed the ten oldest.
+    answer();
+    await DashboardPage();
+    const reads = workspaceFetch.mock.calls
+      .map(([path]) => path as string)
+      .filter((path) => path.startsWith("intents?"));
+    expect(reads).toHaveLength(1);
+    expect(new URLSearchParams(reads[0].split("?")[1]).get("order")).toBe("desc");
+  });
 });
 
 describe("the overview's runway card", () => {

@@ -593,9 +593,9 @@ class TestInstagramCallback:
                 return _cm()
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
-            log.append(("gate", workspace_id, user_id, minimum_role))
+            log.append(("gate", workspace_id, user_id, minimum_role, tenant_bound))
             return "owner"
 
         async def store_credential(
@@ -686,7 +686,7 @@ class TestInstagramCallback:
         )
         assert writes["log"] == [
             ("uow", WS, USER, "web"),
-            ("gate", WS, USER, "admin"),
+            ("gate", WS, USER, "admin", True),
             ("connect", WS, None, "17841400000000001", "exampleshop"),
             ("store", WS, "acct-adopted", "IGQVJ-long"),
         ]
@@ -800,7 +800,7 @@ class TestInstagramCallback:
         )
         assert writes["log"] == [
             ("uow", WS, USER, "web"),
-            ("gate", WS, USER, "admin"),
+            ("gate", WS, USER, "admin", True),
             ("connect", WS, ACCOUNT, "17841400000000001", "exampleshop"),
             ("store", WS, ACCOUNT, "IGQVJ-long"),
         ]
@@ -823,7 +823,7 @@ class TestInstagramCallback:
         monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
         self._return(client)
         assert [e for e in writes["log"] if e[0] == "gate"] == [
-            ("gate", WS, USER, floor)
+            ("gate", WS, USER, floor, True)
         ]
 
     def test_reconnect_takes_the_same_single_write_as_connect(
@@ -841,7 +841,7 @@ class TestInstagramCallback:
         from src.exceptions.tenancy import TenantResolutionError
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
             raise TenantResolutionError("insufficient_role")
 
@@ -945,9 +945,9 @@ class TestDriveCallback:
                 return _cm()
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
-            log.append(("gate", workspace_id, user_id, minimum_role))
+            log.append(("gate", workspace_id, user_id, minimum_role, tenant_bound))
             return "owner"
 
         async def store_credential(session, *, workspace_id, grant, granted_by):
@@ -976,7 +976,7 @@ class TestDriveCallback:
         assert resp.headers["location"].endswith("/dashboard/settings?connected=gdrive")
         assert writes == [
             ("uow", WS, USER, "web"),
-            ("gate", WS, USER, "admin"),
+            ("gate", WS, USER, "admin", True),
             # 091: the state's user — the returning browser, checked — is
             # the granter, the one person who may browse this Drive.
             ("store", WS, "ya29.access", USER),
@@ -1001,7 +1001,9 @@ class TestDriveCallback:
         drive_row["purpose"] = carried
         monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
         self._return(client)
-        assert [e for e in writes if e[0] == "gate"] == [("gate", WS, USER, floor)]
+        assert [e for e in writes if e[0] == "gate"] == [
+            ("gate", WS, USER, floor, True)
+        ]
 
     @pytest.mark.parametrize("target", [ACCOUNT, None])
     def test_a_state_that_pins_anything_but_the_workspace_is_refused(
@@ -1079,7 +1081,7 @@ class TestDriveCallback:
         from src.exceptions.tenancy import TenantResolutionError
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
             raise TenantResolutionError("insufficient_role")
 

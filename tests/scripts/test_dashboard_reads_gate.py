@@ -1,6 +1,6 @@
 """The dashboard reads (#1044), measured as `svc_ingress` on the replayed schema.
 
-Three reads virgil's held screens need and the merged API did not serve: the
+Three reads the dashboard's held screens need and the merged API did not serve: the
 media pool, a server-side stats aggregate, and a multi-state intents filter.
 Each is asserted with exact numbers against seeded rows — a media item with
 no intent (the case that made the pool invisible), two states in one intents
