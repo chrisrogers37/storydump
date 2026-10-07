@@ -141,6 +141,42 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
             CommandRefused("because")
 
 
+class TestTheConnectLegsReadTheirPurposesFloor:
+    def test_each_connect_purpose_stands_for_a_command(self):
+        assert port.CONNECT_PURPOSE_KIND == {
+            "connect": "connect_account",
+            "reconnect": "reconnect_account",
+        }
+        assert set(port.CONNECT_PURPOSE_KIND.values()) <= set(port.ROLE_FLOOR)
+
+    @pytest.mark.parametrize(
+        "purpose,kind",
+        [("connect", "connect_account"), ("reconnect", "reconnect_account")],
+    )
+    def test_a_purposes_floor_follows_its_commands_entry(
+        self, monkeypatch, purpose, kind
+    ):
+        monkeypatch.setitem(port.ROLE_FLOOR, kind, "owner")
+        assert port.connect_floor(purpose) == "owner"
+
+    @pytest.mark.parametrize(
+        "connect,reconnect,lowest",
+        [
+            ("admin", "admin", "admin"),
+            ("owner", "admin", "admin"),
+            ("admin", "owner", "admin"),
+            ("member", "admin", "member"),
+            ("user", "admin", "user"),
+        ],
+    )
+    def test_the_lowest_connect_floor_admits_both_purposes(
+        self, monkeypatch, connect, reconnect, lowest
+    ):
+        monkeypatch.setitem(port.ROLE_FLOOR, "connect_account", connect)
+        monkeypatch.setitem(port.ROLE_FLOOR, "reconnect_account", reconnect)
+        assert port.lowest_connect_floor() == lowest
+
+
 def _cmd(kind="approve", **args) -> Command:
     return Command(
         kind=kind,

@@ -84,7 +84,12 @@ from src.services.target import (
     workspaces,
 )
 from src.services.target.oauth_states import issue_state
-from src.services.target.commands import Command, CommandRefused, CommandResult
+from src.services.target.commands import (
+    CONNECT_PURPOSE_KIND,
+    Command,
+    CommandRefused,
+    CommandResult,
+)
 from src.services.target.intent_ledger import IntentTransitionRefused
 from src.utils.datetime_utils import utcnow
 
@@ -1204,7 +1209,12 @@ async def sync_now(session, command: Command) -> CommandResult:
     )
 
 
-async def _begin_drive_link(session, command: Command, *, expect: str) -> CommandResult:
+#: The purpose each Drive link command mints: `CONNECT_PURPOSE_KIND` read
+#: backwards, so the chat door and the web legs follow one table.
+_LINK_PURPOSE = {kind: purpose for purpose, kind in CONNECT_PURPOSE_KIND.items()}
+
+
+async def _begin_drive_link(session, command: Command) -> CommandResult:
     """Shared body of `connect_account` / `reconnect_account` — the chat-side
     start of the WORKSPACE's Drive grant (069, `07` §15: one Google grant per
     workspace, folders picked under it).
@@ -1221,6 +1231,7 @@ async def _begin_drive_link(session, command: Command, *, expect: str) -> Comman
     invalidate-prior-states step (`07` §2, "last issued wins") and leave two
     live callbacks for one workspace.
     """
+    expect = _LINK_PURPOSE[command.kind]
     purpose = await google_drive_oauth.connect_purpose(
         session, workspace_id=command.workspace_id
     )
@@ -1245,12 +1256,12 @@ async def _begin_drive_link(session, command: Command, *, expect: str) -> Comman
 
 async def connect_account(session, command: Command) -> CommandResult:
     """Begin the workspace's Drive connect — it holds no grant yet."""
-    return await _begin_drive_link(session, command, expect="connect")
+    return await _begin_drive_link(session, command)
 
 
 async def reconnect_account(session, command: Command) -> CommandResult:
     """Begin the workspace's Drive reconnect — it holds a grant already."""
-    return await _begin_drive_link(session, command, expect="reconnect")
+    return await _begin_drive_link(session, command)
 
 
 async def remove_member(session, command: Command) -> CommandResult:
