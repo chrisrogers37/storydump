@@ -39,6 +39,9 @@ import {
   submitInviteMember,
   inviteMemberRefusalCopy,
   rescheduleRefusalCopy,
+  submitSetItemLink,
+  linkRefusalCopy,
+  LINK_URL_MAX,
 } from "./command-client";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -619,5 +622,55 @@ describe("rescheduleRefusalCopy (#1413 phase 6)", () => {
     expect(rescheduleRefusalCopy("http_401", 401)).toMatch(/not signed in/i);
     expect(rescheduleRefusalCopy("unreachable", 0)).toMatch(/nothing was moved/i);
     expect(rescheduleRefusalCopy("something_new", 500)).toMatch(/nothing changed/i);
+  });
+});
+
+describe("an item's link — set_item_link (#1413 phase 7)", () => {
+  const ITEM = "66666666-6666-4666-8666-666666666666";
+
+  it("sends the item and the link as typed, to the port's door", async () => {
+    stubFetch({ outcome: "executed", media_item_id: ITEM, link_url: "https://example.com/menu" }, 200);
+    const result = await submitSetItemLink(WS, ITEM, "https://example.com/menu");
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/set_item_link`);
+    const { submission_id, ...args } = sentBody(0);
+    expect(typeof submission_id).toBe("string");
+    expect(args).toEqual({ media_item_id: ITEM, link_url: "https://example.com/menu" });
+    expect(portKey(0, "set_item_link")).toMatch(/^set_item_link:/);
+  });
+
+  it("sends a clear as an explicit null, never a missing key", async () => {
+    stubFetch({ outcome: "executed", media_item_id: ITEM, link_url: null }, 200);
+    await submitSetItemLink(WS, ITEM, null);
+    expect("link_url" in sentBody(0)).toBe(true);
+    expect(sentBody(0).link_url).toBeNull();
+  });
+
+  it("two attempts are two submissions, so setting a link again after a clear is never deduped", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitSetItemLink(WS, ITEM, "https://example.com/menu");
+    await submitSetItemLink(WS, ITEM, "https://example.com/menu");
+    expect(portKey(0, "set_item_link")).not.toBe(portKey(1, "set_item_link"));
+  });
+});
+
+describe("linkRefusalCopy (#1413 phase 7)", () => {
+  it("states the whole rule, since the port's refusal names no part of it", () => {
+    const sentence = linkRefusalCopy("invalid_args", 400);
+    expect(sentence).toMatch(/https:\/\//);
+    expect(sentence).toContain(LINK_URL_MAX.toLocaleString("en-US"));
+    expect(sentence).toMatch(/no spaces/i);
+    expect(sentence).toMatch(/user name or password/i);
+  });
+
+  it("says the item is gone, and how to see where things stand", () => {
+    expect(linkRefusalCopy("not_found", 404)).toMatch(/no longer in the library.*reload/i);
+  });
+
+  it("tells a permission refusal and a lost session apart from a blip", () => {
+    expect(linkRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+    expect(linkRefusalCopy("http_401", 401)).toMatch(/not signed in/i);
+    expect(linkRefusalCopy("unreachable", 0)).toMatch(/link was not saved/i);
+    expect(linkRefusalCopy("something_new", 500)).toMatch(/nothing changed/i);
   });
 });

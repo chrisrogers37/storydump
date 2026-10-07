@@ -28,6 +28,7 @@ function story(id: string, state: IntentState = "awaiting_approval"): Intent {
     scheduled_by: null,
     tz: "UTC",
     miss_reason: null,
+    link_url: null,
     file_name: `${id}.jpg`,
     media_kind: "image",
     thumbnail_url: null,

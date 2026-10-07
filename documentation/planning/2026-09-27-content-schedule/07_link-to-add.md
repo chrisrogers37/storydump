@@ -62,5 +62,25 @@ None.
 - Don't render `link_url` into an `href` without the https check.
 - Don't try to attach the link through the Graph API. Stories take no link sticker there.
 
+## As built: the web half (#1622)
+
+- **The reads.** The API's media and queue reads return `link_url`; before this the web could not see
+  an item's link. There is no schema change.
+- **Media Library.** A card shows its item's link and offers Link…, a dialog that saves one
+  (`set_item_link`, keyed per submission) or removes it with an explicit `null`. A blank field saves
+  nothing.
+- **Queue.** Every row whose item has a link shows it.
+- **Rendering.** A link becomes an anchor only through `httpsHref`: https and no user name or password,
+  with the URL parser refusing one without a host. It opens in a new tab with no referrer. Anything
+  else, such as a value stored before the port's rule, is text.
+- **Approve.** Following F10 (a), a linked story awaiting approval is not offered Approve in the web
+  Queue; this is its own commit, so it can be dropped. Post again on a review card is unchanged, left
+  for the decision on the card (7b).
+- **Refusal copy.** It states the whole rule, because the port's `invalid_args` names no part of it.
+  A `link_rule` fact from the port would let the web and the CLI name the broken part; that is not built.
+- **Forks weighed.** A dialog over an inline field; Remove link over a blank save; the link on every
+  row of its item; shape checks only in the browser; the API read in the same PR; no sample link in
+  `/demo`.
+
 ## Context
 - Source skill: forge · Area: `src/services/target/` (vocabulary, command_executors, prompts), `landing/src/`, `storydump_cli/` · Effort: M · Risk: Low · Priority: Medium

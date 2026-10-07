@@ -14,6 +14,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import { ItemLink } from "@/components/dashboard/item-link";
 import { RescheduleDialog } from "@/components/dashboard/queue/reschedule-dialog";
 import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import {
@@ -172,6 +173,9 @@ export function QueueView({
                     {formatSlot(intent.schedule_slot_at, tz)}
                     {intent.category ? ` · ${intent.category}` : ""}
                   </p>
+                  {intent.link_url && (
+                    <ItemLink link={intent.link_url} className="mt-0.5" />
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">

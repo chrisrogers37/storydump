@@ -90,6 +90,8 @@ export type Intent = {
   thumbnail_url: string | null;
   caption: string | null;
   category: string | null;
+  /** The item's link to add by hand, from its media row; shown only through `httpsHref`. */
+  link_url: string | null;
   /** NULL when the account carries no handle — the key is always present. */
   account_handle: string | null;
   account_display_name: string | null;
@@ -228,8 +230,13 @@ export function isQueueCommand(value: unknown): value is QueueCommand {
  * rung the port can only refuse it); Post again needs the API to publish;
  * Give up is offered even while a cancel is pending, because it IS the
  * cancel. A planned story still in `scheduled` can be rescheduled or
- * cancelled (#1413) — the port allows the move nowhere else. Every other
- * state renders read-only with its badge.
+ * cancelled (#1413) — the port allows the move nowhere else. A story whose
+ * item carries a link to add by hand gets no Approve: an app cannot attach a
+ * link to a story it publishes, so such a story is posted by hand. That is
+ * fork F10 (a)'s rule for the approval card's Post now, applied here. Post
+ * again on a review card publishes the same way and is left as it is, for
+ * the decision on that card to settle. Every other state renders read-only
+ * with its badge.
  */
 export function actionsFor(
   state: IntentState,
@@ -237,6 +244,7 @@ export function actionsFor(
   cancelRequested = false,
   publishStep: string | null = null,
   origin: Intent["origin"] = "cadence",
+  linked = false,
 ): QueueAction[] {
   if (state === "review_required") {
     if (cancelRequested) return ["resolve_cancel"];
@@ -253,7 +261,7 @@ export function actionsFor(
     return origin === "planned" ? ["reschedule", "cancel"] : [];
   }
   if (state !== "awaiting_approval") return [];
-  return apiPublishingEnabled
+  return apiPublishingEnabled && !linked
     ? ["approve", "mark_posted", "skip", "reject"]
     : ["mark_posted", "skip", "reject"];
 }

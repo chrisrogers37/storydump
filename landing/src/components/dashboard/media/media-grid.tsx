@@ -1,13 +1,17 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ImageOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import { ItemLink } from "@/components/dashboard/item-link";
+import { LinkDialog } from "@/components/dashboard/media/link-dialog";
 import { ScheduleDialog, type ScheduleTargets } from "@/components/dashboard/media/schedule-dialog";
 import { TONE_CLASS } from "@/components/dashboard/tone";
 import { Card, CardContent } from "@/components/ui/card";
+import { linkRefusalCopy, submitSetItemLink } from "@/lib/command-client";
 import type { MediaRow } from "@/lib/dashboard-payloads";
 
 /**
@@ -30,6 +34,8 @@ import type { MediaRow } from "@/lib/dashboard-payloads";
  *
  * Each item can be scheduled onto an account at a chosen time (#1413 phase 6).
  * One dialog serves the grid, opened for the item whose Schedule… was pressed.
+ * Each item can also carry the link its stories ask a person to add by hand
+ * (#1413 phase 7), set from its own Link…; the card shows it under the name.
  */
 function formatBytes(bytes: number | null): string {
   if (bytes === null) return "—";
@@ -73,6 +79,18 @@ export function MediaGrid({
   const [scheduling, setScheduling] = useState<MediaRow | null>(null);
   // The Schedule… that opened the dialog, where focus goes back on close.
   const opener = useRef<HTMLButtonElement | null>(null);
+  const router = useRouter();
+
+  // Sets or clears an item's link; answers the refusal's sentence, or null once saved.
+  async function saveLink(item: MediaRow, link: string | null): Promise<string | null> {
+    const result = await submitSetItemLink(workspaceId, item.id, link);
+    if (result.ok) {
+      router.refresh();
+      return null;
+    }
+    if (result.status === 404) router.refresh();
+    return linkRefusalCopy(result.error, result.status);
+  }
 
   const categories = useMemo(() => {
     const counts = new Map<string, number>();
@@ -149,6 +167,7 @@ export function MediaGrid({
                 <p className="truncate text-sm font-medium" title={item.file_name}>
                   {item.file_name}
                 </p>
+                {item.link_url && <ItemLink link={item.link_url} />}
                 <div className="flex items-center justify-between">
                   <Badge variant="outline" className="text-xs">
                     {item.category ?? "uncategorised"}
@@ -159,7 +178,8 @@ export function MediaGrid({
                   <span>{formatBytes(item.file_size)}</span>
                   <span>{formatDate(item.created_at)}</span>
                 </div>
-                <div className="flex justify-end">
+                <div className="flex justify-end gap-2">
+                  <LinkDialog item={item} onSubmit={saveLink} />
                   <Button
                     variant="outline"
                     size="sm"

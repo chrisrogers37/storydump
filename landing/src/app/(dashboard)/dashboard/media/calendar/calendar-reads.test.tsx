@@ -66,6 +66,7 @@ function story(id: string, over: Partial<Intent> = {}): Intent {
     thumbnail_url: null,
     caption: null,
     category: "memes",
+    link_url: null,
     account_handle: null,
     account_display_name: null,
     ...over,

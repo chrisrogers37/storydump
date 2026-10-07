@@ -30,6 +30,9 @@ from tests.scripts.conftest import (
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
+#: The link the posted item carries, to show that both reads return it.
+LINK = "https://example.com/menu"
+
 
 @pytest.fixture(scope="module")
 def world(admin_conn, owner_actor):
@@ -62,8 +65,9 @@ def world(admin_conn, owner_actor):
                     cur, a["ws"], "reads-a-skipped", state="awaiting_approval"
                 )
                 cur.execute(
-                    "UPDATE media_items SET category = 'food', times_posted = 1 WHERE id = %s",
-                    (posted["media"],),
+                    "UPDATE media_items SET category = 'food', times_posted = 1, link_url = %s"
+                    " WHERE id = %s",
+                    (LINK, posted["media"]),
                 )
                 cur.execute(
                     "UPDATE media_items SET category = 'travel' WHERE id = %s",
@@ -231,6 +235,25 @@ class TestMultiStateIntents:
         # the queue's account column (#1033): present on every row, NULL when
         # the seeded account carries no handle — never a missing key
         assert all("account_handle" in r and "account_display_name" in r for r in rows)
+
+
+class TestTheItemsLink:
+    """An item's link to add by hand reaches the library and the queue, whose
+    rows join their item. Every row carries the key, NULL when the item has no
+    link, so the web never meets a missing key."""
+
+    def test_the_library_and_the_queue_both_read_it(self, world):
+        a = world["a"]
+        media = {str(r["id"]): r for r in _read(world, a, workspaces.list_media)}
+        assert all("link_url" in r for r in media.values())
+        assert media[str(a["posted"]["media"])]["link_url"] == LINK
+        assert media[a["orphan_media"]]["link_url"] is None
+        one = _read(world, a, workspaces.get_media, media_id=str(a["posted"]["media"]))
+        assert one["link_url"] == LINK
+        intents = {str(r["id"]): r for r in _read(world, a, workspaces.list_intents)}
+        assert all("link_url" in r for r in intents.values())
+        assert intents[str(a["posted"]["intent"])]["link_url"] == LINK
+        assert intents[str(a["skipped"]["intent"])]["link_url"] is None
 
 
 class TestStats:
