@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { trackEvent } from "@/lib/analytics"
+import { waitlistRefusal } from "@/lib/waitlist-refusal"
 import { type UtmKey, utmFrom } from "@/lib/utm"
 
 interface WaitlistFormProps {
@@ -114,11 +115,11 @@ export function WaitlistForm({
         trackEvent("Waitlist Signup", { variant, ...utm })
         markRegistered()
       } else {
-        const busy = data.reason === "busy"
-        setStatus(busy ? "busy" : "error")
+        const refusal = waitlistRefusal(res.status, data)
+        setStatus(refusal)
         setMessage(data.message || "Something went wrong. Please try again.")
         trackEvent("Waitlist Error", {
-          reason: busy ? "busy" : "server_error",
+          reason: refusal === "busy" ? "busy" : "server_error",
           variant,
         })
       }
@@ -199,10 +200,10 @@ export function WaitlistForm({
         <p
           id={`waitlist-error-${variant}`}
           className={cn(
-            "mt-2 text-sm font-medium text-balance",
+            "mt-2 text-sm font-medium text-balance text-alarm",
             // The closing form sits on the orange band, where the alarm red
-            // reads at 2.5:1; the band's own ink reads at about 6:1.
-            variant === "footer" ? "font-semibold text-ink" : "text-alarm"
+            // reads at 2.5:1: a white chip keeps it red, and an error, at 7.9:1.
+            variant === "footer" && "inline-block rounded-lg bg-white px-3 py-1.5"
           )}
           role="alert"
         >
