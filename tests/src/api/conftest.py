@@ -235,9 +235,7 @@ def tenant(monkeypatch, engine):
         log.append(("uow", workspace_id, principal.user_id))
         yield engine.session
 
-    async def gate(
-        session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
-    ):
+    async def gate(session, workspace_id, user_id, minimum_role="member"):
         log.append(("gate", workspace_id, user_id, minimum_role))
         if log.refuse is not None:
             raise log.refuse

@@ -40,6 +40,7 @@ class _Fake:
         self.tapper_user = "u1"
         self.gucs = []
         self.gate = []
+        self.tenant_at_gate = []
         self.role_refusal = None
 
 
@@ -67,10 +68,10 @@ def patched(monkeypatch):
     async def apply_gucs(executor, **kw):
         f.gucs.append(kw)
 
-    async def authorize_member(
-        executor, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
-    ):
-        f.gate.append((workspace_id, user_id, minimum_role, tenant_bound))
+    async def authorize_member(executor, workspace_id, user_id, minimum_role="member"):
+        f.gate.append((workspace_id, user_id, minimum_role))
+        # The gate sets no tenant: it reads under whichever the bind set first.
+        f.tenant_at_gate.append(f.gucs[-1]["tenant_id"] if f.gucs else None)
         if f.role_refusal:
             raise TenantResolutionError(f.role_refusal)
         return "admin"
@@ -184,7 +185,8 @@ class TestTheMinterMustStillBeAnAdmin:
         self, patched
     ):
         await channel_bind.handle_bind(object(), ctx())
-        assert patched.gate == [("ws-1", "u1", "admin", True)]
+        assert patched.gate == [("ws-1", "u1", "admin")]
+        assert patched.tenant_at_gate == ["ws-1"]
 
     @pytest.mark.parametrize("reason", ["insufficient_role", "not_a_member"])
     async def test_a_minter_no_longer_admin_binds_nothing(self, patched, reason):

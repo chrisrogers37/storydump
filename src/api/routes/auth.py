@@ -401,14 +401,12 @@ async def google_drive_callback(
         async with uow.begin() as session:
             # The floor of the command the state's purpose stands for, at issue
             # AND at callback, as the Instagram leg: a demoted admin's pending
-            # state must not land a grant. The unit of work binds this same
-            # workspace, so the gate does not set it again (`tenant_bound`).
+            # state must not land a grant.
             await tenant_resolution.authorize_member(
                 session,
                 workspace_id,
                 str(row["user_id"]),
                 minimum_role=commands.connect_floor(row["purpose"]),
-                tenant_bound=True,
             )
             # The state's user is the granter (091, `07` §34): the presenter
             # check above proved the returning browser is theirs, so the
@@ -496,14 +494,11 @@ async def instagram_login_callback(
             # checked at issue AND at callback. The row pins the workspace and
             # the user; what can change between the two is the membership,
             # and a demoted admin's pending state must not land a credential.
-            # The unit of work binds this same workspace, so the gate does not
-            # set it again (`tenant_bound`).
             await tenant_resolution.authorize_member(
                 session,
                 workspace_id,
                 str(row["user_id"]),
                 minimum_role=commands.connect_floor(row["purpose"]),
-                tenant_bound=True,
             )
             account_id, _ = await provisioning.connect_destination(
                 session,

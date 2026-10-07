@@ -35,6 +35,7 @@ from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import commands, invitations, sessions
 from src.services.target.commands import Command, CommandRefused
+from src.services.target.unit_of_work import apply_gucs
 from tests.scripts.conftest import (
     _scratch,
     actor_lacks_createrole,
@@ -142,6 +143,7 @@ async def _execute_invite(world, args, *, origin=ORIGIN, actor=None):
     try:
         with mock.patch.object(settings, "WEB_APP_URL", origin):
             async with engine.begin() as conn:
+                await apply_gucs(conn, tenant_id=str(world["ws"]))
                 return await commands.execute(
                     conn,
                     Command(
@@ -442,6 +444,7 @@ class TestTheExecutorDoesNotNarrowTheWriter:
         engine = create_async_engine(async_url(world["dsn"]))
         try:
             async with engine.begin() as conn:
+                await apply_gucs(conn, tenant_id=str(world["ws"]))
                 return await commands.execute(
                     conn,
                     Command(

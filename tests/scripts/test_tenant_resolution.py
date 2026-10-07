@@ -33,7 +33,7 @@ from src.services.target.tenant_resolution import (
     authorize_member,
     resolve_chat,
 )
-from src.services.target.unit_of_work import asyncpg_url
+from src.services.target.unit_of_work import apply_gucs, asyncpg_url
 from tests.scripts.conftest import (
     _scratch,
     as_user,
@@ -208,12 +208,13 @@ class TestChatResolutionAsIngressGoesThroughTheDoor:
 class TestWebSessionResolutionAsIngress:
     """The production path for the web half, end to end as svc_ingress: the
     router composes `sessions.resolve` (auth-plane) with `authorize_member`
-    (the claimed tenant), and keeps them apart because a principal with no
-    workspace is a normal state."""
+    under the unit of work that binds the claimed tenant, and keeps them apart
+    because a principal with no workspace is a normal state."""
 
     @staticmethod
     async def _resolve(conn, token, ws, minimum_role="member"):
         session = await sessions.resolve(conn, token_hash=_sha(token))
+        await apply_gucs(conn, tenant_id=str(ws))
         role = await authorize_member(conn, str(ws), session.user_id, minimum_role)
         return session, role
 
@@ -299,6 +300,29 @@ class TestWebSessionResolutionAsIngress:
                 )
         finally:
             await engine.dispose()
+
+
+class TestTheGateBindsNoTenant:
+    """#1632: the gate reads under its caller's binding and sets none, so a
+    caller that skips the binding is refused under `p_tenant`, not admitted."""
+
+    async def test_a_transaction_bound_to_no_tenant_refuses(self, world):
+        """The user owns the workspace, so the refusal is the binding's: the
+        control is the same call, same login, once the workspace is bound."""
+        ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+            bound = (
+                await conn.execute(
+                    text("SELECT current_setting('app.tenant_id', true)")
+                )
+            ).scalar()
+            assert bound in (None, ""), f"the transaction is bound to {bound!r}"
+            with pytest.raises(TenantResolutionError) as e:
+                await authorize_member(conn, ws, owner)
+            assert e.value.reason == "not_a_member"
+        async with _txn(world["ingress"], expect_user="svc_ingress") as conn:
+            await apply_gucs(conn, tenant_id=ws)
+            assert await authorize_member(conn, ws, owner) == "owner"
 
 
 class TestNoChatIdCrossesTheBoundary:

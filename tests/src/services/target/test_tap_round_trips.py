@@ -146,75 +146,37 @@ class TestTheActorNameOnTheCommand:
         assert seen["args"] == ("u-1", None) and "The CEO" not in line
 
 
-class TestTheGateTrustsABoundTenant:
-    async def test_tenant_bound_skips_the_second_guc_set(self, monkeypatch):
-        applied = []
+class TestTheGateIsOneRead:
+    """The gate reads under its caller's tenant and sets none (#1632): one
+    statement, the membership read binding both keys, whatever it decides."""
 
-        async def apply_gucs(executor, **kw):
-            applied.append(kw)
-
-        monkeypatch.setattr(tenant_resolution, "apply_gucs", apply_gucs)
-        ex = _Ex(row=("admin",))
-        role = await tenant_resolution.authorize_member(
-            ex, "ws-1", "u-1", "member", tenant_bound=True
-        )
-        assert role == "admin"
-        assert applied == [], "the caller bound the tenant; the gate did not re-set it"
-        assert len(ex.statements) == 1 and "workspace_members" in ex.statements[0][0]
-
-    async def test_by_default_the_gate_binds_the_claim_itself(self, monkeypatch):
-        applied = []
-
-        async def apply_gucs(executor, **kw):
-            applied.append(kw)
-
-        monkeypatch.setattr(tenant_resolution, "apply_gucs", apply_gucs)
-        await tenant_resolution.authorize_member(_Ex(row=("member",)), "ws-1", "u-1")
-        assert applied == [{"tenant_id": "ws-1"}]
-
-    async def test_the_where_still_binds_both_keys_when_bound(self, monkeypatch):
-        async def apply_gucs(executor, **kw):  # pragma: no cover
-            raise AssertionError("not called")
-
-        monkeypatch.setattr(tenant_resolution, "apply_gucs", apply_gucs)
-        ex = _Ex(row=None)
-        with pytest.raises(TenantResolutionError) as info:
-            await tenant_resolution.authorize_member(
-                ex, "ws-1", "u-1", "member", tenant_bound=True
-            )
-        assert info.value.reason == "not_a_member"
-        assert ex.statements[0][1] == {"ws": "ws-1", "u": "u-1"}
-
-    @pytest.mark.parametrize("tenant_bound", [False, True])
     @pytest.mark.parametrize(
         "role,floor,refusal",
         [
+            ("member", "member", None),
+            ("admin", "member", None),
+            ("owner", "member", None),
+            ("member", "admin", "insufficient_role"),
             ("admin", "admin", None),
             ("owner", "admin", None),
-            ("member", "member", None),
-            ("member", "admin", "insufficient_role"),
+            ("member", "owner", "insufficient_role"),
+            ("admin", "owner", "insufficient_role"),
+            ("owner", "owner", None),
             (None, "member", "not_a_member"),
+            (None, "admin", "not_a_member"),
+            (None, "owner", "not_a_member"),
         ],
     )
-    async def test_a_bound_tenant_changes_no_decision(
-        self, monkeypatch, tenant_bound, role, floor, refusal
-    ):
-        applied = []
-
-        async def apply_gucs(executor, **kw):
-            applied.append(kw)
-
-        monkeypatch.setattr(tenant_resolution, "apply_gucs", apply_gucs)
+    async def test_every_role_at_every_floor(self, role, floor, refusal):
         ex = _Ex(row=None if role is None else (role,))
         try:
-            await tenant_resolution.authorize_member(
-                ex, "ws-1", "u-1", floor, tenant_bound=tenant_bound
-            )
+            got = await tenant_resolution.authorize_member(ex, "ws-1", "u-1", floor)
             refused = None
         except TenantResolutionError as exc:
-            refused = exc.reason
+            got, refused = None, exc.reason
         assert refused == refusal
-        assert applied == ([] if tenant_bound else [{"tenant_id": "ws-1"}])
+        assert got == (None if refusal else role)
+        assert len(ex.statements) == 1, "the gate sets no tenant: it only reads"
         ((sql, params),) = ex.statements
         assert "FROM workspace_members WHERE workspace_id = :ws AND user_id = :u" in sql
         assert params == {"ws": "ws-1", "u": "u-1"}

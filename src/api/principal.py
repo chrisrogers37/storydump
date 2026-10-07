@@ -430,14 +430,10 @@ def open_tenant(request: Request, workspace_id: str, principal: Principal):
 
 
 async def _gate(session, workspace_id: str, principal: Principal, floor: str):
-    """The ONE gate at *floor*, inside a unit of work that already binds
-    *workspace_id* as the tenant, so it does not set it again (`tenant_bound`)."""
+    """The ONE gate at *floor*, inside the unit of work that binds
+    *workspace_id* as the tenant."""
     await tenant_resolution.authorize_member(
-        session,
-        workspace_id,
-        principal.user_id,
-        minimum_role=floor,
-        tenant_bound=True,
+        session, workspace_id, principal.user_id, minimum_role=floor
     )
 
 
