@@ -387,7 +387,7 @@ class TestTheTenantSeamsResolveThroughTheModule:
             )
 
 
-class TestAStricterFloorInsideAGatedSession:
+class TestAConnectLegChecksItsPurposesFloor:
     @pytest.fixture
     def gate(self, monkeypatch):
         from src.services.target import tenant_resolution
@@ -402,10 +402,15 @@ class TestAStricterFloorInsideAGatedSession:
         monkeypatch.setattr(tenant_resolution, "authorize_member", fake_gate)
         return seen
 
-    async def test_the_floor_already_passed_needs_no_second_read(self, gate):
-        await principal.require_floor("session", WS, PRINCIPAL, "admin", passed="admin")
+    async def test_a_floor_equal_to_the_sessions_needs_no_second_read(self, gate):
+        await principal.require_connect_floor("session", WS, PRINCIPAL, "reconnect")
         assert gate == []
 
-    async def test_a_different_floor_is_checked_in_the_same_session(self, gate):
-        await principal.require_floor("session", WS, PRINCIPAL, "owner", passed="admin")
+    async def test_a_stricter_purpose_floor_is_checked_in_the_same_session(
+        self, gate, monkeypatch
+    ):
+        from src.services.target import commands
+
+        monkeypatch.setitem(commands.ROLE_FLOOR, "reconnect_account", "owner")
+        await principal.require_connect_floor("session", WS, PRINCIPAL, "reconnect")
         assert gate == [("session", WS, PRINCIPAL.user_id, "owner", True)]

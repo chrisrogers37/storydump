@@ -603,3 +603,52 @@ class TestRemovingAnAccountGivesUpItsParkedReviews:
         )
         await command_executors.disable_account(_Session(), command)
         assert removed["verdicts"] == [] and removed["restates"] == []
+
+
+class TestTheDriveLinkDoorMintsItsTablesPurpose:
+    """The chat door reads `commands.CONNECT_PURPOSE_KIND` too, so it mints the
+    purpose its web legs and callbacks gate by."""
+
+    @pytest.fixture
+    def needs(self, monkeypatch):
+        from src.services.target import google_drive_oauth
+
+        holder = {"purpose": None}
+
+        async def connect_purpose(session, *, workspace_id):
+            return holder["purpose"]
+
+        async def issue_state(session, **kw):
+            return "st"
+
+        monkeypatch.setattr(google_drive_oauth, "connect_purpose", connect_purpose)
+        monkeypatch.setattr(command_executors, "issue_state", issue_state)
+        return holder
+
+    @staticmethod
+    def _command(kind):
+        return Command(
+            kind=kind, workspace_id="ws-1", actor_user_id="u-1", channel="web"
+        )
+
+    @pytest.mark.parametrize(
+        "purpose,kind", list(commands.CONNECT_PURPOSE_KIND.items())
+    )
+    async def test_each_command_mints_the_purpose_the_table_pairs_it_with(
+        self, needs, purpose, kind
+    ):
+        needs["purpose"] = purpose
+        result = await getattr(command_executors, kind)(object(), self._command(kind))
+        assert result.data["purpose"] == purpose
+
+    @pytest.mark.parametrize(
+        "purpose,kind",
+        [("connect", "reconnect_account"), ("reconnect", "connect_account")],
+    )
+    async def test_the_other_commands_purpose_is_refused_by_name(
+        self, needs, purpose, kind
+    ):
+        needs["purpose"] = purpose
+        with pytest.raises(commands.CommandRefused) as info:
+            await getattr(command_executors, kind)(object(), self._command(kind))
+        assert info.value.reason == "illegal_transition"

@@ -22,7 +22,8 @@ refused request leaves no debit behind. That first transaction is
 The state was minted for a signed-in admin and pins the workspace and the
 user. A state minted for another leg is refused by name at consume; the
 returning browser must carry the session of the state's user, and that user
-must still be an admin, checked again inside the write; the credential is
+must still hold the floor of the command the state's purpose stands for
+(`commands.connect_floor`), checked again inside the write; the credential is
 written inside a unit of work for THAT workspace as THAT user, so the audit
 trigger names the actor and `p_tenant` binds the row. Both legs' redirect URIs come from `google_client`.
 
@@ -335,7 +336,8 @@ async def google_drive_callback(
     """The Drive connect leg's return: consume the state, check the returning
     browser is the one that started the flow, exchange the code, write the
     credential. The Instagram leg's checks: the returning session must be the
-    state's user, and that user must still be an admin inside the write."""
+    state's user, and that user must still hold the purpose's floor inside the
+    write."""
     client_id, client_secret, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )

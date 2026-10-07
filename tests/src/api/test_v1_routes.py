@@ -553,6 +553,21 @@ class TestInvitations:
 ACCOUNT = "55555555-5555-4555-8555-555555555555"
 
 
+#: A purpose-reading connect route's gates: (the purpose it mints, the entries
+#: moved, the floors its gates check, in order). The first gate is the lower
+#: connect floor; the minted purpose's own follows only when it is stricter.
+CONNECT_FLOOR_CASES = [
+    ("connect", {"connect_account": "owner"}, ["admin", "owner"]),
+    ("reconnect", {"reconnect_account": "owner"}, ["admin", "owner"]),
+    ("connect", {"reconnect_account": "owner"}, ["admin"]),
+    (
+        "reconnect",
+        {"connect_account": "member", "reconnect_account": "member"},
+        ["member"],
+    ),
+]
+
+
 @pytest.fixture
 def instagram_configured(monkeypatch):
     """Instagram Login configured — shared by both connect routes' suites."""
@@ -617,11 +632,8 @@ class TestDestinationConnect:
         assert issued["workspace_id"] == WS
         assert issued["user_id"] == PRINCIPAL.user_id
 
-    @pytest.mark.parametrize(
-        "minted,kind",
-        [("connect", "connect_account"), ("reconnect", "reconnect_account")],
-    )
-    def test_the_floor_is_the_minted_purposes(
+    @pytest.mark.parametrize("minted,moved,gates", CONNECT_FLOOR_CASES)
+    def test_the_gates_follow_the_minted_purposes_floor(
         self,
         client,
         signed_in,
@@ -631,35 +643,16 @@ class TestDestinationConnect:
         issued,
         monkeypatch,
         minted,
-        kind,
+        moved,
+        gates,
     ):
         purpose["value"] = minted
-        monkeypatch.setitem(commands.ROLE_FLOOR, kind, "owner")
+        for kind, floor in moved.items():
+            monkeypatch.setitem(commands.ROLE_FLOOR, kind, floor)
         resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
         assert resp.status_code == 200, resp.text
-        assert tenant == [
-            ("uow", WS, PRINCIPAL.user_id),
-            ("gate", WS, PRINCIPAL.user_id, "admin"),
-            ("gate", WS, PRINCIPAL.user_id, "owner"),
-        ]
-
-    def test_the_first_gate_is_the_lowest_connect_floor(
-        self,
-        client,
-        signed_in,
-        tenant,
-        instagram_configured,
-        purpose,
-        issued,
-        monkeypatch,
-    ):
-        monkeypatch.setitem(commands.ROLE_FLOOR, "connect_account", "member")
-        monkeypatch.setitem(commands.ROLE_FLOOR, "reconnect_account", "member")
-        resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
-        assert resp.status_code == 200, resp.text
-        assert tenant == [
-            ("uow", WS, PRINCIPAL.user_id),
-            ("gate", WS, PRINCIPAL.user_id, "member"),
+        assert tenant == [("uow", WS, PRINCIPAL.user_id)] + [
+            ("gate", WS, PRINCIPAL.user_id, floor) for floor in gates
         ]
 
     def test_a_credentialed_account_mints_a_reconnect(
@@ -1135,11 +1128,8 @@ class TestDriveConnect:
         assert issued["reconnect_target"] == WS
         assert issued["workspace_id"] == WS and issued["user_id"] == PRINCIPAL.user_id
 
-    @pytest.mark.parametrize(
-        "minted,kind",
-        [("connect", "connect_account"), ("reconnect", "reconnect_account")],
-    )
-    def test_the_floor_is_the_minted_purposes(
+    @pytest.mark.parametrize("minted,moved,gates", CONNECT_FLOOR_CASES)
+    def test_the_gates_follow_the_minted_purposes_floor(
         self,
         client,
         signed_in,
@@ -1149,28 +1139,16 @@ class TestDriveConnect:
         issued,
         monkeypatch,
         minted,
-        kind,
+        moved,
+        gates,
     ):
         purpose["value"] = minted
-        monkeypatch.setitem(commands.ROLE_FLOOR, kind, "owner")
+        for kind, floor in moved.items():
+            monkeypatch.setitem(commands.ROLE_FLOOR, kind, floor)
         resp = client.post(self.URL)
         assert resp.status_code == 200, resp.text
-        assert tenant == [
-            ("uow", WS, PRINCIPAL.user_id),
-            ("gate", WS, PRINCIPAL.user_id, "admin"),
-            ("gate", WS, PRINCIPAL.user_id, "owner"),
-        ]
-
-    def test_the_first_gate_is_the_lowest_connect_floor(
-        self, client, signed_in, tenant, drive_configured, purpose, issued, monkeypatch
-    ):
-        monkeypatch.setitem(commands.ROLE_FLOOR, "connect_account", "member")
-        monkeypatch.setitem(commands.ROLE_FLOOR, "reconnect_account", "member")
-        resp = client.post(self.URL)
-        assert resp.status_code == 200, resp.text
-        assert tenant == [
-            ("uow", WS, PRINCIPAL.user_id),
-            ("gate", WS, PRINCIPAL.user_id, "member"),
+        assert tenant == [("uow", WS, PRINCIPAL.user_id)] + [
+            ("gate", WS, PRINCIPAL.user_id, floor) for floor in gates
         ]
 
     def test_a_workspace_that_holds_a_grant_mints_a_reconnect(

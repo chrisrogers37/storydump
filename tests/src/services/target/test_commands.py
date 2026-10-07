@@ -166,6 +166,7 @@ class TestTheConnectLegsReadTheirPurposesFloor:
             ("owner", "admin", "admin"),
             ("admin", "owner", "admin"),
             ("member", "admin", "member"),
+            ("user", "admin", "user"),
         ],
     )
     def test_the_lowest_connect_floor_admits_both_purposes(

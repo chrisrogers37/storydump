@@ -177,7 +177,7 @@ def lowest_connect_floor() -> str:
     anyone neither admits."""
     return min(
         (connect_floor(purpose) for purpose in CONNECT_PURPOSE_KIND),
-        key=tenant_resolution.ROLE_ORDER.index,
+        key=FLOORS.index,
     )
 
 

@@ -54,6 +54,7 @@ from src.exceptions.tenancy import (
     TokenRefused,
 )
 from src.services.target import (
+    commands,
     rate_counters,
     service_tokens,
     sessions,
@@ -428,6 +429,18 @@ def open_tenant(request: Request, workspace_id: str, principal: Principal):
     ).begin()
 
 
+async def _gate(session, workspace_id: str, principal: Principal, floor: str):
+    """The ONE gate at *floor*, inside a unit of work that already binds
+    *workspace_id* as the tenant, so it does not set it again (`tenant_bound`)."""
+    await tenant_resolution.authorize_member(
+        session,
+        workspace_id,
+        principal.user_id,
+        minimum_role=floor,
+        tenant_bound=True,
+    )
+
+
 @asynccontextmanager
 async def floor_session(
     request: Request, workspace_id: str, principal: Principal, floor: str
@@ -436,35 +449,31 @@ async def floor_session(
 
     A route whose floor is by design a command's passes that command's
     `commands.ROLE_FLOOR` entry rather than a role name, so the route and the
-    command cannot drift apart. The unit of work already binds *workspace_id*
-    as the tenant, so the gate does not set it again (`tenant_bound`)."""
+    command cannot drift apart."""
     async with open_tenant(request, workspace_id, principal) as session:
-        await tenant_resolution.authorize_member(
-            session,
-            workspace_id,
-            principal.user_id,
-            minimum_role=floor,
-            tenant_bound=True,
-        )
+        await _gate(session, workspace_id, principal, floor)
         yield session
 
 
-async def require_floor(
-    session, workspace_id: str, principal: Principal, floor: str, *, passed: str
-) -> None:
-    """Inside a session that already passed the gate at *passed*, require
-    *floor* too: the check a route makes once it has read what decides its
-    floor (an OAuth connect leg's purpose). A floor equal to the one passed
-    needs no second read."""
-    if floor == passed:
-        return
-    await tenant_resolution.authorize_member(
-        session,
-        workspace_id,
-        principal.user_id,
-        minimum_role=floor,
-        tenant_bound=True,
+def connect_session(request: Request, workspace_id: str, principal: Principal):
+    """`floor_session` for an OAuth connect leg that learns its purpose inside
+    the session: gated at the lower of the connect purposes' floors
+    (`commands.lowest_connect_floor`), and `require_connect_floor` checks the
+    purpose's own once it is read."""
+    return floor_session(
+        request, workspace_id, principal, commands.lowest_connect_floor()
     )
+
+
+async def require_connect_floor(
+    session, workspace_id: str, principal: Principal, purpose: str
+) -> None:
+    """Inside a `connect_session`, require the floor of the command *purpose*
+    stands for (`commands.connect_floor`). One equal to the session's gate
+    needs no second read."""
+    floor = commands.connect_floor(purpose)
+    if floor != commands.lowest_connect_floor():
+        await _gate(session, workspace_id, principal, floor)
 
 
 def member_session(request: Request, workspace_id: str, principal: Principal):

@@ -873,16 +873,11 @@ async def connect_drive(
     client_id, _, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )
-    passed = commands.lowest_connect_floor()
-    async with principal_mod.floor_session(
-        request, str(ws), principal, passed
-    ) as session:
+    async with principal_mod.connect_session(request, str(ws), principal) as session:
         purpose = await google_drive_oauth.connect_purpose(
             session, workspace_id=str(ws)
         )
-        await principal_mod.require_floor(
-            session, str(ws), principal, commands.connect_floor(purpose), passed=passed
-        )
+        await principal_mod.require_connect_floor(session, str(ws), principal, purpose)
         state = await issue_state(
             session,
             purpose=purpose,
@@ -1012,14 +1007,15 @@ async def connect_workspace_account(
     (`commands.connect_floor`).
     """
     app_id, _, redirect_uri = instagram_client.configured()
+    purpose = "connect"
     async with principal_mod.floor_session(
-        request, str(ws), principal, commands.connect_floor("connect")
+        request, str(ws), principal, commands.connect_floor(purpose)
     ) as session:
         return await _instagram_grant(
             session,
             principal=principal,
             ws=ws,
-            purpose="connect",
+            purpose=purpose,
             reconnect_target=None,
             app_id=app_id,
             redirect_uri=redirect_uri,
@@ -1068,18 +1064,13 @@ async def connect_account(
     `manual:<handle>` reference to the real Meta id.
     """
     app_id, _, redirect_uri = instagram_client.configured()
-    passed = commands.lowest_connect_floor()
-    async with principal_mod.floor_session(
-        request, str(ws), principal, passed
-    ) as session:
+    async with principal_mod.connect_session(request, str(ws), principal) as session:
         purpose = await ig_login_oauth.connect_purpose(
             session, workspace_id=str(ws), ig_account_id=str(account_id)
         )
         if purpose is None:
             raise principal_mod.not_found()
-        await principal_mod.require_floor(
-            session, str(ws), principal, commands.connect_floor(purpose), passed=passed
-        )
+        await principal_mod.require_connect_floor(session, str(ws), principal, purpose)
         return await _instagram_grant(
             session,
             principal=principal,

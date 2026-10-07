@@ -512,6 +512,15 @@ WS = "33333333-3333-3333-3333-333333333333"
 USER = "22222222-2222-2222-2222-222222222222"
 ACCOUNT = "55555555-5555-4555-8555-555555555555"
 
+#: A callback's gate: (the purpose its state carries, the entry moved to owner,
+#: the floor it checks). Only the carried purpose's own entry moves it.
+CALLBACK_FLOOR_CASES = [
+    ("connect", "connect_account", "owner"),
+    ("reconnect", "reconnect_account", "owner"),
+    ("connect", "reconnect_account", "admin"),
+    ("reconnect", "connect_account", "admin"),
+]
+
 
 class TestInstagramCallback:
     """`GET /auth/instagram-login/callback` — the return half of the destination
@@ -796,15 +805,7 @@ class TestInstagramCallback:
             ("store", WS, ACCOUNT, "IGQVJ-long"),
         ]
 
-    @pytest.mark.parametrize(
-        "carried,moved,floor",
-        [
-            ("connect", "connect_account", "owner"),
-            ("reconnect", "reconnect_account", "owner"),
-            ("connect", "reconnect_account", "admin"),
-            ("reconnect", "connect_account", "admin"),
-        ],
-    )
+    @pytest.mark.parametrize("carried,moved,floor", CALLBACK_FLOOR_CASES)
     def test_the_floor_is_the_carried_purposes(
         self,
         client,
@@ -982,15 +983,7 @@ class TestDriveCallback:
             ("rearm", WS, None),
         ]
 
-    @pytest.mark.parametrize(
-        "carried,moved,floor",
-        [
-            ("connect", "connect_account", "owner"),
-            ("reconnect", "reconnect_account", "owner"),
-            ("connect", "reconnect_account", "admin"),
-            ("reconnect", "connect_account", "admin"),
-        ],
-    )
+    @pytest.mark.parametrize("carried,moved,floor", CALLBACK_FLOOR_CASES)
     def test_the_floor_is_the_carried_purposes(
         self,
         client,
@@ -1007,11 +1000,7 @@ class TestDriveCallback:
     ):
         drive_row["purpose"] = carried
         monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
-        client.get(
-            self.URL,
-            params={"state": "st-drive", "code": "c0de"},
-            follow_redirects=False,
-        )
+        self._return(client)
         assert [e for e in writes if e[0] == "gate"] == [("gate", WS, USER, floor)]
 
     @pytest.mark.parametrize("target", [ACCOUNT, None])
