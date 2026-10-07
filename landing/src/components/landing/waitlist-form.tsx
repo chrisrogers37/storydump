@@ -117,7 +117,10 @@ export function WaitlistForm({
         const busy = data.reason === "busy"
         setStatus(busy ? "busy" : "error")
         setMessage(data.message || "Something went wrong. Please try again.")
-        trackEvent("Waitlist Error", { reason: "server_error", variant })
+        trackEvent("Waitlist Error", {
+          reason: busy ? "busy" : "server_error",
+          variant,
+        })
       }
     } catch {
       setStatus("error")
@@ -195,7 +198,12 @@ export function WaitlistForm({
       {(status === "error" || status === "busy") && (
         <p
           id={`waitlist-error-${variant}`}
-          className="mt-2 text-sm font-medium text-balance text-alarm"
+          className={cn(
+            "mt-2 text-sm font-medium text-balance",
+            // The closing form sits on the orange band, where the alarm red
+            // reads at 2.5:1; the band's own ink reads at about 6:1.
+            variant === "footer" ? "font-semibold text-ink" : "text-alarm"
+          )}
           role="alert"
         >
           {message}
