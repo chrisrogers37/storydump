@@ -320,11 +320,12 @@ class TestTheHouse404:
 
 class TestTheTenantSeamsResolveThroughTheModule:
     """The four seams that moved here from `v1` (`open_tenant`,
-    `member_session`, `admin_session`, `json_object`).
+    `member_session`, `admin_session`, `json_object`), and `floor_session`,
+    the gate the two named gates are at a fixed floor.
 
-    The shared conftest patches `principal.open_tenant` BY NAME, so the two
-    gates must reach it as a module global and every router must reach all
-    four through the module attribute. A from-import binds the real function
+    The shared conftest patches `principal.open_tenant` BY NAME, so the
+    gates must reach it as a module global and every router must reach every
+    seam through the module attribute. A from-import binds the real function
     at import time: the patch would not land, and a route unit test would
     quietly open a real unit of work against the test engine and pass for
     the wrong reason.
@@ -332,11 +333,15 @@ class TestTheTenantSeamsResolveThroughTheModule:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "gate,floor",
-        [("member_session", "member"), ("admin_session", "admin")],
+        "gate,args,floor",
+        [
+            ("member_session", (), "member"),
+            ("admin_session", (), "admin"),
+            ("floor_session", ("owner",), "owner"),
+        ],
     )
-    async def test_both_gates_call_the_patched_open_tenant(
-        self, monkeypatch, gate, floor
+    async def test_every_gate_calls_the_patched_open_tenant(
+        self, monkeypatch, gate, args, floor
     ):
         from contextlib import asynccontextmanager
 
@@ -355,7 +360,7 @@ class TestTheTenantSeamsResolveThroughTheModule:
         monkeypatch.setattr(principal, "open_tenant", fake_open_tenant)
         monkeypatch.setattr(tenant_resolution, "authorize_member", fake_gate)
 
-        async with getattr(principal, gate)(None, WS, PRINCIPAL) as session:
+        async with getattr(principal, gate)(None, WS, PRINCIPAL, *args) as session:
             assert session == "session"
         assert seen == [
             ("uow", WS, PRINCIPAL.user_id),
@@ -367,7 +372,13 @@ class TestTheTenantSeamsResolveThroughTheModule:
         import importlib
 
         module = importlib.import_module(f"src.api.routes.{router}")
-        for name in ("open_tenant", "member_session", "admin_session", "json_object"):
+        for name in (
+            "open_tenant",
+            "floor_session",
+            "member_session",
+            "admin_session",
+            "json_object",
+        ):
             assert not hasattr(module, name), (
                 f"src.api.routes.{router} binds `{name}` at import time; reach it"
                 " as `principal_mod.{name}` so the conftest's patch lands"

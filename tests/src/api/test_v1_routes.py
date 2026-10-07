@@ -310,6 +310,14 @@ class TestWorkspaceReads:
         assert resp.status_code == 403
         assert "invitee@example.com" not in resp.text
 
+    def test_the_listing_floor_is_the_minting_floor(
+        self, client, signed_in, tenant, pending, monkeypatch
+    ):
+        monkeypatch.setitem(commands.ROLE_FLOOR, "invite_member", "owner")
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 200
+        assert ("gate", WS, PRINCIPAL.user_id, "owner") in tenant
+
 
 @pytest.fixture
 def port(monkeypatch):

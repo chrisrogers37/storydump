@@ -402,11 +402,12 @@ def clear_session_cookie(response: Response) -> None:
 # `ops.py` and the shared test conftest all reached across for. They are
 # cross-router gates like the ones above, so they live here, as public names.
 #
-# `member_session` and `admin_session` call `open_tenant` as a BARE MODULE
-# GLOBAL, and every caller outside this module reaches these through the
-# module attribute (`principal_mod.open_tenant(...)`). A from-import would
-# bind the original function at import time and the conftest's monkeypatch
-# would not reach it — a unit test that quietly opens a real unit of work.
+# `floor_session` calls `open_tenant` as a BARE MODULE GLOBAL (`member_session`
+# and `admin_session` are it at a fixed floor), and every caller outside this
+# module reaches these through the module attribute
+# (`principal_mod.open_tenant(...)`). A from-import would bind the original
+# function at import time and the conftest's monkeypatch would not reach it —
+# a unit test that quietly opens a real unit of work.
 
 
 def open_tenant(request: Request, workspace_id: str, principal: Principal):
@@ -428,13 +429,24 @@ def open_tenant(request: Request, workspace_id: str, principal: Principal):
 
 
 @asynccontextmanager
-async def member_session(request: Request, workspace_id: str, principal: Principal):
-    """Open the tenant's unit of work and run the ONE gate — every read."""
+async def floor_session(
+    request: Request, workspace_id: str, principal: Principal, floor: str
+):
+    """Open the tenant's unit of work and run the ONE gate at *floor*.
+
+    A route whose floor is by design a command's passes that command's
+    `commands.ROLE_FLOOR` entry rather than a role name, so the route and the
+    command cannot drift apart."""
     async with open_tenant(request, workspace_id, principal) as session:
         await tenant_resolution.authorize_member(
-            session, workspace_id, principal.user_id, minimum_role="member"
+            session, workspace_id, principal.user_id, minimum_role=floor
         )
         yield session
+
+
+def member_session(request: Request, workspace_id: str, principal: Principal):
+    """Open the tenant's unit of work and run the ONE gate — every read."""
+    return floor_session(request, workspace_id, principal, "member")
 
 
 @asynccontextmanager
@@ -451,14 +463,9 @@ async def reader_session(request: Request, workspace_id: str, principal: Princip
         yield session
 
 
-@asynccontextmanager
-async def admin_session(request: Request, workspace_id: str, principal: Principal):
+def admin_session(request: Request, workspace_id: str, principal: Principal):
     """`member_session`, at the admin floor."""
-    async with open_tenant(request, workspace_id, principal) as session:
-        await tenant_resolution.authorize_member(
-            session, workspace_id, principal.user_id, minimum_role="admin"
-        )
-        yield session
+    return floor_session(request, workspace_id, principal, "admin")
 
 
 def parse_json_object(raw: bytes) -> Optional[dict[str, Any]]:

@@ -477,9 +477,11 @@ async def remove_binding(
 async def list_invitations(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
-    """The pending invitations, each with its invitee's address, so admin
-    floor: the same as minting one (`commands.ROLE_FLOOR["invite_member"]`)."""
-    async with principal_mod.admin_session(request, str(ws), principal) as session:
+    """The pending invitations, each with its invitee's address, so minting's
+    floor (`commands.ROLE_FLOOR["invite_member"]`)."""
+    async with principal_mod.floor_session(
+        request, str(ws), principal, commands.ROLE_FLOOR["invite_member"]
+    ) as session:
         items = await workspaces.list_invitations(session, workspace_id=str(ws))
     return {"invitations": items}
 
