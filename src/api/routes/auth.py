@@ -389,9 +389,10 @@ async def google_drive_callback(
 
     # The credential lands inside the state's own workspace, as the state's
     # user: the audit trigger names the actor, and `p_tenant` binds the row.
+    workspace_id = str(row["workspace_id"])
     uow = unit_of_work(
         require_engine(request),
-        str(row["workspace_id"]),
+        workspace_id,
         actor_kind="user",
         actor_user_id=str(row["user_id"]),
         channel=principal_mod.WEB_CHANNEL,
@@ -404,7 +405,7 @@ async def google_drive_callback(
             # workspace, so the gate does not set it again (`tenant_bound`).
             await tenant_resolution.authorize_member(
                 session,
-                str(row["workspace_id"]),
+                workspace_id,
                 str(row["user_id"]),
                 minimum_role=commands.connect_floor(row["purpose"]),
                 tenant_bound=True,
@@ -495,7 +496,8 @@ async def instagram_login_callback(
             # checked at issue AND at callback. The row pins the workspace and
             # the user; what can change between the two is the membership,
             # and a demoted admin's pending state must not land a credential.
-            # The unit of work binds this same workspace (`tenant_bound`).
+            # The unit of work binds this same workspace, so the gate does not
+            # set it again (`tenant_bound`).
             await tenant_resolution.authorize_member(
                 session,
                 workspace_id,

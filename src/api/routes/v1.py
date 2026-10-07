@@ -171,9 +171,6 @@ async def _dispatch(
     The key is checked before the body is read, so a keyless request buffers
     nothing. The dedup fingerprint is taken over the raw body — never over
     *extra*, which is what this adapter adds (the pre-assigned workspace id).
-    The unit of work binds *tenant*, so the gate trusts that binding exactly
-    when the command's workspace is *tenant* (`tenant_bound`, computed from the
-    two values, never assumed).
     """
     if principal.is_token:
         _refuse_token_write(principal, tenant)
