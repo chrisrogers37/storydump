@@ -1,7 +1,7 @@
 import type { Metadata } from "next"
 import Link from "next/link"
 import { ArrowRight } from "lucide-react"
-import { posts } from "@/lib/blog"
+import { postDateLabel, posts } from "@/lib/blog"
 import { pageMetadata } from "@/lib/seo"
 import { breadcrumbList } from "@/lib/json-ld"
 import { JsonLd } from "@/components/seo/json-ld"
@@ -32,13 +32,7 @@ export default function BlogIndex() {
           <article key={post.slug} className="group">
             <Link href={`/blog/${post.slug}`} className="block space-y-3">
               <div className="flex items-center gap-3 text-sm text-muted-foreground">
-                <time dateTime={post.date}>
-                  {new Date(post.date).toLocaleDateString("en-US", {
-                    year: "numeric",
-                    month: "long",
-                    day: "numeric",
-                  })}
-                </time>
+                <time dateTime={post.updated ?? post.date}>{postDateLabel(post)}</time>
                 <span aria-hidden="true">&middot;</span>
                 <span>{post.readTime}</span>
               </div>

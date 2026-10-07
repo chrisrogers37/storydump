@@ -14,7 +14,7 @@ import { siteConfig } from "@/config/site"
  */
 export const indexablePages = [
   { path: "/", lastModified: "2026-10-07", changeFrequency: "weekly", priority: 1 },
-  { path: "/blog", lastModified: "2026-10-02", changeFrequency: "weekly", priority: 0.8 },
+  { path: "/blog", lastModified: "2026-10-07", changeFrequency: "weekly", priority: 0.8 },
   { path: "/use-cases", lastModified: "2026-10-07", changeFrequency: "monthly", priority: 0.8 },
   { path: "/setup", lastModified: "2026-10-02", changeFrequency: "monthly", priority: 0.8 },
   { path: "/setup/instagram", lastModified: "2026-10-02", changeFrequency: "monthly", priority: 0.7 },
