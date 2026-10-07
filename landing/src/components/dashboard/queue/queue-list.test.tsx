@@ -80,6 +80,7 @@ function intent(overrides: Partial<Intent> = {}): Intent {
     scheduled_by: null,
     tz: "UTC",
     miss_reason: null,
+    link_url: null,
     file_name: "sample.jpg",
     media_kind: "image",
     thumbnail_url: null,

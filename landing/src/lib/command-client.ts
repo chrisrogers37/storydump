@@ -366,6 +366,51 @@ export function rescheduleRefusalCopy(
   return "Could not move that story. Nothing changed — try again shortly.";
 }
 
+/** The longest link the port accepts, in characters (the vocabulary's `LINK_URL_MAX`). */
+export const LINK_URL_MAX = 2048;
+
+/**
+ * Give an item the link its stories ask a person to add by hand, or clear it
+ * with `null` (#1413 phase 7). The link rides as typed; the port trims it and
+ * owns the rule.
+ */
+export function submitSetItemLink(
+  workspaceId: string,
+  mediaItemId: string,
+  linkUrl: string | null,
+) {
+  return submitCommand(workspaceId, "set_item_link", {
+    media_item_id: mediaItemId,
+    link_url: linkUrl,
+  });
+}
+
+/**
+ * A sentence for a `set_item_link` refusal. The port refuses a link that
+ * breaks its rule as `invalid_args` with no facts, so nothing says which part
+ * broke: the sentence states the whole rule, in the CLI's words.
+ */
+export function linkRefusalCopy(reason: unknown, status?: number): string {
+  if (status === 403 || reason === "insufficient_role") {
+    return "You need to be a member of this workspace to change an item's link.";
+  }
+  switch (reason) {
+    case "invalid_args":
+      return `That link can't be used. A link is an https:// address of at most ${LINK_URL_MAX.toLocaleString("en-US")} characters, with no spaces and no user name or password in it.`;
+    case "not_found":
+      return "That item is no longer in the library. Reload the page.";
+    case REPLAYED_ERROR:
+      return "That did not go through — the app sent it under a key the server had already seen. Reload and try again; report this if it repeats.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("The link was not saved");
+  }
+  return "Could not save that link. Nothing changed — try again shortly.";
+}
+
 /**
  * A sentence for an offboarding or restore refusal. Its own vocabulary, like
  * `settingsRefusalCopy`: these reasons cannot arise from a settings write, and

@@ -90,6 +90,8 @@ export type Intent = {
   thumbnail_url: string | null;
   caption: string | null;
   category: string | null;
+  /** The item's link to add by hand, from its media row; shown only through `httpsHref`. */
+  link_url: string | null;
   /** NULL when the account carries no handle — the key is always present. */
   account_handle: string | null;
   account_display_name: string | null;

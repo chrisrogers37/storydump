@@ -21,6 +21,7 @@ function story(file: string, state: IntentState): Intent {
     scheduled_by: null,
     tz: "UTC",
     miss_reason: null,
+    link_url: null,
     file_name: file,
     media_kind: "image",
     thumbnail_url: null,

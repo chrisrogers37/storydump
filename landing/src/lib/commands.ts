@@ -378,6 +378,32 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
     }
     return { ok: true, body: { intent_id: raw.intent_id, local_at: raw.local_at } };
   }),
+
+  /**
+   * Give an item the link its stories ask a person to add by hand (#1413,
+   * phase 7), or clear it with `null`: the Media Library's Link…. The link
+   * belongs to the item, so every story of it shows the same one.
+   *
+   * Shape only, as everywhere here: a non-blank string, or `null` to clear.
+   * The port owns the URL rule (https with a host, no spaces, no user name,
+   * a length cap) and refuses a breach as `invalid_args`. `null` is forwarded
+   * explicitly, because the port reads a missing key as a mistake, never as
+   * a clear.
+   *
+   * Keyed per submission, like `reschedule_item`: setting a link, clearing it
+   * and setting it again are three acts, and an item key would replay the
+   * first as the third. The CLI mints a fresh key per run for the same reason.
+   */
+  set_item_link: submissionCommand((raw) => {
+    if (!isUuid(raw.media_item_id)) {
+      return { ok: false, error: "invalid_media_item_id" };
+    }
+    const link = raw.link_url;
+    if (link !== null && (typeof link !== "string" || link.trim() === "")) {
+      return { ok: false, error: "invalid_link_url" };
+    }
+    return { ok: true, body: { media_item_id: raw.media_item_id, link_url: link } };
+  }),
 };
 
 export function isOfferedCommand(value: unknown): value is string {

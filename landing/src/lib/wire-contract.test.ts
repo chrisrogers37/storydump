@@ -3,7 +3,13 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
 import { IDEMPOTENCY_KEY_MAX, NOT_POSTED, RESOLUTIONS } from "./commands";
-import { AT_RULE_COPY, LOCK_CLAUSES, NO_PUSH_BINDING, PLAN_HORIZON_DAYS } from "./command-client";
+import {
+  AT_RULE_COPY,
+  LINK_URL_MAX,
+  LOCK_CLAUSES,
+  NO_PUSH_BINDING,
+  PLAN_HORIZON_DAYS,
+} from "./command-client";
 import { LIVE_ACCOUNT_STATES } from "./destination";
 import { IN_THE_WAY_MAX } from "./refusal-facts";
 import {
@@ -95,6 +101,10 @@ describe("the wire spellings are the vocabulary's", () => {
   });
   it("how far ahead a story may be planned", () => {
     expect(PLAN_HORIZON_DAYS).toBe(scalar("PLAN_HORIZON_DAYS"));
+  });
+  it("the longest link an item may carry", () => {
+    // The refusal sentence quotes this cap, so a drift would tell a person the wrong number.
+    expect(LINK_URL_MAX).toBe(scalar("LINK_URL_MAX"));
   });
   it("the lock kinds a schedule refusal can name, each with its sentence", () => {
     // A kind the port adds without one here would leave a refusal unnamed.

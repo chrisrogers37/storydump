@@ -299,7 +299,9 @@ def probe_commands() -> ProbeResult:
     """Commands with a real executor that the generic envelope does not send.
 
     This is #1167's instance 1 (`rename_workspace`) and instance 7
-    (`pause_workspace` / `resume_workspace` — wired on 2026-09-10 by #1282; the positive control moved to `cancel`).
+    (`pause_workspace` / `resume_workspace` — wired on 2026-09-10 by #1282). When
+    every built command has a door the probe finds nothing, so the test's positive
+    control plants an instance rather than naming one.
     """
     port = port_commands()
     envelope = envelope_commands()

@@ -86,6 +86,8 @@ export type MediaRow = {
   caption: string | null;
   tags: string[] | null;
   thumbnail_url: string | null;
+  /** The link its stories ask a person to add by hand; shown only through `httpsHref`. */
+  link_url: string | null;
   state: string;
   times_posted: number;
   last_posted_at: string | null;

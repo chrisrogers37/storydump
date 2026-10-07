@@ -8,9 +8,9 @@ toward failure modes rather than toward the happy path, and the exit-code split
 
 **Positive controls, not just negative ones.** A checker that has stopped
 finding anything is indistinguishable from a clean repository unless something
-pins a known instance. Two are pinned by name — `pause_workspace` (#1167's
-seventh instance) and `fn_auth_plane_sweep` (its sixth) — so a parse that
-quietly stops working fails here instead of reporting all clear.
+pins a known instance. Two do: a command planted by withdrawing an allowlisted
+door, and `fn_auth_plane_sweep` (#1167's sixth instance) by name — so a parse
+that quietly stops working fails here instead of reporting all clear.
 """
 
 from __future__ import annotations
@@ -172,18 +172,18 @@ class TestTheParserIgnoresProseAndStrings:
 class TestPositiveControls:
     """A checker that finds nothing must be distinguishable from a clean repo."""
 
-    def test_it_still_finds_a_known_instance(self):
-        # #1167's instance 7 (`pause_workspace` / `resume_workspace`) was FIXED
-        # on 2026-09-10 (#1282: Pause Posting rides the two commands from the
-        # web), so the positive control moved to instances the web still does
-        # not offer. `invite_member` is offered by the Members card (#1563) and
-        # `cancel` by the Queue's planned stories (#1616), so the control is
-        # `set_item_link` alone. When it is wired, move it again — never delete.
+    def test_it_still_finds_a_known_instance(self, monkeypatch):
+        # Every built command the generic envelope does not send has a declared
+        # second door, so the probe finds none on its own. The control plants
+        # one: with create_workspace's door withdrawn from the allowlist, the
+        # probe must report it. The port enumeration and the envelope parse are
+        # still the real ones, and the asserts below guard the other direction:
+        # a parse that read nothing would list every offered command too.
+        monkeypatch.delitem(uc.ALLOWLIST["commands"], "create_workspace")
         names = {f.name for f in uc.probe_commands().findings}
-        assert "set_item_link" in names, (
-            "no known unreachable command is detected any more — either every"
-            " instance was fixed (retire this control) or the probe stopped"
-            " working (fix the probe)."
+        assert "create_workspace" in names, (
+            "a command with no envelope entry and no declared door went"
+            " undetected — the probe stopped working (fix the probe)."
         )
         assert not {"pause_workspace", "resume_workspace"} & names, (
             "pausing is offered by the web since #1282; the probe must not list it"
@@ -193,6 +193,9 @@ class TestPositiveControls:
         )
         assert "cancel" not in names, (
             "cancelling is offered by the Queue since #1616; the probe must not list it"
+        )
+        assert "set_item_link" not in names, (
+            "the Media Library's Link… sends set_item_link; the probe must not list it"
         )
 
     def test_it_still_finds_the_sixth_instance(self):
