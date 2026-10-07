@@ -1,0 +1,3 @@
+### Added
+
+- **The landing page links to the sample workspace from the hero and the header (#1625).** "See a sample workspace" sits under the top-of-page waitlist form and its price line, on the home page and the use-case pages, and a "Demo" link joins the header from the `sm` breakpoint up, since a fifth item overflows even a 390px phone. Both are text links; the waitlist's solid button stays the primary action. A click on either sends a new analytics event, `Sample Workspace Click`, with a `hero` or `header` `location`, and the Privacy page's list of counted actions now names it. The sample workspace itself still sends no custom event.

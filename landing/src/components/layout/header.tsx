@@ -4,6 +4,9 @@ import { buttonVariants } from "@/components/ui/button"
 import { Wordmark } from "@/design/brand"
 import { WaitlistLink } from "./waitlist-link"
 
+/** The header's text links: muted, darkening on hover. */
+const navLinkClass = "whitespace-nowrap py-2.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+
 export function Header() {
   return (
     <header className="sticky top-0 z-50 w-full border-b border-ink/10 bg-white/85 backdrop-blur-sm">
@@ -20,21 +23,26 @@ export function Header() {
         </Link>
         <div className="flex items-center gap-2 sm:gap-4">
           {/*
-            Nothing is hidden at a breakpoint here, deliberately. At 390px the
+            Only Demo is hidden at a breakpoint here, deliberately. At 390px the
             wordmark collided with Blog and "Sign in" wrapped onto two lines
             (#1090 A1); tightened until all four fit rather than hiding Blog
-            on a phone.
+            on a phone. A fifth item overflows even a 390px phone, so Demo
+            waits for sm.
           */}
-          <Link
-            href="/blog"
-            className="whitespace-nowrap py-2.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+          <TrackedLink
+            href="/demo"
+            track={{ event: "Sample Workspace Click", props: { location: "header" } }}
+            className={`hidden sm:inline ${navLinkClass}`}
           >
+            Demo
+          </TrackedLink>
+          <Link href="/blog" className={navLinkClass}>
             Blog
           </Link>
           <TrackedLink
             href="/login"
             track={{ event: "Sign In Click", props: { location: "header" } }}
-            className="whitespace-nowrap py-2.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+            className={navLinkClass}
           >
             Sign in
           </TrackedLink>
