@@ -185,6 +185,40 @@ class TestTheGateTrustsABoundTenant:
         assert info.value.reason == "not_a_member"
         assert ex.statements[0][1] == {"ws": "ws-1", "u": "u-1"}
 
+    @pytest.mark.parametrize("tenant_bound", [False, True])
+    @pytest.mark.parametrize(
+        "role,floor,refusal",
+        [
+            ("admin", "admin", None),
+            ("owner", "admin", None),
+            ("member", "member", None),
+            ("member", "admin", "insufficient_role"),
+            (None, "member", "not_a_member"),
+        ],
+    )
+    async def test_a_bound_tenant_changes_no_decision(
+        self, monkeypatch, tenant_bound, role, floor, refusal
+    ):
+        applied = []
+
+        async def apply_gucs(executor, **kw):
+            applied.append(kw)
+
+        monkeypatch.setattr(tenant_resolution, "apply_gucs", apply_gucs)
+        ex = _Ex(row=None if role is None else (role,))
+        try:
+            await tenant_resolution.authorize_member(
+                ex, "ws-1", "u-1", floor, tenant_bound=tenant_bound
+            )
+            refused = None
+        except TenantResolutionError as exc:
+            refused = exc.reason
+        assert refused == refusal
+        assert applied == ([] if tenant_bound else [{"tenant_id": "ws-1"}])
+        ((sql, params),) = ex.statements
+        assert "FROM workspace_members WHERE workspace_id = :ws AND user_id = :u" in sql
+        assert params == {"ws": "ws-1", "u": "u-1"}
+
 
 class TestTheSupersedeIsOneStatement:
     async def test_every_binding_s_cards_and_their_edits_in_one_round_trip(self):
