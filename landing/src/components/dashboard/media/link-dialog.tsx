@@ -110,7 +110,6 @@ export function LinkDialog({
             <Input
               id={`${ids}-link`}
               type="url"
-              inputMode="url"
               autoComplete="url"
               placeholder="https://"
               aria-describedby={describedBy(`${ids}-hint`, notice && `${ids}-notice`)}

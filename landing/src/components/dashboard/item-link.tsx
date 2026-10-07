@@ -5,9 +5,7 @@ import { cn } from "@/lib/utils";
 /**
  * An item's link to add by hand, on its Media Library card and on each of its
  * Queue rows (#1413 phase 7). The link is what a person typed, so it is shown as
- * text, and it becomes an anchor only through `httpsHref`: https, a host, and no
- * user name or password. Anything else stays text. It opens in a new tab and
- * hands the site no referrer.
+ * text, and it becomes an anchor only when `httpsHref` gives it an href.
  *
  * It reaches no network and holds no state: the Queue's rows draw it, and the
  * sample workspace draws the same rows.

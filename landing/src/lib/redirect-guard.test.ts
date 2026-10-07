@@ -28,9 +28,9 @@ describe("httpsHref: when an item's link may become an anchor", () => {
     expect(httpsHref("https://user:secret@example.com/menu")).toBeNull();
   });
 
-  it("refuses what does not parse as a URL, and nothing at all", () => {
-    for (const link of ["example.com/menu", "https://", "", null, undefined]) {
-      expect(httpsHref(link), String(link)).toBeNull();
+  it("refuses what does not parse as a URL, an https URL with no host among them", () => {
+    for (const link of ["example.com/menu", "https://", ""]) {
+      expect(httpsHref(link), link).toBeNull();
     }
   });
 });

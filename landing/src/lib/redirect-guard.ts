@@ -24,22 +24,22 @@ export function isHttpsUrlOnHost(value: string, host: string): boolean {
 /**
  * The `href` for a link a person typed, or null when it may not become one.
  * An item's link to add by hand reaches the page as an anchor only when it is
- * https, names a host, and carries no user name or password; anything else is
- * shown as text. The port refuses such links on the way in; this guards the way
- * out as well, for a value stored before that rule or written by another door.
+ * https and carries no user name or password; anything else is shown as text.
+ * The port refuses such links on the way in; this guards the way out as well,
+ * for a value stored before that rule or written by another door.
  *
  * Parsed, never prefix-matched: `new URL` reads the scheme the way the browser
- * will, so case, stray whitespace and look-alike prefixes cannot slip through.
+ * will, so case, stray whitespace and look-alike prefixes cannot slip through,
+ * and it refuses an https URL with no host outright.
  */
-export function httpsHref(value: string | null | undefined): string | null {
-  if (!value) return null;
+export function httpsHref(value: string): string | null {
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
     return null;
   }
-  if (parsed.protocol !== "https:" || !parsed.hostname) return null;
+  if (parsed.protocol !== "https:") return null;
   if (parsed.username || parsed.password) return null;
   return parsed.href;
 }

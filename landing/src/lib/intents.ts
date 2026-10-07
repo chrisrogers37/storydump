@@ -225,9 +225,11 @@ export function isQueueCommand(value: unknown): value is QueueCommand {
  * cancel. A planned story still in `scheduled` can be rescheduled or
  * cancelled (#1413) — the port allows the move nowhere else. A story whose
  * item carries a link to add by hand gets no Approve: an app cannot attach a
- * link to a story it publishes, so such a story is posted by hand, as the
- * approval card hides Post now for it (fork F10 (a)). Every other state
- * renders read-only with its badge.
+ * link to a story it publishes, so such a story is posted by hand. That is
+ * fork F10 (a)'s rule for the approval card's Post now, applied here. Post
+ * again on a review card publishes the same way and is left as it is, for
+ * the decision on that card to settle. Every other state renders read-only
+ * with its badge.
  */
 export function actionsFor(
   state: IntentState,
