@@ -168,6 +168,13 @@ export type DriveStatusResponse = { drive: DriveStatus };
 export const HISTORY_STATES = "posted,skipped,rejected";
 
 /**
+ * What the calendar draws under Posted: the stories that went out. A skipped
+ * or rejected story has an outcome date too, and drawn in that lane it reads
+ * as a post that happened. The sample workspace's calendar keeps the same set.
+ */
+export const POSTED_STATES = "posted";
+
+/**
  * What a queue means: everything before a terminal outcome — all seven.
  *
  * #1044 classifies `queue-detail` as `intents?state=` without naming the set,
