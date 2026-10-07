@@ -116,12 +116,9 @@ export function WaitlistForm({
         markRegistered()
       } else {
         const refusal = waitlistRefusal(res.status, data)
-        setStatus(refusal)
+        setStatus(refusal.status)
         setMessage(data.message || "Something went wrong. Please try again.")
-        trackEvent("Waitlist Error", {
-          reason: refusal === "busy" ? "busy" : "server_error",
-          variant,
-        })
+        trackEvent("Waitlist Error", { reason: refusal.reason, variant })
       }
     } catch {
       setStatus("error")

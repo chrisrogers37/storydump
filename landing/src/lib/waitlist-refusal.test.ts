@@ -3,7 +3,10 @@ import { waitlistRefusal } from "./waitlist-refusal"
 
 describe("waitlistRefusal", () => {
   it("is busy only for the route's busy 429", () => {
-    expect(waitlistRefusal(429, { status: "error", reason: "busy" })).toBe("busy")
+    expect(waitlistRefusal(429, { status: "error", reason: "busy" })).toEqual({
+      status: "busy",
+      reason: "busy",
+    })
   })
 
   it.each([
@@ -15,7 +18,10 @@ describe("waitlistRefusal", () => {
     [429, { reason: "full" }],
     [400, { status: "error", message: "Please enter a valid email address." }],
     [429, null],
-  ])("is an error for %s %j", (status, body) => {
-    expect(waitlistRefusal(status, body)).toBe("error")
+  ])("is a server error for %s %j", (status, body) => {
+    expect(waitlistRefusal(status, body)).toEqual({
+      status: "error",
+      reason: "server_error",
+    })
   })
 })
