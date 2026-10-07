@@ -4,7 +4,7 @@ import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
-const LAST_UPDATED = "October 7, 2026"
+const LAST_UPDATED = "October 5, 2026"
 
 const linkClass = "underline underline-offset-4 hover:text-foreground"
 const email = siteConfig.contact.email
