@@ -1,4 +1,4 @@
-"""The outcomes indexed by slot, and the calendar reads over them (107, #1640, #1634).
+"""The outcomes indexed by slot, and the calendar reads over them (#1640, #1634).
 
 `ix_intents_history_slot` holds the posted, skipped and rejected stories by
 `(workspace_id, schedule_slot_at)`. `intent_days` (the calendar's month) and
@@ -216,9 +216,12 @@ def _index_names(node) -> set:
     return found
 
 
-def _month_read(workspace_id: str, executor_for=None):
+def _month_read(workspace_id: str, *, explain: bool = False):
+    """The calendar's month read for July 2026; with *explain*, each statement
+    is EXPLAINed first and its plan returned beside the days."""
+
     async def read(c):
-        executor = c if executor_for is None else executor_for(c)
+        executor = _Explaining(c) if explain else c
         days = await workspaces.intent_days(
             executor,
             workspace_id=workspace_id,
@@ -227,7 +230,7 @@ def _month_read(workspace_id: str, executor_for=None):
             to_date=date(2026, 8, 3),
             per_day=3,
         )
-        return days, executor
+        return days, getattr(executor, "plans", None)
 
     return read
 
@@ -235,13 +238,11 @@ def _month_read(workspace_id: str, executor_for=None):
 def test_the_month_read_walks_the_index(world):
     """#1640's acceptance: on a workspace with thousands of posted stories, the
     calendar's month read is a scan of `ix_intents_history_slot`."""
-    days, executor = asyncio.run(
-        _as_tenant(
-            world["ingress"], world["bulk"], _month_read(world["bulk"], _Explaining)
-        )
+    days, plans = asyncio.run(
+        _as_tenant(world["ingress"], world["bulk"], _month_read(world["bulk"], explain=True))
     )
     assert days, "positive control: the bulk workspace posted in that month"
-    (plan,) = executor.plans
+    (plan,) = plans
     assert INDEX in _index_names(plan), json.dumps(plan, indent=1)
 
 

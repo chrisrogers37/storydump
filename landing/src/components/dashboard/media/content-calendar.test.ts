@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { IntentDay } from "@/lib/calendar-month";
-import { buildCalendarDays } from "./content-calendar";
+import { buildCalendarDays, listedDays } from "./content-calendar";
 
 /** 9:30 PM on Thursday, Oct 1 in New York; already Friday, Oct 2 in UTC. */
 const EVENING = new Date("2026-10-02T01:30:00Z");
@@ -113,5 +113,24 @@ describe("the calendar on the workspace's clock", () => {
     expect(month).toBe("September 2026");
     expect(days[0].date).toBe("2026-08-31");
     expect(days.filter((d) => d.isCurrentMonth)).toHaveLength(30);
+  });
+  it("lists a phone's days: this month's that hold something, in order (#1649 F12)", () => {
+    const queued = (at: string, name: string) => ({
+      scheduled_for: at,
+      media_name: name,
+      category: "Memes",
+      status: "approved",
+      planned: false,
+    });
+    const { days } = buildCalendarDays(
+      OCTOBER,
+      [postedDay("2026-10-05", 15, ["c.jpg"])],
+      // Nov 1 is on October's grid, but it is not October's to list.
+      [queued("2026-10-01T14:00:00Z", "q.jpg"), queued("2026-11-01T14:00:00Z", "n.jpg")],
+      [],
+      "UTC",
+      EVENING
+    );
+    expect(listedDays(days).map((d) => d.date)).toEqual(["2026-10-01", "2026-10-05"]);
   });
 });

@@ -509,9 +509,7 @@ RANGE_MAX_DAYS = 45
 PER_DAY_MAX = 10
 
 
-def _date_range(
-    from_: Optional[date], to: Optional[date]
-) -> tuple[Optional[date], Optional[date]]:
+def _check_date_range(from_: Optional[date], to: Optional[date]) -> None:
     """``?from=&to=``, the workspace's local days ``[from, to)``: both or
     neither, ``to`` after ``from``, at most :data:`RANGE_MAX_DAYS` apart."""
     if (from_ is None) != (to is None):
@@ -521,7 +519,6 @@ def _date_range(
             status_code=422,
             detail=f"to must be after from and within {RANGE_MAX_DAYS} days of it",
         )
-    return from_, to
 
 
 @router.get("/workspaces/{ws}/intents")
@@ -548,7 +545,7 @@ async def list_intents(
         raise HTTPException(status_code=422, detail=f"unknown origin: {origin!r}")
     if order not in ("asc", "desc"):
         raise HTTPException(status_code=422, detail=f"order is asc or desc: {order!r}")
-    from_date, to_date = _date_range(from_, to)
+    _check_date_range(from_, to)
     async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await workspaces.list_intents(
             session,
@@ -557,8 +554,8 @@ async def list_intents(
             origin=origin,
             newest_first=order == "desc",
             limit=limit,
-            from_date=from_date,
-            to_date=to_date,
+            from_date=from_,
+            to_date=to,
         )
     return {"intents": rows, "limit": limit}
 
@@ -580,14 +577,14 @@ async def intent_days(
     states = _states(state)
     if not states:
         raise HTTPException(status_code=422, detail="state is required")
-    from_date, to_date = _date_range(from_, to)
+    _check_date_range(from_, to)
     async with principal_mod.reader_session(request, str(ws), principal) as session:
         days = await workspaces.intent_days(
             session,
             workspace_id=str(ws),
             states=states,
-            from_date=from_date,
-            to_date=to_date,
+            from_date=from_,
+            to_date=to,
             per_day=per_day,
         )
     return {"days": days, "per_day": per_day}

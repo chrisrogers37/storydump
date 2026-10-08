@@ -76,8 +76,9 @@ export function buildCalendarDays(
     postsByDate.get(date)!.push(post);
   };
 
-  const postedByDate = new Map(history.map((day) => [day.date, day] as const));
+  const postedByDate = new Map<string, IntentDay>();
   for (const day of history) {
+    postedByDate.set(day.date, day);
     for (const item of day.newest) {
       add(day.date, {
         label: item.file_name,
@@ -156,8 +157,37 @@ function MonthLink({ month, direction }: { month: Month; direction: -1 | 1 }) {
   );
 }
 
-function DayContents({ day }: { day: CalendarDay }) {
+/**
+ * The days a phone lists (#1649 F12): this month's that hold something, in
+ * order. Seven columns at 390 px leave a name two to four letters, so a phone
+ * reads the month as a list of its days and their names at full width.
+ */
+export function listedDays(days: CalendarDay[]): CalendarDay[] {
+  return days.filter((d) => d.isCurrentMonth && (d.posted > 0 || d.posts.length > 0));
+}
+
+/** A day's first chips, and "+N more" for its other items and unnamed posts. */
+function DayChips({ day, size }: { day: CalendarDay; size: "cell" | "row" }) {
   const more = Math.max(0, day.posts.length - CHIPS_PER_DAY) + day.postedUnnamed;
+  const text = size === "cell" ? "text-[10px]" : "text-xs";
+  return (
+    <div className={size === "cell" ? "mt-0.5 space-y-0.5" : "mt-1 flex flex-wrap gap-1"}>
+      {day.posts.slice(0, CHIPS_PER_DAY).map((post, i) => (
+        <div
+          key={i}
+          className={cn("max-w-full truncate rounded px-1 py-0.5", text, chipClass(post.type))}
+          title={post.label}
+        >
+          {post.type === "planned" && <span className="sr-only">Planned: </span>}
+          {post.label}
+        </div>
+      ))}
+      {more > 0 && <div className={cn("px-1 text-muted-foreground", text)}>+{more} more</div>}
+    </div>
+  );
+}
+
+function DayContents({ day }: { day: CalendarDay }) {
   return (
     <>
       <span className={cn("text-xs font-medium", day.isToday && "text-primary")}>
@@ -166,21 +196,24 @@ function DayContents({ day }: { day: CalendarDay }) {
       {day.posted > 0 && (
         <span className="ml-1 text-[10px] text-muted-foreground">{day.posted} posted</span>
       )}
-      <div className="mt-0.5 space-y-0.5">
-        {day.posts.slice(0, CHIPS_PER_DAY).map((post, i) => (
-          <div
-            key={i}
-            className={cn("truncate rounded px-1 py-0.5 text-[10px]", chipClass(post.type))}
-            title={post.label}
-          >
-            {post.type === "planned" && <span className="sr-only">Planned: </span>}
-            {post.label}
-          </div>
-        ))}
-        {more > 0 && (
-          <div className="text-[10px] text-muted-foreground px-1">+{more} more</div>
+      <DayChips day={day} size="cell" />
+    </>
+  );
+}
+
+/** A listed day on a phone: its date and count on one line, its names below. */
+function DayRow({ day }: { day: CalendarDay }) {
+  return (
+    <>
+      <div className="flex items-baseline justify-between gap-2">
+        <span className={cn("text-sm font-medium", day.isToday && "text-primary")}>
+          {formatCalendarDate(day.date, { weekday: "short", day: "numeric" })}
+        </span>
+        {day.posted > 0 && (
+          <span className="text-xs text-muted-foreground">{day.posted} posted</span>
         )}
       </div>
+      <DayChips day={day} size="row" />
     </>
   );
 }
@@ -219,6 +252,8 @@ export function ContentCalendar({
   );
 
   const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const listed = listedDays(days);
+  const dayHref = (date: string) => `?month=${monthParam(month)}&day=${date}`;
   const cellClass = (day: CalendarDay) =>
     cn(
       "block min-h-[80px] border rounded-sm p-1",
@@ -251,42 +286,73 @@ export function ContentCalendar({
         </div>
       </CardHeader>
       <CardContent>
-        {/* Header */}
-        <div className="grid grid-cols-7 gap-px mb-1">
-          {weekDays.map((d) => (
-            <div
-              key={d}
-              className="text-center text-xs font-medium text-muted-foreground py-1"
-            >
-              {d}
-            </div>
-          ))}
+        {/* Phones: the days that hold something, as a list (#1649 F12). */}
+        <div className="sm:hidden">
+          {listed.length === 0 ? (
+            <p className="py-2 text-sm text-muted-foreground">
+              Nothing on the calendar this month.
+            </p>
+          ) : (
+            <ol className="divide-y">
+              {listed.map((day) => (
+                <li key={day.date}>
+                  {navigable ? (
+                    <Link
+                      href={dayHref(day.date)}
+                      scroll={false}
+                      className={cn("block py-2", day.date === selected && "bg-muted")}
+                      aria-current={day.date === selected ? "date" : undefined}
+                    >
+                      <DayRow day={day} />
+                    </Link>
+                  ) : (
+                    <div className="py-2">
+                      <DayRow day={day} />
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
 
-        {/* Days grid */}
-        <div className="grid grid-cols-7 gap-px">
-          {days.map((day) =>
-            navigable ? (
-              <Link
-                key={day.date}
-                href={`?month=${monthParam(month)}&day=${day.date}`}
-                scroll={false}
-                className={cn(cellClass(day), "hover:bg-muted/50")}
-                aria-label={`${formatCalendarDate(day.date, {
-                  weekday: "long",
-                  month: "long",
-                  day: "numeric",
-                })}, ${day.posted} posted`}
-                aria-current={day.date === selected ? "date" : undefined}
+        {/* Wider screens: the month's grid. */}
+        <div className="hidden sm:block">
+          <div className="grid grid-cols-7 gap-px mb-1">
+            {weekDays.map((d) => (
+              <div
+                key={d}
+                className="text-center text-xs font-medium text-muted-foreground py-1"
               >
-                <DayContents day={day} />
-              </Link>
-            ) : (
-              <div key={day.date} className={cellClass(day)}>
-                <DayContents day={day} />
+                {d}
               </div>
-            )
-          )}
+            ))}
+          </div>
+
+          <div className="grid grid-cols-7 gap-px">
+            {days.map((day) =>
+              navigable ? (
+                <Link
+                  key={day.date}
+                  href={dayHref(day.date)}
+                  scroll={false}
+                  className={cn(cellClass(day), "hover:bg-muted/50")}
+                  aria-label={`${formatCalendarDate(day.date, {
+                    weekday: "long",
+                    month: "long",
+                    day: "numeric",
+                  })}, ${day.posted} posted`}
+                  aria-current={day.date === selected ? "date" : undefined}
+                >
+                  <DayContents day={day} />
+                </Link>
+              ) : (
+                <div key={day.date} className={cellClass(day)}>
+                  <DayContents day={day} />
+                </div>
+              )
+            )}
+          </div>
         </div>
       </CardContent>
     </Card>

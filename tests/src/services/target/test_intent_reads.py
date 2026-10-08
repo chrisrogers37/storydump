@@ -95,7 +95,7 @@ class TestTheMonthRead:
 
     async def test_the_states_are_spelled_into_the_statement_not_bound(self):
         """A partial index proves its predicate from the query's literals; a
-        bound array would hide them from a generic plan (107)."""
+        bound array would hide them from a generic plan (`ix_intents_history_slot`)."""
         ex = _Executor()
         await self._days(ex, ("posted", "skipped"))
         ((sql, params),) = ex.statements

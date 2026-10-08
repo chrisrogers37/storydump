@@ -240,7 +240,7 @@ class PostIntent(TargetBase):
             "entered_state_at",
             postgresql_where=text("state IN ('awaiting_approval','approved')"),
         ),
-        # Migration 107 (#1640): the history's three outcomes by slot, for the
+        # #1640: the history's three outcomes by slot, for the
         # calendar's month and day and the Overview's recent activity.
         Index(
             "ix_intents_history_slot",

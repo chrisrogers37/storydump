@@ -504,7 +504,7 @@ _MEDIA_COLUMNS = (
 #: Midnight of a local date in the workspace's own zone, as the instant a slot
 #: is compared with. A scalar subquery rather than the joined `w.tz`, so the
 #: bound is one value the planner can scan an index range by
-#: (`ix_intents_history_slot`, 107).
+#: (`ix_intents_history_slot`).
 _LOCAL_MIDNIGHT = (
     "(CAST(:{name} AS date)::timestamp AT TIME ZONE"
     " (SELECT tz FROM workspaces WHERE id = :ws))"
@@ -579,7 +579,7 @@ async def intent_days(
     *states* must be named and is spelled into the statement after it is
     checked against :data:`INTENT_STATES`, not bound: a partial index proves
     its predicate from the query's own literals, which a bound array hides
-    from a generic plan (`ix_intents_history_slot`, 107)."""
+    from a generic plan (`ix_intents_history_slot`)."""
     unknown = sorted(set(states) - set(INTENT_STATES))
     if not states or unknown:
         raise ValueError(f"intent states must be named and known, got {unknown}")
