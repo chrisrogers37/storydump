@@ -68,10 +68,10 @@ def world(admin_conn, owner_actor):
                 )
                 cur.execute(
                     "UPDATE media_items SET category = 'food', times_posted = 1, link_url = %s,"
-                    " thumbnail_url = %s WHERE id = %s RETURNING content_hash",
+                    " thumbnail_url = %s WHERE id = %s RETURNING content_hash, source_id",
                     (LINK, THUMB, posted["media"]),
                 )
-                a["posted_hash"] = cur.fetchone()[0]
+                a["posted_hash"], a["posted_source"] = cur.fetchone()
                 cur.execute(
                     "UPDATE media_items SET category = 'travel' WHERE id = %s",
                     (skipped["media"],),
@@ -286,7 +286,8 @@ class TestTheThumbnailFlag:
         media = str(a["posted"]["media"])
         row = _read(world, a, workspaces.thumbnail_link, media_id=media)
         assert row["thumbnail_url"] == THUMB
-        assert str(row["source_id"]) == str(a["src"])
+        # The chain seeds its own source, so the item's is the one to match.
+        assert str(row["source_id"]) == str(a["posted_source"])
         # A member of another workspace, naming this item's id, reads nothing.
         assert _read(world, b, workspaces.thumbnail_link, media_id=media) is None
 
