@@ -53,8 +53,12 @@ export function DemoProvider({ children }: { children: ReactNode }) {
   return inBrowser ? <DemoSession>{children}</DemoSession> : <DemoPlaceholder />;
 }
 
-/** One visit to the sample: its stories, and what the visitor has done with them. */
-function DemoSession({ children }: { children: ReactNode }) {
+/**
+ * One visit to the sample: its stories, and what the visitor has done with
+ * them. Exported so the pages can be rendered over a built sample in tests,
+ * where no browser takes the page over.
+ */
+export function DemoSession({ children }: { children: ReactNode }) {
   const [sample] = useState(sampleNow);
   const [state, dispatch] = useReducer(demoReducer, sample.queue, initialDemoState);
 
