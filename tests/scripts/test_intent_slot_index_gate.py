@@ -16,7 +16,8 @@ Two workspaces, seeded through the stream login:
   and the day. Their dates come from the database's clock, as the seed's do.
 - NEW YORK (`America/New_York`): stories placed on either side of local
   midnight in July 2026, five posted on one day with a skipped story beside
-  them, and a story still scheduled.
+  them, a story still scheduled, and one late on the fall-back day in
+  November.
 
 Every read runs as `svc_ingress` under its workspace's tenant, the API's login.
 """
@@ -141,6 +142,16 @@ def _seed(conn) -> dict:
                 state="scheduled",
             ),
         }
+        # 1 November 2026 is New York's fall-back day: 04:30Z on the 2nd is
+        # 23:30 EST on the 1st (an EDT offset would make it 00:30 on the 2nd).
+        stories["fall-back"] = _story(
+            cur,
+            ny,
+            "history-ny",
+            "fall-back.jpg",
+            at="2026-11-02 04:30+00",
+            state="posted",
+        )
         for hour in range(5):
             stories[f"busy-{hour}"] = _story(
                 cur,
@@ -371,3 +382,22 @@ def test_a_day_read_is_the_workspaces_local_day_in_every_state(world):
     assert [r["schedule_slot_at"] for r in rows] == sorted(
         r["schedule_slot_at"] for r in rows
     ), "soonest first by default"
+
+
+def test_the_month_counts_new_yorks_day_across_the_fall_back_change(world):
+    """October's grid ends at local midnight on 2 November, an EST instant
+    (05:00Z); the story at 04:30Z on the 2nd is 23:30 on the 1st there."""
+
+    async def read(c):
+        return await workspaces.intent_days(
+            c,
+            workspace_id=world["ny"],
+            states=["posted"],
+            from_date=date(2026, 9, 28),
+            to_date=date(2026, 11, 2),
+            per_day=3,
+        )
+
+    days = asyncio.run(_as_tenant(world["ingress"], world["ny"], read))
+    assert [(d["date"], d["count"]) for d in days] == [("2026-11-01", 1)]
+    assert days[0]["newest"][0]["file_name"] == "fall-back.jpg"
