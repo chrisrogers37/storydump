@@ -65,7 +65,9 @@ data-loss-wearing-a-bound's-clothing this seam was designed against.
 
 from __future__ import annotations
 
+import functools
 import re
+import ssl
 import uuid
 from dataclasses import replace as _replace
 from dataclasses import dataclass
@@ -75,7 +77,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from src.services.target import egress
+from src.services.target import egress, vocabulary
 from src.services.target.egress import EgressPolicy
 from src.services.target.drive_adapter import (
     DriveMediaGone,
@@ -246,8 +248,41 @@ MEDIA_CAP_FLOOR_BYTES = 16 * 1024
 #: a chain this long is a loop or a lie, and stops here).
 ANCESTOR_CAP = 32
 
+
+@dataclass(frozen=True)
+class Thumbnail:
+    """A file's thumbnail: its bytes and their raster type (`THUMBNAIL_TYPES`)."""
+
+    content: bytes
+    content_type: str
+
+
 #: Requested per file. `md5Checksum` is the content hash without a download.
-FILE_FIELDS = "id,name,mimeType,size,modifiedTime,md5Checksum"
+#: `thumbnailLink` is a short-lived, credentialed link to the file's thumbnail,
+#: absent until Drive has made one (`fetch_thumbnail` fetches through it).
+FILE_FIELDS = "id,name,mimeType,size,modifiedTime,md5Checksum,thumbnailLink"
+
+#: Where Drive serves thumbnails. Only the thumbnail fetch may reach these, so
+#: they are its own policy's hosts, not `egress.DEFAULT_ALLOWED_HOSTS`: every
+#: other Drive call stays on `www.googleapis.com`.
+THUMBNAIL_HOSTS = frozenset(
+    {
+        "lh3.googleusercontent.com",
+        "lh4.googleusercontent.com",
+        "lh5.googleusercontent.com",
+        "lh6.googleusercontent.com",
+    }
+)
+#: A thumbnail is a small preview; anything larger is not one, and is refused.
+THUMBNAIL_MAX_BYTES = 1024 * 1024
+#: A page asks for many thumbnails at once and draws a placeholder for any
+#: that fail, so a slow one gives up quickly rather than holding a worker.
+THUMBNAIL_BUDGET_S = 8.0
+THUMBNAIL_MAX_ATTEMPTS = 2
+THUMBNAIL_TYPES = frozenset(vocabulary.THUMBNAIL_TYPES)
+#: The thumbnail host's answers to a link that no longer works: the signed link
+#: has expired, or Drive replaced it. The current link is read once and tried.
+THUMBNAIL_LINK_DEAD = frozenset({401, 403, 404, 410})
 
 #: One request's bound — never the traversal's. See the header.
 DEFAULT_PAGE_SIZE = 200
@@ -365,8 +400,9 @@ class GoogleDriveAdapter:
         # `client` optional and per-call by default, following
         # `credential_lifecycle.ig_refresh` (:84-99) rather than inventing a
         # lifecycle: a long-lived client would need closing on shutdown, and
-        # the sync cadence is minutes, so a per-call pool costs nothing. Tests
-        # inject a transport here.
+        # the sync cadence is minutes, so a per-call pool costs nothing. The
+        # thumbnail route calls far more often, so every client opened here
+        # shares one TLS context (`_tls_context`). Tests inject a transport here.
         self._client = client
         self._token_provider = token_provider
         self._policy = policy
@@ -795,6 +831,115 @@ class GoogleDriveAdapter:
             raise DriveMediaTooLarge(str(exc)) from exc
         return response.content, str(meta.get("name") or file_ref), meta.get("mimeType")
 
+    async def fetch_thumbnail(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str,
+        file_ref: str,
+        link: str,
+    ) -> Optional[Thumbnail]:
+        """A file's thumbnail under the workspace grant, or None when there is
+        none to serve.
+
+        The stored `link` is tried first. A dead link (`THUMBNAIL_LINK_DEAD`)
+        is the short-lived link having expired, so Drive is asked once for the
+        file's current `thumbnailLink` and that is tried once. Anything else
+        that is not a raster image within `THUMBNAIL_MAX_BYTES` is None with a
+        log line, never retried: a refused host or redirect, a non-raster type
+        (an SVG among them), an oversized body, a host that gave no answer.
+        The token goes to `THUMBNAIL_HOSTS` and Drive's API host, nowhere
+        else, and the link itself is never logged: it is a credential."""
+        if not is_folder_id(file_ref):  # file ids share the folder-id alphabet
+            raise DriveTerminalError("file_ref is not a Drive id")
+        box = _TokenBox(
+            await self._token_provider(source_id, workspace_id=workspace_id)
+        )
+        dead, thumbnail = await self._thumbnail_get(link, box.value)
+        if not dead:
+            return thumbnail
+        params = {"fields": "thumbnailLink", "supportsAllDrives": "true"}
+        try:
+            meta = _json_body(
+                await self._fetch_as_workspace(
+                    f"{FILES_URL}/{file_ref}?{urlencode(params)}",
+                    source_id=source_id,
+                    workspace_id=workspace_id,
+                    box=box,
+                    policy=self._thumbnail_policy(),
+                )
+            )
+        except DriveSourceGone:
+            logger.info("drive file %s is gone — no thumbnail", file_ref)
+            return None
+        current = meta.get("thumbnailLink")
+        if not current or current == link:
+            logger.info(
+                "drive file %s: its thumbnail link is dead and Drive has no other",
+                file_ref,
+            )
+            return None
+        _, thumbnail = await self._thumbnail_get(current, box.value)
+        return thumbnail
+
+    async def _thumbnail_get(
+        self, link: str, token: str
+    ) -> tuple[bool, Optional[Thumbnail]]:
+        """One GET of a thumbnail link under the thumbnail policy: whether the
+        host said the link is dead, and the thumbnail when the answer is one."""
+        policy = self._thumbnail_policy(
+            max_response_bytes=THUMBNAIL_MAX_BYTES, allowed_hosts=THUMBNAIL_HOSTS
+        )
+        host = httpx.URL(link).host
+        try:
+            response = await self._floored_get(link, token, policy=policy)
+        except egress.ResponseTooLarge:
+            logger.warning(
+                "drive thumbnail from %s is over %d bytes — not served",
+                host,
+                THUMBNAIL_MAX_BYTES,
+            )
+            return False, None
+        except (
+            egress.EgressRefused,
+            egress.EgressBudgetExhausted,
+            httpx.TransportError,
+        ) as exc:
+            # The message is not logged: a refusal of a link with no host
+            # quotes the link, and the link is a credential.
+            logger.warning(
+                "drive thumbnail from %s not fetched: %s", host, type(exc).__name__
+            )
+            return False, None
+        status = response.status_code
+        if status in THUMBNAIL_LINK_DEAD:
+            return True, None
+        if status != 200:
+            logger.warning("drive thumbnail host %s answered %d", host, status)
+            return False, None
+        content_type = (
+            response.headers.get("content-type", "").split(";")[0].strip().lower()
+        )
+        if content_type not in THUMBNAIL_TYPES:
+            logger.warning(
+                "drive thumbnail from %s is %r, not a raster image — not served",
+                host,
+                content_type,
+            )
+            return False, None
+        return False, Thumbnail(response.content, content_type)
+
+    def _thumbnail_policy(self, **changes: Any) -> EgressPolicy:
+        """The floor for both legs of a thumbnail fetch: quick to give up,
+        since the page draws a placeholder for any picture that fails."""
+        return _replace(
+            self._policy or EgressPolicy(),
+            timeout_class="fast",
+            total_budget_s=THUMBNAIL_BUDGET_S,
+            max_attempts=THUMBNAIL_MAX_ATTEMPTS,
+            **changes,
+        )
+
     async def folder_ancestors(
         self, *, workspace_id: str, folder_ref: str
     ) -> list[str]:
@@ -931,23 +1076,26 @@ class GoogleDriveAdapter:
             "content_hash": content_hash,
             "size_bytes": int(entry["size"]) if entry.get("size") else None,
             "modified_at": entry.get("modifiedTime"),
+            "thumbnail_link": entry.get("thumbnailLink"),
         }
 
     async def _floored_get(
         self,
-        client: httpx.AsyncClient,
         url: str,
         token: str,
         *,
         policy: Optional[EgressPolicy] = None,
     ) -> httpx.Response:
-        return await egress.request(
-            client,
-            "GET",
-            url,
-            policy=policy or self._policy,
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        """One GET under the floor with the bearer token: on the injected
+        client, or on one opened for this call with the shared TLS context."""
+        kwargs = {
+            "policy": policy or self._policy,
+            "headers": {"Authorization": f"Bearer {token}"},
+        }
+        if self._client is not None:
+            return await egress.request(self._client, "GET", url, **kwargs)
+        async with httpx.AsyncClient(verify=_tls_context()) as own:
+            return await egress.request(own, "GET", url, **kwargs)
 
     async def _get_as_workspace(
         self,
@@ -1012,13 +1160,7 @@ class GoogleDriveAdapter:
         """One floored GET, with the status mapped to the routing vocabulary;
         a 200 comes back whole for the caller to read."""
         try:
-            if self._client is not None:
-                response = await self._floored_get(
-                    self._client, url, token, policy=policy
-                )
-            else:
-                async with httpx.AsyncClient() as own:
-                    response = await self._floored_get(own, url, token, policy=policy)
+            response = await self._floored_get(url, token, policy=policy)
         except egress.EgressBudgetExhausted as exc:
             # The floor retries transport failures internally and then raises
             # THIS rather than the original error, so a bare
@@ -1065,6 +1207,14 @@ class GoogleDriveAdapter:
         if status == 429 or status >= 500:
             raise DriveRetryableError(f"drive answered {status}: {detail}")
         raise DriveTerminalError(f"drive answered {status}: {detail}")
+
+
+@functools.lru_cache(maxsize=1)
+def _tls_context() -> ssl.SSLContext:
+    """One TLS context, httpx's default, for every client this module opens.
+    Building one loads the CA bundle and blocks the event loop while it does,
+    which a page of thumbnails would otherwise pay once per picture."""
+    return httpx.create_ssl_context()
 
 
 def _json_body(response: httpx.Response) -> dict:
@@ -1131,5 +1281,6 @@ __all__ = [
     "FILE_FIELDS",
     "FILES_URL",
     "GoogleDriveAdapter",
+    "Thumbnail",
     "TokenProvider",
 ]

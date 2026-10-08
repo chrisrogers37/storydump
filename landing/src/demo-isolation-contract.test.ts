@@ -44,6 +44,10 @@ const SHARED_FILES = [
   path.join("components", "dashboard", "queue", "reschedule-dialog.tsx"),
   // QueueView draws an item's link with it, so the sample imports it too.
   path.join("components", "dashboard", "item-link.tsx"),
+  // QueueView draws a row's thumbnail with these, so the sample imports them
+  // too; it passes no workspace, so it never asks for a thumbnail.
+  path.join("components", "dashboard", "media", "media-thumbnail.tsx"),
+  path.join("lib", "thumbnails.ts"),
 ];
 
 const BANNED_MODULES = ["bff", "workspaces", "page-guards", "target-api", "db"].map(

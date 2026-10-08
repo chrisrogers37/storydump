@@ -174,7 +174,53 @@ def _invitation(params: Mapping[str, Any]) -> tuple[str, str]:
     )
 
 
-TEMPLATES = {"invitation": _invitation}
+#: The activation nudge's copy (#1481), one entry per step a person can stop
+#: at (`activation_nudge.STEPS`): `(subject, body)`, the body carrying
+#: `{link}`. A DRAFT until the owner approves it, which is one of the two
+#: things the nudge waits on before it is switched on; the PR that added it
+#: carries the copy for that review. The folder step's Google line mirrors the
+#: Drive card's (`landing/src/lib/drive.ts`) and goes when verification lands.
+_NUDGE_COPY = {
+    "instagram": (
+        "Your Storydump workspace is ready for Instagram",
+        "You created a Storydump workspace but have not connected Instagram"
+        " yet. Connecting it is the step that lets Storydump post your"
+        " Stories.\n\nConnect Instagram:\n{link}\n\n"
+        "Instagram asks for a professional account (Business or Creator)."
+        " Switching takes a minute in the Instagram app.\n",
+    ),
+    "folder": (
+        "Choose the folder Storydump posts from",
+        "Your workspace is connected to Instagram. The last setup step is"
+        " choosing the Google Drive folder your Stories come from.\n\n"
+        "Add a folder:\n{link}\n\n"
+        "If Google says it hasn't verified this app, choose Advanced, then"
+        ' "Go to storydump (unsafe)".\n',
+    ),
+    "approval": (
+        "Your first Story is one tap away",
+        "Storydump lines up a Story for you to approve at each posting time."
+        " Approve the next one from your queue and it goes out on"
+        " schedule.\n\nOpen your queue:\n{link}\n",
+    ),
+}
+
+_NUDGE_FOOTER = (
+    "\nThis is the only reminder we will send. If you have decided Storydump"
+    " is not for you, you can ignore it.\n"
+)
+
+
+def _activation_nudge(params: Mapping[str, Any]) -> tuple[str, str]:
+    step = _required(params, "step")
+    link = _required(params, "link")
+    if step not in _NUDGE_COPY:
+        raise EmailRefused("template_params_missing", "step")
+    subject, body = _NUDGE_COPY[step]
+    return subject, body.format(link=link) + _NUDGE_FOOTER
+
+
+TEMPLATES = {"invitation": _invitation, "activation_nudge": _activation_nudge}
 
 
 def _required(params: Mapping[str, Any], name: str) -> str:

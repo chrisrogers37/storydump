@@ -39,7 +39,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from src.api.principal import (
     Principal,
@@ -570,6 +570,46 @@ async def get_media(
     if row is None:
         raise principal_mod.not_found()
     return row
+
+
+#: How long a browser may keep a thumbnail. The page's URL for it carries the
+#: row's `thumbnail_version`, which names one picture for the row's life, so it
+#: may be kept long; `private` keeps it out of every shared cache.
+THUMBNAIL_CACHE_CONTROL = "private, max-age=2592000"
+
+
+@router.get("/workspaces/{ws}/media/{media_id}/thumbnail")
+async def get_media_thumbnail(
+    ws: uuid.UUID,
+    media_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_session),
+):
+    """A media item's thumbnail, fetched from Drive here under the workspace's
+    grant, behind the member gate the media reads use; the session closes
+    before Drive is called. No picture, for whatever reason
+    (`GoogleDriveAdapter.fetch_thumbnail`), is the 404 an unknown item gets,
+    and the page draws its placeholder."""
+    async with principal_mod.member_session(request, str(ws), principal) as session:
+        row = await workspaces.thumbnail_link(
+            session, workspace_id=str(ws), media_id=str(media_id)
+        )
+    if row is None or not row["thumbnail_url"]:
+        raise principal_mod.not_found()
+    async with _drive_read():
+        thumbnail = await _drive_adapter(request).fetch_thumbnail(
+            source_id=str(row["source_id"]),
+            workspace_id=str(ws),
+            file_ref=row["provider_file_ref"],
+            link=row["thumbnail_url"],
+        )
+    if thumbnail is None:
+        raise principal_mod.not_found()
+    return Response(
+        content=thumbnail.content,
+        media_type=thumbnail.content_type,
+        headers={"Cache-Control": THUMBNAIL_CACHE_CONTROL},
+    )
 
 
 @router.get("/workspaces/{ws}/stats")

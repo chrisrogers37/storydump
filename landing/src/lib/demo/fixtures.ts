@@ -192,7 +192,9 @@ function story(
     link_url: null,
     file_name: input.file,
     media_kind: input.video ? "video" : "image",
-    thumbnail_url: null,
+    // The sample has no media to show, so it never asks for a thumbnail.
+    has_thumbnail: false,
+    thumbnail_version: "",
     caption: null,
     category: FOLDERS[input.folder].name,
     account_handle: ACCOUNT.handle,

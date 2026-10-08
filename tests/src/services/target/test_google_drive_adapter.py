@@ -24,6 +24,7 @@ from src.services.target.drive_adapter import (
     DriveRetryableError,
     DriveTerminalError,
 )
+from src.services.target import google_drive_adapter
 from src.services.target.egress import EgressPolicy
 from src.services.target.google_drive_adapter import (
     SHARED_ROOT,
@@ -38,6 +39,10 @@ INSTAGRAM_VIDEO_SUFFIXES = (".mp4", ".mov")
 CONFIG = {"v": 1, "folder_ref": "FOLDER123"}
 WS = "11111111-1111-1111-1111-111111111111"
 SRC = "22222222-2222-2222-2222-222222222222"
+#: Thumbnail links as Drive hands them out: short-lived, on its content host.
+THUMB = "https://lh3.googleusercontent.com/drive-storage/thumb-1=s220"
+FRESH = "https://lh3.googleusercontent.com/drive-storage/thumb-2=s220"
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
 
 
 def _policy() -> EgressPolicy:
@@ -92,7 +97,9 @@ def _json_handler(payload, status=200, headers=None):
 class TestListChanges:
     @pytest.mark.asyncio
     async def test_maps_a_page_into_media_sync_item_shape(self):
-        handler, _ = _json_handler({"files": [_file("f1", name="cat.jpg")]})
+        handler, _ = _json_handler(
+            {"files": [_file("f1", name="cat.jpg") | {"thumbnailLink": THUMB}]}
+        )
         items, checkpoint = await _adapter(handler).list_changes(
             CONFIG, None, source_id=SRC, workspace_id=WS
         )
@@ -105,6 +112,7 @@ class TestListChanges:
                 "content_hash": "hash1",
                 "size_bytes": 10,
                 "modified_at": "2026-08-01T00:00:00Z",
+                "thumbnail_link": THUMB,
                 "folder_path": "",
             }
         ]
@@ -216,6 +224,7 @@ class TestListChanges:
         url = str(request.url)
         assert "FOLDER123" in url and "in+parents" in url.replace("%20", "+")
         assert "md5Checksum" in url
+        assert "thumbnailLink" in url
         assert "trashed" in url
 
     @pytest.mark.asyncio
@@ -1509,3 +1518,157 @@ class TestFolderAncestors:
             await _adapter(handler).folder_ancestors(
                 workspace_id=WS, folder_ref="CHILD"
             )
+
+
+class TestFetchThumbnail:
+    """The thumbnail route's fetch (#1634): the stored link, under the
+    workspace grant. A dead link is re-read from Drive once and that link
+    tried once. Nothing that is not a raster picture within the cap comes
+    back, and the token reaches only Drive's thumbnail hosts and its API."""
+
+    def _drive(self, *, thumbs, current=FRESH, meta_status=200):
+        """`thumbs` maps a link to its answers in order, each (status, body,
+        content type); `current` is the link `files.get` names now."""
+        calls: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            calls.append((url, request.headers.get("authorization", "")))
+            if request.url.host == "www.googleapis.com":
+                if meta_status != 200:
+                    return httpx.Response(
+                        meta_status, json={"error": {"message": "File not found"}}
+                    )
+                return httpx.Response(
+                    200, json={"thumbnailLink": current} if current else {}
+                )
+            status, body, content_type = thumbs[url].pop(0)
+            return httpx.Response(
+                status, content=body, headers={"content-type": content_type}
+            )
+
+        return _adapter(handler, token="TOKEN-XYZ"), calls
+
+    async def _fetch(self, adapter, link=THUMB):
+        return await adapter.fetch_thumbnail(
+            source_id=SRC, workspace_id=WS, file_ref="FILE1", link=link
+        )
+
+    @staticmethod
+    def _hosts(calls):
+        return [httpx.URL(url).host for url, _ in calls]
+
+    @pytest.mark.asyncio
+    async def test_a_live_link_answers_with_the_picture_under_the_grant(self):
+        adapter, calls = self._drive(thumbs={THUMB: [(200, JPEG, "image/jpeg")]})
+        thumbnail = await self._fetch(adapter)
+        assert (thumbnail.content, thumbnail.content_type) == (JPEG, "image/jpeg")
+        assert calls == [(THUMB, "Bearer TOKEN-XYZ")]
+
+    @pytest.mark.parametrize("dead", [401, 403, 404, 410])
+    @pytest.mark.asyncio
+    async def test_an_expired_link_is_reread_once_and_retried_once(self, dead):
+        adapter, calls = self._drive(
+            thumbs={
+                THUMB: [(dead, b"", "text/html")],
+                FRESH: [(200, JPEG, "image/png")],
+            }
+        )
+        thumbnail = await self._fetch(adapter)
+        assert (thumbnail.content, thumbnail.content_type) == (JPEG, "image/png")
+        assert self._hosts(calls) == [
+            "lh3.googleusercontent.com",
+            "www.googleapis.com",
+            "lh3.googleusercontent.com",
+        ]
+        reread, retry = calls[1][0], calls[2][0]
+        assert "/files/FILE1?" in reread and "fields=thumbnailLink" in reread
+        assert retry == FRESH
+        assert {auth for _, auth in calls} == {"Bearer TOKEN-XYZ"}
+
+    @pytest.mark.asyncio
+    async def test_a_link_still_dead_after_its_one_retry_is_none_with_no_loop(self):
+        adapter, calls = self._drive(
+            thumbs={THUMB: [(403, b"", "text/html")], FRESH: [(403, b"", "text/html")]}
+        )
+        assert await self._fetch(adapter) is None
+        assert len(calls) == 3
+
+    @pytest.mark.parametrize("current", [None, THUMB])
+    @pytest.mark.asyncio
+    async def test_a_dead_link_drive_has_no_other_for_is_none_without_a_retry(
+        self, current
+    ):
+        adapter, calls = self._drive(
+            thumbs={THUMB: [(404, b"", "text/html")]}, current=current
+        )
+        assert await self._fetch(adapter) is None
+        assert self._hosts(calls) == ["lh3.googleusercontent.com", "www.googleapis.com"]
+
+    @pytest.mark.asyncio
+    async def test_a_file_gone_from_drive_is_none(self):
+        adapter, _ = self._drive(
+            thumbs={THUMB: [(404, b"", "text/html")]}, meta_status=404
+        )
+        assert await self._fetch(adapter) is None
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [
+            "image/svg+xml",
+            "image/svg+xml; charset=utf-8",
+            "text/html",
+            "application/octet-stream",
+            "",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_anything_but_a_raster_picture_is_refused_and_never_retried(
+        self, content_type
+    ):
+        adapter, calls = self._drive(
+            thumbs={THUMB: [(200, b"<svg onload='alert(1)'/>", content_type)]}
+        )
+        assert await self._fetch(adapter) is None
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_size_cap_holds(self):
+        over = b"\xff" * (google_drive_adapter.THUMBNAIL_MAX_BYTES + 1)
+        adapter, calls = self._drive(thumbs={THUMB: [(200, over, "image/jpeg")]})
+        assert await self._fetch(adapter) is None
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_picture_at_the_cap_is_served(self):
+        at_cap = b"\xff" * google_drive_adapter.THUMBNAIL_MAX_BYTES
+        adapter, _ = self._drive(thumbs={THUMB: [(200, at_cap, "image/jpeg")]})
+        assert (await self._fetch(adapter)).content == at_cap
+
+    @pytest.mark.parametrize(
+        "link",
+        [
+            "https://thumbnails.example/t.png",
+            # The API host is Drive's, but not a thumbnail host: the policy
+            # for this fetch admits the thumbnail hosts alone.
+            "https://www.googleapis.com/drive/v3/files/FILE1?alt=media",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_link_off_drives_thumbnail_hosts_never_receives_the_token(
+        self, link
+    ):
+        adapter, calls = self._drive(thumbs={})
+        assert await self._fetch(adapter, link=link) is None
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_ref_outside_the_drive_id_shape_is_refused_before_any_request(
+        self,
+    ):
+        adapter, calls = self._drive(thumbs={})
+        with pytest.raises(DriveTerminalError):
+            await adapter.fetch_thumbnail(
+                source_id=SRC, workspace_id=WS, file_ref="x/../y", link=THUMB
+            )
+        assert calls == []
