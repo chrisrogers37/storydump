@@ -12,6 +12,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { isValidElement, type ReactElement } from "react";
+import { ImageIcon, Video } from "lucide-react";
+import { MediaThumbnail } from "@/components/dashboard/media/media-thumbnail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DialogDescription } from "@/components/ui/dialog";
@@ -43,7 +45,8 @@ function intent(overrides: Partial<Intent> = {}): Intent {
     link_url: null,
     file_name: "sample.jpg",
     media_kind: "image",
-    thumbnail_url: null,
+    has_thumbnail: false,
+    thumbnail_version: "0123456789abcdef",
     caption: null,
     category: null,
     account_handle: "example.brand",
@@ -76,6 +79,7 @@ type ViewProps = Parameters<typeof QueueView>[0];
 const view = (props: Partial<ViewProps> = {}) =>
   QueueView({
     intents: [intent()],
+    workspaceId: null,
     tz: "UTC",
     truncatedAt: null,
     pending: null,
@@ -239,5 +243,50 @@ describe("QueueView: an item's link to add by hand (#1413)", () => {
 
   it("draws nothing for a story whose item has no link", () => {
     expect(links(view())).toEqual([]);
+  });
+});
+
+describe("a row's thumbnail (#1634)", () => {
+  const WS = "11111111-1111-4111-8111-111111111111";
+  type ThumbProps = Parameters<typeof MediaThumbnail>[0];
+
+  const thumbnails = (tree: ReactElement) =>
+    [...walk(tree)].filter(
+      (el) => el.type === MediaThumbnail,
+    ) as ReactElement<ThumbProps>[];
+  const has = (tree: ReactElement, type: unknown) =>
+    [...walk(tree)].some((el) => el.type === type);
+
+  it("is fetched through this tier's route and named by the file", () => {
+    const tree = view({
+      workspaceId: WS,
+      intents: [intent({ has_thumbnail: true, media_item_id: "media-9", thumbnail_version: "v1" })],
+    });
+    const [thumbnail] = thumbnails(tree);
+    expect(thumbnail.props.src).toBe(`/api/workspaces/${WS}/media/media-9/thumbnail?v=v1`);
+    expect(thumbnail.props.alt).toBe("sample.jpg");
+    expect(thumbnail.props.video).toBe(false);
+    // The glyph waits as the fallback, not beside the picture.
+    expect((thumbnail.props.fallback as ReactElement).type).toBe(ImageIcon);
+  });
+
+  it("marks a video, and falls back to the video glyph", () => {
+    const [thumbnail] = thumbnails(
+      view({ workspaceId: WS, intents: [intent({ has_thumbnail: true, media_kind: "video" })] }),
+    );
+    expect(thumbnail.props.video).toBe(true);
+    expect((thumbnail.props.fallback as ReactElement).type).toBe(Video);
+  });
+
+  it("draws the glyph, and asks for nothing, when the row has no thumbnail", () => {
+    const tree = view({ workspaceId: WS, intents: [intent({ has_thumbnail: false })] });
+    expect(thumbnails(tree)).toEqual([]);
+    expect(has(tree, ImageIcon)).toBe(true);
+  });
+
+  it("draws the glyph without a workspace, which is how the sample workspace calls it", () => {
+    const tree = view({ workspaceId: null, intents: [intent({ has_thumbnail: true })] });
+    expect(thumbnails(tree)).toEqual([]);
+    expect(has(tree, ImageIcon)).toBe(true);
   });
 });

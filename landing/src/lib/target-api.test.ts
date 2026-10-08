@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { targetFetch } from "./target-api";
+import { targetFetch, targetFetchBytes } from "./target-api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -213,5 +213,29 @@ describe("a command refusal's facts (#1413 phase 6)", () => {
     stubFetch(async () => new Response("<html>bad gateway</html>", { status: 502 }));
     const result = await targetFetch("/x", "tok", { refusalFacts: true });
     expect(result).toStrictEqual({ ok: false, status: 502, error: "http_502" });
+  });
+});
+
+describe("a byte read (#1634)", () => {
+  it("asks the v1 plane with the session as its credential, and hands back the API's own answer", async () => {
+    const answer = new Response(new Uint8Array([1, 2, 3]), {
+      status: 200,
+      headers: { "Content-Type": "image/png" },
+    });
+    stubFetch(() => answer);
+    const res = await targetFetchBytes("/workspaces/w/media/m/thumbnail", "sekrit-token");
+    expect(res).toBe(answer);
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/v1\/workspaces\/w\/media\/m\/thumbnail$/);
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer sekrit-token");
+  });
+
+  it("is a bodiless 503 when the router cannot be reached, never a picture", async () => {
+    stubFetch(() => {
+      throw new TypeError("fetch failed");
+    });
+    const res = await targetFetchBytes("/workspaces/w/media/m/thumbnail", "tok");
+    expect(res.status).toBe(503);
+    expect(res.body).toBeNull();
   });
 });

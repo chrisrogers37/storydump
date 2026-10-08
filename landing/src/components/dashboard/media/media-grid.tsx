@@ -8,11 +8,13 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/dashboard/empty-state";
 import { ItemLink } from "@/components/dashboard/item-link";
 import { LinkDialog } from "@/components/dashboard/media/link-dialog";
+import { MediaThumbnail } from "@/components/dashboard/media/media-thumbnail";
 import { ScheduleDialog, type ScheduleTargets } from "@/components/dashboard/media/schedule-dialog";
 import { TONE_CLASS } from "@/components/dashboard/tone";
 import { Card, CardContent } from "@/components/ui/card";
 import { linkRefusalCopy, submitSetItemLink } from "@/lib/command-client";
 import type { MediaRow } from "@/lib/dashboard-payloads";
+import { thumbnailSrc } from "@/lib/thumbnails";
 
 /**
  * The media pool (#1044 `GET …/media?state=&never_posted=&limit=`).
@@ -145,18 +147,15 @@ export function MediaGrid({
           shown.map((item) => (
             <Card key={item.id} className="overflow-hidden">
               <div className="relative flex h-32 items-center justify-center overflow-hidden bg-muted text-muted-foreground">
-                {item.thumbnail_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={item.thumbnail_url}
+                {item.has_thumbnail ? (
+                  <MediaThumbnail
+                    key={item.thumbnail_version}
+                    src={thumbnailSrc(workspaceId, item.id, item.thumbnail_version)}
                     alt={item.file_name}
-                    loading="lazy"
-                    className="absolute inset-0 h-full w-full object-cover"
-                    onError={(e) => {
-                      // A stored Drive URL rotates; the next sync refreshes it.
-                      // Fall back to the kind label rather than a broken image.
-                      (e.currentTarget as HTMLImageElement).style.display = "none";
-                    }}
+                    video={item.media_kind === "video"}
+                    // The kind label below is drawn under the picture, so a
+                    // thumbnail that fails leaves it showing.
+                    fallback={null}
                   />
                 ) : null}
                 <span className="pointer-events-none text-xs uppercase tracking-wider">

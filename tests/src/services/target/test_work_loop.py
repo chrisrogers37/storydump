@@ -1104,7 +1104,12 @@ class TestLaneSurvivesTransientClaimErrors:
         assert loop.consecutive_errors == 3
 
 
-ACTIVE_ROW = {"external_ref": "-777", "workspace_id": "ws-1", "state": "active"}
+ACTIVE_ROW = {
+    "external_ref": "-777",
+    "workspace_id": "ws-1",
+    "state": "active",
+    "deliverable": True,
+}
 
 
 class TestDeliverOutboxRetiresAGoneChat:
@@ -1175,12 +1180,18 @@ class TestDeliverOutboxRetiresAGoneChat:
 
 
 class TestDeliverOutboxSkipsARevokedBinding:
-    """A job minted before an admin removed the group (or the bot was kicked)
-    sends nothing: the hold ends before a poller is built (`07` §13), and
-    what is left of the binding's queue is retired."""
+    """A job whose binding no card may go to sends nothing — one minted before
+    an admin removed the group (or the bot was kicked), or one for a private
+    chat whose person does not belong: the hold ends before a poller is built
+    (`07` §13), and what is left of the binding's queue is retired. The answer
+    is the binding read's own (`bindings.deliverable_binding_where`), so an
+    ACTIVE binding it refuses is the case that tells a check of it from a
+    check of `state`."""
 
-    async def test_no_poller_runs_for_a_revoked_binding(self, monkeypatch):
+    async def test_no_poller_runs_for_a_binding_no_card_may_go_to(self, monkeypatch):
         from types import SimpleNamespace
+
+        from src.services.target import bindings
 
         built = []
 
@@ -1191,7 +1202,7 @@ class TestDeliverOutboxSkipsARevokedBinding:
         monkeypatch.setattr(work_loop.outbox, "OutboxPoller", _Poller)
         transport = SimpleNamespace(for_chat=lambda ref: lambda row: None)
         registry = build_registry(full_deps(transport=transport))
-        session = _FakeSession(rows=[{**ACTIVE_ROW, "state": "revoked"}])
+        session = _FakeSession(rows=[{**ACTIVE_ROW, "deliverable": False}])
         job = {
             "id": "j-r",
             "kind": "deliver_outbox",
@@ -1200,11 +1211,13 @@ class TestDeliverOutboxSkipsARevokedBinding:
             "payload": {"binding_id": "b-1"},
         }
         assert await registry["deliver_outbox"](session, job) is None
-        assert built == [], "a revoked binding got a sender"
+        assert built == [], "a binding no card may go to got a sender"
         retire = [sql for sql, _ in session.statements if "superseded" in sql]
         assert len(retire) == 1 and "'sending'" in retire[0], (
-            "the revoked binding's leftover queue was not retired"
+            "the binding's leftover queue was not retired"
         )
+        read = [sql for sql, _ in session.statements if "AS deliverable" in sql]
+        assert len(read) == 1 and bindings.DELIVERABLE_BINDING_WHERE in read[0]
 
 
 class TestWeightedCategorySelection:
@@ -2305,7 +2318,9 @@ class TestTheSenderMintReadsItsOwners:
         assert session.calls[0][1]["lim"] == 7
 
     def test_the_four_push_statements_read_the_one_predicate(self):
-        """ "Where can we say this" is `bindings`' fragment at every site."""
+        """ "Where can we say this" has one owner, `bindings`: the sender sweep's
+        door and the outcome doors' supersede read the live set, and every
+        statement that queues or claims a card reads the deliverable one."""
         import inspect
 
         from src.services.target import bindings, outbox, prompts
@@ -2324,23 +2339,34 @@ class TestTheSenderMintReadsItsOwners:
         assert "push_binding_where(" not in inspect.getsource(
             work_loop.ensure_sender_jobs
         )
+
+        def uses(fn, fragment):
+            return inspect.getsource(fn).count(fragment)
+
+        assert uses(prompts.push_bindings, "bindings.DELIVERABLE_BINDING_WHERE") == 1
+        assert uses(outbox.claim_next, "bindings.deliverable_binding_where('b')") == 1
         assert (
-            inspect.getsource(prompts.push_bindings).count(
-                "bindings.PUSH_BINDING_WHERE"
-            )
-            == 1
+            uses(outbox.supersede_all, "bindings.deliverable_binding_where('cb')") == 1
         )
         for door in (
             outbox.supersede_everywhere_touched,
             outbox.restate_everywhere_touched,
         ):
-            assert inspect.getsource(door).count("bindings.PUSH_BINDING_WHERE") == 1, (
-                door.__name__
-            )
-        # And the fragment is what it always was.
-        assert bindings.PUSH_BINDING_WHERE == (
-            "state = 'active' AND channel LIKE 'telegram%'"
-        )
+            # Supersede in every live binding; queue the edit only where a
+            # card may go.
+            assert uses(door, "bindings.push_binding_where()") == 1, door.__name__
+            assert uses(door, "bindings.DELIVERABLE_BINDING_WHERE") == 1, door.__name__
+            assert uses(door, "b.deliverable") == 1, door.__name__
+        # And the fragments are what they say.
         assert bindings.push_binding_where("b") == (
             "b.state = 'active' AND b.channel LIKE 'telegram%'"
+        )
+        assert bindings.deliverable_binding_where("b") == (
+            "b.state = 'active' AND b.channel LIKE 'telegram%'"
+            " AND (b.channel <> 'telegram_dm' OR EXISTS ("
+            "SELECT 1 FROM user_identities dm_ui"
+            " JOIN workspace_members dm_wm ON dm_wm.user_id = dm_ui.user_id"
+            " WHERE dm_ui.provider = 'telegram'"
+            " AND dm_ui.external_id = b.external_ref"
+            " AND dm_wm.workspace_id = b.workspace_id))"
         )

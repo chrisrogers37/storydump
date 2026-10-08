@@ -53,6 +53,7 @@ from tests.scripts.conftest import (
     as_user,
     async_url,
     replay_advertised_stream,
+    in_tenant,
     seed_intent,
     seed_workspace_chain,
     set_test_passwords,
@@ -115,8 +116,10 @@ def outbox_db(admin_conn, owner_actor):
             conn.close()
         yield {
             "worker": as_user(db, "svc_worker"),
+            "ingress": as_user(db, "svc_ingress"),
             "owner_stream": dsn,
             "ws": str(chain["ws"]),
+            "ws_owner": str(chain["user"]),
             "binding": str(binding),
         }
     finally:
@@ -194,9 +197,10 @@ def _tenant_session_factory(outbox_db, sessionmaker):
     return _factory
 
 
-def _new_binding(outbox_db, external_ref=None) -> str:
+def _new_binding(outbox_db, external_ref=None, *, channel="telegram_group") -> str:
     """A binding nobody else is using — on *external_ref* when the scenario
-    needs a real chat id.
+    needs a real chat id. A `telegram_dm` one is seeded here because no code
+    path writes one (the bind door refuses a private chat).
 
     The fixture is module-scoped (a role-carrying template cannot be held),
     so every scenario mints its own binding rather than sharing one — the
@@ -208,8 +212,12 @@ def _new_binding(outbox_db, external_ref=None) -> str:
         _owner_exec(
             outbox_db,
             "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
-            " VALUES (%s, 'telegram_group', %s) RETURNING id",
-            (outbox_db["ws"], external_ref or f"tg-{uuid.uuid4().hex[:10]}"),
+            " VALUES (%s, %s, %s) RETURNING id",
+            (
+                outbox_db["ws"],
+                channel,
+                external_ref or f"tg-{uuid.uuid4().hex[:10]}",
+            ),
             fetch=True,
         )[0][0]
     )
@@ -242,12 +250,13 @@ def _enqueue(
     )[0][0]
 
 
-def _engine(outbox_db, *, pool_size=2):
-    """The worker's async engine on the scratch database."""
+def _engine(outbox_db, *, pool_size=2, login="worker"):
+    """An async engine on the scratch database as *login*: the worker, or
+    `owner_stream` (the schema owner, which bypasses RLS)."""
     from sqlalchemy.ext.asyncio import create_async_engine
 
     return create_async_engine(
-        async_url(outbox_db["worker"]),
+        async_url(outbox_db[login]),
         pool_size=pool_size,
         max_overflow=0,
     )
@@ -283,6 +292,111 @@ def _seed_sender_job(outbox_db, binding=None):
         (outbox_db["ws"], f"tg:{binding or outbox_db['binding']}"),
         fetch=True,
     )[0][0]
+
+
+def _dm_chat() -> str:
+    """A private chat's id: a positive Telegram user id nobody else holds.
+    For a private chat the chat id IS the person's Telegram user id, which is
+    what `bindings.deliverable_binding_where` joins on."""
+    return str(10**9 + uuid.uuid4().int % 10**9)
+
+
+def _join(outbox_db, ws, user):
+    _owner_exec(
+        outbox_db,
+        "INSERT INTO workspace_members (workspace_id, user_id, role)"
+        " VALUES (%s, %s, 'member')",
+        (ws, user),
+    )
+
+
+def _link(outbox_db, user, chat):
+    _owner_exec(
+        outbox_db,
+        "INSERT INTO user_identities (user_id, provider, external_id)"
+        " VALUES (%s, 'telegram', %s)",
+        (user, chat),
+    )
+
+
+def _person(outbox_db, *, chat=None, member_of=()) -> str:
+    """A user, linked to Telegram as *chat* when given, a member of each
+    workspace in *member_of*."""
+    user = str(
+        _owner_exec(
+            outbox_db, "INSERT INTO users DEFAULT VALUES RETURNING id", fetch=True
+        )[0][0]
+    )
+    if chat is not None:
+        _link(outbox_db, user, chat)
+    for ws in member_of:
+        _join(outbox_db, ws, user)
+    return user
+
+
+def _other_workspace(outbox_db) -> str:
+    """A second workspace with its own owner."""
+    conn = psycopg2.connect(outbox_db["owner_stream"])
+    try:
+        return str(seed_workspace_chain(conn, f"l4-other-{uuid.uuid4().hex[:8]}")["ws"])
+    finally:
+        conn.close()
+
+
+async def _claim(engine, outbox_db, binding):
+    """`outbox.claim_next` on one connection of *engine*, with the
+    workspace's tenant set."""
+    from src.services.target.outbox import claim_next
+
+    async with engine.connect() as conn:
+        await _tenant(conn, outbox_db)
+        row = await claim_next(conn, binding_id=binding)
+        await conn.commit()
+    return row
+
+
+async def _run_worker(outbox_db, transport, done, *, after_sweeps=0):
+    """The real worker's interactive lanes and sender sweep over *transport*,
+    run until *done()* (a blocking read, run in a thread) holds and then for
+    *after_sweeps* more completed sweeps; 30 s at most. The module's other
+    scenarios leave rows and jobs of their own behind, and the lanes and the
+    sweep serve those too, so a caller asserts only on its own rows."""
+    import asyncio
+
+    from src.services.target.work_loop import WorkerConfig as _Cfg
+    from src.worker import SenderSweeper, compose
+
+    engine = _engine(outbox_db, pool_size=10)
+    stop = asyncio.Event()
+    try:
+        cfg = _Cfg(
+            lane_concurrency={"interactive": 2, "bulk": 1},
+            poller_interval_seconds=0.1,
+            sender_hold_seconds=1.0,
+            claim_idle_seconds=0.05,
+            sender_sweep_seconds=0.2,
+            chat_limit=CHAT_LIMIT,
+            chat_window_seconds=CHAT_WINDOW_S,
+            global_limit=GLOBAL_LIMIT,
+            global_window_seconds=GLOBAL_WINDOW_S,
+        )
+        app = compose(engine=engine, config=cfg, env={}, transport=transport)
+        loops = [wl for wl in app.loops if wl.lane == "interactive"]
+        sweeper = SenderSweeper(app)
+        tasks = [asyncio.create_task(wl.run()) for wl in loops]
+        tasks.append(asyncio.create_task(sweeper.run(stop)))
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not await asyncio.to_thread(done):
+            await asyncio.sleep(0.1)
+        target = sweeper.sweeps + after_sweeps
+        while time.monotonic() < deadline and sweeper.sweeps < target:
+            await asyncio.sleep(0.05)
+        stop.set()
+        for wl in loops:
+            wl.stop()
+        await asyncio.gather(*tasks)
+    finally:
+        await engine.dispose()
 
 
 class TestTheLevelIsReadCommitted:
@@ -599,6 +713,229 @@ class TestARevokedBindingIsNeverClaimed:
         assert _state(outbox_db, rows["sent"])[0] == "sent"
         assert _state(outbox_db, bystander)[0] == "pending", (
             "another binding's queue was touched"
+        )
+
+
+def _sent_card(outbox_db, binding, intent) -> str:
+    """An `approval_prompt` already sent: a live card with a message to edit."""
+    return _owner_exec(
+        outbox_db,
+        "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+        " payload, state, external_message_ref)"
+        " VALUES (%s, %s, 'approval_prompt', %s, %s, 'sent', %s) RETURNING id",
+        (
+            outbox_db["ws"],
+            binding,
+            intent,
+            json.dumps({"v": 1, "text": "card"}),
+            f"m-{uuid.uuid4().hex[:8]}",
+        ),
+        fetch=True,
+    )[0][0]
+
+
+class TestAPrivateChatIsClaimedOnlyForItsMember:
+    """A card goes to a private chat only while the person whose chat it is
+    belongs to the binding's workspace (`bindings.deliverable_binding_where`).
+    Every refusal has its positive control: the same row IS claimed once the
+    person belongs. As `svc_worker` and as the schema owner: the owner
+    bypasses RLS, so its refusal proves the predicate's own workspace
+    correlation is the guard, not the tenant policy."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("login", ["worker", "owner_stream"])
+    async def test_belonging_to_another_workspace_is_not_belonging_here(
+        self, outbox_db, login
+    ):
+        chat = _dm_chat()
+        binding = _new_binding(outbox_db, chat, channel="telegram_dm")
+        person = _person(outbox_db, chat=chat, member_of=(_other_workspace(outbox_db),))
+        outbox_id = _enqueue(outbox_db, binding=binding)
+        engine = _engine(outbox_db, login=login)
+        try:
+            assert await _claim(engine, outbox_db, binding) is None
+            assert _state(outbox_db, outbox_id)[:2] == ("pending", 0), (
+                "a private chat's card was claimed for a person who belongs to"
+                " another workspace only"
+            )
+
+            _join(outbox_db, outbox_db["ws"], person)
+            row = await _claim(engine, outbox_db, binding)
+        finally:
+            await engine.dispose()
+        assert row is not None and row["id"] == str(outbox_id), (
+            "positive control: once the person belongs here, the row is claimed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_chat_no_linked_member_holds_is_not_claimed(self, outbox_db):
+        """The person is a member but no Telegram identity of theirs is this
+        chat (never linked, or unlinked). A linked member with another chat
+        stands beside them, so the refusal is the chat's, not an empty
+        membership."""
+        chat = _dm_chat()
+        binding = _new_binding(outbox_db, chat, channel="telegram_dm")
+        person = _person(outbox_db, member_of=(outbox_db["ws"],))
+        _person(outbox_db, chat=_dm_chat(), member_of=(outbox_db["ws"],))
+        outbox_id = _enqueue(outbox_db, binding=binding)
+        engine = _engine(outbox_db)
+        try:
+            assert await _claim(engine, outbox_db, binding) is None
+            assert _state(outbox_db, outbox_id)[:2] == ("pending", 0)
+
+            _link(outbox_db, person, chat)
+            row = await _claim(engine, outbox_db, binding)
+        finally:
+            await engine.dispose()
+        assert row is not None and row["id"] == str(outbox_id), (
+            "positive control: linked as this chat, the member's row is claimed"
+        )
+
+
+class TestAnOutcomeQueuesNoEditForAChatNoCardMayGoTo:
+    """An outcome supersedes a card in every live binding but queues the edit
+    only where a card may go: a private chat whose person does not belong
+    gets its card superseded and no edit, from the tap's one-statement door
+    and from the settled sweep's per-binding one alike. A group beside it
+    gets both: the positive control."""
+
+    @pytest.mark.asyncio
+    async def test_the_card_is_superseded_and_no_edit_is_queued(self, outbox_db):
+        from src.services.target import outbox
+
+        chat = _dm_chat()
+        dm = _new_binding(outbox_db, chat, channel="telegram_dm")
+        _person(outbox_db, chat=chat)  # linked, and a member of nothing here
+        group = _new_binding(outbox_db, f"-100{uuid.uuid4().int % 10**10:010d}")
+        tap, swept = (
+            str(
+                seed_intent(
+                    outbox_db["owner_stream"],
+                    outbox_db["ws"],
+                    f"dm-edit-{leg}-{uuid.uuid4().hex[:6]}",
+                )["intent"]
+            )
+            for leg in ("tap", "swept")
+        )
+        cards = {
+            (intent, binding): _sent_card(outbox_db, binding, intent)
+            for intent in (tap, swept)
+            for binding in (dm, group)
+        }
+
+        async def outcome(session):
+            await outbox.supersede_everywhere(
+                session, workspace_id=outbox_db["ws"], intent_id=tap, outcome_text="x"
+            )
+            for binding in (dm, group):
+                await outbox.supersede_all(
+                    session,
+                    workspace_id=outbox_db["ws"],
+                    binding_id=binding,
+                    intent_id=swept,
+                    outcome_text="x",
+                )
+
+        await in_tenant(
+            outbox_db["ingress"], outbox_db["ws"], outbox_db["ws_owner"], outcome
+        )
+
+        for key, card in cards.items():
+            assert _state(outbox_db, card)[0] == "superseded", key
+        edits = {
+            (str(intent), str(binding))
+            for intent, binding in _owner_exec(
+                outbox_db,
+                "SELECT intent_id, binding_id FROM channel_outbox"
+                " WHERE kind = 'prompt_supersede' AND intent_id IN (%s, %s)",
+                (tap, swept),
+                fetch=True,
+            )
+        }
+        assert edits == {(tap, group), (swept, group)}, (
+            f"edits were queued for {edits}; only the group may get one"
+        )
+
+
+class TestARemovedPersonsPrivateChatGetsNoQueuedCard:
+    """A card queued for a person's private chat before they are removed is
+    retired by the sender the sweep mints, and never sent; the sweep, which
+    reads no membership, mints for that chat once and not again. On the real
+    worker: the sweep, the lane and the handler, with the removal run through
+    `workspaces.remove_member` as `svc_ingress`. A member who stays gets their
+    card on the same run: the positive control."""
+
+    @pytest.mark.asyncio
+    async def test_the_queued_card_is_retired_at_send_and_never_sent(self, outbox_db):
+        from src.services.target import workspaces
+
+        gone_chat, kept_chat = _dm_chat(), _dm_chat()
+        gone = _person(outbox_db, chat=gone_chat, member_of=(outbox_db["ws"],))
+        _person(outbox_db, chat=kept_chat, member_of=(outbox_db["ws"],))
+        gone_binding = _new_binding(outbox_db, gone_chat, channel="telegram_dm")
+        kept_binding = _new_binding(outbox_db, kept_chat, channel="telegram_dm")
+        queued = _enqueue(
+            outbox_db, binding=gone_binding, payload={"v": 1, "text": "a"}
+        )
+        control = _enqueue(
+            outbox_db, binding=kept_binding, payload={"v": 1, "text": "b"}
+        )
+
+        role = await in_tenant(
+            outbox_db["ingress"],
+            outbox_db["ws"],
+            outbox_db["ws_owner"],
+            lambda session: workspaces.remove_member(
+                session,
+                workspace_id=outbox_db["ws"],
+                user_id=gone,
+                by_user_id=outbox_db["ws_owner"],
+            ),
+        )
+        assert role == "member"
+
+        delivered: list[tuple[str, str]] = []
+
+        class _Transport:
+            def for_chat(self, external_ref):
+                async def send(row):
+                    delivered.append((external_ref, str(row["id"])))
+                    return f"tg-{row['id']}"
+
+                return send
+
+        # Two more completed sweeps after the retire: a sender minted for the
+        # retired chat again would show below as a second job.
+        await _run_worker(
+            outbox_db,
+            _Transport(),
+            lambda: (
+                (_state(outbox_db, queued)[0], _state(outbox_db, control)[0])
+                == ("superseded", "sent")
+            ),
+            after_sweeps=2,
+        )
+
+        assert _state(outbox_db, queued)[0] == "superseded", (
+            "the removed person's queued card was not retired"
+        )
+        assert [d for d in delivered if d[0] == gone_chat] == [], (
+            "a card reached the private chat of a person no longer in the workspace"
+        )
+        assert _state(outbox_db, control)[0] == "sent"
+        assert (kept_chat, str(control)) in delivered, (
+            "positive control: the member who stays gets their card"
+        )
+        minted = _owner_exec(
+            outbox_db,
+            "SELECT count(*) FROM jobs"
+            " WHERE kind = 'deliver_outbox' AND serialization_key = %s",
+            (f"tg:{gone_binding}",),
+            fetch=True,
+        )[0][0]
+        assert minted == 1, (
+            f"the sweep minted {minted} senders for the retired chat; the first"
+            " retires its queue and none follows"
         )
 
 
@@ -2014,11 +2351,7 @@ class TestTheSenderFollowsAGroupThatMoved:
 
     @pytest.mark.asyncio
     async def test_the_next_delivery_reaches_the_new_chat(self, outbox_db):
-        import asyncio
-
         from src.channels.telegram_transport import TelegramChatGone
-        from src.services.target.work_loop import WorkerConfig as _Cfg
-        from src.worker import SenderSweeper, compose
 
         old, new = (
             f"-4{uuid.uuid4().int % 10**9:09d}",
@@ -2043,39 +2376,9 @@ class TestTheSenderFollowsAGroupThatMoved:
 
                 return send
 
-        # The module's other scenarios leave rows and jobs of their own behind;
-        # the lanes and the sweep serve those too, so only THIS binding's rows
-        # are asserted on.
-        engine = _engine(outbox_db, pool_size=10)
-        stop = asyncio.Event()
-        try:
-            cfg = _Cfg(
-                lane_concurrency={"interactive": 2, "bulk": 1},
-                poller_interval_seconds=0.1,
-                sender_hold_seconds=1.0,
-                claim_idle_seconds=0.05,
-                sender_sweep_seconds=0.2,
-                chat_limit=CHAT_LIMIT,
-                chat_window_seconds=CHAT_WINDOW_S,
-                global_limit=GLOBAL_LIMIT,
-                global_window_seconds=GLOBAL_WINDOW_S,
-            )
-            app = compose(engine=engine, config=cfg, env={}, transport=_Transport())
-            loops = [wl for wl in app.loops if wl.lane == "interactive"]
-            tasks = [asyncio.create_task(wl.run()) for wl in loops]
-            tasks.append(asyncio.create_task(SenderSweeper(app).run(stop)))
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                state = await asyncio.to_thread(_state, outbox_db, follows)
-                if state[0] == "sent":
-                    break
-                await asyncio.sleep(0.1)
-            stop.set()
-            for wl in loops:
-                wl.stop()
-            await asyncio.gather(*tasks)
-        finally:
-            await engine.dispose()
+        await _run_worker(
+            outbox_db, _Transport(), lambda: _state(outbox_db, follows)[0] == "sent"
+        )
 
         ref = _owner_exec(
             outbox_db,

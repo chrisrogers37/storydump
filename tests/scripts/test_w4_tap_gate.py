@@ -890,7 +890,15 @@ class TestATapIsCheapOnRealRows:
         assert len(statements) <= TAP_STATEMENT_BUDGET, "\n".join(statements)
         # The shape, not just the count: each fold is present as ONE statement.
         assert sum("set_config(" in s for s in statements) == 1
-        assert sum("FROM user_identities" in s for s in statements) == 1
+        # The tapper and their name, in ONE read. (The supersede's push
+        # predicate reads `user_identities` too, inside its own one statement.)
+        assert (
+            sum(
+                "SELECT user_id, display_name FROM user_identities" in s
+                for s in statements
+            )
+            == 1
+        )
         assert sum("has_ig_credential" in s for s in statements) == 1
         assert sum("'prompt_supersede'" in s for s in statements) == 1
         assert not any(s.startswith("SET LOCAL") for s in statements)

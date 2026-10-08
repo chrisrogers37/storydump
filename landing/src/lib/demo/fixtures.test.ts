@@ -50,7 +50,8 @@ describe("the sample workspace", () => {
     ]);
     for (const story of stories) {
       expect(story.account_handle).toBe("example.brand");
-      expect(story.thumbnail_url).toBeNull();
+      // No media, so the sample never asks the API for a thumbnail.
+      expect(story.has_thumbnail).toBe(false);
       expect(story.caption).toBeNull();
       expect(story.ig_permalink).toBeNull();
     }

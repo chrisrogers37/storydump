@@ -121,6 +121,7 @@ export function QueueList({
   return (
     <QueueView
       intents={intents}
+      workspaceId={workspaceId}
       tz={tz}
       truncatedAt={truncatedAt}
       pending={pending}

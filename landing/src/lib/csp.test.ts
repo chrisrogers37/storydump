@@ -84,6 +84,14 @@ describe("both policies", () => {
     expect(parsed.get("base-uri")).toEqual(["'self'"]);
     expect(parsed.get("form-action")).toEqual(["'self'"]);
   });
+
+  it("load pictures from this origin alone, so no provider link can draw one", () => {
+    // Thumbnails stream through this tier's route; a page that held a
+    // provider's link could not show it.
+    for (const policy of [staticPagePolicy(), noncePolicy("abc123")]) {
+      expect(directives(policy).get("img-src")).toEqual(["'self'", "data:"]);
+    }
+  });
 });
 
 describe("isReportOnly", () => {
