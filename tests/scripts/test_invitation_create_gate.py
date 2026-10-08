@@ -35,6 +35,7 @@ from src.config.settings import settings
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import commands, invitations, sessions
 from src.services.target.commands import Command, CommandRefused
+from src.services.target.unit_of_work import apply_gucs
 from tests.scripts.conftest import (
     _scratch,
     actor_lacks_createrole,
@@ -142,6 +143,7 @@ async def _execute_invite(world, args, *, origin=ORIGIN, actor=None):
     try:
         with mock.patch.object(settings, "WEB_APP_URL", origin):
             async with engine.begin() as conn:
+                await apply_gucs(conn, tenant_id=str(world["ws"]))
                 return await commands.execute(
                     conn,
                     Command(
@@ -438,26 +440,9 @@ class TestTheExecutorDoesNotNarrowTheWriter:
     deliberately: the writer was never the broken half.
     """
 
-    async def _execute(self, world, args):
-        engine = create_async_engine(async_url(world["dsn"]))
-        try:
-            async with engine.begin() as conn:
-                return await commands.execute(
-                    conn,
-                    Command(
-                        kind="invite_member",
-                        workspace_id=world["ws"],
-                        actor_user_id=world["user"],
-                        channel="web",
-                        args=args,
-                    ),
-                )
-        finally:
-            await engine.dispose()
-
     async def test_a_telegram_invitation_can_be_minted_through_the_command(self, world):
         """The bug, stated as the thing that could not happen."""
-        result = await self._execute(
+        result = await _execute_invite(
             world,
             {
                 "delivery_channel": "telegram",
@@ -501,7 +486,7 @@ class TestTheExecutorDoesNotNarrowTheWriter:
 
     async def test_email_remains_the_default_so_clause_3_is_unchanged(self, world):
         """A caller that names no channel still gets the shipped behaviour."""
-        result = await self._execute(world, {"email": "default@example.com"})
+        result = await _execute_invite(world, {"email": "default@example.com"})
         assert result.outcome == "executed"
         assert result.data["invite_token"]
 
@@ -509,7 +494,7 @@ class TestTheExecutorDoesNotNarrowTheWriter:
         """`ck_invite_channel` would also stop this. The refusal names the
         field instead, which is the same trade `email_required` already makes."""
         with pytest.raises(CommandRefused) as exc:
-            await self._execute(world, {"delivery_channel": "carrier_pigeon"})
+            await _execute_invite(world, {"delivery_channel": "carrier_pigeon"})
         assert "email or telegram" in str(exc.value) or "email, telegram" in str(
             exc.value
         )
@@ -520,7 +505,7 @@ class TestTheExecutorDoesNotNarrowTheWriter:
         for a JSON `true`. Ordinary type confusion everywhere else; here it
         addresses an invitation at a stranger."""
         with pytest.raises(CommandRefused) as exc:
-            await self._execute(
+            await _execute_invite(
                 world, {"delivery_channel": "telegram", "invited_tg_user_id": True}
             )
         assert "invited_tg_user_id" in str(exc.value)

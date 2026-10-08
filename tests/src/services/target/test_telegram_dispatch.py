@@ -356,7 +356,7 @@ def tap(action="skip", *, data=None, with_message=True, uid=7, cid=-100):
 @pytest.fixture
 def seams(monkeypatch):
     """Everything `_tap` reaches through, scripted and recorded."""
-    log = {"executed": [], "gucs": []}
+    log = {"executed": [], "gucs": [], "tenant_at_execute": []}
     state = {
         "tenant": ResolvedTenant(
             workspace_id="ws", channel_binding_id="b1", via="chat"
@@ -385,9 +385,12 @@ def seams(monkeypatch):
     async def apply_gucs(executor, **kw):
         log["gucs"].append(kw)
 
-    async def execute(session, command, **kw):
+    async def execute(session, command):
         log["executed"].append(command)
-        log.setdefault("execute_kw", []).append(kw)
+        # The port sets no tenant: its gate reads under whichever the tap set.
+        log["tenant_at_execute"].append(
+            log["gucs"][-1]["tenant_id"] if log["gucs"] else None
+        )
         if state["raise"] is not None:
             raise state["raise"]
         return state["result"]
@@ -677,7 +680,8 @@ def test_a_repeat_tap_on_a_dry_run_row_hears_dry_run_not_posted():
 class TestATapIsCheap:
     """#1286: the tap's own statements, counted where the dispatch spends
     them — one GUC statement carrying the lock timeout, the tapper and their
-    name in one read, and the command port told the tenant is bound."""
+    name in one read, and the command port run under that statement's
+    tenant."""
 
     @pytest.mark.asyncio
     async def test_the_lock_timeout_rides_the_one_guc_statement(self, seams):
@@ -706,10 +710,10 @@ class TestATapIsCheap:
         assert command.actor_label is None
 
     @pytest.mark.asyncio
-    async def test_the_command_port_is_told_the_tenant_is_bound(self, seams):
+    async def test_the_command_port_runs_under_the_taps_tenant(self, seams):
         d = telegram_dispatch.TelegramDispatcher()
         await d(None, tap("skip"))
-        assert seams["log"]["execute_kw"] == [{"tenant_bound": True}]
+        assert seams["log"]["tenant_at_execute"] == ["ws"]
 
 
 class TestTheReviewTaps:
