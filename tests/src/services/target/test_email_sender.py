@@ -107,6 +107,41 @@ class TestRender:
         assert missing in str(exc.value)
 
 
+class TestTheActivationNudge:
+    """#1481's one reminder: a subject and body per step, the link, and the
+    line that says it is the only one."""
+
+    LINK = "https://app.example/dashboard/queue"
+
+    @pytest.mark.parametrize("step", ["instagram", "folder", "approval"])
+    def test_each_step_carries_its_link_and_says_it_is_the_only_one(self, step):
+        subject, body = render("activation_nudge", {"step": step, "link": self.LINK})
+        assert subject.strip()
+        assert self.LINK in body
+        assert "the only reminder" in body
+
+    def test_the_folder_step_warns_about_googles_screen(self):
+        """It mirrors the Drive card, so a person who meets Google's warning
+        after the email has already been told it is coming."""
+        _, body = render("activation_nudge", {"step": "folder", "link": self.LINK})
+        assert "hasn't verified this app" in body
+
+    def test_a_step_with_no_copy_is_refused_by_name(self):
+        with pytest.raises(EmailRefused) as exc:
+            render("activation_nudge", {"step": "billing", "link": self.LINK})
+        assert exc.value.reason == "template_params_missing"
+        assert "step" in str(exc.value)
+
+    @pytest.mark.parametrize("missing", ["step", "link"])
+    def test_a_missing_parameter_is_refused_by_name(self, missing):
+        params = {"step": "instagram", "link": self.LINK}
+        del params[missing]
+        with pytest.raises(EmailRefused) as exc:
+            render("activation_nudge", params)
+        assert exc.value.reason == "template_params_missing"
+        assert missing in str(exc.value)
+
+
 class TestSenderFromEnv:
     def test_both_values_produce_a_sender(self):
         s = sender_from_env({"RESEND_API_KEY": "re_k", "EMAIL_FROM": "a@b.com"})

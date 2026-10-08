@@ -730,6 +730,8 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
     #: it gained an executor (2026-10-03) and 086's leg does not list: a late
     #: one is still claimed (`fn_claim_job` reads no deadline, and only it holds
     #: its key), so it runs late rather than strands. Listing it is a migration.
+    #: `activation_nudge_sweep` (106) is minted daily by the clock once it is
+    #: switched on, and is kept for the same reason: a late sweep runs late.
     KEPT = frozenset(
         {
             "publish_pipeline",
@@ -738,6 +740,7 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
             "revoke_workspace_credentials",
             "retention_sweep",
             "reencrypt_credentials",
+            "activation_nudge_sweep",
         }
     )
 
