@@ -301,7 +301,7 @@ async def enqueue(
     *,
     kind: str,
     # Optional because `ck_jobs_system_kinds` is a BICONDITIONAL: a system kind
-    # (`send_email` and six others) must carry a NULL workspace, and a tenant
+    # (`send_email` and seven others) must carry a NULL workspace, and a tenant
     # kind must not. The column has always accepted NULL and the annotation
     # simply predated the first caller that needed one — every earlier caller
     # enqueues a tenant kind.

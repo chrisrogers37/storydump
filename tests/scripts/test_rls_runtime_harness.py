@@ -537,6 +537,13 @@ DOORS = {
         "svc_worker",
         "SELECT * FROM fn_activation_funnel(now() - interval '30 days')",
     ),
+    # 106 (`07` §49, #1481): who is owed the activation nudge, user ids and a
+    # stage. The worker's login alone, which runs the sweep; never the API's.
+    "fn_activation_stalled": (
+        "svc_worker",
+        "SELECT * FROM fn_activation_stalled("
+        "now() - interval '30 days', interval '72 hours', 20)",
+    ),
 }
 
 

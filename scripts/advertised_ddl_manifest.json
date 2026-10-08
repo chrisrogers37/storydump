@@ -419,11 +419,18 @@
       "ordinal": 41
     },
     {
+      "sha256": "79ddd5d465f5a8c2b5964df9e119c48fabea8359d8ffeb46312e7ec2c281d97e",
+      "class": "normative",
+      "label": "§49 the activation nudge (106, #1481) — users.activation_nudge_at, the once-per-person latch; activation_nudge_sweep in ck_jobs_kind and ck_jobs_system_kinds as a system kind; fn_activation_stages, the per-person stage timestamps as an invoker helper only the doors can call; fn_activation_funnel replaced over it with the same result; and fn_activation_stalled, user ids and a stage for who is owed a nudge, owned by svc_maintenance, EXECUTE for svc_worker only",
+      "doc": "07-security-model.md",
+      "ordinal": 42
+    },
+    {
       "sha256": "ad5ad21364405f76211ea48e6fcb22dc8407585985d6f2872732ce4808bee124",
       "class": "normative",
       "label": "§50 the outcomes indexed by slot (107, #1640) — ix_intents_history_slot, a partial index on post_intents (workspace_id, schedule_slot_at) WHERE state IN ('posted','skipped','rejected'), for the calendar's month and day and the Overview's recent activity",
       "doc": "07-security-model.md",
-      "ordinal": 42
+      "ordinal": 43
     }
   ],
   "policy_expansion": {

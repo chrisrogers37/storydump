@@ -441,6 +441,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # fetch: the `last_listed_at` stamp, `missing` in ck_media_state and
             # the miss door's `item_missing` (#1545).
             "105_media_item_missing_and_last_listed.sql",
+            # 106 appends §49, the activation nudge, built off: the per-person
+            # latch on users, the sweep's system kind, the stage definition the
+            # funnel and the nudge share, and the door listing who is owed one.
+            "106_activation_nudge.sql",
             # 107 appends §50, the outcomes indexed by slot: a partial index
             # on post_intents (workspace_id, schedule_slot_at) for the history's
             # three outcomes, the calendar's month and day reads (#1640).
