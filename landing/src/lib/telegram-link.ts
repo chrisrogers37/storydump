@@ -8,10 +8,11 @@ import { botName } from "./telegram-bot";
  *
  * The API mints a one-shot `t.me/<bot>?start=link-<state>` link for the
  * signed-in user (`POST /api/v1/me/telegram/link`); tapping it in Telegram
- * sends `/start link-<state>` to the bot, whose webhook attaches the tapping
- * Telegram account to that user. This module asks for the link, guards it
- * before it is opened, and reads "already linked" off the session's
- * identities.
+ * sends `/start link-<state>` to the bot, which names that user's account and
+ * asks for a Confirm. Only the Confirm, pressed in the person's own private
+ * chat with the bot, attaches their Telegram account to that user. This
+ * module asks for the link, guards it before it is opened, and reads
+ * "already linked" off the session's identities.
  */
 
 /** The one host a link from this flow may point at. */

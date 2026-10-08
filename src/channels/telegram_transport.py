@@ -1,22 +1,22 @@
 """The Telegram outbox transport — deliver()'s injected seam, made loud (#942 W2).
 
 Contract (deliver()'s words): takes the claimed outbox row, returns the
-external message ref, raises to signal a lost or refused response — the
-caller marks the row ambiguous and the outbox's own resolution machinery
-takes it from there.
+external message ref, raises to signal a lost or refused response — and
+`outbox.settle` decides from what was raised what becomes of the row.
 
 **A dead credential is a named, observable state, not a quiet one.** The
 lesson is fresh and measured (shitpost-alpha, 2026-08-21: production outbound
 dead for an unknown period because a rejected token had no loud surface —
 zero events drained, so nothing alarmed):
 
-- :meth:`TelegramTransport.probe` (`getMe`) runs at composition time; a 401/403
+- :meth:`TelegramTransport.probe` (`getMe`) runs at composition time; a 401
   raises :class:`TelegramAuthDead` and the worker starts WITHOUT the channel,
   parking `deliver_outbox` with the credential named in the reason — a
   recurring warning, not a one-time line.
-- A mid-run 401/403 raises :class:`TelegramAuthDead` per send, increments
+- A mid-run 401 raises :class:`TelegramAuthDead` per send, increments
   `auth_failures` (surfaced in the worker status line), and logs loudly ONCE —
-  a latch, so the log stays readable while the counter keeps counting.
+  a latch, so the log stays readable while the counter keeps counting. A 403
+  is the chat's (:class:`TelegramChatGone`), never the credential's.
 - The bot token never appears in any exception text or log line. The request
   URL embeds it, so every raise path out of the HTTP layer is re-raised with
   the token redacted.
@@ -43,7 +43,13 @@ import httpx
 
 from src.services.target import egress, vocabulary
 from src.services.target.egress import EgressPolicy
-from src.services.target.outbox import ChannelPaced, ChannelRefused, DestinationGone
+from src.services.target.outbox import (
+    ChannelPaced,
+    ChannelRefused,
+    ChannelSendError,
+    CredentialDead,
+    DestinationGone,
+)
 
 logger = logging.getLogger("channels.telegram")
 
@@ -94,8 +100,9 @@ def _method_for(kind: str, mime: Optional[str]) -> tuple[str, str]:
 _UPLOAD_BUDGET_S = 120.0
 
 
-class TelegramSendError(Exception):
-    """The transport could not produce an external ref for this row."""
+class TelegramSendError(ChannelSendError):
+    """The transport could not produce an external ref for this row. Telegram's
+    own code, when it answered with one, rides as ``code`` (101, #1482)."""
 
 
 class TelegramChatGone(DestinationGone, TelegramSendError):
@@ -136,8 +143,10 @@ class MediaTransient(Exception):
     is loud: ERROR, counted, and the text card goes."""
 
 
-class TelegramAuthDead(TelegramSendError):
-    """Telegram rejected the credential itself (401/403) — the loud class."""
+class TelegramAuthDead(CredentialDead, TelegramSendError):
+    """Telegram rejected the credential itself (401; a 403 is the chat's,
+    `_chat_gone`) — the loud class. For the outbox it is a `CredentialDead`,
+    recorded as `credential_dead` rather than as a lost response (101, #1482)."""
 
 
 class SendReceipt(str):
@@ -263,7 +272,8 @@ class TelegramTransport:
             body = response.json()
         except json.JSONDecodeError:
             raise TelegramSendError(
-                f"{method}: non-JSON response (HTTP {response.status_code})"
+                f"{method}: non-JSON response (HTTP {response.status_code})",
+                code=response.status_code,
             ) from None
         if body.get("ok") is True:
             return body.get("result") or {}
@@ -275,6 +285,7 @@ class TelegramTransport:
             raise TelegramChatGone(
                 f"{method}: {code} {description}",
                 migrate_to=None if migrate_to is None else str(migrate_to),
+                code=code,
             )
         if code == 401:
             self.auth_failures += 1
@@ -288,12 +299,12 @@ class TelegramTransport:
                     method,
                     description,
                 )
-            raise TelegramAuthDead(f"{method}: {code} {description}")
+            raise TelegramAuthDead(f"{method}: {code} {description}", code=code)
         if code in (400, 413):
             # Bad Request / Payload Too Large: the message as shaped will
             # never be accepted. 429 and 5xx are NOT this — the card may have
             # landed, and only the outbox's policy may decide.
-            raise TelegramRefused(f"{method}: {code} {description}")
+            raise TelegramRefused(f"{method}: {code} {description}", code=code)
         if code == 429:
             retry_after = (body.get("parameters") or {}).get("retry_after")
             try:
@@ -307,8 +318,9 @@ class TelegramTransport:
                 f"{method}: 429 retry_after={retry_after_s:g}s {description}",
                 retry_after_s=retry_after_s,
                 scope="chat" if has_chat else "global",
+                code=code,
             )
-        raise TelegramSendError(f"{method}: {code} {description}")
+        raise TelegramSendError(f"{method}: {code} {description}", code=code)
 
     async def answer_callback(
         self, callback_query_id: str, text: str, show_alert: bool = False
@@ -541,7 +553,8 @@ class TelegramTransport:
 
         Only `TelegramRefused` is caught, and that is the whole point: a
         transport failure may have landed the card, so it propagates for the
-        outbox's ambiguity policy, as does a gone chat and a dead token.
+        outbox's ambiguity policy. A gone chat and a dead token propagate too,
+        and `outbox.settle` decides what each means for the row.
         """
         content, filename, mime = fetched
         try:

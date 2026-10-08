@@ -1,0 +1,3 @@
+### Security
+
+- **The landing site takes Next.js 16.3.8, the patch release for six advisories that affect 16.3.6.** next and eslint-config-next move from 16.3.6 to 16.3.8. The advisories: GHSA-cjq9-62q9-8jv4 (high: server-side request forgery in image optimization); GHSA-f87g-xv8r-7p7x, GHSA-4jqv-mc3x-m676, GHSA-mcj8-r9mp-w47p and GHSA-3w37-wq28-93x7 (medium: metadata image routes, SSG and ISR cache poisoning, and a `use cache` draft-mode leak); GHSA-39w2-rjm5-chcv (low: the development server's MCP endpoint). Front End's runtime audit reports them on 16.3.6, so it fails until this lands. Only next's own packages and eslint-config-next's Next.js plugin change in the lockfile; no application code changes.

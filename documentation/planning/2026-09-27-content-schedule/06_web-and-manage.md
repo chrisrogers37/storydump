@@ -65,3 +65,23 @@ None.
 
 ## Context
 - Source skill: forge · Area: `landing/src/` · Effort: M · Risk: Low · Priority: High
+
+## As built
+
+- **6a, #1535:** the Media library's Schedule… (step 2).
+- **6b:** steps 1, 3 and 4. The API needed no change.
+  - **Types.** The web `Intent` carries the five keys the API already served: `origin`,
+    `scheduled_by_user_id`, `scheduled_by`, `tz` and `miss_reason`.
+  - **Queue.** The badge reads "Planned by <name>" rather than "Scheduled by <name> · <time>":
+    "planned" is the word 6a's copy uses beside "a regular slot", and the row already shows the
+    time. The "Scheduled" filter is a Planned view at `?origin=planned`, which the API filters,
+    so it stays exact past the page limit. Reschedule… sends `reschedule_item`, keyed per
+    submission; Cancel sends `cancel`, keyed on the intent and confirmed first. Both are offered
+    on planned stories in `scheduled` only.
+  - **Calendar.** A planned story is drawn as an outline in the queue's colour, and the
+    predicted strip reads `origin=cadence`, so it no longer shows planned stories as
+    predictions.
+  - **Changelog.** A fragment in `changelog.d/`: the repository moved to fragments after this
+    plan was written.
+- **Found, not fixed here:** a cadence story in `scheduled` is drawn twice on the calendar, in
+  the queue lane and as a prediction, because both of the page's reads include `scheduled`.

@@ -18,6 +18,7 @@ import {
   unlinkTelegram,
 } from "@/lib/telegram-link";
 import type { ChannelBinding } from "@/lib/types";
+import { TONE_CLASS } from "@/components/dashboard/tone";
 
 /**
  * Telegram — the IDENTITY link and the GROUP links, on one card.
@@ -171,13 +172,13 @@ export function TelegramCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Telegram</CardTitle>
+        <CardTitle>Telegram</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {telegramLinked ? (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              <Badge variant="secondary" className="bg-green-100 text-green-800">
+              <Badge variant="secondary" className={TONE_CLASS.active}>
                 Linked
               </Badge>
               <p className="text-sm text-muted-foreground">
@@ -251,11 +252,12 @@ export function TelegramCard({
                   {telegramLink.link}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  <strong>Do not share this link.</strong> Whoever taps it links
-                  their Telegram to your account. Tap Start in the chat that
-                  opens — the bot confirms in the chat — then reload this page;
-                  it shows Linked once the bot has heard from you. Asking for a
-                  new link retires this one.
+                  <strong>Do not share this link.</strong> Whoever confirms it
+                  links their Telegram to your account. Tap Start in the chat
+                  that opens: the bot names this account and asks you to
+                  confirm. Tap Confirm, then reload this page; it shows Linked
+                  once you have confirmed. Asking for a new link retires this
+                  one.
                 </p>
                 <Button
                   variant="ghost"
@@ -296,7 +298,7 @@ export function TelegramCard({
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge
                       variant="secondary"
-                      className="bg-green-100 text-green-800"
+                      className={TONE_CLASS.active}
                     >
                       Bound
                     </Badge>

@@ -375,6 +375,48 @@
       "label": "§42 a person can unlink their own Telegram identity (099) — fn_identity_unlink, owned by svc_membership and granted to svc_ingress, removing the user's telegram identity only while another identity remains, with svc_membership's SELECT and DELETE on user_identities under p_member_identities",
       "doc": "07-security-model.md",
       "ordinal": 35
+    },
+    {
+      "sha256": "6d2bfbf4e7feba0704c9718092978386236c462fda836ad7a14ad86ded3fb5c8",
+      "class": "normative",
+      "label": "§43 the waitlist is written by the API, not by the site (100, owner decision 2026-10-03) — waitlist_entries (global, RLS on, svc_ingress may INSERT and nothing else under p_ingress_waitlist), the address rule of §35 with a dot in the domain and no control, bidi-isolate, interlinear or tag characters, at most 254 characters, and a utm object bounded at 2 KB",
+      "doc": "07-security-model.md",
+      "ordinal": 36
+    },
+    {
+      "sha256": "d427a1d276d93d0854cebf9382fabbca23b90993a3ea757a85c901e48f73d700",
+      "class": "normative",
+      "label": "§44 the outbox records why a delivery failed (101, #1482) — channel_outbox gains last_failure_class (checked against the five classes), last_error_code and last_failed_at with a partial index on the time, and two svc_maintenance doors: fn_health_outbox_failures counting the window's failures by class and code with their alerting subset, and fn_health_outbox_sent counting the window's sends",
+      "doc": "07-security-model.md",
+      "ordinal": 37
+    },
+    {
+      "sha256": "0419e9b7ad0e6723df7a976f0715f3f0170a7b47b78d54be7f67db7e7f8ab0f9",
+      "class": "normative",
+      "label": "§45 a removal holds (102) — the runtime logins' SELECT on workspace_member_removals revoked and p_tenant_read dropped (the membership doors alone read and write it), earlier removals backfilled from the governance audit trail keeping any record the door wrote, §41's one-time invitation revoke repeated after the backfill so the pending invitations those removals outrank end revoked, fn_group_member_seen's search_path pinned with pg_temp last (ALTER FUNCTION … SET), and fn_member_remove replace that checks the claimed tenant and the remover's owner-or-admin role first",
+      "doc": "07-security-model.md",
+      "ordinal": 38
+    },
+    {
+      "sha256": "1f491a0e0ab71749e257a84f1c07a183ee44376ae2afb559599fcd43ad7685a4",
+      "class": "normative",
+      "label": "§46 every SECURITY DEFINER function pins search_path = pg_catalog, public, pg_temp, with pg_temp last (103) — one ALTER FUNCTION ... SET search_path per door, the 29 definer functions in public written out by signature, no body restated",
+      "doc": "07-security-model.md",
+      "ordinal": 39
+    },
+    {
+      "sha256": "9e9f55b11015cedf449374daa180852e28ff5045a5e5e514f4290d32e4597c20",
+      "class": "normative",
+      "label": "§47 the activation funnel door (104, #1481) — svc_maintenance's SELECT and a USING (true) policy on users and workspace_members, and fn_activation_funnel: five stage rows of reached and stalled counts for the active users created since p_since, owned by svc_maintenance, EXECUTE for svc_worker only",
+      "doc": "07-security-model.md",
+      "ordinal": 40
+    },
+    {
+      "sha256": "6828e9fdd18d002f75c032a792c252adb9131e732dffc4e38c3c1e4e23362d9a",
+      "class": "normative",
+      "label": "§48 the sync retires what the publish can never fetch (105, #1545) — media_items.last_listed_at, the stamp a walk leaves on every file it lists, missing added to ck_media_state for a file a walk that saw the whole tree no longer lists, and fn_planned_misses replaced to name it item_missing",
+      "doc": "07-security-model.md",
+      "ordinal": 41
     }
   ],
   "policy_expansion": {

@@ -7,21 +7,27 @@ import {
   type AccountsResponse,
   type SourcesResponse,
   type StatsResponse,
+  type WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
 import type { CategoryMixResponse } from "@/lib/category-mix";
 import { deriveConditions, nextSetupStep } from "@/lib/conditions";
 import type { IntentsResponse } from "@/lib/intents";
+import { deriveRunway, type RunwayResponse } from "@/lib/runway";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ConditionsPanel } from "@/components/dashboard/conditions-panel";
 import { AnalyticsCards } from "@/components/dashboard/analytics-cards";
 import { PostingChart } from "@/components/dashboard/posting-chart";
 import { PostingMixCard } from "@/components/dashboard/posting-mix-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
+import { RunwayCard } from "@/components/dashboard/runway-card";
+import { PageHeader } from "@/design/page-header";
 
 /**
- * The overview's history strip. Ten is a glance, not a log — the full list
- * is the Queue's history and the counts come from `stats`, never from this
- * bounded read (`01` H5).
+ * The overview's history strip: the ten newest outcomes. The API sorts by
+ * slot, soonest first, unless asked, and `RecentActivity` draws rows in the
+ * order they come, so the read asks for newest first. Ten is a glance, not a
+ * log — the full list is the Queue's history and the counts come from
+ * `stats`, never from this bounded read (`01` H5).
  */
 const HISTORY_LIMIT = 10;
 
@@ -35,11 +41,22 @@ export default async function DashboardPage() {
   // bounded list, which is what made the old figures wrong on any workspace
   // past the page size. History is the intent ledger filtered to its terminal
   // states, which is one call rather than a separate endpoint.
-  const [statsResult, historyResult, accountsResult, sourcesResult, mixResult] =
+  const [
+    statsResult,
+    runwayResult,
+    historyResult,
+    accountsResult,
+    sourcesResult,
+    mixResult,
+    configResult,
+  ] =
     await Promise.all([
       workspaceFetch<StatsResponse>("stats", workspaceId),
+      // Days of content left per account (#1478), counted on the server by
+      // the planner's own rule.
+      workspaceFetch<RunwayResponse>("runway", workspaceId),
       workspaceFetch<IntentsResponse>(
-        `intents?state=${HISTORY_STATES}&limit=${HISTORY_LIMIT}`,
+        `intents?state=${HISTORY_STATES}&order=desc&limit=${HISTORY_LIMIT}`,
         workspaceId,
       ),
       // The condition panel's two lists, read whole — a workspace holds a
@@ -49,6 +66,8 @@ export default async function DashboardPage() {
       workspaceFetch<SourcesResponse>("sources", workspaceId),
       // The mix card's plan per connected folder; what each posted is `stats`.
       workspaceFetch<CategoryMixResponse>("category-mix", workspaceId),
+      // The workspace's zone, which Recent Activity's times are read in.
+      workspaceFetch<WorkspaceConfig>("", workspaceId),
     ]);
 
   // EVERY dependency, not just the one that fills the most pixels. Two
@@ -57,10 +76,12 @@ export default async function DashboardPage() {
   // unread list would state the worst such fact: that nothing needs attention.
   if (
     !statsResult.ok ||
+    !runwayResult.ok ||
     !historyResult.ok ||
     !accountsResult.ok ||
     !sourcesResult.ok ||
-    !mixResult.ok
+    !mixResult.ok ||
+    !configResult.ok
   ) {
     return <RouterUnavailable what="Your dashboard" />;
   }
@@ -73,6 +94,7 @@ export default async function DashboardPage() {
     sources: sourcesResult.data.sources,
     intentsByState: stats.intents_by_state,
   });
+  const runway = deriveRunway(runwayResult.data);
   // A member is told an admin connects things; an unknown role (the list
   // was unreachable) gets the button, which the API refuses if it must.
   const role = session.workspaces?.find((w) => w.id === workspaceId)?.role;
@@ -86,23 +108,26 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Last 30 days of posting activity.
-        </p>
-      </div>
+      <PageHeader
+        title="Overview"
+        description="Last 30 days of posting activity."
+      />
 
       <ConditionsPanel conditions={conditions} setupStep={setupStep} />
 
       <AnalyticsCards summary={summary} />
+
+      <RunwayCard rows={runway} belowDays={runwayResult.data.below_days} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <PostingChart data={stats.posts_by_day ?? []} />
         <PostingMixCard mix={mix} />
       </div>
 
-      <RecentActivity items={historyResult.data.intents ?? []} />
+      <RecentActivity
+        items={historyResult.data.intents ?? []}
+        tz={configResult.data.tz ?? "UTC"}
+      />
     </div>
   );
 }

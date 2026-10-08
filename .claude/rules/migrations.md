@@ -20,13 +20,17 @@ so **merged is applied**. The ledger is `runner.schema_migrations`.
   version with no file in the tree makes every runner door refuse
   (`ledger_discrepancies`, `scripts/migration_runner.py`); a fresh database is
   also still built by replaying them.
+- The runner bounds a wrapped file's lock waits and retries a lock-wait failure
+  (`LOCK_TIMEOUT`, `LOCK_RETRY_DELAYS_S`); a file gets this by being wrapped and sets no
+  `lock_timeout` of its own. A retry re-runs the whole file, so take the contended lock before
+  any heavy work (`documentation/operations/migration-runner.md`, *Lock waits*).
 - **An applied file is immutable** — the ledger stores its SHA-256 and a changed
   file fails every later apply. Fix forward with a new number (063 replacing
   062's `fn_clock_tick` is the precedent).
 - Carry `-- runner:postcondition <SQL returning bool>` lines. They are also the
   file's permanent adoption probe, so assert only state this file creates, never
   an absence, and use `>=` for counts a later file will raise (058's header).
-- Markers are a closed grammar (`migration_runner.py:79`-`:104`):
+- Markers are a closed grammar (`KNOWN_MARKERS`, `scripts/migration_runner.py`):
   `postcondition`, `no-transaction`, `reapply-safe`, `schema-move`,
   `unadvertised`, `manual`. A misspelt one is a hard failure at discovery, and a
   comment must not open with `runner` plus a marker word.

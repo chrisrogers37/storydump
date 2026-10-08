@@ -34,6 +34,7 @@ COMMANDS: tuple[str, ...] = (
     "cancel",
     "schedule_item",
     "reschedule_item",
+    "set_item_link",
     "autopost_now",
     "sync_now",
     "settings_change",
@@ -116,6 +117,10 @@ LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required")
 #: How far ahead a story may be planned.
 PLAN_HORIZON_DAYS = 365
 
+#: The longest link an item may carry (`set_item_link`, #1413 phase 7), in
+#: characters: an address that long is no longer one a person adds by hand.
+LINK_URL_MAX = 2048
+
 #: `post_intents.last_error.class` on a planned story that ended unserved
 #: at its time (`prompts.sweep_planned_misses`); its `message` is the reason.
 PLANNED_MISSED = "planned_missed"
@@ -129,6 +134,32 @@ NO_PUSH_BINDING = "no_push_binding"
 #: schedule only until the person overrides it, and never causes a miss.
 BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")
 WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
+
+#: `media_items.state` (105 ``ck_media_state``). Only `available` is drawn.
+#: `unsupported` is the sync's judgment that the publish could never fetch the
+#: file (past its byte cap); `removed` is the folder's retirement, which a
+#: re-pick undoes; `missing` is the file's own absence from its folder, which
+#: only a listing undoes.
+MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed", "missing")
+
+#: What a story may weigh on the way to Meta, by `media_items.media_kind`
+#: (Meta's own limits: 8 MB for a story image, 100 MB for a story video pulled
+#: by URL). Distinct from the Telegram card's caps (`MEDIA_CARD_MAX_BYTES`): a
+#: file too large for a Telegram preview may still be a fine story.
+#: The video cap is Cloudinary's, not Meta's: a story video is framed on the
+#: fly at its delivery URL (`transit.story_transformation`), and Cloudinary
+#: transforms a video synchronously only up to 40 MB on the free plan (100 MB
+#: on paid); above that the URL answers 400 and Meta's fetch can never
+#: succeed. A file over the cap is refused by name at the fetch rung
+#: (`DriveMediaTooLarge` → failed + refund, the reason on the intent) rather
+#: than burning five attempts. Raising it means eager, asynchronous framing
+#: at upload — a follow-up. The sync judges a listed file against the same
+#: numbers and lands one past them `unsupported`, so the draw never takes a
+#: file the publish could never fetch (`media_sync._listed_state`).
+PUBLISH_MAX_BYTES: Mapping[str, int] = {
+    "image": 8 * 1024 * 1024,
+    "video": 40 * 1000 * 1000,
+}
 
 #: `post_intents.publish_step` (055 ``ck_intent_step``).
 PUBLISH_STEPS: tuple[str, ...] = (
@@ -158,6 +189,20 @@ AUDIT_CHANNELS: tuple[str, ...] = ("telegram", "web", "cli", "system")
 #: `service_tokens.role` (060 ``ck_service_token_role``).
 TOKEN_ROLES: tuple[str, ...] = ("operator", "readonly")
 
+#: `channel_outbox.last_failure_class` (101 ``ck_outbox_failure_class``): why a
+#: row's last send failed. `rate_limited` is a 429 (a deferral, never counted as
+#: a failure); `destination_gone`, `refused` and `credential_dead` (a dead
+#: token's 401) are the definitive answers, which fail the row; `ambiguous` is a
+#: send whose outcome is unknown (no answer, a 5xx, a reply the transport does
+#: not classify, a dead predecessor's stranded row).
+OUTBOX_FAILURE_CLASSES: tuple[str, ...] = (
+    "rate_limited",
+    "destination_gone",
+    "refused",
+    "credential_dead",
+    "ambiguous",
+)
+
 #: The bounds every adapter enforces before the table does: a token's name
 #: (`service_tokens.name`), and its expiry in whole days — the API's default
 #: and ceiling, the web form's range, the CLI's `tokens` verbs' words.
@@ -165,6 +210,12 @@ TOKEN_NAME_MAX = 80
 TOKEN_EXPIRY_DAYS_MIN = 1
 TOKEN_EXPIRY_DAYS_DEFAULT = 90
 TOKEN_EXPIRY_DAYS_MAX = 365
+
+#: The range of a workspace's TTL settings (`workspaces.SETTINGS_RANGES`): at
+#: least one of the setting's unit, at most a year.
+SETTINGS_TTL_MIN = 1
+SETTINGS_TTL_DAYS_MAX = 365
+SETTINGS_APPROVAL_TTL_MINUTES_MAX = SETTINGS_TTL_DAYS_MAX * 24 * 60
 
 #: Every API token starts with this; the resolver routes on it and secret
 #: scanners recognise it. The rest is 32 url-safe random bytes (43 chars).
@@ -383,6 +434,7 @@ OUTCOME_SENTENCES: Mapping[str, str] = {
 IN_THE_WAY: Mapping[str, str] = {
     "item_removed": "it was removed from the library",
     "item_unsupported": "Instagram cannot post it",
+    "item_missing": "its file is no longer in its Drive folder",
     "reject": "it was rejected",
     "unsupported": "it is marked as one that cannot be posted",
     "hold": "it is on hold",
@@ -427,6 +479,7 @@ WRITE_SENTENCES: Mapping[tuple[str, str], str] = {
     ("cancel", "executed"): "cancel requested",
     ("schedule_item", "executed"): "scheduled",
     ("reschedule_item", "executed"): "rescheduled",
+    ("set_item_link", "executed"): "link updated",
     ("resolve_review", "executed"): "resolved",
     ("resolve_review", "enqueued"): "resolved — posting again shortly",
     ("pause_workspace", "executed"): "posting paused for the workspace",

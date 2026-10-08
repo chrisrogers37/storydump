@@ -243,9 +243,10 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
   who posts in — or is added to — a bound group becomes a member of that
   workspace, at the member role
   (`src/services/target/membership_sync.py`)
-- [ ] Or invite them from the Members card under Settings › General. Outbound
-  email does not send yet (`AGENTS.md`, *What is deliberately not wired*), so
-  an emailed invitation is created and not delivered
+- [ ] Or invite them from the Members card under Settings › General. The card
+  shows the invitation's join link once: send it to them yourself, because
+  outbound email does not send yet (`AGENTS.md`, *What is deliberately not
+  wired*). They accept by signing in with Google as the invited address
 - [ ] Removing a member is the Members card too; it also revokes the pending
   invitations that member sent or was sent. Changing a member's role is
   the `change_role` command — registered, not yet built

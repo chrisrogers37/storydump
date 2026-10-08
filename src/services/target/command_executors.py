@@ -60,6 +60,7 @@ import re
 import uuid
 from datetime import datetime
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy import text
 
@@ -83,7 +84,12 @@ from src.services.target import (
     workspaces,
 )
 from src.services.target.oauth_states import issue_state
-from src.services.target.commands import Command, CommandRefused, CommandResult
+from src.services.target.commands import (
+    CONNECT_PURPOSE_KIND,
+    Command,
+    CommandRefused,
+    CommandResult,
+)
 from src.services.target.intent_ledger import IntentTransitionRefused
 from src.utils.datetime_utils import utcnow
 
@@ -1092,6 +1098,87 @@ async def reschedule_item(session, command: Command) -> CommandResult:
     )
 
 
+def _link_url(command: Command) -> Optional[str]:
+    """`link_url`: an `https://` address of at most `LINK_URL_MAX` characters
+    with no space, control character, user name or password in it, or `null`
+    to clear the link.
+    It reaches a card as a line of text and the web as an anchor, so only
+    https is taken; a missing key is refused, never read as a clear."""
+    if "link_url" not in command.args:
+        raise CommandRefused(
+            "invalid_args", "link_url is required: an https link, or null to clear it"
+        )
+    value = command.args["link_url"]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise CommandRefused(
+            "invalid_args", "link_url is an https link, or null to clear it"
+        )
+    link = value.strip()
+    if len(link) > vocabulary.LINK_URL_MAX:
+        raise CommandRefused(
+            "invalid_args",
+            f"link_url is longer than {vocabulary.LINK_URL_MAX} characters",
+        )
+    if any(ch.isspace() or not ch.isprintable() for ch in link):
+        raise CommandRefused(
+            "invalid_args", "link_url has a space or a control character in it"
+        )
+    try:
+        parts = urlsplit(link)
+    except ValueError:
+        raise CommandRefused("invalid_args", "link_url is not an https link") from None
+    if parts.scheme != "https" or not parts.hostname:
+        raise CommandRefused("invalid_args", "link_url is not an https link")
+    if "@" in parts.netloc:
+        # A user name or a password would sit on the card in the clear.
+        raise CommandRefused(
+            "invalid_args", "link_url has a user name or password in it"
+        )
+    return link
+
+
+async def set_item_link(session, command: Command) -> CommandResult:
+    """The link a story of this item asks a person to add by hand (#1413
+    phase 7, F10 (a)). A story published through the API cannot carry a
+    link sticker, so the card names the link instead. The link is the
+    item's: every story of it, planned or from the cadence, asks for the
+    same one. `null` clears it.
+
+    One UPDATE of the workspace's own item, with the tenant's policy as the
+    second fence, then an audit row naming the link set or cleared. A link
+    is not a state, so the row carries the item's own state on both sides."""
+    media_id = _id_arg(command, "media_item_id")
+    link = _link_url(command)
+    result = await session.execute(
+        text(
+            "UPDATE media_items SET link_url = :link"
+            " WHERE id = :item AND workspace_id = :ws"
+            " RETURNING state"
+        ),
+        {"link": link, "item": media_id, "ws": command.workspace_id},
+    )
+    row = result.mappings().first()
+    if row is None:
+        raise CommandRefused("not_found", f"item {media_id}", facts={"missing": "item"})
+    await audit.record(
+        session,
+        workspace_id=command.workspace_id,
+        entity_kind="media_item",
+        entity_id_sql="CAST(:item AS uuid)",
+        from_state=row["state"],
+        to_state=row["state"],
+        detail={
+            "v": 1,
+            "event": "link_set" if link else "link_cleared",
+            "link_url": link,
+        },
+        item=media_id,
+    )
+    return CommandResult("executed", {"media_item_id": media_id, "link_url": link})
+
+
 async def sync_now(session, command: Command) -> CommandResult:
     source_id = _arg(command, "source_id")
     source = (
@@ -1122,7 +1209,12 @@ async def sync_now(session, command: Command) -> CommandResult:
     )
 
 
-async def _begin_drive_link(session, command: Command, *, expect: str) -> CommandResult:
+#: The purpose each Drive link command mints: `CONNECT_PURPOSE_KIND` read
+#: backwards, so the chat door and the web legs follow one table.
+_LINK_PURPOSE = {kind: purpose for purpose, kind in CONNECT_PURPOSE_KIND.items()}
+
+
+async def _begin_drive_link(session, command: Command) -> CommandResult:
     """Shared body of `connect_account` / `reconnect_account` — the chat-side
     start of the WORKSPACE's Drive grant (069, `07` §15: one Google grant per
     workspace, folders picked under it).
@@ -1139,6 +1231,7 @@ async def _begin_drive_link(session, command: Command, *, expect: str) -> Comman
     invalidate-prior-states step (`07` §2, "last issued wins") and leave two
     live callbacks for one workspace.
     """
+    expect = _LINK_PURPOSE[command.kind]
     purpose = await google_drive_oauth.connect_purpose(
         session, workspace_id=command.workspace_id
     )
@@ -1163,12 +1256,12 @@ async def _begin_drive_link(session, command: Command, *, expect: str) -> Comman
 
 async def connect_account(session, command: Command) -> CommandResult:
     """Begin the workspace's Drive connect — it holds no grant yet."""
-    return await _begin_drive_link(session, command, expect="connect")
+    return await _begin_drive_link(session, command)
 
 
 async def reconnect_account(session, command: Command) -> CommandResult:
     """Begin the workspace's Drive reconnect — it holds a grant already."""
-    return await _begin_drive_link(session, command, expect="reconnect")
+    return await _begin_drive_link(session, command)
 
 
 async def remove_member(session, command: Command) -> CommandResult:
@@ -1409,12 +1502,12 @@ async def invite_member(session, command: Command) -> CommandResult:
     `token_hash` alone, and `invitations.create` writes every column its D33
     identity check reads.
 
-    **The token is returned, once.** It is the credential — possession
-    accepts — and only its hash is stored, so this return value is the single
-    opportunity to deliver it. A delivery producer (email, or a Telegram card
-    in `06` §2's other half) is what turns it into something a person
-    receives; the two share this one minting door rather than each having
-    their own.
+    **The token is returned, once,** with `join_url`, the link built from it.
+    It is the credential — possession accepts — and only its hash is stored,
+    so this return value is the single opportunity to deliver it. The inviter
+    hands `join_url` over; a delivery producer (email, or a Telegram card in
+    `06` §2's other half) could do it instead, and the producers share this
+    one minting door rather than each having their own.
 
     **`delivery_channel` is the caller's, defaulting to `email`.** It was
     pinned to `email` here while `invitations.create` accepted both, which
@@ -1443,7 +1536,6 @@ async def invite_member(session, command: Command) -> CommandResult:
     it is stated rather than left for someone to find in the seam. It is
     inert in practice — no surface passes `delivery_channel` today, so nothing
     mints one — and it closes when #1188 wires the producer to this call site.
-    The `email` arm has no such gap.
 
     `role` defaults to `member` and is a CEILING, never a grant: the acceptor
     downgrades an unmatched admin invite to `member` plus an
@@ -1499,19 +1591,16 @@ async def invite_member(session, command: Command) -> CommandResult:
     # caller reads one shape whichever channel was used.
     delivery: dict[str, Any] = {"channel": channel}
     if channel == "email":
-        job_id = await invitations.deliver_by_email(
-            session,
-            workspace_id=command.workspace_id,
-            invitation_id=invitation_id,
-            token=token,
-            email=email,
-            web_app_origin=settings.web_app_origin,
+        delivery.update(
+            await invitations.deliver_by_email(
+                session,
+                workspace_id=command.workspace_id,
+                invitation_id=invitation_id,
+                token=token,
+                email=email,
+                web_app_origin=settings.web_app_origin,
+            )
         )
-        if job_id is None:
-            delivery["state"] = "not_configured"
-        else:
-            delivery["state"] = "queued"
-            delivery["job_id"] = job_id
     else:
         # The card producer is #1188 and is not wired here yet — see the BOUND
         # in the docstring. Reported as the gap it is rather than omitted,
@@ -1519,11 +1608,22 @@ async def invite_member(session, command: Command) -> CommandResult:
         delivery["state"] = "none_produced"
         delivery["cards"] = 0
 
+    expires_at = (
+        await session.execute(
+            text(
+                "SELECT expires_at FROM workspace_invitations"
+                " WHERE workspace_id = :ws AND id = :id"
+            ),
+            {"ws": str(command.workspace_id), "id": str(invitation_id)},
+        )
+    ).scalar_one()
     return CommandResult(
         "executed",
         {
             "invitation_id": invitation_id,
             "invite_token": token,
+            "join_url": invitations.join_url(settings.web_app_origin, token),
+            "expires_at": expires_at.isoformat(),
             "role": role,
             "delivery": delivery,
         },

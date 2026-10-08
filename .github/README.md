@@ -21,18 +21,23 @@ request into `main` or `develop`, six jobs:
 - **Test** — `pytest tests/ -v --cov=src --cov=storydump_cli` against a
   PostgreSQL 15 service container, with `REQUIRE_TEST_DATABASE=1` so a database
   that fails to come up fails the run instead of skipping the tests it backs
-- **Security Scan** — pip-audit and bandit, both advisory: each step is
-  `|| true` and `continue-on-error`, so the job cannot go red
+- **Security Scan** — pip-audit gates (a known-vulnerable pin in
+  `requirements.txt` fails the job); bandit is advisory (`|| true` and
+  `continue-on-error`)
 - **Front End** — in `landing/`: `npm ci`, `npm test`, `npx tsc --noEmit`,
   `npm run lint` (Node 22; `next build` is deliberately absent — Vercel builds
-  every PR)
-- **Changelog Check** — pull requests only: `CHANGELOG.md` must change unless
-  the PR touches only `documentation/`, `*.md` files or `.github/`
+  every PR), then `npm audit --omit=dev`, which gates: a known advisory
+  against the runtime dependencies fails the job
+- **Changelog Check** — pull requests only, `scripts/changelog_fragments.py
+  check --base`: the fragment rule in `changelog.d/README.md`
 
 All jobs run on **GitHub's cloud runners** (`ubuntu-latest`) — safe for public
-repositories. `main` declares no required status checks, so every check is
-advisory to GitHub; merge on green is a rule, not an enforcement (a red Test
-job has still made Railway skip a deploy — see the CI/CD guide).
+repositories. The `main` ruleset requires a pull request and six of these
+checks by name (Lint, FC-2 Telegram ratchet, Test, Security Scan, Front End,
+Changelog Check), so GitHub refuses a merge until they are green. The ruleset
+has no bypass list: every agent here works as the owner's account, so an admin
+bypass would be a bypass for all of them. Renaming one of those jobs means
+updating the ruleset too.
 
 ### Scheduled: `schema-drift.yml`
 
@@ -86,16 +91,27 @@ pytest tests/path/to/test.py::test_name -v
 
 The local recipe for a throwaway PostgreSQL is in `AGENTS.md` › Testing.
 
-### Missing CHANGELOG Update
-Every PR that changes behaviour should update `CHANGELOG.md` under
-`## [Unreleased]`; docs-only PRs are exempt.
+### Missing changelog fragment
+Every PR that changes behaviour adds one fragment in `changelog.d/` and leaves
+`CHANGELOG.md` alone; `changelog.d/README.md` has the format and the rule.
+
+### Front End: npm audit
+A newly published advisory against a runtime dependency fails every PR's
+Front End, including PRs that change nothing in `landing/`, until a bump lands.
+```bash
+# The step, locally; it reads only the lockfile, so no install is needed
+cd landing && npm audit --omit=dev
+```
+
+Clear it with a bump, or an `overrides` pin in `landing/package.json`. For an
+advisory with no fixed release, see the note on the step in `ci.yml`.
 
 ---
 
 ## For Contributors
 
 When submitting a PR:
-1. Update `CHANGELOG.md` (unless the PR is docs-only)
+1. Add a changelog fragment in `changelog.d/` (unless the PR is docs-only)
 2. Ensure tests pass: `pytest tests/ -v`
 3. Format code: `ruff format .`
 4. Check linting: `ruff check .`

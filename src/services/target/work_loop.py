@@ -21,7 +21,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import nullcontext
+import uuid
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable, Mapping, Optional
@@ -33,6 +34,7 @@ from src.services.target import credential_lifecycle, email_sender, media_sync
 
 from src.services.target import (
     bindings,
+    content_runway,
     jobs,
     offboarding,
     outbox,
@@ -103,6 +105,12 @@ class WorkerConfig:
     global_limit: int = 25  # 05: global sends per window
     global_window_seconds: int = 1
     reap_limit: int = 500  # 05: the reap's total per sweep; the card sweep reuses it
+    # 05 retention: `rate_counters` keeps 7 d (every window is 24 h or less, so
+    # a row that old only holds the key it counted); 5,000 per batch.
+    rate_counters_keep_seconds: int = 7 * 24 * 3600
+    retention_batch: int = 5000
+    #: Batches repeat within one run until one comes back short or this is spent.
+    retention_budget_seconds: float = 5.0
     # 05 §4: 1,440 min (24 h) when the workspace's approval_ttl_minutes is NULL.
     approval_ttl_seconds: int = 24 * 3600
     approved_ttl_seconds: int = 72 * 3600
@@ -113,6 +121,9 @@ class WorkerConfig:
     stranded_alert_limit: int = 200  # rows re-alerted per beat
     # 05: "no media available" notice dedup 24 h (06 section 5, slot missed).
     no_media_notice_after_seconds: int = 24 * 3600
+    # The runway notice's level, in days of eligible content (#1478): told once
+    # below it, re-armed a margin above it (`content_runway.REARM_MARGIN_DAYS`).
+    low_runway_days: int = content_runway.LOW_RUNWAY_DAYS
     # The front end's origin (`settings.web_app_origin`), for the deep link in
     # the parked-intent notice (06 section 5). None = the notice still fires,
     # without a link: being told late beats not being told.
@@ -142,8 +153,7 @@ class WorkerConfig:
 #: the STEADY holders: the clock's pinned election connection, plus two
 #: periodic holders that may coincide (a clock tick's session and a
 #: heartbeat beat). The other periodic readers — the status reporter (60 s),
-#: the sender sweeper (3 s), the prompt sweeper (5 s) — and a kind that opens
-#: a second session inside its job (`reconcile_ambiguous`'s poll) are
+#: the sender sweeper (3 s), the prompt sweeper (5 s) — are
 #: transient waiters: they hold a connection for milliseconds, and when the
 #: pool is momentarily full they wait `pool_timeout`, which is not a fault
 #: (`run_once` counts a claim's pool wait apart from errors). So the ceiling
@@ -151,10 +161,10 @@ class WorkerConfig:
 RESERVED_CONNECTIONS = 3
 #: What one task holds at its peak, per lane. An interactive task's kinds run
 #: their own transactions (the sender) or one short job transaction: one
-#: connection. A bulk task's plain kinds — a sync walk, a credential refresh,
-#: the ambiguous reconciler's poll — open sessions of their own UNDER the
-#: loop's job transaction, so a bulk task holds two at its peak (adversarial
-#: review of the 3b PR). The ceiling weighs them so, rather than pretending.
+#: connection. A bulk task's plain kinds — a sync walk, a credential refresh —
+#: open sessions of their own UNDER the loop's job transaction, so a bulk task
+#: holds two at its peak (adversarial review of the 3b PR). The ceiling weighs
+#: them so, rather than pretending.
 TASK_CONNECTIONS = {"interactive": 1, "bulk": 2}
 
 
@@ -232,16 +242,19 @@ _UNBUILT_REASON = (
 
 #: Kinds the tier has never carried an executor for. The registry parks them
 #: unconditionally; the schema-derived completeness test keeps this honest.
-UNBUILT_KINDS = (
-    "retention_sweep",
-    "reencrypt_credentials",
-)
+UNBUILT_KINDS = ("reencrypt_credentials",)
 
 
 def build_registry(deps: WorkerDeps) -> dict:
     """kind → adapter | Parked, for every kind in the `02` §5 registry."""
 
     cfg = deps.config
+    sessions = unit_of_work.make_session_for(deps.engine)
+
+    def short(session, job):
+        # The loop hands a marked executor no session (phase 3b); a caller
+        # that DOES pass one (the unit seam) keeps it for every write.
+        return sessions(job) if session is None else nullcontext(session)
 
     async def plan_slot(session, job):
         payload = job.get("payload") or {}
@@ -291,6 +304,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             provider_account_ref=row["provider_account_ref"],
             approval_mode=row["approval_mode"],
             no_media_notice_after_seconds=cfg.no_media_notice_after_seconds,
+            low_runway_days=cfg.low_runway_days,
         )
         if outcome.notice is not None:
             # The library was empty AND there was no surface to say so on.
@@ -318,6 +332,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         # and gain the terminal line — phase 1 of the 2026-09-09 tap plan.
         await prompts.sweep_settled_cards(session, limit=cfg.reap_limit)
 
+    @own_transactions
     async def reconcile_ambiguous(session, job):
         """The `02` §6 sweep. TWO reasons, and only one of them needs a poll.
 
@@ -333,56 +348,108 @@ def build_registry(deps: WorkerDeps) -> dict:
         **The poll seam parks the LADDER half, not the kind.** The module
         docstring's rule is that a missing seam parks its *dependent* kind; the
         notify half depends on nothing the deployment lacks, so parking it with
-        the ladder over-parks. This matters concretely rather than in
-        principle: production runs `poll=None` (`worker.py`), so under the old
-        registration the whole kind was `Parked` and the customer notification
-        could not fire even once the producer existed.
+        the ladder over-parks: a deployment with no poll seam would lose the
+        customer notification too.
+
+        **A failed row fails alone** (#1492). The sweep reads in one short
+        transaction and each row runs in a transaction of its own, so a row
+        that raises — a verdict whose flip matched no row is #1438's alarm —
+        rolls back alone, and the rows behind it still land rather than wait
+        behind it (an unresolved ambiguity holds its account's next publish,
+        `uq_publish_exclusive`). Not a savepoint per row in one transaction: a
+        batch larger than `offboarding.MAX_WRITING_SAVEPOINTS` overflows the
+        backend's subtransaction cache (#1441). After the beat the first
+        failure is re-raised, so the job still fails and retries. A notice
+        nobody can hear is recorded only by a beat that returns
+        (`reconciler.record_no_surface` says why), so a failing beat leaves
+        none behind. A caller that passes its own session (the unit seam) gets
+        a savepoint per row on it instead.
+
+        **The provider is asked with no transaction open** (#1508). A ladder
+        row asks the provider (`reconciler.observe`) before its transaction
+        opens, then claims its workspace, reads how far its ladder has climbed
+        and records the answer in it: the egress floor refuses a provider call
+        made inside a transaction (`02` §5), so a poll inside one could never
+        resolve an ambiguity. A verdict that changes the intent's state is a
+        compare-and-set on the state it leaves, so an intent that moved while
+        the provider was asked fails its row, loudly.
         """
-        due = await reconciler.sweep_due(
-            session,
-            limit=cfg.reconcile_limit,
-            notify_after_seconds=cfg.reconcile_notify_after_seconds,
-        )
-        ladder_skipped = unreachable = 0
-        for op in due:
+        async with short(session, job) as reader:
+            due = await reconciler.sweep_due(
+                reader,
+                limit=cfg.reconcile_limit,
+                notify_after_seconds=cfg.reconcile_notify_after_seconds,
+            )
+
+        @asynccontextmanager
+        async def row_transaction():
+            # A transaction of the row's own; on the unit seam, a savepoint.
+            async with (
+                short(session, job) as row_session,
+                nullcontext() if session is None else session.begin_nested(),
+            ):
+                yield row_session
+
+        async def reconcile_row(op):
             if op["reason"] == "notify_window":
-                sent = await reconciler.notify_parked_customer(
+                async with row_transaction() as session:
+                    return await reconciler.notify_parked_customer(
+                        session,
+                        intent_id=op["intent_id"],
+                        workspace_id=op["workspace_id"],
+                        web_app_origin=cfg.web_app_origin,
+                    )
+            # Asked before the row's transaction opens (#1508, the docstring).
+            status_code = await reconciler.observe(
+                deps.poll, intent_id=op["intent_id"], workspace_id=op["workspace_id"]
+            )
+            async with row_transaction() as session:
+                # Scope the ladder row too. 059 says every write from this sweep
+                # "runs tenant-scoped as svc_worker" and nothing did — the
+                # session carries `app.tenant_id = ''` because this is a system
+                # singleton, so these writes were invisible to `p_tenant`
+                # already. On the unit seam the rows share one session, and
+                # asserting the tenant per row is what keeps a ladder row from
+                # inheriting the scope of whichever row preceded it. The
+                # ladder's count is read AFTER the claim for the same reason:
+                # `post_intents` is policy-covered, and a read with no tenant
+                # answers 0 for every row — a ladder that never exhausts
+                # (#1349 review).
+                await unit_of_work.apply_gucs(
+                    session,
+                    tenant_id=str(op["workspace_id"]),
+                    actor_kind="system",
+                )
+                await reconciler.reconcile_intent(
                     session,
                     intent_id=op["intent_id"],
                     workspace_id=op["workspace_id"],
-                    web_app_origin=cfg.web_app_origin,
-                    retry_after_seconds=cfg.reconcile_notify_after_seconds,
+                    status_code=status_code,
+                    checks=await reconciler.checks_so_far(
+                        session, intent_id=op["intent_id"]
+                    ),
                 )
-                if sent == outbox.UNDELIVERABLE:
-                    unreachable += 1
-                continue
-            if deps.poll is None:
+
+        ladder_skipped = 0
+        # The notify rows whose workspace has nowhere to receive the notice.
+        unreachable = []
+        failures = []
+        for op in due:
+            if op["reason"] == "ladder_due" and deps.poll is None:
                 ladder_skipped += 1
                 continue
-            # Scope the ladder row too. 059 says every write from this sweep
-            # "runs tenant-scoped as svc_worker" and nothing did — the session
-            # carries `app.tenant_id = ''` because this is a system singleton,
-            # so these writes were invisible to `p_tenant` already. Reading the
-            # reason tag also makes the tenant VARY across one sweep, so
-            # asserting it per row is what keeps a ladder row from inheriting
-            # the scope of whichever notify row preceded it. The ladder's
-            # count is read AFTER the claim for the same reason: `post_intents`
-            # is policy-covered, and a read with no tenant answers 0 for every
-            # row — a ladder that never exhausts (#1349 review).
-            await unit_of_work.apply_gucs(
-                session,
-                tenant_id=str(op["workspace_id"]),
-                actor_kind="system",
-            )
-            await reconciler.reconcile_intent(
-                session,
-                intent_id=op["intent_id"],
-                workspace_id=op["workspace_id"],
-                poll=deps.poll,
-                checks=await reconciler.checks_so_far(
-                    session, intent_id=op["intent_id"]
-                ),
-            )
+            try:
+                if await reconcile_row(op) == outbox.UNDELIVERABLE:
+                    unreachable.append(op)
+            except Exception as exc:  # noqa: BLE001 — re-raised after the beat
+                logger.exception(
+                    "reconcile_ambiguous: the %s row of intent %s failed; its"
+                    " writes rolled back and NO verdict was recorded for it —"
+                    " the beat goes on",
+                    op["reason"],
+                    op["intent_id"],
+                )
+                failures.append(exc)
         if ladder_skipped:
             # Loud, per the module docstring: the deployment cannot do this
             # half and says so every beat it has work for it.
@@ -392,12 +459,33 @@ def build_registry(deps: WorkerDeps) -> dict:
                 " it); the notify half ran",
                 ladder_skipped,
             )
+        if failures:
+            # Loud, as #1438 asks: the job fails and retries. The rows that
+            # resolved have committed, so only the failed rows come round again.
+            logger.error(
+                "reconcile_ambiguous: %d of %d row(s) failed this beat; the"
+                " rest committed",
+                len(failures),
+                len(due),
+            )
+            raise failures[0]
         if unreachable:
-            # One workspace with nowhere to receive its notice makes the WHOLE
-            # sweep not-a-delivery. The rows that did land are already written
-            # in this transaction; what must not happen is the run reading as
-            # clean when somebody was owed a message and got none.
-            return outbox.UNDELIVERABLE
+            async with short(session, job) as writer:
+                recorded = [
+                    await reconciler.record_no_surface(
+                        writer,
+                        intent_id=op["intent_id"],
+                        workspace_id=op["workspace_id"],
+                        retry_after_seconds=cfg.reconcile_notify_after_seconds,
+                    )
+                    for op in unreachable
+                ]
+            if outbox.UNDELIVERABLE in recorded:
+                # One workspace with nowhere to receive its notice makes the
+                # WHOLE sweep not-a-delivery. The rows that did land have
+                # committed; what must not happen is the run reading as clean
+                # when somebody was owed a message and got none.
+                return outbox.UNDELIVERABLE
 
     async def alert_stranded_sources(session, job):
         # Alert-only: nothing here re-arms a source or enqueues a sync. The
@@ -406,6 +494,17 @@ def build_registry(deps: WorkerDeps) -> dict:
             session,
             stale_after_seconds=cfg.stranded_alert_after_seconds,
             limit=cfg.stranded_alert_limit,
+        )
+
+    # `own_transactions`: no provider, but each batch commits on its own, so
+    # the run must not sit inside one job session. The payload is not read.
+    @own_transactions
+    async def retention_sweep(session, job):
+        await scheduler.execute_retention_sweep(
+            lambda: sessions(job),
+            keep_seconds=cfg.rate_counters_keep_seconds,
+            batch=cfg.retention_batch,
+            budget_seconds=cfg.retention_budget_seconds,
         )
 
     async def reap_transit(session, job):
@@ -433,8 +532,6 @@ def build_registry(deps: WorkerDeps) -> dict:
         # transactions; the loop must not finalize again.
         return jobs.SELF_FINALIZED
 
-    sessions = unit_of_work.make_session_for(deps.engine)
-
     @own_transactions
     async def deliver_outbox(session, job):
         # The bounded sender hold: while THIS lease serializes the binding's
@@ -450,12 +547,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             payload.get("binding_id") or job["serialization_key"].split(":", 1)[1]
         )
 
-        def short():
-            # The loop hands a marked executor no session (phase 3b); a caller
-            # that DOES pass one (the unit seam) keeps it for every write.
-            return sessions(job) if session is None else nullcontext(session)
-
-        async with short() as reader:
+        async with short(session, job) as reader:
             row = (
                 (
                     await reader.execute(
@@ -478,10 +570,10 @@ def build_registry(deps: WorkerDeps) -> dict:
             # Revoked after this job was minted (an admin removed the group,
             # the bot was kicked), or a private chat whose person does not
             # belong (`bindings.deliverable_binding_where`). The claim refuses
-            # it anyway; ending here spends no hold, and retiring its queue
-            # keeps a stale card from going out later and leaves the sweep
-            # nothing to mint for.
-            async with short() as writer:
+            # it anyway (`outbox.claim_next`); ending here spends no hold, and
+            # retiring its queue keeps a stale card from going out later, a
+            # re-bind's included, and leaves the sweep nothing to mint for.
+            async with short(session, job) as writer:
                 retired = await bindings.retire_unsettled(writer, binding_id=binding_id)
             logger.info(
                 "deliver_outbox %s: binding %s (%s) is not deliverable — nothing"
@@ -512,7 +604,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # became a supergroup) or retire the binding; either way this
                 # hold ends — the sweep will not mint for a revoked binding.
                 moved = result.get("migrate_to")
-                async with short() as writer:
+                async with short(session, job) as writer:
                     followed = await bindings.follow_or_retire(
                         writer, binding_id=binding_id, successor=moved
                     )
@@ -529,7 +621,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # sender yields its lane now and comes back when Telegram said
                 # to — its own reschedule, no attempt spent (phase 3a step 2).
                 wait = float(result.get("retry_after_s") or cfg.poller_interval_seconds)
-                async with short() as writer:
+                async with short(session, job) as writer:
                     await jobs.reschedule_job(
                         writer,
                         job["id"],
@@ -557,6 +649,7 @@ def build_registry(deps: WorkerDeps) -> dict:
     registry: dict = {kind: Parked(_UNBUILT_REASON) for kind in UNBUILT_KINDS}
     registry["plan_slot"] = plan_slot
     registry["reap_expired"] = reap_expired
+    registry["retention_sweep"] = retention_sweep
     # No `deps.drive` gate: this path makes no provider call, and a fleet with
     # no adapter wired is exactly the one whose sources are stranded (#1061).
     registry["alert_stranded_sources"] = alert_stranded_sources
@@ -747,10 +840,23 @@ REARM_AFTER_SECONDS = 24 * 3600
 async def _rearm_source(session, job) -> int:
     """Re-arm the source a spent sync job carried (`payload.source_id`) for
     tomorrow's baseline, if it is still active and still disarmed. Returns
-    rows re-armed (0 when the payload names no source or it moved on)."""
+    rows re-armed (0 when the payload names no source, names one that is not
+    a uuid, or it moved on). A malformed id is refused here rather than by the
+    cast: the re-arm runs in the finalize's own transaction, where a raise
+    would abort the finalize and the spent job would be claimed again on
+    every lease lapse. The reaper's re-arm tolerates it the same way."""
     source_id = (job.get("payload") or {}).get("source_id")
     workspace_id = job.get("workspace_id")
     if not source_id or workspace_id is None:
+        return 0
+    try:
+        uuid.UUID(str(source_id))
+    except ValueError:
+        logger.warning(
+            "job %s: payload source_id %r is not a uuid; no source re-armed",
+            job.get("id"),
+            source_id,
+        )
         return 0
     result = await session.execute(
         text(
@@ -770,7 +876,25 @@ _DEFAULT_NOTICE = (
 )
 
 
-async def _notify_exhausted(session, job) -> None:
+async def _settle_exhausted(session, job) -> Optional[dict]:
+    """The state a spent job leaves behind, written in the finalize's own
+    transaction and ahead of the notice's savepoint, so that a failed notice
+    cannot roll it back: a sync's source re-armed for tomorrow, a publish
+    job's story flipped to review. Returns the parked story's `tell_review`
+    arguments for the notice, or None. Nothing here may raise on a malformed
+    payload: outside the savepoint a raise aborts the finalize, and the spent
+    job would be claimed again on every lease lapse, so each branch refuses a
+    malformed id with a log line instead."""
+    kind = str(job.get("kind"))
+    if kind in _SYNC_KINDS:
+        await _rearm_source(session, job)
+        return None
+    if kind == "publish_pipeline":
+        return await publish_pipeline.flip_exhausted(session, job)
+    return None
+
+
+async def _notify_exhausted(session, job, parked: Optional[dict]) -> None:
     """One `notification` outbox row per push binding when a tenant kind the
     sweeps do not re-mint has spent its budget. Nothing for system kinds and
     the re-minted kinds; a workspace with no binding gets nothing here (the
@@ -782,11 +906,11 @@ async def _notify_exhausted(session, job) -> None:
     if kind == "publish_pipeline":
         # Plan 03: the story a dead publish job carried is parked for the
         # workspace's review — the card with its buttons and one honest
-        # line — never left reading Approved behind a generic notice.
-        await publish_pipeline.park_exhausted(session, job)
+        # line — never left reading Approved behind a generic notice. The
+        # flip is `_settle_exhausted`'s; this is its courtesy.
+        if parked:
+            await publish_pipeline.tell_review(session, **parked)
         return
-    if kind in _SYNC_KINDS:
-        await _rearm_source(session, job)
     bindings = await prompts.push_bindings(session, str(workspace_id))
     await outbox.fanout_notification(
         session,
@@ -1012,13 +1136,16 @@ class WorkLoop:
                 )
                 try:
                     async with self._session_for(job) as session:
+                        # Ahead of the notice's savepoint, so a failed notice
+                        # cannot roll the spent job's state back.
+                        parked = await _settle_exhausted(session, job)
                         # The notice rides a savepoint: a failure writing it
                         # must not take the finalize down with it (the log
                         # already carries the failure; the notice is a
                         # courtesy, the terminal state is the record).
                         try:
                             async with session.begin_nested():
-                                await _notify_exhausted(session, job)
+                                await _notify_exhausted(session, job, parked)
                         except Exception:  # noqa: BLE001 — logged, finalize proceeds
                             logger.exception(
                                 "job %s (%s): the exhausted notice could not be"

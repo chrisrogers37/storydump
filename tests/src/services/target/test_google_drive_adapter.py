@@ -324,6 +324,81 @@ class TestErrorRouting:
             )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reason, message, expected",
+        [
+            # A limit passes, so it is retried: a daily limit read as a dead
+            # grant used to flip the source to `error` and alert.
+            ("dailyLimitExceeded", "Daily Limit Exceeded", DriveRetryableError),
+            ("rateLimitExceeded", "Too many requests", DriveRetryableError),
+            ("userRateLimitExceeded", "Slow down", DriveRetryableError),
+            # One item the app may not reach: the item is gone to the app, not
+            # the credential dead, and a reconnect would not bring it back.
+            (
+                "appNotAuthorizedToFile",
+                "The user has not granted the app access to the file",
+                DriveSourceGone,
+            ),
+            (
+                "insufficientFilePermissions",
+                "The user does not have sufficient permissions for this file",
+                DriveSourceGone,
+            ),
+            # Any other 403 stays the credential's.
+            ("forbidden", "Forbidden", DriveCredentialDead),
+            # ...even when its message mentions a quota: a full Drive is not a
+            # limit, and does not pass. The message is read only when the body
+            # names no reason.
+            (
+                "storageQuotaExceeded",
+                "The user's Drive storage quota has been exceeded.",
+                DriveCredentialDead,
+            ),
+        ],
+    )
+    async def test_a_403_routes_on_googles_reason_first(
+        self, reason, message, expected
+    ):
+        record = []
+        handler, _ = _json_handler(
+            {
+                "error": {
+                    "code": 403,
+                    "message": message,
+                    "errors": [{"reason": reason, "message": message}],
+                }
+            },
+            status=403,
+        )
+        with pytest.raises(expected):
+            await _adapter(handler, record=record).list_changes(
+                CONFIG, None, source_id=SRC, workspace_id=WS
+            )
+        fresh = [call for call in record if len(call) == 3]
+        assert fresh == (
+            [(SRC, WS, "fresh")] if expected is DriveCredentialDead else []
+        ), "only a credential refusal re-mints the token"
+
+    @pytest.mark.asyncio
+    async def test_a_file_the_app_may_not_reach_is_a_gone_file_on_the_fetch(self):
+        from src.services.target.drive_adapter import DriveMediaGone
+
+        handler, _ = _json_handler(
+            {
+                "error": {
+                    "code": 403,
+                    "message": "no",
+                    "errors": [{"reason": "insufficientFilePermissions"}],
+                }
+            },
+            status=403,
+        )
+        with pytest.raises(DriveMediaGone):
+            await _adapter(handler).fetch_bytes(
+                source_id=SRC, workspace_id=WS, file_ref="F", max_bytes=1000
+            )
+
+    @pytest.mark.asyncio
     async def test_a_dead_transport_is_not_catchable_as_a_drive_error(self):
         """`DriveLostResponse` is deliberately not a `DriveError`: "no answer
         exists" must not be catchable as "it failed"."""
@@ -758,6 +833,8 @@ class TestAWalkSurvivesWhatDriveDoesMidWalk:
             CONFIG, cp, source_id=SRC, workspace_id=WS
         )
         assert [i["ref"] for i in items] == ["k1"] and not checkpoint_incomplete(cp)
+        # #1545: a folder the walk could not list leaves it partial, never whole.
+        assert cp.get("partial") is True and "whole" not in cp
 
     @pytest.mark.asyncio
     async def test_the_root_itself_gone_is_still_the_sources_fault(self):
@@ -938,9 +1015,12 @@ class TestTheWalkGoesToAnyDepth:
         )
         assert [r for r, _, _ in seen] == ["r1", "m1"]
         assert all(c["walk"] == "minted-by-the-sync" for c in cursors)
-        assert cursors[-1] == {"v": 2, "walk": "minted-by-the-sync", "seen": 1}, (
-            "complete: the token and the folder count, nothing pending"
-        )
+        assert cursors[-1] == {
+            "v": 2,
+            "walk": "minted-by-the-sync",
+            "seen": 1,
+            "whole": True,
+        }, "complete: the token, the folder count and nothing skipped, nothing pending"
 
     @pytest.mark.asyncio
     async def test_a_pre_v2_in_flight_cursor_is_ignored_and_the_walk_starts_over(self):
@@ -1004,6 +1084,7 @@ class TestTheWalkGoesToAnyDepth:
             "folders past the cap never sync"
         )
         assert cursors[-1].get("truncated") is True, "the cut is carried to completion"
+        assert "whole" not in cursors[-1]
         assert not checkpoint_incomplete(cursors[-1])
 
     @pytest.mark.asyncio
@@ -1032,6 +1113,7 @@ class TestTheWalkGoesToAnyDepth:
         )
         seen, cursors = await self._walk(adapter)
         assert [r for r, _, _ in seen] == ["k1"]
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
 
     @pytest.mark.asyncio
     async def test_a_folder_reachable_twice_is_walked_once_and_a_cycle_does_not_spin(
@@ -1052,6 +1134,9 @@ class TestTheWalkGoesToAnyDepth:
             "each folder listed once"
         )
         assert not cursors[-1].get("truncated"), "a cycle is not a size cap"
+        assert not cursors[-1].get("partial") and cursors[-1].get("whole") is True, (
+            "a folder reached twice is walked once: nothing was skipped"
+        )
 
     @pytest.mark.asyncio
     async def test_a_child_id_outside_the_drive_id_shape_is_skipped(self):
@@ -1112,6 +1197,67 @@ class TestTheWalkGoesToAnyDepth:
             "once the cap is hit, a popped folder is not asked for its subfolders"
         )
         assert cursors[-1].get("truncated") is True
+
+    # #1545: the sync tombstones what a walk that saw the WHOLE tree no longer
+    # lists, so every way a walk skips part of the tree rides the completed
+    # cursor (the folder cap as `truncated`, every other skip as `partial`),
+    # and only a walk that skipped nothing ends `whole`. The vanished-folder
+    # skips are pinned in their own tests above; a folder reached twice is
+    # walked once and skips nothing (the cycle test).
+
+    @pytest.mark.asyncio
+    async def test_the_subfolder_cap_leaves_the_walk_partial(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_LIST_CAP", 2)
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("A", "a"), ("B", "b"), ("C", "c")]},
+            files={"A": [_file("fa")], "B": [_file("fb")], "C": [_file("fc")]},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa", "fb"], "past the cap, never synced"
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_subfolder_page_token_leaves_the_walk_partial(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            parent = q.split("'")[1]
+            if "vnd.google-apps.folder" in q:
+                if parent == self.ROOT:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "files": [_folder_entry("A", "a")],
+                            "nextPageToken": "same",
+                        },
+                    )
+                return httpx.Response(200, json={"files": []})
+            return httpx.Response(
+                200, json={"files": [_file("fa")] if parent == "A" else []}
+            )
+
+        seen, cursors = await self._walk(_adapter(handler))
+        assert [r for r, _, _ in seen] == ["fa"]
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("listing", ["media", "subfolders"])
+    async def test_an_incomplete_search_leaves_the_walk_partial(self, listing):
+        # Drive's `incompleteSearch`: the page may leave files out, so what it
+        # did not list is not known to be gone.
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            is_folders = "vnd.google-apps.folder" in q
+            assert "incompleteSearch" in request.url.params["fields"]
+            body: dict = {"files": [] if is_folders else [_file("fa")]}
+            if is_folders == (listing == "subfolders"):
+                body["incompleteSearch"] = True
+            return httpx.Response(200, json=body)
+
+        seen, cursors = await self._walk(_adapter(handler))
+        assert [r for r, _, _ in seen] == ["fa"]
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
 
 
 class TestFetchBytes:

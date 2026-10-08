@@ -33,6 +33,15 @@ import {
   disableAccountRefusalCopy,
   submitRemoveMember,
   removeMemberRefusalCopy,
+  submitScheduleItem,
+  scheduleRefusalCopy,
+  scheduleOverrideCopy,
+  submitInviteMember,
+  inviteMemberRefusalCopy,
+  rescheduleRefusalCopy,
+  submitSetItemLink,
+  linkRefusalCopy,
+  LINK_URL_MAX,
 } from "./command-client";
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -383,6 +392,162 @@ describe("disableAccountRefusalCopy", () => {
   });
 });
 
+describe("planning a story — schedule_item (#1413 phase 6)", () => {
+  const plan = {
+    accountId: "55555555-5555-4555-8555-555555555555",
+    itemId: "66666666-6666-4666-8666-666666666666",
+    localAt: "2026-10-03T14:30",
+  };
+
+  it("sends the account, the item and the wall time as typed, to the port's door", async () => {
+    stubFetch({ outcome: "executed", state: "scheduled" }, 200);
+    const result = await submitScheduleItem(WS, plan);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/schedule_item`);
+    const { submission_id, ...args } = sentBody(0);
+    expect(typeof submission_id).toBe("string");
+    expect(args).toEqual({
+      ig_account_id: plan.accountId,
+      media_item_id: plan.itemId,
+      local_at: plan.localAt,
+    });
+    expect(portKey(0, "schedule_item")).toMatch(/^schedule_item:/);
+  });
+
+  it("two attempts are two submissions, so a deliberate retry is never deduped", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitScheduleItem(WS, plan);
+    await submitScheduleItem(WS, plan);
+    expect(portKey(0, "schedule_item")).not.toBe(portKey(1, "schedule_item"));
+  });
+
+  it("surfaces the port's reason, not a status code", async () => {
+    stubFetch({ error: "locked" }, 409);
+    expect(await submitScheduleItem(WS, plan)).toEqual({
+      ok: false,
+      error: "locked",
+      status: 409,
+    });
+  });
+
+  it("sends override_locks only when the person chose to override", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitScheduleItem(WS, { ...plan, overrideLocks: true });
+    await submitScheduleItem(WS, plan);
+    expect(sentBody(0).override_locks).toBe(true);
+    expect("override_locks" in sentBody(1)).toBe(false);
+    // The override is a second, deliberate submission, never a replay of the first.
+    expect(portKey(0, "schedule_item")).not.toBe(portKey(1, "schedule_item"));
+  });
+});
+
+describe("scheduleRefusalCopy", () => {
+  it("names the member floor on a role refusal", () => {
+    expect(scheduleRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+  });
+
+  it("says a lock or the item itself keeps it out", () => {
+    expect(scheduleRefusalCopy("locked", 409)).toMatch(/lock/i);
+  });
+
+  it("says the item already waits on that account when it is a duplicate", () => {
+    expect(scheduleRefusalCopy("illegal_transition", 409)).toMatch(/already/i);
+  });
+
+  it("asks for another time when the port refuses the time", () => {
+    expect(scheduleRefusalCopy("invalid_args", 400)).toMatch(/time/i);
+  });
+
+  it("sends a stale screen back when the account or the item is gone", () => {
+    expect(scheduleRefusalCopy("not_found", 404)).toMatch(/reload/i);
+  });
+
+  it("does not smooth a replay into success", () => {
+    expect(scheduleRefusalCopy(REPLAYED_ERROR)).toMatch(/not/i);
+  });
+
+  it("has a sentence for the unknown case that promises nothing", () => {
+    expect(scheduleRefusalCopy("something_new")).toMatch(/nothing was scheduled/i);
+  });
+
+  // With the refusal's facts (`refusal-facts.ts`), each sentence can name its remedy.
+  it("says which rule a refused time broke", () => {
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "past" })).toMatch(/passed/i);
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "skipped" })).toMatch(/daylight/i);
+    // The sentence with no rule names the horizon too ("within 365 days"), so
+    // only "more than" tells the horizon's own sentence from it.
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "horizon" })).toMatch(
+      /more than 365 days/,
+    );
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "shape" })).toMatch(
+      /date and a time/,
+    );
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "not_a_date" })).toMatch(
+      /date and a time/,
+    );
+  });
+
+  it("says which of the two is gone", () => {
+    expect(scheduleRefusalCopy("not_found", 404, { missing: "account" })).toMatch(/account.*reload/i);
+    expect(scheduleRefusalCopy("not_found", 404, { missing: "item" })).toMatch(/item.*reload/i);
+  });
+
+  it("names what keeps a blocked item out", () => {
+    expect(
+      scheduleRefusalCopy("locked", 409, { in_the_way: ["reject"], overridable: false }),
+    ).toMatch(/rejected/);
+    expect(
+      scheduleRefusalCopy("locked", 409, { in_the_way: ["item_archived"], overridable: false }),
+    ).toMatch(/no longer available/);
+  });
+
+  it("says Instagram can't post an item it can't, rather than that the item is gone", () => {
+    // The item is still in the library, so "no longer available" would send a
+    // person looking for it; another item is the remedy.
+    const copy = scheduleRefusalCopy("locked", 409, {
+      in_the_way: ["item_unsupported"],
+      overridable: false,
+    });
+    expect(copy).toMatch(/Instagram can't post it/);
+    expect(copy).not.toMatch(/no longer available/);
+  });
+
+  it("tells a person whose earlier story was just cancelled to plan it again once it clears", () => {
+    expect(
+      scheduleRefusalCopy("illegal_transition", 409, {
+        existing: { state: "scheduled", origin: "planned", cancel_requested: true },
+      }),
+    ).toMatch(/cancelled.*again/i);
+  });
+
+  it("says whether the story already waiting was planned or is a regular slot", () => {
+    expect(
+      scheduleRefusalCopy("illegal_transition", 409, { existing: { origin: "planned" } }),
+    ).toMatch(/already scheduled/i);
+    expect(
+      scheduleRefusalCopy("illegal_transition", 409, { existing: { origin: "cadence" } }),
+    ).toMatch(/regular/i);
+  });
+
+  it("never reads a duplicate with no `existing` as no conflict", () => {
+    expect(scheduleRefusalCopy("illegal_transition", 409, {})).toMatch(/already/i);
+  });
+});
+
+describe("scheduleOverrideCopy", () => {
+  it("says what the override gets past, and asks", () => {
+    expect(scheduleOverrideCopy({ in_the_way: ["recent"], overridable: true })).toBe(
+      "It was posted on this account recently. Schedule it anyway?",
+    );
+  });
+
+  it("names both warnings when both are in the way", () => {
+    expect(scheduleOverrideCopy({ in_the_way: ["skip", "recent"], overridable: true })).toMatch(
+      /skipped recently and it was posted/,
+    );
+  });
+});
+
 describe("removing a member — remove_member (the revoke for every join edge)", () => {
   const MEMBER = "66666666-6666-4666-8666-666666666666";
 
@@ -399,5 +564,113 @@ describe("removing a member — remove_member (the revoke for every join edge)",
     expect(removeMemberRefusalCopy("http_403", 403)).toMatch(/admin/i);
     expect(removeMemberRefusalCopy("illegal_transition")).toMatch(/owner/i);
     expect(removeMemberRefusalCopy("not_found")).toMatch(/reload/i);
+  });
+});
+
+describe("inviting a person — invite_member (#1563)", () => {
+  it("sends the address and the role under a fresh submission id, to the port's door", async () => {
+    stubFetch({ outcome: "executed", invitation_id: "i", invite_token: "t", role: "admin" }, 200);
+    const result = await submitInviteMember(WS, { email: "partner@example.com", role: "admin" });
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/invite_member`);
+    expect(sentBody(0)).toMatchObject({ email: "partner@example.com", role: "admin" });
+    expect(portKey(0, "invite_member")).toMatch(/^invite_member:/);
+  });
+
+  it("keys two invitations of the same person apart, so the second is made and not replayed", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitInviteMember(WS, { email: "partner@example.com", role: "member" });
+    await submitInviteMember(WS, { email: "partner@example.com", role: "member" });
+    expect(portKey(0, "invite_member")).not.toBe(portKey(1, "invite_member"));
+  });
+
+  it("names the admin floor, a bad address, and a link that cannot come back", () => {
+    expect(inviteMemberRefusalCopy("http_403", 403)).toMatch(/admin/i);
+    // The port's one code for every invitation refusal, and the route's own.
+    for (const code of ["invalid_args", "invalid_email"]) {
+      expect(inviteMemberRefusalCopy(code, 400), code).toMatch(/email address/i);
+    }
+    expect(inviteMemberRefusalCopy("invalid_role", 400)).toMatch(/member or admin/i);
+    expect(inviteMemberRefusalCopy(REPLAYED_ERROR, 200)).toMatch(/invite them again/i);
+  });
+
+  it("says nothing was created when the app is unreachable or the session is gone", () => {
+    expect(inviteMemberRefusalCopy("unreachable", 0)).toMatch(/cannot reach the server.*nothing was created/i);
+    expect(inviteMemberRefusalCopy("http_401", 401)).toMatch(/not signed in.*nothing was created/i);
+    expect(inviteMemberRefusalCopy("something_new", 500)).toMatch(/nothing was created/i);
+  });
+});
+
+describe("rescheduleRefusalCopy (#1413 phase 6)", () => {
+  it("names the rule a refused time broke, in the words scheduling uses", () => {
+    expect(rescheduleRefusalCopy("invalid_args", 400, { at_rule: "past" })).toBe(
+      scheduleRefusalCopy("invalid_args", 400, { at_rule: "past" }),
+    );
+    expect(rescheduleRefusalCopy("invalid_args", 400, { at_rule: "skipped" })).toMatch(/daylight/i);
+    expect(rescheduleRefusalCopy("invalid_args", 400)).toMatch(/time/i);
+  });
+
+  it("says why the story can no longer move", () => {
+    // The port moves only a planned story still in `scheduled`.
+    expect(rescheduleRefusalCopy("illegal_transition", 409)).toMatch(/moved on.*reload/i);
+    expect(rescheduleRefusalCopy("cancelling", 409)).toMatch(/being cancelled/i);
+    expect(rescheduleRefusalCopy("not_found", 404)).toMatch(/no longer.*reload/i);
+  });
+
+  it("tells a permission refusal and a lost session apart from a blip", () => {
+    expect(rescheduleRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+    expect(rescheduleRefusalCopy("http_401", 401)).toMatch(/not signed in/i);
+    expect(rescheduleRefusalCopy("unreachable", 0)).toMatch(/nothing was moved/i);
+    expect(rescheduleRefusalCopy("something_new", 500)).toMatch(/nothing changed/i);
+  });
+});
+
+describe("an item's link — set_item_link (#1413 phase 7)", () => {
+  const ITEM = "66666666-6666-4666-8666-666666666666";
+
+  it("sends the item and the link as typed, to the port's door", async () => {
+    stubFetch({ outcome: "executed", media_item_id: ITEM, link_url: "https://example.com/menu" }, 200);
+    const result = await submitSetItemLink(WS, ITEM, "https://example.com/menu");
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/set_item_link`);
+    const { submission_id, ...args } = sentBody(0);
+    expect(typeof submission_id).toBe("string");
+    expect(args).toEqual({ media_item_id: ITEM, link_url: "https://example.com/menu" });
+    expect(portKey(0, "set_item_link")).toMatch(/^set_item_link:/);
+  });
+
+  it("sends a clear as an explicit null, never a missing key", async () => {
+    stubFetch({ outcome: "executed", media_item_id: ITEM, link_url: null }, 200);
+    await submitSetItemLink(WS, ITEM, null);
+    expect("link_url" in sentBody(0)).toBe(true);
+    expect(sentBody(0).link_url).toBeNull();
+  });
+
+  it("two attempts are two submissions, so setting a link again after a clear is never deduped", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitSetItemLink(WS, ITEM, "https://example.com/menu");
+    await submitSetItemLink(WS, ITEM, "https://example.com/menu");
+    expect(portKey(0, "set_item_link")).not.toBe(portKey(1, "set_item_link"));
+  });
+});
+
+describe("linkRefusalCopy (#1413 phase 7)", () => {
+  it("states the whole rule, since the port's refusal names no part of it", () => {
+    const sentence = linkRefusalCopy("invalid_args", 400);
+    expect(sentence).toMatch(/https:\/\//);
+    expect(sentence).toContain(LINK_URL_MAX.toLocaleString("en-US"));
+    expect(sentence).toMatch(/no spaces/i);
+    expect(sentence).toMatch(/user name or password/i);
+  });
+
+  it("says the item is gone, and how to see where things stand", () => {
+    expect(linkRefusalCopy("not_found", 404)).toMatch(/no longer in the library.*reload/i);
+  });
+
+  it("tells a permission refusal and a lost session apart from a blip", () => {
+    expect(linkRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+    expect(linkRefusalCopy("http_401", 401)).toMatch(/not signed in/i);
+    expect(linkRefusalCopy("unreachable", 0)).toMatch(/link was not saved/i);
+    expect(linkRefusalCopy("something_new", 500)).toMatch(/nothing changed/i);
   });
 });

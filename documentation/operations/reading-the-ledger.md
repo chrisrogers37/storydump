@@ -51,8 +51,8 @@ click uses, so admission, tenancy and audit apply unchanged — and to ONE works
 (`--workspace <id or name>` is required). A story verb's idempotency key is deterministic
 (`<command>:<story>`, the web's), so running it twice replays ("already done", exit 0) and
 `--idempotency-key <k>` is the deliberate second execution; `resolve`'s key carries the review
-episode, so a later review of the same story is new; `schedule`, `reschedule`, `pause`, `resume`
-and `sync` mint a fresh key per invocation, because a later action must execute (a second
+episode, so a later review of the same story is new; `schedule`, `reschedule`, `link`, `pause`,
+`resume` and `sync` mint a fresh key per invocation, because a later action must execute (a second
 `schedule` of an item that already waits is the database's to refuse). A
 refusal is an answer: the reason in the CLI's words, the fixing verb, exit 2.
 
@@ -66,15 +66,17 @@ refusal is an answer: the reason in the CLI's words, the fixing verb, exit 2.
 | queue a sync of a connected folder | `storydump sync <source_id> --workspace <ws>` |
 | plan a story: an item, on an account, at a time in the account's zone | `storydump schedule <item> --account <handle\|id> --at 'YYYY-MM-DD HH:MM' [--override-locks] --workspace <ws>` |
 | move a planned story that still waits for its time | `storydump reschedule <story> --at 'YYYY-MM-DD HH:MM' --workspace <ws>` |
+| give an item the link its stories ask a person to add by hand, or remove it | `storydump link <item> <https-url> --workspace <ws>` / `storydump link <item> --clear --workspace <ws>` |
 | the deployment: the API's health, the latest deploys, the bot's webhook, this laptop | `storydump health` · `storydump deploys [--watch]` · `storydump webhook status` · `storydump doctor` |
 
 ## What the verbs never read
 
 `rate_counters` (no workspace column) and the system jobs (`workspace_id IS NULL`): both sit
 outside row-level security and are not a workspace's business. Every view carries its own
-`workspace_id` predicate and is proven twice — as the ingress role under the policies, and as a
-role that bypasses them (production's posture today) — so the rows are confined by the query,
-not by the policy alone.
+`workspace_id` predicate and is proven twice: as the ingress role under the policies, which is
+production's posture since 2026-09-21 (the API's `db_role` read `svc_ingress`, `bypassrls`
+false, on 2026-10-02; `storydump health --json` shows it to an operator named in `OPS_USER_IDS`), and as a role that bypasses them, such as the owner login that only the
+migration runner holds. So the rows are confined by the query, not by the policy alone.
 
 ## The escape hatch
 
@@ -85,3 +87,36 @@ railway run --service worker --environment production -- \
 ```
 
 Read-only. The connection string is never printed.
+
+## Activation, estate-wide
+
+How far the people who signed up got through onboarding, across every workspace: a question no
+verb answers, since a verb reads only the workspaces your token belongs to. Put this one line in
+`probe.sql` and run it through the escape hatch above:
+
+```sql
+SELECT * FROM fn_activation_funnel(now() - interval '30 days');
+```
+
+Five rows come back, one per stage, in order.
+
+| Column | Meaning |
+|---|---|
+| `o_ordinal` | the stage's place, 1 to 5 |
+| `o_stage` | `signed in`, `workspace created`, `Instagram connected`, `folder added`, `first approval` |
+| `o_reached` | how many people who signed up since the date reached the stage. Each stage is counted on its own, so a folder added before Instagram counts for both |
+| `o_stalled` | how many of them stopped after this stage: the next one is missing and nothing has happened for them in 72 hours. The `first approval` row is always 0 |
+
+Each stage is the first time it happened. A workspace counts when the person owns it and it is
+active; Instagram and a folder count from the first one connected in such a workspace, even if it
+was removed later; the first approval is the first story moved from awaiting approval to approved,
+or to posted, which is a person's "Posted myself" in manual mode. "Nothing has happened" means none
+of the five stages is newer than 72 hours; a second argument changes the window, as in
+`fn_activation_funnel(now() - interval '30 days', interval '7 days')`. Someone who owns no
+workspace but belongs to another person's joined a team rather than stopping: they count as signed
+in and are not counted as stalled.
+
+The door returns counts only, never an id, a name or an email. It lives in the database, owned by
+`svc_maintenance` and executable by `svc_worker`, the login the escape hatch connects as. The API's
+login, `svc_ingress`, cannot call it, so no API route or CLI verb reads it until an operator
+principal exists (#1124).

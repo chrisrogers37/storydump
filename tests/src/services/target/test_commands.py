@@ -141,6 +141,42 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
             CommandRefused("because")
 
 
+class TestTheConnectLegsReadTheirPurposesFloor:
+    def test_each_connect_purpose_stands_for_a_command(self):
+        assert port.CONNECT_PURPOSE_KIND == {
+            "connect": "connect_account",
+            "reconnect": "reconnect_account",
+        }
+        assert set(port.CONNECT_PURPOSE_KIND.values()) <= set(port.ROLE_FLOOR)
+
+    @pytest.mark.parametrize(
+        "purpose,kind",
+        [("connect", "connect_account"), ("reconnect", "reconnect_account")],
+    )
+    def test_a_purposes_floor_follows_its_commands_entry(
+        self, monkeypatch, purpose, kind
+    ):
+        monkeypatch.setitem(port.ROLE_FLOOR, kind, "owner")
+        assert port.connect_floor(purpose) == "owner"
+
+    @pytest.mark.parametrize(
+        "connect,reconnect,lowest",
+        [
+            ("admin", "admin", "admin"),
+            ("owner", "admin", "admin"),
+            ("admin", "owner", "admin"),
+            ("member", "admin", "member"),
+            ("user", "admin", "user"),
+        ],
+    )
+    def test_the_lowest_connect_floor_admits_both_purposes(
+        self, monkeypatch, connect, reconnect, lowest
+    ):
+        monkeypatch.setitem(port.ROLE_FLOOR, "connect_account", connect)
+        monkeypatch.setitem(port.ROLE_FLOOR, "reconnect_account", reconnect)
+        assert port.lowest_connect_floor() == lowest
+
+
 def _cmd(kind="approve", **args) -> Command:
     return Command(
         kind=kind,
@@ -166,9 +202,11 @@ def gate(monkeypatch):
         role = "owner"
 
     log = Log()
+    log.kw = []
 
     async def authorize_member(session, ws, user, minimum_role="member", **kw):
         log.append((ws, user, minimum_role))
+        log.kw.append(kw)
         if log.refuse is not None:
             raise log.refuse
         return log.role
@@ -315,7 +353,21 @@ class TestIngestOwnsTheOrder:
         )
         assert admission == [("web", "k-1", {"intent_id": "i-1"}, "sess-1")]
         assert gate == [("ws-1", "user-1", "member")]
+        assert gate.kw == [{"tenant_bound": False}]
         assert out.outcome == "executed"
+
+    async def test_ingest_forwards_a_bound_tenant_to_the_gate(
+        self, admission, gate, executor
+    ):
+        await ingest(
+            _Session(),
+            _cmd(intent_id="i-1"),
+            external_ref="k-1",
+            principal="sess-1",
+            payload={},
+            tenant_bound=True,
+        )
+        assert gate.kw == [{"tenant_bound": True}]
 
     async def test_a_replay_propagates_and_nothing_executes(
         self, admission, gate, executor
@@ -326,6 +378,18 @@ class TestIngestOwnsTheOrder:
                 _Session(), _cmd(), external_ref="k-1", principal="sess-1", payload={}
             )
         assert gate == [] and executor == []
+
+
+class TestSetItemLinkIsInThePort:
+    """#1413 phase 7 (F10 (a), F11): a member gives an item the link its story
+    asks a person to add by hand, since a story published through the API
+    cannot carry one. The floor of `schedule_item`, with an executor."""
+
+    def test_named_at_the_member_floor_with_an_executor(self):
+        assert "set_item_link" in port.VOCABULARY
+        assert port.ROLE_FLOOR["set_item_link"] == "member"
+        assert port.REGISTRY["set_item_link"] is not None
+        assert "set_item_link" not in port.UNBUILT
 
 
 class TestDisableAccountIsInThePort:
@@ -510,9 +574,12 @@ class TestRemoveMemberGoesThroughTheDoor:
             ex, workspace_id="ws", user_id="u2", by_user_id="u1"
         )
         assert role == "member"
-        (sql, params), (revoke_sql, revoke_params), (invites_sql, invites_params) = (
-            ex.calls
-        )
+        (
+            (sql, params),
+            (revoke_sql, revoke_params),
+            (invites_sql, invites_params),
+            _retire,
+        ) = ex.calls
         assert "fn_member_remove(" in sql and "DELETE" not in sql.upper()
         assert params == {"ws": "ws", "u": "u2", "by": "u1"}
         # 090: the service identities the removed person minted go with them,
@@ -529,6 +596,23 @@ class TestRemoveMemberGoesThroughTheDoor:
         assert "workspace_id = :ws" in invites_sql
         assert "state = 'pending'" in invites_sql
         assert invites_params == {"ws": "ws", "u": "u2"}
+
+    async def test_a_removal_retires_the_persons_live_states_in_that_workspace(
+        self,
+    ):
+        """`07` §45: once the door answers removed, one retire selecting this
+        person AND this workspace, whatever the provider."""
+        from src.services.target import workspaces
+
+        ex = self._Exec(("removed", "member"))
+        await workspaces.remove_member(
+            ex, workspace_id="ws", user_id="u2", by_user_id="u1"
+        )
+        _door, _revoke, _invites, (sql, params) = ex.calls
+        assert sql.startswith("UPDATE oauth_states SET consumed_at = now()")
+        assert "consumed_at IS NULL" in sql and "provider" not in sql
+        assert "user_id = :uid" in sql and "workspace_id = :ws" in sql
+        assert params == {"uid": "u2", "ws": "ws"}
 
     async def test_a_refused_removal_revokes_nothing(self):
         from src.services.target import workspaces

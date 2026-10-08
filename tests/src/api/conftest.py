@@ -22,13 +22,14 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
+from starlette.types import ASGIApp
 
 from src.api.app import create_app
 from src.api.principal import COOKIE, Principal, current_principal
 from src.api import principal
 from src.api.routes import auth
 from src.config.settings import settings
-from src.services.target import google_oidc, tenant_resolution
+from src.services.target import google_oidc, health_reads, tenant_resolution
 from src.services.target.unit_of_work import asyncpg_url
 
 PRINCIPAL = Principal(
@@ -85,6 +86,65 @@ def cookie_value(resp: httpx.Response, name: str) -> str:
     return cookie_header(resp, name).split(";", 1)[0].split("=", 1)[1]
 
 
+def post_body(
+    client: httpx.Client,
+    path: str,
+    body: bytes,
+    *,
+    streamed: bool = False,
+    content_type: str | None = None,
+) -> httpx.Response:
+    """POST *body* to *path*, its length declared — or, *streamed*, sent as
+    two chunks with no Content-Length, which is checked so that case cannot
+    pass on the declared path."""
+    half = len(body) // 2
+    content = iter([body[:half], body[half:]]) if streamed else body
+    headers = {"Content-Type": content_type} if content_type else {}
+    request = client.build_request("POST", path, content=content, headers=headers)
+    assert ("content-length" in request.headers) is not streamed
+    return client.send(request)
+
+
+async def post_messages(
+    app: ASGIApp,
+    path: str,
+    chunks: list[bytes],
+    *,
+    declared: bool = False,
+    content_type: str | None = None,
+) -> tuple[httpx.Response, list[int]]:
+    """POST *chunks* to *app* at *path*, each as its own ``http.request``
+    message, which `post_body` cannot do: the TestClient joins a streamed body
+    into one message. No Content-Length is sent unless *declared*, which is
+    checked. Returns the response and the size of each non-empty body message
+    the app received, so a test can show that more than one arrived."""
+    received: list[int] = []
+
+    async def recording(scope, receive, send):
+        async def recorded():
+            message = await receive()
+            if message["type"] == "http.request" and message.get("body"):
+                received.append(len(message["body"]))
+            return message
+
+        await app(scope, recorded, send)
+
+    async def body():
+        for chunk in chunks:
+            yield chunk
+
+    headers = {"Content-Type": content_type} if content_type else {}
+    if declared:
+        headers["Content-Length"] = str(sum(map(len, chunks)))
+    transport = httpx.ASGITransport(app=recording)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        resp = await client.post(path, content=body(), headers=headers)
+    assert ("content-length" in resp.request.headers) is declared
+    return resp, received
+
+
 class FakeSession:
     """Refuses SQL. A test that trips this needs a patched seam, not a query."""
 
@@ -105,6 +165,18 @@ class FakeEngine:
         yield self.session
 
     connect = begin
+
+
+@pytest.fixture
+def stubbed_bound(monkeypatch):
+    """The health reads' statement cap, stubbed so a route test never reaches
+    SQL; its own pins are `tests/src/services/target/test_health_reads.py`
+    and `tests/scripts/test_health_reads_gate.py`."""
+
+    async def bound(executor):
+        return None
+
+    monkeypatch.setattr(health_reads, "bound", bound)
 
 
 @pytest.fixture
@@ -163,7 +235,9 @@ def tenant(monkeypatch, engine):
         log.append(("uow", workspace_id, principal.user_id))
         yield engine.session
 
-    async def gate(session, workspace_id, user_id, minimum_role="member"):
+    async def gate(
+        session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+    ):
         log.append(("gate", workspace_id, user_id, minimum_role))
         if log.refuse is not None:
             raise log.refuse

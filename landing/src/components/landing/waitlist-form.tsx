@@ -4,7 +4,9 @@ import { useRef, useState, useSyncExternalStore } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { trackEvent, UTM_KEYS } from "@/lib/analytics"
+import { trackEvent } from "@/lib/analytics"
+import { waitlistRefusal } from "@/lib/waitlist-refusal"
+import { type UtmKey, utmFrom } from "@/lib/utm"
 
 interface WaitlistFormProps {
   variant?: "hero" | "footer"
@@ -14,17 +16,13 @@ interface WaitlistFormProps {
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const STORAGE_KEY = "storydump-waitlist-registered"
 
-type FormStatus = "idle" | "submitting" | "success" | "error" | "duplicate"
+// "busy": the list is full for a minute. Shown like an error, but the
+// address is fine, so the field is not marked invalid.
+type FormStatus = "idle" | "submitting" | "success" | "error" | "busy" | "duplicate"
 
-function getUtmParams(): Record<string, string> {
+function getUtmParams(): Partial<Record<UtmKey, string>> {
   if (typeof window === "undefined") return {}
-  const params = new URLSearchParams(window.location.search)
-  const utm: Record<string, string> = {}
-  for (const key of UTM_KEYS) {
-    const val = params.get(key)
-    if (val) utm[key] = val
-  }
-  return utm
+  return utmFrom(new URLSearchParams(window.location.search))
 }
 
 /**
@@ -117,9 +115,10 @@ export function WaitlistForm({
         trackEvent("Waitlist Signup", { variant, ...utm })
         markRegistered()
       } else {
-        setStatus("error")
+        const refusal = waitlistRefusal(res.status, data)
+        setStatus(refusal.status)
         setMessage(data.message || "Something went wrong. Please try again.")
-        trackEvent("Waitlist Error", { reason: "server_error", variant })
+        trackEvent("Waitlist Error", { reason: refusal.reason, variant })
       }
     } catch {
       setStatus("error")
@@ -157,7 +156,7 @@ export function WaitlistForm({
       onSubmit={handleSubmit}
       className={cn("w-full scroll-mt-20", className)}
     >
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:rounded-full sm:border sm:border-ink sm:bg-white sm:p-1.5 sm:pl-5">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:rounded-full sm:border sm:border-ink sm:bg-white sm:p-1.5 sm:pl-5 sm:has-[input:focus-visible]:ring-2 sm:has-[input:focus-visible]:ring-ring sm:has-[input:focus-visible]:ring-offset-2">
         <label htmlFor={`waitlist-email-${variant}`} className="sr-only">
           Email address
         </label>
@@ -173,28 +172,36 @@ export function WaitlistForm({
           }}
           onChange={(e) => {
             setEmail(e.target.value)
-            if (status === "error") setStatus("idle")
+            if (status === "error" || status === "busy") setStatus("idle")
           }}
           disabled={status === "submitting"}
           className="h-12 rounded-full sm:flex-1 border-ink bg-white px-5 text-base sm:h-10 sm:border-0 sm:px-0 sm:shadow-none sm:focus-visible:ring-0"
           aria-invalid={status === "error" || undefined}
           aria-describedby={
-            status === "error" ? `waitlist-error-${variant}` : undefined
+            status === "error" || status === "busy"
+              ? `waitlist-error-${variant}`
+              : undefined
           }
           required
         />
         <Button
           type="submit"
           disabled={status === "submitting"}
-          className="h-12 rounded-full bg-ink px-6 text-base font-semibold text-white hover:bg-ink/85 sm:h-11"
+          size="xl"
+          className="text-base max-sm:h-12"
         >
           {status === "submitting" ? "Joining…" : "Join the waitlist"}
         </Button>
       </div>
-      {status === "error" && (
+      {(status === "error" || status === "busy") && (
         <p
           id={`waitlist-error-${variant}`}
-          className="mt-2 text-sm font-medium text-[#9f1d1d]"
+          className={cn(
+            "mt-2 text-sm font-medium text-balance text-alarm",
+            // The closing form sits on the orange band, where the alarm red
+            // reads at 2.5:1: a white chip keeps it red, and an error, at 7.9:1.
+            variant === "footer" && "inline-block rounded-lg bg-white px-3 py-1.5"
+          )}
           role="alert"
         >
           {message}

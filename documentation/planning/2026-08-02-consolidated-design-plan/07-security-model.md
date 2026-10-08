@@ -23,7 +23,7 @@ CREATE TRIGGER tg_touch_session_tokens BEFORE UPDATE ON session_tokens
 ```
 
 - **The flow (server-side confidential client — X.3):** `GET /auth/google` issues an anonymous `oauth_states` row (`purpose='signin'`, §2) and redirects to Google's authorization endpoint; the callback exchanges the code server-side (the client secret never leaves the server), verifies the `id_token` — `iss`, `aud`, `exp`, the `nonce` binding stated in §2 and the presence of `sub` — and signs the user in. **As built (`src/services/target/google_oidc.py`): the token is verified by its claims, not by signature — deliberately** (OIDC Core §3.1.3.7: a token received directly from the token endpoint over the egress-validated TLS may be accepted without signature validation), so there is no JWKS fetch and no discovery call; the design's JWKS path (`https://www.googleapis.com/oauth2/v3/certs`, verified against the live discovery document 2026-08-04 — R4 finding) was not taken. The egress allow-list holds `oauth2.googleapis.com` (token, revoke) and `www.googleapis.com` (Drive), **not** `accounts.google.com`, which is only the browser's authorize redirect. The OIDC verification utility is the only genuinely new code class in this ruling, and it is small.
-- **Identity (D32 — `sub`, never email):** success upserts `user_identities(provider='google', external_id = <OIDC sub>, verified_at = now())`, creating the `users` row on first sign-in. `external_id` is the provider's immutable subject — **never the email address**: emails are mutable and recyclable, so keying identity on email is an account-takeover primitive. The verified email claim is metadata, refreshed at each sign-in; `users.primary_email` fills from it when NULL; a claim colliding with a *different* user's `primary_email` surfaces as an error — it never merges accounts (D35).
+- **Identity (D32 — `sub`, never email):** success upserts `user_identities(provider='google', external_id = <OIDC sub>, verified_at = now())`, creating the `users` row on first sign-in. `external_id` is the provider's immutable subject — **never the email address**: emails are mutable and recyclable, so keying identity on email is an account-takeover primitive. The verified email claim is metadata, refreshed at each sign-in; `users.primary_email` follows it whenever it changes (#1579; it used to fill only when NULL). A claim colliding with a *different* user's `primary_email` never merges accounts (D35): a new subject is refused with an error, and a returning one signs in keeping its stored address, the clash logged.
 - **Sessions:** opaque random 256-bit value in an httpOnly/SameSite=Lax/secure cookie; only the hash is stored; verification is one indexed lookup + expiry/revocation check; sliding renewal, **capped by an absolute lifetime** — `settings.SESSION_MAX_AGE_SECONDS` (30 days, the cookie's Max-Age) counted from `created_at`: an older session is refused as expired however recently it was used, and the slide never carries `expires_at` past `created_at` + the cap (`sessions._RESOLVE`). Sign-out and admin revoke set `revoked_at`; **sign out everywhere** (`POST /auth/signout?everywhere=true`, Settings › General) sets it on every live session of the presenting user (`sessions.revoke_all_for_user`), keyed on the presented session so a dead one reaches nothing. **A cookie on a state-changing request must show its origin:** any method but GET/HEAD/OPTIONS carried by the cookie (no bearer) needs an `Origin` — else a `Referer` origin — equal to `WEB_APP_URL`'s origin or the API's own, or it answers 403 `cross_site` before the session is read (`principal.require_same_origin`), because `SameSite=Lax` admits every sibling host of the registrable domain; bearer credentials are not ambient and are not checked. There is no JWT for human web sessions — and none exists anywhere on `main` today (pass-4 anchor: the legacy tier's HMAC WebApp credential, `src/utils/webapp_auth.py`, was deleted in #1216); the machine/consumer surfaces carry `workspace_id` in their signed payloads (born workspace-aware at X.2 — the pass-4 dual-shape migration window died with FC-7), and first-party service auth is §6's `service_tokens`.
 - **API tokens — the second credential (plan `2026-09-15-cli-v2`, phase 01; §6, §23):** a bearer value that starts with `sdt_` is an API token, never a session — the prefix routes it to the token resolver, every other bearer value and the cookie stay on the session path byte for byte. Two principal kinds on one table: a **person-bound** token (`user_id`) acts as that person across their memberships, never above the membership role, over the `cli` channel, and leaves one direct `cli_command` audit row (the token's id and name, the command's idempotency reference) beside the port's own transition row — the two share the transaction's `now()`; a **workspace service identity** (`workspace_id`) reads its one workspace under its own name and never writes in this release (F10). Tokens are admitted to an explicit route allowlist (`src/api/principal.py` `TOKEN_ROUTES`: `/me/principal`, own-token list and revoke, a workspace's token list and revoke, the command route, the Queue read (`GET /workspaces/{ws}/intents`, the CLI's `planned`, gated as the `/ops` views are by `principal.reader_session`), and the nine `/ops` read views — `src/api/routes/ops.py`, seven of them each one bounded tenant-scoped query proven as `svc_ingress` and as a role that bypasses RLS; `posture` and `health` are not tenant data and disclose deployment internals — the migration ledger, the RLS state of every tenant table, the SECURITY DEFINER census, the connected role; the pool, the tap counts, the webhook — so they answer only a person listed in the deployment's `OPS_USER_IDS`, on a session or a person-bound token, and refuse a service identity and everyone else with `reason: not_ops` (#1570, reversing fork F7's "any authenticated principal"; public `/health` keeps only status, version and commit) — every other route depends on `require_session` and refuses a token with `reason: session_required`, so a token can never mint a token, accept an invitation, or drive an OAuth leg. Minting is a signed-in session's act on the web (Settings › API tokens): the secret is shown once and stored as its SHA-256; default expiry 90 days, ceiling a year; revocation sets `revoked_at`; every authenticated use stamps `last_used_at` (throttled like the session slide; a refused attempt rolls back); a revoked, expired or unknown token and a disabled person's token all answer 401 without saying which; a live token asking for what it may not have answers 403 **with** its reason (`readonly_token`, `wrong_workspace`, `session_required`, `not_ops`) so the CLI says the right sentence. The client keeps the secret in the OS keychain by default, failing closed (fork F2).
 - **Pre-auth rate limiting:** the sign-in endpoints ride the `preauth_ip` scope (`rate_counters`, `02` §6; the `05` pre-auth row; the client-IP source rule is stated once at the `02` §6 table) — a mechanism deliberately distinct from the per-workspace S.2 admission, which is fail-closed on tenant context and structurally cannot serve unauthenticated requests. The OTP-specific scopes died with OTP.
@@ -69,10 +69,10 @@ CREATE TRIGGER tg_touch_oauth_states BEFORE UPDATE ON oauth_states
 
 RLS class: `session_tokens`, `oauth_states`, and `service_tokens` are **auth-plane tables** — role-scoped `USING (true)` policies for `svc_ingress` and the sweep door's NOLOGIN owner (`02` §7), no tenant RLS, because they are the door tenant context walks through (`02` §7 states the class; their expiry/retention classes are `05` rows, and their sweep runs only through `fn_auth_plane_sweep` — the `02` §7 door, whose NOLOGIN owner carries the enumerated auth-plane policies, driven on the reaper/retention schedule; the door shipped in 059, but **no executor drives it yet** — the three tables are not swept; #1327).
 
-- **Issuance, by purpose.** `connect`/`reconnect`: only from an authenticated session whose user holds admin+ in `workspace_id` (checked at issue AND at callback — the row pins both, so a callback cannot be replayed into a different workspace). `link`: only from an authenticated session; the row pins the user, and the callback attaches the new identity to exactly that user (D35). `signin`: anonymous — that is its purpose; its guards are the next bullet plus the `preauth_ip` admission (§1). `bind` — an admin's session, at the admin floor of the pinned workspace, and only after that admin has linked their own Telegram (§13).
+- **Issuance, by purpose.** `connect`/`reconnect`: only from an authenticated session whose user holds, in `workspace_id`, the floor of the command the purpose stands for (`commands.ROLE_FLOOR`: `connect_account` for `connect`, `reconnect_account` for `reconnect`, on every provider; both admin, and free to diverge), checked at issue AND at callback (the row pins both, so a callback cannot be replayed into a different workspace). `link`: only from an authenticated session; the row pins the user, and the callback attaches the new identity to exactly that user (D35). `signin`: anonymous — that is its purpose; its guards are the next bullet plus the `preauth_ip` admission (§1). `bind` — an admin's session, at the admin floor of the pinned workspace, and only after that admin has linked their own Telegram (§13).
 - **Anonymous-state CSRF (`signin` — the replacement for session binding):** the issue response sets a short-TTL httpOnly cookie carrying a random nonce and stores its hash in `cookie_nonce_hash`; the callback requires the double-submit (cookie present, hash matches the row) — a cross-site victim's browser would carry no matching cookie for an attacker-supplied state. The id_token is additionally bound to the row via the OIDC `nonce` claim: the authorization request sends `nonce = SHA256(state)`, and verification requires the claim to equal the hash of the state the callback presented — a token minted for one state row cannot be replayed against another. Everything else — one-shot CAS consume, TTL, reaper — is the same machinery every purpose uses.
 - Callback consume is one-shot CAS (`… WHERE state = :s AND consumed_at IS NULL AND expires_at > now() RETURNING …`); a consumed/expired/unknown state is rejected cold. For session-bound purposes CSRF safety comes from the state being unguessable, single-use, and session-bound; for `signin` it comes from the cookie-nonce + OIDC-nonce pair above.
-- **The start-token door (one door, two named purposes — D33/D35):** the Telegram deep link `t.me/<bot>?start=<payload>` serves two flows, kept apart by a payload prefix that names the purpose. `inv-<token>` resolves **only** against `workspace_invitations.token_hash` (membership — `02` §1, `06` §2); `link-<state>` resolves **only** against `oauth_states` rows with `purpose='link', provider='telegram'` — the state value *is* the one-shot start token (unguessable, stored, CAS-consumed; a stateless signed token could not be one-shot). `/start` with a link token binds nothing: it shows the opener, in their private chat, whose account the link belongs to (a masked email) with Confirm and Cancel; a Confirm tap by the same Telegram user consumes the state and binds the identity to the row's pinned user (readiness review, 2026-10-02: a one-step link let anyone attach someone else's Telegram to their own account). An invite token cannot link identities and a link token cannot grant membership — enforced by disjoint lookup tables, not convention.
+- **The start-token door (one door, two named purposes — D33/D35):** the Telegram deep link `t.me/<bot>?start=<payload>` serves two flows, kept apart by a payload prefix that names the purpose. `inv-<token>` resolves **only** against `workspace_invitations.token_hash` (membership — `02` §1, `06` §2); `link-<state>` resolves **only** against `oauth_states` rows with `purpose='link', provider='telegram'` — the state value *is* the one-shot start token (unguessable, stored, CAS-consumed; a stateless signed token could not be one-shot). `/start` with a link token binds nothing: it shows the opener, in their private chat, whose account the link belongs to (a masked email) with Confirm and Cancel; a Confirm tap by the same Telegram user consumes the state and binds the identity to the row's pinned user (readiness review, 2026-10-02). An invite token cannot link identities and a link token cannot grant membership — enforced by disjoint lookup tables, not convention.
 - **Reconnect binding:** `purpose='reconnect'` pins the exact credential owner being replaced; the callback transaction swaps `encrypted_payload` in place (same row id — no window where the account has zero credentials) and flips `ig_accounts.state` `reauth_required → active`. **Concurrent reconnects — "last issued wins", made true of the schema (pass 3; R3 review §6.6: the pass-2 "last consumed wins" claim was false — independently issued state rows never consumed one another, so both callbacks could land):** issuing a reconnect state **invalidates prior live states for the same target in the issue transaction** — `UPDATE oauth_states SET consumed_at = now() WHERE purpose = 'reconnect' AND reconnect_target = :target AND consumed_at IS NULL` — so at most one live state exists per target at any commit; the callback CAS consumes it one-shot, and a superseded state's callback finds it consumed and shows "a newer reconnect superseded this one". Connect-vs-reconnect races on the same account still collapse on `uq_credential_per_account`.
 
 ## §3. Credential encryption and key rotation (review A §5.12; L.6 + a standing runbook)
@@ -85,7 +85,7 @@ RLS class: `session_tokens`, `oauth_states`, and `service_tokens` are **auth-pla
 ## §4. Audit integrity and retention (review A §5.13)
 
 - **Append-only in the database:** no role holds UPDATE on `audit_events`; DELETE only via `svc_maintenance`'s retention sweep (`02` §7). The `02` §4 audit trigger's GUC requirement means every state change carries a named actor — including break-glass psql sessions (below).
-- **Retention:** `05` table — audit rows kept 400 days, then swept via `fn_retention_batch` (`02` §7). **Not running as of 2026-09-20:** the `retention_sweep` executor is unbuilt (`work_loop.UNBUILT_KINDS`) and the clock never mints it, so nothing ages out of `audit_events`, `jobs`, `channel_outbox` or `archive` today — including 078's snapshots, whose 90-day clock the same class owns. Before each sweep batch is deleted it is COPY-exported **into the in-database `archive` schema** as a batch table (`05` §DR names the location; the rationale and the properties that decided it are `03` D30); **the sweep aborts if the export fails — export-or-abort, never delete-then-hope**. No login role holds any grant on the `archive` schema: writes happen only inside `svc_maintenance`-owned door bodies and `svc_migration` contract migrations; reads are the break-glass runbook (§5). Aged archive tables are dropped *as tables* per their `05` retention rows. Queryability of archives is explicitly not a v1 feature.
+- **Retention:** `05` table — audit rows kept 400 days, then swept via `fn_retention_batch` (`02` §7). **Not running for this class:** the `retention_sweep` executor runs only the `rate_counters` class (7 days, since 2026-10-03), so nothing ages out of `audit_events`, `jobs`, `channel_outbox` or `archive` today — including 078's snapshots, whose 90-day clock the same class owns. Before each sweep batch is deleted it is COPY-exported **into the in-database `archive` schema** as a batch table (`05` §DR names the location; the rationale and the properties that decided it are `03` D30); **the sweep aborts if the export fails — export-or-abort, never delete-then-hope**. No login role holds any grant on the `archive` schema: writes happen only inside `svc_maintenance`-owned door bodies and `svc_migration` contract migrations; reads are the break-glass runbook (§5). Aged archive tables are dropped *as tables* per their `05` retention rows. Queryability of archives is explicitly not a v1 feature.
 - **Redaction rule:** `detail` JSONB never contains secrets, tokens, invitation-token values, or `provider_account_ref` (internal UUIDs only); enforced by the writer helper everything routes through + a test that greps captured audit output in the harness. Tamper evidence beyond grants (hash chains, signed exports) is explicitly not v1 — the stated integrity level is "no role can rewrite history without leaving a grant violation," which is what the grant matrix delivers.
 
 ## §5. Existence-oracle and log hygiene (review A §5.14)
@@ -2144,8 +2144,10 @@ and the outbox records what happened to a row the same way. It ends only the clo
 singletons, its slot, refresh and reauth legs, the sender sweep's `deliver_outbox`, and the two
 sync kinds, whose source it re-arms for tomorrow, as `work_loop._rearm_source` does, because a
 sync's mint disarms it. Nothing re-mints the others (`publish_pipeline`, `send_email`,
-`offboard_workspace`, `revoke_workspace_credentials`, `retention_sweep`, `reencrypt_credentials`),
-so ending one would unblock no successor and only lose its work; they are left as they were. For
+`offboard_workspace`, `revoke_workspace_credentials`, `reencrypt_credentials`), so ending one
+would unblock no successor and only lose its work; they are left as they were. The leg also
+leaves `retention_sweep`, which nothing minted when it was written: since 2026-10-03 the clock
+mints it hourly, and a late one still runs, since `fn_claim_job` reads no deadline. For
 the kinds it ends, the leg is the worker's spent-budget path without the tenant notice, which that
 path calls a courtesy, not the record.
 
@@ -2619,12 +2621,9 @@ REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 
 ### §33. A removal sticks, and a removed admin's tokens go with them (090)
 
-**Why:** the real-user readiness review (2026-10-02) found two ways a removal did not hold.
-`fn_member_remove` (§14) deleted the membership row, and `fn_group_member_seen` (§14) inserted a
-member for any linked user seen in the bound group, so a person an admin removed who was still in
-the group was a member again the next time they spoke there. And a workspace service identity
-carried no minter, so the tokens a removed admin had made kept reading the workspace and nobody could
-tell whose they were.
+**Why:** a removal holds, and the removed person's workspace tokens go with it (real-user readiness
+review, 2026-10-02). `fn_member_remove` (§14) is the revoke, and `fn_group_member_seen` (§14), the
+Telegram group's join path, honours it until an invitation brings the person back.
 
 **The removal is recorded.** `workspace_member_removals` holds one row per removed person and
 workspace. `fn_member_remove` writes it beside the delete; `fn_group_member_seen` refuses a removed
@@ -3099,4 +3098,562 @@ REVOKE CREATE ON SCHEMA public FROM svc_membership;
 REVOKE ALL ON FUNCTION fn_identity_unlink(uuid, text) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION fn_identity_unlink(uuid, text) TO svc_ingress;
+```
+
+### §43. The waitlist is written by the API, not by the site (100)
+
+**Why:** the landing site's waitlist form inserted into a Drizzle-managed `waitlist_signups` table
+through its own `DATABASE_URL`, the one write in the system that did not go through the API, with
+a credential that reached every table. Production never had that table, so the form failed every
+signup. The owner ruled "one system, one writer" (2026-10-03): the API owns the write, and the
+site holds no database credential.
+
+**The table.** `waitlist_entries` is global, not tenant-plane: a visitor joining the waitlist has
+no user and no workspace. Its address rule is §35's, with a dot in the domain, no control, bidi-isolate, interlinear or tag characters, and at most 254 characters, and `utm`
+records the campaign the visitor came from, an object bounded at 2 KB. RLS is on and the one
+policy is `svc_ingress`'s INSERT, which is the route's only statement (`POST /public/waitlist`):
+the API can add an address and cannot read, change or remove one, so the public endpoint is no
+oracle for who is on the list. The owner reads the list as the database owner and admits people
+through `signup_admissions` (§35).
+
+**The site's secret.** The API sees only the site's server, so without more a limit keyed on the
+caller is one counter shared by every visitor, and one script spends it for everyone. With
+`WAITLIST_SITE_SECRET` set on both tiers, the site sends the secret and the visitor's address as
+Vercel reports it (Vercel overwrites `x-real-ip` and `x-forwarded-for`, so a visitor cannot choose
+it); the API compares the secret in constant time, refuses a call without it before reading the
+body, and keys the counter (10 a minute) and the per-address slot share on the visitor. Every
+accepted signup through the site, a repeat address too, also spends one counter shared by all
+visitors (600 a minute, spent after the insert so a refused body costs nothing; past it a
+savepoint rolls the row back and keeps the visitor's own spend, and the 429 carries `reason: full`,
+which the site shows as "busy, try again in a minute"), so a leaked secret, which lets a
+caller name a fresh visitor each time, still meets a ceiling on the table's growth. A full
+ceiling is one log line and one Telegram message to the linked operators at most every ten
+minutes per process, counting the refusals between, with no address or visitor in either. The waitlist
+counts every client, visitor or peer, by its IPv6 /64, never its single address. The
+visitor key holds only while Vercel is the first hop: off Vercel a client sets `x-real-ip` itself,
+and behind another CDN every visitor of one edge shares one key. Unset on
+the API it behaves as before whatever the site sends, which is what lets the owner set the site
+first. A matched call with no usable address falls back to the peer and the shared counter, and still
+spends the ceiling; that counter's 429 is `full` too, since every such call shares it, with a
+notice of its own on the same terms as the ceiling's.
+
+**What it does not adopt.** A hand-made, empty `waitlist_signups` and the NOLOGIN
+`waitlist_writer` role were created in production as a stopgap on 2026-10-02 and never served a
+signup. The new name keeps this CREATE from meeting that table at the predeploy; the owner drops
+both by hand once the API serves the form.
+
+```sql
+-- [§43 the waitlist is written by the API, not by the site]
+
+CREATE TABLE waitlist_entries (
+  email     text PRIMARY KEY CONSTRAINT ck_waitlist_entries_email CHECK (
+              email = lower(email) AND length(email) <= 254
+              AND email ~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
+              AND email !~ '[[:cntrl:]]'
+              AND email !~ '[\u061c\u2066-\u2069\ufff9-\ufffb\U000e0000-\U000e007f]'
+              AND email !~ '[\u0080-\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]'),
+  joined_at timestamptz NOT NULL DEFAULT now(),
+  utm       jsonb CONSTRAINT ck_waitlist_entries_utm CHECK (
+              utm IS NULL OR (jsonb_typeof(utm) = 'object' AND length(utm::text) <= 2048))
+);
+
+ALTER TABLE waitlist_entries ENABLE ROW LEVEL SECURITY;
+
+GRANT INSERT ON waitlist_entries TO svc_ingress;
+
+CREATE POLICY p_ingress_waitlist ON waitlist_entries FOR INSERT TO svc_ingress WITH CHECK (true);
+```
+
+### §44. The outbox records why a delivery failed (101, #1482)
+
+**Why:** `settle` sorts a failed send by type: a 429 goes back to `pending`, a gone destination and
+a refused message end `failed`, anything else is `ambiguous`. Then it writes the state and nothing
+else, so a burst of failures leaves no cause in the database. Production's 21 failed rows of
+2026-09-12 (all card edits, 16 of them in one hour) cannot say whether the chat was gone, the
+message refused or the token dead. And nothing counted failures, so nothing could alert on them.
+
+**The record.** Three nullable columns on `channel_outbox`, one fact each: the class of the row's
+LAST failed attempt (`last_failure_class`, the closed list `vocabulary.OUTBOX_FAILURE_CLASSES`
+copies), the provider's code for it (`last_error_code`: Telegram's `error_code`, NULL when no answer
+came back) and when (`last_failed_at`). They describe the last failure, not how the row ended, so a
+later success does not clear them. `settle` writes them in the same CAS as the state change, so a
+fenced writer records nothing. `credential_dead` is a dead token's 401, which the outbox had filed
+as a lost response; this section records it and moves no row differently (#1493 then fails it at
+once). The index is partial on the rows that have ever failed, for the door's one predicate.
+
+**The doors.** §24's shape: owned by `svc_maintenance`, EXECUTE for `svc_ingress` (the
+`/health/delivery` route) and `svc_worker`, the window clamped to [60 s, 24 h], counts only.
+`fn_health_outbox_failures` counts the rows whose last failure falls in the window, by class and
+code, and how many of them ended `failed` or sit `ambiguous`. That is the alerting count; a 429 is a
+deferral and only context. `fn_health_outbox_sent` counts the rows sent in the same window, so an
+hour with no failures and no traffic cannot read as an hour that delivered.
+
+```sql
+-- [§44 the outbox records why a delivery failed]
+
+ALTER TABLE channel_outbox ADD COLUMN last_failure_class TEXT NULL
+  CONSTRAINT ck_outbox_failure_class
+  CHECK (last_failure_class IN ('rate_limited','destination_gone','refused','credential_dead','ambiguous'));
+
+ALTER TABLE channel_outbox ADD COLUMN last_error_code INTEGER NULL;
+
+ALTER TABLE channel_outbox ADD COLUMN last_failed_at TIMESTAMPTZ NULL;
+
+CREATE INDEX ix_outbox_last_failed ON channel_outbox (last_failed_at) WHERE last_failed_at IS NOT NULL;
+
+GRANT CREATE ON SCHEMA public TO svc_maintenance;
+
+CREATE FUNCTION fn_health_outbox_failures(p_window_seconds integer)
+RETURNS TABLE (o_failure_class text, o_error_code integer, o_rows bigint, o_alerting_rows bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT last_failure_class, last_error_code, count(*),
+         count(*) FILTER (WHERE state IN ('failed', 'ambiguous'))
+    FROM channel_outbox
+   WHERE last_failed_at >= now() - make_interval(secs => LEAST(GREATEST(p_window_seconds, 60), 86400))
+   GROUP BY last_failure_class, last_error_code
+$$;
+
+COMMENT ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) IS
+  'Outbox rows whose last failure falls in the window, every tenant''s included, by class and code; o_alerting_rows ended failed or sit ambiguous. Counts only. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (101, #1482).';
+
+ALTER FUNCTION fn_health_outbox_failures(p_window_seconds integer) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_outbox_failures(p_window_seconds integer) TO svc_ingress, svc_worker;
+
+CREATE FUNCTION fn_health_outbox_sent(p_window_seconds integer)
+RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  SELECT count(*) FROM channel_outbox
+   WHERE state = 'sent'
+     AND updated_at >= now() - make_interval(secs => LEAST(GREATEST(p_window_seconds, 60), 86400))
+$$;
+
+COMMENT ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) IS
+  'Outbox rows sent in the window, every tenant''s included: the traffic the failure count is read against. Window clamped to [60 s, 24 h]. Owned by svc_maintenance; EXECUTE for svc_ingress and svc_worker (101, #1482).';
+
+ALTER FUNCTION fn_health_outbox_sent(p_window_seconds integer) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_health_outbox_sent(p_window_seconds integer) TO svc_ingress, svc_worker;
+
+REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
+```
+
+### §45. A removal holds: the remove door checks its caller, and the record is the membership doors' alone (102)
+
+**The invariant.** A member is removed only by an owner or admin of their workspace, acting in that
+workspace, and the removal record (`workspace_member_removals`, §33) is read and written by the
+membership doors alone.
+
+**The remove door checks its own caller.** `fn_member_remove` refuses, before anything else, a
+workspace that is not the caller's claimed tenant (`app.tenant_id`) or a remover (`p_by_user`) who
+is not an owner or admin of it. The command port already holds its caller to both, and the door now
+checks them itself. The refusal is a `RAISE` known by its message, as `fn_offboard_finalize`'s are,
+so SQLSTATE 42501 stays the grant and policy denials' alone. CREATE OR REPLACE keeps the door's
+signature, owner (`svc_membership`) and EXECUTE grant (`svc_ingress`); its comment is restated to
+say what the door checks.
+
+**The join door's path.** §14 and §33 pinned `fn_group_member_seen` to `pg_catalog, public`.
+PostgreSQL searches `pg_temp` first for relations unless the path names it, so this file names it
+last, as `fn_member_remove`'s path already does, and every unqualified name in the door resolves in
+`pg_catalog` or `public`. `ALTER FUNCTION … SET` changes the setting alone and leaves §33's body as
+it is.
+
+**The record is the doors' alone.** §33 granted the runtime logins SELECT on the record under a
+tenant read policy (`p_tenant_read`). Nothing outside the two doors reads it, and the doors run as
+`svc_membership`, so this file revokes that SELECT and drops that policy: `svc_membership`'s grant
+and its row-open policy (`p_member_removals`) are the table's only access. RLS stays enabled, and
+the table keeps the one policy the tenancy gate asks of it.
+
+**Earlier removals.** The backfill reads the governance audit trail (`entity_kind` `member`, op
+`DELETE`, with the workspace and the person). For everyone who is not a member again and whose
+workspace and account still exist, it takes the latest removal and records it when another person
+made it (`actor_kind` `user`, not the member themselves), naming the remover where that account
+still exists. A record the door already wrote is kept (`ON CONFLICT DO NOTHING`).
+
+**The invitations they outrank.** After the backfill, §41's one-time revoke statement runs again,
+unchanged: a pending invitation whose inviter has a removal record in its workspace and is not a
+member there again, and one addressed (by email or Telegram id) to a person removed from its
+workspace after it was sent, are revoked. The doors refuse both (§41).
+
+**Outside the doors.** `remove_member` retires the removed person's live link states for the
+workspace (the `oauth_states` rows naming both the person and the workspace: the group bind and the
+Drive and Instagram connects) in the same unit of work as §33's token revoke, and the Members card
+says that the group does not add a removed person back unless they are invited again.
+
+```sql
+-- [§45 a removal holds]
+
+REVOKE SELECT ON workspace_member_removals FROM svc_ingress, svc_worker;
+
+DROP POLICY p_tenant_read ON workspace_member_removals;
+
+INSERT INTO workspace_member_removals (workspace_id, user_id, removed_by_user_id, removed_at)
+SELECT latest.workspace_id, latest.entity_id, u.id, latest.created_at
+  FROM (SELECT DISTINCT ON (e.workspace_id, e.entity_id)
+               e.workspace_id, e.entity_id, e.actor_kind, e.actor_user_id, e.created_at
+          FROM audit_events e
+         WHERE e.entity_kind = 'member'
+           AND e.detail ->> 'op' = 'DELETE'
+         ORDER BY e.workspace_id, e.entity_id, e.created_at DESC, e.id DESC) latest
+  LEFT JOIN users u ON u.id = latest.actor_user_id
+ WHERE latest.actor_kind = 'user'
+   AND latest.actor_user_id IS DISTINCT FROM latest.entity_id
+   AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = latest.workspace_id)
+   AND EXISTS (SELECT 1 FROM users p WHERE p.id = latest.entity_id)
+   AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                    WHERE m.workspace_id = latest.workspace_id AND m.user_id = latest.entity_id)
+ON CONFLICT (workspace_id, user_id) DO NOTHING;
+
+UPDATE workspace_invitations i SET state = 'revoked'
+ WHERE i.state = 'pending'
+   AND (EXISTS (SELECT 1 FROM workspace_member_removals r
+                 WHERE r.workspace_id = i.workspace_id AND r.user_id = i.invited_by_user_id
+                   AND NOT EXISTS (SELECT 1 FROM workspace_members m
+                                    WHERE m.workspace_id = i.workspace_id
+                                      AND m.user_id = i.invited_by_user_id))
+        OR EXISTS (SELECT 1 FROM workspace_member_removals r
+                     JOIN users u ON u.id = r.user_id
+                    WHERE r.workspace_id = i.workspace_id AND r.removed_at >= i.created_at
+                      AND (lower(u.primary_email) = lower(i.email)
+                           OR i.invited_tg_user_id::text IN
+                              (SELECT x.external_id FROM user_identities x
+                                WHERE x.user_id = r.user_id AND x.provider = 'telegram'))));
+
+GRANT CREATE ON SCHEMA public TO svc_membership;
+
+ALTER FUNCTION fn_group_member_seen(text, text, uuid)
+  SET search_path = pg_catalog, public, pg_temp;
+
+CREATE OR REPLACE FUNCTION fn_member_remove(p_workspace uuid, p_user uuid, p_by_user uuid)
+RETURNS TABLE (o_outcome text, o_role text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  v_role text;
+BEGIN
+  IF p_workspace IS DISTINCT FROM NULLIF(current_setting('app.tenant_id', true), '')::uuid
+     OR NOT EXISTS (SELECT 1 FROM workspace_members a
+                     WHERE a.workspace_id = p_workspace AND a.user_id = p_by_user
+                       AND a.role IN ('owner', 'admin')) THEN
+    RAISE EXCEPTION 'member removal outside the caller''s admin scope';
+  END IF;
+  IF p_user = p_by_user THEN
+    RETURN QUERY SELECT 'self'::text, NULL::text; RETURN;
+  END IF;
+  SELECT m.role INTO v_role FROM workspace_members m
+   WHERE m.workspace_id = p_workspace AND m.user_id = p_user;
+  IF v_role IS NULL THEN
+    RETURN QUERY SELECT 'not_found'::text, NULL::text; RETURN;
+  END IF;
+  IF v_role = 'owner' THEN
+    RETURN QUERY SELECT 'owner'::text, v_role; RETURN;
+  END IF;
+  DELETE FROM workspace_members m WHERE m.workspace_id = p_workspace AND m.user_id = p_user;
+  INSERT INTO workspace_member_removals (workspace_id, user_id, removed_by_user_id)
+  VALUES (p_workspace, p_user, p_by_user)
+  ON CONFLICT (workspace_id, user_id)
+  DO UPDATE SET removed_by_user_id = EXCLUDED.removed_by_user_id, removed_at = now();
+  RETURN QUERY SELECT 'removed'::text, v_role;
+END $$;
+
+COMMENT ON FUNCTION fn_member_remove(uuid, uuid, uuid) IS
+  'The revoke for every join edge (06): an admin removes a member explicitly, and the removal is '
+  'recorded so the Telegram join path cannot undo it (090). The one DELETE on workspace_members '
+  'in the system lives here (057: no login role deletes). The door checks its caller itself '
+  '(102): p_workspace must be the claimed tenant (app.tenant_id) and p_by_user an owner or admin '
+  'of it, or it raises. Outcomes: removed, not_found, owner (never removable here), self (never '
+  'through this door). SECURITY DEFINER owned by svc_membership with EXECUTE granted to '
+  'svc_ingress.';
+
+REVOKE CREATE ON SCHEMA public FROM svc_membership;
+```
+
+### §46. Every definer function pins its search_path with pg_temp last (103)
+
+**Why:** a SECURITY DEFINER function runs with its owner's rights, so every name it resolves must
+come from a schema it chose. The doors already pin `search_path`. This section makes the pinned path
+`pg_catalog, public, pg_temp` everywhere: pg_temp named, and LAST, as PostgreSQL's documentation asks
+of definer functions ("Writing SECURITY DEFINER Functions Safely").
+
+**The form.** One `ALTER FUNCTION ... SET search_path` per door, written out: the 33 SECURITY DEFINER
+functions in `public`, by signature. No body is restated, so a door that a later file re-creates
+keeps its own CREATE's path, and the order in which files merge does not matter.
+
+**The invariant, and what holds it.** A door created after this section names the path in its own
+CREATE. The census in `tests/scripts/test_rls_runtime_harness.py` reads `pg_proc.proconfig` for every
+definer function in `public`, and fails on any that lacks it.
+
+```sql
+ALTER FUNCTION fn_auth_plane_sweep(interval, interval, interval, integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_claim_job(text, text, interval, integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_clock_tick(integer, interval, jsonb) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_extend_leases(uuid[], interval) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_group_member_seen(text, text, uuid) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_destinations() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_oldest_tenant_wait() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_oldest_tenant_wait_named() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_outbox_failures(integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_outbox_pending() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_outbox_sent(integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_posting_freshness() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_publish_attempts() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_ready_lanes() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_health_scheduling_lag() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_identity_unlink(uuid, text) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_invitation_accept(text, uuid, text, text, bigint, text) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_member_remove(uuid, uuid, uuid) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_memberships_for_caller() SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_meta_accounts_for_ref(text) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_offboard_finalize(uuid, interval) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_planned_misses(integer, interval) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_prompts_due(integer, interval) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_prompts_pending(integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_reaper_stale_approved(interval, integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_reaper_sweep(integer, interval, interval) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_reconciler_sweep(integer, interval[], interval) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_resolve_binding(text, text) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_retention_batch(text, interval, integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_sender_sweep(text, integer, numeric, numeric, integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_settled_cards(text[], integer) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_signup_admitted(text) SET search_path = pg_catalog, public, pg_temp;
+
+ALTER FUNCTION fn_stranded_sources(numeric, integer) SET search_path = pg_catalog, public, pg_temp;
+```
+
+### §47. The activation funnel door (104, #1481)
+
+**Why:** "Of the people who signed up this month, how many created a workspace, connected Instagram,
+added a folder and approved a first story, and where did the rest stop?" is a question about every
+workspace at once. The tenant-scoped tables it joins (`workspaces`, `workspace_members`,
+`ig_accounts`, `media_sources`, `audit_events`) show no runtime login another tenant's rows, and
+`users`, the one user-plane table, is open to the runtime logins row by row for sign-in, not as a
+report. One SECURITY DEFINER door answers it, owned by `svc_maintenance`, in
+counts only: five rows, one per stage, each with how many people reached it and how many stalled
+there. No id, name or email leaves it.
+
+**The stages.** The cohort is the active users created at or after `p_since`. A person's workspaces
+are the active ones they own (a `workspace_members` row with `role = 'owner'`), and each stage is
+the earliest matching row: the sign-up itself; the first owned workspace; the first `ig_accounts`
+row and the first `media_sources` row in one, in any state, since a first connect counts even when
+the account was removed later; and the first approval, an audit row the intent trigger wrote
+(`detail IS NULL`; a row a service writes by hand always carries one) moving a `post_intent` from
+`awaiting_approval` to `approved`, or to `posted`, which is a person's "Posted myself" in manual
+mode. Each stage is counted on its own, so a folder added before Instagram counts for both.
+
+**Stalled.** A person's first missing stage is the earliest of stages 2-5 they have not reached,
+and their latest activity is the latest stage they have. They are stalled when a stage is missing
+and nothing has happened for `p_stall` (72 hours unless the caller passes another window), and they
+are counted against the stage before the missing one, so the first approval's row never counts a
+stall. A person who owns no active workspace but belongs to someone else's joined a team rather
+than stopping: signed in, and never stalled.
+
+**Who may call it.** `svc_maintenance` already read `workspaces` and `audit_events` (`02`
+§7-DDL), `ig_accounts` (§24) and `media_sources` (§25); `users` and `workspace_members` are the two
+it lacked, granted here with a `USING (true)` policy each. `EXECUTE` goes to `svc_worker` alone,
+the login the operator's `psql` escape hatch connects as. `svc_ingress` never holds it, so no API
+route or CLI verb reaches the door until an operator principal exists to stand behind one (#1124).
+
+```sql
+-- [§47 the activation funnel door: how far the people who signed up got, counted across every workspace through svc_maintenance]
+-- How many people who signed up since p_since created a workspace, connected Instagram, added a
+-- folder and approved a first story, and how many stalled at each stage: a read across every
+-- workspace that no runtime login can make: the tenant-scoped tables it joins hide other tenants' rows.
+-- One definer door, counts only. svc_maintenance lacked users and workspace_members (SELECT, and a
+-- USING (true) policy each); EXECUTE for svc_worker alone, the login the psql escape hatch connects
+-- as, and for no API principal until an operator principal exists (#1124). The CREATE bracket is
+-- 062's.
+GRANT SELECT ON users TO svc_maintenance;
+
+GRANT SELECT ON workspace_members TO svc_maintenance;
+
+CREATE POLICY p_maint_users ON users FOR SELECT TO svc_maintenance USING (true);
+
+CREATE POLICY p_maint_members ON workspace_members FOR SELECT TO svc_maintenance USING (true);
+
+GRANT CREATE ON SCHEMA public TO svc_maintenance;
+
+CREATE FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval DEFAULT interval '72 hours')
+RETURNS TABLE (o_ordinal int, o_stage text, o_reached bigint, o_stalled bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  WITH owned_ws AS (
+    SELECT m.user_id, w.id AS workspace_id, w.created_at
+      FROM workspace_members m
+      JOIN workspaces w ON w.id = m.workspace_id
+     WHERE m.role = 'owner' AND w.state = 'active'
+  ), stages AS (
+    SELECT u.created_at AS s1,
+           (SELECT min(o.created_at) FROM owned_ws o WHERE o.user_id = u.id) AS s2,
+           (SELECT min(a.created_at) FROM owned_ws o
+              JOIN ig_accounts a ON a.workspace_id = o.workspace_id
+             WHERE o.user_id = u.id) AS s3,
+           (SELECT min(src.created_at) FROM owned_ws o
+              JOIN media_sources src ON src.workspace_id = o.workspace_id
+             WHERE o.user_id = u.id) AS s4,
+           (SELECT min(e.created_at) FROM owned_ws o
+              JOIN audit_events e ON e.workspace_id = o.workspace_id
+             WHERE o.user_id = u.id
+               AND e.entity_kind = 'post_intent' AND e.detail IS NULL
+               AND e.from_state = 'awaiting_approval'
+               AND e.to_state IN ('approved', 'posted')) AS s5,
+           EXISTS (SELECT 1 FROM workspace_members m
+                     JOIN workspaces w ON w.id = m.workspace_id
+                    WHERE m.user_id = u.id AND m.role <> 'owner'
+                      AND w.state = 'active') AS joined
+      FROM users u
+     WHERE u.state = 'active' AND u.created_at >= p_since
+  ), placed AS (
+    SELECT s2, s3, s4, s5,
+           CASE WHEN s2 IS NULL AND joined THEN NULL
+                WHEN s2 IS NULL THEN 2
+                WHEN s3 IS NULL THEN 3
+                WHEN s4 IS NULL THEN 4
+                WHEN s5 IS NULL THEN 5
+           END AS first_missing,
+           GREATEST(s1, s2, s3, s4, s5) < now() - p_stall AS idle
+      FROM stages
+  ), totals AS (
+    SELECT count(*) AS r1, count(s2) AS r2, count(s3) AS r3, count(s4) AS r4, count(s5) AS r5,
+           count(*) FILTER (WHERE first_missing = 2 AND idle) AS t1,
+           count(*) FILTER (WHERE first_missing = 3 AND idle) AS t2,
+           count(*) FILTER (WHERE first_missing = 4 AND idle) AS t3,
+           count(*) FILTER (WHERE first_missing = 5 AND idle) AS t4
+      FROM placed
+  )
+  SELECT k.ordinal, k.stage, k.reached, k.stalled
+    FROM totals t
+   CROSS JOIN LATERAL (VALUES (1, 'signed in', t.r1, t.t1),
+                              (2, 'workspace created', t.r2, t.t2),
+                              (3, 'Instagram connected', t.r3, t.t3),
+                              (4, 'folder added', t.r4, t.t4),
+                              (5, 'first approval', t.r5, 0::bigint))
+         AS k (ordinal, stage, reached, stalled)
+   ORDER BY k.ordinal
+$$;
+
+COMMENT ON FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval) IS
+  'The activation funnel across every workspace: one row per stage (signed in, workspace created, Instagram connected, folder added, first approval) with how many people who signed up since p_since reached it, each stage counted on its own, and how many stalled there: a later stage missing and nothing new from them in p_stall, counted against the stage before the missing one. A person who owns no active workspace but belongs to someone else''s counts as signed in and never as stalled. Counts only: no id, name or email leaves it. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_worker alone, the login the psql escape hatch connects as, and for no API principal until an operator principal exists (#1124) (104, #1481).';
+
+ALTER FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval) OWNER TO svc_maintenance;
+
+REVOKE ALL ON FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION fn_activation_funnel(p_since timestamptz, p_stall interval) TO svc_worker;
+
+REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
+```
+
+### §48. The sync retires what the publish can never fetch (105, #1545)
+
+**Why:** a Drive file the publish can never fetch stalled the folder it lives in. Two kinds do it:
+a file deleted from Drive after it synced, and a file past the publish's byte cap (8 MiB for an
+image, 40 MB for a video). The draw takes a folder's head; the fetch fails; the publish refunds and,
+by design, locks nothing; and the next slot draws the same file, until someone taps Skip. Nothing
+retired a single file and nothing recorded size, so §32's `item_unsupported` could never fire for
+one. The sync is where Drive's state enters, so that is where this is fixed.
+
+**Size, and the cap.** The sync writes the listing's size to `file_size` (054's column, which
+nothing wrote; no DDL) and lands a file past the publish's cap for its kind as `unsupported`. A walk
+judges the file again each time it lists it, so a raised cap brings it back.
+
+**The tombstone.** A walk spans chunks, each one page in its own transaction, so what it listed is
+kept on the rows: every row it lists is stamped `last_listed_at`. A walk that saw the whole tree,
+with no cap cutting it and no folder left unlisted, ends by moving the source's `available` and
+`unsupported` rows that neither it nor the last whole walk before it listed to `missing`: a file
+that still exists can miss one walk, so one miss judges nothing, and a walk with no whole walk
+before it judges nothing. Both starts are read from the database's clock and ride the cursor. A row
+landed outside any walk (the device-native drop relay lands rows so) waits until it predates the
+last whole walk's start. The signal is positive: the adapter ends a walk that skipped
+nothing `whole`, and a walk that skipped part of the tree, or whose adapter does not say, judges
+nothing.
+
+**`missing` is not `removed`.** `removed` is the folder's retirement, which a re-pick undoes;
+`missing` is the file's own absence, which only a listing undoes: a walk that lists the file again,
+or a connected folder that lists the same bytes and adopts the row, as it adopts a retired one. The
+draw takes `available` items only, and `fn_prompts_due` takes an `available` item only for a planned
+story (a cadence row is served whatever its media's state), so neither changes. The miss door names
+the new state `item_missing`, after `item_unsupported` and before the locks. CREATE OR REPLACE keeps
+the door's owner and grant, and its `search_path` ends in `pg_temp`.
+
+```sql
+-- [§48 the sync retires what the publish can never fetch]
+
+ALTER TABLE media_items ADD COLUMN last_listed_at TIMESTAMPTZ NULL;
+
+ALTER TABLE media_items DROP CONSTRAINT ck_media_state;
+
+ALTER TABLE media_items ADD CONSTRAINT ck_media_state
+  CHECK (state IN ('available','unsupported','removed','missing'));
+
+CREATE OR REPLACE FUNCTION fn_planned_misses(p_limit int, p_late interval)
+RETURNS TABLE (o_id uuid, o_workspace_id uuid, o_reason text, o_schedule_slot_at timestamptz, o_file_name text, o_handle varchar, o_tz text, o_scheduled_by_user_id uuid)
+LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT d.id, d.workspace_id, d.reason, d.schedule_slot_at, d.file_name, d.handle, d.tz,
+         d.scheduled_by_user_id
+    FROM (SELECT i.id, i.workspace_id, i.schedule_slot_at, i.scheduled_by_user_id,
+                 m.file_name, a.handle, w.tz,
+                 CASE
+                   WHEN m.id IS NULL OR m.state = 'removed' THEN 'item_removed'
+                   WHEN m.state = 'unsupported' THEN 'item_unsupported'
+                   WHEN m.state = 'missing' THEN 'item_missing'
+                   WHEN EXISTS (SELECT 1 FROM post_locks l
+                                 WHERE l.workspace_id = i.workspace_id
+                                   AND l.ig_account_id IS NULL
+                                   AND l.media_item_id = i.media_item_id
+                                   AND l.kind IN ('reject', 'unsupported', 'hold', 'seasonal')
+                                   AND (l.expires_at IS NULL OR l.expires_at > now()))
+                     THEN 'item_locked'
+                   WHEN a.state IS NULL OR a.state NOT IN ('active', 'reauth_required')
+                     THEN 'account_removed'
+                   WHEN i.schedule_slot_at > now() - p_late THEN NULL
+                   WHEN w.state <> 'active' OR w.is_paused THEN 'paused'
+                   ELSE 'late'
+                 END AS reason
+            FROM post_intents i
+            JOIN workspaces w ON w.id = i.workspace_id
+            LEFT JOIN media_items m ON m.id = i.media_item_id
+             AND m.workspace_id = i.workspace_id
+            LEFT JOIN ig_accounts a ON a.id = i.ig_account_id
+             AND a.workspace_id = i.workspace_id
+           WHERE i.state = 'scheduled' AND i.origin = 'planned'
+             AND i.schedule_slot_at <= now() AND NOT i.cancel_requested) d
+   WHERE d.reason IS NOT NULL
+   ORDER BY d.schedule_slot_at LIMIT p_limit
+$$;
+
+COMMENT ON FUNCTION fn_planned_misses(p_limit int, p_late interval) IS
+  'The planned stories that will not be served, across every workspace: each due, scheduled, unflagged planned intent that cannot be served (item_removed, item_unsupported, item_missing, item_locked, account_removed, in that precedence) or whose p_late window has passed (paused when its workspace was not taking posts, else late) — the complement of fn_prompts_due''s planned rows. The worker expires each with its reason and tells the bound chats in the same transaction, per workspace under that workspace''s tenant. STRICT: a NULL window lists nothing. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_worker (089, #1413; 105, #1545).';
 ```

@@ -2880,6 +2880,16 @@ class TestTheFloatsSafetyNets:
     reaper's safety net end on the review card with its three buttons and
     one honest line, never a story that reads Approved forever."""
 
+    @staticmethod
+    async def _park(conn, job):
+        """The spent job's park as the worker runs it, minus the savepoint: the
+        state change, then the courtesy it is owed."""
+        from src.services.target import work_loop
+
+        parked = await work_loop._settle_exhausted(conn, job)
+        await work_loop._notify_exhausted(conn, job, parked)
+        return parked
+
     async def _as_worker(self, pipe_db, fn):
         from src.services.target.unit_of_work import apply_gucs
 
@@ -2891,18 +2901,13 @@ class TestTheFloatsSafetyNets:
                 return await fn(conn)
 
     def test_a_dead_job_parks_a_story_mid_ladder_for_review(self, pipe_db):
-        from src.services.target import publish_pipeline
 
         intent, ref = _new_intent(
             pipe_db, state="publishing", publish_step="transit_uploaded"
         )
         binding = _seed_card(pipe_db, intent)
         job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
-        _run(
-            self._as_worker(
-                pipe_db, lambda conn: publish_pipeline.park_exhausted(conn, job)
-            )
-        )
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
         row = _intent_row(pipe_db, intent)
         assert row["state"] == "review_required"
         assert row["cap_refunded_at"] is None, (
@@ -2916,7 +2921,6 @@ class TestTheFloatsSafetyNets:
 
     def test_a_dead_job_parks_a_waiting_story_for_review(self, pipe_db):
         """From a stepped-back `approved` row: the second edge of 076."""
-        from src.services.target import publish_pipeline
 
         intent, ref = _new_intent(pipe_db)
         binding = _seed_card(pipe_db, intent)
@@ -2928,27 +2932,68 @@ class TestTheFloatsSafetyNets:
         )
         assert _intent_row(pipe_db, intent)["state"] == "approved"
         dead = _reclaim(pipe_db, job["id"])
-        _run(
-            self._as_worker(
-                pipe_db, lambda conn: publish_pipeline.park_exhausted(conn, dead)
-            )
-        )
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, dead)))
         row = _intent_row(pipe_db, intent)
         assert row["state"] == "review_required" and row["cap_consumed_on"] is not None
         assert "Needs review" in _review_edit(pipe_db, intent, binding)["outcome_text"]
         assert len(_notices(pipe_db, intent, binding)) == 1
 
     def test_a_dead_job_on_a_settled_story_parks_nothing(self, pipe_db):
-        from src.services.target import publish_pipeline
 
         intent, ref = _new_intent(pipe_db, state="skipped")
         job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
-        _run(
-            self._as_worker(
-                pipe_db, lambda conn: publish_pipeline.park_exhausted(conn, job)
-            )
-        )
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
         assert _intent_row(pipe_db, intent)["state"] == "skipped"
+
+    def test_a_dead_job_whose_courtesy_faults_still_parks_its_story(
+        self, pipe_db, monkeypatch
+    ):
+        """Through the worker's spent-budget path. The park's courtesy (the
+        card restated, the notice) rides the exhausted notice's savepoint and
+        may fail there alone; the flip to review must not fail with it. A
+        story left `publishing` keeps its account's `uq_publish_exclusive`
+        slot, and nothing moves a plain `publishing` row once its job has
+        ended, so the account would stop posting with no alert."""
+        from sqlalchemy import text
+
+        from src.services.target import publish_pipeline
+        from src.services.target.work_loop import WorkerConfig
+        from src.worker import compose
+
+        intent, ref = _new_intent(
+            pipe_db, state="publishing", publish_step="transit_uploaded"
+        )
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
+        faulted = []
+
+        async def faulty_courtesy(session, **kwargs):
+            faulted.append(kwargs["intent_id"])
+            # A fault inside the database, as an outbox write can raise one.
+            await session.execute(text("SELECT 1 / 0"))
+
+        async def crashed(session, job):
+            raise RuntimeError("the fifth untyped crash")
+
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", faulty_courtesy)
+        app = compose(engine=pipe_db["engine"], config=WorkerConfig(), env={})
+        loop = next(wl for wl in app.loops if wl.lane == "bulk")
+        loop._registry = {**app.registry, "publish_pipeline": crashed}
+        _run(loop._run_job(job))
+
+        assert faulted == [str(intent)], "the courtesy fault never fired"
+        assert _job_row(pipe_db, job["id"])["state"] == "failed"
+        (held,) = _exec(
+            pipe_db,
+            "SELECT count(*) FROM post_intents WHERE provider_account_ref = %s"
+            " AND state IN ('publishing', 'publishing_ambiguous')",
+            (ref,),
+            fetch=True,
+        )[0]
+        state = _intent_row(pipe_db, intent)["state"]
+        assert (state, held) == ("review_required", 0), (
+            f"the story is left {state!r} and {held} row(s) hold its account's"
+            " publish slot"
+        )
 
     def test_the_reaper_parks_a_stale_approved_story_and_leaves_a_floating_one(
         self, pipe_db

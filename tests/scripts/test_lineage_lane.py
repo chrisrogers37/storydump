@@ -420,6 +420,27 @@ class TestTheBoundaryIsDerivedAndLoud:
             # 099 appends §42, a person can unlink their own Telegram
             # identity: the door and svc_membership's delete behind it.
             "099_identity_unlink.sql",
+            # 100 appends §43, the waitlist written by the API: the global
+            # waitlist_entries and svc_ingress's insert-only policy.
+            "100_waitlist_entries.sql",
+            # 101 appends §44, the outbox's failure record: three columns,
+            # their index and the two doors behind /health/delivery (#1482).
+            "101_outbox_failure_record.sql",
+            # 102 appends §45, a removal holds: the remove door checks its
+            # caller, the record is the membership doors' alone, earlier
+            # removals are backfilled, and the join door pins pg_temp last.
+            "102_member_removal_holds.sql",
+            # 103 appends §46: every SECURITY DEFINER function pins its
+            # search_path with pg_temp last, and a census holds the doors to it.
+            "103_definer_search_path_pinned.sql",
+            # 104 appends §47, the activation funnel door: onboarding counted
+            # across every workspace, owned by svc_maintenance and executable
+            # by svc_worker alone (#1481).
+            "104_activation_funnel_door.sql",
+            # 105 appends §48, the sync retiring what the publish can never
+            # fetch: the `last_listed_at` stamp, `missing` in ck_media_state and
+            # the miss door's `item_missing` (#1545).
+            "105_media_item_missing_and_last_listed.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

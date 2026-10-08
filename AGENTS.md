@@ -2,8 +2,9 @@
 
 Guidance for any coding agent working in this repository. This is the
 vendor-neutral file the wider tool ecosystem reads; `CLAUDE.md` carries the
-Claude Code specifics and defers to this document for everything shared, so the
-two cannot disagree about the substance.
+Claude Code specifics, repeats the safety rules and the rules every PR follows,
+and defers to this document for everything else. A PR that adds or changes one
+of those rules here makes the same change in `CLAUDE.md`.
 
 **The safety rules below are not advisory.** This system posts to Instagram and
 Telegram on behalf of paying tenants.
@@ -50,7 +51,7 @@ the ledger — `post_intents`, `jobs`, `channel_outbox` and every other table
 
 It names what posts, destroys, or re-points the bot. It is not a complete
 read-only/read-write taxonomy: the other write verbs (`skip`, `reject`,
-`posted`, `pause`, `resume`, `sync`, `schedule`, `reschedule`) change the
+`posted`, `pause`, `resume`, `sync`, `schedule`, `reschedule`, `link`) change the
 ledger through the command port too — a skip or a reject is a terminal state
 for that story, and a scheduled story asks the workspace's chats to approve it
 at its time — and every one of them is a posting-related action under the STOP
@@ -94,9 +95,9 @@ Each layer is isolated. Do not violate the boundaries:
   (`tests/storydump_cli/test_import_boundary.py` pins that in a fresh
   interpreter).
 - **UI** (`landing/`) → calls the API through its server-side client
-  (`landing/src/lib/target-api.ts`), never a service. The one table it owns
-  is the marketing waitlist (`landing/src/lib/schema.ts`, Drizzle), which no
-  Python migration manages.
+  (`landing/src/lib/target-api.ts`), never a service, and holds no database
+  credential: the waitlist form posts to the API's `POST /public/waitlist`
+  (migration 100).
 - **API** (`src/api/`) → authenticates a principal (`src/api/principal.py`:
   a web session or an API token), then calls a module under
   `src/services/target/`. Reads are resources; state changes are commands
@@ -251,15 +252,19 @@ client, never a database connection
    execution; a resolution's key carries the review episode, so a later review
    of the same story is new; `pause`, `resume` and `sync` mint a fresh key per
    invocation (their effects are idempotent — a retry is harmless, a later
-   action always executes), and so do `schedule` and `reschedule` (planning an
-   item again after a cancel, or moving a story back to a time it had, is a new
-   act; a duplicate schedule is the database's to refuse):
+   action always executes), and so do `schedule`, `reschedule` and `link`
+   (planning an item again after a cancel, moving a story back to a time it had,
+   or setting a link the item had before, is a new act; a duplicate schedule is
+   the database's to refuse):
    `storydump approve|skip|reject|posted|cancel <story>` ·
    `storydump resolve <story> retry|posted|cancel [--not-posted]` ·
    `storydump pause` / `storydump resume` · `storydump sync <source_id>` ·
    `storydump schedule <item> --account <handle|id> --at 'YYYY-MM-DD HH:MM'
    [--override-locks]` (the time is the account's own zone, else the
-   workspace's) · `storydump reschedule <story> --at 'YYYY-MM-DD HH:MM'`. A
+   workspace's) · `storydump reschedule <story> --at 'YYYY-MM-DD HH:MM'` ·
+   `storydump link <item> <https-url>` / `storydump link <item> --clear` (the
+   link an item's stories ask a person to add by hand, since an API-published
+   story cannot carry one). A
    refusal is an answer, not a failure: the reason's sentence, the fixing
    verb, exit 2. The Telegram adapter's words never appear in a terminal.
 6. The environment: `storydump health` (the API's three health surfaces,
@@ -360,9 +365,11 @@ inert by design: `sender_from_env` returns `None` unless `RESEND_API_KEY` and
 the sender address (`EMAIL_FROM`) are both set, and the job registry parks
 `send_email` with a reason naming what is missing. The provider choice is a
 flagged decision that has not been ratified, and deferring it is deliberate.
-An invitation created today therefore reports
-`delivery: {"channel": "email", "state": "not_configured"}` — the row and its
-token are real, the message is never delivered.
+An email invitation reports `delivery: {"channel": "email", "state": "withheld"}`:
+the email arm is off (`invitations.EMAIL_DELIVERY_ENABLED`) until it can send
+without storing the token, so nothing is queued. The row is real, and the
+inviter hands over the response's `join_url` (`{WEB_APP_URL}/join/{token}`),
+which is returned once.
 
 Do not describe email as working, and do not wire a provider without the owner
 acknowledgement the design calls for.
@@ -388,27 +395,28 @@ check + format over the whole repository), the FC-2 Telegram ratchet
 (`scripts/telegram_ratchet.py`), Test (Python 3.10 against a PostgreSQL 15
 service with `REQUIRE_TEST_DATABASE=1`, coverage of `src` and `storydump_cli`),
 Security Scan (pip-audit gates on a known-vulnerable pin; bandit is advisory),
-Front End (`npm test`, `npx tsc --noEmit`, `npm run lint` in `landing/`) and
-Changelog Check. A scheduled `schema-drift.yml` compares the live schema with
-the tree daily.
+Front End (`npm test`, `npx tsc --noEmit`, `npm run lint` and
+`npm audit --omit=dev` in `landing/`; the audit gates on a known advisory
+against the runtime dependencies) and Changelog Check. A scheduled
+`schema-drift.yml` compares the live schema with the tree daily.
 `scripts/lint.sh` is the local lint pass; `scripts/pr_ready.sh` answers whether
 a PR is really ready — it catches a check that was never scheduled, which a
 green rollup hides (`documentation/guides/ci-cd-pipeline.md`).
 
-**Always update `CHANGELOG.md`** when opening a PR — CI fails without it (the
-`changelog-check` job of `.github/workflows/ci.yml`; a PR that touches only
-`documentation/`, `.md` files or `.github/` is exempt).
-[Keep a Changelog](https://keepachangelog.com/) format, entries under
-`## [Unreleased]`.
+**A PR that touches code or config adds a changelog fragment, and no PR edits
+`CHANGELOG.md`**: one new file in `changelog.d/`. `changelog.d/README.md` has
+the format and the rule the `changelog-check` job of `.github/workflows/ci.yml`
+holds every PR to.
 
 ## Documentation
 
 - Full docs: `documentation/README.md`
 - New docs go in `documentation/` subdirectories: `planning/` (plans and
   specs), `guides/` (how-to), `operations/` (runbooks)
-- Bug fixes and patches: `CHANGELOG.md`; a production incident gets a folder
-  under `documentation/planning/investigations/` (`documentation/updates/` was
-  emptied into `archive/updates/` on 2026-09-18 and no longer exists)
+- Bug fixes and patches: a changelog fragment (`changelog.d/`); a production
+  incident gets a folder under `documentation/planning/investigations/`
+  (`documentation/updates/` was emptied into `archive/updates/` on 2026-09-18
+  and no longer exists)
 - A finished, superseded or abandoned document moves to
   `documentation/archive/` with a status banner and a row in
   `documentation/archive/README.md`. `CLAUDE.md`, `AGENTS.md`, `README.md`,

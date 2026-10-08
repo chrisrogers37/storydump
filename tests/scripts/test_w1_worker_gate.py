@@ -144,6 +144,69 @@ class TestPlanSlotEndToEnd:
         assert minted == [("scheduled",)]
         _assert_no_stranded_lease(sync_conn)
 
+    async def test_a_mint_whose_runway_notice_reaches_nobody_still_succeeds(
+        self, lane_db, sync_conn
+    ):
+        """The runway notice never decides the slot (#1478), end to end at the
+        worker's default level. Minting the world's one free file leaves the
+        account no content, so the notice is owed, and the workspace has no
+        push binding to hear it. The mint is the job's work, so the job
+        succeeds and counts as processed, not undeliverable; the crossing is
+        latched with nobody told, and nothing is queued to any chat."""
+        from src.services.target.content_runway import NOTICE_EVENT
+
+        chain = seed_workspace_chain(sync_conn, "w1runway")
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+                " file_name, media_kind, provider_file_ref)"
+                " VALUES (%s, %s, 'hash-w1runway-free', 'g.jpg', 'image',"
+                " 'ref-w1runway-free')",
+                (chain["ws"], chain["src"]),
+            )
+            cur.execute(
+                "SELECT count(*) FROM channel_bindings WHERE workspace_id = %s",
+                (chain["ws"],),
+            )
+            assert cur.fetchone()[0] == 0, "precondition: nobody to tell"
+        sync_conn.commit()
+        slot = datetime.now(timezone.utc) + timedelta(hours=1)
+        job_id = _insert_job(
+            sync_conn,
+            kind="plan_slot",
+            workspace_id=chain["ws"],
+            serialization_key=f"acct:{chain['iga']}",
+            payload='{"v": 1, "ig_account_id": "%s", "slot_at": "%s"}'
+            % (chain["iga"], slot.isoformat()),
+        )
+
+        wl, claimed = await _run_once(lane_db)
+
+        assert claimed is True
+        assert (wl.processed, wl.undeliverable) == (1, 0)
+        assert _job_row(sync_conn, job_id)["state"] == "succeeded"
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT state FROM post_intents WHERE ig_account_id = %s"
+                " AND schedule_slot_at = %s",
+                (chain["iga"], slot),
+            )
+            assert cur.fetchall() == [("scheduled",)], "the slot minted"
+            cur.execute(
+                "SELECT detail->>'told' FROM audit_events"
+                " WHERE workspace_id = %s AND entity_kind = 'ig_account'"
+                "   AND entity_id = %s AND detail->>'event' = %s",
+                (chain["ws"], chain["iga"], NOTICE_EVENT),
+            )
+            assert cur.fetchall() == [("0",)], "the crossing is latched, told 0"
+            cur.execute(
+                "SELECT count(*) FROM channel_outbox WHERE workspace_id = %s",
+                (chain["ws"],),
+            )
+            assert cur.fetchone()[0] == 0, "nothing was queued to any chat"
+        _assert_no_stranded_lease(sync_conn)
+
 
 class TestParkingOnTheRealMachinery:
     async def test_an_executor_less_kind_is_rescheduled_alive_with_attempt_restored(
@@ -500,6 +563,92 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         assert len(notices) == 1 and "will try again tomorrow" in notices[0], notices
         assert "adapter is down" not in notices[0]
         _assert_no_stranded_lease(sync_conn)
+
+    async def test_a_notice_that_cannot_be_written_keeps_the_re_arm(
+        self, lane_db, sync_conn, monkeypatch
+    ):
+        """The notice rides a savepoint and the re-arm does not. When the
+        notice cannot be written, PostgreSQL rolls its savepoint back, and the
+        source the job carried is still re-armed for tomorrow, in the same
+        transaction that ends the job: never left active with no next sync."""
+        from src.services.target import outbox, work_loop
+
+        chain = seed_workspace_chain(sync_conn, "w1rearm")
+        _binding(sync_conn, chain["ws"])
+        job_id = _insert_job(
+            sync_conn,
+            kind="sync_media_source",
+            workspace_id=chain["ws"],
+            payload='{"v": 1, "source_id": "%s"}' % chain["src"],
+        )
+        _set(sync_conn, job_id, "max_attempts = 1")
+
+        async def failing(session, job):
+            raise RuntimeError("the adapter is down")
+
+        async def refused(*args, **kwargs):
+            raise RuntimeError("the outbox refused the notice")
+
+        monkeypatch.setattr(outbox, "fanout_notification", refused)
+        wl, claimed = await _run_once(
+            lane_db, registry_override={"sync_media_source": failing}
+        )
+
+        assert claimed is True and wl.exhausted == 1
+        assert _job_row(sync_conn, job_id)["state"] == "failed"
+        assert _notices(sync_conn, chain["ws"]) == []
+        with sync_conn.cursor() as cur:
+            # The jobs row's touch trigger stamps `updated_at` with the
+            # transaction's now(), so the span is exact only when the re-arm
+            # committed with the finalize. NULL is the re-arm rolled back.
+            cur.execute(
+                "SELECT s.next_sync_at - j.updated_at FROM media_sources s, jobs j"
+                " WHERE s.id = %s AND j.id = %s",
+                (str(chain["src"]), str(job_id)),
+            )
+            (span,) = cur.fetchone()
+        assert span == timedelta(seconds=work_loop.REARM_AFTER_SECONDS), (
+            f"the re-arm did not commit with the finalize: {span}"
+        )
+        _assert_no_stranded_lease(sync_conn)
+
+    async def test_a_fenced_finalize_takes_the_re_arm_back(self, lane_db, sync_conn):
+        """The re-arm commits only with the finalize. A worker that lost its
+        lease finds the finalize fenced and its whole transaction rolled back:
+        it must not re-arm a source whose job now belongs to another owner."""
+        chain = seed_workspace_chain(sync_conn, "w1fencerearm")
+        job_id = _insert_job(
+            sync_conn,
+            kind="sync_media_source",
+            workspace_id=chain["ws"],
+            payload='{"v": 1, "source_id": "%s"}' % chain["src"],
+        )
+        _set(sync_conn, job_id, "max_attempts = 1")
+        foreign = str(uuid.uuid4())
+
+        async def usurped_then_failing(session, job):
+            with psycopg2.connect(lane_db) as c2, c2.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET lease_token = %s WHERE id = %s",
+                    (foreign, str(job["id"])),
+                )
+                c2.commit()
+            raise RuntimeError("the adapter is down")
+
+        wl, claimed = await _run_once(
+            lane_db, registry_override={"sync_media_source": usurped_then_failing}
+        )
+
+        assert claimed is True and wl.fenced == 1 and wl.exhausted == 0
+        assert _job_row(sync_conn, job_id)["lease_token"] == foreign
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT next_sync_at FROM media_sources WHERE id = %s",
+                (str(chain["src"]),),
+            )
+            (armed,) = cur.fetchone()
+        assert armed is None, "a worker that lost the job re-armed its source"
+        _assert_no_stranded_lease(sync_conn, allowed=1)  # the usurper's, not ours
 
     async def test_a_passed_deadline_ends_the_job_on_its_first_failure(
         self, lane_db, sync_conn

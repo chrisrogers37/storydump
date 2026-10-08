@@ -159,6 +159,9 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   mark_posted: intentCommand(),
   skip: intentCommand(),
   reject: intentCommand(),
+  // A planned story's Cancel (#1413). Keyed on the intent, like the CLI's
+  // `cancel:<intent_id>`: asking twice is one request.
+  cancel: intentCommand(),
   // The review card's resolutions (2026-09-12).
   resolve_review: resolveReviewCommand(),
 
@@ -240,6 +243,23 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   }),
 
   /**
+   * Invite a person by email (#1563). Only the address and the role are
+   * forwarded: the web makes email invitations, so the Telegram arm's
+   * `delivery_channel` and `invited_tg_user_id` never ride along. The port
+   * owns what a valid address and an invitable role are; this checks only
+   * that each is a string.
+   */
+  invite_member: submissionCommand((raw) => {
+    if (typeof raw.email !== "string") {
+      return { ok: false, error: "invalid_email" };
+    }
+    if (typeof raw.role !== "string") {
+      return { ok: false, error: "invalid_role" };
+    }
+    return { ok: true, body: { email: raw.email, role: raw.role } };
+  }),
+
+  /**
    * Remove a destination (owner decision 2026-09-04): the port's
    * `active → disabled` edge. The row stays for history and for the connect
    * that brings the account back, so this is not a delete.
@@ -302,6 +322,87 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
       ok: true,
       body: { ig_account_id: raw.ig_account_id, settings: raw.settings },
     };
+  }),
+
+  /**
+   * Plan one item onto one account at a wall time (#1413, phases 5 and 6):
+   * the Media Library's Schedule…. `local_at` is the date and time a person
+   * picked, with no offset; the port reads it in the ACCOUNT's zone, so it
+   * rides as typed.
+   *
+   * Shape only, as everywhere here. The port owns the time rules (a past time,
+   * one the clocks skip, one past the horizon) and the lock rule, and refuses
+   * each by name; a second copy of either here is one that could disagree.
+   * `override_locks` is forwarded only when it is `true`, which is how the CLI
+   * sends it.
+   */
+  schedule_item: submissionCommand((raw) => {
+    if (!isUuid(raw.ig_account_id)) {
+      return { ok: false, error: "invalid_ig_account_id" };
+    }
+    if (!isUuid(raw.media_item_id)) {
+      return { ok: false, error: "invalid_media_item_id" };
+    }
+    if (typeof raw.local_at !== "string" || raw.local_at.trim() === "") {
+      return { ok: false, error: "invalid_local_at" };
+    }
+    if (raw.override_locks !== undefined && typeof raw.override_locks !== "boolean") {
+      return { ok: false, error: "invalid_override_locks" };
+    }
+    return {
+      ok: true,
+      body: {
+        ig_account_id: raw.ig_account_id,
+        media_item_id: raw.media_item_id,
+        local_at: raw.local_at,
+        ...(raw.override_locks === true ? { override_locks: true } : {}),
+      },
+    };
+  }),
+
+  /**
+   * Move a planned story to another wall time (#1413, phase 6): the Queue's
+   * Reschedule…. The same row moves; its account cannot change. `local_at`
+   * rides as typed, because the port reads it in the story's own zone.
+   *
+   * Keyed per submission, not on the intent: moving a story and then moving
+   * it back is two acts, and an intent key would replay the first as the
+   * second. The CLI mints a fresh key per run for the same reason.
+   */
+  reschedule_item: submissionCommand((raw) => {
+    if (!isUuid(raw.intent_id)) {
+      return { ok: false, error: "invalid_intent" };
+    }
+    if (typeof raw.local_at !== "string" || raw.local_at.trim() === "") {
+      return { ok: false, error: "invalid_local_at" };
+    }
+    return { ok: true, body: { intent_id: raw.intent_id, local_at: raw.local_at } };
+  }),
+
+  /**
+   * Give an item the link its stories ask a person to add by hand (#1413,
+   * phase 7), or clear it with `null`: the Media Library's Link…. The link
+   * belongs to the item, so every story of it shows the same one.
+   *
+   * Shape only, as everywhere here: a non-blank string, or `null` to clear.
+   * The port owns the URL rule (https with a host, no spaces, no user name,
+   * a length cap) and refuses a breach as `invalid_args`. `null` is forwarded
+   * explicitly, because the port reads a missing key as a mistake, never as
+   * a clear.
+   *
+   * Keyed per submission, like `reschedule_item`: setting a link, clearing it
+   * and setting it again are three acts, and an item key would replay the
+   * first as the third. The CLI mints a fresh key per run for the same reason.
+   */
+  set_item_link: submissionCommand((raw) => {
+    if (!isUuid(raw.media_item_id)) {
+      return { ok: false, error: "invalid_media_item_id" };
+    }
+    const link = raw.link_url;
+    if (link !== null && (typeof link !== "string" || link.trim() === "")) {
+      return { ok: false, error: "invalid_link_url" };
+    }
+    return { ok: true, body: { media_item_id: raw.media_item_id, link_url: link } };
   }),
 };
 

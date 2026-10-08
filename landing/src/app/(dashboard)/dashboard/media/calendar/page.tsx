@@ -1,18 +1,19 @@
 import { requireWorkspacePage } from "@/lib/page-guards";
 import { workspaceFetch } from "@/lib/workspaces";
 import {
-  HISTORY_STATES,
+  POSTED_STATES,
   QUEUE_STATES,
   REVIEW_REQUIRED_STATE,
   SCHEDULED_STATES,
   type StatsResponse,
   type WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
-import type { Intent, IntentsResponse } from "@/lib/intents";
+import { LIST_LIMIT_MAX, type Intent, type IntentsResponse } from "@/lib/intents";
 import { postingIntervalMinutes } from "@/lib/schedule";
+import { dateInZone } from "@/lib/zoned-dates";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/card";
 
 /** The calendar's lanes are all the intent ledger now, filtered by state. */
 const laneItem = (i: Intent) => ({
@@ -21,42 +22,42 @@ const laneItem = (i: Intent) => ({
   status: i.state,
 });
 
-/** Today, in the WORKSPACE's timezone — `daily_post_counts.local_date` is local. */
-function todayIn(tz: string | null): string {
-  try {
-    return new Intl.DateTimeFormat("en-CA", {
-      timeZone: tz ?? "UTC",
-    }).format(new Date());
-  } catch {
-    return new Intl.DateTimeFormat("en-CA", { timeZone: "UTC" }).format(new Date());
-  }
-}
-
 /**
- * The calendar's three bounded reads (`01` H5). History and the schedule
- * strip are drawn as dots on a month, so fifteen is what fits; the queue
- * lane lists rows, so it is the shorter ten. Every COUNT on this page comes
+ * The calendar's four bounded reads (`01` H5). Every COUNT on this page comes
  * from `stats`, never from these lists.
+ *
+ * Posted and planned each ask for the API's ceiling. The API sorts by slot,
+ * soonest first, unless asked otherwise, so Posted asks for newest first: the
+ * oldest outcomes fall before any month on screen. At 15 to 20 posts a day,
+ * 200 is about ten days.
  */
-const CALENDAR_HISTORY_LIMIT = 15;
 const CALENDAR_QUEUE_LIMIT = 10;
 const CALENDAR_SCHEDULE_LIMIT = 15;
 
 export default async function CalendarPage() {
   const { workspaceId } = await requireWorkspacePage();
 
-  const [historyResult, queueResult, scheduleResult, statsResult, configResult] =
+  const [historyResult, queueResult, plannedResult, scheduleResult, statsResult, configResult] =
     await Promise.all([
       workspaceFetch<IntentsResponse>(
-        `intents?state=${HISTORY_STATES}&limit=${CALENDAR_HISTORY_LIMIT}`,
+        `intents?state=${POSTED_STATES}&order=desc&limit=${LIST_LIMIT_MAX}`,
+        workspaceId,
+      ),
+      // The upcoming stories are split by origin, so each is in one read: the
+      // slot plan's soonest ten, and every story a person planned, which the
+      // ten can then never push off the month.
+      workspaceFetch<IntentsResponse>(
+        `intents?state=${QUEUE_STATES}&origin=cadence&limit=${CALENDAR_QUEUE_LIMIT}`,
         workspaceId,
       ),
       workspaceFetch<IntentsResponse>(
-        `intents?state=${QUEUE_STATES}&limit=${CALENDAR_QUEUE_LIMIT}`,
+        `intents?state=${QUEUE_STATES}&origin=planned&limit=${LIST_LIMIT_MAX}`,
         workspaceId,
       ),
+      // The predicted strip is the slot plan's: a story a person planned is
+      // not a prediction, and is drawn in the queue lane as planned (#1413).
       workspaceFetch<IntentsResponse>(
-        `intents?state=${SCHEDULED_STATES}&limit=${CALENDAR_SCHEDULE_LIMIT}`,
+        `intents?state=${SCHEDULED_STATES}&origin=cadence&limit=${CALENDAR_SCHEDULE_LIMIT}`,
         workspaceId,
       ),
       workspaceFetch<StatsResponse>("stats", workspaceId),
@@ -69,6 +70,7 @@ export default async function CalendarPage() {
   if (
     !historyResult.ok ||
     !queueResult.ok ||
+    !plannedResult.ok ||
     !scheduleResult.ok ||
     !statsResult.ok ||
     !configResult.ok
@@ -84,21 +86,24 @@ export default async function CalendarPage() {
     posted_at: i.entered_state_at,
   }));
 
-  // A queued intent with no slot cannot be placed on a calendar. Dropping it
-  // here is not hiding it — it has no date to be drawn at.
-  const queueItems = (queueResult.data.intents ?? [])
-    .filter((i) => i.schedule_slot_at !== null)
-    .map((i) => ({ ...laneItem(i), scheduled_for: i.schedule_slot_at as string }));
+  const queueItems = [
+    ...(queueResult.data.intents ?? []),
+    ...(plannedResult.data.intents ?? []),
+  ].map((i) => ({
+    ...laneItem(i),
+    scheduled_for: i.schedule_slot_at,
+    planned: i.origin === "planned",
+  }));
 
-  const scheduleSlots = (scheduleResult.data.intents ?? [])
-    .filter((i) => i.schedule_slot_at !== null)
-    .map((i) => ({
-      slot_time: i.schedule_slot_at as string,
-      predicted_category: i.category,
-    }));
+  const scheduleSlots = (scheduleResult.data.intents ?? []).map((i) => ({
+    slot_time: i.schedule_slot_at,
+    predicted_category: i.category,
+  }));
 
   // Counted where the rows are, not re-summed from the bounded lists above.
-  const today = todayIn(config.tz);
+  // Today is the WORKSPACE's: `daily_post_counts.local_date` is its own date.
+  const tz = config.tz ?? "UTC";
+  const today = dateInZone(new Date(), tz);
   const postsToday =
     (stats.posts_by_day ?? []).find((d) => d.local_date.startsWith(today))
       ?.count ?? 0;
@@ -129,57 +134,32 @@ export default async function CalendarPage() {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Posts Today
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{postsToday}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              In Queue
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{inFlight}</div>
-            {needsReview > 0 && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                {needsReview === 1
-                  ? "1 needs review"
-                  : `${needsReview} need review`}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Posting Rate
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {perDay === null ? "—" : `${perDay}/day`}
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {intervalMinutes === null
-                ? "interval not set"
-                : `Every ${intervalMinutes} min`}
-            </p>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+        <StatCard label="Posts Today" value={postsToday} />
+        <StatCard
+          label="In Queue"
+          value={inFlight}
+          detail={
+            needsReview > 0 &&
+            (needsReview === 1 ? "1 needs review" : `${needsReview} need review`)
+          }
+        />
+        <StatCard
+          label="Posting Rate"
+          value={perDay === null ? "—" : `${perDay}/day`}
+          detail={
+            intervalMinutes === null
+              ? "interval not set"
+              : `Every ${intervalMinutes} min`
+          }
+        />
       </div>
 
       <ContentCalendar
         history={historyItems}
         queue={queueItems}
         schedule={scheduleSlots}
+        tz={tz}
       />
     </div>
   );

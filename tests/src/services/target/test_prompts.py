@@ -745,6 +745,20 @@ def _notice(**over):
     return prompts.missed_notice(**kw)
 
 
+def _door_body(name: str) -> str:
+    """Door `name`'s body as it stands: the last migration that defines it. A
+    door is re-created by a later file, never edited in place (089 created
+    `fn_planned_misses`; 105 re-created it with `item_missing`)."""
+    import re
+
+    from scripts.migration_runner import MIGRATIONS_DIR
+
+    head = re.compile(rf"CREATE (?:OR REPLACE )?FUNCTION {name}\(")
+    texts = [p.read_text() for p in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    ddl = [text for text in texts if head.search(text)][-1]
+    return head.split(ddl, 1)[1].split("$$;", 1)[0]
+
+
 class TestTheMissNotice:
     @pytest.mark.parametrize("reason", sorted(prompts.MISS_REASONS))
     def test_each_reason_says_what_happened_and_that_nothing_was_posted(self, reason):
@@ -759,10 +773,7 @@ class TestTheMissNotice:
         does: `account_removed` comes from the door and from a removal."""
         import re
 
-        from scripts.migration_runner import MIGRATIONS_DIR
-
-        ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
-        body = ddl.split("CREATE FUNCTION fn_planned_misses(", 1)[1].split("$$;", 1)[0]
+        body = _door_body("fn_planned_misses")
         returned = set(re.findall(r"(?:THEN|ELSE) '([a-z_]+)'", body))
         assert returned == set(prompts.MISS_REASONS), returned
 
@@ -782,11 +793,7 @@ class TestTheMissNotice:
         import inspect
         import re
 
-        from scripts.migration_runner import MIGRATIONS_DIR
-
-        ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
-        body = ddl.split("CREATE FUNCTION fn_planned_misses(", 1)[1].split("$$;", 1)[0]
-        body = " ".join(body.split())
+        body = " ".join(_door_body("fn_planned_misses").split())
         columns, joins = prompts._NOTICE_SELECT.split("FROM", 1)
         assert " ".join(columns.split()) in body
         assert " ".join(f"FROM{joins}".split()) in body
@@ -1106,9 +1113,10 @@ class TestTheServeLegServesAStoryAsTheDoorReadIt:
 
 
 class TestBothSweepsTakeTheirRowsInOneOrder:
-    """Each sweep locks a row as it reaches it, so both take rows that tie on
-    workspace and due time in one total order, by id. The rows arrive here
-    in the opposite order, so a sort that kept their order would show."""
+    """Each sweep locks a row as it reaches it, so both take their rows in one
+    total order: by due time, and rows that tie on workspace and due time by
+    id. The rows arrive here out of that order, so a sort that kept their
+    order would show."""
 
     async def test_the_serve_leg_takes_tied_rows_by_id(self, monkeypatch):
         seen = _serving(monkeypatch)
@@ -1137,3 +1145,14 @@ class TestBothSweepsTakeTheirRowsInOneOrder:
         await prompts.sweep_planned_misses(session, limit=5, late_seconds=900)
         ended = [p["id"] for s, p in session.statements if s.startswith("UPDATE")]
         assert ended == ["i-1", "i-2", "i-3"]
+
+    async def test_the_serve_leg_takes_an_earlier_story_before_a_lower_id(
+        self, monkeypatch
+    ):
+        seen = _serving(monkeypatch)
+        later = SLOT + timedelta(hours=1)
+        session = _SweepSession(
+            due=[_due_story(id="i-1", schedule_slot_at=later), _due_story(id="i-2")]
+        )
+        await prompts.sweep_due_prompts(session, limit=5, late_seconds=900)
+        assert seen["served"] == ["i-2", "i-1"]

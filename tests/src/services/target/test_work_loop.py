@@ -23,6 +23,7 @@ from src.models.target.machinery import Job
 from src.services.target import work_loop
 from src.services.target.jobs import JobFenced
 from src.services.target.work_loop import (
+    UNBUILT_KINDS,
     Parked,
     WorkerConfig,
     WorkerDeps,
@@ -54,6 +55,15 @@ def full_deps(**over):
     )
     base.update(over)
     return WorkerDeps(**base)
+
+
+def _reconcile_job():
+    return {"id": "j-rec", "kind": "reconcile_ambiguous", "workspace_id": None}
+
+
+async def _in_progress(*, intent_id, workspace_id):
+    """The reconciler's provider poll, answering a container still in flight."""
+    return "IN_PROGRESS"
 
 
 class TestEveryProviderFacingExecutorOwnsItsTransactions:
@@ -88,7 +98,12 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         # per-call client, the way ig_refresh does"
         "sync_media_source",  # deps.drive.list_changes
         "first_ingest_chunk",  # the same _run_sync, one page at a time
+        "reconcile_ambiguous",  # deps.poll, the provider's verdict on an
+        # ambiguous publish; each row commits alone (#1492)
     }
+
+    #: Marked for another reason: each of its batches commits on its own.
+    OWNS_ITS_BATCHES = {"retention_sweep"}
 
     def test_the_provider_facing_kinds_are_exactly_the_marked_ones(self):
         registry = build_registry(full_deps())
@@ -97,7 +112,7 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
             for kind, entry in registry.items()
             if getattr(entry, "owns_transactions", False)
         }
-        assert marked == self.PROVIDER_FACING, (
+        assert marked == self.PROVIDER_FACING | self.OWNS_ITS_BATCHES, (
             "an executor that reaches the egress floor must own its"
             " transactions, or the loop holds a pooled connection across the"
             " provider call — and arming the `_IN_TRANSACTION` tripwire would"
@@ -111,9 +126,9 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         its own HTTP)". Named here so the exclusion reads as a decision rather
         than an omission — it is the obvious candidate for someone to "fix".
 
-        `retention_sweep` and `reencrypt_credentials` are absent from the set
-        for a different reason: they are `UNBUILT_KINDS`, parked with no
-        executor at all, so there is nothing to reach a provider with.
+        `retention_sweep` is absent because it only deletes rows in the
+        database; `reencrypt_credentials` because it is `UNBUILT_KINDS`, parked
+        with no executor at all, so there is nothing to reach a provider with.
         """
         registry = build_registry(full_deps())
         assert "reap_transit_assets" in registry
@@ -156,6 +171,8 @@ class TestRegistryCoversTheSchema:
             # which `06` §1 already backstops with the FC-3.6 TTL sweep, so a
             # missing transit store must not park the whole workflow.
             "offboard_workspace",
+            # The `rate_counters` retention class only (05).
+            "retention_sweep",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -177,8 +194,10 @@ class TestRegistryCoversTheSchema:
             # supplies that seam like every other.
             "send_email",
             "offboard_workspace",  # #1090 H1
+            "retention_sweep",
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
+        assert unbuilt == set(UNBUILT_KINDS)
         for kind in unbuilt:
             assert isinstance(registry[kind], Parked), f"{kind} should have no executor"
 
@@ -246,18 +265,13 @@ class TestReconcilerSweepBranchesOnItsReason:
     notification was ever produced.
     """
 
-    def _job(self):
-        return {"id": "j-rec", "kind": "reconcile_ambiguous", "workspace_id": None}
-
     async def _drive(self, monkeypatch, *, rows, deps):
         notified, reconciled = [], []
 
         async def fake_sweep(session, *, limit, notify_after_seconds):
             return rows
 
-        async def fake_notify(
-            session, *, intent_id, workspace_id, web_app_origin, retry_after_seconds
-        ):
+        async def fake_notify(session, *, intent_id, workspace_id, web_app_origin):
             notified.append((intent_id, web_app_origin))
             return 1
 
@@ -269,7 +283,7 @@ class TestReconcilerSweepBranchesOnItsReason:
         monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
         monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", fake_reconcile)
         registry = build_registry(deps)
-        await registry["reconcile_ambiguous"](_FakeSession(), self._job())
+        await registry["reconcile_ambiguous"](_FakeSession(), _reconcile_job())
         return notified, reconciled
 
     async def test_a_notify_row_notifies_and_is_never_polled(self, monkeypatch):
@@ -290,7 +304,7 @@ class TestReconcilerSweepBranchesOnItsReason:
         cannot tell "routes correctly" from "routes everything one way"."""
         rows = [{"intent_id": "i-2", "workspace_id": "ws-1", "reason": "ladder_due"}]
         notified, reconciled = await self._drive(
-            monkeypatch, rows=rows, deps=full_deps()
+            monkeypatch, rows=rows, deps=full_deps(poll=_in_progress)
         )
         assert reconciled == ["i-2"]
         assert notified == []
@@ -328,8 +342,8 @@ class TestReconcilerSweepBranchesOnItsReason:
         monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
         monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", fake_reconcile)
         session = _FakeSession(rows=[7])  # the evidence on the row: seven checks
-        registry = build_registry(full_deps())
-        await registry["reconcile_ambiguous"](session, self._job())
+        registry = build_registry(full_deps(poll=_in_progress))
+        await registry["reconcile_ambiguous"](session, _reconcile_job())
         assert seen == [7]
         sql = [s for s, _ in session.statements]
         claim = next(i for i, s in enumerate(sql) if "app.tenant_id" in s)
@@ -338,10 +352,9 @@ class TestReconcilerSweepBranchesOnItsReason:
             "the row's workspace is claimed before its ladder is counted"
         )
 
-    async def test_a_workspace_with_no_surface_makes_the_sweep_undeliverable(
-        self, monkeypatch
-    ):
-        """The executor must not report a delivery it could not make."""
+    async def _unheard(self, monkeypatch, session):
+        """One notify row whose workspace has nowhere to receive the notice,
+        swept on *session*: the beat's answer."""
         from src.services.target import outbox
 
         rows = [{"intent_id": "i-5", "workspace_id": "ws-1", "reason": "notify_window"}]
@@ -355,8 +368,33 @@ class TestReconcilerSweepBranchesOnItsReason:
         monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
         monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
         registry = build_registry(full_deps())
-        got = await registry["reconcile_ambiguous"](_FakeSession(), self._job())
-        assert got == outbox.UNDELIVERABLE
+        return await registry["reconcile_ambiguous"](session, _reconcile_job())
+
+    async def test_a_workspace_with_no_surface_makes_the_sweep_undeliverable(
+        self, monkeypatch
+    ):
+        """The executor must not report a delivery it could not make. The
+        attempt is recorded in the row's workspace, with the window the config
+        names."""
+        from src.services.target import outbox
+
+        session = _FakeSession(rows=[{"id": "i-5"}])  # the stamp landed: a fresh record
+        assert await self._unheard(monkeypatch, session) == outbox.UNDELIVERABLE
+        claim, stamp = session.statements
+        assert "app.tenant_id" in claim[0] and claim[1]["v0"] == "ws-1"
+        assert "notify_attempted_at" in stamp[0]
+        assert stamp[1] == {
+            "intent": "i-5",
+            "age": float(WorkerConfig().reconcile_notify_after_seconds),
+        }
+
+    async def test_inside_the_window_an_unheard_notice_is_a_clean_run(
+        self, monkeypatch
+    ):
+        """Bounded, not silenced: once recorded, the condition stands on the
+        ledger, and re-reporting it every 60 s would park a job per beat."""
+        session = _FakeSession()  # the stamp is inside the window: nothing recorded
+        assert await self._unheard(monkeypatch, session) is None
 
     async def test_the_sweep_keys_match_what_the_door_returns(self):
         """The `KeyError` that could not surface while the kind was parked.
@@ -371,6 +409,204 @@ class TestReconcilerSweepBranchesOnItsReason:
         src = inspect.getsource(work_loop.reconciler.sweep_due)
         for alias in ("AS intent_id", "AS workspace_id", "AS reason"):
             assert alias in src, f"sweep_due must alias {alias}"
+
+
+class TestReconcilerRowsFailAlone:
+    """#1492: one row of the `02` §6 sweep fails alone (the executor's
+    docstring has the why)."""
+
+    def _rows(self, n):
+        return [
+            {"intent_id": f"i-{k}", "workspace_id": "ws-1", "reason": "ladder_due"}
+            for k in range(n)
+        ]
+
+    def _own_transactions(self, monkeypatch):
+        """`make_session_for` replaced by a factory that records how each of
+        its transactions ended and, like the real one, marks the task as in a
+        transaction while it is open. A savepoint inside one fails the test:
+        in the loop's mode nothing should nest."""
+        from contextlib import asynccontextmanager
+
+        ended = []
+
+        class _NoSavepoints(_FakeSession):
+            def begin_nested(self):
+                raise AssertionError("a row nested a savepoint in its own transaction")
+
+        def make_session_for(engine):
+            def session_for(job):
+                @asynccontextmanager
+                async def ctx():
+                    token = work_loop.unit_of_work._IN_TRANSACTION.set(True)
+                    try:
+                        yield _NoSavepoints()
+                    except BaseException:
+                        ended.append("rolled_back")
+                        raise
+                    finally:
+                        work_loop.unit_of_work._IN_TRANSACTION.reset(token)
+                    ended.append("committed")
+
+                return ctx()
+
+            return session_for
+
+        monkeypatch.setattr(
+            work_loop.unit_of_work, "make_session_for", make_session_for
+        )
+        return ended
+
+    def _sweep(self, monkeypatch, rows, reconcile):
+        async def fake_sweep(session, *, limit, notify_after_seconds):
+            return rows[:limit]
+
+        monkeypatch.setattr(work_loop.reconciler, "sweep_due", fake_sweep)
+        monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", reconcile)
+
+    async def test_no_transaction_carries_more_than_one_row(self, monkeypatch):
+        """The bound #1441 put on the drain, pinned with more due rows than it
+        allows: one transaction per row, so none can collect the writing
+        savepoints a batch of `MAX_WRITING_SAVEPOINTS + 1` rows would."""
+        from src.services.target.offboarding import MAX_WRITING_SAVEPOINTS
+
+        ended = self._own_transactions(monkeypatch)
+        rows = self._rows(MAX_WRITING_SAVEPOINTS + 1)
+        reconciled = []
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            reconciled.append(intent_id)
+            return "pending"
+
+        self._sweep(monkeypatch, rows, fake_reconcile)
+        registry = build_registry(
+            full_deps(poll=_in_progress, config=WorkerConfig(reconcile_limit=len(rows)))
+        )
+        assert await registry["reconcile_ambiguous"](None, _reconcile_job()) is None
+        assert reconciled == [r["intent_id"] for r in rows]
+        # The sweep's one short read, then one transaction per row.
+        assert ended == ["committed"] * (1 + len(rows))
+
+    async def test_the_provider_is_asked_with_no_transaction_open(self, monkeypatch):
+        """#1508: the egress floor refuses a provider call made inside a
+        transaction (`unit_of_work.in_transaction()` is what it reads), so a
+        ladder row asks before its transaction opens."""
+        self._own_transactions(monkeypatch)
+        asked = []
+
+        async def poll(*, intent_id, workspace_id):
+            asked.append((intent_id, work_loop.unit_of_work.in_transaction()))
+            return "IN_PROGRESS"
+
+        async def fake_reconcile(session, *, intent_id, status_code, **kw):
+            assert status_code == "IN_PROGRESS", "the verdict gets what was observed"
+            return "pending"
+
+        self._sweep(monkeypatch, self._rows(2), fake_reconcile)
+        registry = build_registry(full_deps(poll=poll))
+        await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert asked == [("i-0", False), ("i-1", False)]
+
+    async def test_a_failed_row_rolls_back_alone_and_the_first_failure_is_raised(
+        self, monkeypatch, caplog
+    ):
+        """Two rows fail and one resolves between them: the resolved row
+        commits, each failed row rolls back only itself, and the beat still
+        fails, with the FIRST failure, so the alarm is as loud as it was."""
+        ended = self._own_transactions(monkeypatch)
+        reconciled = []
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            if intent_id == "i-0":
+                raise ValueError(f"intent {intent_id} matched no row")
+            if intent_id == "i-2":
+                raise RuntimeError("the poll seam broke")
+            reconciled.append(intent_id)
+            return "posted"
+
+        self._sweep(monkeypatch, self._rows(3), fake_reconcile)
+        registry = build_registry(full_deps(poll=_in_progress))
+        with caplog.at_level("ERROR", logger=work_loop.__name__):
+            with pytest.raises(ValueError, match="intent i-0 matched no row"):
+                await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert reconciled == ["i-1"], "the row behind a failure still ran"
+        assert ended == ["committed", "rolled_back", "committed", "rolled_back"]
+        failed = [r for r in caplog.records if "NO verdict was recorded" in r.message]
+        assert [r.args[1] for r in failed] == ["i-0", "i-2"], "every failure is logged"
+        assert any("2 of 3 row(s) failed" in r.message for r in caplog.records)
+
+    def _mixed(self, monkeypatch, *, ladder_fails):
+        """A ladder row, a notice nobody can hear (n-1) and a delivered one
+        (n-2); returns the (intent, workspace) pairs the beat recorded as
+        unheard."""
+        from src.services.target import outbox
+
+        self._own_transactions(monkeypatch)
+        rows = [
+            {"intent_id": "i-0", "workspace_id": "ws-1", "reason": "ladder_due"},
+            {"intent_id": "n-1", "workspace_id": "ws-2", "reason": "notify_window"},
+            {"intent_id": "n-2", "workspace_id": "ws-3", "reason": "notify_window"},
+        ]
+        recorded = []
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            if ladder_fails:
+                raise ValueError(f"intent {intent_id} matched no row")
+            return "pending"
+
+        async def fake_notify(session, *, intent_id, **kw):
+            return outbox.UNDELIVERABLE if intent_id == "n-1" else 1
+
+        async def fake_record(session, *, intent_id, workspace_id, **kw):
+            recorded.append((intent_id, workspace_id))
+            return outbox.UNDELIVERABLE
+
+        self._sweep(monkeypatch, rows, fake_reconcile)
+        monkeypatch.setattr(work_loop.reconciler, "notify_parked_customer", fake_notify)
+        monkeypatch.setattr(work_loop.reconciler, "record_no_surface", fake_record)
+        return recorded
+
+    async def test_a_failed_beat_stays_loud_and_records_no_unheard_notice(
+        self, monkeypatch
+    ):
+        """A beat with a failed ladder row AND a notice nobody can hear fails
+        with the row's error: `UNDELIVERABLE` never stands in for the alarm
+        (#1438). Nor is the notice recorded, so the first beat that returns
+        signals it."""
+        recorded = self._mixed(monkeypatch, ladder_fails=True)
+        registry = build_registry(full_deps(poll=_in_progress))
+        with pytest.raises(ValueError, match="intent i-0 matched no row"):
+            await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert recorded == []
+
+    async def test_a_returning_beat_records_only_its_unheard_notices(self, monkeypatch):
+        from src.services.target import outbox
+
+        recorded = self._mixed(monkeypatch, ladder_fails=False)
+        registry = build_registry(full_deps(poll=_in_progress))
+        got = await registry["reconcile_ambiguous"](None, _reconcile_job())
+        assert got == outbox.UNDELIVERABLE
+        assert recorded == [("n-1", "ws-2")], "a delivered notice is not an attempt"
+
+    async def test_a_passed_session_gets_a_savepoint_per_row(self, monkeypatch):
+        """The unit seam: a caller that passes its own session keeps it, and
+        each row nests a savepoint on it rather than opening a transaction."""
+        ended = self._own_transactions(monkeypatch)
+        nested = []
+
+        class _Counting(_FakeSession):
+            def begin_nested(self):
+                nested.append(1)
+                return super().begin_nested()
+
+        async def fake_reconcile(session, *, intent_id, **kw):
+            return "pending"
+
+        self._sweep(monkeypatch, self._rows(2), fake_reconcile)
+        registry = build_registry(full_deps(poll=_in_progress))
+        await registry["reconcile_ambiguous"](_Counting(), _reconcile_job())
+        assert len(nested) == 2
+        assert ended == [], "the seam's session is used, never a new one"
 
 
 class TestAJobThatReachedNobodyIsNotASuccess:
@@ -459,13 +695,19 @@ class _FakeSession:
         self.statements = []
 
     def begin_nested(self):
-        # The exhausted notice rides a savepoint (phase 3a); the double
-        # offers one that does nothing.
+        # The exhausted notice rides a savepoint (phase 3a). When its body
+        # raises, the double drops what ran inside it, as ROLLBACK TO
+        # SAVEPOINT does, and passes the error on.
         from contextlib import asynccontextmanager
 
         @asynccontextmanager
         async def _sp():
-            yield self
+            mark = len(self.statements)
+            try:
+                yield self
+            except BaseException:
+                del self.statements[mark:]
+                raise
 
         return _sp()
 
@@ -487,6 +729,9 @@ class _FakeSession:
                 return rows[0] if rows else None
 
             def scalar(self_inner):
+                return rows[0] if rows else None
+
+            def fetchone(self_inner):
                 return rows[0] if rows else None
 
         return _R()
@@ -941,6 +1186,24 @@ class TestWeightedCategorySelection:
         class _S:
             def __init__(self):
                 self.statements = []
+                #: How each savepoint ended: "released", or "rolled back" by
+                #: a raise inside it. Kept apart from `statements`, whose
+                #: order the tests below pin.
+                self.savepoints = []
+
+            def begin_nested(self):
+                from contextlib import asynccontextmanager
+
+                @asynccontextmanager
+                async def savepoint():
+                    try:
+                        yield self
+                    except BaseException:
+                        self.savepoints.append("rolled back")
+                        raise
+                    self.savepoints.append("released")
+
+                return savepoint()
 
             async def execute(self, stmt, params=None):
                 self.statements.append((str(stmt), params))
@@ -952,6 +1215,9 @@ class TestWeightedCategorySelection:
 
                     def first(self_inner):
                         return rows_[0] if rows_ else None
+
+                    def __iter__(self_inner):
+                        return iter(rows_)
 
                 class _R:
                     def mappings(self_inner):
@@ -973,6 +1239,7 @@ class TestWeightedCategorySelection:
     async def _plan(self, session, rng):
         import random
 
+        from src.services.target import content_runway
         from src.services.target.scheduler import execute_plan_slot
 
         return await execute_plan_slot(
@@ -983,6 +1250,7 @@ class TestWeightedCategorySelection:
             provider_account_ref="ref",
             approval_mode="manual",
             no_media_notice_after_seconds=86400,
+            low_runway_days=content_runway.LOW_RUNWAY_DAYS,
             rng=random.Random(rng),
         )
 
@@ -1113,6 +1381,65 @@ class TestWeightedCategorySelection:
             and "l.ig_account_id = :acct" in counts_sql
         )
 
+    async def test_a_runway_notice_nobody_receives_does_not_ride_the_mint(
+        self, monkeypatch
+    ):
+        """The runway notice never decides the slot (#1478): owed and heard by
+        nobody, its verdict is not carried back, so the job the mint belongs
+        to succeeds. It is settled after the mint, in a savepoint."""
+        from src.services.target import content_runway, outbox
+        from src.services.target.scheduler import SlotOutcome
+
+        settled = []
+
+        async def after_mint(session, **kwargs):
+            # What the session last sent when the notice was asked for.
+            settled.append((session.statements[-1][0], kwargs))
+            return outbox.UNDELIVERABLE
+
+        monkeypatch.setattr(content_runway, "after_mint", after_mint)
+        s = self._session(
+            rows=self._rows(**{self.MEMES: 1.0}),
+            counts=[{"source_id": self.MEMES, "n": 3}],
+        )
+        assert await self._plan(s, 1) == SlotOutcome(intent_id="intent-1")
+        # Positive control: the notice was asked for, after the mint, with the
+        # pool less the minted file.
+        ((last_sent, asked),) = settled
+        assert "INSERT INTO post_intents" in last_sent
+        assert asked == {
+            "workspace_id": "ws-1",
+            "ig_account_id": "acct-1",
+            "eligible": 2,
+            "below_days": content_runway.LOW_RUNWAY_DAYS,
+        }
+        assert s.savepoints == ["released"]
+
+    async def test_a_runway_notice_that_raises_never_costs_the_mint(
+        self, monkeypatch, caplog
+    ):
+        """A failure writing the notice rolls back its savepoint alone and is
+        logged: the minted intent stands and is returned, with no notice."""
+        from src.services.target import content_runway
+        from src.services.target.scheduler import SlotOutcome
+
+        async def after_mint(session, **kwargs):
+            raise RuntimeError("the latch row could not be written")
+
+        monkeypatch.setattr(content_runway, "after_mint", after_mint)
+        s = self._session(
+            rows=self._rows(**{self.MEMES: 1.0}),
+            counts=[{"source_id": self.MEMES, "n": 3}],
+        )
+        with caplog.at_level("ERROR", logger="src.services.target.scheduler"):
+            out = await self._plan(s, 1)
+
+        assert out == SlotOutcome(intent_id="intent-1")
+        assert "INSERT INTO post_intents" in s.statements[-1][0], "the mint was sent"
+        assert s.savepoints == ["rolled back"], "and the notice failed in its own"
+        (logged,) = [r for r in caplog.records if "NOT written" in r.getMessage()]
+        assert logged.levelname == "ERROR" and logged.exc_info is not None
+
 
 class TestTheBudgetCeiling:
     """F6 (a), phase 3a step 3: a failing job is rescheduled with the lane's
@@ -1120,7 +1447,7 @@ class TestTheBudgetCeiling:
     `failed`, and a tenant kind the sweeps do not re-mint tells the workspace
     in its own words."""
 
-    def _loop(self, monkeypatch, *, executor, bindings=("b-1",)):
+    def _loop(self, monkeypatch, *, executor, bindings=("b-1",), rows=None):
         from datetime import datetime, timezone
 
         from src.services.target import outbox, prompts
@@ -1172,7 +1499,7 @@ class TestTheBudgetCeiling:
 
         @asynccontextmanager
         async def _ctx(job):
-            session = _FakeSession()
+            session = _FakeSession(rows)
             calls["sessions"].append(session)
             yield session
 
@@ -1264,43 +1591,55 @@ class TestTheBudgetCeiling:
             "the sweep re-mints a sender; 'will not retry' would be a lie"
         )
 
+    SRC = "5c0f2e8a-0b1d-4c3e-9f00-00000000c001"
+    INTENT = "5c0f2e8a-0b1d-4c3e-9f00-00000000c0a1"
+
+    @staticmethod
+    def _statements(calls, needle):
+        return [
+            (sql, params)
+            for session in calls["sessions"]
+            for sql, params in session.statements
+            if needle in sql
+        ]
+
     async def test_a_spent_sync_re_arms_its_source_for_tomorrow(self, monkeypatch):
         """Leg 4 nulls `next_sync_at` at mint and only a completed sync re-arms
         it; a sync the loop ends `failed` would leave the source never selected
         again. The exhausted path re-arms it, so "will try again tomorrow" is
-        true — in the same savepoint as the notice."""
+        true."""
 
         async def executor(session, job):
             raise RuntimeError("drive down")
 
         loop, calls = self._loop(monkeypatch, executor=executor)
         await loop._run_job(
-            self._job(attempts=5, payload={"v": 1, "source_id": "src-1"})
+            self._job(attempts=5, payload={"v": 1, "source_id": self.SRC})
         )
         assert calls["finalized"] == ["failed"] and len(calls["notices"]) == 1
-        updates = [
-            (sql, params)
-            for session in calls["sessions"]
-            for sql, params in session.statements
-            if "UPDATE media_sources" in sql
-        ]
-        assert len(updates) == 1, updates
-        sql, params = updates[0]
+        ((sql, params),) = self._statements(calls, "UPDATE media_sources")
         assert "next_sync_at IS NULL" in sql and "state = 'active'" in sql
-        assert params["s"] == "src-1" and params["ws"] == "ws-1"
+        assert params["s"] == self.SRC and params["ws"] == "ws-1"
         assert params["secs"] == work_loop.REARM_AFTER_SECONDS
 
-    async def test_a_spent_sync_without_a_source_re_arms_nothing(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "payload",
+        [{"v": 1}, {"v": 1, "source_id": "not-a-uuid"}],
+        ids=["no source", "a source that is not a uuid"],
+    )
+    async def test_a_spent_sync_without_a_usable_source_re_arms_nothing(
+        self, monkeypatch, payload
+    ):
+        """A malformed id is refused before the cast: the re-arm runs in the
+        finalize's own transaction, and a raise there would abort it."""
+
         async def executor(session, job):
             raise RuntimeError("drive down")
 
         loop, calls = self._loop(monkeypatch, executor=executor)
-        await loop._run_job(self._job(attempts=5))
-        assert not any(
-            "UPDATE media_sources" in sql
-            for session in calls["sessions"]
-            for sql, _ in session.statements
-        )
+        await loop._run_job(self._job(attempts=5, payload=payload))
+        assert calls["finalized"] == ["failed"]
+        assert self._statements(calls, "UPDATE media_sources") == []
 
     async def test_a_publish_job_the_loop_fails_parks_its_story_for_review(
         self, monkeypatch
@@ -1312,26 +1651,103 @@ class TestTheBudgetCeiling:
         the generic exhausted notice is not the answer for a story."""
         from src.services.target import publish_pipeline
 
-        parked = []
+        flipped, told = [], []
 
-        async def park_exhausted(session, job):
-            parked.append(job["id"])
-            return True
+        async def flip_exhausted(session, job):
+            flipped.append(job["id"])
+            return {
+                "workspace_id": "ws-1",
+                "intent_id": "it-1",
+                "tz": "UTC",
+                "notice": "n",
+            }
+
+        async def tell_review(session, **parked):
+            told.append(parked["intent_id"])
 
         async def executor(session, job):
             raise RuntimeError("pool timeout")
 
-        monkeypatch.setattr(publish_pipeline, "park_exhausted", park_exhausted)
+        monkeypatch.setattr(publish_pipeline, "flip_exhausted", flip_exhausted)
+        monkeypatch.setattr(publish_pipeline, "tell_review", tell_review)
         loop, calls = self._loop(monkeypatch, executor=executor)
         loop._registry["publish_pipeline"] = executor
         job = self._job(kind="publish_pipeline", attempts=5)
         await loop._run_job(job)
         assert calls["finalized"] == ["failed"]
-        assert parked == [job["id"]] and calls["notices"] == []
+        assert flipped == [job["id"]] and told == ["it-1"] and calls["notices"] == []
 
-    async def test_a_notice_that_cannot_be_written_does_not_stop_the_finalize(
+    async def test_a_failed_courtesy_does_not_undo_a_dead_publish_job_s_park(
         self, monkeypatch
     ):
+        """A publish job that spends its budget parks its story for review. The
+        flip is the state change; the card restated and the notice are the
+        courtesy, which rides the savepoint. A courtesy that fails must not take
+        the flip with it: a story left `publishing` keeps its account's publish
+        slot, and nothing moves a plain `publishing` row once its job has ended."""
+        from src.services.target import publish_pipeline
+
+        async def executor(session, job):
+            raise RuntimeError("the fifth untyped crash")
+
+        refused = []
+
+        async def courtesy_fails(session, **kwargs):
+            refused.append(kwargs["intent_id"])
+            raise RuntimeError("the outbox refused the card")
+
+        loop, calls = self._loop(
+            monkeypatch,
+            executor=executor,
+            rows=[{"state": "publishing", "workspace_id": "ws-1", "tz": "UTC"}],
+        )
+        loop._registry["publish_pipeline"] = executor
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", courtesy_fails)
+        await loop._run_job(
+            self._job(
+                kind="publish_pipeline",
+                attempts=5,
+                payload={"v": 1, "intent_id": self.INTENT},
+            )
+        )
+
+        assert calls["finalized"] == ["failed"] and loop.exhausted == 1
+        assert refused == [self.INTENT], "the courtesy fault never fired"
+        flips = [
+            params
+            for _, params in self._statements(calls, "SET state = 'review_required'")
+        ]
+        assert flips == [{"intent": self.INTENT, "from_state": "publishing"}], (
+            "the courtesy's rollback took the park's flip with it"
+        )
+
+    async def test_a_dead_publish_job_with_a_malformed_intent_parks_nothing(
+        self, monkeypatch
+    ):
+        """A malformed `intent_id` is refused before the cast: the flip runs in
+        the finalize's own transaction, where a raise would abort the finalize."""
+
+        async def executor(session, job):
+            raise RuntimeError("the fifth untyped crash")
+
+        loop, calls = self._loop(monkeypatch, executor=executor)
+        loop._registry["publish_pipeline"] = executor
+        await loop._run_job(
+            self._job(
+                kind="publish_pipeline",
+                attempts=5,
+                payload={"v": 1, "intent_id": "not-a-uuid"},
+            )
+        )
+        assert calls["finalized"] == ["failed"] and loop.exhausted == 1
+        assert self._statements(calls, "post_intents") == []
+
+    async def test_a_failed_notice_stops_neither_the_finalize_nor_the_re_arm(
+        self, monkeypatch
+    ):
+        """The notice is a courtesy and rides a savepoint. The re-arm is what
+        makes "will try again tomorrow" true, so the notice's rollback must not
+        take it: the source would stay active with nothing to select it."""
         from src.services.target import prompts
 
         async def executor(session, job):
@@ -1342,9 +1758,14 @@ class TestTheBudgetCeiling:
 
         loop, calls = self._loop(monkeypatch, executor=executor)
         monkeypatch.setattr(prompts, "push_bindings", broken_bindings)
-        await loop._run_job(self._job(attempts=5))
+        await loop._run_job(
+            self._job(attempts=5, payload={"v": 1, "source_id": self.SRC})
+        )
         assert calls["finalized"] == ["failed"] and calls["notices"] == []
         assert loop.exhausted == 1
+        assert [
+            params["s"] for _, params in self._statements(calls, "UPDATE media_sources")
+        ] == [self.SRC], "the re-arm went down with the notice"
 
     async def test_a_workspace_with_no_binding_gets_the_log_line_only(
         self, monkeypatch
@@ -1772,23 +2193,25 @@ class TestADeadPublishJobParksItsStory:
     ):
         from src.services.target import publish_pipeline
 
-        parked, fanned = [], []
+        told, fanned = [], []
 
-        async def park_exhausted(session, job):
-            parked.append(job["id"])
+        async def tell_review(session, **parked):
+            told.append(parked)
 
         async def fanout_notification(*a, **k):  # pragma: no cover — must not run
             fanned.append(k)
 
-        monkeypatch.setattr(publish_pipeline, "park_exhausted", park_exhausted)
+        monkeypatch.setattr(publish_pipeline, "tell_review", tell_review)
         monkeypatch.setattr(
             work_loop.outbox, "fanout_notification", fanout_notification
         )
-        await work_loop._notify_exhausted(
-            _FakeSession(),
-            {"id": "j1", "kind": "publish_pipeline", "workspace_id": "ws"},
+        parked = {"workspace_id": "ws", "intent_id": "it", "tz": "UTC", "notice": "n"}
+        job = {"id": "j1", "kind": "publish_pipeline", "workspace_id": "ws"}
+        await work_loop._notify_exhausted(_FakeSession(), job, parked)
+        await work_loop._notify_exhausted(_FakeSession(), job, None)
+        assert told == [parked] and fanned == [], (
+            "a parked story gets its courtesy; nothing parked, no generic notice either"
         )
-        assert parked == ["j1"] and fanned == []
 
 
 class TestTheSenderMintReadsItsOwners:

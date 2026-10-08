@@ -18,6 +18,7 @@ from src.services.target import (
     category_mix,
     channel_bind,
     commands,
+    content_runway,
     google_drive_oauth,
     identity,
     identity_link,
@@ -27,12 +28,14 @@ from src.services.target import (
     oauth_states,
     provisioning,
     sessions,
+    tenant_resolution,
     webhook_ingress,
     workspaces,
 )
 from src.services.target.drive_adapter import DriveRetryableError
 from src.services.target.commands import CommandNotBuilt, CommandRefused, CommandResult
 from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
+from src.services.target.work_loop import WorkerConfig
 from tests.src.api.conftest import INTENT, PRINCIPAL, WS
 
 KEY = {"Idempotency-Key": "k-1"}
@@ -250,6 +253,73 @@ class TestWorkspaceReads:
         assert resp.json()["intents_by_state"] == {"posted": 2}
         assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
 
+    def test_runway_is_served_under_the_gate(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        from src.api.routes import v1
+
+        seen = {}
+
+        async def runway(session, *, workspace_id, below_days):
+            seen.update(ws=workspace_id, below_days=below_days)
+            return {
+                "below_days": below_days,
+                "accounts": [{"id": "a-1", "days_left": 4}],
+            }
+
+        monkeypatch.setattr(content_runway, "runway", runway)
+        # A worker level that is not the default, so what is pinned is the
+        # worker's level, the one the notice is told at, not the constant.
+        assert content_runway.LOW_RUNWAY_DAYS != 5
+        monkeypatch.setattr(v1, "WorkerConfig", lambda: WorkerConfig(low_runway_days=5))
+        resp = client.get(f"/api/v1/workspaces/{WS}/runway")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "below_days": 5,
+            "accounts": [{"id": "a-1", "days_left": 4}],
+        }
+        assert seen == {"ws": str(WS), "below_days": 5}
+        assert ("gate", WS, PRINCIPAL.user_id, "member") in tenant
+
+    @pytest.fixture
+    def pending(self, monkeypatch):
+        async def list_invitations(session, *, workspace_id):
+            return [{"email": "invitee@example.com"}]
+
+        monkeypatch.setattr(workspaces, "list_invitations", list_invitations)
+
+    def test_an_admin_gets_the_pending_invitations(
+        self, client, signed_in, tenant, pending
+    ):
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 200
+        assert resp.json()["invitations"][0]["email"] == "invitee@example.com"
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    def test_a_member_gets_no_pending_invitation(
+        self, client, signed_in, tenant, pending, monkeypatch
+    ):
+        """A member: the gate passes the member floor and refuses any higher."""
+
+        async def as_a_member(
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+        ):
+            if minimum_role != "member":
+                raise TenantResolutionError("insufficient_role")
+
+        monkeypatch.setattr(tenant_resolution, "authorize_member", as_a_member)
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 403
+        assert "invitee@example.com" not in resp.text
+
+    def test_the_listing_floor_is_the_minting_floor(
+        self, client, signed_in, tenant, pending, monkeypatch
+    ):
+        monkeypatch.setitem(commands.ROLE_FLOOR, "invite_member", "owner")
+        resp = client.get(f"/api/v1/workspaces/{WS}/invitations")
+        assert resp.status_code == 200
+        assert ("gate", WS, PRINCIPAL.user_id, "owner") in tenant
+
 
 @pytest.fixture
 def port(monkeypatch):
@@ -257,6 +327,7 @@ def port(monkeypatch):
     log = {
         "admit": [],
         "execute": [],
+        "execute_kw": [],
         "outcome": CommandResult("executed", {"state": "approved"}),
     }
 
@@ -265,6 +336,7 @@ def port(monkeypatch):
 
     async def execute(session, command, **kw):
         log["execute"].append(command)
+        log["execute_kw"].append(kw)
         result = log["outcome"]
         if isinstance(result, Exception):
             raise result
@@ -320,6 +392,7 @@ class TestCommands:
         )
         assert cmd.args == {"intent_id": INTENT}
         assert tenant[0] == ("uow", WS, PRINCIPAL.user_id)
+        assert port["execute_kw"] == [{"tenant_bound": True}]
 
     def test_an_enqueued_outcome_is_202(self, client, signed_in, tenant, port):
         port["outcome"] = CommandResult("enqueued", {"job": "publish_pipeline"})
@@ -435,6 +508,8 @@ class TestCreateWorkspace:
             ("uow", preassigned, PRINCIPAL.user_id)
         ]  # no gate: no membership yet
         assert port["admit"][0][1] == "k-1"
+        # The workspace is not the tenant, so the port does not vouch for it.
+        assert port["execute_kw"] == [{"tenant_bound": False}]
 
     def test_a_client_supplied_id_is_ignored(self, client, signed_in, tenant, port):
         port["outcome"] = CommandResult("executed", {"workspace_id": "x"})
@@ -481,6 +556,21 @@ class TestInvitations:
 
 
 ACCOUNT = "55555555-5555-4555-8555-555555555555"
+
+
+#: A purpose-reading connect route's gates: (the purpose it mints, the entries
+#: moved, the floors its gates check, in order). The first gate is the lower
+#: connect floor; the minted purpose's own follows only when it is stricter.
+CONNECT_FLOOR_CASES = [
+    ("connect", {"connect_account": "owner"}, ["admin", "owner"]),
+    ("reconnect", {"reconnect_account": "owner"}, ["admin", "owner"]),
+    ("connect", {"reconnect_account": "owner"}, ["admin"]),
+    (
+        "reconnect",
+        {"connect_account": "member", "reconnect_account": "member"},
+        ["member"],
+    ),
+]
 
 
 @pytest.fixture
@@ -546,6 +636,29 @@ class TestDestinationConnect:
         assert issued["reconnect_target"] == ACCOUNT
         assert issued["workspace_id"] == WS
         assert issued["user_id"] == PRINCIPAL.user_id
+
+    @pytest.mark.parametrize("minted,moved,gates", CONNECT_FLOOR_CASES)
+    def test_the_gates_follow_the_minted_purposes_floor(
+        self,
+        client,
+        signed_in,
+        tenant,
+        instagram_configured,
+        purpose,
+        issued,
+        monkeypatch,
+        minted,
+        moved,
+        gates,
+    ):
+        purpose["value"] = minted
+        for kind, floor in moved.items():
+            monkeypatch.setitem(commands.ROLE_FLOOR, kind, floor)
+        resp = client.post(f"/api/v1/workspaces/{WS}/accounts/{ACCOUNT}/connect")
+        assert resp.status_code == 200, resp.text
+        assert tenant == [("uow", WS, PRINCIPAL.user_id)] + [
+            ("gate", WS, PRINCIPAL.user_id, floor) for floor in gates
+        ]
 
     def test_a_credentialed_account_mints_a_reconnect(
         self, client, signed_in, tenant, instagram_configured, purpose, issued
@@ -613,6 +726,28 @@ class TestWorkspaceConnect:
         assert issued["workspace_id"] == WS
         assert issued["user_id"] == PRINCIPAL.user_id
 
+    @pytest.mark.parametrize(
+        "moved,floor", [("connect_account", "owner"), ("reconnect_account", "admin")]
+    )
+    def test_the_floor_is_connects_alone(
+        self,
+        client,
+        signed_in,
+        tenant,
+        instagram_configured,
+        issued,
+        monkeypatch,
+        moved,
+        floor,
+    ):
+        monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, floor),
+        ]
+
     def test_unconfigured_instagram_refuses_503_before_any_seam(
         self, client, signed_in, tenant, issued, monkeypatch
     ):
@@ -623,6 +758,66 @@ class TestWorkspaceConnect:
         assert resp.status_code == 503
         assert "INSTAGRAM_APP_ID" in resp.json()["detail"]
         assert tenant == [] and issued == {}
+
+
+class TestTypedDestination:
+    """`POST /workspaces/{ws}/accounts` takes a handle only (`v1.create_account`):
+    a body carrying ``provider_account_ref`` is refused by name, after the
+    admin gate, and nothing is written."""
+
+    URL = f"/api/v1/workspaces/{WS}/accounts"
+
+    @pytest.fixture
+    def written(self, monkeypatch):
+        calls = []
+
+        async def create_destination(
+            session,
+            *,
+            workspace_id,
+            provider_account_ref=None,
+            handle=None,
+            schedule=True,
+        ):
+            calls.append((workspace_id, provider_account_ref, handle, schedule))
+            return ACCOUNT, True
+
+        monkeypatch.setattr(provisioning, "create_destination", create_destination)
+        return calls
+
+    def test_a_handle_reaches_the_writer_with_no_account_id(
+        self, client, signed_in, tenant, written
+    ):
+        """The control: the writer gets the handle and no reference, and
+        derives ``manual:<handle>`` from it (what lands is pinned by
+        `tests/scripts/test_provisioning_gate.py`,
+        `TestATypedHandleBecomesADestination`)."""
+        resp = client.post(self.URL, json={"handle": "@ExampleShop"})
+        assert resp.status_code == 201, resp.text
+        assert resp.json() == {
+            "account_id": ACCOUNT,
+            "created": True,
+            "scheduled": True,
+        }
+        assert written == [(WS, None, "@ExampleShop", True)]
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"provider_account_ref": "17841400000000000"},
+            {"handle": "h", "provider_account_ref": "manual:h"},
+        ],
+        ids=["account-id", "manual-ref-beside-a-handle"],
+    )
+    def test_a_provider_account_ref_is_refused_by_name_and_nothing_is_created(
+        self, client, signed_in, tenant, written, body
+    ):
+        resp = client.post(self.URL, json=body)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["reason"] == "account_ref_requires_connect"
+        assert written == []
+        assert ("gate", WS, PRINCIPAL.user_id, "admin") in tenant
 
 
 class TestTelegramGroupBindLink:
@@ -937,6 +1132,29 @@ class TestDriveConnect:
         assert issued["provider"] == google_drive_oauth.PROVIDER
         assert issued["reconnect_target"] == WS
         assert issued["workspace_id"] == WS and issued["user_id"] == PRINCIPAL.user_id
+
+    @pytest.mark.parametrize("minted,moved,gates", CONNECT_FLOOR_CASES)
+    def test_the_gates_follow_the_minted_purposes_floor(
+        self,
+        client,
+        signed_in,
+        tenant,
+        drive_configured,
+        purpose,
+        issued,
+        monkeypatch,
+        minted,
+        moved,
+        gates,
+    ):
+        purpose["value"] = minted
+        for kind, floor in moved.items():
+            monkeypatch.setitem(commands.ROLE_FLOOR, kind, floor)
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert tenant == [("uow", WS, PRINCIPAL.user_id)] + [
+            ("gate", WS, PRINCIPAL.user_id, floor) for floor in gates
+        ]
 
     def test_a_workspace_that_holds_a_grant_mints_a_reconnect(
         self, client, signed_in, tenant, drive_configured, purpose, issued

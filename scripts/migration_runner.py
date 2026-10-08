@@ -49,6 +49,11 @@ runner owns one transaction, ledger row inside it), ``self-managed`` (the file
 carries its own BEGIN/COMMIT, the legacy corpus shape, run with psql
 semantics), or ``no-transaction`` — visible in ``status`` output. New files
 (051+) should be ``wrapped``.
+
+A wrapped file's lock waits are bounded, and a failure on one is tried again
+(``LOCK_TIMEOUT``, ``LOCK_RETRY_DELAYS_S``; #1515). Self-managed and
+no-transaction files run without the bound: their statements and their
+transactions are their own.
 """
 
 import argparse
@@ -75,6 +80,23 @@ RUNNER_LOCK_KEY = 712_050_2026
 #: The corpus, relative to this file — the home for the path the suites import
 #: (the legacy `src.utils.validators.MIGRATIONS_DIR` went with the legacy tier).
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+
+#: The longest a wrapped file waits for any one lock (#1515). A file that
+#: must wait for ACCESS EXCLUSIVE holds its place in the table's lock queue,
+#: and every later statement on the table, readers included, queues behind
+#: it. Bounded, the file fails with SQLSTATE 55P03 instead, having stalled the
+#: table for at most this long: under the app's own lock bound (the tap
+#: path's 2 s), so a statement queued behind it does not fail on its own. A
+#: failed apply aborts the deploy with the old version serving (078's
+#: header), so failing fast on a lock is safe.
+LOCK_TIMEOUT = "1s"
+
+#: The pauses before each new attempt at a wrapped file that failed on its
+#: lock wait alone, so a transient holder costs seconds, not a deploy. A file
+#: is one transaction, so every attempt starts clean and nothing waits on
+#: the table between attempts. About 20 s in all before a holder that never
+#: lets go fails the apply.
+LOCK_RETRY_DELAYS_S = (1.0, 2.0, 4.0, 8.0)
 
 NO_TRANSACTION_MARKER = "-- runner:no-transaction"
 POSTCONDITION_MARKER = "-- runner:postcondition"
@@ -525,6 +547,9 @@ def _apply_one(conn, migration) -> None:
         # One migration = one transaction, ledger row included: applied and
         # recorded are the same fact or neither happens.
         with _transaction(conn) as cur:
+            # Bounded lock waits; `true` keeps the setting local to this
+            # transaction (SET LOCAL), as the tap path's is.
+            cur.execute("SELECT set_config('lock_timeout', %s, true)", (LOCK_TIMEOUT,))
             cur.execute(migration.sql)
             _run_postconditions(cur, migration)
             _record(cur, migration, _elapsed_ms(started), "applied")
@@ -547,8 +572,22 @@ def _apply_one(conn, migration) -> None:
 
 def _apply_guarded(conn, migration) -> None:
     """`_apply_one`, with a database failure named by the file — the one
-    wrap both doors share."""
+    wrap both doors share. A wrapped file is one transaction, so one that
+    failed on its lock wait alone is tried again after each pause in
+    `LOCK_RETRY_DELAYS_S`; the last attempt's failure is final."""
+    pauses = LOCK_RETRY_DELAYS_S if migration.execution_mode == "wrapped" else ()
     try:
+        for pause in pauses:
+            try:
+                _apply_one(conn, migration)
+                return
+            except psycopg2.errors.LockNotAvailable:
+                print(
+                    f"migration {migration.label}: a lock was held past"
+                    f" {LOCK_TIMEOUT}; trying again in {pause:g}s",
+                    file=sys.stderr,
+                )
+                time.sleep(pause)
         _apply_one(conn, migration)
     except MigrationRunnerError:
         raise

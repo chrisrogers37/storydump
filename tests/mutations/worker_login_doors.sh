@@ -76,34 +76,34 @@ check "the prompt sweep keeps the last workspace it prompted" src/services/targe
     return counts' '            pass  # raced by the fast path — the state is already right
     return counts' "$GATE -k hands_the_callers_scope_back"
 # The ladder's count: read before the claim, a tenant-less session counts every step as the first.
-check "the reconciler counts the ladder before claiming the row's workspace" src/services/target/work_loop.py '            await unit_of_work.apply_gucs(
-                session,
-                tenant_id=str(op["workspace_id"]),
-                actor_kind="system",
-            )
-            await reconciler.reconcile_intent(
-                session,
-                intent_id=op["intent_id"],
-                workspace_id=op["workspace_id"],
-                poll=deps.poll,
-                checks=await reconciler.checks_so_far(
+check "the reconciler counts the ladder before claiming the row's workspace" src/services/target/work_loop.py '                await unit_of_work.apply_gucs(
+                    session,
+                    tenant_id=str(op["workspace_id"]),
+                    actor_kind="system",
+                )
+                await reconciler.reconcile_intent(
+                    session,
+                    intent_id=op["intent_id"],
+                    workspace_id=op["workspace_id"],
+                    status_code=status_code,
+                    checks=await reconciler.checks_so_far(
+                        session, intent_id=op["intent_id"]
+                    ),
+                )' '                climbed = await reconciler.checks_so_far(
                     session, intent_id=op["intent_id"]
-                ),
-            )' '            climbed = await reconciler.checks_so_far(
-                session, intent_id=op["intent_id"]
-            )
-            await unit_of_work.apply_gucs(
-                session,
-                tenant_id=str(op["workspace_id"]),
-                actor_kind="system",
-            )
-            await reconciler.reconcile_intent(
-                session,
-                intent_id=op["intent_id"],
-                workspace_id=op["workspace_id"],
-                poll=deps.poll,
-                checks=climbed,
-            )' "$GATE -k climbs_the_ladder"
+                )
+                await unit_of_work.apply_gucs(
+                    session,
+                    tenant_id=str(op["workspace_id"]),
+                    actor_kind="system",
+                )
+                await reconciler.reconcile_intent(
+                    session,
+                    intent_id=op["intent_id"],
+                    workspace_id=op["workspace_id"],
+                    status_code=status_code,
+                    checks=climbed,
+                )' "$GATE -k climbs_the_ladder"
 # The advance phase's refusal rides a savepoint: without it one raced row aborts the sweep's transaction.
 check "the advance phase's refusal has no savepoint" src/services/target/prompts.py '            async with session.begin_nested():
                 await intent_ledger.transition(

@@ -42,9 +42,8 @@
       "body": {
         "intent_id": "0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
       },
-      "web": null,
-      "cli": "cancel:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
-      "note": "the web offers no cancel (the dashboard has no control for it); the CLI does"
+      "web": "cancel:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50",
+      "cli": "cancel:0395b173-9c3e-4a6b-8f2e-6d1c2b3a4f50"
     },
     {
       "command": "resolve_review",

@@ -4,11 +4,13 @@ tier's `ConfigValidator`, #1216)."""
 
 import pytest
 from fastapi import Depends
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from src.api.principal import COOKIE, current_principal
 from src.config.settings import settings
 from src.services.target import service_tokens, sessions
+from tests.src.api.conftest import post_body, post_messages
 
 
 # =============================================================================
@@ -301,6 +303,220 @@ class TestForwardedForAmbiguity:
             [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.CALLER
         )
         assert got == self.CALLER
+
+
+class TestRailwayEdgeAttribution:
+    """Who the assembled app believes the client is behind Railway's edge.
+
+    Production's access log showed every request arriving from 100.64.0.x,
+    Railway's edge, with the visitor's address unread: every IP-keyed control
+    counted all visitors as one. Railway's edge writes X-Forwarded-For itself,
+    as "<client>" or, when it routes through its Fastly CDN,
+    "<client>, <Fastly edge>". Driven through `create_app`, so these pin the
+    middleware as the app assembles it, not a copy.
+    """
+
+    EDGE = "100.64.0.13"  # Railway's edge, our TCP peer in production
+    CALLER = "192.0.2.50"
+    FORGED = "198.51.100.7"
+    FASTLY = "151.101.2.10"  # in Fastly's published 151.101.0.0/16
+
+    @pytest.fixture
+    def seen_from(self):
+        """``seen_from(peer, *xff)`` -> the client host the app attributes."""
+        from fastapi.responses import PlainTextResponse
+
+        from src.api.app import create_app
+
+        app = create_app(env={})
+
+        async def whoami(request):
+            return PlainTextResponse(request.client.host)
+
+        app.add_route("/whoami", whoami)
+
+        def seen(peer, *xff):
+            headers = [("X-Forwarded-For", v) for v in xff]
+            client = TestClient(app, client=(peer, 4321))
+            return client.get("/whoami", headers=headers).text
+
+        return seen
+
+    def test_the_visitor_is_read_through_railways_edge(self, seen_from):
+        assert seen_from(self.EDGE, self.CALLER) == self.CALLER
+
+    def test_an_ipv6_visitor_is_read_through_railways_edge(self, seen_from):
+        assert seen_from(self.EDGE, "2001:db8::1") == "2001:db8::1"
+
+    def test_a_forged_entry_left_of_the_edges_does_not_win(self, seen_from):
+        """Should the edge ever append rather than overwrite, the caller's own
+        entry sits left of what it observed and is never reached."""
+        assert seen_from(self.EDGE, f"{self.FORGED}, {self.CALLER}") == self.CALLER
+
+    def test_the_cdn_hop_is_not_skipped(self, seen_from):
+        """Through someone's Fastly service the client entry is whatever that
+        service wrote, so the walk stops at the Fastly edge: shared, never
+        forged."""
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.FASTLY}")
+        assert got == self.FASTLY
+
+
+class TestRailwayEdgeHop:
+    """The one hop Railway appends after the visitor (`EDGE_HOP_HOSTS`).
+
+    Measured 2026-10-06: the edge's Network Logs saw the visitor, and the app
+    logged 152.233.47.69, an entry after the visitor's in the header the edge
+    sends from 100.64.0.x. Driven through `create_app`, like the class above.
+    """
+
+    EDGE = TestRailwayEdgeAttribution.EDGE
+    CALLER = TestRailwayEdgeAttribution.CALLER
+    FORGED = TestRailwayEdgeAttribution.FORGED
+    FASTLY = TestRailwayEdgeAttribution.FASTLY
+    HOP = "152.233.47.69"
+    OTHER_HOP = "152.233.48.10"  # outside the measured range
+
+    seen_from = TestRailwayEdgeAttribution.seen_from
+
+    def test_the_hop_is_removed_and_the_visitor_read(self, seen_from):
+        assert seen_from(self.EDGE, f"{self.CALLER}, {self.HOP}") == self.CALLER
+
+    def test_a_forged_entry_left_of_the_visitor_still_loses(self, seen_from):
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.CALLER}, {self.HOP}")
+        assert got == self.CALLER
+
+    def test_only_one_hop_is_ever_removed(self, seen_from):
+        """A client holding a hop-range address, behind the hop, is that
+        address: the second hop-range entry stays and the walk stops there."""
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.HOP}, {self.HOP}")
+        assert got == self.HOP
+
+    def test_a_hop_with_a_port_is_removed(self, seen_from):
+        assert seen_from(self.EDGE, f"{self.CALLER}, {self.HOP}:443") == self.CALLER
+
+    def test_the_only_entry_is_never_removed(self, seen_from):
+        assert seen_from(self.EDGE, self.HOP) == self.HOP
+
+    def test_an_unknown_hop_is_kept_and_keyed_on(self, seen_from):
+        got = seen_from(self.EDGE, f"{self.CALLER}, {self.OTHER_HOP}")
+        assert got == self.OTHER_HOP
+
+    def test_the_cdn_hop_is_still_not_skipped(self, seen_from):
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.FASTLY}, {self.HOP}")
+        assert got == self.FASTLY
+
+    def test_an_untrusted_peers_header_stays_ignored(self, seen_from):
+        assert seen_from(self.CALLER, f"{self.FORGED}, {self.HOP}") == self.CALLER
+
+    def test_a_hop_range_peer_is_not_trusted(self, seen_from):
+        assert seen_from(self.HOP, self.FORGED) == self.HOP
+
+    def test_a_wildcard_hop_list_is_refused(self):
+        from src.config.settings import Settings, SettingsError
+
+        for broad in (
+            "*",
+            "0.0.0.0/0",
+            "152.0.0.0/8",
+            "::/0",
+            "nonsense",
+            "152.233.47.66/24",
+            "::ffff:0:0/96",
+            "64:ff9b::/96",
+        ):
+            with pytest.raises(SettingsError, match="EDGE_HOP_HOSTS"):
+                Settings(EDGE_HOP_HOSTS=broad)
+        assert Settings(EDGE_HOP_HOSTS="152.233.47.0/24, 192.0.2.7").edge_hop_hosts
+
+
+# =============================================================================
+# Request body limit
+# =============================================================================
+
+
+class TestBodySizeLimit:
+    """No route reads more of a request body than the API admits.
+
+    Driven through the real app, so these pin BodySizeLimitMiddleware as
+    `create_app` registers it rather than a copy of it. The limit is lowered
+    to LIMIT so the bodies stay small, and a probe route reads its whole body,
+    recording that it ran and then how much it read.
+    """
+
+    LIMIT = 1024
+
+    @pytest.fixture
+    def probe(self, monkeypatch):
+        from fastapi import Response
+        from fastapi.testclient import TestClient
+
+        from src.api.app import create_app
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "API_REQUEST_BODY_MAX_BYTES", self.LIMIT)
+        app = create_app(env={})
+        seen = []
+
+        async def read_it_all(request):
+            seen.append("ran")
+            seen.append(len(await request.body()))
+            return Response()
+
+        app.add_route("/probe", read_it_all, methods=["POST"])
+        return TestClient(app), seen
+
+    def test_a_declared_length_over_the_limit_never_reaches_the_route(self, probe):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * (self.LIMIT + 1))
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        assert resp.headers["connection"] == "close"
+        assert seen == [], "the route ran on a body the limit refused"
+
+    def test_an_undeclared_body_is_cut_off_once_it_passes_the_limit(self, probe):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * (self.LIMIT + 1), streamed=True)
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        # The route ran -- no length was declared to refuse on -- and the read
+        # it began never completed.
+        assert seen == ["ran"]
+
+    @pytest.mark.parametrize("streamed", [False, True], ids=["declared", "streamed"])
+    def test_a_body_at_the_limit_reaches_its_route(self, probe, streamed):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * self.LIMIT, streamed=streamed)
+        assert resp.status_code == 200, resp.text
+        assert seen == ["ran", self.LIMIT]
+
+    async def test_the_limit_is_on_the_total_across_messages(self, probe):
+        """Each message is under the limit and their total is over it: the
+        limit counts the whole body, not one message at a time."""
+        client, seen = probe
+        resp, received = await post_messages(client.app, "/probe", [b"x" * 600] * 2)
+        assert received == [600, 600]
+        assert max(received) <= self.LIMIT < sum(received)
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        # The route ran -- no length was declared to refuse on -- and the read
+        # it began never completed.
+        assert seen == ["ran"]
+
+
+class TestRoutesReadTheirOwnBodies:
+    def test_no_route_declares_a_body_parameter(self, app):
+        """A route reads its own body after its gate, so none declares a body
+        parameter for the framework to parse first; bounds on the body live in
+        the app's body size limit and in the routes themselves."""
+        routes = [route for route in app.routes if isinstance(route, APIRoute)]
+        assert routes, "no APIRoute to walk"
+        declared = sorted(
+            f"{method} {route.path}"
+            for route in routes
+            if route.body_field is not None
+            for method in route.methods
+        )
+        assert declared == [], declared
 
 
 # =============================================================================

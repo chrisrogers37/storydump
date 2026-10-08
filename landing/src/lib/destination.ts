@@ -51,6 +51,13 @@ export function destinationIsActive(state: string | null | undefined): boolean {
 }
 
 /**
+ * The states a story can be planned onto and is served on: the vocabulary's
+ * `LIVE_ACCOUNT_STATES` (`wire-contract.test.ts` holds them equal).
+ * `schedule_item` refuses an account in any other.
+ */
+export const LIVE_ACCOUNT_STATES: readonly string[] = ["active", "reauth_required"];
+
+/**
  * How a destination's state should read on screen.
  *
  * **Every state returns a badge, including one this build does not recognise.**

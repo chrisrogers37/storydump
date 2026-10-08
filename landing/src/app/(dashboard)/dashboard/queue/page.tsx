@@ -1,17 +1,25 @@
+import { CalendarClock } from "lucide-react";
 import { requireWorkspacePage } from "@/lib/page-guards";
 import { workspaceFetch } from "@/lib/workspaces";
 import type { WorkspaceConfig } from "@/lib/dashboard-payloads";
-import { NON_TERMINAL_STATES, type IntentsResponse } from "@/lib/intents";
+import {
+  LIST_LIMIT_MAX,
+  NON_TERMINAL_STATES,
+  queueOriginFilter,
+  type IntentsResponse,
+} from "@/lib/intents";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
+import { EmptyState } from "@/components/dashboard/empty-state";
+import { QueueFilter } from "@/components/dashboard/queue/queue-filter";
 import { QueueList } from "@/components/dashboard/queue/queue-list";
+import { QueueHeader } from "@/components/dashboard/page-headers";
 
 /**
- * `01` H5: every list is bounded. This asks for the API's ceiling
- * (`LIST_LIMIT_MAX`); the response echoes the limit it actually applied, and
- * a queue that reaches it says so rather than rendering the first page as
- * the whole.
+ * `01` H5: every list is bounded. This asks for the API's ceiling; the
+ * response echoes the limit it actually applied, and a queue that reaches it
+ * says so rather than rendering the first page as the whole.
  */
-const QUEUE_LIMIT = 200;
+const QUEUE_LIMIT = LIST_LIMIT_MAX;
 
 /**
  * The act-on-it surface (#1033): every intent the ledger has not closed, in
@@ -22,14 +30,23 @@ const QUEUE_LIMIT = 200;
  * reads, both guarded: a workspace config that could not be fetched would
  * mean rendering slots in the wrong clock and Approve on a guess, and the
  * rule for a page with N dependencies is to guard on all N.
+ *
+ * `?origin=planned` narrows it to the stories a person planned (#1413). The
+ * API applies the filter, so the view stays exact past the page limit.
  */
-export default async function QueuePage() {
+export default async function QueuePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ origin?: string }>;
+}) {
   const { workspaceId } = await requireWorkspacePage();
+  const origin = queueOriginFilter((await searchParams).origin);
 
   const [configResult, intentsResult] = await Promise.all([
     workspaceFetch<WorkspaceConfig>("", workspaceId),
     workspaceFetch<IntentsResponse>(
-      `intents?state=${NON_TERMINAL_STATES.join(",")}&limit=${QUEUE_LIMIT}`,
+      `intents?state=${NON_TERMINAL_STATES.join(",")}&limit=${QUEUE_LIMIT}` +
+        (origin ? `&origin=${origin}` : ""),
       workspaceId,
     ),
   ]);
@@ -40,23 +57,30 @@ export default async function QueuePage() {
 
   const config = configResult.data;
   const { intents, limit } = intentsResult.data;
+  const tz = config.tz ?? "UTC";
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Queue</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Every post that is not done yet, in slot order. Times are in {config.tz ?? "UTC"}.
-        </p>
-      </div>
+      <QueueHeader tz={tz} />
 
-      <QueueList
-        workspaceId={workspaceId}
-        intents={intents}
-        tz={config.tz ?? "UTC"}
-        apiPublishingEnabled={config.api_publishing_enabled === true}
-        truncatedAt={intents.length >= limit ? limit : null}
-      />
+      <QueueFilter origin={origin} />
+
+      {origin === "planned" && intents.length === 0 ? (
+        <EmptyState
+          icon={CalendarClock}
+          title="Nothing is planned"
+          description="Schedule a story from the Media library to post it at a time you pick."
+          action={{ label: "Open the Media library", href: "/dashboard/media" }}
+        />
+      ) : (
+        <QueueList
+          workspaceId={workspaceId}
+          intents={intents}
+          tz={tz}
+          apiPublishingEnabled={config.api_publishing_enabled === true}
+          truncatedAt={intents.length >= limit ? limit : null}
+        />
+      )}
     </div>
   );
 }

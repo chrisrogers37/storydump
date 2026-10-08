@@ -48,8 +48,10 @@ GitHub Actions runs automatically on every push/PR (`.github/workflows/ci.yml`):
 - **Security** -- vulnerability scanning: `pip-audit` gates (a known-vulnerable
   pin in `requirements.txt` fails the job); `bandit` is advisory, read its
   uploaded report rather than the step's colour
-- **Front end** (`landing/`: vitest, `tsc --noEmit`, eslint)
-- **Changelog** -- a PR must touch `CHANGELOG.md` unless it is docs-only
+- **Front end** (`landing/`: vitest, `tsc --noEmit`, eslint, and
+  `npm audit --omit=dev`, which gates on a known advisory against the runtime
+  dependencies)
+- **Changelog** -- the fragment rule in `changelog.d/README.md`
 
 A second workflow, `schema-drift.yml`, runs daily at 06:00 UTC and compares a
 live database's schema with the one the repository declares; it is an audit,

@@ -86,6 +86,8 @@ export type MediaRow = {
   caption: string | null;
   tags: string[] | null;
   thumbnail_url: string | null;
+  /** The link its stories ask a person to add by hand; shown only through `httpsHref`. */
+  link_url: string | null;
   state: string;
   times_posted: number;
   last_posted_at: string | null;
@@ -166,6 +168,13 @@ export type DriveStatusResponse = { drive: DriveStatus };
 
 /** What a history tab means: the terminal outcomes. #1044 names this set. */
 export const HISTORY_STATES = "posted,skipped,rejected";
+
+/**
+ * What the calendar draws under Posted: the stories that went out. A skipped
+ * or rejected story has an outcome date too, and drawn in that lane it reads
+ * as a post that happened. The sample workspace's calendar keeps the same set.
+ */
+export const POSTED_STATES = "posted";
 
 /**
  * What a queue means: everything before a terminal outcome — all seven.

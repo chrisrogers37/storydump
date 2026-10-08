@@ -61,6 +61,7 @@ from src.services.target import (
     category_mix,
     channel_bind,
     commands,
+    content_runway,
     drive_credentials,
     google_drive_adapter,
     google_drive_oauth,
@@ -75,6 +76,7 @@ from src.services.target import (
 )
 from src.services.target.commands import Command, CommandResult
 from src.services.target.oauth_states import STATE_TTL_SECONDS, issue_state
+from src.services.target.work_loop import WorkerConfig
 from src.exceptions.tenancy import TokenRefused
 from sqlalchemy import text
 
@@ -189,6 +191,7 @@ async def _dispatch(
             external_ref=key,
             principal=principal.dedup_principal,
             payload=body,
+            tenant_bound=command.workspace_id == tenant,
         )
         if principal.is_token:
             await _audit_cli_command(
@@ -300,10 +303,12 @@ async def me(request: Request, principal: Principal = Depends(require_session)):
 async def telegram_link(
     request: Request, principal: Principal = Depends(require_session)
 ):
-    """The link a signed-in user taps to attach their Telegram identity
+    """The link a signed-in user opens to attach their Telegram identity
     (`07` §2 `link`: only from an authenticated session; the row pins the
-    user, and the bot's `/start` door attaches the tapping identity to exactly
-    that user — D35). The service half is #1180; this route is what the X.3
+    user). The bot's `/start` door names that user's account and offers
+    Confirm; only the Confirm, pressed by the person the offer was made to in
+    their own private chat with the bot, attaches their identity to exactly
+    that user — D35. The service half is #1180; this route is what the X.3
     drive was missing (#1172, #1157).
 
     Tenant-less, like `/me`: an identity belongs to a user, not a workspace.
@@ -473,9 +478,13 @@ async def remove_binding(
 async def list_invitations(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
-    return await _collection(
-        request, ws, principal, workspaces.list_invitations, "invitations"
-    )
+    """The pending invitations, each with its invitee's address, so minting's
+    floor (`commands.ROLE_FLOOR["invite_member"]`)."""
+    async with principal_mod.floor_session(
+        request, str(ws), principal, commands.ROLE_FLOOR["invite_member"]
+    ) as session:
+        items = await workspaces.list_invitations(session, workspace_id=str(ws))
+    return {"invitations": items}
 
 
 def _states(state: Optional[str]) -> list[str]:
@@ -574,6 +583,22 @@ async def get_stats(
         return await workspaces.stats(session, workspace_id=str(ws))
 
 
+@router.get("/workspaces/{ws}/runway")
+async def get_runway(
+    ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
+):
+    """Days of content left per account (#1478): the eligible files over the
+    posts per day they are spent at, counted by the planner's own rule. An
+    account is marked low at the worker's own level, so the card marks the
+    accounts the notice is about."""
+    async with principal_mod.member_session(request, str(ws), principal) as session:
+        return await content_runway.runway(
+            session,
+            workspace_id=str(ws),
+            below_days=WorkerConfig().low_runway_days,
+        )
+
+
 @router.get("/workspaces/{ws}/intents/{intent_id}")
 async def get_intent(
     ws: uuid.UUID,
@@ -615,18 +640,16 @@ async def create_account(
     `provider_account_ref`, and a workspace with `api_publishing_enabled` false
     (the default) publishes through a human rather than through the API.
 
-    **The web no longer adds destinations this way** (owner ruling 2026-09-04:
-    a destination is added by CONNECTING — `connect_workspace_account` below
-    — so the handle is Instagram's word, never a second source of truth). The
-    route stays as the API's typed path: the CLI, tests, and a destination
-    that is deliberately parked without a login.
-
-    **Two bodies, one row (#1089).** ``{"handle": "..."}`` is the typed path the
-    CLI and tests use: there is no Meta id to send, so `create_destination`
-    derives a provisional ``manual:<handle>`` reference. ``{"provider_account_ref":
-    "..."}`` is the OAuth path for when a real id exists, and it still wins if
-    both are sent. A request carrying NEITHER is refused as
-    `account_ref_required`, unchanged.
+    **A handle only (#1089).** A destination's real Instagram account id is
+    written only by connecting the account: `connect_workspace_account` below
+    (``POST …/accounts/connect``, the route the web uses) and its callback.
+    The CLI does not call this route. It is the API's typed path, for a
+    destination deliberately parked without a login: ``{"handle": "..."}``,
+    from which `create_destination` derives a provisional ``manual:<handle>``
+    reference. A body carrying ``provider_account_ref`` is refused as
+    `account_ref_requires_connect`, with or without a handle beside it, and
+    nothing is written; a body with no handle is refused as
+    `account_ref_required`.
 
     Creating a destination SCHEDULES it: the posting cursor is seeded so the
     clock can see the row at all (`provisioning.create_destination` explains
@@ -641,17 +664,21 @@ async def create_account(
     schedule = body.get("schedule", True)
     if not isinstance(schedule, bool):
         raise HTTPException(status_code=400, detail="schedule must be a boolean")
-    # Both values pass through RAW. Coercing a blank handle to None here would
+    # The handle passes through RAW. Coercing a blank handle to None here would
     # be this route holding a second copy of "what counts as a handle" — the
     # thing the sibling `sources` route's comment forbids — and the copy already
     # disagreed: `{"handle": "   "}` answered `account_ref_required` while
     # `{"handle": "@"}` answered `handle_required`, one user error with two
     # reasons. `provisioning` owns presence for both columns.
     async with principal_mod.admin_session(request, str(ws), principal) as session:
+        if body.get("provider_account_ref") is not None:
+            raise provisioning.ProvisioningRefused(
+                "account_ref_requires_connect", "send a handle, or connect the account"
+            )
         account_id, created = await provisioning.create_destination(
             session,
             workspace_id=str(ws),
-            provider_account_ref=body.get("provider_account_ref"),
+            provider_account_ref=None,
             handle=body.get("handle"),
             schedule=schedule,
         )
@@ -837,9 +864,9 @@ async def connect_drive(
     folders picked under it).
 
     An OAuth leg is a browser redirect, which the command port cannot express,
-    so it lives here as a resource route at the admin floor — the floor
-    `commands.ROLE_FLOOR["connect_account"]` names — and the executor stays
-    the thin chat-side door (F1 (a)). The state pins the workspace as its own
+    so it lives here as a resource route at the floor of the command its
+    purpose stands for (`commands.connect_floor`), and the executor stays the
+    thin chat-side door (F1 (a)). The state pins the workspace as its own
     `reconnect_target`: `connect` for a workspace that has never held a grant
     and `reconnect` after that, so a stale state is retired by the next one
     (last issued wins, per workspace).
@@ -847,10 +874,11 @@ async def connect_drive(
     client_id, _, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )
-    async with principal_mod.admin_session(request, str(ws), principal) as session:
+    async with principal_mod.connect_session(request, str(ws), principal) as session:
         purpose = await google_drive_oauth.connect_purpose(
             session, workspace_id=str(ws)
         )
+        await principal_mod.require_connect_floor(session, str(ws), principal, purpose)
         state = await issue_state(
             session,
             purpose=purpose,
@@ -976,15 +1004,19 @@ async def connect_workspace_account(
     the identity Instagram returns (`provisioning.connect_destination`).
     `connect` always — with no row to be credentialed there is no reconnect
     to name, and an untargeted state retires nothing (states with no target
-    are independent one-shots).
+    are independent one-shots) — so its floor is `connect`'s
+    (`commands.connect_floor`).
     """
     app_id, _, redirect_uri = instagram_client.configured()
-    async with principal_mod.admin_session(request, str(ws), principal) as session:
+    purpose = "connect"
+    async with principal_mod.floor_session(
+        request, str(ws), principal, commands.connect_floor(purpose)
+    ) as session:
         return await _instagram_grant(
             session,
             principal=principal,
             ws=ws,
-            purpose="connect",
+            purpose=purpose,
             reconnect_target=None,
             app_id=app_id,
             redirect_uri=redirect_uri,
@@ -1024,8 +1056,8 @@ async def connect_account(
     #1041). The Drive connect route's shape, exactly.
 
     An OAuth leg is a browser redirect, which the command port cannot express,
-    so it lives here as a resource route at the admin floor — the floor
-    `commands.ROLE_FLOOR["connect_account"]` names. Per-DESTINATION: the state
+    so it lives here as a resource route at the floor of the command its
+    purpose stands for (`commands.connect_floor`). Per-DESTINATION: the state
     pins the `ig_accounts` row in `reconnect_target`, `connect` for a row that
     has never been credentialed and `reconnect` after that, so a stale
     reconnect state is retired by the next one (last issued wins). The
@@ -1033,12 +1065,13 @@ async def connect_account(
     `manual:<handle>` reference to the real Meta id.
     """
     app_id, _, redirect_uri = instagram_client.configured()
-    async with principal_mod.admin_session(request, str(ws), principal) as session:
+    async with principal_mod.connect_session(request, str(ws), principal) as session:
         purpose = await ig_login_oauth.connect_purpose(
             session, workspace_id=str(ws), ig_account_id=str(account_id)
         )
         if purpose is None:
             raise principal_mod.not_found()
+        await principal_mod.require_connect_floor(session, str(ws), principal, purpose)
         return await _instagram_grant(
             session,
             principal=principal,

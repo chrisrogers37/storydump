@@ -1,10 +1,10 @@
 """090: a removal sticks, and a removed admin's tokens go with them.
 
-Before 090, `fn_member_remove` deleted the membership row and
-`fn_group_member_seen` inserted a member for any linked user seen in the bound
-group, so a removed person still in the group was a member again the next time
-they spoke there. And a workspace service identity carried no minter, so the
-tokens a removed admin made kept reading the workspace.
+`fn_member_remove` records the removal and `fn_group_member_seen` honours it:
+a removed person seen in the bound group is refused (`removed`) until invited
+back, while a person never removed still joins. A workspace service identity
+records its minter, and the removal revokes the tokens the removed person
+minted (and only those) with the membership.
 
 Both doors run here as the production role (`svc_ingress`) on the replayed
 advertised stream, and the removal runs through `workspaces.remove_member`, the

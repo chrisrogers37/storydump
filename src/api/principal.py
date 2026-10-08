@@ -35,10 +35,12 @@ variable, never a silent fallback to the settings-built URL (#1010's class).
 
 from __future__ import annotations
 
+import ipaddress
 import json
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -51,7 +53,13 @@ from src.exceptions.tenancy import (
     TenantResolutionError,
     TokenRefused,
 )
-from src.services.target import service_tokens, sessions, tenant_resolution
+from src.services.target import (
+    commands,
+    rate_counters,
+    service_tokens,
+    sessions,
+    tenant_resolution,
+)
 from src.services.target.unit_of_work import unit_of_work
 from src.services.target.vocabulary import DATABASE_URL_VAR
 
@@ -395,11 +403,12 @@ def clear_session_cookie(response: Response) -> None:
 # `ops.py` and the shared test conftest all reached across for. They are
 # cross-router gates like the ones above, so they live here, as public names.
 #
-# `member_session` and `admin_session` call `open_tenant` as a BARE MODULE
-# GLOBAL, and every caller outside this module reaches these through the
-# module attribute (`principal_mod.open_tenant(...)`). A from-import would
-# bind the original function at import time and the conftest's monkeypatch
-# would not reach it — a unit test that quietly opens a real unit of work.
+# `floor_session` calls `open_tenant` as a BARE MODULE GLOBAL (`member_session`
+# and `admin_session` are it at a fixed floor), and every caller outside this
+# module reaches these through the module attribute
+# (`principal_mod.open_tenant(...)`). A from-import would bind the original
+# function at import time and the conftest's monkeypatch would not reach it —
+# a unit test that quietly opens a real unit of work.
 
 
 def open_tenant(request: Request, workspace_id: str, principal: Principal):
@@ -420,14 +429,56 @@ def open_tenant(request: Request, workspace_id: str, principal: Principal):
     ).begin()
 
 
+async def _gate(session, workspace_id: str, principal: Principal, floor: str):
+    """The ONE gate at *floor*, inside a unit of work that already binds
+    *workspace_id* as the tenant, so it does not set it again (`tenant_bound`)."""
+    await tenant_resolution.authorize_member(
+        session,
+        workspace_id,
+        principal.user_id,
+        minimum_role=floor,
+        tenant_bound=True,
+    )
+
+
 @asynccontextmanager
-async def member_session(request: Request, workspace_id: str, principal: Principal):
-    """Open the tenant's unit of work and run the ONE gate — every read."""
+async def floor_session(
+    request: Request, workspace_id: str, principal: Principal, floor: str
+):
+    """Open the tenant's unit of work and run the ONE gate at *floor*.
+
+    A route whose floor is by design a command's passes that command's
+    `commands.ROLE_FLOOR` entry rather than a role name, so the route and the
+    command cannot drift apart."""
     async with open_tenant(request, workspace_id, principal) as session:
-        await tenant_resolution.authorize_member(
-            session, workspace_id, principal.user_id, minimum_role="member"
-        )
+        await _gate(session, workspace_id, principal, floor)
         yield session
+
+
+def connect_session(request: Request, workspace_id: str, principal: Principal):
+    """`floor_session` for an OAuth connect leg that learns its purpose inside
+    the session: gated at the lower of the connect purposes' floors
+    (`commands.lowest_connect_floor`), and `require_connect_floor` checks the
+    purpose's own once it is read."""
+    return floor_session(
+        request, workspace_id, principal, commands.lowest_connect_floor()
+    )
+
+
+async def require_connect_floor(
+    session, workspace_id: str, principal: Principal, purpose: str
+) -> None:
+    """Inside a `connect_session`, require the floor of the command *purpose*
+    stands for (`commands.connect_floor`). One equal to the session's gate
+    needs no second read."""
+    floor = commands.connect_floor(purpose)
+    if floor != commands.lowest_connect_floor():
+        await _gate(session, workspace_id, principal, floor)
+
+
+def member_session(request: Request, workspace_id: str, principal: Principal):
+    """Open the tenant's unit of work and run the ONE gate — every read."""
+    return floor_session(request, workspace_id, principal, "member")
 
 
 @asynccontextmanager
@@ -444,14 +495,18 @@ async def reader_session(request: Request, workspace_id: str, principal: Princip
         yield session
 
 
-@asynccontextmanager
-async def admin_session(request: Request, workspace_id: str, principal: Principal):
+def admin_session(request: Request, workspace_id: str, principal: Principal):
     """`member_session`, at the admin floor."""
-    async with open_tenant(request, workspace_id, principal) as session:
-        await tenant_resolution.authorize_member(
-            session, workspace_id, principal.user_id, minimum_role="admin"
-        )
-        yield session
+    return floor_session(request, workspace_id, principal, "admin")
+
+
+def parse_json_object(raw: bytes) -> Optional[dict[str, Any]]:
+    """*raw* as a JSON object, or None when it is not one."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):  # deep nesting fits in a small body
+        return None
+    return body if isinstance(body, dict) else None
 
 
 async def json_object(request: Request) -> dict[str, Any]:
@@ -459,10 +514,86 @@ async def json_object(request: Request) -> dict[str, Any]:
     raw = await request.body()
     if not raw.strip():
         return {}
-    try:
-        body = json.loads(raw)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="body is not JSON")
-    if not isinstance(body, dict):
+    body = parse_json_object(raw)
+    if body is None:
         raise HTTPException(status_code=400, detail="body must be a JSON object")
     return body
+
+
+#: The detail of every 413 that refuses a request body for its size.
+BODY_TOO_LARGE_DETAIL = "request body too large"
+
+
+def declared_length(raw_headers: Iterable[tuple[bytes, bytes]]) -> int | None:
+    """The declared ``Content-Length``, read from ASGI raw headers (names
+    lowercased, as the server hands them over): an int, or None when the
+    header is absent or not an integer. The first such header answers, as it
+    does for `Request.headers`."""
+    for name, value in raw_headers:
+        if name == b"content-length":
+            try:
+                return int(value.decode("latin-1"))
+            except ValueError:
+                return None
+    return None
+
+
+#: `05`: pre-auth admission, 30/min per client (an IPv4 address or an IPv6
+#: /64, :func:`address_key`), scope `preauth_ip`.
+PREAUTH_LIMIT = 30
+PREAUTH_WINDOW_SECONDS = 60
+PREAUTH_SCOPE = "preauth_ip"
+
+
+def address_key(raw: Optional[str]) -> Optional[str]:
+    """The key one client is counted under: an IPv4 address, or an IPv6
+    address's /64 (one subscriber holds a whole /64, so keying on the address
+    alone would hand a script 2^64 limits). None when *raw* is not an
+    address."""
+    try:
+        ip = ipaddress.ip_address((raw or "").strip())
+    except ValueError:
+        return None
+    if ip.version == 4:
+        return str(ip)
+    if ip.ipv4_mapped:
+        return str(ip.ipv4_mapped)
+    return str(ipaddress.IPv6Network((ip.packed, 64), strict=False))
+
+
+def client_ip(request: Request) -> str:
+    """The attributed peer as a counter key (:func:`address_key`) —
+    `request.client.host` AFTER ProxyHeadersMiddleware has applied the
+    trusted-proxy walk (#726/#765), which is the `02` §6 client-IP source
+    rule. Never a header read here; the one other address a counter may key
+    on is :func:`preauth_guard`'s *client*, which a caller passes only after
+    verifying who sent it."""
+    host = request.client.host if request.client else "unknown"
+    return address_key(host) or host
+
+
+async def preauth_guard(
+    conn,
+    request: Request,
+    *,
+    detail: str,
+    key_prefix: str = "",
+    limit: Optional[int] = None,
+    client: Optional[str] = None,
+) -> None:
+    """Spend one of the caller's pre-auth admissions in *conn*'s transaction;
+    429 with *detail* past the limit. *key_prefix* gives a route its own
+    counter under the same scope; *limit* replaces `05`'s number for it;
+    *client* replaces the attributed peer, for a caller that vouches for the
+    address it forwards."""
+    count = await rate_counters.increment(
+        conn,
+        scope=PREAUTH_SCOPE,
+        key=key_prefix + (client or client_ip(request)),
+        window_start=rate_counters.window_start(
+            datetime.now(timezone.utc), PREAUTH_WINDOW_SECONDS
+        ),
+        limit=PREAUTH_LIMIT if limit is None else limit,
+    )
+    if count is None:
+        raise HTTPException(status_code=429, detail=detail)

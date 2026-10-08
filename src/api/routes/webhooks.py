@@ -76,7 +76,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 
 from src.config.settings import settings
-from src.services.target import vocabulary
+from src.services.target import unit_of_work, vocabulary
 from src.services.target.webhook_ingress import (
     AdmissionConflict,
     DeliveryReplayed,
@@ -232,28 +232,30 @@ async def telegram_webhook(
     except PoolTimeout:
         return _refuse_saturated(runtime, payload, metrics, background)
     try:
-        try:
-            await admit(
-                conn,
-                channel="telegram",
-                external_ref=str(update_id),
-                payload=payload,
-                principal=TELEGRAM_PRINCIPAL,
-            )
-        except DeliveryReplayed:
-            # Acknowledged WITHOUT re-execution — the two obligations L.8 names.
-            logger.info("telegram webhook: replay of update_id=%s", update_id)
-            replayed = True
-        except AdmissionConflict:
-            # Never swallowed as a replay: same key, different content.
-            logger.warning(
-                "telegram webhook: admission conflict on update_id=%s", update_id
-            )
-            raise HTTPException(status_code=409, detail="admission conflict")
+        # §5: no provider call inside the delivery's transaction.
+        with unit_of_work.transaction_discipline():
+            try:
+                await admit(
+                    conn,
+                    channel="telegram",
+                    external_ref=str(update_id),
+                    payload=payload,
+                    principal=TELEGRAM_PRINCIPAL,
+                )
+            except DeliveryReplayed:
+                # Acknowledged WITHOUT re-execution — the two obligations L.8 names.
+                logger.info("telegram webhook: replay of update_id=%s", update_id)
+                replayed = True
+            except AdmissionConflict:
+                # Never swallowed as a replay: same key, different content.
+                logger.warning(
+                    "telegram webhook: admission conflict on update_id=%s", update_id
+                )
+                raise HTTPException(status_code=409, detail="admission conflict")
 
-        if not replayed:
-            result = await runtime.dispatch(conn, payload)
-            await conn.commit()
+            if not replayed:
+                result = await runtime.dispatch(conn, payload)
+                await conn.commit()
     except SQLAlchemyError as exc:
         # A database fault around admit()/dispatch/commit: the admission row
         # rolls back with the connection (L.8 `TestAnAbortedWinnerDoesNotPoisonTheKey`),

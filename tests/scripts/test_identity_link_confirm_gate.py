@@ -1,10 +1,8 @@
 """The Telegram identity link's two steps, against the real replayed schema.
 
-Opening `t.me/<bot>?start=link-<state>` used to link the opener on the spot,
-so a link minted by one person and opened by another made the opener's
-Telegram the minter's identity. Now the `/start` only ASKS (`handle_link`
-peeks the state and names the account by a masked email) and a Confirm tap
-by the same Telegram user links (`handle_tap` consumes the state one-shot).
+Opening `t.me/<bot>?start=link-<state>` only ASKS (`handle_link` peeks the
+state and names the account by a masked email), and a Confirm tap by the same
+Telegram user links (`handle_tap` consumes the state one-shot).
 
 What only PostgreSQL can prove, driven as `svc_ingress` in the user plane —
 the shape the ingress opens (no tenant, no GUCs):
@@ -174,11 +172,11 @@ class TestTheTwoSteps:
 
     def test_another_users_confirm_touches_nothing(self, world):
         _, _, state = minted(world)
-        victim, other = telegram_user(), telegram_user()
-        open_link(world, state, victim)
-        r = tap(world, "linkok", state, offered_to=victim, by=other)
+        offered, other = telegram_user(), telegram_user()
+        open_link(world, state, offered)
+        r = tap(world, "linkok", state, offered_to=offered, by=other)
         assert r.outcome == "tapper_mismatch"
-        assert linked_to(world, victim) is None and linked_to(world, other) is None
+        assert linked_to(world, offered) is None and linked_to(world, other) is None
         assert live(world, state), "a refused tap spent the state"
 
     def test_a_refused_open_is_silent(self, world):

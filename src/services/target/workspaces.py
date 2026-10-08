@@ -46,6 +46,7 @@ from src.services.target import (
     google_drive_oauth,
     identity,
     invitations,
+    oauth_states,
     offboarding,
     readers,
     service_tokens,
@@ -80,6 +81,17 @@ SETTINGS_COLUMNS: dict[str, type] = {
 NULLABLE_SETTINGS = frozenset(
     {"approval_ttl_minutes", "repost_ttl_days", "skip_ttl_days", "caption_style"}
 )
+
+#: The inclusive range each bounded setting accepts. The three TTL columns
+#: carry no CHECK; these are their bounds.
+SETTINGS_RANGES: dict[str, tuple[int, int]] = {
+    "approval_ttl_minutes": (
+        vocabulary.SETTINGS_TTL_MIN,
+        vocabulary.SETTINGS_APPROVAL_TTL_MINUTES_MAX,
+    ),
+    "repost_ttl_days": (vocabulary.SETTINGS_TTL_MIN, vocabulary.SETTINGS_TTL_DAYS_MAX),
+    "skip_ttl_days": (vocabulary.SETTINGS_TTL_MIN, vocabulary.SETTINGS_TTL_DAYS_MAX),
+}
 
 #: The per-account schedule overrides an `account_settings_change` may touch —
 #: `054`'s "per-account schedule overrides; NULL = inherit the workspace
@@ -294,8 +306,8 @@ async def list_accounts(executor, *, workspace_id: str) -> list[dict]:
         "   AND c.provider = :provider"
         # A `disabled` destination is a REMOVED one (owner decision 2026-09-04):
         # it leaves this list, and connecting the account again brings it back.
-        " WHERE a.workspace_id = :ws AND a.state <> 'disabled'"
-        " ORDER BY a.created_at, a.id",
+        f" WHERE a.workspace_id = :ws AND {LISTED_ACCOUNT_SQL}"
+        f" {LISTED_ACCOUNT_ORDER_SQL}",
         ws=str(workspace_id),
         provider=IG_LOGIN_PROVIDER,
     )
@@ -369,6 +381,16 @@ CONNECTED_FLAG_SQL = "COALESCE((s.config->>'removed')::boolean, false)"
 #: — a folder whose grant died is paused, still connected, still weighted.
 CONNECTED_SQL = "NOT " + CONNECTED_FLAG_SQL
 
+#: The predicate for a LISTED destination, over `ig_accounts` aliased `a`: a
+#: `disabled` destination is a removed one, so it leaves the list, and
+#: connecting the account again brings it back. The Accounts tab
+#: (:func:`list_accounts`) and the Overview's runway (`content_runway.runway`)
+#: both list with it and :data:`LISTED_ACCOUNT_ORDER_SQL`, so the two show the
+#: same accounts in the same order.
+LISTED_ACCOUNT_SQL = "a.state <> 'disabled'"
+#: The order the destinations are listed in: oldest first, the id breaking ties.
+LISTED_ACCOUNT_ORDER_SQL = "ORDER BY a.created_at, a.id"
+
 
 async def list_sources(executor, *, workspace_id: str) -> list[dict]:
     """Sources with the folder each reads — `folder_ref`, and `folder_name`
@@ -440,8 +462,9 @@ INTENT_STATES: tuple[str, ...] = vocabulary.INTENT_STATES
 #: `ck_intent_origin`: the list filter's other closed set.
 INTENT_ORIGINS: tuple[str, ...] = vocabulary.INTENT_ORIGINS
 
-#: `ck_media_state`.
-MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed")
+#: `ck_media_state`, owned by the vocabulary module (pinned against the
+#: migration there).
+MEDIA_STATES: tuple[str, ...] = vocabulary.MEDIA_STATES
 
 #: The intent row plus the two joins the queue renders it with: the media it
 #: posts, and the account it posts to (`06` §3 — the handle is how a person
@@ -459,7 +482,7 @@ _INTENT_COLUMNS = (
     " COALESCE(a.tz, w.tz) AS tz,"
     f" CASE WHEN i.last_error->>'class' = '{vocabulary.PLANNED_MISSED}'"
     "      THEN i.last_error->>'message' END AS miss_reason,"
-    " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category,"
+    " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category, m.link_url,"
     " a.handle AS account_handle, a.display_name AS account_display_name"
 )
 
@@ -472,7 +495,7 @@ _INTENT_FROM = (
 
 _MEDIA_COLUMNS = (
     "id, source_id, provider_file_ref, file_name, media_kind, mime_type, file_size,"
-    " category, title, caption, tags, thumbnail_url, state, times_posted,"
+    " category, title, caption, tags, thumbnail_url, link_url, state, times_posted,"
     " last_posted_at, created_at"
 )
 
@@ -683,8 +706,10 @@ def _validate_against(
     changes: Mapping[str, Any],
     columns: Mapping[str, type],
     nullable: frozenset[str],
+    ranges: Mapping[str, tuple[int, int]],
 ) -> dict[str, Any]:
-    """Keys and Python types only — the DB CHECKs decide the values.
+    """Keys, Python types, and the inclusive *ranges* — the DB CHECKs decide
+    every other value.
 
     `bool` is refused for int columns explicitly, because `True` IS an int in
     Python and would otherwise slip through as `posts_per_day = 1`.
@@ -710,19 +735,25 @@ def _validate_against(
             raise InvalidWorkspaceArgs(f"{key} must be an integer")
         elif not isinstance(value, expected):
             raise InvalidWorkspaceArgs(f"{key} must be {expected.__name__}")
+        elif key in ranges:
+            low, high = ranges[key]
+            if not low <= value <= high:
+                raise InvalidWorkspaceArgs(f"{key} must be {low} to {high}")
         cleaned[key] = value
     return cleaned
 
 
 def validate_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
     """The workspace's typed product configuration (`02` §1)."""
-    return _validate_against(changes, SETTINGS_COLUMNS, NULLABLE_SETTINGS)
+    return _validate_against(
+        changes, SETTINGS_COLUMNS, NULLABLE_SETTINGS, SETTINGS_RANGES
+    )
 
 
 def validate_account_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
     """One account's schedule overrides — same rules, narrower allowlist."""
     return _validate_against(
-        changes, ACCOUNT_SETTINGS_COLUMNS, ACCOUNT_NULLABLE_SETTINGS
+        changes, ACCOUNT_SETTINGS_COLUMNS, ACCOUNT_NULLABLE_SETTINGS, {}
     )
 
 
@@ -800,12 +831,15 @@ async def remove_member(
     delete lives in the `fn_member_remove` door, and this is its one caller.
     Refusals come back by name — the owner cannot be removed
     (`transfer_ownership` is that edge), nobody removes themselves, a
-    non-member is `not_found`. The removal is recorded by the door, so the
-    Telegram join path cannot re-add the person until they are invited back,
-    and the workspace service identities they minted are revoked here, in the
-    same transaction (090), as are the pending invitations in the workspace
-    that they sent or that are addressed to them, so none of them lets anyone
-    in and none blocks the fresh invitation that brings them back."""
+    non-member is `not_found`. The door also checks its caller: the workspace
+    must be the claimed tenant and *by_user_id* an owner or admin of it, or it
+    raises (`07` §45). The door records the removal, which the Telegram join
+    path honours until the person is invited back. In the same transaction,
+    the workspace service identities they minted are revoked (090), as are the
+    pending invitations in the workspace that they sent or that are addressed
+    to them, so none of them lets anyone in and none blocks the fresh
+    invitation that brings them back, and every live link state they hold for
+    this workspace is retired (`07` §45)."""
     row = (
         await executor.execute(
             text(
@@ -817,14 +851,18 @@ async def remove_member(
     ).first()
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
-        # The door recorded the removal, so the Telegram group cannot undo it
+        # The door recorded the removal, which the Telegram join path honours
         # (090); the service identities this person minted go with them, and so
-        # do the pending invitations they sent or were sent.
+        # do the pending invitations they sent or were sent and every bind or
+        # connect link they hold for this workspace.
         await service_tokens.revoke_minted_by(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
         )
         await invitations.revoke_on_removal(
             executor, workspace_id=str(workspace_id), user_id=str(user_id)
+        )
+        await oauth_states.retire_live_states(
+            executor, user_id=user_id, workspace_id=workspace_id
         )
         return str(row[1])
     if outcome == "not_found":
