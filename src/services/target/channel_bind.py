@@ -122,11 +122,7 @@ async def handle_bind(conn, ctx: StartContext) -> StartResult:
         # What can change between the mint and the tap is the membership:
         # re-checked under the tenant just set, before anything is written.
         await tenant_resolution.authorize_member(
-            conn,
-            str(workspace_id),
-            str(minter),
-            minimum_role="admin",
-            tenant_bound=True,
+            conn, str(workspace_id), str(minter), minimum_role="admin"
         )
     except TenantResolutionError as exc:
         logger.warning("group bind: the minter is no longer an admin (%s)", exc.reason)

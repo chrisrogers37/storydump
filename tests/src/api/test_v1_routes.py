@@ -301,9 +301,7 @@ class TestWorkspaceReads:
     ):
         """A member: the gate passes the member floor and refuses any higher."""
 
-        async def as_a_member(
-            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
-        ):
+        async def as_a_member(session, workspace_id, user_id, minimum_role="member"):
             if minimum_role != "member":
                 raise TenantResolutionError("insufficient_role")
 
@@ -327,16 +325,14 @@ def port(monkeypatch):
     log = {
         "admit": [],
         "execute": [],
-        "execute_kw": [],
         "outcome": CommandResult("executed", {"state": "approved"}),
     }
 
     async def admit(session, *, channel, external_ref, payload, principal):
         log["admit"].append((channel, external_ref, payload, principal))
 
-    async def execute(session, command, **kw):
+    async def execute(session, command):
         log["execute"].append(command)
-        log["execute_kw"].append(kw)
         result = log["outcome"]
         if isinstance(result, Exception):
             raise result
@@ -392,7 +388,6 @@ class TestCommands:
         )
         assert cmd.args == {"intent_id": INTENT}
         assert tenant[0] == ("uow", WS, PRINCIPAL.user_id)
-        assert port["execute_kw"] == [{"tenant_bound": True}]
 
     def test_an_enqueued_outcome_is_202(self, client, signed_in, tenant, port):
         port["outcome"] = CommandResult("enqueued", {"job": "publish_pipeline"})
@@ -508,8 +503,6 @@ class TestCreateWorkspace:
             ("uow", preassigned, PRINCIPAL.user_id)
         ]  # no gate: no membership yet
         assert port["admit"][0][1] == "k-1"
-        # The workspace is not the tenant, so the port does not vouch for it.
-        assert port["execute_kw"] == [{"tenant_bound": False}]
 
     def test_a_client_supplied_id_is_ignored(self, client, signed_in, tenant, port):
         port["outcome"] = CommandResult("executed", {"workspace_id": "x"})

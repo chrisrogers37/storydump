@@ -36,9 +36,8 @@ This module was written against sync DB-API cursors and had no caller in
 `src/services/target/`. It was ported in place rather than duplicated — a
 second async copy of "the one central authorization gate" would be two
 gates. Every function takes the caller's async executor (an `AsyncConnection`
-or `AsyncSession`) and runs in the caller's transaction, so `SET LOCAL` never
-outlives it. The tenant claim is applied through `unit_of_work.apply_gucs`,
-the one spelling of the GUC statement, for the reason that module states.
+or `AsyncSession`) and runs in the caller's transaction. The tenant claim is
+the caller's to bind (`unit_of_work.apply_gucs`); nothing here sets it.
 """
 
 from __future__ import annotations
@@ -50,7 +49,6 @@ from sqlalchemy import text
 
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import bindings
-from src.services.target.unit_of_work import apply_gucs
 
 #: Channel vocabulary — `bindings.CHANNELS` is `ck_bindings_channel` verbatim
 #: and this module routes on the same set (#1325 audit, TD-B20).
@@ -116,25 +114,20 @@ async def authorize_member(
     workspace_id: str,
     user_id: str,
     minimum_role: str = "member",
-    *,
-    tenant_bound: bool = False,
 ) -> str:
     """The one central authorization gate (`01` §1): workspace_members role
     check, in one place, never per handler.
 
-    Sets the CLAIMED workspace as transaction-local tenant context first —
-    "the door tenant context walks through": under RLS the membership row is
-    visible iff the claim is the row's own workspace, so a false claim reads
-    empty and refuses. Fail-closed by construction, and safe to call on a
-    privileged connection too (the read is then unfiltered but the WHERE
-    still binds both keys). *tenant_bound*: the caller's transaction already
-    binds *workspace_id* as its tenant context, so setting it again would only
-    be a round trip (#1286) — the WHERE still binds both keys either way.
+    Called in a transaction the caller has already bound to *workspace_id*
+    (`unit_of_work.apply_gucs`); the gate reads under that binding and never
+    sets one. Under RLS the membership row is visible iff the bound tenant is
+    the row's own workspace, so a transaction bound to no tenant, or to
+    another, reads empty and refuses. Fail-closed by construction, and safe
+    to call on a privileged connection too (the read is then unfiltered but
+    the WHERE still binds both keys).
     """
     if minimum_role not in ROLE_ORDER:
         raise TenantResolutionError("insufficient_role", f"unknown role {minimum_role}")
-    if not tenant_bound:
-        await apply_gucs(executor, tenant_id=str(workspace_id))
     row = (
         await executor.execute(
             text(

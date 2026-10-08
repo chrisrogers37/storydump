@@ -103,7 +103,7 @@ def port(monkeypatch):
         log["admit"].append((channel, external_ref, payload, principal))
         return {}
 
-    async def execute(session, command, *, tenant_bound=False):
+    async def execute(session, command):
         log["execute"].append(command)
         return log["outcome"]
 
