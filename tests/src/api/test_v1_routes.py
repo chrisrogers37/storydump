@@ -1769,3 +1769,133 @@ class TestCategoryMix:
         )
         assert resp.status_code == 400
         assert resp.json()["reason"] == "invalid_mix_unknown_source"
+
+
+class TestMediaThumbnail:
+    """`GET /workspaces/{ws}/media/{media_id}/thumbnail` (#1634): the picture,
+    fetched on the server through the row's stored link, behind the member
+    gate the media reads use. Every way of having no picture is the 404 an
+    unknown item gets, and the page draws its placeholder."""
+
+    URL = f"/api/v1/workspaces/{WS}/media/{INTENT}/thumbnail"
+    SOURCE = "55555555-5555-5555-5555-555555555555"
+    LINK = "https://lh3.googleusercontent.com/drive-storage/thumb-1=s220"
+
+    @pytest.fixture
+    def drive(self, monkeypatch):
+        from src.api.routes import v1
+        from src.services.target.google_drive_adapter import Thumbnail
+
+        holder = {
+            "row": {
+                "source_id": self.SOURCE,
+                "provider_file_ref": "FILE1",
+                "thumbnail_url": self.LINK,
+            },
+            "thumbnail": Thumbnail(b"\xff\xd8picture", "image/jpeg"),
+            "raise": None,
+            "read": [],
+            "asked": [],
+            "events": [],
+        }
+
+        async def thumbnail_link(session, *, workspace_id, media_id):
+            holder["read"].append((workspace_id, media_id))
+            return holder["row"]
+
+        class _Adapter:
+            async def fetch_thumbnail(self, *, source_id, workspace_id, file_ref, link):
+                holder["events"].append("drive")
+                holder["asked"].append((source_id, workspace_id, file_ref, link))
+                if holder["raise"] is not None:
+                    raise holder["raise"]
+                return holder["thumbnail"]
+
+        monkeypatch.setattr(workspaces, "thumbnail_link", thumbnail_link)
+        monkeypatch.setattr(v1, "_drive_adapter", lambda request: _Adapter())
+        return holder
+
+    def test_serves_the_picture_at_the_member_floor_for_private_keeping(
+        self, client, signed_in, tenant, drive
+    ):
+        resp = client.get(self.URL)
+        assert resp.status_code == 200, resp.text
+        assert resp.content == b"\xff\xd8picture"
+        assert resp.headers["content-type"] == "image/jpeg"
+        assert resp.headers["cache-control"] == "private, max-age=2592000"
+        assert tenant == [
+            ("uow", WS, PRINCIPAL.user_id),
+            ("gate", WS, PRINCIPAL.user_id, "member"),
+        ]
+        assert drive["read"] == [(WS, INTENT)]
+        assert drive["asked"] == [(self.SOURCE, WS, "FILE1", self.LINK)]
+
+    def test_a_member_of_another_workspace_gets_404_and_drive_is_never_asked(
+        self, client, signed_in, tenant, drive
+    ):
+        tenant.refuse = TenantResolutionError("not_a_member")
+        resp = client.get(self.URL)
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "not found"}
+        assert drive["read"] == [] and drive["asked"] == []
+
+    def test_an_item_the_workspace_does_not_hold_is_404(
+        self, client, signed_in, tenant, drive
+    ):
+        drive["row"] = None
+        assert client.get(self.URL).status_code == 404
+        assert drive["asked"] == []
+
+    def test_an_item_with_no_link_is_404_and_drive_is_never_asked(
+        self, client, signed_in, tenant, drive
+    ):
+        drive["row"] = {**drive["row"], "thumbnail_url": None}
+        assert client.get(self.URL).status_code == 404
+        assert drive["asked"] == []
+
+    def test_no_picture_from_drive_is_the_same_404(
+        self, client, signed_in, tenant, drive
+    ):
+        drive["thumbnail"] = None
+        resp = client.get(self.URL)
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "not found"}
+
+    @pytest.mark.parametrize(
+        ("exc", "status", "detail"),
+        [
+            (media_sync.DriveCredentialDead("revoked"), 409, "drive_grant_refused"),
+            (DriveRetryableError("quota"), 503, "drive_unavailable"),
+        ],
+    )
+    def test_drive_refusals_are_named_the_way_every_drive_route_names_them(
+        self, client, signed_in, tenant, drive, exc, status, detail
+    ):
+        drive["raise"] = exc
+        resp = client.get(self.URL)
+        assert resp.status_code == status
+        assert resp.json()["detail"] == detail
+
+    def test_the_database_session_closes_before_drive_is_asked(
+        self, client, signed_in, tenant, drive, engine, monkeypatch
+    ):
+        from contextlib import asynccontextmanager
+
+        from src.api import principal
+
+        @asynccontextmanager
+        async def open_tenant(request, workspace_id, who):
+            drive["events"].append("session open")
+            yield engine.session
+            drive["events"].append("session closed")
+
+        monkeypatch.setattr(principal, "open_tenant", open_tenant)
+        assert client.get(self.URL).status_code == 200
+        assert drive["events"] == ["session open", "session closed", "drive"]
+
+    def test_a_non_uuid_media_id_is_refused_before_any_seam(
+        self, client, signed_in, tenant, drive
+    ):
+        resp = client.get(f"/api/v1/workspaces/{WS}/media/not-a-uuid/thumbnail")
+        assert resp.status_code == 422
+        assert drive["read"] == [] and drive["asked"] == []

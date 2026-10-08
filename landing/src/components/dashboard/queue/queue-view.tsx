@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/dashboard/empty-state";
 import { ItemLink } from "@/components/dashboard/item-link";
+import { MediaThumbnail } from "@/components/dashboard/media/media-thumbnail";
 import { RescheduleDialog } from "@/components/dashboard/queue/reschedule-dialog";
 import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import {
@@ -26,6 +27,7 @@ import {
   type IntentState,
   type QueueAction,
 } from "@/lib/intents";
+import { thumbnailSrc } from "@/lib/thumbnails";
 import { cn } from "@/lib/utils";
 
 /**
@@ -113,6 +115,7 @@ export type RowNote = { text: string; tone: "alert" | "status" };
 
 export function QueueView({
   intents,
+  workspaceId,
   tz,
   truncatedAt,
   pending,
@@ -122,6 +125,11 @@ export function QueueView({
   onReschedule,
 }: {
   intents: Intent[];
+  /**
+   * The workspace the rows belong to, for their thumbnails; null where there
+   * is no media, as in the sample workspace, and every row draws its glyph.
+   */
+  workspaceId: string | null;
   tz: string;
   /** The page limit when the list hit it, so the reader knows it is a page. */
   truncatedAt: number | null;
@@ -155,15 +163,33 @@ export function QueueView({
           const actions = actionsOf(intent);
           const note = noteFor(intent);
           const MediaGlyph = intent.media_kind === "video" ? Video : ImageIcon;
+          const glyph = (
+            <MediaGlyph className="h-5 w-5 text-muted-foreground" aria-hidden />
+          );
+          const thumbnail =
+            workspaceId && intent.has_thumbnail
+              ? thumbnailSrc(
+                  workspaceId,
+                  intent.media_item_id,
+                  intent.thumbnail_version,
+                )
+              : null;
 
           return (
             <li key={intent.id} className="p-4">
               <div className="flex flex-wrap items-center gap-4">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-muted">
-                  <MediaGlyph
-                    className="h-5 w-5 text-muted-foreground"
-                    aria-hidden
-                  />
+                <div className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted">
+                  {thumbnail ? (
+                    <MediaThumbnail
+                      key={thumbnail}
+                      src={thumbnail}
+                      alt={intent.file_name}
+                      video={intent.media_kind === "video"}
+                      fallback={glyph}
+                    />
+                  ) : (
+                    glyph
+                  )}
                 </div>
 
                 <div className="min-w-0 grow basis-32">

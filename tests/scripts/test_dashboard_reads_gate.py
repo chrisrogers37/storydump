@@ -32,6 +32,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 #: The link the posted item carries, to show that both reads return it.
 LINK = "https://example.com/menu"
+#: The provider's thumbnail link the posted item carries, which no read returns.
+THUMB = "https://lh3.googleusercontent.com/drive-storage/thumb-1=s220"
 
 
 @pytest.fixture(scope="module")
@@ -65,10 +67,11 @@ def world(admin_conn, owner_actor):
                     cur, a["ws"], "reads-a-skipped", state="awaiting_approval"
                 )
                 cur.execute(
-                    "UPDATE media_items SET category = 'food', times_posted = 1, link_url = %s"
-                    " WHERE id = %s",
-                    (LINK, posted["media"]),
+                    "UPDATE media_items SET category = 'food', times_posted = 1, link_url = %s,"
+                    " thumbnail_url = %s WHERE id = %s RETURNING content_hash, source_id",
+                    (LINK, THUMB, posted["media"]),
                 )
+                a["posted_hash"], a["posted_source"] = cur.fetchone()
                 cur.execute(
                     "UPDATE media_items SET category = 'travel' WHERE id = %s",
                     (skipped["media"],),
@@ -254,6 +257,39 @@ class TestTheItemsLink:
         assert all("link_url" in r for r in intents.values())
         assert intents[str(a["posted"]["intent"])]["link_url"] == LINK
         assert intents[str(a["skipped"]["intent"])]["link_url"] is None
+
+
+class TestTheThumbnailFlag:
+    """#1634: the library and the queue say whether an item has a thumbnail,
+    and the version its URL carries, but never the provider's link. Only the
+    thumbnail route's read selects the link, and only inside its workspace."""
+
+    def test_the_reads_carry_the_flag_and_the_version_never_the_link(self, world):
+        a = world["a"]
+        version = a["posted_hash"][: workspaces.THUMBNAIL_VERSION_CHARS]
+        media = {str(r["id"]): r for r in _read(world, a, workspaces.list_media)}
+        assert all("thumbnail_url" not in r for r in media.values())
+        posted = media[str(a["posted"]["media"])]
+        assert (posted["has_thumbnail"], posted["thumbnail_version"]) == (True, version)
+        assert media[a["orphan_media"]]["has_thumbnail"] is False
+        one = _read(world, a, workspaces.get_media, media_id=str(a["posted"]["media"]))
+        assert "thumbnail_url" not in one
+        assert (one["has_thumbnail"], one["thumbnail_version"]) == (True, version)
+        intents = {str(r["id"]): r for r in _read(world, a, workspaces.list_intents)}
+        assert all("thumbnail_url" not in r for r in intents.values())
+        row = intents[str(a["posted"]["intent"])]
+        assert (row["has_thumbnail"], row["thumbnail_version"]) == (True, version)
+        assert intents[str(a["skipped"]["intent"])]["has_thumbnail"] is False
+
+    def test_the_link_is_read_only_inside_its_own_workspace(self, world):
+        a, b = world["a"], world["b"]
+        media = str(a["posted"]["media"])
+        row = _read(world, a, workspaces.thumbnail_link, media_id=media)
+        assert row["thumbnail_url"] == THUMB
+        # The chain seeds its own source, so the item's is the one to match.
+        assert str(row["source_id"]) == str(a["posted_source"])
+        # A member of another workspace, naming this item's id, reads nothing.
+        assert _read(world, b, workspaces.thumbnail_link, media_id=media) is None
 
 
 class TestStats:

@@ -1442,7 +1442,7 @@ def _media_rows(conn, ws):
     with conn.cursor() as cur:
         cur.execute(
             "SELECT content_hash, source_id, state, category, folder_path, provider_file_ref,"
-            "       file_size"
+            "       file_size, thumbnail_url"
             "  FROM media_items WHERE workspace_id = %s ORDER BY content_hash",
             (ws,),
         )
@@ -1455,6 +1455,7 @@ def _media_rows(conn, ws):
                 "path": r[4],
                 "ref": r[5],
                 "size": r[6],
+                "thumbnail": r[7],
             }
             for r in cur.fetchall()
         ]
@@ -2166,3 +2167,43 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
             stamp = cur.fetchone()[0]
         sync_conn.commit()
         assert stamp == newer, "the newer stamp stands"
+
+
+def _thumbnail_links(conn, ws):
+    return {r["ref"]: r["thumbnail"] for r in _media_rows(conn, ws)}
+
+
+class TestTheThumbnailLinkReachesTheColumn:
+    """#1634: the sync stores the provider's thumbnail link in
+    `media_items.thumbnail_url`, which only the thumbnail route reads. The
+    link is short-lived, so each listing's replaces the stored one, and a
+    listing without one clears it. Asserted at the database: a key carried as
+    far as the INSERT and dropped there looks the same from the seam."""
+
+    LINK = "https://lh3.googleusercontent.com/drive-storage/thumb-1=s220"
+    NEXT = "https://lh3.googleusercontent.com/drive-storage/thumb-2=s220"
+
+    @pytest.mark.asyncio
+    async def test_a_listed_link_lands_and_an_unlisted_one_stays_null(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-thumb")
+        page = [_item("t1") | {"thumbnail_link": self.LINK}, _item("t2")]
+        await _walk(lane_db, sync_conn, chain["src"], ScriptedDrive([(page, None)]))
+        links = _thumbnail_links(sync_conn, chain["ws"])
+        assert links["t1"] == self.LINK
+        assert links["t2"] is None
+
+    @pytest.mark.asyncio
+    async def test_each_listing_replaces_the_link_and_one_without_clears_it(
+        self, lane_db, sync_conn
+    ):
+        chain = seed_workspace_chain(sync_conn, "w6-thumb-moves")
+        for listed in (self.LINK, self.NEXT, None):
+            item = _item("t1")
+            if listed is not None:
+                item["thumbnail_link"] = listed
+            await _walk(
+                lane_db, sync_conn, chain["src"], ScriptedDrive([([item], None)])
+            )
+            assert _thumbnail_links(sync_conn, chain["ws"])["t1"] == listed
