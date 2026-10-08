@@ -4,4 +4,4 @@
 
 ### Changed
 
-- **The outcomes are indexed by slot, so the newest-first and day-at-a-time reads stop walking a workspace's whole history (#1640).** A migration adds `ix_intents_history_slot`, a partial index on `post_intents (workspace_id, schedule_slot_at)` for posted, skipped and rejected stories. It covers all three outcomes, not posted alone, because the reads that ship ask for all three: the calendar's month asks for posted, and the Overview's recent activity and the history tab for all three. The month read spells its states into its SQL, so the planner can prove the index's predicate under any plan.
+- **A workspace's stories are indexed by slot, so the calendar's month, its day view and the Overview's recent activity stop walking a workspace's whole history (#1640).** A migration adds `ix_intents_workspace_slot` on `post_intents (workspace_id, schedule_slot_at)`, over every state. #1640 proposed a partial index on the outcomes (posted, skipped and rejected), but the day view reads every state, which that index could not serve.

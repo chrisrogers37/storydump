@@ -17,6 +17,16 @@ describe("the calendar's month and day params (#1634)", () => {
     }
   });
 
+  it("reads only a year it can draw: four digits, its grid inside year 9999", () => {
+    // 0999 would be named "999" and fail to format; 9999's grid runs into 10000.
+    for (const bad of ["0999-12", "0050-01", "9999-12"]) {
+      expect(parseMonth(bad)).toBeNull();
+    }
+    expect(parseMonth("1000-01")).toEqual({ year: 1000, month: 1 });
+    expect(parseDay("0999-12-01")).toBeNull();
+    expect(parseDay("9999-12-31")).toBeNull();
+  });
+
   it("reads a day only when it is a real one", () => {
     expect(parseDay("2026-10-03")).toBe("2026-10-03");
     expect(parseDay("2028-02-29")).toBe("2028-02-29");

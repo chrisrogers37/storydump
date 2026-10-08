@@ -35,7 +35,7 @@ import re
 import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -514,7 +514,8 @@ def _check_date_range(from_: Optional[date], to: Optional[date]) -> None:
     neither, ``to`` after ``from``, at most :data:`RANGE_MAX_DAYS` apart."""
     if (from_ is None) != (to is None):
         raise HTTPException(status_code=422, detail="from and to come together")
-    if from_ is not None and not from_ < to <= from_ + timedelta(days=RANGE_MAX_DAYS):
+    # A difference, not from + 45 days: that sum overflows near year 9999.
+    if from_ is not None and not 0 < (to - from_).days <= RANGE_MAX_DAYS:
         raise HTTPException(
             status_code=422,
             detail=f"to must be after from and within {RANGE_MAX_DAYS} days of it",

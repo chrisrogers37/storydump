@@ -521,7 +521,7 @@ _MEDIA_COLUMNS = (
 #: Midnight of a local date in the workspace's own zone, as the instant a slot
 #: is compared with. A scalar subquery rather than the joined `w.tz`, so the
 #: bound is one value the planner can scan an index range by
-#: (`ix_intents_history_slot`).
+#: (`ix_intents_workspace_slot`).
 _LOCAL_MIDNIGHT = (
     "(CAST(:{name} AS date)::timestamp AT TIME ZONE"
     " (SELECT tz FROM workspaces WHERE id = :ws))"
@@ -593,18 +593,17 @@ async def intent_days(
     holds and its *per_day* newest. The count is a COUNT, never re-summed
     from a bounded list (`01` H5); a day with none is absent.
 
-    *states* must be named and is spelled into the statement after it is
-    checked against :data:`INTENT_STATES`, not bound: a partial index proves
-    its predicate from the query's own literals, which a bound array hides
-    from a generic plan (`ix_intents_history_slot`)."""
-    unknown = sorted(set(states) - set(INTENT_STATES))
-    if not states or unknown:
-        raise ValueError(f"intent states must be named and known, got {unknown}")
-    params: dict[str, Any] = {"ws": str(workspace_id), "per_day": int(per_day)}
-    named = ", ".join(f"'{s}'" for s in states)
-    where = f"i.workspace_id = :ws AND i.state IN ({named})" + _slot_range(
-        params, from_date, to_date
-    )
+    *states* must be named, and validated against :data:`INTENT_STATES` as
+    :func:`list_intents`'s are."""
+    if not states:
+        raise ValueError("intent states must be named")
+    params: dict[str, Any] = {
+        "ws": str(workspace_id),
+        "per_day": int(per_day),
+        "states": list(states),
+    }
+    where = "i.workspace_id = :ws AND i.state = ANY(CAST(:states AS text[]))"
+    where += _slot_range(params, from_date, to_date)
     rows = await readers.rows(
         executor,
         "SELECT day, total, id, state, schedule_slot_at, file_name, category"

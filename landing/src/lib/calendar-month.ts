@@ -36,17 +36,25 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
 
-/** `?month=2026-10` → the month, or null when it is not one. */
+/**
+ * A year the calendar can draw: four digits, as the dates it formats are
+ * spelled, and a grid that ends before year 10000.
+ */
+const drawable = (year: number) => year >= 1000 && year < 9999;
+
+/** `?month=2026-10` → the month, or null when it is not one it can draw. */
 export function parseMonth(value: unknown): Month | null {
   const found = typeof value === "string" ? MONTH.exec(value) : null;
   if (!found) return null;
+  const year = Number(found[1]);
   const month = Number(found[2]);
-  return month >= 1 && month <= 12 ? { year: Number(found[1]), month } : null;
+  return month >= 1 && month <= 12 && drawable(year) ? { year, month } : null;
 }
 
-/** `?day=2026-10-03` → the date, or null when it is not a real one. */
+/** `?day=2026-10-03` → the date, or null when it is not a real one it can draw. */
 export function parseDay(value: unknown): string | null {
   if (typeof value !== "string" || !DAY.test(value)) return null;
+  if (!drawable(Number(value.slice(0, 4)))) return null;
   const d = new Date(`${value}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && isoDay(d) === value ? value : null;
 }

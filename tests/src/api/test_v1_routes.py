@@ -246,6 +246,9 @@ class TestWorkspaceReads:
         )
         client.get(url)
         assert (seen["from_date"], seen["to_date"]) == (None, None)
+        # The span is a difference: a sum would overflow at the calendar's end.
+        assert client.get(f"{url}?from=9999-12-30&to=9999-12-31").status_code == 200
+        assert seen["to_date"] == date(9999, 12, 31)
 
     def test_the_month_read_needs_a_state_and_a_range_and_bounds_its_names(
         self, client, signed_in, tenant, monkeypatch

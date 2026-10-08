@@ -426,9 +426,9 @@
       "ordinal": 42
     },
     {
-      "sha256": "ad5ad21364405f76211ea48e6fcb22dc8407585985d6f2872732ce4808bee124",
+      "sha256": "406f66e10619d7411a6472e2c11822d011d7858925d263b7eb24d6c8cc87b674",
       "class": "normative",
-      "label": "§50 the outcomes indexed by slot (107, #1640) — ix_intents_history_slot, a partial index on post_intents (workspace_id, schedule_slot_at) WHERE state IN ('posted','skipped','rejected'), for the calendar's month and day and the Overview's recent activity",
+      "label": "§50 the ledger indexed by workspace and slot (107, #1640) — ix_intents_workspace_slot, an index on post_intents (workspace_id, schedule_slot_at) over every state, for the calendar's month, its day view and the Overview's recent activity",
       "doc": "07-security-model.md",
       "ordinal": 43
     }

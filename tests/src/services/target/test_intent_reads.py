@@ -1,9 +1,8 @@
 """The calendar's reads over the ledger (#1634), over a scripted executor.
 
 What PostgreSQL decides (the local day in the workspace's zone, the index, the
-tenant) is the gate's, `tests/scripts/test_intent_history_index_gate.py`. This
-pins the statements: the range clauses and their parameters, and the month
-read's states spelled into the SQL for the partial index to prove.
+tenant) is the gate's, `tests/scripts/test_intent_slot_index_gate.py`. This
+pins the statements: the range clauses, the states and their parameters.
 """
 
 from __future__ import annotations
@@ -86,26 +85,23 @@ class TestTheMonthRead:
             per_day=3,
         )
 
-    @pytest.mark.parametrize("states", [(), ("posted", "frobnicated")])
-    async def test_states_must_be_named_and_known(self, states):
+    async def test_states_must_be_named(self):
         ex = _Executor()
         with pytest.raises(ValueError):
-            await self._days(ex, states)
+            await self._days(ex, ())
         assert ex.statements == [], "refused before any SQL ran"
 
-    async def test_the_states_are_spelled_into_the_statement_not_bound(self):
-        """A partial index proves its predicate from the query's literals; a
-        bound array would hide them from a generic plan (`ix_intents_history_slot`)."""
+    async def test_the_states_are_bound_as_the_intents_read_binds_them(self):
         ex = _Executor()
         await self._days(ex, ("posted", "skipped"))
         ((sql, params),) = ex.statements
-        assert "i.state IN ('posted', 'skipped')" in sql
-        assert "states" not in params
+        assert "i.state = ANY(CAST(:states AS text[]))" in sql
         assert FROM_CLAUSE in sql and TO_CLAUSE in sql
         assert "AT TIME ZONE w.tz" in sql, "the day is the workspace's local day"
         assert params == {
             "ws": WS,
             "per_day": 3,
+            "states": ["posted", "skipped"],
             "from_date": date(2026, 9, 28),
             "to_date": date(2026, 11, 2),
         }

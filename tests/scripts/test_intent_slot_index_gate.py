@@ -1,18 +1,22 @@
-"""The outcomes indexed by slot, and the calendar reads over them (#1640, #1634).
+"""The ledger indexed by workspace and slot, and the calendar reads over it
+(#1640, #1634).
 
-`ix_intents_history_slot` holds the posted, skipped and rejected stories by
-`(workspace_id, schedule_slot_at)`. `intent_days` (the calendar's month) and
-`list_intents` with `from_date`/`to_date` (its day view) bound the slot to a
-workspace's local days, read in the workspace's own zone.
+`ix_intents_workspace_slot` holds every story by `(workspace_id,
+schedule_slot_at)`. `intent_days` (the calendar's month) and `list_intents`
+with `from_date`/`to_date` (its day view) bound the slot to a workspace's local
+days, read in the workspace's own zone; the Overview's recent activity reads
+the outcomes newest first.
 
 Two workspaces, seeded through the stream login:
 
-- BULK: three thousand posted stories five hours apart, about twenty months of
-  posting, so one month on the calendar is a small range of the table. It is
-  where #1640's acceptance runs: EXPLAIN of the month read shows the index.
+- BULK: three thousand posted stories five hours apart going back from now,
+  about twenty months of posting, so a month or a day is a small range of the
+  table. It is where #1640's acceptance runs: EXPLAIN of each of the three
+  reads shows the index, with the slot range as its condition for the month
+  and the day. Their dates come from the database's clock, as the seed's do.
 - NEW YORK (`America/New_York`): stories placed on either side of local
-  midnight in July, five posted on one day with a skipped story beside them,
-  and a story still scheduled.
+  midnight in July 2026, five posted on one day with a skipped story beside
+  them, and a story still scheduled.
 
 Every read runs as `svc_ingress` under its workspace's tenant, the API's login.
 """
@@ -21,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import psycopg2
 import pytest
@@ -40,7 +44,7 @@ from tests.scripts.conftest import (
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
-INDEX = "ix_intents_history_slot"
+INDEX = "ix_intents_workspace_slot"
 BULK_POSTED = 3000
 
 
@@ -205,56 +209,114 @@ class _Explaining:
         return await self.conn.execute(statement, params)
 
 
-def _index_names(node) -> set:
-    """Every index a plan node, or any node under it, reads."""
-    found = set()
-    if isinstance(node, dict):
-        if "Index Name" in node:
-            found.add(node["Index Name"])
-        for value in node.values():
-            found |= _index_names(value)
-    elif isinstance(node, list):
-        for value in node:
-            found |= _index_names(value)
-    return found
+def _index_conds(node, index: str) -> list:
+    """The `Index Cond` of every plan node, at or under *node*, that reads
+    *index*."""
+    if isinstance(node, list):
+        return [c for value in node for c in _index_conds(value, index)]
+    if not isinstance(node, dict):
+        return []
+    found = [node.get("Index Cond", "")] if node.get("Index Name") == index else []
+    return found + [c for value in node.values() for c in _index_conds(value, index)]
 
 
-def _month_read(workspace_id: str, *, explain: bool = False):
-    """The calendar's month read for July 2026; with *explain*, each statement
-    is EXPLAINed first and its plan returned beside the days."""
+def _ranges_by_slot(plan) -> bool:
+    """Whether the plan reads the index by a range of the slot, not only by
+    the workspace."""
+    return any("schedule_slot_at" in c for c in _index_conds(plan, INDEX))
+
+
+def _explained(world, read):
+    """*read(executor, day)* over the bulk workspace, every statement it runs
+    EXPLAINed first; returns its result and its one plan. *day* is 180 days
+    back on the database's clock, well inside the bulk workspace's posting."""
+
+    async def run(c):
+        day = (
+            await c.execute(text("SELECT (now() - interval '180 days')::date"))
+        ).scalar()
+        executor = _Explaining(c)
+        result = await read(executor, day)
+        (plan,) = executor.plans
+        return result, plan
+
+    return asyncio.run(_as_tenant(world["ingress"], world["bulk"], run))
+
+
+def test_the_month_read_walks_the_index(world):
+    """#1640's acceptance: on a workspace with thousands of posted stories, the
+    calendar's month read is a range of `ix_intents_workspace_slot`."""
+
+    async def read(executor, day):
+        first = day.replace(day=1)
+        return await workspaces.intent_days(
+            executor,
+            workspace_id=world["bulk"],
+            states=["posted"],
+            from_date=first,
+            to_date=(first + timedelta(days=32)).replace(day=1),
+            per_day=3,
+        )
+
+    days, plan = _explained(world, read)
+    assert days, "positive control: the bulk workspace posted in that month"
+    assert _ranges_by_slot(plan), json.dumps(plan, indent=1)
+
+
+def test_the_day_view_walks_the_index(world):
+    """The day view reads every state, which an index on the outcomes alone
+    could not serve."""
+
+    async def read(executor, day):
+        return await workspaces.list_intents(
+            executor,
+            workspace_id=world["bulk"],
+            from_date=day,
+            to_date=day + timedelta(days=1),
+            limit=50,
+        )
+
+    rows, plan = _explained(world, read)
+    assert rows, "positive control: the bulk workspace posted that day"
+    assert _ranges_by_slot(plan), json.dumps(plan, indent=1)
+
+
+def test_the_overviews_recent_activity_reads_the_index(world):
+    """The Overview's recent activity: the three outcomes, newest first."""
+
+    async def read(executor, day):
+        return await workspaces.list_intents(
+            executor,
+            workspace_id=world["bulk"],
+            states=["posted", "skipped", "rejected"],
+            newest_first=True,
+            limit=10,
+        )
+
+    rows, plan = _explained(world, read)
+    assert len(rows) == 10, "positive control: the bulk workspace has ten to read"
+    assert _index_conds(plan, INDEX), json.dumps(plan, indent=1)
+
+
+def _july(workspace_id: str):
+    """The calendar's month read for July 2026's grid, where the New York
+    stories sit."""
 
     async def read(c):
-        executor = _Explaining(c) if explain else c
-        days = await workspaces.intent_days(
-            executor,
+        return await workspaces.intent_days(
+            c,
             workspace_id=workspace_id,
             states=["posted"],
             from_date=date(2026, 6, 29),
             to_date=date(2026, 8, 3),
             per_day=3,
         )
-        return days, getattr(executor, "plans", None)
 
     return read
 
 
-def test_the_month_read_walks_the_index(world):
-    """#1640's acceptance: on a workspace with thousands of posted stories, the
-    calendar's month read is a scan of `ix_intents_history_slot`."""
-    days, plans = asyncio.run(
-        _as_tenant(
-            world["ingress"], world["bulk"], _month_read(world["bulk"], explain=True)
-        )
-    )
-    assert days, "positive control: the bulk workspace posted in that month"
-    (plan,) = plans
-    assert INDEX in _index_names(plan), json.dumps(plan, indent=1)
-
-
 def test_the_month_counts_each_local_day_in_the_workspaces_zone(world):
-    days, _ = asyncio.run(
-        _as_tenant(world["ingress"], world["ny"], _month_read(world["ny"]))
-    )
+    days = asyncio.run(_as_tenant(world["ingress"], world["ny"], _july(world["ny"])))
     by_date = {d["date"]: d for d in days}
     assert sorted(by_date) == ["2026-07-09", "2026-07-10", "2026-07-15"], (
         "03:30Z on the 10th is the 9th in New York; the skipped and the "
