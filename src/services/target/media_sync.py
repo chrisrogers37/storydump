@@ -389,14 +389,12 @@ async def _run_sync(deps, job, *, reason) -> str:
     if page is None:
         return "source-error"
     items, new_checkpoint = page
-    # The adapter's cursor carries the adapter's own keys. The walk's start is
-    # the sync's, so it goes back onto every cursor of the walk it began, and
-    # the walk's last page judges against it.
-    if "started_at" in start.checkpoint:
-        new_checkpoint = {
-            **new_checkpoint,
-            "started_at": start.checkpoint["started_at"],
-        }
+    # The adapter's cursor carries the adapter's own keys. The walk's start,
+    # and the last whole walk's, are the sync's, so they go back onto every
+    # cursor of the walk, and the walk's last page judges against them.
+    carried = {k: start.checkpoint[k] for k in _WALK_KEYS if k in start.checkpoint}
+    if carried:
+        new_checkpoint = {**new_checkpoint, **carried}
 
     return await _land_page(
         factory,
@@ -523,14 +521,17 @@ async def _read_source(
                 source_id,
             )
         # The walk's start rides its cursor, read from the database's clock —
-        # the clock that writes `created_at` and `last_listed_at` — because a
-        # walk that saw the whole tree tombstones only what predates it
-        # (`_tombstone_unlisted`).
+        # the clock that writes `created_at` and `last_listed_at` — and so
+        # does the start of the last whole walk before it, because a whole
+        # walk tombstones only what that walk missed too (`_tombstone_unlisted`).
         checkpoint = {
             "v": 2,
             "walk": uuid.uuid4().hex,
             "started_at": row["db_now"].isoformat(),
         }
+        last_whole = _last_whole_start(stored)
+        if last_whole:
+            checkpoint["last_whole_started_at"] = last_whole
         minted = True
     walk = checkpoint["walk"]
     if minted:
@@ -737,12 +738,14 @@ async def _land_page(
                     # A retired row is adopted by whichever CONNECTED folder
                     # lists its bytes — including its own, should it find one
                     # retired under itself (a re-pick's revive lost a race).
+                    # A live row is adopted by whichever lists the same Drive
+                    # file, so a file moved between connected folders keeps
+                    # its row and never passes through `missing`.
                     # A removed folder's carrier never lands its page (the
                     # cursor CAS above fails once the source is paused), so
                     # no guard on the source is needed here.
                     " WHERE media_items.state IN ('removed', 'missing')"
-                    "    OR (media_items.source_id = EXCLUDED.source_id"
-                    "        AND media_items.provider_file_ref = EXCLUDED.provider_file_ref)"
+                    "    OR media_items.provider_file_ref = EXCLUDED.provider_file_ref"
                     " RETURNING (xmax = 0) AS inserted"
                 ),
                 {
@@ -828,20 +831,40 @@ async def _land_page(
     return "chained" if checkpoint_incomplete(new_checkpoint) else "synced"
 
 
-async def _tombstone_unlisted(s, checkpoint, *, source_id, workspace_id) -> int:
-    """The last page of a walk that saw the whole tree: the source's rows it
-    did not list are no longer in the folder, so the draw must not take them
-    (#1545). They go `missing` — the file's own absence, which only a listing
-    undoes; a re-pick revives `removed` rows, never these.
+#: The keys a walk's cursor carries for the sync, beside the adapter's own.
+_WALK_KEYS = ("started_at", "last_whole_started_at")
 
-    Only what predates the walk is judged: a row created or listed since the
-    walk began waits for the next walk, since rows land outside any walk too
-    (a relay's drop). Only a walk the adapter says was whole is judged
-    (`walk_saw_whole_tree`): one that skipped part of the tree, or whose
-    adapter does not say, judges nothing, and nor does a walk with no start on
-    its cursor (one in flight at the deploy that added the start). Returns
-    the rows tombstoned."""
-    started = (checkpoint or {}).get("started_at")
+
+def _last_whole_start(stored) -> Optional[str]:
+    """The start of the last walk that saw the whole tree, for the walk being
+    minted after *stored*: the stored walk's own start when it was whole,
+    else what it carried, since a walk that skipped part of the tree judges
+    nothing and moves nothing on. None when no whole walk is known: nothing
+    stored, a walk in flight, or a cursor a re-pick or a reset nulled."""
+    if not stored or checkpoint_incomplete(stored):
+        return None
+    if walk_saw_whole_tree(stored):
+        return stored.get("started_at")
+    return stored.get("last_whole_started_at")
+
+
+async def _tombstone_unlisted(s, checkpoint, *, source_id, workspace_id) -> int:
+    """The last page of a walk that saw the whole tree: the source's rows
+    neither it nor the last whole walk before it listed are no longer in the
+    folder, so the draw must not take them (#1545). They go `missing` — the
+    file's own absence, which only a listing undoes; a re-pick revives
+    `removed` rows, never these.
+
+    Two whole walks, not one: a file that still exists can miss one walk
+    (moved into a folder the walk had already listed, or trashed and
+    restored across its end), and a planned story on a `missing` file
+    expires. So only what predates the last whole walk is judged: a row
+    created or listed since that walk began waits, since rows land outside
+    any walk too (a relay's drop). Only a walk the adapter says was whole is
+    judged (`walk_saw_whole_tree`): one that skipped part of the tree, or
+    whose adapter does not say, judges nothing, and nor does a walk that
+    knows no whole walk before it. Returns the rows tombstoned."""
+    started = (checkpoint or {}).get("last_whole_started_at")
     if not started or not walk_saw_whole_tree(checkpoint):
         return 0
     result = await s.execute(

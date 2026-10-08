@@ -185,15 +185,19 @@ check "the late window is not the owner's hour" src/services/target/work_loop.py
 # The removal's notice reads the row the miss door's notice is written from.
 check "the removal's notice forgets the account" src/services/target/prompts.py '    "       m.file_name, a.handle, w.tz"' '    "       m.file_name, NULL AS handle, w.tz"' "$G -k 'RemovingADestination'"
 # The sync that writes what the miss door reads as `item_missing` (§48, in Python; the sync gate
-# judges it): the states a whole walk tombstones, a `missing` row adopted by a listing of the same
-# bytes, and the size a relisting that states none keeps.
+# judges it): the states a whole walk tombstones, the two whole walks a tombstone waits for, a
+# `missing` row adopted by a listing of the same bytes, a live row taken over by the folder its
+# file moved to, and the size a relisting that states none keeps.
 SYNC=src/services/target/media_sync.py
 TOMB="\"   AND state IN ('available', 'unsupported')\""
 ADOPT="\" WHERE media_items.state IN ('removed', 'missing')\""
+TAKE="\"    OR media_items.provider_file_ref = EXCLUDED.provider_file_ref\""
+LAST="    started = (checkpoint or {}).get(\"last_whole_started_at\")"
 check "an over-cap file deleted from Drive stays unsupported" $SYNC "$TOMB" "\"   AND state IN ('available')\"" "$W -k 'over_cap_file_deleted'"
 check "a whole walk tombstones a retired row" $SYNC "$TOMB" "\"   AND state IN ('available', 'unsupported', 'removed')\"" "$W -k 'unlisted_retired_row'"
 check "a missing row is not adopted by its twin" $SYNC "$ADOPT" "\" WHERE media_items.state IN ('removed')\"" "$W -k 'deleted_twins_row'"
-check "a missing row is not adopted by the folder it moved to" $SYNC "$ADOPT" "\" WHERE media_items.state IN ('removed')\"" "$W -k 'moved_to_another_connected_folder'"
+check "a live row is not taken over by the folder its file moved to" $SYNC "$TAKE" "\"    OR (media_items.source_id = EXCLUDED.source_id AND media_items.provider_file_ref = EXCLUDED.provider_file_ref)\"" "$W -k 'moved_to_another_connected_folder'"
+check "one whole walk tombstones a file that still exists" $SYNC "$LAST" "    started = (checkpoint or {}).get(\"started_at\")" "$W -k 'one_whole_walk_missed'"
 check "a relisting that states no size erases the stored one" $SYNC '"       file_size = COALESCE(EXCLUDED.file_size, media_items.file_size),"' '"       file_size = EXCLUDED.file_size,"' "$W -k 'states_no_size_keeps'"
 # The file and the model are held to the stream. Parity compares uniqueness SEMANTICS, not index
 # names, so renaming the model's index would be an equivalent mutant; these mutate what it compares.
