@@ -1,9 +1,10 @@
 """Helpers the two Google-leg suites share (sign-in and Drive): the one
-egress seam they drive the token endpoint through, and the grant the Drive
-tests build.
+egress seam they drive the token endpoint through, the grant the Drive tests
+build, and the PKCE pair RFC 7636 Appendix B computes.
 
-Plain functions, imported by name — the Drive gate under `tests/scripts/`
-reads the same grant builder, and a fixture cannot be imported across suites.
+Plain functions and constants, imported by name — the Drive gate under
+`tests/scripts/` reads the same grant builder, and a fixture cannot be
+imported across suites.
 """
 
 from __future__ import annotations
@@ -47,3 +48,8 @@ def drive_grant(**over) -> DriveGrant:
     )
     kw.update(over)
     return DriveGrant(**kw)
+
+
+#: RFC 7636 Appendix B: the example code verifier and its S256 challenge.
+APPENDIX_B_VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+APPENDIX_B_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"

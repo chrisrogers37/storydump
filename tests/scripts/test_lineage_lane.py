@@ -445,6 +445,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # latch on users, the sweep's system kind, the stage definition the
             # funnel and the nudge share, and the door listing who is owed one.
             "106_activation_nudge.sql",
+            # This appends §51, PKCE on the Drive connect flow: the code
+            # verifier minted with the state, stored encrypted (RFC 7636).
+            "108_oauth_state_code_verifier.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

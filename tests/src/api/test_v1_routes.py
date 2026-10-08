@@ -10,6 +10,8 @@ in `tests/scripts/`.
 
 from __future__ import annotations
 
+from urllib.parse import parse_qs, urlsplit
+
 import pytest
 
 from src.exceptions.tenancy import TenantResolutionError
@@ -587,7 +589,8 @@ def instagram_configured(monkeypatch):
 
 @pytest.fixture
 def issued(monkeypatch):
-    """Records what `issue_state` was asked to mint; returns a fixed state."""
+    """Records what the Instagram connect routes asked `issue_state` to mint;
+    returns a fixed state."""
     seen = {}
 
     async def issue_state(session, **kw):
@@ -1115,6 +1118,19 @@ class TestDriveConnect:
         monkeypatch.setattr(google_drive_oauth, "connect_purpose", connect_purpose)
         return holder
 
+    @pytest.fixture
+    def issued(self, monkeypatch):
+        """Records what the Drive leg's `issue_connect_state` asked
+        `oauth_states.issue_state` to mint; returns a fixed state."""
+        seen = {}
+
+        async def issue_state(conn, **kw):
+            seen.update(kw)
+            return "st4te"
+
+        monkeypatch.setattr(oauth_states, "issue_state", issue_state)
+        return seen
+
     def test_mints_a_state_pinned_to_the_workspace_and_says_where_to_go(
         self, client, signed_in, tenant, drive_configured, purpose, issued
     ):
@@ -1162,6 +1178,19 @@ class TestDriveConnect:
         purpose["value"] = "reconnect"
         assert client.post(self.URL).status_code == 200
         assert issued["purpose"] == "reconnect" and issued["reconnect_target"] == WS
+
+    def test_the_url_carries_the_s256_challenge_of_the_verifier_minted_with_the_state(
+        self, client, signed_in, tenant, drive_configured, purpose, issued
+    ):
+        """PKCE (RFC 7636, `07` §51): the verifier is stored with the state,
+        and only its S256 challenge reaches the browser, in the URL."""
+        resp = client.post(self.URL)
+        assert resp.status_code == 200, resp.text
+        verifier = issued["code_verifier"]
+        assert verifier and verifier not in resp.text
+        q = parse_qs(urlsplit(resp.json()["authorization_url"]).query)
+        assert q["code_challenge"] == [oauth_states.code_challenge(verifier)]
+        assert q["code_challenge_method"] == ["S256"]
 
     def test_unconfigured_google_refuses_503_before_any_seam(
         self, client, signed_in, tenant, purpose, issued, monkeypatch

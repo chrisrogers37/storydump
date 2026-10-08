@@ -33,10 +33,20 @@ It is the other half of what the non-Instagram importers were taking from
 want the encryption ring, not the Instagram flow. It is ONE door on purpose —
 every credential writer and reader in the tier encrypts and decrypts through
 it, so a ring change lands once.
+
+## PKCE rides the state row
+
+`07` §51, RFC 7636. A leg whose authorization URL carries a PKCE challenge
+mints the verifier with its state (:func:`new_code_verifier`), sends only its
+S256 challenge (:func:`code_challenge`), and :func:`issue_state` stores the
+verifier on the row ENCRYPTED under :func:`ring`. The callback reads it back
+from the row its one-shot consume returned (:func:`code_verifier_of`) and
+sends it with the code (RFC 7636 §4.5). The verifier never reaches the browser.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import secrets
 from typing import Any, Optional
@@ -134,6 +144,7 @@ async def issue_state(
     reconnect_target=None,
     cookie_nonce: Optional[str] = None,
     provider: str = vocabulary.PROVIDER_IG_LOGIN,
+    code_verifier: Optional[str] = None,
 ) -> str:
     """Mint one state row and return the state value.
 
@@ -142,11 +153,17 @@ async def issue_state(
     issue path rather than of the callback path. Doing it at consume time was
     the pass-2 error: two independently issued rows never consumed one another,
     so both callbacks could land.
+
+    ``code_verifier``, when given, is stored ENCRYPTED under :func:`ring` and
+    read back by :func:`code_verifier_of` (`07` §51); a state minted without
+    one needs no ring.
     """
     if purpose not in PURPOSES:
         raise OAuthStateRefused(f"unknown purpose {purpose!r}")
     if purpose == "reconnect" and reconnect_target is None:
         raise OAuthStateRefused("reconnect requires a reconnect_target")
+    # Before any statement: a ring that cannot be built refuses the mint whole.
+    sealed = None if code_verifier is None else ring().encrypt(code_verifier)
 
     if reconnect_target is not None:
         # Last issued wins, for EVERY purpose that pins a target (`07` §2 says
@@ -163,9 +180,9 @@ async def issue_state(
         text(
             "INSERT INTO oauth_states"
             " (state, user_id, workspace_id, provider, purpose, reconnect_target,"
-            "  cookie_nonce_hash, expires_at)"
+            "  cookie_nonce_hash, encrypted_code_verifier, expires_at)"
             " VALUES (:state, :uid, :ws, :provider, :purpose, :target, :nonce,"
-            "         now() + make_interval(secs => :ttl))"
+            "         :verifier, now() + make_interval(secs => :ttl))"
         ),
         {
             "state": state,
@@ -175,6 +192,7 @@ async def issue_state(
             "purpose": purpose,
             "target": None if reconnect_target is None else str(reconnect_target),
             "nonce": None if cookie_nonce is None else hash_nonce(cookie_nonce),
+            "verifier": sealed,
             "ttl": STATE_TTL_SECONDS,
         },
     )
@@ -210,7 +228,7 @@ async def consume_state(
             "UPDATE oauth_states SET consumed_at = now()"
             " WHERE state = :state AND consumed_at IS NULL AND expires_at > now()"
             " RETURNING state, user_id, workspace_id, provider, purpose,"
-            "           reconnect_target, cookie_nonce_hash"
+            "           reconnect_target, cookie_nonce_hash, encrypted_code_verifier"
         ),
         {"state": state},
     )
@@ -382,3 +400,56 @@ def ring():
         return TokenEncryption()
     except ValueError as exc:
         raise RingUnavailable(str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# PKCE: the verifier minted with a state (RFC 7636, `07` §51)
+# ---------------------------------------------------------------------------
+
+#: RFC 7636 §4.1 recommends 32 octets from a CSPRNG, base64url-encoded: 43
+#: characters, every one in the unreserved set (§4.1 admits 43 to 128).
+CODE_VERIFIER_BYTES = 32
+
+#: The one transform this tier sends (RFC 7636 §4.2) — `plain`, never.
+CODE_CHALLENGE_METHOD = "S256"
+
+
+def new_code_verifier() -> str:
+    """A PKCE code verifier: 43 unreserved characters, 256 bits from
+    :mod:`secrets` (RFC 7636 §4.1)."""
+    return secrets.token_urlsafe(CODE_VERIFIER_BYTES)
+
+
+def code_challenge(verifier: str) -> str:
+    """The S256 challenge of *verifier* — ``BASE64URL(SHA256(ASCII(verifier)))``
+    without padding (RFC 7636 §4.2; Appendix B's vector is its pin)."""
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def code_verifier_of(row) -> str:
+    """The PKCE verifier stored with a consumed state, decrypted — what the
+    code exchange sends beside the code (RFC 7636 §4.5).
+
+    Refused BY NAME when the row carries none (a state minted without one, or
+    before the column existed) or carries one no key in the ring decrypts:
+    either way there is no verifier to send, and the callback says so before
+    it spends the code. A ring that cannot be built is the process's fault,
+    never the row's, so it is built outside the ``try`` and passes as
+    :class:`RingUnavailable` — the order every decrypt door keeps.
+    """
+    sealed = row["encrypted_code_verifier"]
+    if not sealed:
+        raise OAuthStateRefused(
+            "no code verifier: this state was minted without one, so there is"
+            " none to send with the code returned for it"
+        )
+    keys = ring()
+    try:
+        return keys.decrypt(sealed)
+    except ValueError as exc:
+        # Never the ciphertext in the message: the reason is the whole story.
+        raise OAuthStateRefused(
+            "code verifier undecryptable: no key in the ring decrypts the one"
+            " stored with this state"
+        ) from exc

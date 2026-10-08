@@ -16,6 +16,7 @@ import hashlib
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from src.api.principal import (
@@ -38,8 +39,8 @@ from src.services.target import (
     sessions,
     tenant_resolution,
 )
-from src.services.target.oauth_states import OAuthStateRefused
-from tests.src.services.target.conftest import drive_grant
+from src.services.target.oauth_states import OAuthStateRefused, ring
+from tests.src.services.target.conftest import APPENDIX_B_VERIFIER, drive_grant
 from tests.src.api.conftest import (
     API,
     COOKIE_DOMAIN,
@@ -893,7 +894,8 @@ class TestDriveCallback:
     URL = "/auth/google-drive/callback"
 
     @pytest.fixture
-    def drive_row(self, monkeypatch):
+    def drive_row(self, monkeypatch, ring_env):
+        ring_env(key=Fernet.generate_key().decode())
         row = {
             "state": "st-drive",
             "purpose": "connect",
@@ -901,6 +903,7 @@ class TestDriveCallback:
             "user_id": USER,
             "workspace_id": WS,
             "reconnect_target": WS,
+            "encrypted_code_verifier": ring().encrypt(APPENDIX_B_VERIFIER),
         }
 
         async def consume_state(
@@ -915,12 +918,17 @@ class TestDriveCallback:
 
     @pytest.fixture
     def exchanged(self, monkeypatch):
+        """The Drive exchange, stubbed; records the verifier each call sent."""
+        verifiers = []
+
         async def exchange_code(
-            client, *, code, redirect_uri, client_id, client_secret
+            client, *, code, redirect_uri, client_id, client_secret, code_verifier
         ):
+            verifiers.append(code_verifier)
             return drive_grant()
 
         monkeypatch.setattr(google_drive_oauth, "exchange_code", exchange_code)
+        return verifiers
 
     @pytest.fixture
     def writes(self, monkeypatch):
@@ -974,6 +982,9 @@ class TestDriveCallback:
         )
         assert resp.status_code == 302, resp.text
         assert resp.headers["location"].endswith("/dashboard/settings?connected=gdrive")
+        # PKCE (RFC 7636, `07` §51): the code is redeemed with the verifier
+        # minted beside the state, read from the row the consume returned.
+        assert exchanged == [APPENDIX_B_VERIFIER]
         assert writes == [
             ("uow", WS, USER, "web"),
             ("gate", WS, USER, "admin", True),
@@ -1005,19 +1016,44 @@ class TestDriveCallback:
             ("gate", WS, USER, floor, True)
         ]
 
-    @pytest.mark.parametrize("target", [ACCOUNT, None])
-    def test_a_state_that_pins_anything_but_the_workspace_is_refused(
-        self, client, configured, counter, drive_row, browser, exchanged, writes, target
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("reconnect_target", ACCOUNT),
+            ("reconnect_target", None),
+            ("encrypted_code_verifier", None),
+            ("encrypted_code_verifier", "not-a-fernet-token"),
+        ],
+        ids=["another-target", "no-target", "no-verifier", "undecryptable"],
+    )
+    def test_a_state_that_cannot_redeem_the_code_is_refused_before_the_exchange(
+        self,
+        client,
+        configured,
+        counter,
+        drive_row,
+        browser,
+        exchanged,
+        writes,
+        field,
+        value,
     ):
-        drive_row["reconnect_target"] = target
+        """A state that pins anything but the workspace, carries no verifier
+        (minted without one, or before the column) or carries one the ring
+        cannot decrypt: refused as `state_refused` for this flow, the code
+        never sent to Google, and nothing written."""
+        drive_row[field] = value
         resp = client.get(
             self.URL,
             params={"state": "st-drive", "code": "c0de"},
             follow_redirects=False,
         )
         assert resp.status_code == 302
-        assert "state_refused" in resp.headers["location"]
-        assert "flow=drive" in resp.headers["location"]
+        assert (
+            resp.headers["location"]
+            == f"{FRONT}/auth/error?reason=state_refused&flow=drive"
+        )
+        assert exchanged == []
         assert writes == []
 
     def _return(self, client):

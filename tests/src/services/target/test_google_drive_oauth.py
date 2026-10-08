@@ -4,21 +4,31 @@ gdrive credential epic, F2 (b): a target-tier sibling of `google_oidc`).
 Driven through the egress seam exactly as `test_google_oidc.py` drives the
 sign-in exchange (`capture_egress`, shared). The token-endpoint REQUEST shape
 is pinned once, there, because both legs post it through one function
-(`google_oidc.code_grant`); what is pinned here is what THIS leg makes of the
-answer. Nothing here touches a database; the row the grant becomes is the
-gate's business (`tests/scripts/test_gdrive_oauth_gate.py`).
+(`google_oidc.code_grant`); what is pinned here is what THIS leg adds to it —
+the PKCE verifier (RFC 7636) — and what it makes of the answer. Nothing here
+touches a database: the state mint meets a connection that records its
+statements, and the row the grant becomes is the gate's business
+(`tests/scripts/test_gdrive_oauth_gate.py`).
 """
 
 from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from cryptography.fernet import Fernet
 
 from src.services.target import google_drive_oauth as drive
-from tests.src.services.target.conftest import capture_egress, drive_grant
+from src.services.target import oauth_states
+from tests.src.services.target.conftest import (
+    APPENDIX_B_CHALLENGE,
+    APPENDIX_B_VERIFIER,
+    capture_egress,
+    drive_grant,
+)
 
 CLIENT_ID = "cid.apps.googleusercontent.com"
 REDIRECT = "https://api.test/auth/google-drive/callback"
@@ -33,10 +43,48 @@ GRANT = {
 }
 
 
+class _Conn:
+    """Records each statement and its parameters. A mint reads nothing back
+    but the retire's `rowcount`."""
+
+    def __init__(self):
+        self.statements = []
+
+    async def execute(self, statement, params=None):
+        self.statements.append((str(statement), params))
+        return SimpleNamespace(rowcount=0)
+
+
+class TestIssueConnectState:
+    async def test_stores_the_verifier_encrypted_and_returns_its_challenge(
+        self, ring_env, monkeypatch
+    ):
+        """The state pins the workspace as its own target; the verifier minted
+        with it reaches the row only as ciphertext under the ring, and the
+        caller gets back that verifier's S256 challenge."""
+        ring_env(key=Fernet.generate_key().decode())
+        monkeypatch.setattr(
+            oauth_states, "new_code_verifier", lambda: APPENDIX_B_VERIFIER
+        )
+        conn = _Conn()
+        state, challenge = await drive.issue_connect_state(
+            conn, purpose="connect", user_id="u-1", workspace_id="ws-1"
+        )
+        sql, params = conn.statements[-1]
+        assert sql.startswith("INSERT INTO oauth_states") and params["state"] == state
+        assert (params["provider"], params["target"]) == (drive.PROVIDER, "ws-1")
+        assert challenge == APPENDIX_B_CHALLENGE
+        assert oauth_states.ring().decrypt(params["verifier"]) == APPENDIX_B_VERIFIER
+        assert APPENDIX_B_VERIFIER not in str(conn.statements)
+
+
 class TestAuthorizationUrl:
     def test_asks_for_offline_readonly_access_on_a_consent_screen(self):
         url = drive.authorization_url(
-            client_id=CLIENT_ID, redirect_uri=REDIRECT, state="st4te"
+            client_id=CLIENT_ID,
+            redirect_uri=REDIRECT,
+            state="st4te",
+            code_challenge=APPENDIX_B_CHALLENGE,
         )
         parts = urlsplit(url)
         q = parse_qs(parts.query)
@@ -56,6 +104,10 @@ class TestAuthorizationUrl:
         assert q["prompt"] == ["consent"]
         # Not an OIDC flow: no nonce. The state row pins user and workspace.
         assert "nonce" not in q
+        # PKCE (RFC 7636 §4.3): the challenge it was handed, under S256 —
+        # never `plain`.
+        assert q["code_challenge"] == [APPENDIX_B_CHALLENGE]
+        assert q["code_challenge_method"] == ["S256"]
 
 
 class TestExchangeCode:
@@ -75,6 +127,7 @@ class TestExchangeCode:
             redirect_uri=REDIRECT,
             client_id=CLIENT_ID,
             client_secret="s3cret",
+            code_verifier=APPENDIX_B_VERIFIER,
         )
 
     async def test_posts_the_code_grant_and_keeps_both_tokens(self, monkeypatch):
@@ -83,8 +136,11 @@ class TestExchangeCode:
         grant = await self._exchange()
         after = datetime.now(timezone.utc)
         # The request rides `google_oidc.code_grant`, whose shape is pinned
-        # there; this leg's own claim is that it is the code grant at all.
+        # there; this leg's own claim is that it is the code grant at all,
+        # with the PKCE verifier beside the code (RFC 7636 §4.5).
         assert seen["data"]["grant_type"] == "authorization_code"
+        assert seen["data"]["code"] == "c0de"
+        assert seen["data"]["code_verifier"] == APPENDIX_B_VERIFIER
         assert grant.access_token == "ya29.access"
         assert grant.refresh_token == "1//refresh"
         # `expires_in` is relative to the exchange, so the expiry is bounded

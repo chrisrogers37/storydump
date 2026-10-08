@@ -39,6 +39,9 @@ target tier imports nothing legacy). What transfers is knowledge:
   both legs share) — never raw `httpx`, and never `google-auth` (F3a (ii): a
   library doing its own I/O voids the floor's allowlist, byte cap, budget and
   private-address block).
+- **PKCE** (`07` §51): every connect state carries a verifier
+  (:func:`issue_connect_state`); the URL sends its challenge and the
+  exchange sends the verifier.
 
 ## The credential row, and why its payload is an envelope
 
@@ -79,9 +82,9 @@ from urllib.parse import urlencode
 from sqlalchemy import text
 
 from src.exceptions.base import RefusalError, StorydumpError
-from src.services.target import egress, vocabulary
+from src.services.target import egress, oauth_states, vocabulary
 from src.services.target.google_oidc import AUTHORIZE_URL, code_grant, refresh_grant
-from src.services.target.oauth_states import ring
+from src.services.target.oauth_states import CODE_CHALLENGE_METHOD, ring
 
 #: `ck_credentials_provider` / `ck_sources_provider` / `ck_oauth_state_provider`.
 PROVIDER = vocabulary.PROVIDER_GDRIVE
@@ -174,7 +177,33 @@ class DrivePayload:
     refresh_token: str
 
 
-def authorization_url(*, client_id: str, redirect_uri: str, state: str) -> str:
+async def issue_connect_state(
+    conn, *, purpose: str, user_id, workspace_id
+) -> tuple[str, str]:
+    """Mint the state a Drive connect callback consumes and return
+    ``(state, code_challenge)``.
+
+    The workspace is its own `reconnect_target`, so the next mint retires
+    this one (`07` §2, last issued wins). The PKCE verifier is minted here and
+    stored, encrypted, on the row (`07` §51): a caller holds only its
+    challenge, for :func:`authorization_url`.
+    """
+    verifier = oauth_states.new_code_verifier()
+    state = await oauth_states.issue_state(
+        conn,
+        purpose=purpose,
+        provider=PROVIDER,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        reconnect_target=workspace_id,
+        code_verifier=verifier,
+    )
+    return state, oauth_states.code_challenge(verifier)
+
+
+def authorization_url(
+    *, client_id: str, redirect_uri: str, state: str, code_challenge: str
+) -> str:
     """Where the browser is sent. Offline + consent, for the reasons in the
     module docstring; no nonce, because this is not an OIDC flow — the
     `oauth_states` row pins the user and workspace the callback acts for."""
@@ -186,6 +215,8 @@ def authorization_url(*, client_id: str, redirect_uri: str, state: str) -> str:
         "state": state,
         "access_type": "offline",
         "prompt": "consent",
+        "code_challenge": code_challenge,
+        "code_challenge_method": CODE_CHALLENGE_METHOD,
     }
     return f"{AUTHORIZE_URL}?{urlencode(params)}"
 
@@ -197,12 +228,16 @@ async def exchange_code(
     redirect_uri: str,
     client_id: str,
     client_secret: str,
+    code_verifier: str,
 ) -> DriveGrant:
     """Trade the authorization code for the grant, through the egress floor
     (`google_oidc.code_grant`). Refuses by name rather than storing a grant it
     cannot use — no refresh token, or a scope the consent screen narrowed
     below `drive.readonly` (the module docstring has why). `expires_in` is
     relative to the exchange, so the expiry is stamped here.
+
+    ``code_verifier`` is the consumed state's PKCE verifier
+    (`oauth_states.code_verifier_of`, `07` §51).
     """
     status, body = await code_grant(
         client,
@@ -210,6 +245,7 @@ async def exchange_code(
         redirect_uri=redirect_uri,
         client_id=client_id,
         client_secret=client_secret,
+        code_verifier=code_verifier,
     )
     if status != 200:
         raise DriveOAuthRefused("exchange_failed", f"token endpoint answered {status}")

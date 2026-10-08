@@ -424,6 +424,13 @@
       "label": "§49 the activation nudge (106, #1481) — users.activation_nudge_at, the once-per-person latch; activation_nudge_sweep in ck_jobs_kind and ck_jobs_system_kinds as a system kind; fn_activation_stages, the per-person stage timestamps as an invoker helper only the doors can call; fn_activation_funnel replaced over it with the same result; and fn_activation_stalled, user ids and a stage for who is owed a nudge, owned by svc_maintenance, EXECUTE for svc_worker only",
       "doc": "07-security-model.md",
       "ordinal": 42
+    },
+    {
+      "sha256": "c02d09ebaaf4d302543312ed71203e8f89b7aeb2109035051da3108774d01486",
+      "class": "normative",
+      "label": "§51 PKCE on the Drive connect flow — oauth_states.encrypted_code_verifier, the RFC 7636 code verifier minted with a Drive connect state, stored as ciphertext under the credential ring",
+      "doc": "07-security-model.md",
+      "ordinal": 43
     }
   ],
   "policy_expansion": {

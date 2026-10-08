@@ -909,7 +909,8 @@ async def connect_drive(
     thin chat-side door (F1 (a)). The state pins the workspace as its own
     `reconnect_target`: `connect` for a workspace that has never held a grant
     and `reconnect` after that, so a stale state is retired by the next one
-    (last issued wins, per workspace).
+    (last issued wins, per workspace), and carries the PKCE verifier
+    (`07` §51).
     """
     client_id, _, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
@@ -919,17 +920,18 @@ async def connect_drive(
             session, workspace_id=str(ws)
         )
         await principal_mod.require_connect_floor(session, str(ws), principal, purpose)
-        state = await issue_state(
+        state, challenge = await google_drive_oauth.issue_connect_state(
             session,
             purpose=purpose,
-            provider=google_drive_oauth.PROVIDER,
             user_id=principal.user_id,
             workspace_id=str(ws),
-            reconnect_target=str(ws),
         )
     return {
         "authorization_url": google_drive_oauth.authorization_url(
-            client_id=client_id, redirect_uri=redirect_uri, state=state
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            state=state,
+            code_challenge=challenge,
         )
     }
 

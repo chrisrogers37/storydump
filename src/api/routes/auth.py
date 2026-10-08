@@ -26,12 +26,15 @@ must still hold the floor of the command the state's purpose stands for
 (`commands.connect_floor`), checked again inside the write; the credential is
 written inside a unit of work for THAT workspace as THAT user, so the audit
 trigger names the actor and `p_tenant` binds the row. Both legs' redirect URIs come from `google_client`.
+The state row also carries the PKCE verifier (RFC 7636, `07` §51) that the
+exchange sends with the code.
 
 Failures redirect to the front end's `/auth/error` with a closed ``reason``
 (virgil's P3 already renders it) when `WEB_APP_URL` is set, and answer JSON
 400 otherwise. Reasons: ``denied`` (the person or Google declined) ·
 ``missing_params`` · ``state_refused`` (unknown, expired, consumed, minted
-for another leg, or the nonce cookie did not match) · ``exchange_failed`` ·
+for another leg, the nonce cookie did not match, or — Drive — the state
+carries no PKCE verifier the ring can read) · ``exchange_failed`` ·
 ``identity_collision`` (sign-in: the verified email belongs to another
 account — D35, never merged) · ``not_admitted`` (sign-in: a new account whose
 email nobody admitted or invited, 092 — the one refusal that lands on
@@ -87,6 +90,7 @@ from src.services.target import (
 from src.services.target.oauth_states import (
     STATE_TTL_SECONDS,
     OAuthStateRefused,
+    code_verifier_of,
     consume_state,
     issue_state,
     new_state,
@@ -365,6 +369,13 @@ async def google_drive_callback(
         )
         return _fail("state_refused", flow=DRIVE_FLOW)
 
+    try:
+        # PKCE (`07` §51): read before the code is spent.
+        code_verifier = code_verifier_of(row)
+    except OAuthStateRefused as exc:
+        logger.warning("drive connect: state refused: %s", exc)
+        return _fail("state_refused", flow=DRIVE_FLOW)
+
     # The provider call sits between the two transactions, never inside one.
     try:
         async with httpx.AsyncClient() as client:
@@ -374,6 +385,7 @@ async def google_drive_callback(
                 redirect_uri=redirect_uri,
                 client_id=client_id,
                 client_secret=client_secret,
+                code_verifier=code_verifier,
             )
     except StorydumpError as exc:
         # The message names the refusal; no token rides in it. A Drive
