@@ -1,11 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { Menu } from "lucide-react";
 import type { SessionUser } from "@/lib/session";
-import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { Sidebar } from "@/components/dashboard/sidebar";
+import { NavDrawer } from "@/components/dashboard/nav-drawer";
 import { SignOutButton } from "@/components/auth/sign-out-button";
 
 /**
@@ -40,24 +37,7 @@ export function DashboardHeader({ user }: { user: SessionUser }) {
   return (
     <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b bg-card px-4 lg:px-6">
       <div className="flex min-w-0 items-center gap-3">
-        <Sheet>
-          <SheetTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="lg:hidden"
-              aria-label="Open navigation"
-            >
-              <Menu className="h-5 w-5" />
-            </Button>
-          </SheetTrigger>
-          <SheetContent side="left" className="w-64 p-0">
-            {/* `mobile` is not optional here: without it the sidebar takes its
-                `hidden … lg:block` variant and the drawer opens onto nothing
-                at exactly the widths the drawer exists for (#1363). */}
-            <Sidebar mobile />
-          </SheetContent>
-        </Sheet>
+        <NavDrawer />
 
         <Link
           href="/workspaces"

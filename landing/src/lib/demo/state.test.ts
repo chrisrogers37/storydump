@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Intent, IntentState } from "@/lib/intents";
+import type { Intent, IntentState, QueueAction } from "@/lib/intents";
 import {
   DECISIONS_BEFORE_END,
   demoActionsFor,
@@ -42,21 +42,27 @@ function story(id: string, state: IntentState = "awaiting_approval"): Intent {
 const start = () =>
   initialDemoState([story("a"), story("b"), story("c"), story("d"), story("later", "scheduled")]);
 
-const decide = (state: DemoState, id: string, action: "approve" | "skip" | "reject") =>
-  demoReducer(state, { type: "act", intentId: id, action });
+/** When the visitor tapped. */
+const AT = "2026-10-15T15:30:00.000Z";
+
+const decide = (state: DemoState, id: string, action: QueueAction) =>
+  demoReducer(state, { type: "act", intentId: id, action, at: AT });
 
 describe("a decision in the sample", () => {
-  it("is offered as Approve, Skip and Reject on a story waiting on one, and not otherwise", () => {
-    expect(demoActionsFor(story("a"))).toEqual(["approve", "skip", "reject"]);
+  it("is offered as a new workspace's Queue offers it: Posted myself, Skip and Reject, and not otherwise", () => {
+    // Direct posting is off in a new workspace, so there is no Approve (#1649).
+    expect(demoActionsFor(story("a"))).toEqual(["mark_posted", "skip", "reject"]);
     expect(demoActionsFor(story("a", "scheduled"))).toEqual([]);
-    expect(demoActionsFor(story("a", "approved"))).toEqual([]);
+    expect(demoActionsFor(story("a", "posted"))).toEqual([]);
   });
 
-  it("approves: the story is approved, and the line says it would post right away", () => {
-    const next = decide(start(), "a", "approve");
-    expect(next.queue.find((i) => i.id === "a")?.state).toBe("approved");
+  it("marks a story posted from the moment of the tap, and the line says what that records", () => {
+    const next = decide(start(), "a", "mark_posted");
+    const a = next.queue.find((i) => i.id === "a");
+    expect(a?.state).toBe("posted");
+    expect(a?.entered_state_at).toBe(AT);
     expect(next.outcomes).toEqual({
-      a: "Approved. In your workspace, this would post to example.brand's Story right away.",
+      a: "Marked as posted. In your workspace, this would record that you posted it to example.brand's Story yourself.",
     });
   });
 
@@ -76,40 +82,36 @@ describe("a decision in the sample", () => {
   });
 
   it("is made once: a second tap on a decided story changes nothing", () => {
-    const once = decide(start(), "a", "approve");
+    const once = decide(start(), "a", "mark_posted");
     expect(decide(once, "a", "reject")).toBe(once);
   });
 
   it("takes no lever the sample does not offer, and no story it does not have", () => {
     const state = start();
-    expect(demoReducer(state, { type: "act", intentId: "a", action: "mark_posted" })).toBe(state);
-    expect(decide(state, "later", "approve")).toBe(state);
-    expect(decide(state, "missing", "approve")).toBe(state);
+    expect(decide(state, "a", "approve")).toBe(state);
+    expect(decide(state, "later", "mark_posted")).toBe(state);
+    expect(decide(state, "missing", "mark_posted")).toBe(state);
   });
 });
 
 describe("the end panel", () => {
-  it(`waits for ${DECISIONS_BEFORE_END} decisions`, () => {
-    const two = decide(decide(start(), "a", "approve"), "b", "skip");
+  it(`waits for ${DECISIONS_BEFORE_END} decisions, because its line is about the taps`, () => {
+    const two = decide(decide(start(), "a", "mark_posted"), "b", "skip");
     expect(endPanelDue(two)).toBe(false);
     expect(endPanelDue(decide(two, "c", "reject"))).toBe(true);
   });
 
-  it("or for all three pages, each counted once", () => {
-    let state = start();
-    for (const page of ["overview", "queue", "queue", "overview"] as const) {
-      state = demoReducer(state, { type: "visit", page });
-    }
-    expect(state.visited).toEqual(["overview", "queue"]);
-    expect(endPanelDue(state)).toBe(false);
-    expect(endPanelDue(demoReducer(state, { type: "visit", page: "calendar" }))).toBe(true);
+  it("does not come for browsing alone", () => {
+    // Opening the three pages once brought it up with nothing decided, and its
+    // "That's the job: one tap per Story." spoke of taps never made (#1649).
+    expect(endPanelDue(start())).toBe(false);
   });
 
   it("stays closed once closed", () => {
     let state = start();
-    for (const id of ["a", "b", "c"]) state = decide(state, id, "approve");
+    for (const id of ["a", "b", "c"]) state = decide(state, id, "mark_posted");
     state = demoReducer(state, { type: "dismiss" });
     expect(endPanelDue(state)).toBe(false);
-    expect(endPanelDue(decide(state, "d", "approve"))).toBe(false);
+    expect(endPanelDue(decide(state, "d", "mark_posted"))).toBe(false);
   });
 });

@@ -3,9 +3,10 @@ import { deriveConditions } from "@/lib/conditions";
 import { deriveFolderMix, deriveSummary } from "@/lib/dashboard-payloads";
 import { SAMPLE_POSTING_HOURS, SAMPLE_TZ, sampleWorkspace } from "./fixtures";
 
+/** 17:20 in London: the six most recent slots run from 19:00 yesterday to 17:00 today. */
 const NOW = new Date("2026-10-15T16:20:00.000Z");
 const w = sampleWorkspace(NOW);
-const stories = [...w.queue, ...w.history];
+const stories = w.queue;
 
 /** An instant on the sample workspace's own clock. */
 function onItsClock(iso: string) {
@@ -68,8 +69,9 @@ describe("the sample workspace", () => {
   });
 
   it("posts only inside its posting hours, on its own clock, across both clock changes", () => {
-    // Mid-October; the morning after clocks go back; the morning after they go forward.
-    for (const at of ["2026-10-15T16:20:00Z", "2026-11-01T14:00:00Z", "2026-03-08T15:00:00Z"]) {
+    // Mid-October; the morning after London's clocks go back (25 October); the
+    // morning after they go forward (29 March). Each month's window spans its change.
+    for (const at of ["2026-10-15T16:20:00Z", "2026-10-26T10:00:00Z", "2026-03-30T09:00:00Z"]) {
       const sample = sampleWorkspace(new Date(at));
       for (const story of [...sample.queue, ...sample.history]) {
         const { hour, minute } = onItsClock(story.schedule_slot_at);
@@ -80,10 +82,46 @@ describe("the sample workspace", () => {
   });
 
   it("counts its days by its own calendar, as `local_date` does", () => {
-    // 22:00 in New York is already the next day in UTC.
-    const evening = sampleWorkspace(new Date("2026-10-16T02:00:00Z"));
-    expect(evening.stats.posts_by_day.at(-1)?.local_date).toBe("2026-10-15");
+    // Half past midnight in London is still the evening before in UTC.
+    const night = sampleWorkspace(new Date("2026-10-15T23:30:00Z"));
+    expect(night.stats.posts_by_day.at(-1)?.local_date).toBe("2026-10-16");
     expect(w.stats.posts_by_day.at(-1)?.local_date).toBe(onItsClock(NOW.toISOString()).date);
+  });
+
+  it("draws every screen from one set of stories: each day's posts are the stories that posted that day", () => {
+    const posted = w.history.filter((s) => s.state === "posted");
+    for (const day of w.stats.posts_by_day) {
+      const that = posted.filter((s) => onItsClock(s.entered_state_at).date === day.local_date);
+      expect(day.count, day.local_date).toBe(that.length);
+      expect(day.count).toBeLessThanOrEqual(day.cap);
+    }
+    const ended = (state: string) => w.history.filter((s) => s.state === state).length;
+    expect(w.stats.intents_by_state.skipped).toBe(ended("skipped"));
+    expect(w.stats.intents_by_state.rejected).toBe(ended("rejected"));
+  });
+
+  it("posts nothing today while today's slots wait for a tap", () => {
+    // The chart once drew five posts on a day whose every slot was still in the Queue (#1649).
+    const today = w.stats.posts_by_day.at(-1)!;
+    const waitingToday = w.queue.filter(
+      (i) => i.state === "awaiting_approval" && onItsClock(i.schedule_slot_at).date === today.local_date,
+    );
+    expect(waitingToday).toHaveLength(5);
+    expect(today.count).toBe(0);
+  });
+
+  it("keeps a slot's story from one render to the next, and repeats no file in the window", () => {
+    const later = sampleWorkspace(new Date(NOW.getTime() + 2 * 60 * 60 * 1000));
+    const before = new Map(w.history.map((s) => [s.id, s] as const));
+    const shared = later.history.filter((s) => before.has(s.id));
+    expect(shared.length).toBeGreaterThan(100);
+    for (const s of shared) expect(s).toEqual(before.get(s.id));
+    expect(new Set(w.history.map((s) => s.file_name)).size).toBe(w.history.length);
+  });
+
+  it("posts by hand, as a new workspace does: no direct posting, so no failed publish", () => {
+    expect(w.config.api_publishing_enabled).toBe(false);
+    expect(w.stats.intents_by_state.failed).toBe(0);
   });
 
   it("is built from now, so it is always current", () => {

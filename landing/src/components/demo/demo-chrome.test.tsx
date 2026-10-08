@@ -2,10 +2,9 @@
  * The sample workspace's chrome (#1480): the shared sidebar under its own
  * entries, the drawer that carries it below the breakpoint, and the banner.
  *
- * The drawer gets the same pins `mobile-nav.test.tsx` gives the dashboard's
- * (#1363): it hands the sidebar its `mobile` variant, and its trigger hides at
- * exactly the width the static sidebar appears. Read as returned element
- * trees, without a DOM.
+ * The drawer is the dashboard's own `NavDrawer`, whose pins live in
+ * `mobile-nav.test.tsx` (#1363, #1649); here, only that the sample hands it
+ * the sample's entries. Read as returned element trees, without a DOM.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -14,6 +13,7 @@ import { isValidElement, type ReactElement } from "react";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/demo" }));
 
+import { NavDrawer } from "@/components/dashboard/nav-drawer";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { DEMO_SIGN_IN_HREF, DEMO_WAITLIST_HREF } from "@/lib/demo/cta";
 import { DemoCta } from "./demo-cta";
@@ -41,41 +41,17 @@ function text(node: unknown): string {
   return "";
 }
 
-/** The responsive prefix on one utility, `lg` of `lg:hidden`. */
-function breakpointOf(className: string, utility: string): string {
-  const found = className.match(new RegExp(`\\b(sm|md|lg|xl|2xl):${utility}\\b`));
-  expect(found, `expected a responsive \`${utility}\` in: ${className}`).not.toBeNull();
-  return found![1];
-}
-
 type SidebarProps = Parameters<typeof Sidebar>[0];
 
 const header = () => DemoHeader() as ReactElement;
 
 describe("the sample's drawer", () => {
-  it("hands the sidebar its mobile variant and the sample's entries", () => {
-    const inDrawer = [...walk(header())].find((el) => el.type === Sidebar);
-    expect(inDrawer, "the drawer renders a <Sidebar>").toBeDefined();
-    const props = inDrawer!.props as SidebarProps;
-    expect(props.mobile).toBe(true);
+  it("is the dashboard's drawer, handed the sample's entries", () => {
+    const drawer = [...walk(header())].find((el) => el.type === NavDrawer);
+    expect(drawer, "the header draws a <NavDrawer>").toBeDefined();
+    const props = drawer!.props as Parameters<typeof NavDrawer>[0];
     expect(props.items).toBe(DEMO_NAV);
     expect(props.home).toBe(DEMO_HOME);
-  });
-
-  it("hides its trigger at exactly the width the static sidebar appears", () => {
-    const trigger = [...walk(header())].find((el) =>
-      /\b(sm|md|lg|xl|2xl):hidden\b/.test(
-        String((el.props as { className?: string }).className ?? ""),
-      ),
-    );
-    expect(trigger, "the header has a breakpoint-hidden trigger").toBeDefined();
-
-    const desktop = Sidebar({ items: DEMO_NAV, home: DEMO_HOME }) as ReactElement<{
-      className: string;
-    }>;
-    expect(
-      breakpointOf(String((trigger!.props as { className: string }).className), "hidden"),
-    ).toBe(breakpointOf(desktop.props.className, "block"));
   });
 });
 

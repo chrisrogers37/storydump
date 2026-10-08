@@ -1,28 +1,29 @@
 import type { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import type { Intent } from "@/lib/intents";
+import type { FinishedStory } from "./fixtures";
 
 /** The calendar's three lanes, typed from the component, so its shape cannot drift. */
 export type CalendarLanes = Parameters<typeof ContentCalendar>[0];
 
 /**
- * The sample's calendar lanes (#1480). Deliberately NOT the real calendar
- * page's mapping, which puts every open story in the "In Queue" lane, where
- * an approval would change nothing a visitor can see:
+ * The sample's calendar lanes, drawn as the real Calendar draws a workspace
+ * (#1649):
  *
- *  - a story waiting on a decision, or scheduled, is "Predicted", labelled by
- *    its folder: nothing the workspace has agreed to yet;
- *  - an approved story is "In Queue", under its file name;
+ *  - Posted: the month's finished stories that posted, and each story the
+ *    visitor marked Posted myself, on the day of the tap;
+ *  - In Queue: a story waiting for a tap, under its file name, in its slot,
+ *    as the Queue lists it;
+ *  - Predicted: a scheduled story, labelled by its folder, as the real
+ *    Calendar's predicted lane holds the slot plan's scheduled stories;
  *  - a skipped or rejected story leaves the calendar.
  *
- * So Approve, Skip and Reject each change what the calendar draws. The past
- * lane carries posted stories only: `ContentCalendar` draws that whole lane
- * under its "Posted" legend, and nothing a visitor does here may look like
- * it posted.
+ * Each story is drawn once. The real Calendar's queue read also returns its
+ * scheduled stories, which it then draws in both lanes.
  */
-export function demoCalendarLanes(queue: Intent[], history: Intent[]): CalendarLanes {
-  const category = (i: Intent) => i.category ?? "uncategorised";
+export function demoCalendarLanes(queue: Intent[], history: FinishedStory[]): CalendarLanes {
+  const category = (i: { category: string | null }) => i.category ?? "uncategorised";
   return {
-    history: history
+    history: [...queue, ...history]
       .filter((i) => i.state === "posted")
       .map((i) => ({
         posted_at: i.entered_state_at,
@@ -31,7 +32,7 @@ export function demoCalendarLanes(queue: Intent[], history: Intent[]): CalendarL
         status: i.state,
       })),
     queue: queue
-      .filter((i) => i.state === "approved")
+      .filter((i) => i.state === "awaiting_approval")
       .map((i) => ({
         scheduled_for: i.schedule_slot_at,
         media_name: i.file_name,
@@ -40,7 +41,7 @@ export function demoCalendarLanes(queue: Intent[], history: Intent[]): CalendarL
         planned: i.origin === "planned",
       })),
     schedule: queue
-      .filter((i) => i.state === "awaiting_approval" || i.state === "scheduled")
+      .filter((i) => i.state === "scheduled")
       .map((i) => ({
         slot_time: i.schedule_slot_at,
         predicted_category: i.category,

@@ -33,11 +33,13 @@ function story(file: string, state: IntentState): Intent {
 }
 
 describe("the sample's calendar lanes", () => {
+  /** Marked Posted myself by the visitor: it entered `posted` at the tap. */
+  const marked = { ...story("marked.jpg", "posted"), entered_state_at: "2026-10-15T15:30:00.000Z" };
   const lanes = demoCalendarLanes(
     [
       story("waiting.jpg", "awaiting_approval"),
       story("later.jpg", "scheduled"),
-      story("approved.jpg", "approved"),
+      marked,
       story("skipped.jpg", "skipped"),
       story("rejected.jpg", "rejected"),
     ],
@@ -48,29 +50,38 @@ describe("the sample's calendar lanes", () => {
     ],
   );
 
-  it("predicts a story still undecided, by its folder", () => {
-    expect(lanes.schedule).toEqual([
-      { slot_time: "2026-10-15T14:00:00.000Z", predicted_category: "Memes" },
-      { slot_time: "2026-10-15T14:00:00.000Z", predicted_category: "Memes" },
-    ]);
-  });
-
-  it("queues an approved story under its own name, in its slot", () => {
+  it("queues a story waiting for a tap under its own name, in its slot, as the Queue lists it", () => {
     expect(lanes.queue).toEqual([
       {
         scheduled_for: "2026-10-15T14:00:00.000Z",
-        media_name: "approved.jpg",
+        media_name: "waiting.jpg",
         category: "Memes",
-        status: "approved",
+        status: "awaiting_approval",
         planned: false,
       },
     ]);
   });
 
-  it("drops a skipped or rejected story, and draws only what posted under Posted", () => {
+  it("predicts a scheduled story by its folder, as the real Calendar's predicted lane does", () => {
+    expect(lanes.schedule).toEqual([
+      { slot_time: "2026-10-15T14:00:00.000Z", predicted_category: "Memes" },
+    ]);
+  });
+
+  it("draws a story marked posted under Posted, on the day of the tap, beside the month's posts", () => {
+    expect(lanes.history).toEqual([
+      { posted_at: "2026-10-15T15:30:00.000Z", media_name: "marked.jpg", category: "Memes", status: "posted" },
+      { posted_at: "2026-10-14T18:00:00.000Z", media_name: "posted.jpg", category: "Memes", status: "posted" },
+    ]);
+  });
+
+  it("draws each story once, and drops one that was skipped or rejected", () => {
     const named = [...lanes.queue.map((i) => i.media_name), ...lanes.history.map((i) => i.media_name)];
-    expect(named).not.toContain("skipped.jpg");
-    expect(named).not.toContain("rejected.jpg");
-    expect(lanes.history.map((i) => i.media_name)).toEqual(["posted.jpg"]);
+    for (const gone of ["skipped.jpg", "rejected.jpg", "old-skip.jpg", "old-reject.jpg"]) {
+      expect(named).not.toContain(gone);
+    }
+    // Scheduled is Predicted only, never In Queue as well.
+    expect(named).not.toContain("later.jpg");
+    expect(new Set(named).size).toBe(named.length);
   });
 });
