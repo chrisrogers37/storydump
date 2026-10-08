@@ -36,8 +36,13 @@ def schema_kinds() -> set:
     return set(re.findall(r"'([a-z_]+)'", str(ck.sqltext)))
 
 
+#: The config half of "everything supplied": the activation nudge (#1481) is
+#: gated on its switch and a web origin as well as on the email seam.
+FULL_CONFIG = dict(activation_nudge_enabled=True, web_app_origin="https://app.example")
+
+
 def full_deps(**over):
-    """Every seam supplied — the maximal registry."""
+    """Every seam supplied, and every config gate open — the maximal registry."""
 
     async def _fake_seam(*a, **k):  # pragma: no cover - never invoked here
         raise AssertionError("seam invoked in a registry-shape test")
@@ -51,7 +56,7 @@ def full_deps(**over):
         refresh=_fake_seam,
         drive=object(),
         email=object(),
-        config=WorkerConfig(),
+        config=WorkerConfig(**FULL_CONFIG),
     )
     base.update(over)
     return WorkerDeps(**base)
@@ -173,6 +178,9 @@ class TestRegistryCoversTheSchema:
             "offboard_workspace",
             # The `rate_counters` retention class only (05).
             "retention_sweep",
+            # #1481: built, and live only with its switch and an origin as
+            # well as the email seam, which `FULL_CONFIG` supplies.
+            "activation_nudge_sweep",
         }
 
     def test_the_unbuilt_kinds_park_even_with_every_seam_supplied(self):
@@ -195,6 +203,7 @@ class TestRegistryCoversTheSchema:
             "send_email",
             "offboard_workspace",  # #1090 H1
             "retention_sweep",
+            "activation_nudge_sweep",  # #1481, with `FULL_CONFIG`
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         assert unbuilt == set(UNBUILT_KINDS)
@@ -268,9 +277,9 @@ class TestTheActivationNudgeIsBuiltOff:
         return build_registry(full_deps(**over))["activation_nudge_sweep"]
 
     def test_the_default_build_parks_it_naming_the_switch(self):
-        """`full_deps` supplies every seam, and the default config has neither
+        """Every seam supplied but the REAL default config, which has neither
         the switch nor an origin: both are named, the provider is not."""
-        entry = self._nudge()
+        entry = self._nudge(config=WorkerConfig())
         assert isinstance(entry, Parked)
         assert (
             entry.reason
