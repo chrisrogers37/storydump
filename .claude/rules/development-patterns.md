@@ -57,8 +57,10 @@ every rule below is `.claude/rules/database.md`.
 - **Provider HTTP goes through the egress floor**:
   `egress.request(client, method, url, policy=…)` supplies the timeout class,
   one absolute retry budget, the response byte cap and SSRF-safe resolution. A
-  new provider host is a deliberate addition to `DEFAULT_ALLOWED_HOSTS`
-  (`egress.py:128`). Not inside an open transaction.
+  new provider host is a deliberate addition: to `DEFAULT_ALLOWED_HOSTS`
+  (`egress.py:133`) when every adapter may reach it, otherwise to the one
+  module's own policy (`email_sender`, `transit`, the Drive adapter's thumbnail
+  fetch). Not inside an open transaction.
 - **Numbers are parameters.** Operational numbers live in `WorkerConfig` and
   arrive as arguments; the pinned ones are named seam constants
   (`POOL_SIZE_SEAM`). A literal in a service or a door body is a review blocker.

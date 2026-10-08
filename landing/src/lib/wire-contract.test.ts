@@ -12,6 +12,7 @@ import {
 } from "./command-client";
 import { LIVE_ACCOUNT_STATES } from "./destination";
 import { IN_THE_WAY_MAX } from "./refusal-facts";
+import { THUMBNAIL_TYPES } from "./thumbnails";
 import {
   EXPIRY_DAYS_DEFAULT,
   EXPIRY_DAYS_MAX,
@@ -111,6 +112,11 @@ describe("the wire spellings are the vocabulary's", () => {
     expect(Object.keys(LOCK_CLAUSES).sort()).toEqual(
       [...tuple("BLOCKING_LOCKS"), ...tuple("WARNING_LOCKS")].sort(),
     );
+  });
+  it("the image types a thumbnail may be", () => {
+    // A type the API serves that is missing here would reach the page as a
+    // placeholder, with no error on either side.
+    expect([...THUMBNAIL_TYPES]).toEqual(tuple("THUMBNAIL_TYPES"));
   });
   it("the account states a story can be planned onto", () => {
     // A drift here would offer an account the port refuses, or hide one it takes.

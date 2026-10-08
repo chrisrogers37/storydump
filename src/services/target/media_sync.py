@@ -700,9 +700,9 @@ async def _land_page(
                     "INSERT INTO media_items (workspace_id, source_id,"
                     " content_hash, file_name, media_kind, mime_type,"
                     " provider_file_ref, category, folder_path, file_size, state,"
-                    " last_listed_at)"
+                    " thumbnail_url, last_listed_at)"
                     " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref,"
-                    "  :category, :folder_path, :size, :state, now())"
+                    "  :category, :folder_path, :size, :state, :thumb, now())"
                     # The row is the ITEM (owner ruling 2026-09-09): the dedup
                     # is per workspace by content hash (`uq_media_dedup`), and
                     # posting history and locks hang off the row, so it is
@@ -728,6 +728,11 @@ async def _land_page(
                     # `available` — so a retired or tombstoned row comes back,
                     # and a raised cap brings an `unsupported` one back too.
                     "       state = EXCLUDED.state,"
+                    # The provider's thumbnail link is short-lived, so each
+                    # listing's is the current one and replaces the stored
+                    # link; a listing without one means the provider offers
+                    # none now, and the media reads say `has_thumbnail` false.
+                    "       thumbnail_url = EXCLUDED.thumbnail_url,"
                     # The stamp only moves forward. now() is a transaction's
                     # START, so a writer that opened before a walk and lands
                     # after a page re-stamped the row would otherwise move it
@@ -767,6 +772,7 @@ async def _land_page(
                     # port without the key is unaffected rather than crashing.
                     "mime": item.get("mime_type"),
                     "ref": item["ref"],
+                    "thumb": item.get("thumbnail_link"),
                 },
             )
             outcomes = [inserted for (inserted,) in result.all()]

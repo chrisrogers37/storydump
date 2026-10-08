@@ -23,6 +23,8 @@ export function DemoQueue() {
 
       <QueueView
         intents={state.queue}
+        // The sample has no media to fetch, so no row asks for a thumbnail.
+        workspaceId={null}
         tz={tz}
         truncatedAt={null}
         pending={null}

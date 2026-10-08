@@ -87,7 +87,10 @@ export type Intent = {
   miss_reason: string | null;
   file_name: string;
   media_kind: string;
-  thumbnail_url: string | null;
+  /** Whether the media has a thumbnail to fetch through `thumbnailSrc`. */
+  has_thumbnail: boolean;
+  /** The thumbnail URL's version: the same version is always the same picture. */
+  thumbnail_version: string;
   caption: string | null;
   category: string | null;
   /** The item's link to add by hand, from its media row; shown only through `httpsHref`. */

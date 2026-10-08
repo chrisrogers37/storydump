@@ -278,6 +278,9 @@ class MediaItem(TargetBase):
     link_url = Column(Text, nullable=True)
     tags = Column(ARRAY(Text), nullable=True)
     custom_metadata = Column(JSONB, nullable=True)
+    # The provider's short-lived thumbnail link, which the sync rewrites on every
+    # listing. Server-side only: the thumbnail route fetches through it
+    # (`workspaces.thumbnail_link`), and the reads return `has_thumbnail`.
     thumbnail_url = Column(Text, nullable=True)
     state = Column(Text, nullable=False, server_default=text("'available'"))
     times_posted = Column(Integer, nullable=False, server_default=text("0"))
