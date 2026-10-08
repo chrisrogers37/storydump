@@ -3,13 +3,13 @@ part-way through setting up.
 
 `fn_activation_stalled` (106) lists who is owed one: people whose first
 missing stage is connecting Instagram, adding a folder or approving a first
-story, idle for the stall window, and never nudged. For each, ONE conditional
-UPDATE sets `users.activation_nudge_at` and returns the address, and the
-`send_email` job is enqueued in the same transaction. The UPDATE's predicate
-repeats the door's (still never nudged, still active, still has an email), so
-two sweeps that overlap nudge a person once, and a person the door listed who
-no longer qualifies is dropped, never stamped: the `alert_stranded_sources`
-shape (`media_sync.py`).
+story, idle for the stall window, and never nudged. ONE conditional UPDATE
+then sets `users.activation_nudge_at` for them and returns their addresses,
+and a `send_email` job is enqueued for each, in the same transaction. The
+UPDATE's predicate repeats the door's (still never nudged, still active, still
+has an email), so two sweeps that overlap nudge a person once, and a person
+the door listed who no longer qualifies is dropped, never stamped: the
+`alert_stranded_sources` shape (`media_sync.py`).
 
 ## Built off
 
@@ -33,9 +33,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import text
-
-from src.services.target import jobs
+from src.services.target import jobs, readers
 
 logger = logging.getLogger(__name__)
 
@@ -60,29 +58,20 @@ async def sweep_stalled(
     web_app_origin: str,
 ) -> int:
     """Nudge up to *limit* stalled people who signed up in the last
-    *since_days*. Returns how many emails were queued."""
-    candidates = (
-        (
-            await session.execute(
-                text(
-                    "SELECT o_user_id AS user_id, o_stage AS stage"
-                    "  FROM fn_activation_stalled("
-                    "    now() - make_interval(days => :days),"
-                    "    make_interval(secs => :stall), :lim)"
-                ),
-                {
-                    "days": int(since_days),
-                    "stall": float(stall_seconds),
-                    "lim": int(limit),
-                },
-            )
-        )
-        .mappings()
-        .all()
+    *since_days*. Returns how many emails were queued. *web_app_origin* is
+    `settings.web_app_origin`, already normalized (`invitations.join_url`)."""
+    owed = await readers.rows(
+        session,
+        "SELECT o_user_id AS user_id, o_stage AS stage"
+        "  FROM fn_activation_stalled("
+        "    now() - make_interval(days => :days),"
+        "    make_interval(secs => :stall), :lim)",
+        days=int(since_days),
+        stall=float(stall_seconds),
+        lim=int(limit),
     )
-    origin = web_app_origin.rstrip("/")
-    queued = 0
-    for row in candidates:
+    steps = {}
+    for row in owed:
         step = STEPS.get(int(row["stage"]))
         if step is None:
             # The door lists stages 3-5 only. A stage this table does not know
@@ -91,23 +80,27 @@ async def sweep_stalled(
                 "activation nudge: no step for stage %s; skipped", row["stage"]
             )
             continue
-        user_id = str(row["user_id"])
-        email = (
-            await session.execute(
-                text(
-                    "UPDATE users SET activation_nudge_at = now()"
-                    " WHERE id = CAST(:u AS uuid)"
-                    "   AND activation_nudge_at IS NULL"
-                    "   AND state = 'active'"
-                    "   AND primary_email IS NOT NULL"
-                    " RETURNING primary_email"
-                ),
-                {"u": user_id},
-            )
-        ).scalar_one_or_none()
+        steps[str(row["user_id"])] = step
+    if not steps:
+        return 0
+    addresses = {
+        str(row["id"]): row["primary_email"]
+        for row in await readers.rows(
+            session,
+            "UPDATE users SET activation_nudge_at = now()"
+            " WHERE id = ANY(CAST(:ids AS uuid[]))"
+            "   AND activation_nudge_at IS NULL"
+            "   AND state = 'active'"
+            "   AND primary_email IS NOT NULL"
+            " RETURNING id, primary_email",
+            ids=list(steps),
+        )
+    }
+    queued = 0
+    for user_id, (key, path) in steps.items():  # the door's order
+        email = addresses.get(user_id)
         if email is None:
             continue
-        key, path = step
         await jobs.enqueue(
             session,
             kind="send_email",
@@ -118,7 +111,7 @@ async def sweep_stalled(
                 "v": 1,
                 "to": email,
                 "template": TEMPLATE,
-                "params": {"step": key, "link": origin + path},
+                "params": {"step": key, "link": f"{web_app_origin}{path}"},
             },
             # `bulk`: nobody is waiting on this one, unlike an invitation.
             lane="bulk",

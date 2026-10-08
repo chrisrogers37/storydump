@@ -2,9 +2,8 @@
 
 The SQL's truth (who the door lists, the latch, the grants) is the gate's,
 `tests/scripts/test_activation_nudge_gate.py`. This pins what the sweep sends
-for what it reads: the door's parameters, one latch UPDATE per person whose
-predicate repeats the door's, and a `send_email` job only for a person the
-UPDATE returned.
+for what it reads: the door's parameters, ONE latch UPDATE whose predicate
+repeats the door's, and a `send_email` job only for a person it returned.
 """
 
 from __future__ import annotations
@@ -15,20 +14,26 @@ import pytest
 
 from src.services.target import activation_nudge, email_sender
 
+ORIGIN = "https://app.example"
 
-class _Result:
-    def __init__(self, rows=(), scalar=None):
+LATCH_CLAUSES = (
+    "UPDATE users SET activation_nudge_at = now()",
+    "id = ANY(CAST(:ids AS uuid[]))",
+    "activation_nudge_at IS NULL",
+    "state = 'active'",
+    "primary_email IS NOT NULL",
+    "RETURNING id, primary_email",
+)
+
+
+class _Rows:
+    """One statement's answer, read the way `readers.rows` reads it."""
+
+    def __init__(self, *rows):
         self._rows = list(rows)
-        self._scalar = scalar
 
     def mappings(self):
-        return self
-
-    def all(self):
-        return self._rows
-
-    def scalar_one_or_none(self):
-        return self._scalar
+        return iter(self._rows)
 
 
 class _Session:
@@ -61,12 +66,27 @@ async def _sweep(session):
         since_days=30,
         stall_seconds=72 * 3600,
         limit=20,
-        web_app_origin="https://app.example/",
+        web_app_origin=ORIGIN,
     )
 
 
+def _email(user, step, path, to):
+    return {
+        "kind": "send_email",
+        "workspace_id": None,
+        "serialization_key": f"email:nudge:{user}",
+        "payload": {
+            "v": 1,
+            "to": to,
+            "template": "activation_nudge",
+            "params": {"step": step, "link": ORIGIN + path},
+        },
+        "lane": "bulk",
+    }
+
+
 async def test_it_reads_the_door_with_the_callers_numbers(enqueued):
-    session = _Session(_Result(rows=[]))
+    session = _Session(_Rows())
 
     assert await _sweep(session) == 0
 
@@ -78,75 +98,50 @@ async def test_it_reads_the_door_with_the_callers_numbers(enqueued):
     assert enqueued == []
 
 
-async def test_each_person_is_latched_then_sent_one_email(enqueued):
+async def test_one_latch_for_everyone_then_one_email_each_in_the_doors_order(
+    enqueued,
+):
     session = _Session(
-        _Result(rows=[{"user_id": "u-3", "stage": 3}, {"user_id": "u-5", "stage": 5}]),
-        _Result(scalar="three@example.com"),
-        _Result(scalar="five@example.com"),
+        _Rows({"user_id": "u-5", "stage": 5}, {"user_id": "u-3", "stage": 3}),
+        # RETURNING has no order: the emails follow the door's, not this one.
+        _Rows(
+            {"id": "u-3", "primary_email": "three@example.com"},
+            {"id": "u-5", "primary_email": "five@example.com"},
+        ),
     )
 
     assert await _sweep(session) == 2
 
-    latch = session.statements[1]
-    assert "UPDATE users SET activation_nudge_at = now()" in latch[0]
-    for clause in (
-        "activation_nudge_at IS NULL",
-        "state = 'active'",
-        "primary_email IS NOT NULL",
-        "RETURNING primary_email",
-    ):
-        assert clause in latch[0], clause
-    assert latch[1] == {"u": "u-3"}
-    assert session.statements[2][1] == {"u": "u-5"}
-
+    latch, params = session.statements[1]
+    for clause in LATCH_CLAUSES:
+        assert clause in latch, clause
+    assert params == {"ids": ["u-5", "u-3"]}
     assert enqueued == [
-        {
-            "kind": "send_email",
-            "workspace_id": None,
-            "serialization_key": "email:nudge:u-3",
-            "payload": {
-                "v": 1,
-                "to": "three@example.com",
-                "template": "activation_nudge",
-                "params": {
-                    "step": "instagram",
-                    "link": "https://app.example/dashboard/settings?tab=accounts",
-                },
-            },
-            "lane": "bulk",
-        },
-        {
-            "kind": "send_email",
-            "workspace_id": None,
-            "serialization_key": "email:nudge:u-5",
-            "payload": {
-                "v": 1,
-                "to": "five@example.com",
-                "template": "activation_nudge",
-                "params": {
-                    "step": "approval",
-                    "link": "https://app.example/dashboard/queue",
-                },
-            },
-            "lane": "bulk",
-        },
+        _email("u-5", "approval", "/dashboard/queue", "five@example.com"),
+        _email(
+            "u-3", "instagram", "/dashboard/settings?tab=accounts", "three@example.com"
+        ),
     ]
 
 
 async def test_a_person_the_latch_did_not_return_is_not_mailed(enqueued):
     """Nudged by an overlapping sweep, disabled, or without an address since
-    the door read: the UPDATE returns nothing, and nothing is sent."""
+    the door read: the UPDATE does not return them, and nothing is sent."""
     session = _Session(
-        _Result(rows=[{"user_id": "u-4", "stage": 4}]), _Result(scalar=None)
+        _Rows({"user_id": "u-4", "stage": 4}, {"user_id": "u-3", "stage": 3}),
+        _Rows({"id": "u-3", "primary_email": "three@example.com"}),
     )
 
-    assert await _sweep(session) == 0
-    assert len(session.statements) == 2
-    assert enqueued == []
+    assert await _sweep(session) == 1
+    assert enqueued == [
+        _email(
+            "u-3", "instagram", "/dashboard/settings?tab=accounts", "three@example.com"
+        )
+    ]
 
 
-async def test_a_stage_with_no_step_is_named_and_skipped(enqueued, caplog):
-    session = _Session(_Result(rows=[{"user_id": "u-2", "stage": 2}]))
+async def test_a_stage_with_no_step_is_named_and_never_latched(enqueued, caplog):
+    session = _Session(_Rows({"user_id": "u-2", "stage": 2}))
 
     with caplog.at_level(logging.WARNING):
         assert await _sweep(session) == 0

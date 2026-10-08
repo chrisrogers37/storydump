@@ -89,13 +89,13 @@ _TRUTHY = ("1", "true", "yes", "on")
 ACTIVATION_NUDGE_ENV = "TARGET_ACTIVATION_NUDGE_ENABLED"
 
 
-def _activation_nudge_from_env(env) -> bool:
-    return str(env.get(ACTIVATION_NUDGE_ENV) or "").strip().lower() in _TRUTHY
+def _env_flag(env, name: str) -> bool:
+    """A default-off switch: on for a truthy spelling, off for anything else."""
+    return str(env.get(name) or "").strip().lower() in _TRUTHY
 
 
 def _precheck_from_env(env):
-    raw = str(env.get(USAGE_PRECHECK_ENV) or "").strip().lower()
-    if raw not in _TRUTHY:
+    if not _env_flag(env, USAGE_PRECHECK_ENV):
         return None
     from src.services.target.usage_precheck import DEFAULT_TTL_SECONDS, UsagePrecheck
 
@@ -884,7 +884,7 @@ def main() -> None:
     config = WorkerConfig(
         web_app_origin=settings.web_app_origin,
         lane_concurrency=lane_concurrency_from_env(env),
-        activation_nudge_enabled=_activation_nudge_from_env(env),
+        activation_nudge_enabled=_env_flag(env, ACTIVATION_NUDGE_ENV),
     )
     engine = unit_of_work.create_engine(url)
     transport = None

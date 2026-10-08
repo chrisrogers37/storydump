@@ -10,7 +10,7 @@ and the heartbeat/lease numbers agreeing.
 import pytest
 
 from src.services.target.work_loop import _UNBUILT_REASON, Parked, WorkerConfig
-from src.worker import _activation_nudge_from_env, compose
+from src.worker import ACTIVATION_NUDGE_ENV, _env_flag, compose
 
 
 def test_w1_composition_parks_only_for_a_named_reason():
@@ -116,8 +116,8 @@ def test_an_armed_activation_nudge_is_on_the_clock_daily():
     ],
 )
 def test_the_nudge_switch_reads_the_truthy_spellings_only(raw, armed):
-    env = {} if raw is None else {"TARGET_ACTIVATION_NUDGE_ENABLED": raw}
-    assert _activation_nudge_from_env(env) is armed
+    env = {} if raw is None else {ACTIVATION_NUDGE_ENV: raw}
+    assert _env_flag(env, ACTIVATION_NUDGE_ENV) is armed
 
 
 def test_clock_recurring_kinds_are_a_subset_of_the_live_registry():

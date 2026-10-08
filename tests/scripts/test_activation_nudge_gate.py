@@ -56,16 +56,19 @@ STALLED = (
 ORIGIN = "https://app.example"
 
 
-def _person(cur, name: str, *, ago: str, email: bool = True, **extra) -> str:
+def _person(
+    cur,
+    name: str,
+    *,
+    ago: str,
+    email: bool = True,
+    state: str = "active",
+    nudged_at: str | None = None,
+) -> str:
     cur.execute(
         "INSERT INTO users (primary_email, state, activation_nudge_at, created_at)"
         " VALUES (%s, %s, %s, now() - %s::interval) RETURNING id",
-        (
-            f"{name}@example.com" if email else None,
-            extra.get("state", "active"),
-            extra.get("nudged_at"),
-            ago,
-        ),
+        (f"{name}@example.com" if email else None, state, nudged_at, ago),
     )
     return str(cur.fetchone()[0])
 
@@ -115,16 +118,17 @@ def _card(cur, ws: str, *, ago: str) -> None:
     )
 
 
-def _set_up(cur, name: str, *, ago: str, ig=None, folder=None, card=None) -> str:
-    """A person 1 hour older than their workspace, then whichever stages are given."""
-    person = _person(cur, name, ago=f"{int(ago.split()[0]) + 1} hours")
-    ws = _workspace(cur, person, f"nudge-{name}", ago=ago)
+def _set_up(cur, name: str, *, hours: int, ig=None, folder=None, card=None) -> str:
+    """A person who signed up an hour before their workspace, made *hours*
+    ago, then each stage given as its age in hours."""
+    person = _person(cur, name, ago=f"{hours + 1} hours")
+    ws = _workspace(cur, person, f"nudge-{name}", ago=f"{hours} hours")
     if ig:
-        _instagram(cur, ws, f"acct-nudge-{name}", ago=ig)
+        _instagram(cur, ws, f"acct-nudge-{name}", ago=f"{ig} hours")
     if folder:
-        _folder(cur, ws, ago=folder)
+        _folder(cur, ws, ago=f"{folder} hours")
     if card:
-        _card(cur, ws, ago=card)
+        _card(cur, ws, ago=f"{card} hours")
     return person
 
 
@@ -133,42 +137,30 @@ def _seed(conn) -> dict:
     with conn.cursor() as cur:
         cur.execute("SET LOCAL app.actor_kind = 'migration'")
         people = {
-            "AT_INSTAGRAM": _set_up(cur, "instagram", ago="99 hours"),
-            "AT_INSTAGRAM_FRESH": _set_up(cur, "instagram-fresh", ago="19 hours"),
-            "AT_FOLDER": _set_up(cur, "folder", ago="120 hours", ig="110 hours"),
+            "AT_INSTAGRAM": _set_up(cur, "instagram", hours=99),
+            "AT_INSTAGRAM_FRESH": _set_up(cur, "instagram-fresh", hours=19),
+            "AT_FOLDER": _set_up(cur, "folder", hours=120, ig=110),
             "AT_APPROVAL_CARD": _set_up(
-                cur,
-                "card",
-                ago="160 hours",
-                ig="150 hours",
-                folder="140 hours",
-                card="130 hours",
+                cur, "card", hours=160, ig=150, folder=140, card=130
             ),
             "AT_APPROVAL_NO_CARD": _set_up(
-                cur, "no-card", ago="120 hours", ig="110 hours", folder="100 hours"
+                cur, "no-card", hours=120, ig=110, folder=100
             ),
             "AT_APPROVAL_FRESH_CARD": _set_up(
-                cur,
-                "fresh-card",
-                ago="160 hours",
-                ig="150 hours",
-                folder="140 hours",
-                card="10 hours",
+                cur, "fresh-card", hours=160, ig=150, folder=140, card=10
             ),
             "NO_WORKSPACE": _person(cur, "no-workspace", ago="100 hours"),
+            # Stage 3 and idle, each with one reason to be left alone.
+            "NUDGED": _person(
+                cur, "nudged", ago="100 hours", nudged_at="2026-01-01T00:00:00Z"
+            ),
+            "NO_EMAIL": _person(cur, "no-email", ago="100 hours", email=False),
+            "DISABLED": _person(cur, "disabled", ago="100 hours", state="disabled"),
+            "EARLY": _person(cur, "early", ago="40 days"),
         }
-        for name, extra in (
-            ("NUDGED", {"nudged_at": "2026-01-01T00:00:00Z"}),
-            ("NO_EMAIL", {"email": False}),
-            ("DISABLED", {"state": "disabled"}),
-        ):
-            email = extra.pop("email", True)
-            person = _person(cur, name.lower(), ago="100 hours", email=email, **extra)
-            _workspace(cur, person, f"nudge-{name.lower()}", ago="99 hours")
-            people[name] = person
-        early = _person(cur, "early", ago="40 days")
-        _workspace(cur, early, "nudge-early", ago="40 days")
-        people["EARLY"] = early
+        for name in ("NUDGED", "NO_EMAIL", "DISABLED"):
+            _workspace(cur, people[name], f"nudge-{name.lower()}", ago="99 hours")
+        _workspace(cur, people["EARLY"], "nudge-early", ago="40 days")
     conn.commit()
     return people
 
@@ -262,7 +254,7 @@ def test_the_sweep_queues_one_email_per_person_and_latches_each(world):
             since_days=30,
             stall_seconds=72 * 3600,
             limit=50,
-            web_app_origin=ORIGIN + "/",
+            web_app_origin=ORIGIN,
         )
 
     async def check(c):
