@@ -85,7 +85,10 @@ export type MediaRow = {
   title: string | null;
   caption: string | null;
   tags: string[] | null;
-  thumbnail_url: string | null;
+  /** Whether the media has a thumbnail to fetch through `thumbnailSrc`. */
+  has_thumbnail: boolean;
+  /** The thumbnail URL's version: the same version is always the same picture. */
+  thumbnail_version: string;
   /** The link its stories ask a person to add by hand; shown only through `httpsHref`. */
   link_url: string | null;
   state: string;

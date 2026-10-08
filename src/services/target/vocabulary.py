@@ -142,6 +142,18 @@ WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
 #: only a listing undoes.
 MEDIA_STATES: tuple[str, ...] = ("available", "unsupported", "removed", "missing")
 
+#: The image types a thumbnail may be: raster only. The API serves no other and
+#: the web tier relays no other (`landing/src/lib/thumbnails.ts`, held to this
+#: by `wire-contract.test.ts`). An SVG is a document that can carry script, so
+#: it is never a thumbnail, whatever a provider calls it.
+THUMBNAIL_TYPES: tuple[str, ...] = (
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+)
+
 #: What a story may weigh on the way to Meta, by `media_items.media_kind`
 #: (Meta's own limits: 8 MB for a story image, 100 MB for a story video pulled
 #: by URL). Distinct from the Telegram card's caps (`MEDIA_CARD_MAX_BYTES`): a

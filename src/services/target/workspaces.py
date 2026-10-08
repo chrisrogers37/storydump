@@ -466,6 +466,21 @@ INTENT_ORIGINS: tuple[str, ...] = vocabulary.INTENT_ORIGINS
 #: migration there).
 MEDIA_STATES: tuple[str, ...] = vocabulary.MEDIA_STATES
 
+#: The characters of a media row's content hash its `thumbnail_version` carries.
+THUMBNAIL_VERSION_CHARS = 16
+
+
+def _thumbnail_sql(m: str) -> str:
+    """A media row's thumbnail as the reads return it, the row's columns
+    prefixed by *m*: whether it has one, and the version the page puts in the
+    image URL, never the link. The version is a prefix of the content hash,
+    which a row keeps for life, so one URL always names one picture."""
+    return (
+        f"{m}thumbnail_url IS NOT NULL AS has_thumbnail,"
+        f" left({m}content_hash, {THUMBNAIL_VERSION_CHARS}) AS thumbnail_version"
+    )
+
+
 #: The intent row plus the two joins the queue renders it with: the media it
 #: posts, and the account it posts to (`06` §3 — the handle is how a person
 #: recognises the row; NULL when the account carries none, never absent).
@@ -482,7 +497,8 @@ _INTENT_COLUMNS = (
     " COALESCE(a.tz, w.tz) AS tz,"
     f" CASE WHEN i.last_error->>'class' = '{vocabulary.PLANNED_MISSED}'"
     "      THEN i.last_error->>'message' END AS miss_reason,"
-    " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category, m.link_url,"
+    " m.file_name, m.media_kind, m.caption, m.category, m.link_url,"
+    f" {_thumbnail_sql('m.')},"
     " a.handle AS account_handle, a.display_name AS account_display_name"
 )
 
@@ -495,8 +511,9 @@ _INTENT_FROM = (
 
 _MEDIA_COLUMNS = (
     "id, source_id, provider_file_ref, file_name, media_kind, mime_type, file_size,"
-    " category, title, caption, tags, thumbnail_url, link_url, state, times_posted,"
-    " last_posted_at, created_at"
+    " category, title, caption, tags, link_url, state, times_posted,"
+    " last_posted_at, created_at,"
+    f" {_thumbnail_sql('')}"
 )
 
 
@@ -565,6 +582,21 @@ async def get_media(executor, *, workspace_id: str, media_id: str) -> Optional[d
     return await readers.row(
         executor,
         f"SELECT {_MEDIA_COLUMNS} FROM media_items WHERE workspace_id = :ws AND id = :id",
+        ws=str(workspace_id),
+        id=str(media_id),
+    )
+
+
+async def thumbnail_link(
+    executor, *, workspace_id: str, media_id: str
+) -> Optional[dict]:
+    """What the thumbnail route fetches through: the row's provider link and
+    the file it names, or None for a media id this workspace does not hold.
+    The one read that selects the link."""
+    return await readers.row(
+        executor,
+        "SELECT source_id, provider_file_ref, thumbnail_url FROM media_items"
+        " WHERE workspace_id = :ws AND id = :id",
         ws=str(workspace_id),
         id=str(media_id),
     )

@@ -23,8 +23,9 @@ import { POSTHOG_HOST } from "./posthog-host";
 const SHARED = [
   "default-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  // Drive thumbnails are served from Google's content hosts (`media-grid.tsx`).
-  "img-src 'self' data: https:",
+  // Every picture is this tier's own, thumbnails included: they stream through
+  // its thumbnail route, so a page never loads an image from another host.
+  "img-src 'self' data:",
   "font-src 'self'",
   // The browser calls only this tier and PostHog's ingestion host. Signing in
   // is a navigation, not a fetch.

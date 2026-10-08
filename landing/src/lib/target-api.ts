@@ -71,19 +71,12 @@ export async function targetFetch<T = unknown>(
 ): Promise<TargetResult<T>> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
-  if (sessionToken) headers.set("Authorization", `Bearer ${sessionToken}`);
   if (init?.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
-  let response: Response;
-  try {
-    response = await fetch(`${TARGET_API_URL}${PREFIX[init?.plane ?? "v1"]}${path}`, {
-      ...init,
-      headers,
-      cache: "no-store",
-    });
-  } catch {
+  const response = await send(path, sessionToken, headers, init);
+  if (response === null) {
     // The router is not reachable. Until it is mounted this is the expected
     // state of every call here, and it must not be reported as "no data".
     return { ok: false, status: 503, error: "target_router_unreachable" };
@@ -106,6 +99,43 @@ export async function targetFetch<T = unknown>(
     return { ok: true, data: (await response.json()) as T };
   } catch {
     return { ok: false, status: response.status, error: "malformed_response" };
+  }
+}
+
+/**
+ * A GET whose answer is bytes, not JSON (a media thumbnail), returned as the
+ * API's own response: its status, its headers and a body that streams through
+ * unread. Same credential and plane as `targetFetch`. A router that cannot be
+ * reached is a bodiless 503, never something a caller could relay as a picture.
+ */
+export async function targetFetchBytes(
+  path: string,
+  sessionToken: string | null,
+): Promise<Response> {
+  const response = await send(path, sessionToken, new Headers({ Accept: "image/*" }));
+  return response ?? new Response(null, { status: 503 });
+}
+
+/**
+ * One call to the router: the URL from the plane, the session token as the
+ * bearer credential and nothing else (the header above), never cached. Null
+ * when the router cannot be reached; each caller answers that in its own shape.
+ */
+async function send(
+  path: string,
+  sessionToken: string | null,
+  headers: Headers,
+  init?: RequestInit & { plane?: ApiPlane },
+): Promise<Response | null> {
+  if (sessionToken) headers.set("Authorization", `Bearer ${sessionToken}`);
+  try {
+    return await fetch(`${TARGET_API_URL}${PREFIX[init?.plane ?? "v1"]}${path}`, {
+      ...init,
+      headers,
+      cache: "no-store",
+    });
+  } catch {
+    return null;
   }
 }
 
