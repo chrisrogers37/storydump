@@ -55,10 +55,11 @@ def _bulk_posted(cur, chain, *, n: int, tag: str) -> None:
         "    FROM generate_series(1, %(n)s) g"
         "  RETURNING id, content_hash)"
         " INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-        "   provider_account_ref, approval_mode, published_via, schedule_slot_at, state)"
+        "   provider_account_ref, approval_mode, published_via, schedule_slot_at, state,"
+        "   cap_consumed_on)"
         " SELECT %(ws)s, %(iga)s, m.id, %(ref)s, 'manual', 'manual',"
         "        now() - make_interval(hours => 5 * (row_number() OVER"
-        "          (ORDER BY m.content_hash))::int), 'posted'"
+        "          (ORDER BY m.content_hash))::int), 'posted', current_date"
         "   FROM m",
         {
             "ws": chain["ws"],
@@ -82,9 +83,11 @@ def _story(cur, chain, tag: str, name: str, *, at: str, state: str) -> str:
     media = cur.fetchone()[0]
     cur.execute(
         "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
-        " provider_account_ref, approval_mode, published_via, schedule_slot_at, state)"
-        " VALUES (%s, %s, %s, %s, 'manual', 'manual', %s::timestamptz, %s) RETURNING id",
-        (chain["ws"], chain["iga"], media, f"acct-{tag}", at, state),
+        " provider_account_ref, approval_mode, published_via, schedule_slot_at, state,"
+        " cap_consumed_on)"
+        " VALUES (%s, %s, %s, %s, 'manual', 'manual', %s::timestamptz, %s,"
+        " CASE WHEN %s = 'posted' THEN current_date END) RETURNING id",
+        (chain["ws"], chain["iga"], media, f"acct-{tag}", at, state, state),
     )
     return str(cur.fetchone()[0])
 
@@ -239,7 +242,9 @@ def test_the_month_read_walks_the_index(world):
     """#1640's acceptance: on a workspace with thousands of posted stories, the
     calendar's month read is a scan of `ix_intents_history_slot`."""
     days, plans = asyncio.run(
-        _as_tenant(world["ingress"], world["bulk"], _month_read(world["bulk"], explain=True))
+        _as_tenant(
+            world["ingress"], world["bulk"], _month_read(world["bulk"], explain=True)
+        )
     )
     assert days, "positive control: the bulk workspace posted in that month"
     (plan,) = plans

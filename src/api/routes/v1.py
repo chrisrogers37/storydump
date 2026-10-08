@@ -564,7 +564,7 @@ async def list_intents(
 async def intent_days(
     ws: uuid.UUID,
     request: Request,
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_session),
     state: Optional[str] = Query(None),
     from_: date = Query(..., alias="from"),
     to: date = Query(...),
@@ -573,7 +573,9 @@ async def intent_days(
     """The calendar's month (#1634): for each local day in ``[from, to)`` that
     holds an intent in ``state``, how many it holds and its ``per_day`` newest
     — ``?state=posted&from=2026-09-29&to=2026-11-02``. ``state`` is required: a
-    count of every state at once is not a question the calendar asks."""
+    count of every state at once is not a question the calendar asks. The
+    web's read alone: a token is refused, as on every route outside its
+    allowlist."""
     states = _states(state)
     if not states:
         raise HTTPException(status_code=422, detail="state is required")
