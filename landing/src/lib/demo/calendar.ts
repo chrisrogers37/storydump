@@ -10,7 +10,8 @@ export type CalendarLanes = Parameters<typeof ContentCalendar>[0];
  * (#1649):
  *
  *  - Posted: the month's finished stories that posted, and each story the
- *    visitor marked Posted myself, on the day of the tap;
+ *    visitor marked Posted myself. Each sits in its slot's day, so a story
+ *    keeps its cell and changes its lane;
  *  - In Queue: a story waiting for a tap, under its file name, in its slot,
  *    as the Queue lists it;
  *  - Predicted: a scheduled story, labelled by its folder, as the real
@@ -26,7 +27,7 @@ export function demoCalendarLanes(queue: Intent[], history: FinishedStory[]): Ca
     history: [...queue, ...history]
       .filter((i) => i.state === "posted")
       .map((i) => ({
-        posted_at: i.entered_state_at,
+        posted_at: i.schedule_slot_at,
         media_name: i.file_name,
         category: category(i),
         status: i.state,

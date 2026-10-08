@@ -12,7 +12,8 @@
  *
  * Asserted without a DOM, per this suite's `environment: "node"` — the
  * components are read as returned element trees, which is enough because the
- * faults are props, keys and class strings.
+ * faults are props, handlers and class strings. The drawer's open state is one
+ * `useState` in `NavDrawer`; everything else is `NavDrawerView`, read here.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -21,8 +22,9 @@ import { isValidElement } from "react";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/dashboard" }));
 
+import { SheetContent } from "@/components/ui/sheet";
 import { DashboardHeader } from "./header";
-import { NavDrawer } from "./nav-drawer";
+import { NavDrawer, NavDrawerView } from "./nav-drawer";
 import { Sidebar } from "./sidebar";
 
 /** Every element in a returned tree, depth-first. Client components are not
@@ -43,7 +45,8 @@ const header = () =>
     user: { email: "owner@example.com", displayName: "Owner" },
   } as Parameters<typeof DashboardHeader>[0]) as ReactElement;
 
-const drawer = () => NavDrawer({}) as ReactElement;
+const drawer = (onOpenChange: (open: boolean) => void = () => {}) =>
+  NavDrawerView({ open: true, onOpenChange }) as ReactElement;
 
 /** The responsive prefix attached to one utility — `lg` of `lg:hidden`.
  *
@@ -107,9 +110,21 @@ describe("the mobile navigation drawer", () => {
     ).toBe(breakpointOf(desktop.props.className, "block"));
   });
 
-  it("closes once a link in it is followed: each path mounts its own, closed drawer", () => {
-    // The third fault. The drawer is keyed by the path, so a navigation
-    // replaces the open drawer with a closed one.
-    expect(drawer().key).toBe("/dashboard");
+  it("closes on a tap that follows a link in it, and on no other tap", () => {
+    // The third fault. Closed on the tap itself, so it also closes for the
+    // entry of the page already open, where the path never changes.
+    const onOpenChange = vi.fn();
+    const content = [...walk(drawer(onOpenChange))].find((el) => el.type === SheetContent);
+    expect(content, "the drawer has its sheet").toBeDefined();
+    const tap = (onLink: boolean) =>
+      (content!.props as { onClick: (event: unknown) => void }).onClick({
+        target: { closest: (selector: string) => (onLink && selector === "a[href]" ? {} : null) },
+      });
+
+    tap(false);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    tap(true);
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

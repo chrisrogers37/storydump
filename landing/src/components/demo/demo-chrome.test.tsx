@@ -19,6 +19,7 @@ import { DEMO_SIGN_IN_HREF, DEMO_WAITLIST_HREF } from "@/lib/demo/cta";
 import { DemoCta } from "./demo-cta";
 import { DemoEndPanel } from "./demo-end-panel";
 import { DemoHeader } from "./demo-header";
+import { DemoProvider } from "./demo-provider";
 import { DemoShell } from "./demo-shell";
 import { DEMO_HOME, DEMO_NAV } from "./nav";
 
@@ -73,7 +74,7 @@ describe("the sample's banner", () => {
 });
 
 describe("the sample's shell", () => {
-  it("draws the shared sidebar with the sample's entries, and ends its column with the end panel", () => {
+  it("draws the shared sidebar with the sample's entries, and ends its column, inside the sample's state, with the end panel", () => {
     const tree = DemoShell({ children: "page" }) as ReactElement;
 
     const aside = [...walk(tree)].find((el) => el.type === Sidebar);
@@ -82,8 +83,11 @@ describe("the sample's shell", () => {
     expect(props.items).toBe(DEMO_NAV);
     expect(props.home).toBe(DEMO_HOME);
 
+    // The sidebar and the banner need no sample; the column waits for one.
     const main = [...walk(tree)].find((el) => el.type === "main");
-    const children = (main!.props as { children: unknown[] }).children;
+    const state = (main!.props as { children: ReactElement }).children;
+    expect(state.type).toBe(DemoProvider);
+    const children = (state.props as { children: unknown[] }).children;
     expect(children[0]).toBe("page");
     expect((children[children.length - 1] as ReactElement).type).toBe(DemoEndPanel);
   });

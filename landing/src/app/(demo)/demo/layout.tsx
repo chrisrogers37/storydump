@@ -1,8 +1,5 @@
 import type { Metadata } from "next";
-import { connection } from "next/server";
-import { DemoProvider } from "@/components/demo/demo-provider";
 import { DemoShell } from "@/components/demo/demo-shell";
-import { sampleWorkspace } from "@/lib/demo/fixtures";
 import { noindexMetadata } from "@/lib/seo";
 
 /**
@@ -12,6 +9,12 @@ import { noindexMetadata } from "@/lib/seo";
  * in the browser (`demo-isolation-contract.test.ts`).
  *
  * NOT INDEXED, and with no canonical: the sample is a copy of no other page.
+ *
+ * PRERENDERED, AND IT HOLDS NO SAMPLE (#1649). The sample's slots are counted
+ * from now, so a copy made ahead of the visit is wrong by however long it
+ * waited: an hourly rebuild served the visitor who set it off scheduled posts
+ * already past. The visitor's browser builds the sample when the page opens
+ * (`DemoProvider`), and the page stays on the CDN.
  */
 export const metadata: Metadata = {
   title: "Sample workspace",
@@ -21,19 +24,6 @@ export const metadata: Metadata = {
   alternates: { canonical: null },
 };
 
-/**
- * RENDERED FOR EACH REQUEST, from the request's own time (#1649). The sample's
- * slots are counted from now. An hourly prerender showed the visitor whose
- * request set off its rebuild a copy hours old, its scheduled posts already
- * past.
- */
-export default async function DemoLayout({ children }: { children: React.ReactNode }) {
-  await connection();
-  const sample = sampleWorkspace(new Date());
-
-  return (
-    <DemoProvider sample={sample}>
-      <DemoShell>{children}</DemoShell>
-    </DemoProvider>
-  );
+export default function DemoLayout({ children }: { children: React.ReactNode }) {
+  return <DemoShell>{children}</DemoShell>;
 }

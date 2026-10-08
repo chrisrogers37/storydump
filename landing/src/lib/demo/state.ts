@@ -34,21 +34,13 @@ export function isDemoAction(action: QueueAction): action is DemoAction {
 }
 
 /**
- * The levers a story offers: the real Queue's own matrix (`actionsFor`), for
- * the sample's workspace, so the sample offers what a new workspace's Queue
- * would and cannot drift from it.
+ * The levers a story offers: the real Queue's own matrix (`actionsFor`) for a
+ * story in that state, with direct posting as the sample's workspace has it.
+ * The sample's stories carry no link, no pending cancellation and no planner,
+ * so the matrix's other inputs stay at their defaults.
  */
-export function demoActionsFor(
-  intent: Pick<Intent, "state" | "cancel_requested" | "publish_step" | "origin" | "link_url">,
-): DemoAction[] {
-  return actionsFor(
-    intent.state,
-    SAMPLE_API_PUBLISHING,
-    intent.cancel_requested,
-    intent.publish_step,
-    intent.origin,
-    Boolean(intent.link_url),
-  ).filter(isDemoAction);
+export function demoActionsFor(intent: Pick<Intent, "state">): DemoAction[] {
+  return actionsFor(intent.state, SAMPLE_API_PUBLISHING).filter(isDemoAction);
 }
 
 /**

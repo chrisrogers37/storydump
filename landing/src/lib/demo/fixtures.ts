@@ -6,6 +6,7 @@ import type {
   WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
 import type { Intent, IntentState } from "@/lib/intents";
+import { dateInZone } from "@/lib/zoned-dates";
 
 /**
  * The sample workspace `/demo` shows a signed-out visitor (#1480).
@@ -108,40 +109,44 @@ const SCHEDULED: StoryInput[] = [
   { file: "weekend-plans.jpg", folder: 2 },
 ];
 
-/** The names a finished story's file takes in each folder; a number keeps each file apart. */
-const FINISHED_NAMES: Record<Folder, readonly string[]> = {
-  0: ["product-lineup", "colour-swatches", "window-display", "gift-box-detail", "fabric-close-up"],
-  1: ["gift-wrap-station", "half-finished-sketch", "morning-setup", "packing-table", "label-printing"],
-  2: ["coffee-first", "friday-feeling", "plot-twist", "mood-board", "inbox-zero"],
-};
-
-/** The folder of each slot in a run of ten: five, three and two, the mix's shares. */
-const FOLDER_RUN: readonly Folder[] = [0, 1, 0, 2, 0, 1, 0, 2, 0, 1];
+/**
+ * A run of ten slots: each slot's folder (five, three and two, the mix's
+ * shares) and the name its story's file takes. A number keeps one run's
+ * files apart from the next run's.
+ */
+const FINISHED_RUN: readonly { folder: Folder; name: string }[] = [
+  { folder: 0, name: "product-lineup" },
+  { folder: 1, name: "half-finished-sketch" },
+  { folder: 0, name: "window-display" },
+  { folder: 2, name: "mood-board" },
+  { folder: 0, name: "fabric-close-up" },
+  { folder: 1, name: "gift-wrap-station" },
+  { folder: 0, name: "colour-swatches" },
+  { folder: 2, name: "plot-twist" },
+  { folder: 0, name: "gift-box-detail" },
+  { folder: 1, name: "label-printing" },
+];
 
 /** The stats window, in days, today included. */
 const WINDOW_DAYS = 30;
 
 type LocalDate = { year: number; month: number; day: number };
 
-/** One formatter per zone: a month of slots reads the clock several hundred times a render. */
-const clocks = new Map<string, Intl.DateTimeFormat>();
+/** Made on first use and kept: a month of slots reads the clock several hundred times a render. */
+let clock: Intl.DateTimeFormat | undefined;
 
-/** An instant's wall clock in a zone. */
-function wallClock(instant: number, timeZone: string) {
-  let clock = clocks.get(timeZone);
-  if (!clock) {
-    clock = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      hourCycle: "h23",
-      year: "numeric",
-      month: "numeric",
-      day: "numeric",
-      hour: "numeric",
-      minute: "numeric",
-      second: "numeric",
-    });
-    clocks.set(timeZone, clock);
-  }
+/** An instant's wall clock in the workspace's zone. */
+function wallClock(instant: number) {
+  clock ??= new Intl.DateTimeFormat("en-US", {
+    timeZone: SAMPLE_TZ,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+  });
   const parts = clock.formatToParts(new Date(instant));
   const part = (type: Intl.DateTimeFormatPartTypes) =>
     Number(parts.find((p) => p.type === type)?.value);
@@ -156,17 +161,17 @@ function wallClock(instant: number, timeZone: string) {
 }
 
 /** How far the zone's wall clock runs ahead of UTC at an instant, in milliseconds. */
-function zoneOffset(instant: number, timeZone: string): number {
-  const w = wallClock(instant, timeZone);
+function zoneOffset(instant: number): number {
+  const w = wallClock(instant);
   return Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second) - instant;
 }
 
-/** The instant a zone's wall clock reads `hour`:00 on a date. */
-function wallTime({ year, month, day }: LocalDate, hour: number, timeZone: string): number {
+/** The instant the zone's wall clock reads `hour`:00 on a date. */
+function wallTime({ year, month, day }: LocalDate, hour: number): number {
   const asUtc = Date.UTC(year, month - 1, day, hour);
-  const first = asUtc - zoneOffset(asUtc, timeZone);
+  const first = asUtc - zoneOffset(asUtc);
   // Once more at the guess, so a date that crosses a clock change lands right.
-  return asUtc - zoneOffset(first, timeZone);
+  return asUtc - zoneOffset(first);
 }
 
 /** A date `days` after `date`, counted on the calendar. */
@@ -179,21 +184,23 @@ function addDays({ year, month, day }: LocalDate, days: number): LocalDate {
 const isoDate = ({ year, month, day }: LocalDate) =>
   `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 
-/** Every posting slot from `before` days back to two days ahead of `now`, in order. */
-function slotsAround(now: number, before: number): number[] {
-  const today = wallClock(now, SAMPLE_TZ);
-  const slots: number[] = [];
-  for (let offset = -before; offset <= 2; offset++) {
-    const date = addDays(today, offset);
-    for (const hour of SAMPLE_POSTING_HOURS) slots.push(wallTime(date, hour, SAMPLE_TZ));
-  }
-  return slots.sort((a, b) => a - b);
-}
+/**
+ * A posting slot: its instant, and its place in the workspace's run of slots,
+ * which is the same at every render, so a slot keeps its story.
+ */
+type Slot = { at: number; ordinal: number };
 
-/** A slot's place in the workspace's run of slots: the same at every render, so a slot keeps its story. */
-function ordinalOf(slot: number): number {
-  const w = wallClock(slot, SAMPLE_TZ);
-  return (Date.UTC(w.year, w.month - 1, w.day) / DAY) * POSTS_PER_DAY + SAMPLE_POSTING_HOURS.indexOf(w.hour);
+/** Every posting slot from `before` days before `today` to the day after it, in order. */
+function slotsAround(today: LocalDate, before: number): Slot[] {
+  const slots: Slot[] = [];
+  for (let offset = -before; offset <= 1; offset++) {
+    const date = addDays(today, offset);
+    const first = (Date.UTC(date.year, date.month - 1, date.day) / DAY) * POSTS_PER_DAY;
+    SAMPLE_POSTING_HOURS.forEach((hour, i) =>
+      slots.push({ at: wallTime(date, hour), ordinal: first + i }),
+    );
+  }
+  return slots;
 }
 
 /** How a finished story ended: most posted; one slot in eleven was skipped, one in twenty-nine rejected. */
@@ -203,19 +210,46 @@ function endingOf(ordinal: number): IntentState {
   return "posted";
 }
 
-/** The story that finished in an earlier slot: its folder from the mix, its file and its ending from its place in the run. */
-function finishedStory(slot: number): FinishedStory {
-  const ordinal = ordinalOf(slot);
-  const folder = FOLDER_RUN[ordinal % FOLDER_RUN.length];
-  const names = FINISHED_NAMES[folder];
-  const number = String(Math.floor(ordinal / FOLDER_RUN.length) % 1000).padStart(3, "0");
+/** The story that finished in an earlier slot: its folder, its file and its ending all follow from its place in the run. */
+function finishedStory({ at, ordinal }: Slot): FinishedStory {
+  const { folder, name } = FINISHED_RUN[ordinal % FINISHED_RUN.length];
+  const run = String(Math.floor(ordinal / FINISHED_RUN.length) % 1000).padStart(3, "0");
   return {
     id: `sample-finished-${ordinal}`,
     state: endingOf(ordinal),
-    file_name: `${names[ordinal % names.length]}-${number}.jpg`,
+    file_name: `${name}-${run}.jpg`,
     category: FOLDERS[folder].name,
-    schedule_slot_at: new Date(slot).toISOString(),
-    entered_state_at: new Date(slot + 2 * MINUTE).toISOString(),
+    schedule_slot_at: new Date(at).toISOString(),
+    entered_state_at: new Date(at + 2 * MINUTE).toISOString(),
+  };
+}
+
+/**
+ * The Overview's figures, counted from finished stories: how they ended, the
+ * posts on each day of the window, and each folder's posts. The sample's month
+ * is counted with it, and so is that month plus what a visitor decides, so the
+ * two cannot disagree. A day is the Calendar's own (`dateInZone`).
+ */
+export function countFinished(stories: FinishedStory[], dates: string[]) {
+  const posts = stories.filter((s) => s.state === "posted");
+  const ended = (state: IntentState) => stories.filter((s) => s.state === state).length;
+  const postsOn = new Map<string, number>();
+  for (const s of posts) {
+    const date = dateInZone(s.entered_state_at, SAMPLE_TZ);
+    postsOn.set(date, (postsOn.get(date) ?? 0) + 1);
+  }
+  return {
+    posted: posts.length,
+    skipped: ended("skipped"),
+    rejected: ended("rejected"),
+    posts_by_day: dates.map((date) => ({
+      local_date: date,
+      count: postsOn.get(date) ?? 0,
+      cap: POSTS_PER_DAY,
+    })),
+    posted_by_source: Object.fromEntries(
+      FOLDERS.map((f) => [f.id, posts.filter((s) => s.category === f.name).length]),
+    ),
   };
 }
 
@@ -256,19 +290,24 @@ function story(
   };
 }
 
+/** The sample as of this moment: what a visit builds when it opens. */
+export function sampleNow(): SampleWorkspace {
+  return sampleWorkspace(new Date());
+}
+
 export function sampleWorkspace(now: Date): SampleWorkspace {
   const t = now.getTime();
   const longAgo = new Date(t - 60 * DAY).toISOString();
-  const today = wallClock(t, SAMPLE_TZ);
-  const localDate = (instant: number) => isoDate(wallClock(instant, SAMPLE_TZ));
+  const today = wallClock(t);
   const dates = Array.from({ length: WINDOW_DAYS }, (_, i) =>
     isoDate(addDays(today, i - (WINDOW_DAYS - 1))),
   );
 
-  const slots = slotsAround(t, WINDOW_DAYS);
-  const arrived = slots.filter((s) => s <= t);
-  const waitingSlots = arrived.slice(-WAITING.length);
-  const nextSlots = slots.filter((s) => s > t).slice(0, SCHEDULED.length);
+  // The window's slots, and the next day's for what is scheduled.
+  const slots = slotsAround(today, WINDOW_DAYS - 1);
+  const arrived = slots.filter((s) => s.at <= t);
+  const waitingSlots = arrived.slice(-WAITING.length).map((s) => s.at);
+  const nextSlots = slots.filter((s) => s.at > t).slice(0, SCHEDULED.length).map((s) => s.at);
 
   const queue = [
     ...WAITING.map((input, i) =>
@@ -280,29 +319,12 @@ export function sampleWorkspace(now: Date): SampleWorkspace {
   ];
 
   // Every slot of the window before the waiting ones finished. Newest first.
-  const history = arrived
-    .slice(0, -WAITING.length)
-    .filter((slot) => localDate(slot) >= dates[0])
-    .map(finishedStory)
-    .reverse();
+  const history = arrived.slice(0, -WAITING.length).map(finishedStory).reverse();
 
   // The Overview's figures are counted from those stories, so its chart, its
   // cards and Recent activity agree with the Queue and the Calendar.
-  const posts = history.filter((s) => s.state === "posted");
-  const ended = (state: IntentState) => history.filter((s) => s.state === state).length;
-  const postsOn = new Map<string, number>();
-  for (const s of posts) {
-    const date = localDate(Date.parse(s.entered_state_at));
-    postsOn.set(date, (postsOn.get(date) ?? 0) + 1);
-  }
-  const postsByDay = dates.map((date) => ({
-    local_date: date,
-    count: postsOn.get(date) ?? 0,
-    cap: POSTS_PER_DAY,
-  }));
-  const postedBySource = Object.fromEntries(
-    FOLDERS.map((f) => [f.id, posts.filter((s) => s.category === f.name).length]),
-  );
+  const counted = countFinished(history, dates);
+  const lastPost = history.find((s) => s.state === "posted");
 
   return {
     config: {
@@ -332,9 +354,9 @@ export function sampleWorkspace(now: Date): SampleWorkspace {
     },
     stats: {
       intents_by_state: {
-        posted: posts.length,
-        skipped: ended("skipped"),
-        rejected: ended("rejected"),
+        posted: counted.posted,
+        skipped: counted.skipped,
+        rejected: counted.rejected,
         // Posted by hand: no publish call is ever made, so none fails.
         failed: 0,
         awaiting_approval: WAITING.length,
@@ -343,8 +365,8 @@ export function sampleWorkspace(now: Date): SampleWorkspace {
       media_by_state: { available: FOLDERS.reduce((a, f) => a + f.media, 0) },
       media_never_posted: 37,
       media_by_category: Object.fromEntries(FOLDERS.map((f) => [f.name, f.media])),
-      posted_by_source: postedBySource,
-      posts_by_day: postsByDay,
+      posted_by_source: counted.posted_by_source,
+      posts_by_day: counted.posts_by_day,
       accounts: 1,
       sources: FOLDERS.length,
     },
@@ -357,7 +379,7 @@ export function sampleWorkspace(now: Date): SampleWorkspace {
           display_name: ACCOUNT.displayName,
           state: "active",
           next_slot_at: queue[WAITING.length].schedule_slot_at,
-          last_posted_at: posts[0].entered_state_at,
+          last_posted_at: lastPost?.entered_state_at ?? null,
           credential_status: "active",
           credential_connected_at: longAgo,
           tz: null,

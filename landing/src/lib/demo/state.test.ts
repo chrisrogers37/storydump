@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Intent, IntentState, QueueAction } from "@/lib/intents";
+import { actionsFor, type Intent, type IntentState, type QueueAction } from "@/lib/intents";
+import { SAMPLE_API_PUBLISHING, sampleWorkspace } from "./fixtures";
 import {
   DECISIONS_BEFORE_END,
   demoActionsFor,
@@ -56,6 +57,17 @@ describe("a decision in the sample", () => {
     expect(demoActionsFor(story("a", "posted"))).toEqual([]);
   });
 
+  it("hides no lever the real Queue would offer the sample's stories", () => {
+    // `demoActionsFor` keeps the levers the sample answers. Should the Queue's
+    // matrix grow one for these stories, this fails rather than the sample
+    // quietly offering less than a new workspace does.
+    for (const queued of sampleWorkspace(new Date("2026-10-15T16:20:00.000Z")).queue) {
+      expect(demoActionsFor(queued), queued.file_name).toEqual(
+        actionsFor(queued.state, SAMPLE_API_PUBLISHING),
+      );
+    }
+  });
+
   it("marks a story posted from the moment of the tap, and the line says what that records", () => {
     const next = decide(start(), "a", "mark_posted");
     const a = next.queue.find((i) => i.id === "a");
@@ -96,15 +108,12 @@ describe("a decision in the sample", () => {
 
 describe("the end panel", () => {
   it(`waits for ${DECISIONS_BEFORE_END} decisions, because its line is about the taps`, () => {
+    // Nothing else brings it up: opening the three pages once did, and its
+    // "That's the job: one tap per Story." spoke of taps never made (#1649).
+    expect(endPanelDue(start())).toBe(false);
     const two = decide(decide(start(), "a", "mark_posted"), "b", "skip");
     expect(endPanelDue(two)).toBe(false);
     expect(endPanelDue(decide(two, "c", "reject"))).toBe(true);
-  });
-
-  it("does not come for browsing alone", () => {
-    // Opening the three pages once brought it up with nothing decided, and its
-    // "That's the job: one tap per Story." spoke of taps never made (#1649).
-    expect(endPanelDue(start())).toBe(false);
   });
 
   it("stays closed once closed", () => {

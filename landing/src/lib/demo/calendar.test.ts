@@ -33,8 +33,8 @@ function story(file: string, state: IntentState): Intent {
 }
 
 describe("the sample's calendar lanes", () => {
-  /** Marked Posted myself by the visitor: it entered `posted` at the tap. */
-  const marked = { ...story("marked.jpg", "posted"), entered_state_at: "2026-10-15T15:30:00.000Z" };
+  /** Marked Posted myself by the visitor, a day after its slot. */
+  const marked = { ...story("marked.jpg", "posted"), entered_state_at: "2026-10-16T09:30:00.000Z" };
   const lanes = demoCalendarLanes(
     [
       story("waiting.jpg", "awaiting_approval"),
@@ -68,10 +68,11 @@ describe("the sample's calendar lanes", () => {
     ]);
   });
 
-  it("draws a story marked posted under Posted, on the day of the tap, beside the month's posts", () => {
+  it("draws a story marked posted under Posted, in its slot's day, beside the month's posts", () => {
+    // A story keeps its cell: marking it posted a day late changes its lane, not its day.
     expect(lanes.history).toEqual([
-      { posted_at: "2026-10-15T15:30:00.000Z", media_name: "marked.jpg", category: "Memes", status: "posted" },
-      { posted_at: "2026-10-14T18:00:00.000Z", media_name: "posted.jpg", category: "Memes", status: "posted" },
+      { posted_at: "2026-10-15T14:00:00.000Z", media_name: "marked.jpg", category: "Memes", status: "posted" },
+      { posted_at: "2026-10-15T14:00:00.000Z", media_name: "posted.jpg", category: "Memes", status: "posted" },
     ]);
   });
 

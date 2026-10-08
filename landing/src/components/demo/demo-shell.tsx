@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { DemoEndPanel } from "@/components/demo/demo-end-panel";
 import { DemoHeader } from "@/components/demo/demo-header";
+import { DemoProvider } from "@/components/demo/demo-provider";
 import { DEMO_HOME, DEMO_NAV } from "@/components/demo/nav";
 
 /**
@@ -11,6 +12,10 @@ import { DEMO_HOME, DEMO_NAV } from "@/components/demo/nav";
  * column as `(dashboard)/layout.tsx`, with the sample's header and end panel.
  * A client component because the sidebar's items carry icon components,
  * which cannot cross from a server component.
+ *
+ * The sample's state wraps the main column only: the sidebar and the banner
+ * need no sample, so they are in the prerendered page, while the column waits
+ * for the visitor's browser to build one (`DemoProvider`).
  */
 export function DemoShell({ children }: { children: ReactNode }) {
   return (
@@ -19,8 +24,10 @@ export function DemoShell({ children }: { children: ReactNode }) {
       <div className="flex flex-1 flex-col overflow-hidden">
         <DemoHeader />
         <main className="flex-1 overflow-y-auto p-6">
-          {children}
-          <DemoEndPanel />
+          <DemoProvider>
+            {children}
+            <DemoEndPanel />
+          </DemoProvider>
         </main>
       </div>
     </div>

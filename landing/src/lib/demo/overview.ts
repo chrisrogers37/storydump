@@ -1,61 +1,41 @@
-import type { StatsResponse } from "@/lib/dashboard-payloads";
-import type { Intent, IntentState } from "@/lib/intents";
-import type { FinishedStory, SampleWorkspace } from "./fixtures";
+import { HISTORY_STATES, type StatsResponse } from "@/lib/dashboard-payloads";
+import type { Intent } from "@/lib/intents";
+import { countFinished, type FinishedStory, type SampleWorkspace } from "./fixtures";
 
-/** The states a visitor's tap leaves a story in. */
-const DECIDED: readonly IntentState[] = ["posted", "skipped", "rejected"];
+/** The states Recent activity lists, the dashboard's own set. */
+const FINISHED = HISTORY_STATES.split(",");
 
 /**
- * The Overview as the visitor has left the sample (#1649): the month's counts
- * with each story the visitor decided added in, as a real workspace's counts
- * would move, and those stories first in Recent activity.
- *
- * A story marked posted counts on today, the window's last day, and in its
- * folder's share of the mix. One that is skipped or rejected stops waiting.
+ * The Overview as the visitor has left the sample (#1649): the month, counted
+ * again with each story the visitor decided, so its counts move as a real
+ * workspace's would, and those stories first in Recent activity.
  */
 export function overviewOf(
-  sample: Pick<SampleWorkspace, "stats" | "sources" | "history">,
+  sample: Pick<SampleWorkspace, "stats" | "history">,
   queue: Intent[],
 ): { stats: StatsResponse; activity: FinishedStory[] } {
   const decided = queue
-    .filter((i) => DECIDED.includes(i.state))
-    .map(({ id, state, file_name, category, schedule_slot_at, entered_state_at }) => ({
-      id,
-      state,
-      file_name,
-      category,
-      schedule_slot_at,
-      entered_state_at,
-    }))
+    .filter((i) => FINISHED.includes(i.state))
     .sort((a, b) => Date.parse(b.entered_state_at) - Date.parse(a.entered_state_at));
-  const posted = decided.filter((s) => s.state === "posted");
-  const ended = (state: IntentState) => decided.filter((s) => s.state === state).length;
+  const activity: FinishedStory[] = [...decided, ...sample.history];
 
   const { stats } = sample;
-  const by = stats.intents_by_state;
-  const sourceOf = new Map(sample.sources.sources.map((s) => [s.folder_name, s.id] as const));
-  const postedBySource = { ...stats.posted_by_source };
-  for (const story of posted) {
-    const source = sourceOf.get(story.category ?? "");
-    if (source) postedBySource[source] = (postedBySource[source] ?? 0) + 1;
-  }
-  const last = stats.posts_by_day.length - 1;
+  const { posts_by_day, posted_by_source, ...ended } = countFinished(
+    activity,
+    stats.posts_by_day.map((day) => day.local_date),
+  );
 
   return {
     stats: {
       ...stats,
       intents_by_state: {
-        ...by,
-        posted: (by.posted ?? 0) + posted.length,
-        skipped: (by.skipped ?? 0) + ended("skipped"),
-        rejected: (by.rejected ?? 0) + ended("rejected"),
-        awaiting_approval: (by.awaiting_approval ?? 0) - decided.length,
+        ...stats.intents_by_state,
+        ...ended,
+        awaiting_approval: stats.intents_by_state.awaiting_approval - decided.length,
       },
-      posts_by_day: stats.posts_by_day.map((day, i) =>
-        i === last ? { ...day, count: day.count + posted.length } : day,
-      ),
-      posted_by_source: postedBySource,
+      posts_by_day,
+      posted_by_source,
     },
-    activity: [...decided, ...sample.history],
+    activity,
   };
 }
