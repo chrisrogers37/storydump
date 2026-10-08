@@ -68,9 +68,35 @@ describe("the sample's calendar lanes", () => {
   });
 
   it("drops a skipped or rejected story, and draws only what posted under Posted", () => {
-    const named = [...lanes.queue.map((i) => i.media_name), ...lanes.history.map((i) => i.media_name)];
+    const posted = lanes.history.flatMap((day) => day.newest.map((n) => n.file_name));
+    const named = [...lanes.queue.map((i) => i.media_name), ...posted];
     expect(named).not.toContain("skipped.jpg");
     expect(named).not.toContain("rejected.jpg");
-    expect(lanes.history.map((i) => i.media_name)).toEqual(["posted.jpg"]);
+    expect(posted).toEqual(["posted.jpg"]);
+  });
+
+  it("groups what posted by its day, as the real month read does (#1634)", () => {
+    expect(lanes.history).toEqual([
+      {
+        date: "2026-10-15",
+        count: 1,
+        newest: [
+          {
+            id: "posted.jpg",
+            state: "posted",
+            schedule_slot_at: "2026-10-15T14:00:00.000Z",
+            file_name: "posted.jpg",
+            category: "Memes",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("draws the month the visitor is in", () => {
+    expect(demoCalendarLanes([], [], new Date("2026-10-02T12:00:00Z")).month).toEqual({
+      year: 2026,
+      month: 10,
+    });
   });
 });

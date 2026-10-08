@@ -417,6 +417,13 @@
       "label": "§48 the sync retires what the publish can never fetch (105, #1545) — media_items.last_listed_at, the stamp a walk leaves on every file it lists, missing added to ck_media_state for a file a walk that saw the whole tree no longer lists, and fn_planned_misses replaced to name it item_missing",
       "doc": "07-security-model.md",
       "ordinal": 41
+    },
+    {
+      "sha256": "ad5ad21364405f76211ea48e6fcb22dc8407585985d6f2872732ce4808bee124",
+      "class": "normative",
+      "label": "§50 the outcomes indexed by slot (107, #1640) — ix_intents_history_slot, a partial index on post_intents (workspace_id, schedule_slot_at) WHERE state IN ('posted','skipped','rejected'), for the calendar's month and day and the Overview's recent activity",
+      "doc": "07-security-model.md",
+      "ordinal": 42
     }
   ],
   "policy_expansion": {

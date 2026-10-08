@@ -33,6 +33,7 @@ free-form keys — and whose validation is a floor: the database's CHECKs
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from typing import Any, Mapping, Optional, Sequence
 
 from asyncpg.exceptions import CheckViolationError
@@ -500,6 +501,29 @@ _MEDIA_COLUMNS = (
 )
 
 
+#: Midnight of a local date in the workspace's own zone, as the instant a slot
+#: is compared with. A scalar subquery rather than the joined `w.tz`, so the
+#: bound is one value the planner can scan an index range by
+#: (`ix_intents_history_slot`, 107).
+_LOCAL_MIDNIGHT = (
+    "(CAST(:{name} AS date)::timestamp AT TIME ZONE"
+    " (SELECT tz FROM workspaces WHERE id = :ws))"
+)
+
+
+def _slot_range(
+    params: dict[str, Any], from_date: Optional[date], to_date: Optional[date]
+) -> str:
+    """`AND` clauses bounding the slot to the workspace's local days
+    ``[from_date, to_date)``; either end may be absent."""
+    sql = ""
+    for name, value, op in (("from_date", from_date, ">="), ("to_date", to_date, "<")):
+        if value is not None:
+            sql += f" AND i.schedule_slot_at {op} " + _LOCAL_MIDNIGHT.format(name=name)
+            params[name] = value
+    return sql
+
+
 async def list_intents(
     executor,
     *,
@@ -508,12 +532,16 @@ async def list_intents(
     origin: Optional[str] = None,
     newest_first: bool = False,
     limit: int = 50,
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
 ) -> list[dict]:
     """The ledger read model (X.2: "reads pending approvals from the ledger").
     *states* narrows to any of several states — a history tab is one call —
     and must already be validated against :data:`INTENT_STATES`; *origin*
     (one of :data:`INTENT_ORIGINS`) to the planned stories or the cadence's —
-    "what is coming" is the planned ones still `scheduled`. Soonest first, or
+    "what is coming" is the planned ones still `scheduled`. *from_date* and
+    *to_date* bound the slot to the workspace's local days ``[from_date,
+    to_date)``: the calendar's day view (#1634). Soonest first, or
     *newest_first* for a history (the latest misses, not the oldest). Bounded
     (`01` H5) — *limit* is applied after the caller's clamp."""
     params: dict[str, Any] = {"ws": str(workspace_id), "lim": int(limit)}
@@ -524,6 +552,7 @@ async def list_intents(
     if origin is not None:
         where += " AND i.origin = :origin"
         params["origin"] = origin
+    where += _slot_range(params, from_date, to_date)
     order = "DESC" if newest_first else "ASC"
     return await readers.rows(
         executor,
@@ -531,6 +560,64 @@ async def list_intents(
         f" ORDER BY i.schedule_slot_at {order}, i.id {order} LIMIT :lim",
         **params,
     )
+
+
+async def intent_days(
+    executor,
+    *,
+    workspace_id: str,
+    states: Sequence[str],
+    from_date: date,
+    to_date: date,
+    per_day: int,
+) -> list[dict]:
+    """The calendar's month (#1634): for each of the workspace's local days in
+    ``[from_date, to_date)`` that holds an intent in *states*, how many it
+    holds and its *per_day* newest. The count is a COUNT, never re-summed
+    from a bounded list (`01` H5); a day with none is absent.
+
+    *states* must be named and is spelled into the statement after it is
+    checked against :data:`INTENT_STATES`, not bound: a partial index proves
+    its predicate from the query's own literals, which a bound array hides
+    from a generic plan (`ix_intents_history_slot`, 107)."""
+    unknown = sorted(set(states) - set(INTENT_STATES))
+    if not states or unknown:
+        raise ValueError(f"intent states must be named and known, got {unknown}")
+    params: dict[str, Any] = {"ws": str(workspace_id), "per_day": int(per_day)}
+    named = ", ".join(f"'{s}'" for s in states)
+    where = f"i.workspace_id = :ws AND i.state IN ({named})" + _slot_range(
+        params, from_date, to_date
+    )
+    rows = await readers.rows(
+        executor,
+        "SELECT day, total, id, state, schedule_slot_at, file_name, category"
+        "  FROM (SELECT d.*, count(*) OVER (PARTITION BY d.day) AS total,"
+        "               row_number() OVER (PARTITION BY d.day"
+        "                 ORDER BY d.schedule_slot_at DESC, d.id DESC) AS rn"
+        "          FROM (SELECT to_char(i.schedule_slot_at AT TIME ZONE w.tz,"
+        "                               'YYYY-MM-DD') AS day,"
+        "                       i.id, i.state, i.schedule_slot_at,"
+        "                       m.file_name, m.category"
+        "                  FROM post_intents i"
+        "                  JOIN media_items m ON m.workspace_id = i.workspace_id"
+        "                                    AND m.id = i.media_item_id"
+        "                  JOIN workspaces w ON w.id = i.workspace_id"
+        f"                WHERE {where}) d) ranked"
+        " WHERE rn <= :per_day ORDER BY day, rn",
+        **params,
+    )
+    days: dict[str, dict] = {}
+    for row in rows:
+        day = days.setdefault(
+            row["day"], {"date": row["day"], "count": int(row["total"]), "newest": []}
+        )
+        day["newest"].append(
+            {
+                k: row[k]
+                for k in ("id", "state", "schedule_slot_at", "file_name", "category")
+            }
+        )
+    return list(days.values())
 
 
 async def list_media(

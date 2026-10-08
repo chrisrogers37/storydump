@@ -240,6 +240,14 @@ class PostIntent(TargetBase):
             "entered_state_at",
             postgresql_where=text("state IN ('awaiting_approval','approved')"),
         ),
+        # Migration 107 (#1640): the history's three outcomes by slot, for the
+        # calendar's month and day and the Overview's recent activity.
+        Index(
+            "ix_intents_history_slot",
+            "workspace_id",
+            "schedule_slot_at",
+            postgresql_where=text("state IN ('posted','skipped','rejected')"),
+        ),
         # Created by migration 056 (F.2.5), not 055 — the plan groups it under
         # §6 with the outbox rather than with the ledger. It lives here because
         # `create_all` renders a table's indexes from its own `__table_args__`,

@@ -3646,3 +3646,30 @@ $$;
 COMMENT ON FUNCTION fn_planned_misses(p_limit int, p_late interval) IS
   'The planned stories that will not be served, across every workspace: each due, scheduled, unflagged planned intent that cannot be served (item_removed, item_unsupported, item_missing, item_locked, account_removed, in that precedence) or whose p_late window has passed (paused when its workspace was not taking posts, else late) — the complement of fn_prompts_due''s planned rows. The worker expires each with its reason and tells the bound chats in the same transaction, per workspace under that workspace''s tenant. STRICT: a NULL window lists nothing. A SECURITY DEFINER read owned by svc_maintenance; EXECUTE for svc_worker (089, #1413; 105, #1545).';
 ```
+
+### §50. The outcomes indexed by slot (107, #1640)
+
+**Why:** the calendar's month, its day view, the Overview's recent activity and the history tab
+read a workspace's outcomes by `schedule_slot_at`, newest first or a day at a time. No index served
+`workspace_id = $1 AND state IN (…)` in slot order: `uq_intent_slot` leads with the account and is
+cadence-only, `ix_intents_reap_slot` holds `scheduled` and `prompt_pending` rows only,
+`uq_intent_live_subject` holds no terminal state, and the primary key is the id. `post_intents` is
+kept forever (055's retention), so each of these reads walked a workspace's whole history.
+
+**The predicate.** The index holds the three outcomes the history names, `posted`, `skipped` and
+`rejected`, not `posted` alone: the calendar's month asks for posted, and the Overview's recent
+activity and the history tab ask for all three. A read naming `posted` alone still uses it, since
+the planner proves `state = 'posted'` implies the list. The month's read spells its states into the
+statement rather than binding them, so a generic plan can prove that too.
+
+**The columns.** The tenant first, as every read names it, then the slot, so a month or a day is
+one range of the index and newest first is a backward walk of it.
+
+```sql
+-- [§50 the outcomes indexed by slot: the calendar's month and day and the Overview's recent activity read a workspace's posted, skipped and rejected stories by schedule_slot_at]
+-- A partial index on post_intents (workspace_id, schedule_slot_at) holding the three outcomes the
+-- history names, so the newest-first and day-at-a-time reads walk one range of it rather than the
+-- workspace's whole history (#1640).
+CREATE INDEX ix_intents_history_slot ON post_intents (workspace_id, schedule_slot_at)
+  WHERE state IN ('posted','skipped','rejected');
+```

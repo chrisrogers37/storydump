@@ -441,6 +441,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # fetch: the `last_listed_at` stamp, `missing` in ck_media_state and
             # the miss door's `item_missing` (#1545).
             "105_media_item_missing_and_last_listed.sql",
+            # 107 appends §50, the outcomes indexed by slot: a partial index
+            # on post_intents (workspace_id, schedule_slot_at) for the history's
+            # three outcomes, the calendar's month and day reads (#1640).
+            "107_intent_history_slot_index.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

@@ -1,15 +1,15 @@
 /**
- * Which stories the calendar asks for, and that a planned story reaches the
- * month however busy the queue is. The page, an async server component, is
- * called directly with its two doors mocked — the session guard and the
- * target fetch — and the returned element tree is read without rendering it
- * (`environment: "node"`).
+ * Which stories the calendar asks for: the month on screen, the day opened
+ * from it, and that a planned story reaches the month however busy the queue
+ * is. The page, an async server component, is called directly with its two
+ * doors mocked — the session guard and the target fetch — and the returned
+ * element tree is read without rendering it (`environment: "node"`).
  *
- * The calendar makes four `intents` reads, so `readOf()` tells them apart by
- * their query, and `answer()` answers every read from one table.
+ * The page makes several reads, so `readOf()` tells them apart by their path
+ * and query, and `answer()` answers every read from one table.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement, ReactNode } from "react";
 
 const { workspaceFetch } = vi.hoisted(() => ({ workspaceFetch: vi.fn() }));
@@ -20,6 +20,7 @@ vi.mock("@/lib/page-guards", () => ({
 vi.mock("@/lib/workspaces", () => ({ workspaceFetch }));
 
 import CalendarPage from "./page";
+import { CalendarDay } from "@/components/dashboard/media/calendar-day";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { QUEUE_STATES } from "@/lib/dashboard-payloads";
@@ -38,7 +39,7 @@ function* walk(node: ReactNode): Generator<ReactElement> {
 }
 
 const ok = (data: unknown) => ({ ok: true, data });
-const rows = (...intents: Intent[]) => ok({ intents });
+const rows = (...intents: Intent[]) => ok({ intents, limit: LIST_LIMIT_MAX });
 const DOWN = { ok: false, status: 503, error: "http_503" };
 
 /** A full row of the intents read; its file is named after its id. */
@@ -73,19 +74,17 @@ function story(id: string, over: Partial<Intent> = {}): Intent {
   };
 }
 
-type Read = "history" | "queue" | "planned" | "predicted" | "stats" | "config";
+type Read = "month" | "day" | "queue" | "planned" | "predicted" | "stats" | "config";
 
-/**
- * Which read a path is. History is the one asking for a posted state, so a
- * read that slipped back to all three outcomes still lands here, and fails.
- */
+/** Which read a path is. */
 function readOf(path: string): Read {
   const [head, query = ""] = path.split("?");
   if (head === "") return "config";
   if (head === "stats") return "stats";
+  if (head === "intents/days") return "month";
   if (head !== "intents") throw new Error(`unexpected read: ${path}`);
   const q = new URLSearchParams(query);
-  if ((q.get("state") ?? "").split(",").includes("posted")) return "history";
+  if (q.has("from")) return "day";
   if (q.get("origin") === "planned") return "planned";
   if (q.get("state") === "scheduled") return "predicted";
   return "queue";
@@ -94,13 +93,14 @@ function readOf(path: string): Read {
 /** Answer each read from one table; `over` replaces some of it. */
 function answer(over: Partial<Record<Read, unknown>> = {}) {
   const table: Record<Read, unknown> = {
-    history: rows(),
+    month: ok({ days: [], per_day: 3 }),
+    day: rows(),
     queue: rows(),
     planned: rows(),
     predicted: rows(),
     stats: ok({ intents_by_state: {}, posts_by_day: [] }),
     config: ok({
-      tz: "UTC",
+      tz: "America/New_York",
       posts_per_day: null,
       posting_hours_start: null,
       posting_hours_end: null,
@@ -110,11 +110,16 @@ function answer(over: Partial<Record<Read, unknown>> = {}) {
   workspaceFetch.mockImplementation(async (path: string) => table[readOf(path)]);
 }
 
-/** The lanes the page hands the calendar. */
-async function lanes() {
-  const el = [...walk(await CalendarPage())].find((e) => e.type === ContentCalendar);
-  expect(el, "the page renders no calendar").toBeDefined();
-  return el!.props as Parameters<typeof ContentCalendar>[0];
+/** The page for these `?month=` and `?day=`. */
+async function page(params: { month?: string; day?: string } = {}) {
+  return [...walk(await CalendarPage({ searchParams: Promise.resolve(params) }))];
+}
+
+/** The props the page hands one component. */
+function propsOf<P>(elements: ReactElement[], type: unknown): P {
+  const el = elements.find((e) => e.type === type);
+  expect(el, "the page does not render it").toBeDefined();
+  return el!.props as P;
 }
 
 /** The query of the page's one read of this kind. */
@@ -126,26 +131,114 @@ function query(read: Read): URLSearchParams {
   return new URLSearchParams(paths[0].split("?")[1]);
 }
 
+type CalendarProps = Parameters<typeof ContentCalendar>[0];
+type DayProps = Parameters<typeof CalendarDay>[0];
+
 beforeEach(() => {
   workspaceFetch.mockReset();
+  // 9:30 PM on Thursday, Oct 1 in New York: already Oct 2 in UTC.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-02T01:30:00Z"));
 });
 
-describe("the calendar's reads", () => {
-  it("asks for the newest posted stories, up to the API's ceiling", async () => {
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("the calendar's month (#1634)", () => {
+  it("draws this month in the workspace's zone, its whole grid counted", async () => {
     answer();
-    await lanes();
-    const q = query("history");
-    // The API sorts soonest first unless asked; oldest-first fills the lane
-    // with outcomes from before the month on screen.
-    expect(q.get("order")).toBe("desc");
-    // Posted only: a skipped or rejected story drawn here reads as posted.
+    const calendar = propsOf<CalendarProps>(await page(), ContentCalendar);
+    expect(calendar.month).toEqual({ year: 2026, month: 10 });
+    expect(calendar.navigable).toBe(true);
+    const q = query("month");
+    // Posted only: a skipped or rejected story drawn under Posted reads as posted.
     expect(q.get("state")).toBe("posted");
-    expect(q.get("limit")).toBe(String(LIST_LIMIT_MAX));
+    // October 2026 in Monday-first weeks: Sep 28 to Nov 1, so up to Nov 2.
+    expect([q.get("from"), q.get("to")]).toEqual(["2026-09-28", "2026-11-02"]);
+    expect(q.get("per_day")).toBe("3");
   });
 
+  it("draws the month it is asked for, and hands it the month read's days", async () => {
+    const days = [{ date: "2026-09-03", count: 15, newest: [] }];
+    answer({ month: ok({ days, per_day: 3 }) });
+    const calendar = propsOf<CalendarProps>(await page({ month: "2026-09" }), ContentCalendar);
+    expect(calendar.month).toEqual({ year: 2026, month: 9 });
+    expect(calendar.history).toEqual(days);
+    expect([query("month").get("from"), query("month").get("to")]).toEqual([
+      "2026-08-31",
+      "2026-10-05",
+    ]);
+  });
+
+  it("reads a month it cannot parse as this one", async () => {
+    answer();
+    const calendar = propsOf<CalendarProps>(await page({ month: "2026-13" }), ContentCalendar);
+    expect(calendar.month).toEqual({ year: 2026, month: 10 });
+  });
+
+  it("renders the unavailable state, not a calendar, when the month read fails", async () => {
+    answer({ month: DOWN });
+    const elements = await page();
+    expect(elements.some((el) => el.type === RouterUnavailable)).toBe(true);
+    expect(elements.some((el) => el.type === ContentCalendar)).toBe(false);
+  });
+});
+
+describe("a day opened from the month (#1634)", () => {
+  it("lists the day's stories in every state, in time order", async () => {
+    const day = [story("a", { state: "posted" }), story("b", { state: "skipped" })];
+    answer({ day: rows(...day) });
+    const elements = await page({ month: "2026-10", day: "2026-10-03" });
+    const q = query("day");
+    expect([q.get("from"), q.get("to")]).toEqual(["2026-10-03", "2026-10-04"]);
+    expect(q.get("state")).toBeNull();
+    expect(q.get("order")).toBe("asc");
+    expect(q.get("limit")).toBe(String(LIST_LIMIT_MAX));
+    const opened = propsOf<DayProps>(elements, CalendarDay);
+    expect(opened.date).toBe("2026-10-03");
+    expect(opened.intents).toEqual(day);
+    expect(opened.closeHref).toBe("?month=2026-10");
+    expect(opened.truncatedAt).toBeNull();
+    expect(propsOf<CalendarProps>(elements, ContentCalendar).selected).toBe("2026-10-03");
+  });
+
+  it("opens the day's own month when no month is given", async () => {
+    answer();
+    const elements = await page({ day: "2026-11-15" });
+    expect(propsOf<CalendarProps>(elements, ContentCalendar).month).toEqual({
+      year: 2026,
+      month: 11,
+    });
+    expect(propsOf<DayProps>(elements, CalendarDay).date).toBe("2026-11-15");
+  });
+
+  it("opens nothing for a day off the month's grid", async () => {
+    answer();
+    const elements = await page({ month: "2026-10", day: "2026-12-03" });
+    expect(workspaceFetch.mock.calls.map(([p]) => readOf(p as string))).not.toContain("day");
+    expect(elements.some((el) => el.type === CalendarDay)).toBe(false);
+  });
+
+  it("says when the day reached the read's limit", async () => {
+    answer({
+      day: ok({ intents: Array.from({ length: 2 }, (_, n) => story(`s${n}`)), limit: 2 }),
+    });
+    const elements = await page({ month: "2026-10", day: "2026-10-03" });
+    expect(propsOf<DayProps>(elements, CalendarDay).truncatedAt).toBe(2);
+  });
+
+  it("renders the unavailable state when the day read fails", async () => {
+    answer({ day: DOWN });
+    const elements = await page({ month: "2026-10", day: "2026-10-03" });
+    expect(elements.some((el) => el.type === RouterUnavailable)).toBe(true);
+  });
+});
+
+describe("the calendar's upcoming reads", () => {
   it("splits the upcoming stories by origin, so each is in one read", async () => {
     answer();
-    await lanes();
+    await page();
     const queue = query("queue");
     expect(queue.get("origin")).toBe("cadence");
     expect(queue.get("state")).toBe(QUEUE_STATES);
@@ -165,7 +258,7 @@ describe("the calendar's reads", () => {
         story("waiting", { origin: "planned", state: "awaiting_approval" }),
       ),
     });
-    const { queue } = await lanes();
+    const { queue } = propsOf<CalendarProps>(await page(), ContentCalendar);
     expect(queue).toHaveLength(12);
     expect(queue.filter((item) => item.planned).map((item) => item.media_name)).toEqual([
       "later.jpg",
@@ -175,7 +268,7 @@ describe("the calendar's reads", () => {
 
   it("renders the unavailable state, not a calendar, when the planned read fails", async () => {
     answer({ planned: DOWN });
-    const elements = [...walk(await CalendarPage())];
+    const elements = await page();
     expect(elements.some((el) => el.type === RouterUnavailable)).toBe(true);
     expect(elements.some((el) => el.type === ContentCalendar)).toBe(false);
   });
