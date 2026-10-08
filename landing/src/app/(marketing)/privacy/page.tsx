@@ -260,10 +260,11 @@ export default function PrivacyPolicy() {
               carries how long you stayed on the previous page and how far you
               scrolled it. Invitation links (under <Code>/join/</Code>) send
               nothing, and PostHog receives no names, email addresses or
-              account IDs. A click on a link to the sample workspace is sent
-              as <Code>Sample Workspace Click</Code>, with which link was
-              clicked (Demo in the header, or See a sample workspace under the
-              signup form), and, like the other events, it is cookieless.
+              account IDs. A click on the Demo link in the site header, or on
+              See a sample workspace under the signup form on the home page
+              and the use-case pages, is sent as{" "}
+              <Code>Sample Workspace Click</Code>, with which of the two links
+              was clicked, and, like the other events, it is cookieless.
             </li>
           </ul>
         </section>
