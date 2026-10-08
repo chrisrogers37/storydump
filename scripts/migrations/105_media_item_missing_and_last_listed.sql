@@ -8,8 +8,9 @@
 --     past the cap as `unsupported`, judged again each time a walk lists it;
 --   * stamps `last_listed_at` on every row a walk lists. A walk spans chunks, each one page in its
 --     own transaction, so the rows are where the walk's listing is kept. The last page of a walk
---     that saw the whole tree moves the source's `available` and `unsupported` rows that it did not
---     list, and that were created and last listed before the walk began, to `missing`.
+--     that saw the whole tree moves the source's `available` and `unsupported` rows that neither
+--     it nor the last whole walk before it listed to `missing`: a file that still exists can miss
+--     one walk, so one miss judges nothing, and a walk with no whole walk before it judges nothing.
 -- `missing` is not `removed`. `removed` is the folder's retirement, which a re-pick undoes
 -- (`rearm_after_connect`); `missing` is the file's own absence, which only a listing undoes. So
 -- ck_media_state learns the value, and the miss door (fn_planned_misses, 089) names it

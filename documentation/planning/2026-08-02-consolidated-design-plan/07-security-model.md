@@ -3581,10 +3581,11 @@ judges the file again each time it lists it, so a raised cap brings it back.
 **The tombstone.** A walk spans chunks, each one page in its own transaction, so what it listed is
 kept on the rows: every row it lists is stamped `last_listed_at`. A walk that saw the whole tree,
 with no cap cutting it and no folder left unlisted, ends by moving the source's `available` and
-`unsupported` rows that it did not list to `missing`, if they were created and last listed before
-the walk began. The start is read from the database's clock when the walk is minted, and rides its
-cursor. A row landed outside any walk while it ran (the device-native drop relay lands rows so) is
-judged by the next walk, not this one. The signal is positive: the adapter ends a walk that skipped
+`unsupported` rows that neither it nor the last whole walk before it listed to `missing`: a file
+that still exists can miss one walk, so one miss judges nothing, and a walk with no whole walk
+before it judges nothing. Both starts are read from the database's clock and ride the cursor. A row
+landed outside any walk (the device-native drop relay lands rows so) waits until it predates the
+last whole walk's start. The signal is positive: the adapter ends a walk that skipped
 nothing `whole`, and a walk that skipped part of the tree, or whose adapter does not say, judges
 nothing.
 

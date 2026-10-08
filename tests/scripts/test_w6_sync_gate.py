@@ -2005,6 +2005,52 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         }
 
     @pytest.mark.asyncio
+    async def test_a_partial_walk_between_two_whole_ones_keeps_the_two_walk_rule(
+        self, lane_db, sync_conn
+    ):
+        """A partial walk judges nothing and is not a whole walk's start: the
+        next whole walk still judges against the whole walk before the partial
+        one, so a file one whole walk missed stays (navi's review of #1628)."""
+        chain = seed_workspace_chain(sync_conn, "w6-partial-between")
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        kept = _item(seeded["ref"], h=seeded["hash"])
+        await _whole_walk(lane_db, sync_conn, chain["src"], [kept, _item("f1")])
+        await _walk(
+            lane_db,
+            sync_conn,
+            chain["src"],
+            ScriptedDrive([([kept], None)], final={"partial": True}),
+        )
+        await _whole_walk(lane_db, sync_conn, chain["src"], [kept])
+        assert _states(sync_conn, chain["ws"])["f1"] == "available"
+
+    @pytest.mark.asyncio
+    async def test_a_file_deleted_before_a_whole_walk_is_retired_across_a_partial_one(
+        self, lane_db, sync_conn
+    ):
+        """A partial walk carries the last whole walk's start on, so a file
+        two whole walks missed is retired even with a partial walk between
+        them (navi's review of #1628)."""
+        chain = seed_workspace_chain(sync_conn, "w6-partial-carry")
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        kept = _item(seeded["ref"], h=seeded["hash"])
+        await _walk(
+            lane_db,
+            sync_conn,
+            chain["src"],
+            ScriptedDrive([([kept, _item("gone")], None)]),
+        )
+        await _whole_walk(lane_db, sync_conn, chain["src"], [kept])
+        await _walk(
+            lane_db,
+            sync_conn,
+            chain["src"],
+            ScriptedDrive([([kept], None)], final={"partial": True}),
+        )
+        await _whole_walk(lane_db, sync_conn, chain["src"], [kept])
+        assert _states(sync_conn, chain["ws"])["gone"] == "missing"
+
+    @pytest.mark.asyncio
     async def test_a_row_listed_on_an_earlier_page_of_the_walk_is_kept(
         self, lane_db, sync_conn
     ):
