@@ -83,6 +83,16 @@ USAGE_PRECHECK_ENV = "TARGET_USAGE_PRECHECK_ENABLED"
 _TRUTHY = ("1", "true", "yes", "on")
 
 
+#: The activation nudge's switch (#1481), default off like the pre-check above.
+#: It is one of three gates: `build_registry` also wants an email provider and
+#: a web origin, and parks the sweep naming whichever is missing.
+ACTIVATION_NUDGE_ENV = "TARGET_ACTIVATION_NUDGE_ENABLED"
+
+
+def _activation_nudge_from_env(env) -> bool:
+    return str(env.get(ACTIVATION_NUDGE_ENV) or "").strip().lower() in _TRUTHY
+
+
 def _precheck_from_env(env):
     raw = str(env.get(USAGE_PRECHECK_ENV) or "").strip().lower()
     if raw not in _TRUTHY:
@@ -320,6 +330,14 @@ def compose(
     }
     if "reap_transit_assets" in live:
         recurring["reap_transit_assets"] = 6 * 3600.0
+    if "activation_nudge_sweep" in live:
+        # Daily. Live only when the switch, a provider and an origin are all
+        # there (#1481); said here because an armed nudge emails real people,
+        # and that must be visible in the deploy log.
+        recurring["activation_nudge_sweep"] = 24 * 3600.0
+        logger.info(
+            "activation nudge armed (limit=%d/day)", config.activation_nudge_limit
+        )
     assert set(recurring) - {"v"} <= live, "recurring kinds must be runnable here"
 
     heartbeat = jobs.LeaseHeartbeat(
@@ -866,6 +884,7 @@ def main() -> None:
     config = WorkerConfig(
         web_app_origin=settings.web_app_origin,
         lane_concurrency=lane_concurrency_from_env(env),
+        activation_nudge_enabled=_activation_nudge_from_env(env),
     )
     engine = unit_of_work.create_engine(url)
     transport = None

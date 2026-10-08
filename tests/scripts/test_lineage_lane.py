@@ -441,6 +441,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # fetch: the `last_listed_at` stamp, `missing` in ck_media_state and
             # the miss door's `item_missing` (#1545).
             "105_media_item_missing_and_last_listed.sql",
+            # 106 appends §49, the activation nudge, built off: the per-person
+            # latch on users, the sweep's system kind, the stage definition the
+            # funnel and the nudge share, and the door listing who is owed one.
+            "106_activation_nudge.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

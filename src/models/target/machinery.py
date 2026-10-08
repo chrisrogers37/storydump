@@ -80,7 +80,7 @@ class Job(TargetBase):
             "'offboard_workspace','revoke_workspace_credentials','reauth_prompt',"
             "'reconcile_ambiguous','reap_expired','reap_transit_assets',"
             "'retention_sweep','reencrypt_credentials','send_email',"
-            "'alert_stranded_sources')",
+            "'alert_stranded_sources','activation_nudge_sweep')",
             name="ck_jobs_kind",
         ),
         CheckConstraint("lane IN ('interactive','bulk')", name="ck_jobs_lane"),
@@ -96,7 +96,7 @@ class Job(TargetBase):
             "(workspace_id IS NULL) = (kind IN"
             " ('reconcile_ambiguous','reap_expired','reap_transit_assets',"
             "'retention_sweep','reencrypt_credentials','send_email',"
-            "'alert_stranded_sources'))",
+            "'alert_stranded_sources','activation_nudge_sweep'))",
             name="ck_jobs_system_kinds",
         ),
         Index(

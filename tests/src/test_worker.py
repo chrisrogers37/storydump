@@ -10,7 +10,7 @@ and the heartbeat/lease numbers agreeing.
 import pytest
 
 from src.services.target.work_loop import _UNBUILT_REASON, Parked, WorkerConfig
-from src.worker import compose
+from src.worker import _activation_nudge_from_env, compose
 
 
 def test_w1_composition_parks_only_for_a_named_reason():
@@ -82,6 +82,42 @@ def test_cloudinary_config_brings_the_transit_reaper_live():
     app = compose(engine=object(), config=WorkerConfig(), env=env)
     live = {k for k, e in app.registry.items() if not isinstance(e, Parked)}
     assert "reap_transit_assets" in live
+
+
+def test_the_activation_nudge_is_off_and_off_the_clock_by_default():
+    """#1481, built off: nothing mints the sweep until it is switched on."""
+    app = compose(engine=object(), config=WorkerConfig(), env={})
+    assert isinstance(app.registry["activation_nudge_sweep"], Parked)
+    assert "activation_nudge_sweep" not in app.recurring
+
+
+def test_an_armed_activation_nudge_is_on_the_clock_daily():
+    env = {"RESEND_API_KEY": "re_test", "EMAIL_FROM": "hello@example.com"}
+    config = WorkerConfig(
+        activation_nudge_enabled=True, web_app_origin="https://app.example"
+    )
+    app = compose(engine=object(), config=config, env=env)
+    assert not isinstance(app.registry["activation_nudge_sweep"], Parked)
+    assert app.recurring["activation_nudge_sweep"] == 24 * 3600.0
+
+
+@pytest.mark.parametrize(
+    "raw, armed",
+    [
+        ("true", True),
+        ("1", True),
+        (" On ", True),
+        ("yes", True),
+        ("", False),
+        ("false", False),
+        ("0", False),
+        ("enabled", False),
+        (None, False),
+    ],
+)
+def test_the_nudge_switch_reads_the_truthy_spellings_only(raw, armed):
+    env = {} if raw is None else {"TARGET_ACTIVATION_NUDGE_ENABLED": raw}
+    assert _activation_nudge_from_env(env) is armed
 
 
 def test_clock_recurring_kinds_are_a_subset_of_the_live_registry():

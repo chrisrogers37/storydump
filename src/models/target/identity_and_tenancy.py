@@ -64,6 +64,10 @@ class User(TargetBase):
     primary_email = Column(Text, nullable=True)
     state = Column(Text, nullable=False, server_default=text("'active'"))
     created_at, updated_at = timestamps()
+    #: When this person was sent the activation nudge: set once, in the same
+    #: transaction that enqueues the email, and never cleared, so nobody is
+    #: nudged twice (106, #1481).
+    activation_nudge_at = Column(TZ, nullable=True)
 
     __table_args__ = (
         CheckConstraint(

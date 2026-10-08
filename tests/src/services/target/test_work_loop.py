@@ -257,6 +257,49 @@ class TestSeamAbsenceParksTheDependentKind:
         assert not isinstance(registry["reconcile_ambiguous"], Parked)
 
 
+class TestTheActivationNudgeIsBuiltOff:
+    """#1481. The sweep emails real people, so it is live only when its switch,
+    an email provider and a web origin are ALL there, and a parked one names
+    every gate that is closed and none that is open."""
+
+    ORIGIN = "https://app.example"
+
+    def _nudge(self, **over):
+        return build_registry(full_deps(**over))["activation_nudge_sweep"]
+
+    def test_the_default_build_parks_it_naming_the_switch(self):
+        """`full_deps` supplies every seam, and the default config has neither
+        the switch nor an origin: both are named, the provider is not."""
+        entry = self._nudge()
+        assert isinstance(entry, Parked)
+        assert (
+            entry.reason
+            == "TARGET_ACTIVATION_NUDGE_ENABLED is off; no web app origin for the email's link"
+        )
+
+    def test_switched_on_without_an_email_provider_it_stays_parked(self):
+        config = WorkerConfig(activation_nudge_enabled=True, web_app_origin=self.ORIGIN)
+        entry = self._nudge(email=None, config=config)
+        assert isinstance(entry, Parked)
+        assert entry.reason == "no email provider configured"
+
+    def test_switched_on_without_a_web_origin_it_stays_parked(self):
+        entry = self._nudge(config=WorkerConfig(activation_nudge_enabled=True))
+        assert isinstance(entry, Parked)
+        assert entry.reason == "no web app origin for the email's link"
+
+    def test_a_provider_and_an_origin_do_not_arm_it_without_the_switch(self):
+        entry = self._nudge(config=WorkerConfig(web_app_origin=self.ORIGIN))
+        assert isinstance(entry, Parked)
+        assert entry.reason == "TARGET_ACTIVATION_NUDGE_ENABLED is off"
+
+    def test_all_three_gates_open_make_it_live(self):
+        """The positive control: without it, "parks correctly" cannot be told
+        from "parks always"."""
+        config = WorkerConfig(activation_nudge_enabled=True, web_app_origin=self.ORIGIN)
+        assert not isinstance(self._nudge(config=config), Parked)
+
+
 class TestReconcilerSweepBranchesOnItsReason:
     """The `notify_window` half of the `02` §6 sweep (#1090 D4).
 

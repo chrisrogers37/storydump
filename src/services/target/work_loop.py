@@ -30,7 +30,12 @@ from typing import Any, Callable, Mapping, Optional
 from sqlalchemy import text
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
-from src.services.target import credential_lifecycle, email_sender, media_sync
+from src.services.target import (
+    activation_nudge,
+    credential_lifecycle,
+    email_sender,
+    media_sync,
+)
 
 from src.services.target import (
     bindings,
@@ -128,6 +133,18 @@ class WorkerConfig:
     # the parked-intent notice (06 section 5). None = the notice still fires,
     # without a link: being told late beats not being told.
     web_app_origin: Optional[str] = None
+    # The activation nudge (#1481), built off: `build_registry` parks its sweep
+    # unless this is set AND an email provider and `web_app_origin` exist, and
+    # the entrypoint sets it only from TARGET_ACTIVATION_NUDGE_ENABLED.
+    activation_nudge_enabled: bool = False
+    # Emails per daily run. `email_sender`'s 90/day is shared with
+    # invitations, and a person waiting on an invite comes first.
+    activation_nudge_limit: int = 20
+    # Only people who signed up this recently, so switching the nudge on does
+    # not mail everyone who ever stopped part-way.
+    activation_nudge_since_days: int = 30
+    # Idle this long before a nudge: 104's stall window for the funnel.
+    activation_nudge_stall_seconds: int = 72 * 3600
 
     def concurrency_for(self, lane: str) -> int:
         return max(1, int(self.lane_concurrency.get(lane, 1)))
@@ -738,6 +755,32 @@ def build_registry(deps: WorkerDeps) -> dict:
             "no email provider configured — set RESEND_API_KEY and EMAIL_FROM"
             " (`07` §1's owner ack on adding Resend is OPEN, #1092)"
         )
+    )
+
+    async def activation_nudge_sweep(session, job):
+        # Enqueues `send_email` jobs and sets each person's latch in the same
+        # transaction; no provider call happens here (#1481).
+        await activation_nudge.sweep_stalled(
+            session,
+            since_days=cfg.activation_nudge_since_days,
+            stall_seconds=cfg.activation_nudge_stall_seconds,
+            limit=cfg.activation_nudge_limit,
+            web_app_origin=cfg.web_app_origin,
+        )
+
+    # Built off (#1481). Three gates, each named when it is the one missing: the
+    # switch, a provider to send through, and an origin for the email's link.
+    nudge_closed = [
+        reason
+        for is_open, reason in (
+            (cfg.activation_nudge_enabled, "TARGET_ACTIVATION_NUDGE_ENABLED is off"),
+            (deps.email is not None, "no email provider configured"),
+            (bool(cfg.web_app_origin), "no web app origin for the email's link"),
+        )
+        if not is_open
+    ]
+    registry["activation_nudge_sweep"] = (
+        Parked("; ".join(nudge_closed)) if nudge_closed else activation_nudge_sweep
     )
 
     # No external seam: the prompt writes outbox rows and nothing else, so it
