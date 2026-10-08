@@ -22,7 +22,8 @@ refused request leaves no debit behind. That first transaction is
 The state was minted for a signed-in admin and pins the workspace and the
 user. A state minted for another leg is refused by name at consume; the
 returning browser must carry the session of the state's user, and that user
-must still be an admin, checked again inside the write; the credential is
+must still hold the floor of the command the state's purpose stands for
+(`commands.connect_floor`), checked again inside the write; the credential is
 written inside a unit of work for THAT workspace as THAT user, so the audit
 trigger names the actor and `p_tenant` binds the row. Both legs' redirect URIs come from `google_client`.
 
@@ -73,6 +74,7 @@ from src.config.settings import settings
 from src.exceptions.base import StorydumpError
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
+    commands,
     google_drive_oauth,
     google_oidc,
     identity,
@@ -334,7 +336,8 @@ async def google_drive_callback(
     """The Drive connect leg's return: consume the state, check the returning
     browser is the one that started the flow, exchange the code, write the
     credential. The Instagram leg's checks: the returning session must be the
-    state's user, and that user must still be an admin inside the write."""
+    state's user, and that user must still hold the purpose's floor inside the
+    write."""
     client_id, client_secret, redirect_uri = google_client.configured(
         google_client.DRIVE_CALLBACK_PATH
     )
@@ -344,7 +347,7 @@ async def google_drive_callback(
         code=code,
         error=error,
         expected_provider=google_drive_oauth.PROVIDER,
-        expected_purpose={"connect", "reconnect"},
+        expected_purpose=set(commands.CONNECT_PURPOSE_KIND),
         flow=DRIVE_FLOW,
         require_presenter=True,
     )
@@ -386,22 +389,26 @@ async def google_drive_callback(
 
     # The credential lands inside the state's own workspace, as the state's
     # user: the audit trigger names the actor, and `p_tenant` binds the row.
+    workspace_id = str(row["workspace_id"])
     uow = unit_of_work(
         require_engine(request),
-        str(row["workspace_id"]),
+        workspace_id,
         actor_kind="user",
         actor_user_id=str(row["user_id"]),
         channel=principal_mod.WEB_CHANNEL,
     )
     try:
         async with uow.begin() as session:
-            # Admin+ at issue AND at callback, as the Instagram leg: a demoted
-            # admin's pending state must not land a grant.
+            # The floor of the command the state's purpose stands for, at issue
+            # AND at callback, as the Instagram leg: a demoted admin's pending
+            # state must not land a grant. The unit of work binds this same
+            # workspace, so the gate does not set it again (`tenant_bound`).
             await tenant_resolution.authorize_member(
                 session,
-                str(row["workspace_id"]),
+                workspace_id,
                 str(row["user_id"]),
-                minimum_role="admin",
+                minimum_role=commands.connect_floor(row["purpose"]),
+                tenant_bound=True,
             )
             # The state's user is the granter (091, `07` §34): the presenter
             # check above proved the returning browser is theirs, so the
@@ -448,7 +455,7 @@ async def instagram_login_callback(
         code=code,
         error=error,
         expected_provider=ig_login_oauth.PROVIDER,
-        expected_purpose={"connect", "reconnect"},
+        expected_purpose=set(commands.CONNECT_PURPOSE_KIND),
         flow=INSTAGRAM_FLOW,
         require_presenter=True,
     )
@@ -485,12 +492,18 @@ async def instagram_login_callback(
     )
     try:
         async with uow.begin() as session:
-            # `07` §2: admin+ checked at issue AND at callback. The row pins
-            # the workspace and the user; what can change between the two is
-            # the membership, and a demoted admin's pending state must not
-            # land a credential.
+            # `07` §2: the floor of the command the state's purpose stands for,
+            # checked at issue AND at callback. The row pins the workspace and
+            # the user; what can change between the two is the membership,
+            # and a demoted admin's pending state must not land a credential.
+            # The unit of work binds this same workspace, so the gate does not
+            # set it again (`tenant_bound`).
             await tenant_resolution.authorize_member(
-                session, workspace_id, str(row["user_id"]), minimum_role="admin"
+                session,
+                workspace_id,
+                str(row["user_id"]),
+                minimum_role=commands.connect_floor(row["purpose"]),
+                tenant_bound=True,
             )
             account_id, _ = await provisioning.connect_destination(
                 session,

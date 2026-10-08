@@ -80,6 +80,7 @@ function intent(overrides: Partial<Intent> = {}): Intent {
     scheduled_by: null,
     tz: "UTC",
     miss_reason: null,
+    link_url: null,
     file_name: "sample.jpg",
     media_kind: "image",
     thumbnail_url: null,
@@ -225,6 +226,12 @@ describe("QueueList: the wiring", () => {
       list(true).props.actionsOf(intent({ state: "scheduled", origin: "planned" })),
     ).toEqual(["reschedule", "cancel"]);
     expect(list(true).props.actionsOf(intent({ state: "scheduled" }))).toEqual([]);
+  });
+
+  it("hands QueueView no Approve for a story whose item has a link (fork F10 (a))", () => {
+    const linked = intent({ link_url: "https://example.com/menu" });
+    expect(list(true).props.actionsOf(linked)).toEqual(["mark_posted", "skip", "reject"]);
+    expect(list(true).props.actionsOf(intent())).toContain("approve");
   });
 
   it("moves a planned story, then re-reads the list", async () => {

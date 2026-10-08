@@ -189,6 +189,7 @@ function story(
     scheduled_by: null,
     tz: SAMPLE_TZ,
     miss_reason: null,
+    link_url: null,
     file_name: input.file,
     media_kind: input.video ? "video" : "image",
     thumbnail_url: null,

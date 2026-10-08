@@ -38,6 +38,15 @@ describe("which actions an intent offers", () => {
     ]);
   });
 
+  it("offers no Approve for a story whose item has a link to add by hand (fork F10 (a))", () => {
+    // An app cannot attach a link to a story it publishes, so the story is posted by hand.
+    const linked = actionsFor("awaiting_approval", true, false, null, "cadence", true);
+    expect(linked).toEqual(["mark_posted", "skip", "reject"]);
+    expect(actionsFor("awaiting_approval", true, false, null, "planned", true)).toEqual(linked);
+    // Without a link, the same story keeps Approve.
+    expect(actionsFor("awaiting_approval", true, false, null, "cadence", false)).toContain("approve");
+  });
+
   it("offers nothing on a card whose cancellation is requested — its destination may be gone", () => {
     expect(actionsFor("awaiting_approval", true, true)).toEqual([]);
     expect(actionsFor("awaiting_approval", false, true)).toEqual([]);

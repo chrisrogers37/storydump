@@ -23,9 +23,11 @@ import { RunwayCard } from "@/components/dashboard/runway-card";
 import { PageHeader } from "@/design/page-header";
 
 /**
- * The overview's history strip. Ten is a glance, not a log — the full list
- * is the Queue's history and the counts come from `stats`, never from this
- * bounded read (`01` H5).
+ * The overview's history strip: the ten newest outcomes. The API sorts by
+ * slot, soonest first, unless asked, and `RecentActivity` draws rows in the
+ * order they come, so the read asks for newest first. Ten is a glance, not a
+ * log — the full list is the Queue's history and the counts come from
+ * `stats`, never from this bounded read (`01` H5).
  */
 const HISTORY_LIMIT = 10;
 
@@ -54,7 +56,7 @@ export default async function DashboardPage() {
       // the planner's own rule.
       workspaceFetch<RunwayResponse>("runway", workspaceId),
       workspaceFetch<IntentsResponse>(
-        `intents?state=${HISTORY_STATES}&limit=${HISTORY_LIMIT}`,
+        `intents?state=${HISTORY_STATES}&order=desc&limit=${HISTORY_LIMIT}`,
         workspaceId,
       ),
       // The condition panel's two lists, read whole — a workspace holds a

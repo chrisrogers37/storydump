@@ -11,6 +11,7 @@ import {
 } from "./dashboard-payloads";
 import {
   INTENT_STATES,
+  LIST_LIMIT_MAX,
   NON_TERMINAL_STATES,
   TERMINAL_STATES as TERMINAL_STATE_LIST,
 } from "./intents";
@@ -46,16 +47,19 @@ const API_WORKSPACES = path.resolve(
   "../../../src/services/target/vocabulary.py",
 );
 
-function apiIntentStates(): string[] {
-  let source: string;
+function apiVocabulary(): string {
   try {
-    source = readFileSync(API_WORKSPACES, "utf8");
+    return readFileSync(API_WORKSPACES, "utf8");
   } catch (err) {
     throw new Error(
-      `cannot read the API's INTENT_STATES at ${API_WORKSPACES} — the ` +
+      `cannot read the API's vocabulary at ${API_WORKSPACES} — the ` +
         `contract is unverified, which is not the same as satisfied: ${err}`,
     );
   }
+}
+
+function apiIntentStates(): string[] {
+  const source = apiVocabulary();
 
   // Anchored at column 0: the module-level tuple, not a local rebinding.
   const block = source.match(/^INTENT_STATES[^=]*=\s*\(([\s\S]*?)\n\)/m);
@@ -153,5 +157,17 @@ describe("the intent-state partition agrees with the API", () => {
         true,
       );
     }
+  });
+});
+
+describe("the list ceiling agrees with the API", () => {
+  it("asks for exactly the API's LIST_LIMIT_MAX", () => {
+    // A limit above it is refused, and a page that guards on its reads, as the
+    // queue and the calendar do, renders unavailable rather than a short list.
+    const ceiling = apiVocabulary().match(/^LIST_LIMIT_MAX\b[^=\n]*=\s*(\d+)/m);
+    if (!ceiling) {
+      throw new Error(`no module-level LIST_LIMIT_MAX found in ${API_WORKSPACES}`);
+    }
+    expect(LIST_LIMIT_MAX).toBe(Number(ceiling[1]));
   });
 });

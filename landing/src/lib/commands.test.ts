@@ -79,6 +79,7 @@ describe("every offered command can produce an idempotency key", () => {
       local_at: "2026-10-03T14:30",
     },
     reschedule_item: { submission_id: UUID, intent_id: UUID2, local_at: "2026-10-09T09:30" },
+    set_item_link: { submission_id: UUID, media_item_id: UUID2, link_url: "https://example.com/menu" },
   };
 
   it("covers the whole table, so a new spec cannot skip this check", () => {
@@ -504,6 +505,64 @@ describe("a planned story's two levers (#1413)", () => {
         submission_id: UUID,
         intent_id: UUID2,
         local_at: "2001-01-01 00:00",
+      }).ok,
+    ).toBe(true);
+  });
+});
+
+describe("an item's link to add by hand (#1413)", () => {
+  it("is offered", () => {
+    expect(isOfferedCommand("set_item_link")).toBe(true);
+  });
+
+  it("keys on the submission, so setting the same link again after a clear is a third act", () => {
+    expect(
+      parseCommand("set_item_link", {
+        submission_id: UUID,
+        media_item_id: UUID2,
+        link_url: "https://example.com/menu",
+      }),
+    ).toEqual({
+      ok: true,
+      body: { media_item_id: UUID2, link_url: "https://example.com/menu" },
+      identity: UUID,
+    });
+  });
+
+  it("forwards a clear as an explicit null, which the port reads as a clear", () => {
+    expect(
+      parseCommand("set_item_link", { submission_id: UUID, media_item_id: UUID2, link_url: null }),
+    ).toEqual({ ok: true, body: { media_item_id: UUID2, link_url: null }, identity: UUID });
+  });
+
+  it("refuses a missing or blank link, and a bad item, by name", () => {
+    // A missing key is never a clear: the port reads it as a mistake, so it stops here too.
+    expect(parseCommand("set_item_link", { submission_id: UUID, media_item_id: UUID2 })).toEqual({
+      ok: false,
+      error: "invalid_link_url",
+    });
+    expect(
+      parseCommand("set_item_link", { submission_id: UUID, media_item_id: UUID2, link_url: "  " }),
+    ).toEqual({ ok: false, error: "invalid_link_url" });
+    expect(
+      parseCommand("set_item_link", { submission_id: UUID, media_item_id: UUID2, link_url: 7 }),
+    ).toEqual({ ok: false, error: "invalid_link_url" });
+    expect(
+      parseCommand("set_item_link", {
+        submission_id: UUID,
+        media_item_id: "x",
+        link_url: "https://example.com/menu",
+      }),
+    ).toEqual({ ok: false, error: "invalid_media_item_id" });
+  });
+
+  it("leaves the URL rule to the port, which owns it", () => {
+    // An http link is the port's to refuse by its rule (`invalid_args`).
+    expect(
+      parseCommand("set_item_link", {
+        submission_id: UUID,
+        media_item_id: UUID2,
+        link_url: "http://example.com/menu",
       }).ok,
     ).toBe(true);
   });

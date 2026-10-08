@@ -1,7 +1,7 @@
 import { TextLink } from "@/components/landing/text-link"
 import { WaitlistForm } from "@/components/landing/waitlist-form"
 
-/** The top-of-page signup: the form, the locked price line and Sign in. */
+/** The top-of-page signup: the form, the locked price line, Sign in and the sample workspace. */
 export function HeroSignup() {
   return (
     <>
@@ -15,6 +15,11 @@ export function HeroSignup() {
             Sign in
           </TextLink>
         </span>
+      </p>
+      <p className="mt-3 text-sm">
+        <TextLink href="/demo" track={{ event: "Sample Workspace Click", props: { location: "hero" } }}>
+          See a sample workspace
+        </TextLink>
       </p>
     </>
   )

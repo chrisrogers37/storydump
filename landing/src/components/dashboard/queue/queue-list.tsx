@@ -131,6 +131,7 @@ export function QueueList({
           intent.cancel_requested,
           intent.publish_step,
           intent.origin,
+          Boolean(intent.link_url),
         )
       }
       noteFor={(intent) =>

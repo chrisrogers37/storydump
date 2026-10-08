@@ -7,6 +7,8 @@ type Variant = "hero" | "footer"
 export const CTA_LOCATIONS = ["header", "blog_post", "use_case"] as const
 /** Where a "Sign in" link sits. */
 export const SIGN_IN_LOCATIONS = ["header", "hero", "closing", "footer"] as const
+/** Where a link to the sample workspace (`/demo`) sits. */
+export const SAMPLE_WORKSPACE_LOCATIONS = ["header", "hero"] as const
 /** The home page demo's buttons. */
 export const DEMO_ACTIONS = [
   "post_now",
@@ -28,13 +30,14 @@ export type DemoAction = (typeof DEMO_ACTIONS)[number]
 export interface Events {
   "Waitlist Signup": { variant: Variant } & Partial<Record<UtmKey, string>>
   "Waitlist Error": {
-    reason: "invalid_email" | "server_error" | "network_error"
+    reason: "invalid_email" | "busy" | "server_error" | "network_error"
     variant: Variant
   }
   "Waitlist Start": { variant: Variant }
   "FAQ Expanded": { question: string }
   "CTA Click": { location: (typeof CTA_LOCATIONS)[number] }
   "Sign In Click": { location: (typeof SIGN_IN_LOCATIONS)[number] }
+  "Sample Workspace Click": { location: (typeof SAMPLE_WORKSPACE_LOCATIONS)[number] }
   "Demo Tap": { action: DemoAction }
 }
 

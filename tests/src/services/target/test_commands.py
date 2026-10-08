@@ -141,6 +141,42 @@ class TestEveryCommandHasAFloorAndAnExecutorSlot:
             CommandRefused("because")
 
 
+class TestTheConnectLegsReadTheirPurposesFloor:
+    def test_each_connect_purpose_stands_for_a_command(self):
+        assert port.CONNECT_PURPOSE_KIND == {
+            "connect": "connect_account",
+            "reconnect": "reconnect_account",
+        }
+        assert set(port.CONNECT_PURPOSE_KIND.values()) <= set(port.ROLE_FLOOR)
+
+    @pytest.mark.parametrize(
+        "purpose,kind",
+        [("connect", "connect_account"), ("reconnect", "reconnect_account")],
+    )
+    def test_a_purposes_floor_follows_its_commands_entry(
+        self, monkeypatch, purpose, kind
+    ):
+        monkeypatch.setitem(port.ROLE_FLOOR, kind, "owner")
+        assert port.connect_floor(purpose) == "owner"
+
+    @pytest.mark.parametrize(
+        "connect,reconnect,lowest",
+        [
+            ("admin", "admin", "admin"),
+            ("owner", "admin", "admin"),
+            ("admin", "owner", "admin"),
+            ("member", "admin", "member"),
+            ("user", "admin", "user"),
+        ],
+    )
+    def test_the_lowest_connect_floor_admits_both_purposes(
+        self, monkeypatch, connect, reconnect, lowest
+    ):
+        monkeypatch.setitem(port.ROLE_FLOOR, "connect_account", connect)
+        monkeypatch.setitem(port.ROLE_FLOOR, "reconnect_account", reconnect)
+        assert port.lowest_connect_floor() == lowest
+
+
 def _cmd(kind="approve", **args) -> Command:
     return Command(
         kind=kind,
@@ -166,9 +202,11 @@ def gate(monkeypatch):
         role = "owner"
 
     log = Log()
+    log.kw = []
 
     async def authorize_member(session, ws, user, minimum_role="member", **kw):
         log.append((ws, user, minimum_role))
+        log.kw.append(kw)
         if log.refuse is not None:
             raise log.refuse
         return log.role
@@ -315,7 +353,21 @@ class TestIngestOwnsTheOrder:
         )
         assert admission == [("web", "k-1", {"intent_id": "i-1"}, "sess-1")]
         assert gate == [("ws-1", "user-1", "member")]
+        assert gate.kw == [{"tenant_bound": False}]
         assert out.outcome == "executed"
+
+    async def test_ingest_forwards_a_bound_tenant_to_the_gate(
+        self, admission, gate, executor
+    ):
+        await ingest(
+            _Session(),
+            _cmd(intent_id="i-1"),
+            external_ref="k-1",
+            principal="sess-1",
+            payload={},
+            tenant_bound=True,
+        )
+        assert gate.kw == [{"tenant_bound": True}]
 
     async def test_a_replay_propagates_and_nothing_executes(
         self, admission, gate, executor

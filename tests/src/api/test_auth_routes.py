@@ -27,6 +27,7 @@ from src.api.principal import (
 from src.api.routes import auth
 from src.config.settings import settings
 from src.services.target import (
+    commands,
     google_drive_oauth,
     google_oidc,
     identity,
@@ -511,6 +512,15 @@ WS = "33333333-3333-3333-3333-333333333333"
 USER = "22222222-2222-2222-2222-222222222222"
 ACCOUNT = "55555555-5555-4555-8555-555555555555"
 
+#: A callback's gate: (the purpose its state carries, the entry moved to owner,
+#: the floor it checks). Only the carried purpose's own entry moves it.
+CALLBACK_FLOOR_CASES = [
+    ("connect", "connect_account", "owner"),
+    ("reconnect", "reconnect_account", "owner"),
+    ("connect", "reconnect_account", "admin"),
+    ("reconnect", "connect_account", "admin"),
+]
+
 
 class TestInstagramCallback:
     """`GET /auth/instagram-login/callback` — the return half of the destination
@@ -583,9 +593,9 @@ class TestInstagramCallback:
                 return _cm()
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
-            log.append(("gate", workspace_id, user_id, minimum_role))
+            log.append(("gate", workspace_id, user_id, minimum_role, tenant_bound))
             return "owner"
 
         async def store_credential(
@@ -676,7 +686,7 @@ class TestInstagramCallback:
         )
         assert writes["log"] == [
             ("uow", WS, USER, "web"),
-            ("gate", WS, USER, "admin"),
+            ("gate", WS, USER, "admin", True),
             ("connect", WS, None, "17841400000000001", "exampleshop"),
             ("store", WS, "acct-adopted", "IGQVJ-long"),
         ]
@@ -790,9 +800,30 @@ class TestInstagramCallback:
         )
         assert writes["log"] == [
             ("uow", WS, USER, "web"),
-            ("gate", WS, USER, "admin"),
+            ("gate", WS, USER, "admin", True),
             ("connect", WS, ACCOUNT, "17841400000000001", "exampleshop"),
             ("store", WS, ACCOUNT, "IGQVJ-long"),
+        ]
+
+    @pytest.mark.parametrize("carried,moved,floor", CALLBACK_FLOOR_CASES)
+    def test_the_floor_is_the_carried_purposes(
+        self,
+        client,
+        instagram,
+        state_row,
+        browser,
+        writes,
+        grant,
+        monkeypatch,
+        carried,
+        moved,
+        floor,
+    ):
+        state_row["purpose"] = carried
+        monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
+        self._return(client)
+        assert [e for e in writes["log"] if e[0] == "gate"] == [
+            ("gate", WS, USER, floor, True)
         ]
 
     def test_reconnect_takes_the_same_single_write_as_connect(
@@ -810,7 +841,7 @@ class TestInstagramCallback:
         from src.exceptions.tenancy import TenantResolutionError
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
             raise TenantResolutionError("insufficient_role")
 
@@ -914,9 +945,9 @@ class TestDriveCallback:
                 return _cm()
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
-            log.append(("gate", workspace_id, user_id, minimum_role))
+            log.append(("gate", workspace_id, user_id, minimum_role, tenant_bound))
             return "owner"
 
         async def store_credential(session, *, workspace_id, grant, granted_by):
@@ -945,11 +976,33 @@ class TestDriveCallback:
         assert resp.headers["location"].endswith("/dashboard/settings?connected=gdrive")
         assert writes == [
             ("uow", WS, USER, "web"),
-            ("gate", WS, USER, "admin"),
+            ("gate", WS, USER, "admin", True),
             # 091: the state's user — the returning browser, checked — is
             # the granter, the one person who may browse this Drive.
             ("store", WS, "ya29.access", USER),
             ("rearm", WS, None),
+        ]
+
+    @pytest.mark.parametrize("carried,moved,floor", CALLBACK_FLOOR_CASES)
+    def test_the_floor_is_the_carried_purposes(
+        self,
+        client,
+        configured,
+        counter,
+        drive_row,
+        browser,
+        exchanged,
+        writes,
+        monkeypatch,
+        carried,
+        moved,
+        floor,
+    ):
+        drive_row["purpose"] = carried
+        monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
+        self._return(client)
+        assert [e for e in writes if e[0] == "gate"] == [
+            ("gate", WS, USER, floor, True)
         ]
 
     @pytest.mark.parametrize("target", [ACCOUNT, None])
@@ -1028,7 +1081,7 @@ class TestDriveCallback:
         from src.exceptions.tenancy import TenantResolutionError
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member"
+            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
         ):
             raise TenantResolutionError("insufficient_role")
 

@@ -250,8 +250,9 @@ export default function PrivacyPolicy() {
               <Label>Usage analytics</Label> — PostHog, in cookieless mode,
               counts page views on the site and dashboard, and a few actions:
               starting, completing or failing a waitlist signup, opening an FAQ
-              answer, clicking a call-to-action or Sign in, and tapping the
-              demo. With each one it receives the page&apos;s address without
+              answer, clicking a call-to-action, Sign in or a link to the
+              sample workspace, and tapping the demo. With each one it
+              receives the page&apos;s address without
               its query string, the site you came from (its address only, not
               your search terms), your browser&apos;s user agent (browser,
               operating system and their versions, and device type), and any

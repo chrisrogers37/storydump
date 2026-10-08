@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DialogDescription } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import { ItemLink } from "@/components/dashboard/item-link";
 import type { Intent } from "@/lib/intents";
 import { QueueView, type RowNote } from "./queue-view";
 import { RescheduleDialog } from "./reschedule-dialog";
@@ -39,6 +40,7 @@ function intent(overrides: Partial<Intent> = {}): Intent {
     scheduled_by: null,
     tz: "UTC",
     miss_reason: null,
+    link_url: null,
     file_name: "sample.jpg",
     media_kind: "image",
     thumbnail_url: null,
@@ -221,5 +223,21 @@ describe("QueueView: a planned story (#1413)", () => {
     expect(text(confirm.props.children)).toBe("Cancel story");
     confirm.props.onClick!();
     expect(onAction).toHaveBeenCalledWith(intent(), "cancel");
+  });
+});
+
+describe("QueueView: an item's link to add by hand (#1413)", () => {
+  const links = (tree: ReactElement) =>
+    [...walk(tree)]
+      .filter((el) => el.type === ItemLink)
+      .map((el) => (el.props as { link: string }).link);
+
+  it("draws a story's item link on its row", () => {
+    const linked = view({ intents: [intent({ link_url: "https://example.com/menu" })] });
+    expect(links(linked)).toEqual(["https://example.com/menu"]);
+  });
+
+  it("draws nothing for a story whose item has no link", () => {
+    expect(links(view())).toEqual([]);
   });
 });

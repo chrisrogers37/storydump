@@ -154,6 +154,33 @@ ROLE_FLOOR: dict[str, str] = {
     "clear_quarantine": "operator",
 }
 
+#: The command each OAuth connect purpose stands for. The connect trio is
+#: provider-general (F1 (a)): a Drive leg and an Instagram leg read the same
+#: entry, an issue leg reads the entry for the purpose it mints, and a callback
+#: the entry for the purpose its state row carries, so every door to an intent
+#: follows one floor and a callback cannot disagree with its issue leg.
+CONNECT_PURPOSE_KIND: dict[str, str] = {
+    "connect": "connect_account",
+    "reconnect": "reconnect_account",
+}
+
+
+def connect_floor(purpose: str) -> str:
+    """The floor of the command an OAuth connect leg for *purpose* stands for."""
+    return ROLE_FLOOR[CONNECT_PURPOSE_KIND[purpose]]
+
+
+def lowest_connect_floor() -> str:
+    """The lower of the connect purposes' floors, where an issue leg that
+    learns its purpose inside the session gates before reading it: no one
+    either purpose admits is refused before the read, and nothing is read for
+    anyone neither admits."""
+    return min(
+        (connect_floor(purpose) for purpose in CONNECT_PURPOSE_KIND),
+        key=FLOORS.index,
+    )
+
+
 #: `CommandRefused.reason`, closed, owned by the vocabulary module. Adapters
 #: map it without parsing prose, and the web adapter's status table is pinned
 #: TOTAL over this tuple.
@@ -344,7 +371,13 @@ async def execute(
 
 
 async def ingest(
-    session, command: Command, *, external_ref: str, principal: str, payload: Any
+    session,
+    command: Command,
+    *,
+    external_ref: str,
+    principal: str,
+    payload: Any,
+    tenant_bound: bool = False,
 ) -> CommandResult:
     """Refuse cold → admit → execute, in the caller's one transaction.
 
@@ -353,7 +386,8 @@ async def ingest(
     what the fingerprint is taken over — the adapter's raw body, so a replay
     of the same request matches regardless of what the adapter added to
     ``command.args``. Admission's own refusals (`DeliveryReplayed`,
-    `AdmissionConflict`) propagate for the adapter to answer.
+    `AdmissionConflict`) propagate for the adapter to answer. *tenant_bound*
+    is `execute`'s, forwarded.
     """
     if command.kind not in ROLE_FLOOR:
         raise UnknownCommand(command.kind)
@@ -364,4 +398,4 @@ async def ingest(
         payload=payload,
         principal=principal,
     )
-    return await execute(session, command)
+    return await execute(session, command, tenant_bound=tenant_bound)

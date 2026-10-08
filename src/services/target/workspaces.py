@@ -482,7 +482,7 @@ _INTENT_COLUMNS = (
     " COALESCE(a.tz, w.tz) AS tz,"
     f" CASE WHEN i.last_error->>'class' = '{vocabulary.PLANNED_MISSED}'"
     "      THEN i.last_error->>'message' END AS miss_reason,"
-    " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category,"
+    " m.file_name, m.media_kind, m.thumbnail_url, m.caption, m.category, m.link_url,"
     " a.handle AS account_handle, a.display_name AS account_display_name"
 )
 
@@ -495,7 +495,7 @@ _INTENT_FROM = (
 
 _MEDIA_COLUMNS = (
     "id, source_id, provider_file_ref, file_name, media_kind, mime_type, file_size,"
-    " category, title, caption, tags, thumbnail_url, state, times_posted,"
+    " category, title, caption, tags, thumbnail_url, link_url, state, times_posted,"
     " last_posted_at, created_at"
 )
 

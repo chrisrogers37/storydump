@@ -3,6 +3,7 @@ import { requireWorkspacePage } from "@/lib/page-guards";
 import { workspaceFetch } from "@/lib/workspaces";
 import type { WorkspaceConfig } from "@/lib/dashboard-payloads";
 import {
+  LIST_LIMIT_MAX,
   NON_TERMINAL_STATES,
   queueOriginFilter,
   type IntentsResponse,
@@ -14,12 +15,11 @@ import { QueueList } from "@/components/dashboard/queue/queue-list";
 import { QueueHeader } from "@/components/dashboard/page-headers";
 
 /**
- * `01` H5: every list is bounded. This asks for the API's ceiling
- * (`LIST_LIMIT_MAX`); the response echoes the limit it actually applied, and
- * a queue that reaches it says so rather than rendering the first page as
- * the whole.
+ * `01` H5: every list is bounded. This asks for the API's ceiling; the
+ * response echoes the limit it actually applied, and a queue that reaches it
+ * says so rather than rendering the first page as the whole.
  */
-const QUEUE_LIMIT = 200;
+const QUEUE_LIMIT = LIST_LIMIT_MAX;
 
 /**
  * The act-on-it surface (#1033): every intent the ledger has not closed, in
