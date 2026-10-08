@@ -39,6 +39,11 @@ class TestTheClosedSets:
                 "ck_intent_origin",
             ),
             (
+                vocabulary.MEDIA_STATES,
+                "105_media_item_missing_and_last_listed.sql",
+                "ck_media_state",
+            ),
+            (
                 vocabulary.INTENT_STATES,
                 "055_intent_ledger_tables.sql",
                 "ck_intent_state",

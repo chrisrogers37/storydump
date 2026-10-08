@@ -106,6 +106,7 @@ SERVED_LATE_AFTER = timedelta(minutes=1)
 MISS_REASONS = {
     "item_removed": "the item was removed from the library",
     "item_unsupported": "Instagram cannot post the item",
+    "item_missing": "the item's file is no longer in its Drive folder",
     "item_locked": "the item is locked",
     "account_removed": "the account was removed",
     "paused": "the workspace was not taking posts until it was too late",

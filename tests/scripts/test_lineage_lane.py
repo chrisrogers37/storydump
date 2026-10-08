@@ -437,6 +437,10 @@ class TestTheBoundaryIsDerivedAndLoud:
             # across every workspace, owned by svc_maintenance and executable
             # by svc_worker alone (#1481).
             "104_activation_funnel_door.sql",
+            # 105 appends §48, the sync retiring what the publish can never
+            # fetch: the `last_listed_at` stamp, `missing` in ck_media_state and
+            # the miss door's `item_missing` (#1545).
+            "105_media_item_missing_and_last_listed.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"
