@@ -30,14 +30,14 @@ export const useCases = [
     slug: "google-drive-to-instagram-stories",
     seoTitle: "Google Drive to Instagram Stories",
     description:
-      "Connect a Google Drive folder, read-only. Storydump picks today’s Instagram Story from it and brings it to your team on time. One tap posts it.",
+      "Connect a Google Drive folder, read-only. Storydump picks today’s Instagram Story from it and brings it to your team on time, to post with one tap or by hand.",
     ogTitle: "Google Drive to Instagram Stories",
     ogSubtitle: "Storydump picks today’s Story from your Drive folders and brings it to your team on time.",
     eyebrow: "Use case · Google Drive",
     title: "From Google Drive to Instagram Stories, one tap at a time",
     navLabel: "Google Drive",
     closing: "Your next Story is already in your Drive.",
-    lastModified: "2026-10-07",
+    lastModified: "2026-10-08",
   },
   {
     slug: "evergreen-instagram-stories",
@@ -50,7 +50,7 @@ export const useCases = [
     title: "Recycle your evergreen content into Instagram Stories",
     navLabel: "Evergreen content",
     closing: "Put your archive back on your Story.",
-    lastModified: "2026-10-07",
+    lastModified: "2026-10-08",
   },
   {
     slug: "approve-instagram-stories-in-telegram",
@@ -69,14 +69,14 @@ export const useCases = [
     slug: "instagram-stories-for-online-stores",
     seoTitle: "Instagram Stories for Small Online Stores",
     description:
-      "Daily Instagram Stories for your shop, picked from the product shots, restocks and behind-the-scenes in your Google Drive. Your team taps to post.",
+      "Daily Instagram Stories for your shop, picked from the product shots, restocks and behind-the-scenes in your Google Drive, to post with one tap or by hand.",
     ogTitle: "Instagram Stories for small online stores",
     ogSubtitle: "Product shots, restocks and behind-the-scenes from your own Drive, every day.",
     eyebrow: "Use case · Online stores",
     title: "Daily Instagram Stories for your online store",
     navLabel: "Online stores",
     closing: "Your product shots are tomorrow’s Stories.",
-    lastModified: "2026-10-07",
+    lastModified: "2026-10-08",
   },
 ] as const satisfies readonly UseCase[]
 

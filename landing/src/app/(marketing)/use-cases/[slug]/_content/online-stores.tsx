@@ -6,8 +6,11 @@ export const onlineStores: UseCaseContent = {
   lede: (
     <>
       Keep product shots, restocks and behind-the-scenes in Google Drive
-      folders. Storydump brings your team a Story from them right on time. Tap{" "}
+      folders. Storydump brings your team a Story from them right on time.
+      With direct posting switched on, tap{" "}
       <strong className="font-semibold text-ink">Post now</strong> and it’s up.
+      Otherwise your team posts it and taps{" "}
+      <strong className="font-semibold text-ink">Posted myself</strong>.
     </>
   ),
   visual: (

@@ -4,7 +4,7 @@ import { pageMetadata } from "@/lib/seo"
 import Link from "next/link"
 import { siteConfig } from "@/config/site"
 
-const LAST_UPDATED = "October 5, 2026"
+const LAST_UPDATED = "October 8, 2026"
 
 const linkClass = "underline underline-offset-4 hover:text-foreground"
 const email = siteConfig.contact.email
@@ -260,7 +260,10 @@ export default function PrivacyPolicy() {
               carries how long you stayed on the previous page and how far you
               scrolled it. Invitation links (under <Code>/join/</Code>) send
               nothing, and PostHog receives no names, email addresses or
-              account IDs.
+              account IDs. A click on a link to the sample workspace is sent
+              as <Code>Sample Workspace Click</Code>, with which link was
+              clicked (Demo in the header, or See a sample workspace under the
+              signup form), and, like the other events, it is cookieless.
             </li>
           </ul>
         </section>

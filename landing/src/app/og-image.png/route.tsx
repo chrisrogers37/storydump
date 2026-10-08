@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
   const title = (searchParams.get("title") || "Instagram Stories, on tap").slice(0, 70)
   const subtitle = (
     searchParams.get("subtitle") ||
-    "Stories from your Google Drive, brought to your team and posted with one tap."
+    "Stories from your Google Drive, brought to your team on time, to post with one tap or by hand."
   ).slice(0, 110)
 
   return new ImageResponse(
