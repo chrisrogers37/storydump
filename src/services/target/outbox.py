@@ -371,12 +371,11 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
     seq-scan whatever the index says, so an EXPLAIN assertion here would prove
     nothing.
 
-    **Only a binding the push predicate still admits is claimed**
-    (`bindings.push_binding_where`). A `deliver_outbox` job minted before an
-    admin removed the group (`bindings.revoke_for_workspace`) or before the
-    bot was kicked would otherwise still drain the queue into a chat the
-    workspace let go of; the sweep stops minting for a revoked binding, and
-    this is the same rule at the sender.
+    **Only a binding a card may go to is claimed**
+    (`bindings.deliverable_binding_where`): a `deliver_outbox` job minted
+    before an admin removed the group (`bindings.revoke_for_workspace`), before
+    the bot was kicked, or for a private chat whose person does not belong to
+    the workspace drains nothing.
     """
     row = (
         await session.execute(
@@ -387,7 +386,7 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
                 "               AND EXISTS (SELECT 1 FROM channel_bindings b"
                 "                 WHERE b.id = :b"
                 "                   AND b.workspace_id = channel_outbox.workspace_id"
-                f"                  AND {bindings.push_binding_where('b')})"
+                f"                  AND {bindings.deliverable_binding_where('b')})"
                 "             ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)"
                 "   AND state = 'pending'"
                 " RETURNING id, kind, payload, attempts, intent_id, workspace_id,"
@@ -608,6 +607,10 @@ async def supersede_all(
     the provider call (phase 1 step 8), so `sending` is a committed state a
     tap can meet; the sender finds its `mark_sent` fenced and edits the card
     it just sent itself (`OutboxPoller`).
+
+    The edit is queued only where a card may go
+    (`bindings.deliverable_binding_where`); elsewhere the card is superseded
+    and nothing is queued.
     """
     live = (
         await session.execute(
@@ -621,15 +624,19 @@ async def supersede_all(
                 " WHERE workspace_id = :ws AND binding_id = :b AND intent_id = :i"
                 "   AND kind IN ('approval_prompt', 'invitation')"
                 "   AND state IN ('pending', 'sending', 'sent', 'ambiguous')"
-                " RETURNING external_message_ref, payload"
+                " RETURNING external_message_ref, payload,"
+                "   EXISTS (SELECT 1 FROM channel_bindings cb WHERE cb.id = :b"
+                f"           AND {bindings.deliverable_binding_where('cb')}) AS deliverable"
             ),
             {"ws": workspace_id, "b": binding_id, "i": intent_id, "o": outcome_text},
         )
     ).fetchall()
 
-    for ref, payload in live:
-        if ref is None:
-            continue  # the ref was lost (or never sent); the card heals on first touch
+    for ref, payload, deliverable in live:
+        if ref is None or not deliverable:
+            # The ref was lost (or never sent) — the card heals on first
+            # touch — or no card may go to this chat.
+            continue
         await enqueue(
             session,
             workspace_id=workspace_id,
@@ -696,13 +703,15 @@ async def supersede_everywhere_touched(
 ) -> Touched:
     """:func:`supersede_everywhere`, also answering whether *touched* — the
     `(binding_id, external_message_ref)` a tap came from — was among the
-    cards it superseded (2026-09-15)."""
+    cards it superseded (2026-09-15). Cards are superseded in every live
+    binding; the edit is queued only where a card may go."""
     row = (
         await session.execute(
             text(
                 "WITH b AS ("
-                "  SELECT id FROM channel_bindings"
-                f"   WHERE workspace_id = :ws AND {bindings.PUSH_BINDING_WHERE}"
+                f"  SELECT id, ({bindings.DELIVERABLE_BINDING_WHERE}) AS deliverable"
+                "     FROM channel_bindings"
+                f"   WHERE workspace_id = :ws AND {bindings.push_binding_where()}"
                 "), sup AS ("
                 "  UPDATE channel_outbox o SET state = 'superseded',"
                 "     payload = CASE WHEN CAST(:o AS text) IS NULL THEN o.payload"
@@ -722,7 +731,8 @@ async def supersede_everywhere_touched(
                 "           'header', COALESCE(NULLIF(s.payload->>'caption', ''),"
                 "                              NULLIF(s.payload->>'text', '')),"
                 "           'sent_as', NULLIF(s.payload->>'sent_as', '')))"
-                "    FROM sup s WHERE s.external_message_ref IS NOT NULL"
+                "    FROM sup s JOIN b ON b.id = s.binding_id"
+                "   WHERE s.external_message_ref IS NOT NULL AND b.deliverable"
                 "  RETURNING id"
                 ")"
                 " SELECT (SELECT count(*) FROM sup) AS superseded,"
@@ -882,13 +892,14 @@ async def restate_everywhere_touched(
     `review_required` intent shows was superseded by the approve tap, so the
     resolution's line reaches it by ref, and the shape is
     `supersede_everywhere`'s (#1286: one round trip inside the transaction).
-    Returns the edits queued."""
+    Returns the edits queued — only where a card may go."""
     row = (
         await session.execute(
             text(
                 "WITH b AS ("
-                "  SELECT id FROM channel_bindings"
-                f"   WHERE workspace_id = :ws AND {bindings.PUSH_BINDING_WHERE}"
+                f"  SELECT id, ({bindings.DELIVERABLE_BINDING_WHERE}) AS deliverable"
+                "     FROM channel_bindings"
+                f"   WHERE workspace_id = :ws AND {bindings.push_binding_where()}"
                 "), upd AS ("
                 "  UPDATE channel_outbox o"
                 "     SET payload = o.payload || jsonb_build_object('outcome_text', CAST(:o AS text))"
@@ -912,7 +923,7 @@ async def restate_everywhere_touched(
                 "                              NULLIF(r.payload->>'text', '')),"
                 "           'sent_as', NULLIF(r.payload->>'sent_as', ''),"
                 "           'reply_markup', CAST(:kb AS jsonb)))"
-                "    FROM refs r"
+                "    FROM refs r JOIN b ON b.id = r.binding_id WHERE b.deliverable"
                 "  RETURNING id"
                 ")"
                 " SELECT (SELECT count(*) FROM ins) AS queued"
