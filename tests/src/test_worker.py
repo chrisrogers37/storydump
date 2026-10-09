@@ -17,6 +17,7 @@ from src.worker import (
     ACTIVATION_NUDGE_LIMIT_ENV,
     _env_flag,
     compose,
+    logger as worker_logger,
     worker_config_from_env,
 )
 
@@ -94,7 +95,7 @@ def test_cloudinary_config_brings_the_transit_reaper_live():
 
 def test_the_activation_nudge_is_off_and_off_the_clock_by_default(caplog):
     """#1481, built off: nothing mints the sweep until it is switched on."""
-    with caplog.at_level(logging.INFO, logger="src.worker"):
+    with caplog.at_level(logging.INFO, logger=worker_logger.name):
         app = compose(engine=object(), config=WorkerConfig(), env={})
     assert isinstance(app.registry["activation_nudge_sweep"], Parked)
     assert "activation_nudge_sweep" not in app.recurring
@@ -110,7 +111,7 @@ def test_an_armed_activation_nudge_is_on_the_clock_daily_and_says_so(caplog):
         web_app_origin="https://app.example",
         activation_nudge_limit=7,
     )
-    with caplog.at_level(logging.INFO, logger="src.worker"):
+    with caplog.at_level(logging.INFO, logger=worker_logger.name):
         app = compose(engine=object(), config=config, env=env)
     assert not isinstance(app.registry["activation_nudge_sweep"], Parked)
     assert app.recurring["activation_nudge_sweep"] == 24 * 3600.0
