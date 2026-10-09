@@ -35,6 +35,7 @@ import re
 import json
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -71,6 +72,7 @@ from src.services.target import (
     invitations,
     media_sync,
     provisioning,
+    upcoming,
     workspaces,
     vocabulary,
 )
@@ -636,6 +638,35 @@ async def get_runway(
             workspace_id=str(ws),
             below_days=WorkerConfig().low_runway_days,
         )
+
+
+@router.get("/workspaces/{ws}/upcoming")
+async def get_upcoming(
+    ws: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_session),
+    from_: date = Query(..., alias="from"),
+    to: date = Query(...),
+):
+    """What is coming on the calendar (#1634): for the workspace's local days
+    ``[from, to)``, the planned stories still scheduled and the slots the
+    cadence will open, ``?from=2026-10-26&to=2026-12-07``. A predicted slot is
+    projected with the clock's own function and says ``kind: predicted``,
+    never a state (`upcoming.upcoming`). ``to`` is after ``from`` and at most
+    `upcoming.RANGE_MAX_DAYS` days from it. The web's read alone."""
+    # A difference, not from + the maximum: that sum can pass the last date.
+    if not 0 < (to - from_).days <= upcoming.RANGE_MAX_DAYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"to must be after from and within {upcoming.RANGE_MAX_DAYS} days of it"
+            ),
+        )
+    async with principal_mod.member_session(request, str(ws), principal) as session:
+        coming = await upcoming.upcoming(
+            session, workspace_id=str(ws), from_date=from_, to_date=to
+        )
+    return {"from": from_, "to": to, **coming}
 
 
 @router.get("/workspaces/{ws}/intents/{intent_id}")
