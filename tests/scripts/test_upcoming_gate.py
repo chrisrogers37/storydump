@@ -720,10 +720,10 @@ class TestACursorFarBehind:
         ids=[case[0] for case in FAR_BEHIND],
     )
     def test_it_predicts_what_the_clock_will_mint(
-        self, world, request, ws_zone, settings, first, days, behind, on_grid
+        self, world, ws_zone, settings, first, days, behind, on_grid
     ):
         zone, start, end, ppd = settings
-        ws = _workspace(world, f"behind-{request.node.callspec.index}", tz=ws_zone)
+        ws = _workspace(world, "behind", tz=ws_zone)
         cursor = _next_slot(world, behind, settings) if on_grid else behind
         account = _account(
             world,
@@ -880,15 +880,13 @@ class TestTheBounds:
         [timedelta(hours=20), timedelta(days=40)],
         ids=["a cursor just before the range", "a cursor forty days behind"],
     )
-    def test_the_widest_range_at_the_most_posts_a_day_is_whole(
-        self, world, request, behind
-    ):
+    def test_the_widest_range_at_the_most_posts_a_day_is_whole(self, world, behind):
         """The step bound cuts no walk: the widest range the read takes, at the
         schema's fifty posts a day, comes back whole."""
         busiest = (NY, 0, 0, 50)
         ws = _workspace(
             world,
-            f"widest-{request.node.callspec.index}",
+            "widest",
             tz=NY,
             posts_per_day=50,
             posting_hours_start=0,
