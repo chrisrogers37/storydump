@@ -67,7 +67,8 @@ does.
   back short or 5 s is spent), `reap_transit_assets` every 6 h when a transit
   store exists, and `activation_nudge_sweep` daily only when it is live: its
   switch (`TARGET_ACTIVATION_NUDGE_ENABLED`, default off), an email provider
-  and a web origin (#1481). The reaper's 60 s and its 500-row budget
+  and a web origin (#1481), at most `TARGET_ACTIVATION_NUDGE_LIMIT` emails a
+  run (3 when unset, #1653). The reaper's 60 s and its 500-row budget
   (`WorkerConfig.reap_limit`, the sweep's total across every leg) are `05`'s,
   pinned by `tests/src/test_worker.py`: an expired lease holds its
   serialization key until the next sweep.

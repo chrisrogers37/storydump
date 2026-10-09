@@ -7,10 +7,18 @@ work the registry parks would manufacture parked jobs on its own cadence),
 and the heartbeat/lease numbers agreeing.
 """
 
+import logging
+
 import pytest
 
 from src.services.target.work_loop import _UNBUILT_REASON, Parked, WorkerConfig
-from src.worker import ACTIVATION_NUDGE_ENV, _env_flag, compose
+from src.worker import (
+    ACTIVATION_NUDGE_ENV,
+    ACTIVATION_NUDGE_LIMIT_ENV,
+    _env_flag,
+    compose,
+    worker_config_from_env,
+)
 
 
 def test_w1_composition_parks_only_for_a_named_reason():
@@ -84,21 +92,61 @@ def test_cloudinary_config_brings_the_transit_reaper_live():
     assert "reap_transit_assets" in live
 
 
-def test_the_activation_nudge_is_off_and_off_the_clock_by_default():
+def test_the_activation_nudge_is_off_and_off_the_clock_by_default(caplog):
     """#1481, built off: nothing mints the sweep until it is switched on."""
-    app = compose(engine=object(), config=WorkerConfig(), env={})
+    with caplog.at_level(logging.INFO, logger="src.worker"):
+        app = compose(engine=object(), config=WorkerConfig(), env={})
     assert isinstance(app.registry["activation_nudge_sweep"], Parked)
     assert "activation_nudge_sweep" not in app.recurring
+    assert "activation nudge armed" not in caplog.text
 
 
-def test_an_armed_activation_nudge_is_on_the_clock_daily():
+def test_an_armed_activation_nudge_is_on_the_clock_daily_and_says_so(caplog):
+    """The arming line is the deploy log's only mark that real people may be
+    emailed, and it carries the cap the sweep runs with (#1653)."""
     env = {"RESEND_API_KEY": "re_test", "EMAIL_FROM": "hello@example.com"}
     config = WorkerConfig(
-        activation_nudge_enabled=True, web_app_origin="https://app.example"
+        activation_nudge_enabled=True,
+        web_app_origin="https://app.example",
+        activation_nudge_limit=7,
     )
-    app = compose(engine=object(), config=config, env=env)
+    with caplog.at_level(logging.INFO, logger="src.worker"):
+        app = compose(engine=object(), config=config, env=env)
     assert not isinstance(app.registry["activation_nudge_sweep"], Parked)
     assert app.recurring["activation_nudge_sweep"] == 24 * 3600.0
+    assert "activation nudge armed (limit=7/day)" in caplog.text
+
+
+def test_a_live_runs_bounds_are_a_small_first_run():
+    """#1653: what one armed day may do. Three emails, because the latch is set
+    as each is queued, so a provider mistake uses them up; only people who
+    signed up in the last 30 days; each idle for 72 hours."""
+    config = WorkerConfig()
+    assert config.activation_nudge_limit == 3
+    assert config.activation_nudge_since_days == 30
+    assert config.activation_nudge_stall_seconds == 72 * 3600
+
+
+def test_the_config_main_runs_with_carries_the_nudges_switch_and_cap():
+    """#1653: the switch reaches the config `main` builds, not only the flag
+    helper, and so does the cap."""
+    origin = "https://app.example"
+    default = worker_config_from_env({}, web_app_origin=origin)
+    assert default.activation_nudge_enabled is False
+    assert default.activation_nudge_limit == WorkerConfig().activation_nudge_limit
+    assert default.web_app_origin == origin
+    armed = worker_config_from_env(
+        {ACTIVATION_NUDGE_ENV: "on", ACTIVATION_NUDGE_LIMIT_ENV: " 12 "},
+        web_app_origin=origin,
+    )
+    assert armed.activation_nudge_enabled is True
+    assert armed.activation_nudge_limit == 12
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "ten", "2.5"])
+def test_a_nudge_cap_that_is_not_a_count_is_refused_by_name(raw):
+    with pytest.raises(ValueError, match=ACTIVATION_NUDGE_LIMIT_ENV):
+        worker_config_from_env({ACTIVATION_NUDGE_LIMIT_ENV: raw}, web_app_origin=None)
 
 
 @pytest.mark.parametrize(

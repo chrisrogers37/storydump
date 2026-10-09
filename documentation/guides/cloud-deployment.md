@@ -231,6 +231,7 @@ reads. Variables are per service on Railway.
 | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | The transit store. Without all three the worker parks the publish kind by name (`src/worker.py:92-100`) | `dxyz123`, … |
 | `TARGET_USAGE_PRECHECK_ENABLED` | Optional, default off: the advisory read of Meta's publishing quota before a publish | `true` |
 | `TARGET_ACTIVATION_NUDGE_ENABLED` | Optional, default off: the activation nudge, one email, once, to a person who stopped part-way through setup (#1481). It also needs `RESEND_API_KEY` and `EMAIL_FROM` and the web origin, and stays off until email is switched on and the owner approves the copy | `true` |
+| `TARGET_ACTIVATION_NUDGE_LIMIT` | Optional, default 3: the nudge's emails per daily run. Each person is marked nudged as their email is queued, so a provider mistake uses up that run. Arm the nudge at the default once email is on and a send has been confirmed, then raise it (#1653) | `20` |
 | `TARGET_WORKER_INTERACTIVE_CONCURRENCY`, `TARGET_WORKER_BULK_CONCURRENCY` | Optional, defaults 3 and 2: claim-and-run tasks per lane; the worker refuses a sum the pool cannot fit (`src/worker.py`) | `3`, `2` |
 | `META_GRAPH_VERSION` | Optional; overrides the Graph API version the publish adapter calls (`src/worker.py`) | `v21.0` |
 | `RESEND_API_KEY`, `EMAIL_FROM` | The notification-email sender (`src/services/target/email_sender.py`). Deliberately unset today: outbound email does not send, and the worker logs that no provider is configured | |

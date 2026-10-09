@@ -88,6 +88,11 @@ _TRUTHY = ("1", "true", "yes", "on")
 #: a web origin, and parks the sweep naming whichever is missing.
 ACTIVATION_NUDGE_ENV = "TARGET_ACTIVATION_NUDGE_ENABLED"
 
+#: The nudge's daily cap when set; `WorkerConfig.activation_nudge_limit`, a
+#: small first-run value, when not (#1653). Refused by name as the lane sizes
+#: are.
+ACTIVATION_NUDGE_LIMIT_ENV = "TARGET_ACTIVATION_NUDGE_LIMIT"
+
 
 def _env_flag(env, name: str) -> bool:
     """A default-off switch: on for a truthy spelling, off for anything else."""
@@ -258,20 +263,44 @@ LANE_CONCURRENCY_ENV = {
 }
 
 
+def _env_count(env: dict, name: str) -> Optional[int]:
+    """A count from *env*, or None when it is unset. A non-integer or a value
+    below 1 is refused by name."""
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be at least 1, got {value}")
+    return value
+
+
 def lane_concurrency_from_env(env: dict) -> dict:
     out = dict(WorkerConfig().lane_concurrency)
     for lane, name in LANE_CONCURRENCY_ENV.items():
-        raw = (env.get(name) or "").strip()
-        if not raw:
-            continue
-        try:
-            value = int(raw)
-        except ValueError as exc:
-            raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
-        if value < 1:
-            raise ValueError(f"{name} must be at least 1, got {value}")
-        out[lane] = value
+        value = _env_count(env, name)
+        if value is not None:
+            out[lane] = value
     return out
+
+
+def worker_config_from_env(env: dict, *, web_app_origin: Optional[str]) -> WorkerConfig:
+    """The config `main` runs with. `05`'s numbers are the dataclass's
+    defaults and the deployment's own come from *env*. The web origin is
+    deployment config read from settings at the composition root, rather
+    than duplicated as a worker env var."""
+    return WorkerConfig(
+        web_app_origin=web_app_origin,
+        lane_concurrency=lane_concurrency_from_env(env),
+        activation_nudge_enabled=_env_flag(env, ACTIVATION_NUDGE_ENV),
+        activation_nudge_limit=(
+            _env_count(env, ACTIVATION_NUDGE_LIMIT_ENV)
+            or WorkerConfig().activation_nudge_limit
+        ),
+    )
 
 
 def compose(
@@ -878,14 +907,7 @@ def main() -> None:
             file=sys.stderr,
         )
         raise SystemExit(2)
-    # `05` numbers come from the dataclass defaults; the web origin is
-    # deployment config, so it is read from settings at the composition root
-    # rather than duplicated as a worker env var.
-    config = WorkerConfig(
-        web_app_origin=settings.web_app_origin,
-        lane_concurrency=lane_concurrency_from_env(env),
-        activation_nudge_enabled=_env_flag(env, ACTIVATION_NUDGE_ENV),
-    )
+    config = worker_config_from_env(env, web_app_origin=settings.web_app_origin)
     engine = unit_of_work.create_engine(url)
     transport = None
     token = env.get(reg.TOKEN_VAR)
