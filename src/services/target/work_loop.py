@@ -103,6 +103,16 @@ class WorkerConfig:
     # no migration.
     planned_late_seconds: int = 3600
     status_interval_seconds: float = 60.0  # cadence of the status line
+    # The event-loop watchdog (`loop_watchdog`): the loop stamps a beat every
+    # `loop_beat_seconds`, and one silent for `loop_stall_seconds` ends the
+    # process so the platform restarts it. Five minutes, because a false exit
+    # spends a restart and the loop can be held for minutes by steps that DO
+    # return: the egress floor resolves names on the loop's thread
+    # (`egress._resolve_addresses`), and several provider calls can queue
+    # behind one slow resolver. `tests/src/test_worker.py` pins that the
+    # restart still lands inside the fleet monitor's worker-down threshold.
+    loop_stall_seconds: float = 300.0
+    loop_beat_seconds: float = 5.0
     lane_max_consecutive_errors: int = 10  # claim errors before the lane dies loudly
     poller_interval_seconds: float = 2.0  # 05: outbox cadence
     chat_limit: int = 18  # 05: per-chat sends per window

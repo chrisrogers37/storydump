@@ -34,6 +34,8 @@ So the one failure this endpoint can see that the supervisor cannot is a worker
 that is ALIVE but STUCK: a task blocked forever inside its loop has not exited,
 so `supervise` never fires, and the counters simply stop moving. That is the
 condition a restart actually repairs, and it is the only one that 503s here.
+(When the event loop itself stops turning, this listener stops with it: that
+case is `loop_watchdog`'s.)
 
 **Deliberately NOT a threshold on `consecutive_failures`.** Those counters are
 documented as "what a liveness check reads" (`scheduler.Clock`,

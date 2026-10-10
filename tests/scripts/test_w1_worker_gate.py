@@ -377,6 +377,7 @@ class TestTheWorkerIdlesVisibly:
             claim_idle_seconds=0.2,
             clock_interval_seconds=0.5,
             heartbeat_interval_seconds=0.5,
+            loop_beat_seconds=0.5,
         )
         engine = create_async_engine(async_url(lane_db))
         app = compose(engine=engine, config=cfg, env={})
@@ -417,6 +418,13 @@ class TestTheWorkerIdlesVisibly:
             "the executor-less kind must park, not vanish"
         )
         assert app.heartbeat.consecutive_failures == 0
+        # The event-loop watchdog rides the run and ends with it (#1664): the
+        # same positive control. A thread still armed here would outlive the
+        # worker it guards.
+        assert app.watchdog is not None and app.watchdog.beats >= 3, (
+            "run() must arm the loop watchdog for the whole run"
+        )
+        assert not app.watchdog.armed, "run() must disarm the watchdog when it ends"
 
         with sync_conn.cursor() as cur:
             # The slot was due when it was minted, so the W3 fast path prompted

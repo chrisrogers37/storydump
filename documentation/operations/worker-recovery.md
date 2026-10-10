@@ -53,6 +53,26 @@ that is momentarily full is not an error: it is counted as `waits` on the status
 restarts a process that exits non-zero (`railway.toml`: `restartPolicyType = "ON_FAILURE"`,
 `restartPolicyMaxRetries = 10`).
 
+**A loop that stops turning ends the process too.** Supervision runs on the event loop, so it
+cannot act when the loop itself is not running: a call that does not return on the loop's thread,
+or a process that was stopped and resumed. A watchdog thread
+(`src/services/target/loop_watchdog.py`) is armed for the whole of `run()`, startup and teardown
+included. The loop stamps a beat every 5 s (`loop_beat_seconds`); when it has been silent for more
+than 300 s (`loop_stall_seconds`), or the thread itself was absent for more than that and one beat
+between two of its own checks, the thread writes
+`FATAL: worker watchdog: <reason>. Every thread's stack follows; …` and each thread's stack to
+stderr, and the process exits 3. Three things it cannot see:
+
+- **A loop that turns while its tasks wait** on a database or a provider. From inside, a wait that
+  will never end looks the same as an outage, and exiting through an outage spends the ten
+  restarts. So a worker whose counters stop while its status lines keep arriving is waiting, and
+  this does not restart it.
+- **A call that holds the interpreter lock for the whole stall.** The thread needs that lock to
+  run. It reports such a call only after it returns, as the watchdog having been absent, with
+  stacks that no longer name it.
+- **A process that no longer runs at all** (a host that is gone). That is the monitor's page
+  (`scheduling-monitor.md`) and a redeploy, below.
+
 ### The job lease and its heartbeat
 
 A claim is one call to the `fn_claim_job` door: it takes the oldest `ready` row of the lane whose
@@ -163,8 +183,10 @@ The `status:` line is the instrument for a worker that is alive: per lane
 `clock[elected ticks inserts errs]`, `heartbeat[beats short errs]`,
 `transport[bot auth_failures media_fetch_failures]`, `sweeper[sweeps mints]`,
 `prompts[sweeps prompted advanced missed unheard]` (`missed` counts planned stories the miss leg
-ended, `unheard` those whose workspace had no chat to tell) and the queue's depth and age per lane
-(`src/worker.py:440-509`). Counters that stop moving between two lines are the stuck worker;
+ended, `unheard` those whose workspace had no chat to tell), `watchdog[armed]` (`armed=False` on
+a running worker means the watchdog thread is gone and nothing would end a stopped loop) and the
+queue's depth and age per lane (`status_line` in `src/worker.py`). Counters that stop moving
+between two lines are the stuck worker;
 `elected=False` with `ticks=0` long after a deploy means another session still holds the clock.
 
 ## Before restarting: find the cause
@@ -176,6 +198,9 @@ A restart that lands on the same fault re-enters it, and spends Railway's ten re
 | `FATAL: TARGET_DATABASE_URL is unset` (exit 2) | the variable is missing on the worker service | set it on the service; the redeploy follows |
 | `ValueError: … exceeds the pool of 10`, or `… must be an integer` | a lane-concurrency variable the pool cannot hold | lower `TARGET_WORKER_*_CONCURRENCY` |
 | `background task <name> DIED (…)` | the named task raised; the exception is on the line | fix forward; the restart policy has been retrying it |
+| `FATAL: worker watchdog: the event loop has not turned for N s` (exit 3) | a call on the loop's thread did not return; the stacks that follow the line name it | fix the call (bound it, or move it off the loop); the restart policy has already restarted the worker |
+| `FATAL: worker watchdog: the watchdog was absent N s between two checks` (exit 3) | the process was stopped and resumed on the platform's side, or one call held the interpreter lock that long. The stacks are from after it, so they do not say which | the restart is the repair. If it repeats, ask the platform about the container, and look for a long synchronous call in whatever ran just before |
+| the `status:` line stops with no line after it, and the deployment still reads `SUCCESS` | either the process is not running at all (nothing inside it can report or exit), or its loop turns while every task waits, the status reporter's own read included | the container's metrics tell them apart: if they stop with the log, the host is gone; if they continue, the worker is waiting. Redeploy (below) either way, and raise a stopped container with the platform |
 | `lane <lane>: claim failed … 10/10 consecutive` | the database refused the claim door ten times running | `storydump health --json`; Neon status; the worker's role and its grants (`runtime-database-roles.md`) |
 | `clock tick failed (N consecutive)` on every tick | a row the schema refuses — the deployed code is ahead of the ledger | `storydump posture` against the checkout; the pre-deploy log of the last deploy (`migration-runner.md`) |
 | `Telegram credential is DEAD at startup` / `token belongs to @x but the configured bot is @y` | the sender is parked; everything else runs | replace `TARGET_TELEGRAM_BOT_TOKEN` on the worker (`telegram-webhook.md`), then redeploy |
