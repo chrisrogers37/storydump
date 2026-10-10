@@ -108,6 +108,7 @@ async def code_grant(
     redirect_uri: str,
     client_id: str,
     client_secret: str,
+    code_verifier: Optional[str] = None,
 ) -> tuple[int, Any]:
     """POST the authorization-code grant to the token endpoint, through the
     egress floor, and hand back ``(status, body)`` — the body parsed as JSON,
@@ -118,19 +119,26 @@ async def code_grant(
     field MEANS differs per leg, so each caller raises its own refusal; the
     floor's own refusals (host, budget) propagate as themselves. The body is
     never logged — it carries bearer tokens.
+
+    ``code_verifier`` is a PKCE leg's verifier (RFC 7636 §4.5, `07` §51) — the
+    Drive connect leg sends one; sign-in sends none, and its form is
+    unchanged by it.
     """
+    data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    if code_verifier is not None:
+        data["code_verifier"] = code_verifier
     response = await egress.request(
         client,
         "POST",
         TOKEN_URL,
         policy=EgressPolicy(timeout_class="standard"),
-        data={
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        },
+        data=data,
     )
     try:
         body = response.json()

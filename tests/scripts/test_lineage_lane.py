@@ -449,6 +449,9 @@ class TestTheBoundaryIsDerivedAndLoud:
             # index on post_intents (workspace_id, schedule_slot_at) over every
             # state, for the calendar's month and day reads and the Overview (#1640).
             "107_intent_workspace_slot_index.sql",
+            # This appends §51, PKCE on the Drive connect flow: the code
+            # verifier minted with the state, stored encrypted (RFC 7636).
+            "108_oauth_state_code_verifier.sql",
         ], (
             f"the files above the move are {above}. If you are landing the next"
             " F.2 increment, add it here — deliberately, and at the end: arm (b)"

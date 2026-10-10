@@ -431,6 +431,13 @@
       "label": "§50 the ledger indexed by workspace and slot (107, #1640) — ix_intents_workspace_slot, an index on post_intents (workspace_id, schedule_slot_at) over every state, for the calendar's month, its day view and the Overview's recent activity",
       "doc": "07-security-model.md",
       "ordinal": 43
+    },
+    {
+      "sha256": "c02d09ebaaf4d302543312ed71203e8f89b7aeb2109035051da3108774d01486",
+      "class": "normative",
+      "label": "§51 PKCE on the Drive connect flow — oauth_states.encrypted_code_verifier, the RFC 7636 code verifier minted with a Drive connect state, stored as ciphertext under the credential ring",
+      "doc": "07-security-model.md",
+      "ordinal": 44
     }
   ],
   "policy_expansion": {

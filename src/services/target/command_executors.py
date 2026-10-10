@@ -83,7 +83,6 @@ from src.services.target import (
     vocabulary,
     workspaces,
 )
-from src.services.target.oauth_states import issue_state
 from src.services.target.commands import (
     CONNECT_PURPOSE_KIND,
     Command,
@@ -1222,7 +1221,8 @@ async def _begin_drive_link(session, command: Command) -> CommandResult:
     THIN BY DESIGN — F1 (a). The OAuth leg is the API route's; this door only
     initiates and records. It returns the state, not a URL, because composing
     the URL needs `(client_id, redirect_uri)`, which `src/api/google_client.py`
-    owns — the adapter renders, as it already does for sign-in.
+    owns — the adapter renders, as it already does for sign-in. The result
+    carries the state's PKCE challenge for that URL (`07` §51).
 
     The connect/reconnect split is the SCHEMA's answer, not the caller's:
     `connect_purpose` reports which one this workspace is in, and a command
@@ -1240,17 +1240,20 @@ async def _begin_drive_link(session, command: Command) -> CommandResult:
             "illegal_transition",
             f"this workspace's Drive needs {purpose}, not {expect}",
         )
-    state = await issue_state(
+    state, challenge = await google_drive_oauth.issue_connect_state(
         session,
         purpose=purpose,
         user_id=command.actor_user_id,
         workspace_id=command.workspace_id,
-        reconnect_target=command.workspace_id,
-        provider=google_drive_oauth.PROVIDER,
     )
     return CommandResult(
         "executed",
-        {"provider": google_drive_oauth.PROVIDER, "purpose": purpose, "state": state},
+        {
+            "provider": google_drive_oauth.PROVIDER,
+            "purpose": purpose,
+            "state": state,
+            "code_challenge": challenge,
+        },
     )
 
 

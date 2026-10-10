@@ -69,6 +69,10 @@ class OAuthState(TargetBase):
     # a red parity test.
     reconnect_target = Column(UUID(as_uuid=True), nullable=True)
     cookie_nonce_hash = Column(Text, nullable=True)
+    #: The PKCE code verifier minted with the state (RFC 7636, `07` §51):
+    #: ciphertext under the credential ring, never the verifier itself. NULL on
+    #: a state minted without one.
+    encrypted_code_verifier = Column(Text, nullable=True)
     expires_at = Column(TZ, nullable=False)
     consumed_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()

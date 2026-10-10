@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from src.services.target import jobs, vocabulary
+from src.services.target import jobs, oauth_states, vocabulary
 from src.services.target.commands import CommandRefused
 from src.services.target.work_loop import WorkerConfig
 from src.worker import compose
@@ -1000,7 +1000,8 @@ class TestTheConnectTrioIsThinAndTenantBound:
 
         with sync_conn.cursor() as cur:
             cur.execute(
-                "SELECT workspace_id, reconnect_target, provider, consumed_at"
+                "SELECT workspace_id, reconnect_target, provider, consumed_at,"
+                "       encrypted_code_verifier"
                 " FROM oauth_states WHERE state = %s",
                 (res.data["state"],),
             )
@@ -1009,6 +1010,13 @@ class TestTheConnectTrioIsThinAndTenantBound:
         assert str(row[0]) == str(chain["ws"])
         assert str(row[1]) == str(chain["ws"]), "the workspace is its own target (069)"
         assert row[2] == "gdrive" and row[3] is None
+
+        # PKCE (RFC 7636, `07` §51): the callback redeems the code only with
+        # the verifier stored, encrypted, beside the state. The result carries
+        # its S256 challenge for the URL, never the verifier itself.
+        verifier = oauth_states.ring().decrypt(row[4])
+        assert res.data["code_challenge"] == oauth_states.code_challenge(verifier)
+        assert verifier not in res.data.values()
 
 
 def _remove_source(conn, source_id):

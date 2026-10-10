@@ -51,6 +51,17 @@ class TestAuthorizationUrl:
         assert q["state"] == [STATE]
         assert q["nonce"] == [oidc.nonce_for(STATE)]
         assert set(q["scope"][0].split()) == {"openid", "email", "profile"}
+        # Exactly these: the Drive leg's PKCE challenge (`07` §51) is not
+        # sign-in's, which keeps its OIDC nonce.
+        assert set(q) == {
+            "response_type",
+            "client_id",
+            "redirect_uri",
+            "scope",
+            "state",
+            "nonce",
+            "prompt",
+        }
 
     def test_nonce_is_a_pure_function_of_the_state(self):
         assert oidc.nonce_for(STATE) == oidc.nonce_for(STATE)
@@ -166,6 +177,15 @@ class TestExchangeCode:
         assert seen["data"]["code"] == "c0de"
         assert seen["data"]["redirect_uri"] == "https://api.test/auth/google/callback"
         assert seen["policy"].timeout_class == "standard"
+        # Exactly these five: the verifier the Drive leg sends (`07` §51)
+        # never rides sign-in's grant.
+        assert set(seen["data"]) == {
+            "code",
+            "client_id",
+            "client_secret",
+            "redirect_uri",
+            "grant_type",
+        }
 
     async def test_token_endpoint_error_is_refused_by_name(self, monkeypatch):
         capture_egress(monkeypatch, status=400, body={"error": "invalid_grant"})

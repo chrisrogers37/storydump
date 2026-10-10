@@ -3869,3 +3869,29 @@ one range of the index and newest first is a backward walk of it.
 -- of the workspace's whole history (#1640).
 CREATE INDEX ix_intents_workspace_slot ON post_intents (workspace_id, schedule_slot_at);
 ```
+
+### §51. PKCE on the Drive connect flow: the code is exchanged with the verifier minted beside its state (108)
+
+**Why:** RFC 7636 (PKCE) is the standard hardening of an authorization-code flow, and Google's
+discovery document advertises `S256` on the endpoints the Drive connect leg (§15) uses. Every Drive
+connect state is minted with a code verifier — 43 characters from the unreserved set, 256 bits from
+`secrets` — and the authorization URL carries its challenge, `BASE64URL(SHA256(code_verifier))`,
+with `code_challenge_method=S256`; `plain` is never sent.
+
+**The verifier stays on the server.** It is stored on the state row, encrypted under the §3 ring as
+the credential payloads are. The callback reads it from the row its one-shot consume returned (§2)
+and sends it beside the code, so the token endpoint can match it to the challenge (RFC 7636 §4.6).
+A consumed row with no verifier, or with one no ring entry decrypts, is refused as `state_refused`
+before the code is exchanged. A state minted before this column existed has none: a connect started
+across the deploy fails once and is started again (a state lives 15 minutes).
+
+**Scope.** Google sign-in (§1) is unchanged: it keeps its OIDC `nonce`, and its token request
+carries no verifier. No policy, grant or door changes: the column rides `oauth_states`' table-level
+grants and its auth-plane policies (§6b).
+
+```sql
+-- [§51 oauth_states: the PKCE code verifier, encrypted]
+-- RFC 7636: the code verifier minted with a Drive connect state, stored as ciphertext under the
+-- credential ring (§3) and never as itself. NULL on a state minted without one.
+ALTER TABLE oauth_states ADD COLUMN encrypted_code_verifier TEXT NULL;
+```

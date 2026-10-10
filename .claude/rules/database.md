@@ -63,8 +63,10 @@ pinned at `tests/scripts/test_tenancy_gate.py:378`-`:379`):
   **`command_dedup`** is admission idempotency; **`rate_counters`** holds the
   pacing and admission windows.
 - **Secrets**: `oauth_credentials.encrypted_payload` is Fernet ciphertext
-  (`ENCRYPTION_KEY`); `session_tokens` and `service_tokens` store a SHA-256
-  hash, never the secret. Do not select the payload column into a log or a view.
+  (`ENCRYPTION_KEY`), and so is `oauth_states.encrypted_code_verifier` (a
+  PKCE verifier, `07` §51); `session_tokens` and `service_tokens` store a SHA-256
+  hash, never the secret. Do not select either ciphertext column into a log or
+  a view.
 
 ## Tenancy: RLS, the GUC, and the gate
 

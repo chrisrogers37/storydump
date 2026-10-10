@@ -24,8 +24,10 @@ from src.services.target import drive_credentials, workspaces
 from src.services.target import google_drive_oauth as drive
 from src.services.target.oauth_states import (
     OAuthStateRefused,
+    code_challenge,
     consume_state,
     issue_state,
+    ring,
 )
 from src.services.target.drive_adapter import DriveRetryableError
 from src.services.target.media_sync import DriveCredentialDead
@@ -513,16 +515,26 @@ class TestTheRoutePairAsSvcIngress:
                 assert q["access_type"] == ["offline"] and q["prompt"] == ["consent"]
                 assert q["redirect_uri"] == [f"{API}/auth/google-drive/callback"]
                 state = q["state"][0]
-                assert fetch_one(
+                *pinned, stored = fetch_one(
                     world["stream"],
-                    "SELECT provider, purpose, reconnect_target::text, workspace_id::text"
+                    "SELECT provider, purpose, reconnect_target::text,"
+                    "       workspace_id::text, encrypted_code_verifier"
                     "  FROM oauth_states WHERE state = %s",
                     (state,),
-                ) == ("gdrive", "connect", ws, ws)
+                )
+                assert pinned == ["gdrive", "connect", ws, ws]
+                # PKCE (RFC 7636, `07` §51): the URL carries the S256 challenge
+                # of the verifier stored with the state, encrypted.
+                assert q["code_challenge_method"] == ["S256"]
+                assert code_challenge(ring().decrypt(stored)) == q["code_challenge"][0]
 
-                # 2. The callback, with only the Drive exchange stubbed.
+                # 2. The callback, with only the Drive exchange stubbed; the
+                # stub records the verifier each exchange is handed.
+                exchanged = []
+
                 async def exchange_code(client_, **kw):
                     assert kw["code"] == "c0de"
+                    exchanged.append(kw["code_verifier"])
                     return drive_grant()
 
                 monkeypatch.setattr(drive, "exchange_code", exchange_code)
@@ -531,6 +543,10 @@ class TestTheRoutePairAsSvcIngress:
                     follow_redirects=False,
                 )
                 assert done.status_code == 302, done.text
+                # The verifier stored with the state reached the exchange: its
+                # S256 is the challenge the browser carried to Google.
+                assert len(exchanged) == 1
+                assert code_challenge(exchanged[-1]) == q["code_challenge"][0]
                 assert (
                     done.headers["location"]
                     == f"{FRONT}/dashboard/settings?connected=gdrive"
@@ -576,9 +592,9 @@ class TestTheRoutePairAsSvcIngress:
                 restarted = await client.post(
                     f"/api/v1/workspaces/{ws}/drive/connect", headers=owner
                 )
-                state2 = parse_qs(
-                    urlsplit(restarted.json()["authorization_url"]).query
-                )["state"][0]
+                q2 = parse_qs(urlsplit(restarted.json()["authorization_url"]).query)
+                state2 = q2["state"][0]
+                assert q2["code_challenge_method"] == ["S256"]
                 assert fetch_one(
                     world["stream"],
                     "SELECT purpose, reconnect_target::text FROM oauth_states WHERE state = %s",
@@ -589,6 +605,8 @@ class TestTheRoutePairAsSvcIngress:
                     follow_redirects=False,
                 )
                 assert redone.status_code == 302, redone.text
+                assert len(exchanged) == 2
+                assert code_challenge(exchanged[-1]) == q2["code_challenge"][0]
                 after = _credential_rows(world, ws)
                 assert [str(r["id"]) for r in after] == [str(row["id"])]
 
@@ -677,14 +695,16 @@ class TestTheRoutePairAsSvcIngress:
                 restarted = await client.post(
                     f"/api/v1/workspaces/{ws}/drive/connect", headers=owner
                 )
-                state3 = parse_qs(
-                    urlsplit(restarted.json()["authorization_url"]).query
-                )["state"][0]
+                q3 = parse_qs(urlsplit(restarted.json()["authorization_url"]).query)
+                state3 = q3["state"][0]
                 redone = await client.get(
                     f"/auth/google-drive/callback?state={state3}&code=c0de",
                     follow_redirects=False,
                 )
                 assert redone.status_code == 302, redone.text
+                # Three connects, three exchanges, a fresh verifier each time.
+                assert len(exchanged) == len(set(exchanged)) == 3
+                assert code_challenge(exchanged[-1]) == q3["code_challenge"][0]
                 assert fetch_one(
                     world["stream"],
                     "SELECT state, config->>'removed' FROM media_sources WHERE id = %s",

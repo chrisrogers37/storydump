@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from src.services.target import commands  # noqa: I001 — the port first: the registry cycle
-from src.services.target import command_executors, intent_ledger, jobs
+from src.services.target import command_executors, intent_ledger, jobs, oauth_states
 from src.services.target.commands import Command
 
 ROW = {
@@ -622,7 +622,7 @@ class TestTheDriveLinkDoorMintsItsTablesPurpose:
             return "st"
 
         monkeypatch.setattr(google_drive_oauth, "connect_purpose", connect_purpose)
-        monkeypatch.setattr(command_executors, "issue_state", issue_state)
+        monkeypatch.setattr(oauth_states, "issue_state", issue_state)
         return holder
 
     @staticmethod
@@ -652,3 +652,48 @@ class TestTheDriveLinkDoorMintsItsTablesPurpose:
         with pytest.raises(commands.CommandRefused) as info:
             await getattr(command_executors, kind)(object(), self._command(kind))
         assert info.value.reason == "illegal_transition"
+
+
+class TestTheDriveLinkMintsItsVerifierWithTheState:
+    """`connect_account` / `reconnect_account` mint the state the Drive
+    callback consumes, and that callback redeems a code only with the PKCE
+    verifier minted beside it (RFC 7636, `07` §51). So the state carries one,
+    and the result carries its S256 challenge for whoever composes the URL —
+    never the verifier, which stays on the row."""
+
+    @pytest.fixture
+    def minted(self, monkeypatch):
+        seen = {"purpose": "connect", "issued": {}}
+
+        async def connect_purpose(session, *, workspace_id):
+            return seen["purpose"]
+
+        async def issue_state(session, **kw):
+            seen["issued"] = kw
+            return "st-drive"
+
+        monkeypatch.setattr(
+            command_executors.google_drive_oauth, "connect_purpose", connect_purpose
+        )
+        monkeypatch.setattr(oauth_states, "issue_state", issue_state)
+        return seen
+
+    @pytest.mark.parametrize(
+        "kind,purpose",
+        [("connect_account", "connect"), ("reconnect_account", "reconnect")],
+    )
+    async def test_the_state_carries_a_verifier_and_the_result_its_challenge(
+        self, minted, kind, purpose
+    ):
+        minted["purpose"] = purpose
+        command = Command(
+            kind=kind, workspace_id="ws", actor_user_id="admin", channel="web", args={}
+        )
+        out = await getattr(command_executors, kind)(_Session(), command)
+        issued = minted["issued"]
+        verifier = issued["code_verifier"]
+        assert issued["purpose"] == purpose and issued["reconnect_target"] == "ws"
+        assert out.outcome == "executed"
+        assert out.data["state"] == "st-drive"
+        assert out.data["code_challenge"] == oauth_states.code_challenge(verifier)
+        assert verifier not in out.data.values()
