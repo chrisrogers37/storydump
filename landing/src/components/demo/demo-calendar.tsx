@@ -5,12 +5,12 @@ import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import { useDemo } from "@/components/demo/demo-provider";
 import { demoCalendarLanes } from "@/lib/demo/calendar";
 
-/** The real calendar over the sample's stories, as the visitor has left them. */
+/** The real calendar over the sample's stories, as the visitor has left them, on the sample's own clock. */
 export function DemoCalendar() {
-  const { state, history } = useDemo();
+  const { state, sample, tz } = useDemo();
   const lanes = useMemo(
-    () => demoCalendarLanes(state.queue, history),
-    [state.queue, history],
+    () => demoCalendarLanes(state.queue, sample.history),
+    [state.queue, sample.history],
   );
 
   return (
@@ -18,11 +18,11 @@ export function DemoCalendar() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Calendar</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          What posted, what is queued and what is predicted, this month.
+          What posted this month, what waits in the Queue, and what is scheduled next.
         </p>
       </div>
 
-      <ContentCalendar {...lanes} />
+      <ContentCalendar {...lanes} tz={tz} />
     </div>
   );
 }

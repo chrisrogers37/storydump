@@ -1,7 +1,5 @@
 import type { Metadata } from "next";
-import { DemoProvider } from "@/components/demo/demo-provider";
 import { DemoShell } from "@/components/demo/demo-shell";
-import { sampleWorkspace } from "@/lib/demo/fixtures";
 import { noindexMetadata } from "@/lib/seo";
 
 /**
@@ -11,28 +9,21 @@ import { noindexMetadata } from "@/lib/seo";
  * in the browser (`demo-isolation-contract.test.ts`).
  *
  * NOT INDEXED, and with no canonical: the sample is a copy of no other page.
+ *
+ * PRERENDERED, AND IT HOLDS NO SAMPLE (#1649). The sample's slots are counted
+ * from now, so a copy made ahead of the visit is wrong by however long it
+ * waited: an hourly rebuild served the visitor who set it off scheduled posts
+ * already past. The visitor's browser builds the sample when the page opens
+ * (`DemoProvider`), and the page stays on the CDN.
  */
 export const metadata: Metadata = {
   title: "Sample workspace",
   description:
-    "Approve, skip and reject sample Stories in a made-up workspace. Nothing here is real, nothing is saved, nothing posts.",
+    "Mark sample Stories posted, skip them or reject them in a made-up workspace. Nothing here is real, nothing is saved, nothing posts.",
   ...noindexMetadata,
   alternates: { canonical: null },
 };
 
-/** Prerendered and rebuilt hourly, so the sample's times stay current. */
-export const revalidate = 3600;
-
 export default function DemoLayout({ children }: { children: React.ReactNode }) {
-  const workspace = sampleWorkspace(new Date());
-
-  return (
-    <DemoProvider
-      queue={workspace.queue}
-      history={workspace.history}
-      tz={workspace.config.tz ?? "UTC"}
-    >
-      <DemoShell>{children}</DemoShell>
-    </DemoProvider>
-  );
+  return <DemoShell>{children}</DemoShell>;
 }

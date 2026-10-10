@@ -4,6 +4,7 @@ paths:
   - "src/services/target/scheduler*"
   - "src/services/target/category_mix.py"
   - "src/services/target/content_runway.py"
+  - "src/services/target/upcoming.py"
   - "src/services/target/work_loop.py"
   - "src/services/target/jobs.py"
   - "src/services/target/publish_pipeline.py"
@@ -59,6 +60,11 @@ does.
 - Slots are the account's effective `posts_per_day` spread evenly across its
   posting hours in its `tz` — the account's override, else the workspace's
   (`fn_next_slot`, 059). A paused or inactive workspace mints no `plan_slot`.
+  The calendar's predicted slots are that function walked forward
+  (`upcoming.py`), and its walk may start ahead of the cursor: it relies on
+  the function answering ANY instant with a slot of one daily grid, a grid the
+  settings alone fix. A change that makes a slot depend on the slots before it
+  breaks that read.
 - Every scheduling decision reads the DATABASE clock (`now()` inside the door);
   the loop paces on `asyncio.sleep`. Do not pass a host timestamp into a door.
 - The recurring kinds this worker asks for are `compose`'s (`worker.py:314`):
@@ -67,7 +73,8 @@ does.
   back short or 5 s is spent), `reap_transit_assets` every 6 h when a transit
   store exists, and `activation_nudge_sweep` daily only when it is live: its
   switch (`TARGET_ACTIVATION_NUDGE_ENABLED`, default off), an email provider
-  and a web origin (#1481). The reaper's 60 s and its 500-row budget
+  and a web origin (#1481), at most `TARGET_ACTIVATION_NUDGE_LIMIT` emails a
+  run (3 when unset, #1653). The reaper's 60 s and its 500-row budget
   (`WorkerConfig.reap_limit`, the sweep's total across every leg) are `05`'s,
   pinned by `tests/src/test_worker.py`: an expired lease holds its
   serialization key until the next sweep.

@@ -14,7 +14,7 @@ import type { Destination } from "./types";
  *
  * DERIVED, NEVER AN INBOX. Every line is a fact the database already holds (a
  * destination's state or Instagram access, a folder's sync state, a post
- * waiting on a decision), read through the payloads the tabs render and in
+ * parked for review), read through the payloads the tabs render and in
  * the tabs' own words. Nothing writes a notification, so nothing here can be
  * stale, unread, or disagree with the row it describes: a condition clears
  * when its row does. An inbox would need a writer, a read state and a dedup
@@ -34,9 +34,13 @@ export const RESOLVED_IN = {
 /**
  * The all-clear, naming every kind of condition `deriveConditions` checks, so
  * it claims no more than was looked at. A new kind is a new clause here.
+ *
+ * A post parked for review "needs attention", the Queue's own badge for it. A
+ * post waiting for a tap is the Queue's ordinary work, not a condition, so the
+ * all-clear must not read as if none were waiting (#1649).
  */
 export const ALL_CLEAR_DETAIL =
-  "No account needs reconnecting, no Drive folder has stopped syncing, and no post is waiting on a decision.";
+  "No account needs reconnecting, no Drive folder has stopped syncing, and no post needs attention.";
 
 export type Condition = {
   /** Stable per row, for React's key. */
@@ -110,7 +114,7 @@ export function deriveConditions({
   if (review > 0) {
     conditions.push({
       key: REVIEW_REQUIRED_STATE,
-      text: review === 1 ? "1 post needs a decision" : `${review} posts need a decision`,
+      text: review === 1 ? "1 post needs attention" : `${review} posts need attention`,
       ...RESOLVED_IN.queue,
     });
   }

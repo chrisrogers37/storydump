@@ -2,9 +2,9 @@
  * `QueueView` offers the levers its caller hands it and adds none of its own
  * (#1480).
  *
- * The real Queue hands it the matrix; the sample workspace hands it Approve,
- * Skip and Reject, never Posted myself, because nothing in the sample may
- * look like it posted. Both lists are the caller's decision, so this pins
+ * The real Queue hands it the matrix; the sample workspace hands it a new
+ * workspace's levers (Posted myself, Skip and Reject) and answers them in the
+ * browser. Both lists are the caller's decision, so this pins
  * that the view decides nothing, and that the line under a row reads as what
  * it is: a refusal is an alert, what a tap did is a status. Read as returned
  * element trees, like `mobile-nav.test.tsx`.

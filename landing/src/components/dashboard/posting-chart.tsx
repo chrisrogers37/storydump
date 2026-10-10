@@ -31,10 +31,16 @@ type DayCount = StatsResponse["posts_by_day"][number];
 
 export function PostingChart({ data }: { data: DayCount[] }) {
   // `local_date` already names the workspace's day; label it as that day,
-  // never as an instant read on the viewer's clock.
+  // never as an instant read on the viewer's clock. The axis names the date,
+  // and the tooltip names its weekday too ("Fri, Oct 9"), from the same day.
   const formatted = data.map((d) => ({
     ...d,
     label: formatCalendarDate(d.local_date, { month: "short", day: "numeric" }),
+    day: formatCalendarDate(d.local_date, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    }),
   }));
 
   return (
@@ -60,6 +66,9 @@ export function PostingChart({ data }: { data: DayCount[] }) {
               />
               <YAxis tick={{ fontSize: 12 }} allowDecimals={false} />
               <Tooltip
+                labelFormatter={(label, payload) =>
+                  payload?.[0]?.payload?.day ?? label
+                }
                 formatter={(value, name) => [
                   value as number,
                   name === "count" ? "posted" : "capacity",

@@ -308,6 +308,33 @@ class TestTheActivationNudgeIsBuiltOff:
         config = WorkerConfig(activation_nudge_enabled=True, web_app_origin=self.ORIGIN)
         assert not isinstance(self._nudge(config=config), Parked)
 
+    async def test_the_live_sweep_runs_with_the_configs_bounds(self, monkeypatch):
+        """#1653: the entry hands the sweep the config's cap, window and idle
+        time, and the origin for its links, rather than defaults of its own."""
+        seen = {}
+
+        async def sweep_stalled(session, **kwargs):
+            seen.update(session=session, **kwargs)
+            return 0
+
+        monkeypatch.setattr(work_loop.activation_nudge, "sweep_stalled", sweep_stalled)
+        config = WorkerConfig(
+            activation_nudge_enabled=True,
+            web_app_origin=self.ORIGIN,
+            activation_nudge_limit=7,
+            activation_nudge_since_days=11,
+            activation_nudge_stall_seconds=1234,
+        )
+        session = object()
+        await self._nudge(config=config)(session, {"id": "job-1"})
+        assert seen == {
+            "session": session,
+            "since_days": 11,
+            "stall_seconds": 1234,
+            "limit": 7,
+            "web_app_origin": self.ORIGIN,
+        }
+
 
 class TestReconcilerSweepBranchesOnItsReason:
     """The `notify_window` half of the `02` §6 sweep (#1090 D4).

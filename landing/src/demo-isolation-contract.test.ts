@@ -39,6 +39,8 @@ const OWNED_DIRS = [
   path.join("lib", "demo"),
 ];
 const SHARED_FILES = [
+  // The sample's header draws the dashboard's drawer.
+  path.join("components", "dashboard", "nav-drawer.tsx"),
   path.join("components", "dashboard", "queue", "queue-view.tsx"),
   // QueueView draws Reschedule… with it, so the sample imports it too.
   path.join("components", "dashboard", "queue", "reschedule-dialog.tsx"),
