@@ -29,3 +29,34 @@ class TestTheListingDecidesWhatTheDrawMayTake:
         from src import worker
 
         assert worker.PUBLISH_MAX_BYTES is vocabulary.PUBLISH_MAX_BYTES
+
+
+class TestTheLastWholeWalkStart:
+    """`_last_whole_start`, read by a new walk and by the takeover (#1645):
+    the start of the folder's last walk that saw the whole tree."""
+
+    @pytest.mark.parametrize(
+        "stored, expected",
+        [
+            (None, None),
+            ({"started_at": "S2", "whole": True}, "S2"),
+            (
+                {
+                    "started_at": "S2",
+                    "whole": True,
+                    "partial": True,
+                    "last_whole_started_at": "S1",
+                },
+                "S1",
+            ),
+            ({"started_at": "S2", "last_whole_started_at": "S1"}, "S1"),
+            (
+                {"started_at": "S3", "last_whole_started_at": "S2", "page_token": "t"},
+                "S2",
+            ),
+            ({"started_at": "S3", "page_token": "t"}, None),
+        ],
+        ids=["nothing", "whole", "partial", "silent", "in_flight", "in_flight_unknown"],
+    )
+    def test_each_cursor_shape(self, stored, expected):
+        assert media_sync._last_whole_start(stored) == expected

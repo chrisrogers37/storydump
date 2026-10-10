@@ -691,6 +691,9 @@ async def _land_page(
                 walk,
             )
             return "stale"
+        whole_starts = (
+            await _whole_starts(s, workspace_id=workspace_id) if items else "{}"
+        )
         for item in items:
             if item.get("kind") not in _ALLOWED_KINDS:
                 skipped_kind += 1
@@ -743,14 +746,26 @@ async def _land_page(
                     # A retired row is adopted by whichever CONNECTED folder
                     # lists its bytes — including its own, should it find one
                     # retired under itself (a re-pick's revive lost a race).
-                    # A live row is adopted by whichever lists the same Drive
-                    # file, so a file moved between connected folders keeps
-                    # its row and never passes through `missing`.
+                    # A live row stays with its folder while that folder still
+                    # lists the file, so a file two connected folders both
+                    # list keeps one owner. Another folder listing the same
+                    # Drive file takes it over once a whole walk of the owner
+                    # has missed it (`_whole_starts`), so a file moved between
+                    # connected folders keeps its row. One such miss is enough
+                    # here, because that listing shows the file still exists;
+                    # the tombstone has no such proof, and waits for two.
                     # A removed folder's carrier never lands its page (the
-                    # cursor CAS above fails once the source is paused), so
-                    # no guard on the source is needed here.
+                    # cursor CAS above fails once the source is paused), so no
+                    # check that the listing folder is still connected is
+                    # needed here.
                     " WHERE media_items.state IN ('removed', 'missing')"
-                    "    OR media_items.provider_file_ref = EXCLUDED.provider_file_ref"
+                    "    OR (media_items.provider_file_ref = EXCLUDED.provider_file_ref"
+                    "        AND (media_items.source_id = EXCLUDED.source_id"
+                    "             OR GREATEST(media_items.created_at,"
+                    "                         media_items.last_listed_at)"
+                    "                < CAST(CAST(:whole_starts AS jsonb)"
+                    "                       ->> CAST(media_items.source_id AS text)"
+                    "                       AS timestamptz)))"
                     " RETURNING (xmax = 0) AS inserted"
                 ),
                 {
@@ -773,6 +788,7 @@ async def _land_page(
                     "mime": item.get("mime_type"),
                     "ref": item["ref"],
                     "thumb": item.get("thumbnail_link"),
+                    "whole_starts": whole_starts,
                 },
             )
             outcomes = [inserted for (inserted,) in result.all()]
@@ -842,16 +858,31 @@ _WALK_KEYS = ("started_at", "last_whole_started_at")
 
 
 def _last_whole_start(stored) -> Optional[str]:
-    """The start of the last walk that saw the whole tree, for the walk being
-    minted after *stored*: the stored walk's own start when it was whole,
-    else what it carried, since a walk that skipped part of the tree judges
-    nothing and moves nothing on. None when no whole walk is known: nothing
-    stored, a walk in flight, or a cursor a re-pick or a reset nulled."""
-    if not stored or checkpoint_incomplete(stored):
+    """The start of the last walk of *stored*'s folder that saw the whole
+    tree: the stored walk's own start when it was whole, else what it
+    carried, since a walk in flight or one that skipped part of the tree
+    judges nothing and moves nothing on. None when no whole walk is known:
+    nothing stored, or a cursor a re-pick or a reset nulled."""
+    if not stored:
         return None
     if walk_saw_whole_tree(stored):
         return stored.get("started_at")
     return stored.get("last_whole_started_at")
+
+
+async def _whole_starts(s, *, workspace_id: str) -> str:
+    """Each folder's `_last_whole_start`, keyed by source id, as JSON; a
+    folder with none is absent."""
+    rows = (
+        await s.execute(
+            text(
+                "SELECT id, sync_checkpoint FROM media_sources WHERE workspace_id = :ws"
+            ),
+            {"ws": workspace_id},
+        )
+    ).mappings()
+    starts = {str(r["id"]): _last_whole_start(r["sync_checkpoint"]) for r in rows}
+    return json.dumps({k: v for k, v in starts.items() if v})
 
 
 async def _tombstone_unlisted(s, checkpoint, *, source_id, workspace_id) -> int:
