@@ -1,7 +1,10 @@
+import { createElement } from "react";
+import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { SHARED_ROOT } from "@/lib/drive";
 import type { DriveFolder } from "@/lib/drive";
 import {
+  DriveFolderPickerDialog,
   driveRootLabel,
   folderAlreadyConnected,
   pickerCurrentFolder,
@@ -12,14 +15,15 @@ import {
 /**
  * The Drive folder picker's decisions, which had no test at all until #1216
  * — they were inline in an 821-line component, and `vitest.config.ts` pins
- * `environment: "node"` (it says why), so nothing that calls a hook can be
- * reached here. The picker answers that the way `api-tokens-tab.tsx` does:
+ * `environment: "node"` (it says why), so no test can press a button in the
+ * picker. The picker answers that the way `api-tokens-tab.tsx` does:
  * the decisions are named exports the component calls at the point the logic
  * used to be written out, so this file and the screen cannot drift.
  *
- * What is NOT covered, stated rather than implied: no test renders the
- * dialog, and none exercises `fetchDriveFolders`/`addDriveFolder` from here —
- * `lib/drive.test.ts` covers those doors.
+ * What is NOT covered, stated rather than implied: no test opens the dialog
+ * (the last block renders it closed, to a string, which shows its trigger and
+ * nothing inside it), and none exercises `fetchDriveFolders`/`addDriveFolder`
+ * from here — `lib/drive.test.ts` covers those doors.
  */
 
 const A: DriveFolder = { id: "fid-a", name: "Campaigns" };
@@ -102,5 +106,32 @@ describe("the root crumb's label", () => {
   it("names the root the listing hangs from", () => {
     expect(driveRootLabel("mine")).toBe("My Drive");
     expect(driveRootLabel("shared")).toBe("Shared with me");
+  });
+});
+
+/**
+ * Add folder, which is where focus has to go back when the picker closes
+ * (#1577). It shows what the button is. It does not show focus moving: that
+ * takes a DOM.
+ */
+describe("the Add folder button", () => {
+  const button = (disabled: boolean) =>
+    renderToString(
+      createElement(DriveFolderPickerDialog, {
+        workspaceId: "ws-1",
+        connectedRefs: new Set<string>(),
+        disabled,
+        onOpen: () => {},
+        onPicked: () => {},
+      }),
+    ).match(/<button[^>]*>Add folder<\/button>/)?.[0] ?? "";
+
+  it("opens the picker as its trigger, which is where Radix returns focus on close", () => {
+    expect(button(false)).toContain('aria-haspopup="dialog"');
+  });
+
+  it("still takes `disabled` through the trigger", () => {
+    expect(button(false)).not.toMatch(/\sdisabled=""/);
+    expect(button(true)).toMatch(/\sdisabled=""/);
   });
 });

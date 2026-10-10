@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,6 +11,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -67,10 +68,25 @@ export function DangerZoneCard({
   restorableUntil: string | null;
 }) {
   const router = useRouter();
+  const statusId = useId();
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const moveFocus = useRef(false);
+
+  // Deleting and restoring each replace the card's one button with the other,
+  // and the button that goes takes focus with it. So focus is moved by hand to
+  // the one that takes its place, rather than left on <body>. Only after this
+  // card's own action, since any other re-read of the page can change the
+  // state too. And only focus that was dropped: a person who has already moved
+  // on is left where they are.
+  useEffect(() => {
+    if (!moveFocus.current) return;
+    moveFocus.current = false;
+    if (document.activeElement === document.body) buttonRef.current?.focus();
+  }, [state]);
 
   async function offboard() {
     setError(null);
@@ -83,6 +99,7 @@ export function DangerZoneCard({
     }
     setOpen(false);
     setTyped("");
+    moveFocus.current = true;
     // Re-read: this card, the header and the switcher all render the state.
     router.refresh();
   }
@@ -96,6 +113,7 @@ export function DangerZoneCard({
       setError(offboardingRefusalCopy(result.error, result.status));
       return;
     }
+    moveFocus.current = true;
     router.refresh();
   }
 
@@ -106,7 +124,7 @@ export function DangerZoneCard({
           <CardTitle>This workspace is being deleted</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">
+          <p id={statusId} className="text-sm text-muted-foreground">
             Posting has stopped and connected Instagram and Google Drive access
             has been revoked. Everything in the workspace is deleted when the
             grace period ends. You can restore it {restoreDeadlineCopy(restorableUntil)}.
@@ -116,7 +134,12 @@ export function DangerZoneCard({
           {error && (
             <Notice tone="error">{error}</Notice>
           )}
-          <Button onClick={restore} disabled={busy}>
+          <Button
+            ref={buttonRef}
+            onClick={restore}
+            disabled={busy}
+            aria-describedby={statusId}
+          >
             {busy ? "Restoring..." : "Restore workspace"}
           </Button>
         </CardContent>
@@ -139,17 +162,19 @@ export function DangerZoneCard({
         {error && !open && (
           <Notice tone="error">{error}</Notice>
         )}
-        <Button
-          variant="destructive"
-          onClick={() => {
-            setError(null);
-            setOpen(true);
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            if (busy) return;
+            if (next) setError(null);
+            setOpen(next);
           }}
         >
-          Delete this workspace...
-        </Button>
-
-        <Dialog open={open} onOpenChange={(next) => !busy && setOpen(next)}>
+          <DialogTrigger asChild>
+            <Button ref={buttonRef} variant="destructive">
+              Delete this workspace...
+            </Button>
+          </DialogTrigger>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Delete {workspaceName}?</DialogTitle>
