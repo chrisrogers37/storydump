@@ -6,7 +6,6 @@ import {
   HISTORY_STATES,
   QUEUE_STATES,
   REVIEW_REQUIRED_STATE,
-  SCHEDULED_STATES,
   TERMINAL_STATES,
 } from "./dashboard-payloads";
 import {
@@ -145,15 +144,6 @@ describe("the intent-state partition agrees with the API", () => {
     const terminal = new Set(split(TERMINAL_STATES));
     for (const state of split(HISTORY_STATES)) {
       expect(terminal.has(state), `${state} shown as history but not terminal`).toBe(
-        true,
-      );
-    }
-  });
-
-  it("keeps the schedule strip a subset of the queue", () => {
-    const queue = new Set(split(QUEUE_STATES));
-    for (const state of split(SCHEDULED_STATES)) {
-      expect(queue.has(state), `${state} on the schedule strip but not queued`).toBe(
         true,
       );
     }

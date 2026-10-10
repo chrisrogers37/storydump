@@ -6,7 +6,10 @@ import {
   monthParam,
   parseDay,
   parseMonth,
+  predictedDays,
   shiftMonth,
+  upcomingCuts,
+  type UpcomingResponse,
 } from "./calendar-month";
 
 describe("the calendar's month and day params (#1634)", () => {
@@ -63,5 +66,60 @@ describe("the month's grid", () => {
     for (let month = 1; month <= 12; month++) {
       expect(monthGrid({ year: 2026, month }).dates.length).toBeLessThanOrEqual(42);
     }
+  });
+});
+
+describe("what is coming on the month (#1634 Phase 3b)", () => {
+  const slot = (day: string, hour: number) => ({
+    kind: "predicted" as const,
+    schedule_slot_at: `${day}T${String(hour).padStart(2, "0")}:00:00+00:00`,
+    day,
+    tz: "UTC",
+    ig_account_id: "a1",
+    account_handle: "example.brand",
+    account_display_name: "Example Co",
+  });
+  const upcoming = (over: Partial<UpcomingResponse> = {}): UpcomingResponse => ({
+    from: "2026-09-28",
+    to: "2026-11-02",
+    planned: [],
+    planned_truncated: false,
+    predicted: [],
+    predicted_truncated: false,
+    ...over,
+  });
+
+  it("counts the predicted slots on their days, soonest day first", () => {
+    const slots = [slot("2026-10-20", 9), slot("2026-10-20", 13), slot("2026-10-21", 9)];
+    expect(predictedDays(slots)).toEqual([
+      { date: "2026-10-20", count: 2 },
+      { date: "2026-10-21", count: 1 },
+    ]);
+    expect(predictedDays([])).toEqual([]);
+  });
+
+  it("vouches for every day of a list that was not cut", () => {
+    const whole = upcoming({ predicted: [slot("2026-10-20", 9)] });
+    expect(upcomingCuts(whole)).toEqual({ planned: null, predicted: null, first: null });
+  });
+
+  it("stops vouching for a cut list at its last row's day, and the month at the earlier cut", () => {
+    const cut = upcoming({
+      predicted: [slot("2026-10-20", 9), slot("2026-10-22", 9)],
+      predicted_truncated: true,
+    });
+    expect(upcomingCuts(cut)).toEqual({ planned: null, predicted: "2026-10-22", first: "2026-10-22" });
+
+    const planned = { day: "2026-10-25" } as UpcomingResponse["planned"][number];
+    const both = { ...cut, planned: [planned], planned_truncated: true };
+    expect(upcomingCuts(both)).toEqual({
+      planned: "2026-10-25",
+      predicted: "2026-10-22",
+      first: "2026-10-22",
+    });
+  });
+
+  it("vouches for nothing of a cut list with no rows, from the range's first day", () => {
+    expect(upcomingCuts(upcoming({ planned_truncated: true })).first).toBe("2026-09-28");
   });
 });

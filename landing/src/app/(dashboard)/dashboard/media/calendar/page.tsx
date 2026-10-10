@@ -4,11 +4,15 @@ import {
   POSTED_STATES,
   QUEUE_STATES,
   REVIEW_REQUIRED_STATE,
-  SCHEDULED_STATES,
   type StatsResponse,
   type WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
-import { LIST_LIMIT_MAX, type Intent, type IntentsResponse } from "@/lib/intents";
+import {
+  LIST_LIMIT_MAX,
+  NON_TERMINAL_STATES,
+  type Intent,
+  type IntentsResponse,
+} from "@/lib/intents";
 import {
   addDays,
   monthGrid,
@@ -17,34 +21,55 @@ import {
   NAMES_PER_DAY,
   parseDay,
   parseMonth,
+  predictedDays,
+  upcomingCuts,
   type IntentDaysResponse,
+  type UpcomingResponse,
 } from "@/lib/calendar-month";
 import { postingIntervalMinutes } from "@/lib/schedule";
+import { thumbnailMedia } from "@/lib/thumbnails";
 import { dateInZone } from "@/lib/zoned-dates";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
 import { CalendarDay } from "@/components/dashboard/media/calendar-day";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import { StatCard } from "@/components/ui/card";
 
-/** The calendar's lanes are all the intent ledger now, filtered by state. */
+/**
+ * A story on the calendar's lanes, from the intent ledger. Its picture is the
+ * fields the chip reads, not the whole row: the month is a client component,
+ * and every field handed to it is sent to the browser.
+ */
 const laneItem = (i: Intent) => ({
+  scheduled_for: i.schedule_slot_at,
   media_name: i.file_name,
   category: i.category ?? "uncategorised",
   status: i.state,
+  planned: i.origin === "planned",
+  media: thumbnailMedia(i),
 });
 
 /**
  * The calendar's bounded reads (`01` H5). Every COUNT on this page is one the
- * API counted: `stats`, or the month read's count per day. None is a list's
- * length.
+ * API counted: `stats`, or the month read's count per day. The one counted
+ * here is a day's predicted slots, from the upcoming read's list, which says
+ * where it was cut; every day from there on says it may hold more.
  *
- * The month on screen is one read (#1634): every local day on its grid with
- * how many stories it posted and the newest names (`intents/days`), so a day
- * early in a busy month is counted as fully as yesterday. A day opened from
- * its cell is one more read: that day's stories, every state, in time order.
+ * The month on screen is two reads (#1634). What it posted: every local day on
+ * its grid with how many stories it posted and the newest names
+ * (`intents/days`), so a day early in a busy month is counted as fully as
+ * yesterday. What is coming (`upcoming`): the stories a person planned that
+ * are still scheduled, and the slots the cadence will open, each on its local
+ * day. A day opened from its cell is one more read: that day's stories, every
+ * state, in time order.
  */
 const CALENDAR_QUEUE_LIMIT = 10;
-const CALENDAR_SCHEDULE_LIMIT = 15;
+
+/**
+ * The planned stories past their slot, waiting on a person or being posted.
+ * One still `scheduled` comes from the upcoming read, on its day, so each
+ * planned story is in one read.
+ */
+const PLANNED_UNDERWAY = NON_TERMINAL_STATES.filter((s) => s !== "scheduled").join(",");
 
 export default async function CalendarPage({
   searchParams,
@@ -70,29 +95,27 @@ export default async function CalendarPage({
   // A day off the grid is not this month's to open.
   const day = asked !== null && grid.dates.includes(asked) ? asked : null;
 
-  const [historyResult, queueResult, plannedResult, scheduleResult, statsResult, dayResult] =
+  const [historyResult, queueResult, plannedResult, upcomingResult, statsResult, dayResult] =
     await Promise.all([
       workspaceFetch<IntentDaysResponse>(
         `intents/days?state=${POSTED_STATES}&from=${grid.from}&to=${grid.to}&per_day=${NAMES_PER_DAY}`,
         workspaceId,
       ),
-      // The upcoming stories are split by origin, so each is in one read: the
-      // slot plan's soonest ten, and every story a person planned, which the
-      // ten can then never push off the month.
+      // The stories under way are split by origin, so each is in one read: the
+      // slot plan's soonest ten, and every story a person planned that is past
+      // its slot, which the ten can then never push off the month.
       workspaceFetch<IntentsResponse>(
         `intents?state=${QUEUE_STATES}&origin=cadence&limit=${CALENDAR_QUEUE_LIMIT}`,
         workspaceId,
       ),
       workspaceFetch<IntentsResponse>(
-        `intents?state=${QUEUE_STATES}&origin=planned&limit=${LIST_LIMIT_MAX}`,
+        `intents?state=${PLANNED_UNDERWAY}&origin=planned&limit=${LIST_LIMIT_MAX}`,
         workspaceId,
       ),
-      // The predicted strip is the slot plan's: a story a person planned is
-      // not a prediction, and is drawn in the queue lane as planned (#1413).
-      workspaceFetch<IntentsResponse>(
-        `intents?state=${SCHEDULED_STATES}&origin=cadence&limit=${CALENDAR_SCHEDULE_LIMIT}`,
-        workspaceId,
-      ),
+      // What is coming on the grid's days. A predicted slot is the API's
+      // projection of the cadence, never a story: the slot plan mints a story
+      // only when its slot comes due.
+      workspaceFetch<UpcomingResponse>(`upcoming?from=${grid.from}&to=${grid.to}`, workspaceId),
       workspaceFetch<StatsResponse>("stats", workspaceId),
       day === null
         ? null
@@ -109,7 +132,7 @@ export default async function CalendarPage({
     !historyResult.ok ||
     !queueResult.ok ||
     !plannedResult.ok ||
-    !scheduleResult.ok ||
+    !upcomingResult.ok ||
     !statsResult.ok ||
     (dayResult !== null && !dayResult.ok)
   ) {
@@ -118,20 +141,16 @@ export default async function CalendarPage({
 
   const stats = statsResult.data;
 
+  const upcoming = upcomingResult.data;
+  const underway = [...(queueResult.data.intents ?? []), ...(plannedResult.data.intents ?? [])];
   const queueItems = [
-    ...(queueResult.data.intents ?? []),
-    ...(plannedResult.data.intents ?? []),
-  ].map((i) => ({
-    ...laneItem(i),
-    scheduled_for: i.schedule_slot_at,
-    planned: i.origin === "planned",
-    media: i,
-  }));
-
-  const scheduleSlots = (scheduleResult.data.intents ?? []).map((i) => ({
-    slot_time: i.schedule_slot_at,
-    predicted_category: i.category,
-  }));
+    ...underway.map(laneItem),
+    // On the day the API placed it on, as the month's history is.
+    ...upcoming.planned.map((i) => ({ ...laneItem(i), day: i.day })),
+  ];
+  // Counted here, so the month is handed a count per day rather than every slot.
+  const predicted = predictedDays(upcoming.predicted);
+  const cuts = upcomingCuts(upcoming);
 
   // Counted where the rows are, not re-summed from the bounded lists above.
   // Today is the WORKSPACE's: `daily_post_counts.local_date` is its own date.
@@ -192,7 +211,8 @@ export default async function CalendarPage({
         month={month}
         history={historyResult.data.days ?? []}
         queue={queueItems}
-        schedule={scheduleSlots}
+        predicted={predicted}
+        incompleteFrom={cuts.first}
         tz={tz}
         navigable
         selected={day}
@@ -203,6 +223,8 @@ export default async function CalendarPage({
         <CalendarDay
           date={day}
           intents={dayIntents}
+          predicted={upcoming.predicted.filter((slot) => slot.day === day)}
+          predictedCut={cuts.predicted !== null && day >= cuts.predicted}
           tz={tz}
           workspaceId={workspaceId}
           closeHref={`?month=${monthParam(month)}`}

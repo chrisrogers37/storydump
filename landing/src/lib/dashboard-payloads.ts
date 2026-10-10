@@ -236,9 +236,6 @@ export const TERMINAL_STATES = TERMINAL_STATE_LIST.join(",");
  */
 export const REVIEW_REQUIRED_STATE = "review_required";
 
-/** The schedule strip: only what has a slot. #1044 names this one. */
-export const SCHEDULED_STATES = "scheduled";
-
 // ── Derived views ──────────────────────────────────────────────────────────
 
 /**

@@ -17,18 +17,20 @@ import {
   shiftMonth,
   type IntentDay,
   type Month,
+  type PredictedDay,
 } from "@/lib/calendar-month";
 import { TONE_CLASS, TONE_DOT, type BadgeTone } from "@/components/dashboard/tone";
 import { mediaTile } from "@/components/dashboard/media/media-tile";
 import type { ThumbnailMedia } from "@/lib/thumbnails";
 
-interface ScheduleSlot {
-  slot_time: string;
-  predicted_category: string | null;
-}
-
 interface QueueItem {
   scheduled_for: string;
+  /**
+   * The day the API placed it on, in the workspace's zone: the upcoming read's
+   * planned stories carry one (#1634). Without one it is drawn on the day its
+   * slot falls on in `tz`.
+   */
+  day?: string;
   media_name: string;
   category: string;
   status: string;
@@ -50,29 +52,40 @@ interface CalendarDay {
   posts: {
     label: string;
     category: string;
-    type: "past" | "queued" | "planned" | "predicted";
-    /** The story's picture; a predicted slot has no story yet, and none. */
-    media?: ThumbnailMedia;
+    type: "past" | "queued" | "planned";
+    /** The story's picture. */
+    media: ThumbnailMedia;
   }[];
+  /**
+   * How many slots the cadence will open on the day (#1634). Predictions, never
+   * stories: a slot has no file until it draws one, so it is counted, not named.
+   */
+  predicted: number;
+  /** A list of what is coming was cut on or before the day, so it may hold more than it shows. */
+  incomplete: boolean;
 }
+
+type PostType = CalendarDay["posts"][number]["type"];
 
 /** Chips a day draws before "+N more". */
 const CHIPS_PER_DAY = 3;
 
 /**
  * The month's grid, read in the workspace's zone (#1511). Today and the day
- * each item falls on are read in `tz`, the zone the Queue's times already
- * use; the month's history arrives already grouped by the workspace's local
- * day (`GET …/intents/days`). The grid itself is calendar arithmetic on UTC
- * dates (`monthGrid`), which has no zone to disagree about.
+ * each queued item falls on are read in `tz`, the zone the Queue's times
+ * already use; the month's history, its planned stories and its predicted
+ * slots arrive already placed on the workspace's local days
+ * (`GET …/intents/days`, `GET …/upcoming`). The grid itself is calendar
+ * arithmetic on UTC dates (`monthGrid`), which has no zone to disagree about.
  */
 export function buildCalendarDays(
   month: Month,
   history: IntentDay[],
   queue: QueueItem[],
-  schedule: ScheduleSlot[],
+  predicted: PredictedDay[],
   tz: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  incompleteFrom: string | null = null
 ): { month: string; days: CalendarDay[] } {
   const today = dateInZone(now, tz);
 
@@ -95,20 +108,14 @@ export function buildCalendarDays(
     }
   }
   for (const item of queue) {
-    add(dateInZone(item.scheduled_for, tz), {
+    add(item.day ?? dateInZone(item.scheduled_for, tz), {
       label: item.media_name,
       category: item.category,
       type: item.planned ? "planned" : "queued",
       media: item.media ?? { file_name: item.media_name },
     });
   }
-  for (const slot of schedule) {
-    add(dateInZone(slot.slot_time, tz), {
-      label: slot.predicted_category || "any",
-      category: slot.predicted_category || "any",
-      type: "predicted",
-    });
-  }
+  const predictedByDate = new Map(predicted.map((day) => [day.date, day.count] as const));
 
   const days = monthGrid(month).dates.map((date) => {
     const posted = postedByDate.get(date);
@@ -120,6 +127,8 @@ export function buildCalendarDays(
       posted: posted?.count ?? 0,
       postedUnnamed: posted ? posted.count - posted.newest.length : 0,
       posts: postsByDate.get(date) || [],
+      predicted: predictedByDate.get(date) ?? 0,
+      incomplete: incompleteFrom !== null && date >= incompleteFrom,
     };
   });
 
@@ -146,7 +155,7 @@ const typeTone = {
 const PLANNED_CHIP = "ring-1 ring-inset ring-tap text-tap-ink";
 const PLANNED_DOT = "ring-1 ring-inset ring-tap";
 
-function chipClass(type: CalendarDay["posts"][number]["type"]): string {
+function chipClass(type: PostType): string {
   return type === "planned" ? PLANNED_CHIP : TONE_CLASS[typeTone[type]];
 }
 
@@ -166,12 +175,36 @@ function MonthLink({ month, direction }: { month: Month; direction: -1 | 1 }) {
 }
 
 /**
- * The days a phone lists (#1649 F12): this month's that hold something, in
- * order. Seven columns at 390 px leave a name two to four letters, so a phone
- * reads the month as a list of its days and their names at full width.
+ * The days a phone lists (#1649 F12): this month's that hold something, or
+ * may hold more than was read (#1634), in order. Seven columns at 390 px leave
+ * a name two to four letters, so a phone reads the month as a list of its
+ * days and their names at full width.
  */
 export function listedDays(days: CalendarDay[]): CalendarDay[] {
-  return days.filter((d) => d.isCurrentMonth && (d.posted > 0 || d.posts.length > 0));
+  return days.filter(
+    (d) =>
+      d.isCurrentMonth &&
+      (d.posted > 0 || d.posts.length > 0 || d.predicted > 0 || d.incomplete)
+  );
+}
+
+/**
+ * What a day's link says. A screen reader reads it in place of the chips, so
+ * it counts everything they draw (#1634): a day ahead has posted nothing, and
+ * "0 posted" would read it as empty.
+ */
+export function dayLabel(day: CalendarDay): string {
+  const stories = (type: PostType) => day.posts.filter((post) => post.type === type).length;
+  const counts: [number, string][] = [
+    [day.posted, "posted"],
+    [stories("queued"), "in queue"],
+    [stories("planned"), "planned"],
+    [day.predicted, "predicted"],
+  ];
+  const parts = counts.filter(([n]) => n > 0).map(([n, what]) => `${n} ${what}`);
+  if (day.incomplete) parts.push("not all shown");
+  const date = formatCalendarDate(day.date, { weekday: "long", month: "long", day: "numeric" });
+  return parts.length > 0 ? `${date}: ${parts.join(", ")}` : date;
 }
 
 /** A chip's picture box, by where the chip is drawn: a grid cell or a phone's row. */
@@ -182,7 +215,9 @@ const CHIP_TILE = {
 
 /**
  * A day's first chips, each with its story's picture beside its name (#1634),
- * and "+N more" for its other items and unnamed posts.
+ * and "+N more" for its other items and unnamed posts. Then how many slots the
+ * cadence will open on the day, and, when a list was cut, that the day may
+ * hold more than it shows.
  */
 export function DayChips({
   day,
@@ -207,8 +242,7 @@ export function DayChips({
           )}
           title={post.label}
         >
-          {post.media &&
-            mediaTile({ media: post.media, workspaceId, ...CHIP_TILE[size], badge: false })}
+          {mediaTile({ media: post.media, workspaceId, ...CHIP_TILE[size], badge: false })}
           <span className="min-w-0 truncate">
             {post.type === "planned" && <span className="sr-only">Planned: </span>}
             {post.label}
@@ -216,6 +250,14 @@ export function DayChips({
         </div>
       ))}
       {more > 0 && <div className={cn("px-1 text-muted-foreground", text)}>+{more} more</div>}
+      {day.predicted > 0 && (
+        <div className={cn("rounded px-1 py-0.5", text, TONE_CLASS[typeTone.predicted])}>
+          {day.predicted} predicted
+        </div>
+      )}
+      {day.incomplete && (
+        <div className={cn("px-1 italic text-muted-foreground", text)}>Not all shown</div>
+      )}
     </div>
   );
 }
@@ -255,7 +297,8 @@ export function ContentCalendar({
   month,
   history,
   queue,
-  schedule,
+  predicted,
+  incompleteFrom = null,
   tz = "UTC",
   navigable = false,
   selected = null,
@@ -266,7 +309,17 @@ export function ContentCalendar({
   /** The month's posted stories, a count and the newest names per local day. */
   history: IntentDay[];
   queue: QueueItem[];
-  schedule: ScheduleSlot[];
+  /**
+   * How many slots the cadence will open on each local day (#1634):
+   * predictions, drawn as a count and labelled as such, never as stories.
+   */
+  predicted: PredictedDay[];
+  /**
+   * The first day a list of what is coming was cut on (#1634). From it on, a
+   * day may hold more than it shows, and says so. The sample workspace's lists
+   * are whole.
+   */
+  incompleteFrom?: string | null;
   /**
    * The workspace's zone, which today, the month and each item's day are read
    * in. Without one it reads UTC, the zone the API writes its timestamps in.
@@ -286,8 +339,8 @@ export function ContentCalendar({
   workspaceId?: string | null;
 }) {
   const { month: monthName, days } = useMemo(
-    () => buildCalendarDays(month, history, queue, schedule, tz),
-    [month, history, queue, schedule, tz]
+    () => buildCalendarDays(month, history, queue, predicted, tz, new Date(), incompleteFrom),
+    [month, history, queue, predicted, tz, incompleteFrom]
   );
 
   const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -376,11 +429,7 @@ export function ContentCalendar({
                   href={dayHref(day.date)}
                   scroll={false}
                   className={cn(cellClass(day), "hover:bg-muted/50")}
-                  aria-label={`${formatCalendarDate(day.date, {
-                    weekday: "long",
-                    month: "long",
-                    day: "numeric",
-                  })}, ${day.posted} posted`}
+                  aria-label={dayLabel(day)}
                   aria-current={day.date === selected ? "date" : undefined}
                 >
                   <DayContents day={day} workspaceId={workspaceId} />
@@ -393,6 +442,19 @@ export function ContentCalendar({
             )}
           </div>
         </div>
+
+        {incompleteFrom !== null && (
+          <p className="mt-3 text-xs text-muted-foreground">
+            From{" "}
+            {formatCalendarDate(incompleteFrom, {
+              weekday: "short",
+              month: "short",
+              day: "numeric",
+            })}
+            , the calendar shows only part of what is planned and predicted: there is more than it
+            reads at once.
+          </p>
+        )}
       </CardContent>
     </Card>
   );

@@ -42,6 +42,20 @@ export type ThumbnailMedia = {
 };
 
 /**
+ * The fields a picture reads, copied off a larger row: what a client component
+ * is handed for a story's picture, rather than the whole row.
+ */
+export function thumbnailMedia({
+  file_name,
+  media_kind,
+  media_item_id,
+  has_thumbnail,
+  thumbnail_version,
+}: ThumbnailMedia): ThumbnailMedia {
+  return { file_name, media_kind, media_item_id, has_thumbnail, thumbnail_version };
+}
+
+/**
  * The row's thumbnail URL, or null when it has no picture or there is no
  * workspace to ask, which is how the sample workspace draws.
  */
