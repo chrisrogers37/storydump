@@ -319,17 +319,13 @@ REGISTRY: dict[str, Optional[Executor]] = _build_registry()
 UNBUILT: tuple[str, ...] = tuple(k for k in VOCABULARY if REGISTRY[k] is None)
 
 
-async def execute(
-    session, command: Command, *, tenant_bound: bool = False
-) -> CommandResult:
+async def execute(session, command: Command) -> CommandResult:
     """Gate, then execute. The ONE path every adapter takes.
 
     *session* is the caller's open unit of work (tenant + actor GUCs already
-    applied — `02` §0's writer-identity rule, enforced by the audit triggers).
-    *tenant_bound* says the caller applied `app.tenant_id` for THIS
-    `command.workspace_id` in this transaction already, so the gate need not
-    set it again (#1286: one round trip per tap); a caller that cannot vouch
-    for that leaves it False and the gate binds the claim itself.
+    applied — `02` §0's writer-identity rule, enforced by the audit triggers),
+    bound to `command.workspace_id` for any command the gate checks
+    (`tenant_resolution.authorize_member`).
 
     Order is load-bearing: unknown → refused cold (no gate, nothing to
     authorize against); then the gate; then not-built; then the executor. A
@@ -354,11 +350,7 @@ async def execute(
         if not command.workspace_id:
             raise CommandRefused("workspace_required", command.kind)
         await tenant_resolution.authorize_member(
-            session,
-            command.workspace_id,
-            command.actor_user_id,
-            floor,
-            tenant_bound=tenant_bound,
+            session, command.workspace_id, command.actor_user_id, floor
         )
 
     executor = REGISTRY.get(command.kind)
@@ -377,7 +369,6 @@ async def ingest(
     external_ref: str,
     principal: str,
     payload: Any,
-    tenant_bound: bool = False,
 ) -> CommandResult:
     """Refuse cold → admit → execute, in the caller's one transaction.
 
@@ -386,8 +377,7 @@ async def ingest(
     what the fingerprint is taken over — the adapter's raw body, so a replay
     of the same request matches regardless of what the adapter added to
     ``command.args``. Admission's own refusals (`DeliveryReplayed`,
-    `AdmissionConflict`) propagate for the adapter to answer. *tenant_bound*
-    is `execute`'s, forwarded.
+    `AdmissionConflict`) propagate for the adapter to answer.
     """
     if command.kind not in ROLE_FLOOR:
         raise UnknownCommand(command.kind)
@@ -398,4 +388,4 @@ async def ingest(
         payload=payload,
         principal=principal,
     )
-    return await execute(session, command, tenant_bound=tenant_bound)
+    return await execute(session, command)

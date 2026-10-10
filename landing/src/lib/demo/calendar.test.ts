@@ -69,21 +69,56 @@ describe("the sample's calendar lanes", () => {
     ]);
   });
 
-  it("draws a story marked posted under Posted, in its slot's day, beside the month's posts", () => {
+  it("groups what posted by its slot's day, as the real month read does (#1634): a marked story beside the month's posts", () => {
     // A story keeps its cell: marking it posted a day late changes its lane, not its day.
+    const named = (file: string) => ({
+      id: file,
+      state: "posted",
+      schedule_slot_at: "2026-10-15T14:00:00.000Z",
+      file_name: file,
+      category: "Memes",
+    });
     expect(lanes.history).toEqual([
-      { posted_at: "2026-10-15T14:00:00.000Z", media_name: "marked.jpg", category: "Memes", status: "posted" },
-      { posted_at: "2026-10-15T14:00:00.000Z", media_name: "posted.jpg", category: "Memes", status: "posted" },
+      { date: "2026-10-15", count: 2, newest: [named("marked.jpg"), named("posted.jpg")] },
+    ]);
+  });
+
+  it("counts every post of a day, and names the newest three", () => {
+    // The month read's own shape: a count, and at most its `per_day` names.
+    const hours = ["09", "11", "13", "15", "17"];
+    const posts = hours.map((hour) => ({
+      ...story(`posted-${hour}.jpg`, "posted"),
+      schedule_slot_at: `2026-10-15T${hour}:00:00.000Z`,
+    }));
+    const [day] = demoCalendarLanes([], posts).history;
+    expect(day.count).toBe(5);
+    expect(day.newest.map((n) => n.file_name)).toEqual([
+      "posted-17.jpg",
+      "posted-15.jpg",
+      "posted-13.jpg",
     ]);
   });
 
   it("draws each story once, and drops one that was skipped or rejected", () => {
-    const named = [...lanes.queue.map((i) => i.media_name), ...lanes.history.map((i) => i.media_name)];
+    const posted = lanes.history.flatMap((day) => day.newest.map((n) => n.file_name));
+    const named = [...lanes.queue.map((i) => i.media_name), ...posted];
     for (const gone of ["skipped.jpg", "rejected.jpg", "old-skip.jpg", "old-reject.jpg"]) {
       expect(named).not.toContain(gone);
     }
     // Scheduled is Predicted only, never In Queue as well.
     expect(named).not.toContain("later.jpg");
     expect(new Set(named).size).toBe(named.length);
+  });
+
+  it("draws the month the visitor is in, on the sample's own clock", () => {
+    expect(demoCalendarLanes([], [], new Date("2026-10-02T12:00:00Z")).month).toEqual({
+      year: 2026,
+      month: 10,
+    });
+    // Half past midnight in London on 1 October is still September in UTC.
+    expect(demoCalendarLanes([], [], new Date("2026-09-30T23:30:00Z")).month).toEqual({
+      year: 2026,
+      month: 10,
+    });
   });
 });

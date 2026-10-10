@@ -562,15 +562,12 @@ class TelegramDispatcher:
         review of #1271).
         """
         begin_nested = getattr(conn, "begin_nested", None)
-        # `tenant_bound`: `_tap`'s GUC statement already set this workspace as
-        # the transaction's tenant; the gate's own re-set would be a round trip
-        # for nothing (#1286).
         if callable(begin_nested):
             async with begin_nested():
-                result = await commands.execute(conn, command, tenant_bound=True)
+                result = await commands.execute(conn, command)
                 await self._debit(conn, tenant.workspace_id, window, limit, result)
         else:
-            result = await commands.execute(conn, command, tenant_bound=True)
+            result = await commands.execute(conn, command)
             await self._debit(conn, tenant.workspace_id, window, limit, result)
         return result
 
