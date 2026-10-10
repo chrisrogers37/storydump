@@ -1,5 +1,5 @@
 import type { ContentCalendar } from "@/components/dashboard/media/content-calendar";
-import { monthOf, NAMES_PER_DAY, type IntentDay } from "@/lib/calendar-month";
+import { monthOf, NAMES_PER_DAY, predictedDays, type IntentDay } from "@/lib/calendar-month";
 import type { Intent } from "@/lib/intents";
 import { dateInZone } from "@/lib/zoned-dates";
 import { SAMPLE_TZ, type FinishedStory } from "./fixtures";
@@ -17,13 +17,14 @@ export type CalendarLanes = Parameters<typeof ContentCalendar>[0];
  *    changes its lane;
  *  - In Queue: a story waiting for a tap, under its file name, in its slot,
  *    as the Queue lists it;
- *  - Predicted: a scheduled story, labelled by its folder, as the real
- *    Calendar's predicted lane holds the slot plan's scheduled stories;
+ *  - Predicted: the scheduled stories, counted on their days and labelled as
+ *    predicted, as the real Calendar counts the slots its cadence will open
+ *    (#1634). The sample's slot plan is a fixture, so its next slots already
+ *    hold stories, where a real cadence mints one only as its slot comes due;
  *  - a skipped or rejected story leaves the calendar.
  *
- * Each story is drawn once. The real Calendar's queue read also returns its
- * scheduled stories, which it then draws in both lanes. The sample draws this
- * month on its own clock, with no month or day to navigate to.
+ * Each story is drawn once. The sample draws this month on its own clock, with
+ * no month or day to navigate to.
  */
 export function demoCalendarLanes(
   queue: Intent[],
@@ -61,11 +62,10 @@ export function demoCalendarLanes(
         status: i.state,
         planned: i.origin === "planned",
       })),
-    schedule: queue
-      .filter((i) => i.state === "scheduled")
-      .map((i) => ({
-        slot_time: i.schedule_slot_at,
-        predicted_category: i.category,
-      })),
+    predicted: predictedDays(
+      queue
+        .filter((i) => i.state === "scheduled")
+        .map((i) => ({ day: dateInZone(i.schedule_slot_at, SAMPLE_TZ) })),
+    ),
   };
 }

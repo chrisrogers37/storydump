@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { thumbnailFor, thumbnailSrc } from "./thumbnails";
+import { thumbnailFor, thumbnailMedia, thumbnailSrc } from "./thumbnails";
 
 describe("thumbnailSrc (#1634)", () => {
   it("names this tier's route, never a provider's host, and carries the version", () => {
@@ -36,5 +36,26 @@ describe("thumbnailFor (#1634)", () => {
 
   it("is nothing for a row without the thumbnail's fields, as the sample's calendar draws", () => {
     expect(thumbnailFor({ file_name: "a.jpg" }, "ws-1")).toBeNull();
+  });
+});
+
+describe("thumbnailMedia (#1634)", () => {
+  it("copies the fields a picture reads off a larger row, and nothing else", () => {
+    const row = {
+      id: "intent-1",
+      caption: "a caption the picture does not read",
+      file_name: "a.jpg",
+      media_kind: "image",
+      media_item_id: "media-1",
+      has_thumbnail: true,
+      thumbnail_version: "v1",
+    };
+    expect(thumbnailMedia(row)).toStrictEqual({
+      file_name: "a.jpg",
+      media_kind: "image",
+      media_item_id: "media-1",
+      has_thumbnail: true,
+      thumbnail_version: "v1",
+    });
   });
 });

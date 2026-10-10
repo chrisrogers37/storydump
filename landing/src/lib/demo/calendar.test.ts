@@ -63,10 +63,9 @@ describe("the sample's calendar lanes", () => {
     ]);
   });
 
-  it("predicts a scheduled story by its folder, as the real Calendar's predicted lane does", () => {
-    expect(lanes.schedule).toEqual([
-      { slot_time: "2026-10-15T14:00:00.000Z", predicted_category: "Memes" },
-    ]);
+  it("counts a scheduled story as a predicted slot on its day, as the real Calendar counts its cadence's (#1634)", () => {
+    // 3 PM in London: a count per day, with no file and no folder.
+    expect(lanes.predicted).toEqual([{ date: "2026-10-15", count: 1 }]);
   });
 
   it("groups what posted by its slot's day, as the real month read does (#1634): a marked story beside the month's posts", () => {

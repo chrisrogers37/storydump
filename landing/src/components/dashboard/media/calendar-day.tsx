@@ -2,26 +2,39 @@ import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import { mediaTile } from "@/components/dashboard/media/media-tile";
+import type { PredictedSlot } from "@/lib/calendar-month";
 import type { Intent } from "@/lib/intents";
 import { cn } from "@/lib/utils";
-import { formatCalendarDate, formatInZone } from "@/lib/zoned-dates";
+import { formatCalendarDate, formatInZone, instant } from "@/lib/zoned-dates";
+
+/** Who a predicted slot posts for: the account's handle, else its name. */
+function accountOf(slot: PredictedSlot): string {
+  if (slot.account_handle) return `@${slot.account_handle}`;
+  return slot.account_display_name ?? "An account";
+}
 
 /**
  * One day of the calendar, opened from its cell (#1634): every story the day
- * holds, in time order, with its picture, its time in the workspace's zone
- * and its state. The grid shows a day's first few names and "+N more"; this
- * is the rest.
+ * holds and every slot the cadence will open on it, in time order, each time
+ * in the workspace's zone. A story shows its picture and its state. A
+ * predicted slot shows neither and says it is predicted: it is a place the
+ * cadence will look for a story, not a story. The grid shows a day's first
+ * few names and "+N more"; this is the rest.
  */
 export function CalendarDay({
   date,
   intents,
+  predicted,
   tz,
   workspaceId,
   closeHref,
   truncatedAt,
+  predictedCut,
 }: {
   date: string;
   intents: Intent[];
+  /** The slots the cadence will open on the day (`GET …/upcoming`). */
+  predicted: PredictedSlot[];
   tz: string;
   /** The workspace whose thumbnails the rows ask for. */
   workspaceId: string;
@@ -29,7 +42,15 @@ export function CalendarDay({
   closeHref: string;
   /** The read's limit when the day reached it, so a page is not read as the whole. */
   truncatedAt: number | null;
+  /** The predicted slots were cut on or before this day, so it may hold more of them. */
+  predictedCut: boolean;
 }) {
+  // The sort is stable and the stories come first, so a story precedes a slot at its time.
+  const rows: (Intent | PredictedSlot)[] = [...intents, ...predicted].sort(
+    (a, b) => instant(a.schedule_slot_at).getTime() - instant(b.schedule_slot_at).getTime()
+  );
+  const time = (at: string) => formatInZone(at, tz, { hour: "numeric", minute: "2-digit" });
+
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between pb-3">
@@ -45,42 +66,67 @@ export function CalendarDay({
         </Link>
       </CardHeader>
       <CardContent>
-        {intents.length === 0 ? (
+        {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">No stories on this day.</p>
         ) : (
           <ul className="divide-y">
-            {intents.map((intent) => (
-              <li key={intent.id} className="flex items-center gap-3 py-2 text-sm">
-                {mediaTile({
-                  media: intent,
-                  workspaceId,
-                  box: "h-10 w-10 rounded-md",
-                  glyph: "h-5 w-5",
-                })}
-                <span className="w-20 shrink-0 tabular-nums text-muted-foreground">
-                  {formatInZone(intent.schedule_slot_at, tz, {
-                    hour: "numeric",
-                    minute: "2-digit",
-                  })}
-                </span>
-                <span className="min-w-0 grow truncate" title={intent.file_name}>
-                  {intent.file_name}
-                </span>
-                <span
-                  className={cn(
-                    "shrink-0 rounded px-1.5 py-0.5 text-xs",
-                    TONE_CLASS[INTENT_STATE_TONE[intent.state]]
-                  )}
+            {rows.map((row) =>
+              "kind" in row ? (
+                <li
+                  key={`${row.ig_account_id}@${row.schedule_slot_at}`}
+                  className="flex items-center gap-3 py-2 text-sm"
                 >
-                  {intent.state.replaceAll("_", " ")}
-                </span>
-              </li>
-            ))}
+                  <div
+                    className="h-10 w-10 shrink-0 rounded-md border border-dashed border-muted-foreground/40"
+                    aria-hidden
+                  />
+                  <span className="w-20 shrink-0 tabular-nums text-muted-foreground">
+                    {time(row.schedule_slot_at)}
+                  </span>
+                  <span className="min-w-0 grow truncate text-muted-foreground">
+                    {accountOf(row)}
+                  </span>
+                  <span
+                    className={cn("shrink-0 rounded px-1.5 py-0.5 text-xs", TONE_CLASS.inert)}
+                  >
+                    predicted
+                  </span>
+                </li>
+              ) : (
+                <li key={row.id} className="flex items-center gap-3 py-2 text-sm">
+                  {mediaTile({
+                    media: row,
+                    workspaceId,
+                    box: "h-10 w-10 rounded-md",
+                    glyph: "h-5 w-5",
+                  })}
+                  <span className="w-20 shrink-0 tabular-nums text-muted-foreground">
+                    {time(row.schedule_slot_at)}
+                  </span>
+                  <span className="min-w-0 grow truncate" title={row.file_name}>
+                    {row.file_name}
+                  </span>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded px-1.5 py-0.5 text-xs",
+                      TONE_CLASS[INTENT_STATE_TONE[row.state]]
+                    )}
+                  >
+                    {row.state.replaceAll("_", " ")}
+                  </span>
+                </li>
+              )
+            )}
           </ul>
         )}
         {truncatedAt !== null && (
           <p className="mt-2 text-xs text-muted-foreground">
             Showing the first {truncatedAt} stories of this day.
+          </p>
+        )}
+        {predictedCut && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            This day may hold more predicted slots than are shown.
           </p>
         )}
       </CardContent>

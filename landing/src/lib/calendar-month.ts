@@ -8,6 +8,7 @@
  * disagree about.
  */
 
+import type { Intent } from "@/lib/intents";
 import type { ThumbnailMedia } from "@/lib/thumbnails";
 
 /** A month, `month` 1-12. */
@@ -109,4 +110,70 @@ export function monthGrid({ year, month }: Month): {
     dates.push(isoDay(d));
   }
   return { from: dates[0], to: addDays(dates[dates.length - 1], 1), dates };
+}
+
+/** A planned story of `GET /workspaces/{ws}/upcoming`: the intents read's row and its day. */
+export type PlannedStory = Intent & {
+  /** The day its slot falls on in the workspace's zone. */
+  day: string;
+};
+
+/**
+ * A slot the cadence will open, from the same read: a place the cadence will
+ * look for a story, not a story, so it has no state, no file and no folder.
+ */
+export type PredictedSlot = {
+  kind: "predicted";
+  schedule_slot_at: string;
+  /** The day the slot falls on in the workspace's zone. */
+  day: string;
+  /** The zone its account posts in. The calendar reads every time in the workspace's. */
+  tz: string;
+  ig_account_id: string;
+  account_handle: string | null;
+  account_display_name: string | null;
+};
+
+/**
+ * `GET /workspaces/{ws}/upcoming?from=&to=`: what is coming on the local days
+ * `[from, to)`, each list soonest first and cut at its own limit.
+ */
+export type UpcomingResponse = {
+  from: string;
+  to: string;
+  /** The stories a person planned that are still `scheduled`. */
+  planned: PlannedStory[];
+  planned_truncated: boolean;
+  predicted: PredictedSlot[];
+  predicted_truncated: boolean;
+};
+
+/** How many slots the cadence will open on a local day: a count, never a list of stories. */
+export type PredictedDay = { date: string; count: number };
+
+/** The predicted slots counted on their days, soonest day first. */
+export function predictedDays(slots: { day: string }[]): PredictedDay[] {
+  const counts = new Map<string, number>();
+  for (const { day } of slots) counts.set(day, (counts.get(day) ?? 0) + 1);
+  return [...counts].map(([date, count]) => ({ date, count }));
+}
+
+/**
+ * Where the upcoming read stops vouching for its lists. Each list is cut by
+ * count in slot order, so a cut list is whole before its last row's day, may
+ * be short on that day, and holds nothing of the days after it. `planned` and
+ * `predicted` are each list's first such day, null when it was not cut, and
+ * `first` is the earlier: from it on, a day may show less than it holds.
+ */
+export function upcomingCuts(upcoming: UpcomingResponse): {
+  planned: string | null;
+  predicted: string | null;
+  first: string | null;
+} {
+  const cut = (rows: { day: string }[], truncated: boolean) =>
+    truncated ? (rows.at(-1)?.day ?? upcoming.from) : null;
+  const planned = cut(upcoming.planned, upcoming.planned_truncated);
+  const predicted = cut(upcoming.predicted, upcoming.predicted_truncated);
+  const first = [planned, predicted].filter((day) => day !== null).sort()[0] ?? null;
+  return { planned, predicted, first };
 }

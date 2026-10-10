@@ -1,9 +1,10 @@
 /**
- * Which stories the calendar asks for: the month on screen, the day opened
- * from it, and that a planned story reaches the month however busy the queue
- * is. The page, an async server component, is called directly with its two
- * doors mocked — the session guard and the target fetch — and the returned
- * element tree is read without rendering it (`environment: "node"`).
+ * Which stories the calendar asks for: the month on screen, what is coming on
+ * it, the day opened from it, and that a planned story reaches the month
+ * however busy the queue is. The page, an async server component, is called
+ * directly with its two doors mocked — the session guard and the target fetch
+ * — and the returned element tree is read without rendering it
+ * (`environment: "node"`).
  *
  * The page makes several reads, so `readOf()` tells them apart by their path
  * and query, and `answer()` answers every read from one table.
@@ -23,6 +24,7 @@ import CalendarPage from "./page";
 import { CalendarDay } from "@/components/dashboard/media/calendar-day";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
+import type { PredictedSlot, UpcomingResponse } from "@/lib/calendar-month";
 import { QUEUE_STATES } from "@/lib/dashboard-payloads";
 import { LIST_LIMIT_MAX, type Intent } from "@/lib/intents";
 
@@ -75,7 +77,33 @@ function story(id: string, over: Partial<Intent> = {}): Intent {
   };
 }
 
-type Read = "month" | "day" | "queue" | "planned" | "predicted" | "stats" | "config";
+/** A slot the cadence will open, on its day in the workspace's zone. */
+function slot(day: string, hour: number, over: Partial<PredictedSlot> = {}): PredictedSlot {
+  return {
+    kind: "predicted",
+    schedule_slot_at: `${day}T${String(hour).padStart(2, "0")}:00:00+00:00`,
+    day,
+    tz: "America/New_York",
+    ig_account_id: "a1",
+    account_handle: "example.brand",
+    account_display_name: "Example Co",
+    ...over,
+  };
+}
+
+/** The upcoming read's answer for October's grid; `over` replaces some of it. */
+const coming = (over: Partial<UpcomingResponse> = {}) =>
+  ok({
+    from: "2026-09-28",
+    to: "2026-11-02",
+    planned: [],
+    planned_truncated: false,
+    predicted: [],
+    predicted_truncated: false,
+    ...over,
+  });
+
+type Read = "month" | "day" | "queue" | "planned" | "upcoming" | "stats" | "config";
 
 /** Which read a path is. */
 function readOf(path: string): Read {
@@ -83,12 +111,13 @@ function readOf(path: string): Read {
   if (head === "") return "config";
   if (head === "stats") return "stats";
   if (head === "intents/days") return "month";
+  if (head === "upcoming") return "upcoming";
   if (head !== "intents") throw new Error(`unexpected read: ${path}`);
   const q = new URLSearchParams(query);
   if (q.has("from")) return "day";
   if (q.get("origin") === "planned") return "planned";
-  if (q.get("state") === "scheduled") return "predicted";
-  return "queue";
+  if (q.get("origin") === "cadence") return "queue";
+  throw new Error(`unexpected intents read: ${path}`);
 }
 
 /** Answer each read from one table; `over` replaces some of it. */
@@ -98,7 +127,7 @@ function answer(over: Partial<Record<Read, unknown>> = {}) {
     day: rows(),
     queue: rows(),
     planned: rows(),
-    predicted: rows(),
+    upcoming: coming(),
     stats: ok({ intents_by_state: {}, posts_by_day: [] }),
     config: ok({
       tz: "America/New_York",
@@ -237,14 +266,18 @@ describe("a day opened from the month (#1634)", () => {
 });
 
 describe("the calendar's upcoming reads", () => {
-  it("splits the upcoming stories by origin, so each is in one read", async () => {
+  it("splits the stories under way by origin, and leaves a planned one still scheduled to the upcoming read", async () => {
     answer();
     await page();
     const queue = query("queue");
     expect(queue.get("origin")).toBe("cadence");
     expect(queue.get("state")).toBe(QUEUE_STATES);
     const planned = query("planned");
-    expect(planned.get("state")).toBe(QUEUE_STATES);
+    // Every queue state but `scheduled`: a planned story still scheduled is in
+    // the upcoming read, so each planned story is in one read.
+    expect(planned.get("state")!.split(",")).toEqual(
+      QUEUE_STATES.split(",").filter((state) => state !== "scheduled"),
+    );
     expect(planned.get("limit")).toBe(String(LIST_LIMIT_MAX));
   });
 
@@ -254,16 +287,23 @@ describe("the calendar's upcoming reads", () => {
     );
     answer({
       queue: rows(...soonest),
-      planned: rows(
-        story("later", { origin: "planned", schedule_slot_at: "2026-10-24T14:00:00Z" }),
-        story("waiting", { origin: "planned", state: "awaiting_approval" }),
-      ),
+      planned: rows(story("waiting", { origin: "planned", state: "awaiting_approval" })),
+      upcoming: coming({
+        planned: [
+          {
+            ...story("later", { origin: "planned", schedule_slot_at: "2026-10-24T14:00:00Z" }),
+            day: "2026-10-24",
+          },
+        ],
+      }),
     });
     const { queue } = propsOf<CalendarProps>(await page(), ContentCalendar);
     expect(queue).toHaveLength(12);
-    expect(queue.filter((item) => item.planned).map((item) => item.media_name)).toEqual([
-      "later.jpg",
-      "waiting.jpg",
+    expect(
+      queue.filter((item) => item.planned).map((item) => [item.media_name, item.day]),
+    ).toEqual([
+      ["waiting.jpg", undefined],
+      ["later.jpg", "2026-10-24"],
     ]);
   });
 
@@ -284,6 +324,78 @@ describe("the calendar's upcoming reads", () => {
 
   it("renders the unavailable state, not a calendar, when the planned read fails", async () => {
     answer({ planned: DOWN });
+    const elements = await page();
+    expect(elements.some((el) => el.type === RouterUnavailable)).toBe(true);
+    expect(elements.some((el) => el.type === ContentCalendar)).toBe(false);
+  });
+
+  it("hands the month a story's picture fields, not its whole row", async () => {
+    answer({ queue: rows(story("pictured", { caption: "not the chip's" })) });
+    const { queue } = propsOf<CalendarProps>(await page(), ContentCalendar);
+    expect(Object.keys(queue[0].media!).sort()).toEqual([
+      "file_name",
+      "has_thumbnail",
+      "media_item_id",
+      "media_kind",
+      "thumbnail_version",
+    ]);
+  });
+});
+
+describe("what is coming on the month (#1634 Phase 3b)", () => {
+  it("asks what is coming on the whole grid, past days and future alike", async () => {
+    answer();
+    await page({ month: "2026-12" });
+    // December 2026 in Monday-first weeks: Nov 30 to Jan 3, so up to Jan 4.
+    expect([query("upcoming").get("from"), query("upcoming").get("to")]).toEqual([
+      "2026-11-30",
+      "2027-01-04",
+    ]);
+  });
+
+  it("hands the month a count of predicted slots per day, never the slots", async () => {
+    answer({
+      upcoming: coming({
+        predicted: [slot("2026-10-20", 13), slot("2026-10-20", 17), slot("2026-10-21", 13)],
+      }),
+    });
+    const calendar = propsOf<CalendarProps>(await page(), ContentCalendar);
+    expect(calendar.predicted).toEqual([
+      { date: "2026-10-20", count: 2 },
+      { date: "2026-10-21", count: 1 },
+    ]);
+    expect(calendar.incompleteFrom).toBeNull();
+  });
+
+  it("marks the month from the first day a cut list may be short on", async () => {
+    answer({
+      upcoming: coming({
+        planned: [{ ...story("p", { origin: "planned" }), day: "2026-10-25" }],
+        planned_truncated: true,
+        predicted: [slot("2026-10-20", 13), slot("2026-10-22", 13)],
+        predicted_truncated: true,
+      }),
+    });
+    const calendar = propsOf<CalendarProps>(await page(), ContentCalendar);
+    expect(calendar.incompleteFrom).toBe("2026-10-22");
+  });
+
+  it("lists a day's predicted slots in its day view, and says when they were cut", async () => {
+    const predicted = [slot("2026-10-20", 13), slot("2026-10-20", 17), slot("2026-10-21", 13)];
+    answer({ upcoming: coming({ predicted }) });
+    const opened = propsOf<DayProps>(await page({ month: "2026-10", day: "2026-10-20" }), CalendarDay);
+    expect(opened.predicted).toEqual(predicted.slice(0, 2));
+    expect(opened.predictedCut).toBe(false);
+
+    answer({ upcoming: coming({ predicted, predicted_truncated: true }) });
+    const before = propsOf<DayProps>(await page({ month: "2026-10", day: "2026-10-20" }), CalendarDay);
+    expect(before.predictedCut).toBe(false);
+    const after = propsOf<DayProps>(await page({ month: "2026-10", day: "2026-10-21" }), CalendarDay);
+    expect(after.predictedCut).toBe(true);
+  });
+
+  it("renders the unavailable state, not a calendar, when the upcoming read fails", async () => {
+    answer({ upcoming: DOWN });
     const elements = await page();
     expect(elements.some((el) => el.type === RouterUnavailable)).toBe(true);
     expect(elements.some((el) => el.type === ContentCalendar)).toBe(false);

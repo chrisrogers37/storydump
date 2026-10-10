@@ -9,8 +9,11 @@
  * `formatSlot` already does, so the server and the browser say the same thing.
  */
 
-/** Postgres renders fractional seconds at any width; `Date` only promises three. */
-function instant(value: string | Date): Date {
+/**
+ * The instant a timestamp names. Postgres renders fractional seconds at any
+ * width; `Date` only promises three.
+ */
+export function instant(value: string | Date): Date {
   return typeof value === "string"
     ? new Date(value.replace(/\.(\d{3})\d+/, ".$1"))
     : value;

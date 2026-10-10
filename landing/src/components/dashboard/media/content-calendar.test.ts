@@ -3,15 +3,18 @@
  * (#1511). Before, it read the server's (UTC) or the browser's, so from the
  * evening in New York it highlighted tomorrow and drew an evening slot on the
  * next day. It draws the month it is given (#1634), and a day's posted count
- * is the month read's count, not the names it carried.
+ * is the month read's count, not the names it carried. A day ahead holds the
+ * stories a person planned and a count of the slots the cadence will open,
+ * labelled as predicted, and says when a list of them was cut.
  */
 
 import { describe, expect, it } from "vitest";
 import { isValidElement, type ReactElement } from "react";
 import { ImageIcon, Video } from "lucide-react";
 import type { IntentDay } from "@/lib/calendar-month";
+import { TONE_CLASS } from "@/components/dashboard/tone";
 import { MediaThumbnail } from "./media-thumbnail";
-import { buildCalendarDays, DayChips, listedDays } from "./content-calendar";
+import { buildCalendarDays, dayLabel, DayChips, listedDays } from "./content-calendar";
 
 /** 9:30 PM on Thursday, Oct 1 in New York; already Friday, Oct 2 in UTC. */
 const EVENING = new Date("2026-10-02T01:30:00Z");
@@ -44,8 +47,14 @@ describe("the calendar on the workspace's clock", () => {
 
   it("draws an evening slot on the workspace's day", () => {
     // 8:30 PM on Oct 1 in New York, 00:30 on Oct 2 in UTC.
-    const slot = { slot_time: "2026-10-02T00:30:00Z", predicted_category: "Memes" };
-    const { days } = buildCalendarDays(OCTOBER, [], [], [slot], "America/New_York", EVENING);
+    const queued = {
+      scheduled_for: "2026-10-02T00:30:00Z",
+      media_name: "q.jpg",
+      category: "Memes",
+      status: "approved",
+      planned: false,
+    };
+    const { days } = buildCalendarDays(OCTOBER, [], [queued], [], "America/New_York", EVENING);
     expect(days.find((d) => d.date === "2026-10-01")!.posts).toHaveLength(1);
     expect(days.find((d) => d.date === "2026-10-02")!.posts).toHaveLength(0);
   });
@@ -149,6 +158,103 @@ function* walk(node: unknown): Generator<ReactElement> {
   yield* walk((node.props as { children?: unknown }).children);
 }
 
+/** The text a tree draws: its strings and numbers, joined. */
+function textOf(node: unknown): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (!isValidElement(node)) return "";
+  return textOf((node.props as { children?: unknown }).children);
+}
+
+const classOf = (el: ReactElement) => String((el.props as { className?: string }).className ?? "");
+
+describe("the calendar's days ahead (#1634 Phase 3b)", () => {
+  const planned = (at: string, day: string, name: string) => ({
+    scheduled_for: at,
+    day,
+    media_name: name,
+    category: "Memes",
+    status: "scheduled",
+    planned: true,
+  });
+
+  it("draws a planned story on the day the read placed it on", () => {
+    // 8:30 PM on Oct 1 in New York, already Oct 2 in UTC: the read placed it on the 1st.
+    const { days } = buildCalendarDays(
+      OCTOBER,
+      [],
+      [planned("2026-10-02T00:30:00Z", "2026-10-01", "p.jpg")],
+      [],
+      "UTC",
+      EVENING
+    );
+    expect(days.find((d) => d.date === "2026-10-01")!.posts.map((p) => [p.label, p.type])).toEqual([
+      ["p.jpg", "planned"],
+    ]);
+    expect(days.find((d) => d.date === "2026-10-02")!.posts).toEqual([]);
+  });
+
+  it("counts a day's predicted slots and never draws one as a story", () => {
+    const { days } = buildCalendarDays(OCTOBER, [], [], [{ date: "2026-10-20", count: 6 }], "UTC", EVENING);
+    const ahead = days.find((d) => d.date === "2026-10-20")!;
+    expect([ahead.predicted, ahead.posts]).toEqual([6, []]);
+    expect(days.filter((d) => d.predicted > 0).map((d) => d.date)).toEqual(["2026-10-20"]);
+  });
+
+  it("labels the count as predicted, in the legend's predicted tone, with no picture", () => {
+    const { days } = buildCalendarDays(
+      OCTOBER,
+      [],
+      [planned("2026-10-20T13:00:00Z", "2026-10-20", "p.jpg")],
+      [{ date: "2026-10-20", count: 6 }],
+      "UTC",
+      EVENING
+    );
+    const tree = DayChips({ day: days.find((d) => d.date === "2026-10-20")!, size: "cell", workspaceId: "ws-1" }) as ReactElement;
+    const count = [...walk(tree)].filter((el) => textOf(el) === "6 predicted");
+    expect(count).toHaveLength(1);
+    for (const token of TONE_CLASS.inert.split(" ")) expect(classOf(count[0]).split(" ")).toContain(token);
+    // One glyph, the planned story's: the count draws no picture.
+    expect([...walk(tree)].filter((el) => el.type === ImageIcon)).toHaveLength(1);
+  });
+
+  it("says a day from the first cut day on may hold more than it shows", () => {
+    const { days } = buildCalendarDays(OCTOBER, [], [], [], "UTC", EVENING, "2026-10-28");
+    expect(days.filter((d) => d.incomplete).map((d) => d.date)).toEqual([
+      "2026-10-28",
+      "2026-10-29",
+      "2026-10-30",
+      "2026-10-31",
+      "2026-11-01",
+    ]);
+    const cut = DayChips({ day: days.find((d) => d.date === "2026-10-28")!, size: "row", workspaceId: null });
+    expect(textOf(cut)).toBe("Not all shown");
+    const whole = DayChips({ day: days.find((d) => d.date === "2026-10-27")!, size: "row", workspaceId: null });
+    expect(textOf(whole)).toBe("");
+  });
+
+  it("lists on a phone a day that holds only predicted slots, or may hold more", () => {
+    const { days } = buildCalendarDays(OCTOBER, [], [], [{ date: "2026-10-20", count: 2 }], "UTC", EVENING, "2026-10-30");
+    expect(listedDays(days).map((d) => d.date)).toEqual(["2026-10-20", "2026-10-30", "2026-10-31"]);
+  });
+
+  it("tells a screen reader everything a day draws, not 0 posted for a day ahead", () => {
+    const { days } = buildCalendarDays(
+      OCTOBER,
+      [postedDay("2026-10-01", 15, ["a.jpg"])],
+      [planned("2026-10-20T13:00:00Z", "2026-10-20", "p.jpg")],
+      [{ date: "2026-10-20", count: 6 }],
+      "UTC",
+      EVENING,
+      "2026-10-20"
+    );
+    const label = (date: string) => dayLabel(days.find((d) => d.date === date)!);
+    expect(label("2026-10-01")).toBe("Thursday, October 1: 15 posted");
+    expect(label("2026-10-20")).toBe("Tuesday, October 20: 1 planned, 6 predicted, not all shown");
+    expect(label("2026-10-05")).toBe("Monday, October 5");
+  });
+});
+
 describe("the calendar's pictures (#1634 Phase 4)", () => {
   const pictured: IntentDay = {
     date: "2026-10-01",
@@ -179,23 +285,23 @@ describe("the calendar's pictures (#1634 Phase 4)", () => {
   };
   // The sample workspace's queue carries no picture fields.
   const sampleQueued = { ...queuedClip, media_name: "s.jpg", media: undefined };
-  const slot = { slot_time: "2026-10-02T16:00:00Z", predicted_category: "Memes" };
+  const predicted = [{ date: "2026-10-02", count: 1 }];
   const october = () =>
-    buildCalendarDays(OCTOBER, [pictured], [queuedClip, sampleQueued], [slot], "UTC", EVENING).days;
+    buildCalendarDays(OCTOBER, [pictured], [queuedClip, sampleQueued], predicted, "UTC", EVENING).days;
   const dayOf = (date: string) => october().find((d) => d.date === date)!;
 
-  it("gives each story chip its picture's fields, and a predicted slot none", () => {
+  it("gives each story chip its picture's fields; a predicted slot is a count, not a chip", () => {
     expect(dayOf("2026-10-01").posts[0].media).toMatchObject({
       media_item_id: "media-a",
       has_thumbnail: true,
     });
     expect(
-      dayOf("2026-10-02").posts.map((p) => [p.label, p.media?.media_item_id, p.media?.file_name])
+      dayOf("2026-10-02").posts.map((p) => [p.label, p.media.media_item_id, p.media.file_name])
     ).toEqual([
       ["q.mp4", "media-q", "q.mp4"],
       ["s.jpg", undefined, "s.jpg"],
-      ["Memes", undefined, undefined],
     ]);
+    expect(dayOf("2026-10-02").predicted).toBe(1);
   });
 
   it("draws a picture beside a chip's name through the route, with no play badge", () => {

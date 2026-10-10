@@ -1,11 +1,14 @@
 /**
  * The calendar's day view draws each story's picture in a row-size box, the
- * Queue's (#1634 Phase 4). Read as a returned element tree, without a DOM.
+ * Queue's (#1634 Phase 4), and lists the slots the cadence will open among
+ * the stories, as predicted (Phase 3b). Read as a returned element tree,
+ * without a DOM.
  */
 
 import { describe, expect, it } from "vitest";
 import { isValidElement, type ReactElement } from "react";
 import { ImageIcon } from "lucide-react";
+import type { PredictedSlot } from "@/lib/calendar-month";
 import type { Intent } from "@/lib/intents";
 import { CalendarDay } from "./calendar-day";
 import { MediaThumbnail } from "./media-thumbnail";
@@ -35,15 +38,44 @@ const story = (id: string, over: Partial<Intent> = {}) =>
     ...over,
   }) as Intent;
 
-const day = (intents: Intent[]) =>
+/** The text a tree draws: its strings and numbers, joined. */
+function textOf(node: unknown): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (!isValidElement(node)) return "";
+  return textOf((node.props as { children?: unknown }).children);
+}
+
+/** A slot the cadence will open on the day. */
+const slot = (at: string, over: Partial<PredictedSlot> = {}): PredictedSlot => ({
+  kind: "predicted",
+  schedule_slot_at: at,
+  day: "2026-10-09",
+  tz: "America/New_York",
+  ig_account_id: "a1",
+  account_handle: "example.brand",
+  account_display_name: "Example Co",
+  ...over,
+});
+
+const day = (intents: Intent[], predicted: PredictedSlot[] = [], predictedCut = false) =>
   CalendarDay({
     date: "2026-10-09",
     intents,
+    predicted,
     tz: "UTC",
     workspaceId: "ws-1",
     closeHref: "?month=2026-10",
     truncatedAt: null,
+    predictedCut,
   }) as ReactElement;
+
+/**
+ * The text of each of the day's rows, in order. ICU may put a narrow no-break
+ * space before AM/PM, so whitespace is compared as words, not bytes.
+ */
+const rowsOf = (tree: ReactElement) =>
+  [...walk(tree)].filter((el) => el.type === "li").map((li) => textOf(li).replace(/\s/g, " "));
 
 describe("the day view's pictures (#1634 Phase 4)", () => {
   it("draws each story's picture through the route, row-size, as the Queue does", () => {
@@ -65,5 +97,64 @@ describe("the day view's pictures (#1634 Phase 4)", () => {
     const types = [...walk(tree)].map((el) => el.type);
     expect(types).not.toContain(MediaThumbnail);
     expect(types).toContain(ImageIcon);
+  });
+});
+
+describe("the day view's predicted slots (#1634 Phase 3b)", () => {
+  it("lists each slot among the stories in time order, as predicted, in the workspace's zone", () => {
+    const tree = day(
+      [story("a", { state: "scheduled", schedule_slot_at: "2026-10-09T14:00:00.123456+00:00" })],
+      [slot("2026-10-09T12:00:00+00:00"), slot("2026-10-09T16:00:00+00:00")],
+    );
+    expect(rowsOf(tree)).toEqual([
+      "12:00 PM@example.brandpredicted",
+      "2:00 PMa.jpgscheduled",
+      "4:00 PM@example.brandpredicted",
+    ]);
+  });
+
+  it("draws no picture for a slot, which has no file until it draws one", () => {
+    const tree = day([], [slot("2026-10-09T12:00:00+00:00")]);
+    const types = [...walk(tree)].map((el) => el.type);
+    expect(types).not.toContain(MediaThumbnail);
+    expect(types).not.toContain(ImageIcon);
+  });
+
+  it("puts a story before a slot at the same time", () => {
+    const at = "2026-10-09T12:00:00+00:00";
+    const tree = day([story("a", { state: "scheduled", schedule_slot_at: at })], [slot(at)]);
+    expect(rowsOf(tree)).toEqual([
+      "12:00 PMa.jpgscheduled",
+      "12:00 PM@example.brandpredicted",
+    ]);
+  });
+
+  it("names a slot's account by its handle, else by its name", () => {
+    const tree = day(
+      [],
+      [
+        slot("2026-10-09T12:00:00+00:00", { ig_account_id: "a2", account_handle: null }),
+        slot("2026-10-09T13:00:00+00:00", {
+          ig_account_id: "a3",
+          account_handle: null,
+          account_display_name: null,
+        }),
+      ],
+    );
+    expect(rowsOf(tree)).toEqual([
+      "12:00 PMExample Copredicted",
+      "1:00 PMAn accountpredicted",
+    ]);
+  });
+
+  it("says when the day may hold more predicted slots than were read", () => {
+    const cut = textOf(day([], [slot("2026-10-09T12:00:00+00:00")], true));
+    expect(cut).toContain("This day may hold more predicted slots than are shown.");
+    expect(textOf(day([], [slot("2026-10-09T12:00:00+00:00")]))).not.toContain("may hold more");
+  });
+
+  it("reads as empty only with no story and no slot", () => {
+    expect(textOf(day([]))).toContain("No stories on this day.");
+    expect(textOf(day([], [slot("2026-10-09T12:00:00+00:00")]))).not.toContain("No stories");
   });
 });
