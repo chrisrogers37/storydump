@@ -62,7 +62,7 @@ export function WhereTap() {
                     monday-again.jpg
                   </p>
                   <p className="mt-0.5 text-xs text-ink/70">
-                    @example.brand · Fri, Oct 2, 1:30 PM · Memes
+                    example.brand · Fri, Oct 2, 1:30 PM · Memes
                   </p>
                   <span className="mt-2 inline-block rounded-full bg-[#fff1c2] px-2 py-0.5 font-mono text-[11px] text-[#7a5300]">
                     awaiting approval

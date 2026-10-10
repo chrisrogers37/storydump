@@ -34,11 +34,13 @@ function story(file: string, state: IntentState): Intent {
 }
 
 describe("the sample's calendar lanes", () => {
+  /** Marked Posted myself by the visitor, a day after its slot. */
+  const marked = { ...story("marked.jpg", "posted"), entered_state_at: "2026-10-16T09:30:00.000Z" };
   const lanes = demoCalendarLanes(
     [
       story("waiting.jpg", "awaiting_approval"),
       story("later.jpg", "scheduled"),
-      story("approved.jpg", "approved"),
+      marked,
       story("skipped.jpg", "skipped"),
       story("rejected.jpg", "rejected"),
     ],
@@ -49,53 +51,72 @@ describe("the sample's calendar lanes", () => {
     ],
   );
 
-  it("predicts a story still undecided, by its folder", () => {
-    expect(lanes.schedule).toEqual([
-      { slot_time: "2026-10-15T14:00:00.000Z", predicted_category: "Memes" },
-      { slot_time: "2026-10-15T14:00:00.000Z", predicted_category: "Memes" },
-    ]);
-  });
-
-  it("queues an approved story under its own name, in its slot", () => {
+  it("queues a story waiting for a tap under its own name, in its slot, as the Queue lists it", () => {
     expect(lanes.queue).toEqual([
       {
         scheduled_for: "2026-10-15T14:00:00.000Z",
-        media_name: "approved.jpg",
+        media_name: "waiting.jpg",
         category: "Memes",
-        status: "approved",
+        status: "awaiting_approval",
         planned: false,
       },
     ]);
   });
 
-  it("drops a skipped or rejected story, and draws only what posted under Posted", () => {
-    const posted = lanes.history.flatMap((day) => day.newest.map((n) => n.file_name));
-    const named = [...lanes.queue.map((i) => i.media_name), ...posted];
-    expect(named).not.toContain("skipped.jpg");
-    expect(named).not.toContain("rejected.jpg");
-    expect(posted).toEqual(["posted.jpg"]);
-  });
-
-  it("groups what posted by its day, as the real month read does (#1634)", () => {
-    expect(lanes.history).toEqual([
-      {
-        date: "2026-10-15",
-        count: 1,
-        newest: [
-          {
-            id: "posted.jpg",
-            state: "posted",
-            schedule_slot_at: "2026-10-15T14:00:00.000Z",
-            file_name: "posted.jpg",
-            category: "Memes",
-          },
-        ],
-      },
+  it("predicts a scheduled story by its folder, as the real Calendar's predicted lane does", () => {
+    expect(lanes.schedule).toEqual([
+      { slot_time: "2026-10-15T14:00:00.000Z", predicted_category: "Memes" },
     ]);
   });
 
-  it("draws the month the visitor is in", () => {
+  it("groups what posted by its slot's day, as the real month read does (#1634): a marked story beside the month's posts", () => {
+    // A story keeps its cell: marking it posted a day late changes its lane, not its day.
+    const named = (file: string) => ({
+      id: file,
+      state: "posted",
+      schedule_slot_at: "2026-10-15T14:00:00.000Z",
+      file_name: file,
+      category: "Memes",
+    });
+    expect(lanes.history).toEqual([
+      { date: "2026-10-15", count: 2, newest: [named("marked.jpg"), named("posted.jpg")] },
+    ]);
+  });
+
+  it("counts every post of a day, and names the newest three", () => {
+    // The month read's own shape: a count, and at most its `per_day` names.
+    const hours = ["09", "11", "13", "15", "17"];
+    const posts = hours.map((hour) => ({
+      ...story(`posted-${hour}.jpg`, "posted"),
+      schedule_slot_at: `2026-10-15T${hour}:00:00.000Z`,
+    }));
+    const [day] = demoCalendarLanes([], posts).history;
+    expect(day.count).toBe(5);
+    expect(day.newest.map((n) => n.file_name)).toEqual([
+      "posted-17.jpg",
+      "posted-15.jpg",
+      "posted-13.jpg",
+    ]);
+  });
+
+  it("draws each story once, and drops one that was skipped or rejected", () => {
+    const posted = lanes.history.flatMap((day) => day.newest.map((n) => n.file_name));
+    const named = [...lanes.queue.map((i) => i.media_name), ...posted];
+    for (const gone of ["skipped.jpg", "rejected.jpg", "old-skip.jpg", "old-reject.jpg"]) {
+      expect(named).not.toContain(gone);
+    }
+    // Scheduled is Predicted only, never In Queue as well.
+    expect(named).not.toContain("later.jpg");
+    expect(new Set(named).size).toBe(named.length);
+  });
+
+  it("draws the month the visitor is in, on the sample's own clock", () => {
     expect(demoCalendarLanes([], [], new Date("2026-10-02T12:00:00Z")).month).toEqual({
+      year: 2026,
+      month: 10,
+    });
+    // Half past midnight in London on 1 October is still September in UTC.
+    expect(demoCalendarLanes([], [], new Date("2026-09-30T23:30:00Z")).month).toEqual({
       year: 2026,
       month: 10,
     });

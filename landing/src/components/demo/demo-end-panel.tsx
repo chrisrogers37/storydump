@@ -7,8 +7,7 @@ import { useDemo } from "@/components/demo/demo-provider";
 import { endPanelDue } from "@/lib/demo/state";
 
 /**
- * The sample's close, once the visitor has decided three stories or opened
- * all three pages.
+ * The sample's close, once the visitor has decided three stories.
  *
  * STICKY AT THE FOOT OF THE MAIN COLUMN, the last thing in it. While the page
  * scrolls it rides the bottom of the view, so it is on screen the moment it

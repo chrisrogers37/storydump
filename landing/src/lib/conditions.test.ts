@@ -145,8 +145,8 @@ describe("deriveConditions — folders (Integrations)", () => {
 
 describe("deriveConditions — posts (Queue)", () => {
   it.each([
-    [1, "1 post needs a decision"],
-    [3, "3 posts need a decision"],
+    [1, "1 post needs attention"],
+    [3, "3 posts need attention"],
   ])("%i review_required post(s) read as %j and send the person to the Queue", (n, text) => {
     expect(
       deriveConditions({ ...NOTHING, intentsByState: { review_required: n } }),
@@ -192,6 +192,16 @@ describe("deriveConditions — the panel as a whole", () => {
     expect(ALL_CLEAR_DETAIL).toMatch(/account/);
     expect(ALL_CLEAR_DETAIL).toMatch(/folder/);
     expect(ALL_CLEAR_DETAIL).toMatch(/post/);
+  });
+
+  it("the all-clear's post clause is the review condition's own words, never that no post is waiting", () => {
+    // A post waiting for a tap is the Queue's ordinary work, so the all-clear
+    // stands beside a Queue of them; "no post is waiting on a decision" read as
+    // a contradiction of it (#1649).
+    const [review] = deriveConditions({ ...NOTHING, intentsByState: { review_required: 1 } });
+    expect(review.text).toMatch(/needs attention$/);
+    expect(ALL_CLEAR_DETAIL).toMatch(/no post needs attention\.$/);
+    expect(ALL_CLEAR_DETAIL).not.toMatch(/waiting/);
   });
 });
 

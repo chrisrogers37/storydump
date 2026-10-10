@@ -44,7 +44,7 @@ const CONDITIONS: Condition[] = [
   },
   {
     key: "review_required",
-    text: "2 posts need a decision",
+    text: "2 posts need attention",
     href: "/dashboard/queue",
     action: "Open Queue",
   },
