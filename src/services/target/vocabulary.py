@@ -621,6 +621,10 @@ FLOATING_LIMIT_MAX = 500
 #: bounded) — the API's clamp and the CLI's `planned --limit`.
 LIST_LIMIT_DEFAULT = 50
 LIST_LIMIT_MAX = 200
+#: The widest range of local days a date-ranged read takes: a calendar month
+#: drawn in whole weeks is at most six of them (#1634). The API's 422, and
+#: the bound a read that walks its range holds a direct caller to.
+RANGE_MAX_DAYS = 45
 #: Two clocks judge one window — the CLI computes a span's start, the API
 #: measures it against its own now — so a start this close to a bound is
 #: clamped to the bound rather than refused (a `30d` from a client one second

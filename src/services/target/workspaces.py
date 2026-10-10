@@ -482,6 +482,23 @@ def _thumbnail_sql(m: str) -> str:
     )
 
 
+#: The calendar's local day, as a bound and as a label. A day is the
+#: WORKSPACE's: one zone for the whole calendar, whatever zone an account's
+#: times read in.
+#:
+#: Midnight of a local date in the workspace's own zone, as the instant a slot
+#: is compared with. A scalar subquery rather than the joined `w.tz`, so the
+#: bound is one value the planner can scan an index range by
+#: (`ix_intents_workspace_slot`).
+LOCAL_MIDNIGHT_SQL = (
+    "(CAST(:{name} AS date)::timestamp AT TIME ZONE"
+    " (SELECT tz FROM workspaces WHERE id = :ws))"
+)
+
+#: The day a slot falls on: its date in the workspace's zone, *tz* being the
+#: workspace's own as the statement names it.
+LOCAL_DAY_SQL = "to_char({slot} AT TIME ZONE {tz}, 'YYYY-MM-DD') AS day"
+
 #: The intent row plus the two joins the queue renders it with: the media it
 #: posts, and the account it posts to (`06` §3 — the handle is how a person
 #: recognises the row; NULL when the account carries none, never absent).
@@ -518,16 +535,6 @@ _MEDIA_COLUMNS = (
 )
 
 
-#: Midnight of a local date in the workspace's own zone, as the instant a slot
-#: is compared with. A scalar subquery rather than the joined `w.tz`, so the
-#: bound is one value the planner can scan an index range by
-#: (`ix_intents_workspace_slot`).
-_LOCAL_MIDNIGHT = (
-    "(CAST(:{name} AS date)::timestamp AT TIME ZONE"
-    " (SELECT tz FROM workspaces WHERE id = :ws))"
-)
-
-
 def _slot_range(
     params: dict[str, Any], from_date: Optional[date], to_date: Optional[date]
 ) -> str:
@@ -536,7 +543,9 @@ def _slot_range(
     sql = ""
     for name, value, op in (("from_date", from_date, ">="), ("to_date", to_date, "<")):
         if value is not None:
-            sql += f" AND i.schedule_slot_at {op} " + _LOCAL_MIDNIGHT.format(name=name)
+            sql += f" AND i.schedule_slot_at {op} " + LOCAL_MIDNIGHT_SQL.format(
+                name=name
+            )
             params[name] = value
     return sql
 
@@ -610,8 +619,8 @@ async def intent_days(
         "  FROM (SELECT d.*, count(*) OVER (PARTITION BY d.day) AS total,"
         "               row_number() OVER (PARTITION BY d.day"
         "                 ORDER BY d.schedule_slot_at DESC, d.id DESC) AS rn"
-        "          FROM (SELECT to_char(i.schedule_slot_at AT TIME ZONE w.tz,"
-        "                               'YYYY-MM-DD') AS day,"
+        "          FROM (SELECT"
+        f"                 {LOCAL_DAY_SQL.format(slot='i.schedule_slot_at', tz='w.tz')},"
         "                       i.id, i.state, i.schedule_slot_at,"
         "                       m.file_name, m.category"
         "                  FROM post_intents i"
