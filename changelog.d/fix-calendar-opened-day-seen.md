@@ -1,0 +1,3 @@
+### Fixed
+
+- **A day opened on the Calendar is now brought on screen.** The day view is drawn under the month, and nothing scrolled to it: on a phone a tap on a day or on "+N more" changed nothing on screen, and on a laptop only the day's date showed. The day view now scrolls into view when it opens, by the least the page has to move, and takes focus on its date, so a screen reader says which day opened and the next Tab is Close. Close hands the visitor back: focus returns to the day's link in the month, which is scrolled back into view if the shorter page left it off screen. The dashboard's Calendar and the sample workspace's share the day view, so both are fixed. The day links are unchanged.

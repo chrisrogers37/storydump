@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import { mediaTile } from "@/components/dashboard/media/media-tile";
+import { OpenedDayTitle } from "@/components/dashboard/media/opened-day";
 import type { PredictedSlot } from "@/lib/calendar-month";
 import type { Intent } from "@/lib/intents";
 import type { ThumbnailMedia } from "@/lib/thumbnails";
@@ -37,6 +38,9 @@ const NAME = "min-w-0 grow basis-24 break-words sm:truncate";
  * predicted slot shows neither and says it is predicted: it is a place the
  * cadence will look for a story, not a story. The grid shows a day's first
  * few names and "+N more"; this is the rest.
+ *
+ * It is drawn after the month, so its title brings it on screen when it opens
+ * and hands the visitor back to the day when it closes (`OpenedDayTitle`).
  */
 export function CalendarDay({
   date,
@@ -72,11 +76,12 @@ export function CalendarDay({
   const time = (at: string) => formatInZone(at, tz, { hour: "numeric", minute: "2-digit" });
 
   return (
-    <Card>
+    // The margin is the page's own padding, so the view comes to rest clear of the edge.
+    <Card className="scroll-my-6">
       <CardHeader className="flex-row items-center justify-between pb-3">
-        <CardTitle>
+        <OpenedDayTitle date={date}>
           {formatCalendarDate(date, { weekday: "long", month: "long", day: "numeric" })}
-        </CardTitle>
+        </OpenedDayTitle>
         <Link
           href={closeHref}
           scroll={false}

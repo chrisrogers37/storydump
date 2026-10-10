@@ -12,6 +12,7 @@ import type { PredictedSlot } from "@/lib/calendar-month";
 import type { Intent } from "@/lib/intents";
 import { CalendarDay } from "./calendar-day";
 import { MediaThumbnail } from "./media-thumbnail";
+import { OpenedDayTitle } from "./opened-day";
 
 /** Every element in a returned tree, depth-first. */
 function* walk(node: unknown): Generator<ReactElement> {
@@ -192,5 +193,21 @@ describe("the day view on a phone", () => {
 
   it("breaks a long name onto a second line rather than letting it run out of the row", () => {
     for (const found of names()) expect(found[0]).toContain("break-words");
+  });
+});
+
+describe("an opened day is put in front of the visitor", () => {
+  it("draws its date as the title that takes focus when the day opens", () => {
+    const titles = [...walk(day([story("a")]))].filter((el) => el.type === OpenedDayTitle);
+    expect(titles).toHaveLength(1);
+    expect((titles[0].props as { date: string }).date).toBe("2026-10-09");
+    expect(textOf(titles[0])).toBe("Friday, October 9");
+  });
+
+  it("keeps a margin from the edge of the page it is scrolled to", () => {
+    const view = day([story("a")]);
+    expect(String((view.props as { className?: string }).className).split(/\s+/)).toContain(
+      "scroll-my-6",
+    );
   });
 });

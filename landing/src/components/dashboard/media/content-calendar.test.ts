@@ -332,7 +332,7 @@ describe("the calendar's pictures (#1634 Phase 4)", () => {
 
 describe("the calendar's links", () => {
   /** An empty October, rendered to a string: the links are all there is to read. */
-  const draw = (props: { navigable?: boolean; monthLinks?: boolean }) =>
+  const draw = (props: { navigable?: boolean; monthLinks?: boolean; selected?: string }) =>
     renderToString(
       createElement(ContentCalendar, {
         month: { year: 2026, month: 10 },
@@ -362,5 +362,14 @@ describe("the calendar's links", () => {
     const html = draw({});
     expect(html).not.toContain("day=");
     expect(html).not.toContain("Previous month");
+  });
+
+  it("marks the link of the day whose view is open, which the day view returns the visitor to", () => {
+    const marked = (html: string) => html.match(/<a[^>]*aria-current="date"[^>]*>/g) ?? [];
+    expect(marked(draw({ navigable: true }))).toEqual([]);
+    // An empty month lists no day for phones, so the grid's cell is the one link.
+    const open = marked(draw({ navigable: true, selected: "2026-10-10" }));
+    expect(open).toHaveLength(1);
+    expect(open[0]).toContain(DAY);
   });
 });
