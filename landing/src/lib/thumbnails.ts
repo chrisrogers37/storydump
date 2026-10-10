@@ -26,3 +26,33 @@ export function thumbnailSrc(
   const media = encodeURIComponent(mediaId);
   return `/api/workspaces/${ws}/media/${media}/thumbnail?v=${encodeURIComponent(version)}`;
 }
+
+/**
+ * What a picture needs from a payload row. The intents read and the calendar's
+ * month read carry all of it; a row without the thumbnail's fields (the sample
+ * workspace's calendar) draws its glyph.
+ */
+export type ThumbnailMedia = {
+  /** The picture's alt text. */
+  file_name: string;
+  media_kind?: string;
+  media_item_id?: string;
+  has_thumbnail?: boolean;
+  thumbnail_version?: string;
+};
+
+/**
+ * The row's thumbnail URL, or null when it has no picture or there is no
+ * workspace to ask, which is how the sample workspace draws.
+ */
+export function thumbnailFor(
+  media: ThumbnailMedia,
+  workspaceId: string | null | undefined,
+): string | null {
+  return workspaceId &&
+    media.has_thumbnail &&
+    media.media_item_id &&
+    media.thumbnail_version !== undefined
+    ? thumbnailSrc(workspaceId, media.media_item_id, media.thumbnail_version)
+    : null;
+}

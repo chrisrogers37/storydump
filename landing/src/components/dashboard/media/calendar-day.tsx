@@ -1,25 +1,30 @@
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
+import { mediaTile } from "@/components/dashboard/media/media-tile";
 import type { Intent } from "@/lib/intents";
 import { cn } from "@/lib/utils";
 import { formatCalendarDate, formatInZone } from "@/lib/zoned-dates";
 
 /**
  * One day of the calendar, opened from its cell (#1634): every story the day
- * holds, in time order, with its time in the workspace's zone and its state.
- * The grid shows a day's first few names and "+N more"; this is the rest.
+ * holds, in time order, with its picture, its time in the workspace's zone
+ * and its state. The grid shows a day's first few names and "+N more"; this
+ * is the rest.
  */
 export function CalendarDay({
   date,
   intents,
   tz,
+  workspaceId,
   closeHref,
   truncatedAt,
 }: {
   date: string;
   intents: Intent[];
   tz: string;
+  /** The workspace whose thumbnails the rows ask for. */
+  workspaceId: string;
   /** Back to the month, with no day open. */
   closeHref: string;
   /** The read's limit when the day reached it, so a page is not read as the whole. */
@@ -46,6 +51,12 @@ export function CalendarDay({
           <ul className="divide-y">
             {intents.map((intent) => (
               <li key={intent.id} className="flex items-center gap-3 py-2 text-sm">
+                {mediaTile({
+                  media: intent,
+                  workspaceId,
+                  box: "h-10 w-10 rounded-md",
+                  glyph: "h-5 w-5",
+                })}
                 <span className="w-20 shrink-0 tabular-nums text-muted-foreground">
                   {formatInZone(intent.schedule_slot_at, tz, {
                     hour: "numeric",

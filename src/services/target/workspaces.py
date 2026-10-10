@@ -579,6 +579,22 @@ async def list_intents(
     )
 
 
+#: What each of a month day's newest carries: enough to name it and to draw its
+#: thumbnail through the route (`has_thumbnail` and its version, never the
+#: link), as the intents read does (#1634).
+INTENT_DAY_FIELDS = (
+    "id",
+    "state",
+    "schedule_slot_at",
+    "file_name",
+    "category",
+    "media_item_id",
+    "media_kind",
+    "has_thumbnail",
+    "thumbnail_version",
+)
+
+
 async def intent_days(
     executor,
     *,
@@ -606,14 +622,15 @@ async def intent_days(
     where += _slot_range(params, from_date, to_date)
     rows = await readers.rows(
         executor,
-        "SELECT day, total, id, state, schedule_slot_at, file_name, category"
+        f"SELECT day, total, {', '.join(INTENT_DAY_FIELDS)}"
         "  FROM (SELECT d.*, count(*) OVER (PARTITION BY d.day) AS total,"
         "               row_number() OVER (PARTITION BY d.day"
         "                 ORDER BY d.schedule_slot_at DESC, d.id DESC) AS rn"
         "          FROM (SELECT to_char(i.schedule_slot_at AT TIME ZONE w.tz,"
         "                               'YYYY-MM-DD') AS day,"
-        "                       i.id, i.state, i.schedule_slot_at,"
-        "                       m.file_name, m.category"
+        "                       i.id, i.state, i.schedule_slot_at, i.media_item_id,"
+        "                       m.file_name, m.category, m.media_kind,"
+        f"                      {_thumbnail_sql('m.')}"
         "                  FROM post_intents i"
         "                  JOIN media_items m ON m.workspace_id = i.workspace_id"
         "                                    AND m.id = i.media_item_id"
@@ -627,12 +644,7 @@ async def intent_days(
         day = days.setdefault(
             row["day"], {"date": row["day"], "count": int(row["total"]), "newest": []}
         )
-        day["newest"].append(
-            {
-                k: row[k]
-                for k in ("id", "state", "schedule_slot_at", "file_name", "category")
-            }
-        )
+        day["newest"].append({k: row[k] for k in INTENT_DAY_FIELDS})
     return list(days.values())
 
 

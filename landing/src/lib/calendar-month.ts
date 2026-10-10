@@ -8,6 +8,8 @@
  * disagree about.
  */
 
+import type { ThumbnailMedia } from "@/lib/thumbnails";
+
 /** A month, `month` 1-12. */
 export type Month = { year: number; month: number };
 
@@ -16,14 +18,18 @@ export type IntentDay = {
   date: string;
   /** Every intent the day holds in the asked states: a COUNT, not a list's length. */
   count: number;
-  /** The day's newest, at most the read's `per_day`. */
-  newest: {
+  /**
+   * The day's newest, at most the read's `per_day`. The read carries each
+   * one's thumbnail fields (#1634); the sample workspace's days carry none,
+   * so their chips draw the glyph.
+   */
+  newest: ({
     id: string;
     state: string;
     schedule_slot_at: string;
     file_name: string;
     category: string | null;
-  }[];
+  } & Omit<ThumbnailMedia, "file_name">)[];
 };
 
 export type IntentDaysResponse = { days: IntentDay[]; per_day: number };

@@ -19,6 +19,8 @@ import {
   type Month,
 } from "@/lib/calendar-month";
 import { TONE_CLASS, TONE_DOT, type BadgeTone } from "@/components/dashboard/tone";
+import { mediaTile } from "@/components/dashboard/media/media-tile";
+import type { ThumbnailMedia } from "@/lib/thumbnails";
 
 interface ScheduleSlot {
   slot_time: string;
@@ -32,6 +34,8 @@ interface QueueItem {
   status: string;
   /** A story a person planned for a chosen time (#1413), not one the slot plan placed. */
   planned: boolean;
+  /** Its picture's fields (#1634). The sample workspace's queue carries none. */
+  media?: ThumbnailMedia;
 }
 
 interface CalendarDay {
@@ -47,6 +51,8 @@ interface CalendarDay {
     label: string;
     category: string;
     type: "past" | "queued" | "planned" | "predicted";
+    /** The story's picture; a predicted slot has no story yet, and none. */
+    media?: ThumbnailMedia;
   }[];
 }
 
@@ -84,6 +90,7 @@ export function buildCalendarDays(
         label: item.file_name,
         category: item.category ?? "uncategorised",
         type: "past",
+        media: item,
       });
     }
   }
@@ -92,6 +99,7 @@ export function buildCalendarDays(
       label: item.media_name,
       category: item.category,
       type: item.planned ? "planned" : "queued",
+      media: item.media ?? { file_name: item.media_name },
     });
   }
   for (const slot of schedule) {
@@ -166,8 +174,25 @@ export function listedDays(days: CalendarDay[]): CalendarDay[] {
   return days.filter((d) => d.isCurrentMonth && (d.posted > 0 || d.posts.length > 0));
 }
 
-/** A day's first chips, and "+N more" for its other items and unnamed posts. */
-function DayChips({ day, size }: { day: CalendarDay; size: "cell" | "row" }) {
+/** A chip's picture box, by where the chip is drawn: a grid cell or a phone's row. */
+const CHIP_TILE = {
+  cell: { box: "h-3.5 w-3.5 rounded-sm", glyph: "h-2.5 w-2.5" },
+  row: { box: "h-4 w-4 rounded-sm", glyph: "h-3 w-3" },
+} as const;
+
+/**
+ * A day's first chips, each with its story's picture beside its name (#1634),
+ * and "+N more" for its other items and unnamed posts.
+ */
+export function DayChips({
+  day,
+  size,
+  workspaceId,
+}: {
+  day: CalendarDay;
+  size: "cell" | "row";
+  workspaceId: string | null;
+}) {
   const more = Math.max(0, day.posts.length - CHIPS_PER_DAY) + day.postedUnnamed;
   const text = size === "cell" ? "text-[10px]" : "text-xs";
   return (
@@ -175,11 +200,19 @@ function DayChips({ day, size }: { day: CalendarDay; size: "cell" | "row" }) {
       {day.posts.slice(0, CHIPS_PER_DAY).map((post, i) => (
         <div
           key={i}
-          className={cn("max-w-full truncate rounded px-1 py-0.5", text, chipClass(post.type))}
+          className={cn(
+            "flex max-w-full items-center gap-1 rounded px-1 py-0.5",
+            text,
+            chipClass(post.type)
+          )}
           title={post.label}
         >
-          {post.type === "planned" && <span className="sr-only">Planned: </span>}
-          {post.label}
+          {post.media &&
+            mediaTile({ media: post.media, workspaceId, ...CHIP_TILE[size], badge: false })}
+          <span className="min-w-0 truncate">
+            {post.type === "planned" && <span className="sr-only">Planned: </span>}
+            {post.label}
+          </span>
         </div>
       ))}
       {more > 0 && <div className={cn("px-1 text-muted-foreground", text)}>+{more} more</div>}
@@ -187,7 +220,7 @@ function DayChips({ day, size }: { day: CalendarDay; size: "cell" | "row" }) {
   );
 }
 
-function DayContents({ day }: { day: CalendarDay }) {
+function DayContents({ day, workspaceId }: { day: CalendarDay; workspaceId: string | null }) {
   return (
     <>
       <span className={cn("text-xs font-medium", day.isToday && "text-primary")}>
@@ -196,13 +229,13 @@ function DayContents({ day }: { day: CalendarDay }) {
       {day.posted > 0 && (
         <span className="ml-1 text-[10px] text-muted-foreground">{day.posted} posted</span>
       )}
-      <DayChips day={day} size="cell" />
+      <DayChips day={day} size="cell" workspaceId={workspaceId} />
     </>
   );
 }
 
 /** A listed day on a phone: its date and count on one line, its names below. */
-function DayRow({ day }: { day: CalendarDay }) {
+function DayRow({ day, workspaceId }: { day: CalendarDay; workspaceId: string | null }) {
   return (
     <>
       <div className="flex items-baseline justify-between gap-2">
@@ -213,7 +246,7 @@ function DayRow({ day }: { day: CalendarDay }) {
           <span className="text-xs text-muted-foreground">{day.posted} posted</span>
         )}
       </div>
-      <DayChips day={day} size="row" />
+      <DayChips day={day} size="row" workspaceId={workspaceId} />
     </>
   );
 }
@@ -226,6 +259,7 @@ export function ContentCalendar({
   tz = "UTC",
   navigable = false,
   selected = null,
+  workspaceId = null,
 }: {
   /** The month on screen. */
   month: Month;
@@ -245,6 +279,11 @@ export function ContentCalendar({
   navigable?: boolean;
   /** The day whose list is open, marked on the grid. */
   selected?: string | null;
+  /**
+   * The workspace whose thumbnails the chips ask for (#1634). The sample
+   * workspace draws without one, so its chips draw the glyph.
+   */
+  workspaceId?: string | null;
 }) {
   const { month: monthName, days } = useMemo(
     () => buildCalendarDays(month, history, queue, schedule, tz),
@@ -303,11 +342,11 @@ export function ContentCalendar({
                       className={cn("block py-2", day.date === selected && "bg-muted")}
                       aria-current={day.date === selected ? "date" : undefined}
                     >
-                      <DayRow day={day} />
+                      <DayRow day={day} workspaceId={workspaceId} />
                     </Link>
                   ) : (
                     <div className="py-2">
-                      <DayRow day={day} />
+                      <DayRow day={day} workspaceId={workspaceId} />
                     </div>
                   )}
                 </li>
@@ -344,11 +383,11 @@ export function ContentCalendar({
                   })}, ${day.posted} posted`}
                   aria-current={day.date === selected ? "date" : undefined}
                 >
-                  <DayContents day={day} />
+                  <DayContents day={day} workspaceId={workspaceId} />
                 </Link>
               ) : (
                 <div key={day.date} className={cellClass(day)}>
-                  <DayContents day={day} />
+                  <DayContents day={day} workspaceId={workspaceId} />
                 </div>
               )
             )}

@@ -7,8 +7,11 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { isValidElement, type ReactElement } from "react";
+import { ImageIcon, Video } from "lucide-react";
 import type { IntentDay } from "@/lib/calendar-month";
-import { buildCalendarDays, listedDays } from "./content-calendar";
+import { MediaThumbnail } from "./media-thumbnail";
+import { buildCalendarDays, DayChips, listedDays } from "./content-calendar";
 
 /** 9:30 PM on Thursday, Oct 1 in New York; already Friday, Oct 2 in UTC. */
 const EVENING = new Date("2026-10-02T01:30:00Z");
@@ -132,5 +135,84 @@ describe("the calendar on the workspace's clock", () => {
       EVENING
     );
     expect(listedDays(days).map((d) => d.date)).toEqual(["2026-10-01", "2026-10-05"]);
+  });
+});
+
+/** Every element in a returned tree, depth-first. */
+function* walk(node: unknown): Generator<ReactElement> {
+  if (Array.isArray(node)) {
+    for (const child of node) yield* walk(child);
+    return;
+  }
+  if (!isValidElement(node)) return;
+  yield node;
+  yield* walk((node.props as { children?: unknown }).children);
+}
+
+describe("the calendar's pictures (#1634 Phase 4)", () => {
+  const pictured: IntentDay = {
+    date: "2026-10-01",
+    count: 1,
+    newest: [
+      {
+        ...postedDay("2026-10-01", 1, ["a.jpg"]).newest[0],
+        media_item_id: "media-a",
+        media_kind: "image",
+        has_thumbnail: true,
+        thumbnail_version: "v1",
+      },
+    ],
+  };
+  const queuedClip = {
+    scheduled_for: "2026-10-02T14:00:00Z",
+    media_name: "q.mp4",
+    category: "Memes",
+    status: "approved",
+    planned: false,
+    media: {
+      file_name: "q.mp4",
+      media_item_id: "media-q",
+      media_kind: "video",
+      has_thumbnail: true,
+      thumbnail_version: "v2",
+    },
+  };
+  // The sample workspace's queue carries no picture fields.
+  const sampleQueued = { ...queuedClip, media_name: "s.jpg", media: undefined };
+  const slot = { slot_time: "2026-10-02T16:00:00Z", predicted_category: "Memes" };
+  const october = () =>
+    buildCalendarDays(OCTOBER, [pictured], [queuedClip, sampleQueued], [slot], "UTC", EVENING).days;
+  const dayOf = (date: string) => october().find((d) => d.date === date)!;
+
+  it("gives each story chip its picture's fields, and a predicted slot none", () => {
+    expect(dayOf("2026-10-01").posts[0].media).toMatchObject({
+      media_item_id: "media-a",
+      has_thumbnail: true,
+    });
+    expect(
+      dayOf("2026-10-02").posts.map((p) => [p.label, p.media?.media_item_id, p.media?.file_name])
+    ).toEqual([
+      ["q.mp4", "media-q", "q.mp4"],
+      ["s.jpg", undefined, "s.jpg"],
+      ["Memes", undefined, undefined],
+    ]);
+  });
+
+  it("draws a picture beside a chip's name through the route, with no play badge", () => {
+    const tree = DayChips({ day: dayOf("2026-10-02"), size: "cell", workspaceId: "ws-1" }) as ReactElement;
+    const pictures = [...walk(tree)].filter((el) => el.type === MediaThumbnail);
+    expect(pictures.map((el) => (el.props as { src: string }).src)).toEqual([
+      "/api/workspaces/ws-1/media/media-q/thumbnail?v=v2",
+    ]);
+    expect((pictures[0].props as { video: boolean }).video).toBe(false);
+    // The sample's story draws its glyph; the predicted slot draws none.
+    expect([...walk(tree)].filter((el) => el.type === ImageIcon)).toHaveLength(1);
+  });
+
+  it("draws every story chip's glyph without a workspace, as the sample workspace does", () => {
+    const tree = DayChips({ day: dayOf("2026-10-02"), size: "row", workspaceId: null }) as ReactElement;
+    const types = [...walk(tree)].map((el) => el.type);
+    expect(types).not.toContain(MediaThumbnail);
+    expect(types.filter((type) => type === Video || type === ImageIcon)).toEqual([Video, ImageIcon]);
   });
 });
