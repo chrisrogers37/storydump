@@ -50,6 +50,8 @@ const SHARED_FILES = [
   // too; it passes no workspace, so it never asks for a thumbnail.
   path.join("components", "dashboard", "media", "media-thumbnail.tsx"),
   path.join("lib", "thumbnails.ts"),
+  // The sample's Calendar opens the product's day view over its own stories.
+  path.join("components", "dashboard", "media", "calendar-day.tsx"),
 ];
 
 const BANNED_MODULES = ["bff", "workspaces", "page-guards", "target-api", "db"].map(

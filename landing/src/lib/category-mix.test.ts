@@ -5,6 +5,7 @@ import {
   mixRefusalCopy,
   saveCategoryMix,
   toMixBySource,
+  wholeShares,
   type MixSourceRow,
 } from "./category-mix";
 
@@ -221,5 +222,30 @@ describe("refusal copy", () => {
     );
     expect(mixRefusalCopy("invalid_mix_all_off")).toMatch(/at least one/i);
     expect(mixRefusalCopy("invalid_mix_sum_not_one")).toMatch(/100/);
+  });
+});
+
+describe("wholeShares", () => {
+  it("gives the points lost to rounding down to the largest remainders, so the column adds up", () => {
+    // 77, 45 and 30 of 152 posts. Rounded one by one they read 51, 30 and 20: 101.
+    const shares = [77, 45, 30].map((posts) => (posts / 152) * 100);
+    expect(wholeShares(shares)).toEqual([51, 29, 20]);
+  });
+
+  it("keeps shares that are already whole", () => {
+    expect(wholeShares([50, 30, 20])).toEqual([50, 30, 20]);
+  });
+
+  it("gives a tie to the earlier row", () => {
+    expect(wholeShares([100 / 3, 100 / 3, 100 / 3])).toEqual([34, 33, 33]);
+  });
+
+  it("adds to what the shares add to, which is under 100 when some posts are on no row", () => {
+    expect(wholeShares([59.6, 20.4])).toEqual([60, 20]);
+    expect(wholeShares([60, 20, 0])).toEqual([60, 20, 0]);
+  });
+
+  it("has nothing to share out of an empty column", () => {
+    expect(wholeShares([])).toEqual([]);
   });
 });

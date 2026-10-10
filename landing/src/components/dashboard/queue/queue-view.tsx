@@ -171,11 +171,16 @@ export function QueueView({
                   glyph: "h-5 w-5",
                 })}
 
-                <div className="min-w-0 grow basis-32">
+                {/* Wide enough for the line under the name: on a phone the
+                    badge wraps below it rather than squeezing it. */}
+                <div className="min-w-0 grow basis-56">
                   <p className="truncate font-medium">{intent.file_name}</p>
                   <p className="text-sm text-muted-foreground">
                     {accountLabel(intent)} ·{" "}
-                    {formatSlot(intent.schedule_slot_at, tz)}
+                    {/* One piece: a narrow row breaks the line beside the date, never inside it. */}
+                    <span className="whitespace-nowrap">
+                      {formatSlot(intent.schedule_slot_at, tz)}
+                    </span>
                     {intent.category ? ` · ${intent.category}` : ""}
                   </p>
                   {intent.link_url && (

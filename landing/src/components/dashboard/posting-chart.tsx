@@ -56,7 +56,15 @@ export function PostingChart({ data }: { data: DayCount[] }) {
             description="This chart fills in as your Stories go out."
           />
         ) : (
-          <ResponsiveContainer width="100%" height={300}>
+          // The library draws its bars inside <g tabindex="-1">. A click or a
+          // tap focuses that layer, and a browser outlines a focused SVG
+          // element: a box round every bar. Those layers take no outline. The
+          // surface, where a keyboard's focus lands, keeps its own.
+          <ResponsiveContainer
+            width="100%"
+            height={300}
+            className="[&_g[tabindex='-1']]:outline-none"
+          >
             <BarChart data={formatted}>
               <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
               <XAxis

@@ -9,7 +9,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isValidElement, type ReactElement } from "react";
-import { BarChart, Tooltip } from "recharts";
+import { BarChart, ResponsiveContainer, Tooltip } from "recharts";
 import { PostingChart } from "./posting-chart";
 
 const zone = process.env.TZ;
@@ -78,5 +78,24 @@ describe("the posting chart's tooltip", () => {
     ]);
     // The axis keeps the date alone.
     expect(rows.map((row) => row.label)).toEqual(["Oct 9", "Nov 1"]);
+  });
+});
+
+describe("the posting chart's focus outline", () => {
+  it("draws none on the layers a click or a tap focuses, and leaves the chart's own alone", () => {
+    const tree = PostingChart({
+      data: [{ local_date: "2026-10-09", count: 4, cap: 6 }],
+    }) as ReactElement;
+    const container = [...walk(tree)].find((el) => el.type === ResponsiveContainer);
+    expect(container, "the chart sits in a <ResponsiveContainer>").toBeDefined();
+    const classes = String((container!.props as { className?: string }).className ?? "").split(/\s+/);
+    // The library draws its bars inside <g tabindex="-1">. A press focuses that
+    // layer, and the browser outlines a focused SVG element: a box round every bar.
+    expect(classes).toContain("[&_g[tabindex='-1']]:outline-none");
+    // The surface is <svg tabindex="0">, where a keyboard's ring belongs, so
+    // the layers are the only thing the chart takes an outline from.
+    expect(classes.filter((name) => name.includes("outline"))).toEqual([
+      "[&_g[tabindex='-1']]:outline-none",
+    ]);
   });
 });

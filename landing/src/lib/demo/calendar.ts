@@ -1,5 +1,13 @@
+import type { DayStory } from "@/components/dashboard/media/calendar-day";
 import type { ContentCalendar } from "@/components/dashboard/media/content-calendar";
-import { monthOf, NAMES_PER_DAY, type IntentDay } from "@/lib/calendar-month";
+import {
+  monthGrid,
+  monthOf,
+  NAMES_PER_DAY,
+  parseDay,
+  type IntentDay,
+  type Month,
+} from "@/lib/calendar-month";
 import type { Intent } from "@/lib/intents";
 import { dateInZone } from "@/lib/zoned-dates";
 import { SAMPLE_TZ, type FinishedStory } from "./fixtures";
@@ -25,7 +33,7 @@ export type CalendarLanes = Parameters<typeof ContentCalendar>[0];
  *  - a skipped or rejected story leaves the calendar.
  *
  * Each story is drawn once. The sample draws this month on its own clock, with
- * no month or day to navigate to.
+ * no other month to navigate to. A day opens, as it does in the product.
  */
 export function demoCalendarLanes(
   queue: Intent[],
@@ -65,4 +73,29 @@ export function demoCalendarLanes(
       })),
     predicted: [],
   };
+}
+
+/**
+ * The day `?day=` opens: a real date on the month's grid, as the real
+ * Calendar reads it. Anything else opens no day.
+ */
+export function demoOpenDay(value: string | null, month: Month): string | null {
+  const day = parseDay(value);
+  return day !== null && monthGrid(month).dates.includes(day) ? day : null;
+}
+
+/**
+ * Every story of one day, as the real day read returns them: every state, in
+ * slot order, the day read on the sample's clock. The month draws a day's
+ * first three and "+N more"; this is all of them, so every story the Queue
+ * names can be reached from the Calendar.
+ */
+export function demoDayStories(
+  queue: Intent[],
+  history: FinishedStory[],
+  day: string,
+): DayStory[] {
+  return [...history, ...queue]
+    .filter((i) => dateInZone(i.schedule_slot_at, SAMPLE_TZ) === day)
+    .sort((a, b) => Date.parse(a.schedule_slot_at) - Date.parse(b.schedule_slot_at));
 }

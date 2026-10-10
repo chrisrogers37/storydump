@@ -99,6 +99,43 @@ describe("the posting mix card", () => {
     );
   });
 
+  it("adds the Posted column to 100, where rounding each share alone read 101", () => {
+    // The sample workspace's own month: 77, 45 and 30 of 152 posts.
+    const share = (posts: number) => (posts / 152) * 100;
+    const shown = text(
+      card({
+        folders: [
+          row({ name: "Product shots", planned: 50, posted: share(77) }),
+          row({ name: "Behind the scenes", planned: 30, posted: share(45) }),
+          row({ name: "Memes", planned: 20, posted: share(30) }),
+        ],
+        total: 152,
+        fromRemoved: 0,
+      }),
+    );
+    expect(shown).toContain("Product shots50%51%");
+    expect(shown).toContain("Behind the scenes30%29%");
+    expect(shown).toContain("Memes20%20%");
+  });
+
+  it("adds the Target column to 100 too, when the mix splits three ways", () => {
+    const third = 100 / 3;
+    const shown = text(
+      card({
+        folders: [
+          row({ name: "a", mode: "automatic", planned: third }),
+          row({ name: "b", mode: "automatic", planned: third }),
+          row({ name: "c", mode: "automatic", planned: third }),
+        ],
+        total: 0,
+        fromRemoved: 0,
+      }),
+    );
+    expect(shown).toContain("a34% auto—");
+    expect(shown).toContain("b33% auto—");
+    expect(shown).toContain("c33% auto—");
+  });
+
   it("is the empty state when no folder is connected", () => {
     const tree = card({ folders: [], total: 0, fromRemoved: 0 });
     expect([...walk(tree)].some((el) => el.type === EmptyState)).toBe(true);

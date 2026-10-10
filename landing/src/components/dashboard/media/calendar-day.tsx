@@ -4,6 +4,7 @@ import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import { mediaTile } from "@/components/dashboard/media/media-tile";
 import type { PredictedSlot } from "@/lib/calendar-month";
 import type { Intent } from "@/lib/intents";
+import type { ThumbnailMedia } from "@/lib/thumbnails";
 import { cn } from "@/lib/utils";
 import { formatCalendarDate, formatInZone, instant } from "@/lib/zoned-dates";
 
@@ -12,6 +13,14 @@ function accountOf(slot: PredictedSlot): string {
   if (slot.account_handle) return `@${slot.account_handle}`;
   return slot.account_display_name ?? "An account";
 }
+
+/**
+ * A story as the day view reads it: its time, its name, its state and its
+ * picture's fields. Narrowed from the intent row, so the sample workspace's
+ * finished stories, which carry less, are listed by the same view.
+ */
+export type DayStory = Pick<Intent, "id" | "state" | "schedule_slot_at" | "file_name"> &
+  ThumbnailMedia;
 
 /**
  * One day of the calendar, opened from its cell (#1634): every story the day
@@ -32,12 +41,15 @@ export function CalendarDay({
   predictedCut,
 }: {
   date: string;
-  intents: Intent[];
+  intents: DayStory[];
   /** The slots the cadence will open on the day (`GET …/upcoming`). */
   predicted: PredictedSlot[];
   tz: string;
-  /** The workspace whose thumbnails the rows ask for. */
-  workspaceId: string;
+  /**
+   * The workspace whose thumbnails the rows ask for. The sample workspace has
+   * none, so its rows draw the glyph.
+   */
+  workspaceId: string | null;
   /** Back to the month, with no day open. */
   closeHref: string;
   /** The read's limit when the day reached it, so a page is not read as the whole. */
@@ -46,7 +58,7 @@ export function CalendarDay({
   predictedCut: boolean;
 }) {
   // The sort is stable and the stories come first, so a story precedes a slot at its time.
-  const rows: (Intent | PredictedSlot)[] = [...intents, ...predicted].sort(
+  const rows: (DayStory | PredictedSlot)[] = [...intents, ...predicted].sort(
     (a, b) => instant(a.schedule_slot_at).getTime() - instant(b.schedule_slot_at).getTime()
   );
   const time = (at: string) => formatInZone(at, tz, { hour: "numeric", minute: "2-digit" });

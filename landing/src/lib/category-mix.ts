@@ -99,6 +99,27 @@ export function toMixBySource(rows: CardRow[]): ToMixResult {
   };
 }
 
+/**
+ * Shares as whole percents that add to what the shares add to. Each is rounded
+ * down, and the points that leaves over go to the largest remainders, the
+ * earlier row on a tie. Rounded one by one, 50.7, 29.6 and 19.7 read 51, 30
+ * and 20, which is 101.
+ */
+export function wholeShares(shares: number[]): number[] {
+  const whole = shares.map(Math.floor);
+  const sum = (values: number[]) => values.reduce((a, b) => a + b, 0);
+  let left = Math.round(sum(shares)) - sum(whole);
+  const byRemainder = shares
+    .map((share, i) => ({ i, remainder: share - whole[i] }))
+    .sort((a, b) => b.remainder - a.remainder || a.i - b.i);
+  for (const { i } of byRemainder) {
+    if (left <= 0) break;
+    whole[i] += 1;
+    left -= 1;
+  }
+  return whole;
+}
+
 /** An even split to one decimal; the remainder lands on the first row so the total is exactly 100. */
 export function evenSplit(count: number): number[] {
   if (count <= 0) return [];

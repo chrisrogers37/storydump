@@ -1,6 +1,7 @@
 import { Layers } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/dashboard/empty-state";
+import { wholeShares } from "@/lib/category-mix";
 import type { FolderMixView, FolderMix } from "@/lib/dashboard-payloads";
 
 /**
@@ -15,9 +16,15 @@ import type { FolderMixView, FolderMix } from "@/lib/dashboard-payloads";
  * A window with no post, or an API that sent no counts, has no posted share:
  * `deriveFolderMix` types it `Unavailable`, the cell prints "—", and the
  * footer says which.
+ *
+ * Each column is rounded as a whole (`wholeShares`), so the percents a reader
+ * adds up come to what the shares come to: 100, or less when some of the
+ * window's posts are from folders no longer connected.
  */
 export function PostingMixCard({ mix }: { mix: FolderMix }) {
   const { folders, total, fromRemoved } = mix;
+  const targets = wholeShares(folders.map((f) => (f.mode === "off" ? 0 : f.planned)));
+  const posted = wholeShares(folders.map((f) => f.posted ?? 0));
 
   return (
     <Card>
@@ -48,14 +55,16 @@ export function PostingMixCard({ mix }: { mix: FolderMix }) {
                 </tr>
               </thead>
               <tbody>
-                {folders.map((f) => (
+                {folders.map((f, i) => (
                   <tr key={f.sourceId}>
                     <th scope="row" className="break-words pt-2 text-left font-medium">
                       {f.name}
                     </th>
-                    <td className="whitespace-nowrap pt-2 pl-4 text-right tabular-nums">{target(f)}</td>
                     <td className="whitespace-nowrap pt-2 pl-4 text-right tabular-nums">
-                      {f.posted === null ? "—" : `${f.posted.toFixed(0)}%`}
+                      {target(f, targets[i])}
+                    </td>
+                    <td className="whitespace-nowrap pt-2 pl-4 text-right tabular-nums">
+                      {f.posted === null ? "—" : `${posted[i]}%`}
                     </td>
                   </tr>
                 ))}
@@ -81,9 +90,8 @@ export function PostingMixCard({ mix }: { mix: FolderMix }) {
   );
 }
 
-/** What the folder is set to: its share, marked "auto" when the mix derives it, or Off. */
-function target(f: FolderMixView): string {
+/** What the folder is set to: its whole share, marked "auto" when the mix derives it, or Off. */
+function target(f: FolderMixView, planned: number): string {
   if (f.mode === "off") return "Off";
-  const share = `${f.planned.toFixed(0)}%`;
-  return f.mode === "automatic" ? `${share} auto` : share;
+  return f.mode === "automatic" ? `${planned}% auto` : `${planned}%`;
 }

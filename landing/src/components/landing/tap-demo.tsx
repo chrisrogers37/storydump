@@ -1,14 +1,14 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { DEMO_SLOT } from "@/components/landing/card-labels"
+import { DEMO_DAY, DEMO_SLOT } from "@/components/landing/card-labels"
 import { trackEvent, type DemoAction } from "@/lib/analytics"
 import { ApprovalCard, type CardAction } from "@/components/landing/approval-card"
 import { StoryArt, artLabels, type ArtKind } from "@/components/landing/story-art"
 import { cn } from "@/lib/utils"
 
 /**
- * The hero's demo: today's card in a team's Telegram group, and the visitor
+ * The hero's demo: a card in a team's Telegram group, and the visitor
  * taps it. Post now walks through what really happens (posting, the Story,
  * the settled card); the other buttons settle the card the way the product
  * does. It runs entirely in the browser; the only thing it sends is a
@@ -182,7 +182,7 @@ export function TapDemo() {
             </div>
             <div className="flex flex-1 flex-col justify-end gap-2 bg-[radial-gradient(#c9d3de_1px,transparent_1px)] bg-[length:14px_14px] p-2.5">
               <span className="mx-auto rounded-full bg-black/20 px-2.5 py-0.5 text-[11px] font-medium text-white">
-                Today
+                {DEMO_DAY}
               </span>
               <ApprovalCard
                 key={photo}

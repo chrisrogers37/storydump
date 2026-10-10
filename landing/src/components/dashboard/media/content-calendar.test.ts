@@ -9,12 +9,19 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { isValidElement, type ReactElement } from "react";
+import { createElement, isValidElement, type ReactElement } from "react";
+import { renderToString } from "react-dom/server";
 import { ImageIcon, Video } from "lucide-react";
 import type { IntentDay } from "@/lib/calendar-month";
 import { TONE_CLASS } from "@/components/dashboard/tone";
 import { MediaThumbnail } from "./media-thumbnail";
-import { buildCalendarDays, dayLabel, DayChips, listedDays } from "./content-calendar";
+import {
+  buildCalendarDays,
+  ContentCalendar,
+  dayLabel,
+  DayChips,
+  listedDays,
+} from "./content-calendar";
 
 /** 9:30 PM on Thursday, Oct 1 in New York; already Friday, Oct 2 in UTC. */
 const EVENING = new Date("2026-10-02T01:30:00Z");
@@ -320,5 +327,40 @@ describe("the calendar's pictures (#1634 Phase 4)", () => {
     const types = [...walk(tree)].map((el) => el.type);
     expect(types).not.toContain(MediaThumbnail);
     expect(types.filter((type) => type === Video || type === ImageIcon)).toEqual([Video, ImageIcon]);
+  });
+});
+
+describe("the calendar's links", () => {
+  /** An empty October, rendered to a string: the links are all there is to read. */
+  const draw = (props: { navigable?: boolean; monthLinks?: boolean }) =>
+    renderToString(
+      createElement(ContentCalendar, {
+        month: { year: 2026, month: 10 },
+        history: [],
+        queue: [],
+        predicted: [],
+        ...props,
+      }),
+    );
+  const DAY = 'href="?month=2026-10&amp;day=2026-10-10"';
+
+  it("links each day and the months either side when it can be navigated", () => {
+    const html = draw({ navigable: true });
+    expect(html).toContain(DAY);
+    expect(html).toContain("Previous month");
+    expect(html).toContain("Next month");
+  });
+
+  it("can link its days alone, for a calendar that draws one month", () => {
+    const html = draw({ navigable: true, monthLinks: false });
+    expect(html).toContain(DAY);
+    expect(html).not.toContain("Previous month");
+    expect(html).not.toContain("Next month");
+  });
+
+  it("links nothing when it cannot be navigated", () => {
+    const html = draw({});
+    expect(html).not.toContain("day=");
+    expect(html).not.toContain("Previous month");
   });
 });
