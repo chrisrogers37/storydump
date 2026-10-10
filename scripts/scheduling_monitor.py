@@ -143,6 +143,13 @@ WORKER_UNKNOWN = "worker-unknown"
 #: a healthy worker every cycle. `tests/src/test_worker.py` fails when three beats
 #: (two plus one of slack) of the bare composition's fastest recurring kind no
 #: longer fit.
+#:
+#: **The worker's loop watchdog is sized against this too.** A worker whose event
+#: loop stopped ends itself after `WorkerConfig.loop_stall_seconds` and is
+#: restarted; that bound, the restart and the first beat after it are meant to
+#: fit inside this threshold, so a stall the worker repairs by itself is not
+#: paged. The same test file pins the sum: lower this, or raise that bound, and
+#: it fails.
 DEFAULT_WORKER_STALE_S = 600
 
 #: A due system job nobody claimed for this long. It sees what the staleness

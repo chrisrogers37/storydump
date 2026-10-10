@@ -33,6 +33,9 @@ class _Heartbeat:
 
 class _Config:
     clock_interval_seconds = 10.0
+    # run() arms the loop watchdog from these before its first step.
+    loop_stall_seconds = 300.0
+    loop_beat_seconds = 5.0
 
 
 class _App:

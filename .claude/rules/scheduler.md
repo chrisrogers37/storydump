@@ -42,6 +42,11 @@ does.
   (interactive 3, bulk 2; `TARGET_WORKER_*_CONCURRENCY`), the sender sweeper
   (3 s), the prompt sweeper (5 s) and a status line every 60 s. `supervise`
   (`:545`) ends the worker loudly when any of them dies.
+- A task that dies is `supervise`'s; an event loop that stops turning is the
+  watchdog thread's (`loop_watchdog.py`, armed by `run` for the whole run): exit
+  3 with every thread's stack after `loop_stall_seconds` (300 s). It never acts
+  on a wait, so bound a wait where it is made. What it cannot see, and what an
+  operator does, is `documentation/operations/worker-recovery.md`.
 - The numbers are `WorkerConfig`'s defaults (`work_loop.py:62`), passed as
   parameters to the doors. Do not hardcode one in a service or a door body.
 

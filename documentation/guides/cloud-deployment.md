@@ -171,7 +171,9 @@ commands.
   (`src/services/target/worker_health.py:156-177`), bound before the first database
   connection so a slow start is not marked failed. The worker is fail-fast — a
   supervised task that dies takes the process down with exit 1
-  (`src/worker.py:860-861`) and Railway restarts it; `/health` answers 503 only
+  (`src/worker.py:860-861`) and Railway restarts it; an event loop that stops
+  turning does the same with exit 3, from a watchdog thread
+  (`src/services/target/loop_watchdog.py`); `/health` answers 503 only
   for a clock that is alive and no longer advancing. It stops on SIGTERM and
   SIGINT (`src/worker.py:633-637`).
 - **API**: `GET /health` (`src/api/routes/health.py`) says ok, the version and

@@ -51,6 +51,7 @@ from src.services.target import (
     email_sender,
     google_drive_adapter,
     jobs,
+    loop_watchdog,
     oauth_states,
     scheduler,
     unit_of_work,
@@ -247,6 +248,9 @@ class WorkerApp:
     #: attribute assignment — the test that reads it already had to
     #: `getattr(..., None)` for exactly that reason (#1325 audit, TD-A20).
     health_server: object = None
+    #: Set by run(): the event-loop watchdog (`loop_watchdog`), armed for the
+    #: whole of the run.
+    watchdog: object = None
     #: The bot this worker is CONFIGURED to speak as (`TARGET_TELEGRAM_BOT_USERNAME`,
     #: the API's webhook bot) and the bot its token actually is (from the
     #: startup probe). A mismatch means every card's buttons belong to a bot
@@ -480,6 +484,7 @@ def status_line(
     prompt_sweeper=None,
     bot_username=None,
     backpressure=None,
+    watchdog=None,
 ) -> str:
     """One human-readable line from the observables — the soak's visibility.
     *backpressure* is `backpressure.snapshot`'s dict (phase 3a step 6): the
@@ -537,6 +542,8 @@ def status_line(
             f" missed={prompt_sweeper.missed}"
             f" unheard={prompt_sweeper.unheard}]"
         )
+    if watchdog is not None:
+        line += f" watchdog[armed={watchdog.armed}]"
     if backpressure is not None:
         line += " " + _backpressure.render(backpressure)
     return line
@@ -688,16 +695,44 @@ async def _status_reporter(app: WorkerApp, stop: asyncio.Event, every: float) ->
                     prompt_sweeper=app.prompt_sweeper,
                     bot_username=app.bot_username,
                     backpressure=await _backpressure_snapshot(app),
+                    watchdog=app.watchdog,
                 ),
             )
 
 
 async def run(app: WorkerApp, *, stop: asyncio.Event | None = None) -> None:
-    """Bind connections, start the clock/heartbeat/loops, run until stopped.
+    """Run the worker under its event-loop watchdog (`loop_watchdog`).
+
+    The watchdog is armed before the first startup step and disarmed after the
+    last step of the stop. Its condition is the loop not turning, which is as
+    true of a startup or a teardown that blocks as of a tick that does, and
+    nothing else times either: the health listener answers from before the
+    first connection, so the deploy's check says nothing about the rest of
+    startup, and a stop the worker begins by itself, after a task death, has no
+    drain window behind it. The `finally` holds nothing else, so the thread
+    cannot outlive the run whichever way the run ends.
 
     *stop* is the test seam: signals set the same event, so a harness can end
     a soak the way SIGTERM would without owning a process.
     """
+    cfg = app.config
+    watchdog = app.watchdog = loop_watchdog.LoopWatchdog(
+        stall_seconds=cfg.loop_stall_seconds, beat_seconds=cfg.loop_beat_seconds
+    )
+    watchdog.start(asyncio.get_running_loop())
+    try:
+        logger.info(
+            "loop watchdog armed: exits %d when the event loop is silent for %ds",
+            loop_watchdog.STALL_EXIT_CODE,
+            cfg.loop_stall_seconds,
+        )
+        await _run(app, stop=stop)
+    finally:
+        watchdog.stop()
+
+
+async def _run(app: WorkerApp, *, stop: asyncio.Event | None) -> None:
+    """Bind connections, start the clock/heartbeat/loops, run until stopped."""
     engine = app.engine
     cfg = app.config
     stop = stop or asyncio.Event()

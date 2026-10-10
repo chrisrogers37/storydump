@@ -418,14 +418,13 @@ class TestTheWorkerIdlesVisibly:
             "the executor-less kind must park, not vanish"
         )
         assert app.heartbeat.consecutive_failures == 0
-        # The event-loop watchdog rides the run and ends with it (#1664). The
-        # same positive control: `beats` moving is the loop's half armed, and a
-        # thread still alive after the stop would outlive the worker it guards
-        # (and, in this process, end the test session two minutes later).
+        # The event-loop watchdog rides the run and ends with it (#1664): the
+        # same positive control. A thread still armed here would outlive the
+        # worker it guards.
         assert app.watchdog is not None and app.watchdog.beats >= 3, (
             "run() must arm the loop watchdog for the whole run"
         )
-        assert not app.watchdog.alive, "run() must disarm the watchdog as it stops"
+        assert not app.watchdog.armed, "run() must disarm the watchdog when it ends"
 
         with sync_conn.cursor() as cur:
             # The slot was due when it was minted, so the W3 fast path prompted

@@ -238,20 +238,34 @@ def test_a_card_is_late_only_past_what_the_worker_s_own_beats_explain():
 
 
 def test_a_stopped_loop_is_restarted_before_the_monitor_pages_for_it():
-    """`loop_stall_seconds` is when the watchdog ends a worker whose event loop
-    stopped turning (`loop_watchdog`). The restart and its first beats have to
-    fit inside the fleet monitor's worker-down threshold too, or the page
-    arrives for a stall that was already being repaired: so the bound takes at
-    most half of it. And it spans three of the loop's own beats, two plus one
-    of slack, the rule the monitor's threshold follows above, so one late beat
-    never ends a healthy worker. Raise the bound and this fails until the
-    monitor's threshold rises with it.
+    """The watchdog ends a worker whose event loop stopped turning
+    (`loop_watchdog`), and the platform restarts it. The page
+    (`DEFAULT_WORKER_STALE_S`) is for a worker nothing repaired, so the whole
+    repair has to fit inside it, term by term: the last success can be one
+    beat of the fastest recurring kind old when the loop stops; the watchdog
+    sees it after its bound and one check; the report takes its grace at most;
+    and the restarted worker's first success is allowed one more beat. Raise
+    the bound, or lower the threshold, and this fails until the other moves.
     """
     from scripts.scheduling_monitor import DEFAULT_WORKER_STALE_S
+    from src.services.target import loop_watchdog
 
     cfg = WorkerConfig()
-    assert 2 * cfg.loop_stall_seconds <= DEFAULT_WORKER_STALE_S
-    assert 3 * cfg.loop_beat_seconds <= cfg.loop_stall_seconds
+    app = compose(engine=object(), config=cfg, env={})
+    beat = min(secs for kind, secs in app.recurring.items() if kind != "v")
+    repair = (
+        beat
+        + cfg.loop_stall_seconds
+        + cfg.loop_beat_seconds
+        + loop_watchdog.REPORT_GRACE_SECONDS
+        + beat
+    )
+    assert repair <= DEFAULT_WORKER_STALE_S, (
+        f"a stopped loop is repaired in up to {repair:.0f}s (two {beat:.0f}s beats"
+        f" around a {cfg.loop_stall_seconds:.0f}s bound), past the monitor's"
+        f" {DEFAULT_WORKER_STALE_S}s worker-down threshold: the page would arrive"
+        " for a stall the worker was already repairing"
+    )
 
 
 class TestEngineUrlFromEnv:
@@ -562,9 +576,6 @@ class TestSweeperObservables:
         assert "sweeps=7" in line and "mints=2" in line
 
     def test_status_line_carries_the_watchdog_and_says_when_it_is_gone(self):
-        # The watchdog is a thread, so `supervise` cannot see it die. The line
-        # is where that shows: `armed=False` on a running worker is a worker
-        # nothing would end if its loop stopped.
         from src.worker import status_line
 
         class _L:
@@ -574,13 +585,13 @@ class TestSweeperObservables:
             beats, short_beats, consecutive_failures = 0, 0, 0
 
         class _W:
-            alive, beats = True, 41
+            armed = True
 
         line = status_line(loops=[_L], clock=None, heartbeat=_H, watchdog=_W)
-        assert "watchdog[armed=True beats=41]" in line
-        _W.alive = False
+        assert "watchdog[armed=True]" in line
+        _W.armed = False
         line = status_line(loops=[_L], clock=None, heartbeat=_H, watchdog=_W)
-        assert "watchdog[armed=False beats=41]" in line
+        assert "watchdog[armed=False]" in line
         assert "watchdog" not in status_line(loops=[_L], clock=None, heartbeat=_H)
 
 
