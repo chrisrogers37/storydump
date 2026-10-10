@@ -32,8 +32,8 @@ import type { DriveFolder } from "@/lib/drive";
  *
  * ── Why the pure parts are exported separately ───────────────────────────
  *
- * `vitest.config.ts` pins `environment: "node"` and says why, so nothing in
- * this app renders under test. `api-tokens-tab.tsx` answers that by exporting
+ * `vitest.config.ts` pins `environment: "node"` and says why, so no test in
+ * this app presses a button. `api-tokens-tab.tsx` answers that by exporting
  * its decisions beside its components (`mintFormValid`, `tokenStateBadge`,
  * `secretSlot`), and `api-tokens-tab.test.ts` reaches those. The five
  * functions below are this file's equivalent: the component calls each one

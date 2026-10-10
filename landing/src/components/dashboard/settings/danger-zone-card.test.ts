@@ -65,13 +65,13 @@ describe("the card's button", () => {
     );
 
   /** The opening tag of the button that holds exactly this label. */
-  const button = (html: string, label: string) =>
-    html.match(new RegExp(`<button[^>]*>${label}</button>`))?.[0] ?? "";
+  const button = (html: string, label: string) => {
+    const end = html.indexOf(`>${label}</button>`);
+    return end < 0 ? "" : html.slice(html.lastIndexOf("<button", end), end + 1);
+  };
 
   it("opens the confirmation as its trigger, which is where Radix returns focus on close", () => {
-    expect(button(card("active"), "Delete this workspace\\.\\.\\.")).toContain(
-      'aria-haspopup="dialog"',
-    );
+    expect(button(card("active"), "Delete this workspace...")).toContain('aria-haspopup="dialog"');
   });
 
   it("is described, as Restore, by what deleting did: what is heard when focus lands on it", () => {

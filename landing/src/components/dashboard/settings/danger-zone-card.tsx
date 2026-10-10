@@ -78,11 +78,14 @@ export function DangerZoneCard({
 
   // Deleting and restoring each replace the card's one button with the other,
   // and the button that goes takes focus with it. So focus is moved by hand to
-  // the one that takes its place, rather than left to fall to <body>.
+  // the one that takes its place, rather than left on <body>. Only after this
+  // card's own action, since any other re-read of the page can change the
+  // state too. And only focus that was dropped: a person who has already moved
+  // on is left where they are.
   useEffect(() => {
     if (!moveFocus.current) return;
     moveFocus.current = false;
-    buttonRef.current?.focus();
+    if (document.activeElement === document.body) buttonRef.current?.focus();
   }, [state]);
 
   async function offboard() {

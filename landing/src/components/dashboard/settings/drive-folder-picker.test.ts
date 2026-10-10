@@ -15,8 +15,8 @@ import {
 /**
  * The Drive folder picker's decisions, which had no test at all until #1216
  * — they were inline in an 821-line component, and `vitest.config.ts` pins
- * `environment: "node"` (it says why), so nothing that calls a hook can be
- * reached here. The picker answers that the way `api-tokens-tab.tsx` does:
+ * `environment: "node"` (it says why), so no test can press a button in the
+ * picker. The picker answers that the way `api-tokens-tab.tsx` does:
  * the decisions are named exports the component calls at the point the logic
  * used to be written out, so this file and the screen cannot drift.
  *
@@ -130,7 +130,7 @@ describe("the Add folder button", () => {
     expect(button(false)).toContain('aria-haspopup="dialog"');
   });
 
-  it("is dead while the workspace's grant is not active", () => {
+  it("still takes `disabled` through the trigger", () => {
     expect(button(false)).not.toMatch(/\sdisabled=""/);
     expect(button(true)).toMatch(/\sdisabled=""/);
   });
