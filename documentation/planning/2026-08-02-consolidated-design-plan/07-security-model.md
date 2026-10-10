@@ -3661,10 +3661,12 @@ COMMENT ON FUNCTION fn_planned_misses(p_limit int, p_late interval) IS
 ### §49. The activation nudge, built off (106, #1481)
 
 **Why:** §47 counts where people stop setting up. The nudge writes once to someone who stopped,
-naming the step they stopped at with a link straight to it. It is built off: nothing sends until an
-email provider is configured and `TARGET_ACTIVATION_NUDGE_ENABLED` is set, which waits on email
-being switched on and on the owner approving the copy. This section makes the kind legal and the
-door exist, so turning the nudge on later is configuration, not a migration.
+naming the step they stopped at with a link straight to it. It is built off: the worker parks the
+sweep until three gates are open, `TARGET_ACTIVATION_NUDGE_ENABLED`, an email provider, and the web
+app origin the email's link needs, and switching it on waits on email being switched on and on the
+owner approving the copy. 106's header names only the first two; the origin is the registry's
+(`work_loop.build_registry`), and an applied migration is not edited. This section makes the kind
+legal and the door exist, so turning the nudge on later is configuration, not a migration.
 
 **One definition of a stage.** §47's door computed each person's stage timestamps inline. The
 nudge needs the same timestamps per person, and two copies of what counts as connecting Instagram
@@ -3678,15 +3680,20 @@ PUBLIC: only the two doors, which run as `svc_maintenance`, can call it, and it 
 email, were never nudged, and have done nothing for `p_stall`. Stage 2, no workspace, is counted by
 the funnel and never emailed. Stage 5 counts only once a card was offered, an audit row the intent
 trigger wrote moving a `post_intent` into `awaiting_approval`: a folder with no card is the
-product's stall, not the person's, and an auto-approve workspace never offers one. For stage 5 the
-idle clock starts at the first card. The most recent stalls come first, so a capped run spends its
+product's stall, not the person's, and an auto-approve workspace never offers one. The first card
+counts as activity at every stage: idle means nothing for `p_stall` since the later of the person's
+last stage and their first card, which for stage 5 starts the clock at the card. The most recent
+stalls come first, so a capped run spends its
 emails on the people most likely to come back. It returns user ids and a stage, and nothing else.
 
 **Once per person.** The latch is `users.activation_nudge_at`, because §47's stages are a person's,
 across the workspaces they own. The sweep sets it with a conditional `UPDATE … RETURNING` whose
 predicate repeats the door's, and enqueues the `send_email` job in the same transaction, so overlapping
 sweeps still nudge a person once. `users` is the user plane (058 class 3): `svc_worker` already
-holds SELECT, INSERT and UPDATE on it (057) under a row-open policy, so no grant is needed.
+holds SELECT, INSERT and UPDATE on it (057) under a row-open policy, so no grant is needed. The
+latch is set as the email is queued, not as it is sent, so a provider mistake on an armed day uses
+up that day's nudges. The daily cap, `TARGET_ACTIVATION_NUDGE_LIMIT`, is three when unset: small
+for the first armed run, and raised once a nudge has been delivered (#1653).
 
 **The kind.** `activation_nudge_sweep` joins both job-kind constraints as a system kind, as 065 did
 for `alert_stranded_sources`: `ck_jobs_system_kinds` is a biconditional that must widen with the

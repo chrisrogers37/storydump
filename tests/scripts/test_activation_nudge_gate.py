@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
 
 import psycopg2
 import psycopg2.errors
@@ -307,5 +308,66 @@ def test_the_sweep_queues_one_email_per_person_and_latches_each(world):
         assert {str(u) for u in latched} == set(expected)
         # The latch: a second sweep in the same transaction owes nobody anything.
         assert await sweep(c) == 0
+
+    asyncio.run(_as_worker(world["worker"], check))
+
+
+class _LatchedInBetween:
+    """The worker's connection, except that once the door has listed who is
+    owed a nudge, *user* is latched at *at*, as an overlapping sweep that got
+    there first would have done: after this sweep's read, before its UPDATE."""
+
+    def __init__(self, conn, user: str, at: datetime):
+        self.conn, self.user, self.at = conn, user, at
+        self.latched = False
+
+    async def execute(self, statement, params=None):
+        result = await self.conn.execute(statement, params)
+        if not self.latched and "fn_activation_stalled" in str(statement):
+            self.latched = True
+            await self.conn.execute(
+                text("UPDATE users SET activation_nudge_at = :at WHERE id = :id"),
+                {"at": self.at, "id": self.user},
+            )
+        return result
+
+
+def test_overlapping_sweeps_nudge_a_person_once_by_the_updates_predicate(world):
+    """#1653: the door listed AT_INSTAGRAM, and another sweep latched them
+    before this one's UPDATE ran. The UPDATE's predicate, not the door's
+    filter, is what keeps this sweep from stamping them again and queueing a
+    second email."""
+    p = world["people"]
+    first = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    async def check(c):
+        queued = await activation_nudge.sweep_stalled(
+            _LatchedInBetween(c, p["AT_INSTAGRAM"], first),
+            since_days=30,
+            stall_seconds=72 * 3600,
+            limit=50,
+            web_app_origin=ORIGIN,
+        )
+        assert queued == 2
+        keys = (
+            (
+                await c.execute(
+                    text("SELECT serialization_key FROM jobs WHERE kind = 'send_email'")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert set(keys) == {
+            f"email:nudge:{p['AT_FOLDER']}",
+            f"email:nudge:{p['AT_APPROVAL_CARD']}",
+        }
+        stamped = (
+            await c.execute(
+                text("SELECT activation_nudge_at FROM users WHERE id = :id"),
+                {"id": p["AT_INSTAGRAM"]},
+            )
+        ).scalar()
+        assert stamped == first, "the other sweep's latch stands, not re-stamped"
 
     asyncio.run(_as_worker(world["worker"], check))
