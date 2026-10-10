@@ -28,7 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.services.target import upcoming, workspaces
+from src.services.target import upcoming, vocabulary, workspaces
 from src.services.target.unit_of_work import asyncpg_url, unit_of_work
 from tests.scripts.conftest import (
     _dsn,
@@ -893,7 +893,7 @@ class TestTheBounds:
             posting_hours_end=0,
         )
         first = date(2031, 6, 1)
-        days = upcoming.RANGE_MAX_DAYS
+        days = vocabulary.RANGE_MAX_DAYS
         lo, hi = _midnight(first, NY), _midnight(first + timedelta(days=days), NY)
         cursor = _next_slot(world, lo - behind, busiest)
         account = _account(world, ws, "busiest", cursor=cursor)
@@ -950,7 +950,7 @@ class TestTheBounds:
         )
         eve = datetime(2031, 6, 9, 1, tzinfo=UTC)
         account = _account(world, ws, "wide", cursor=_next_slot(world, eve, settings))
-        days = upcoming.RANGE_MAX_DAYS
+        days = vocabulary.RANGE_MAX_DAYS
         walk = _clock_walk(
             world,
             account["cursor"],

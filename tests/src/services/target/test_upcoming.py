@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from datetime import date, timedelta
 
-from src.services.target import content_runway, upcoming, workspaces
+from src.services.target import content_runway, upcoming, vocabulary, workspaces
 from tests.src.services.target.test_content_runway import (
     CLOCK_TICK_MIGRATION,
     _Executor,
@@ -139,10 +139,10 @@ class TestTheBounds:
     async def test_a_wider_range_is_cut_to_the_maximum_for_both_statements(self):
         ex = _Executor()
         await _read(ex, to_date=FROM + timedelta(days=400))
-        cut = FROM + timedelta(days=upcoming.RANGE_MAX_DAYS)
+        cut = FROM + timedelta(days=vocabulary.RANGE_MAX_DAYS)
         assert [params["to_date"] for _, params in ex.sent] == [cut, cut]
         assert ex.sent[1][1]["span_days"] == (
-            upcoming.RANGE_MAX_DAYS + upcoming.WALK_LEAD_DAYS + 2
+            vocabulary.RANGE_MAX_DAYS + upcoming.WALK_LEAD_DAYS + 2
         )
 
     async def test_the_last_dates_are_served_without_overflow(self):

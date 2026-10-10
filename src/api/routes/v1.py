@@ -501,9 +501,8 @@ def _states(state: Optional[str]) -> list[str]:
     return wanted
 
 
-#: The widest local-date range a read takes: a calendar month drawn in whole
-#: weeks is at most six of them (#1634).
-RANGE_MAX_DAYS = 45
+#: The widest local-date range a read takes.
+RANGE_MAX_DAYS = vocabulary.RANGE_MAX_DAYS
 
 #: The most intents one day of `GET …/intents/days` carries.
 PER_DAY_MAX = 10
@@ -712,15 +711,8 @@ async def get_upcoming(
     cadence will open, ``?from=2026-10-26&to=2026-12-07``. A predicted slot is
     projected with the clock's own function and says ``kind: predicted``,
     never a state (`upcoming.upcoming`). ``to`` is after ``from`` and at most
-    `upcoming.RANGE_MAX_DAYS` days from it. The web's read alone."""
-    # A difference, not from + the maximum: that sum can pass the last date.
-    if not 0 < (to - from_).days <= upcoming.RANGE_MAX_DAYS:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"to must be after from and within {upcoming.RANGE_MAX_DAYS} days of it"
-            ),
-        )
+    :data:`RANGE_MAX_DAYS` days from it. The web's read alone."""
+    _check_date_range(from_, to)
     async with principal_mod.member_session(request, str(ws), principal) as session:
         coming = await upcoming.upcoming(
             session, workspace_id=str(ws), from_date=from_, to_date=to

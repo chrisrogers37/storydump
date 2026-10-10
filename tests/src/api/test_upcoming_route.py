@@ -13,7 +13,7 @@ from datetime import date
 import pytest
 
 from src.exceptions.tenancy import TenantResolutionError
-from src.services.target import upcoming
+from src.services.target import upcoming, vocabulary
 from tests.src.api.conftest import PRINCIPAL, WS
 
 URL = f"/api/v1/workspaces/{WS}/upcoming"
@@ -102,7 +102,7 @@ class TestUpcoming:
         assert tenant == [] and read == []
 
     def test_the_widest_range_is_served(self, client, signed_in, tenant, read):
-        assert upcoming.RANGE_MAX_DAYS == 45
+        assert vocabulary.RANGE_MAX_DAYS == 45
         resp = client.get(URL, params={"from": "2026-10-26", "to": "2026-12-10"})
         assert resp.status_code == 200
         assert (read[0]["to_date"] - read[0]["from_date"]).days == 45

@@ -33,7 +33,7 @@ and any account of a workspace that is not `active` or is paused.
 ## The range, and what a row carries
 
 ``[from_date, to_date)`` are local days in the WORKSPACE's zone, at most
-:data:`RANGE_MAX_DAYS` of them. Every row's ``day`` is its slot's date in that
+`vocabulary.RANGE_MAX_DAYS` of them. Every row's ``day`` is its slot's date in that
 zone, and its ``tz`` the zone its time reads in: the account's, else the
 workspace's.
 
@@ -54,13 +54,13 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from src.services.target import readers
+from src.services.target import readers, vocabulary
 from src.services.target.content_runway import _POSTING_SQL, _POSTS_PER_DAY_SQL
-from src.services.target.workspaces import _INTENT_COLUMNS, _INTENT_FROM
-
-#: The widest range of local days one read takes: a calendar month drawn in
-#: whole weeks is six of them.
-RANGE_MAX_DAYS = 45
+from src.services.target.workspaces import (
+    _INTENT_COLUMNS,
+    _INTENT_FROM,
+    _LOCAL_MIDNIGHT,
+)
 
 #: How long before the range a walk may start when the cursor is further back.
 #: `fn_next_slot` answers within a local day of the instant it is given, 25
@@ -73,13 +73,10 @@ PLANNED_MAX = 500
 
 #: The most predicted slots one read returns: the widest range for accounts
 #: that post a hundred times a day between them.
-PREDICTED_MAX = RANGE_MAX_DAYS * 100
+PREDICTED_MAX = vocabulary.RANGE_MAX_DAYS * 100
 
-#: Midnight of a local date in the workspace's own zone, as an instant.
-_LOCAL_MIDNIGHT = (
-    "(CAST(:{name} AS date)::timestamp AT TIME ZONE"
-    " (SELECT tz FROM workspaces WHERE id = :ws))"
-)
+#: The range's two bounds as instants: midnight of each date in the workspace's
+#: own zone, as the intents read bounds a slot.
 _RANGE_START = _LOCAL_MIDNIGHT.format(name="from_date")
 _RANGE_END = _LOCAL_MIDNIGHT.format(name="to_date")
 
@@ -160,11 +157,11 @@ async def upcoming(
     ``planned`` holds the stories a person scheduled that are still
     `scheduled`; ``predicted`` the slots the cadence will open (the module
     docstring has how). ``planned_truncated`` and ``predicted_truncated`` say
-    a list was cut at its limit. A range wider than :data:`RANGE_MAX_DAYS` is
-    cut to that."""
+    a list was cut at its limit. A range wider than
+    `vocabulary.RANGE_MAX_DAYS` is cut to that."""
     # A difference, not from_date + the maximum: that sum can pass the last date.
-    if (to_date - from_date).days > RANGE_MAX_DAYS:
-        to_date = from_date + timedelta(days=RANGE_MAX_DAYS)
+    if (to_date - from_date).days > vocabulary.RANGE_MAX_DAYS:
+        to_date = from_date + timedelta(days=vocabulary.RANGE_MAX_DAYS)
     ws = str(workspace_id)
     planned = await readers.rows(
         executor,
