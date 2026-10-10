@@ -38,6 +38,7 @@ class _Fake:
         self.bound = []
         self.name = "Northside Coffee"
         self.tapper_user = "u1"
+        self.tapper_refusal = None
         self.gucs = []
         self.gate = []
         self.tenant_at_gate = []
@@ -63,6 +64,8 @@ def patched(monkeypatch):
 
     async def user_for_identity(executor, *, provider, external_id):
         f.identity_kw = {"provider": provider, "external_id": external_id}
+        if f.tapper_refusal:
+            raise TenantResolutionError(f.tapper_refusal)
         return f.tapper_user
 
     async def apply_gucs(executor, **kw):
@@ -147,6 +150,19 @@ class TestRefusalsBeforeTheTapperIsProvenAreSilent:
             assert not result.handled and result.reply is None
             assert result.outcome == "tapper_not_minter"
         assert patched.bound == [] and patched.gucs == []
+
+    async def test_a_disabled_tapper_binds_nothing(self, patched):
+        """A disabled person is refused where the tapper is resolved, the
+        minting admin included (#1572): silently, and before any tenant or
+        actor is set, the admin re-check asked or the chat bound."""
+        patched.tapper_refusal = "disabled_user"
+        result = await channel_bind.handle_bind(object(), ctx())
+        assert (result.outcome, result.handled, result.reply) == (
+            "disabled_user",
+            False,
+            None,
+        )
+        assert patched.bound == [] and patched.gucs == [] and patched.gate == []
 
     async def test_a_state_without_a_workspace_is_refused_not_trusted(self, patched):
         patched.state_row = {"user_id": "u1", "workspace_id": None}

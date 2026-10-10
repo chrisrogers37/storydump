@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import membership_sync
 
 
@@ -82,17 +83,14 @@ def linked(monkeypatch):
 
     async def user_for_identity(executor, *, provider, external_id):
         holder["asked"] = (provider, external_id)
+        if holder.get("refused"):
+            # The resolver's own refusal: it reads the state with the identity.
+            raise TenantResolutionError(holder["refused"])
         return holder["user"]
 
     monkeypatch.setattr(
         membership_sync.identity, "user_for_identity", user_for_identity
     )
-
-    async def row(executor, sql, **params):
-        assert "FROM users" in sql
-        return {"state": holder.get("state", "active")}
-
-    monkeypatch.setattr(membership_sync.readers, "row", row)
     return holder
 
 
@@ -145,12 +143,13 @@ class TestObserve:
 
 class TestADisabledAccountIsRefusedByTheCaller:
     async def test_no_membership_for_a_disabled_user(self, linked):
-        linked["state"] = "disabled"
+        linked["refused"] = "disabled_user"
         conn = _Conn(None)
         result = await membership_sync.observe(
             conn, chat_type="group", external_ref="-5", telegram_user_id="42"
         )
-        assert result.outcome == "user_inactive" and not result.handled
+        assert result.outcome == "disabled_user" and not result.handled
+        assert result.reply is None, "named, and never answered in the chat"
         assert conn.statements == [], "the door is never asked"
 
 

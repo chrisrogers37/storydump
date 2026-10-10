@@ -603,6 +603,55 @@ class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
         assert (result.outcome, result.handled) == ("insufficient_role", False)
         assert _row(world, "-1009000000003") is None
 
+    def test_an_admin_disabled_after_minting_binds_nothing(self, world):
+        """A disabled person is refused where the tapper is resolved (#1572).
+        The same admin binds a first group while active, so it is their state
+        that refuses the second link, which they minted before it changed."""
+        from src.services.target import channel_bind
+
+        ws, admin = str(world["a"]["ws"]), str(uuid.uuid4())
+        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (admin,))
+        _migrate(
+            world,
+            "INSERT INTO workspace_members (workspace_id, user_id, role)"
+            " VALUES (%s, %s, 'admin')",
+            (ws, admin),
+        )
+        _migrate(
+            world,
+            "INSERT INTO user_identities (user_id, provider, external_id, display_name)"
+            " VALUES (%s, 'telegram', 'tg-admin-disabled', 'ada')",
+            (admin,),
+        )
+
+        def mint() -> str:
+            link = run(
+                world,
+                lambda s: channel_bind.issue_bind_state(
+                    s, user_id=admin, workspace_id=ws, bot_username="storydump_app_bot"
+                ),
+                ids={"ws": ws, "user": admin},
+            )
+            return link.rsplit("bind-", 1)[1]
+
+        bound = self._tap(
+            world, mint(), tg_user_id="tg-admin-disabled", external_ref="-1009000000004"
+        )
+        assert bound.outcome == "bound", bound.outcome
+
+        state = mint()
+        _migrate(world, "UPDATE users SET state = 'disabled' WHERE id = %s", (admin,))
+        result = self._tap(
+            world, state, tg_user_id="tg-admin-disabled", external_ref="-1009000000005"
+        )
+
+        assert (result.outcome, result.handled, result.reply) == (
+            "disabled_user",
+            False,
+            None,
+        )
+        assert _row(world, "-1009000000005") is None
+
     def test_a_stranger_holding_the_link_binds_nothing(self, world):
         self._linked_admin(world, "tg-admin-1")
         state = self._mint(world).rsplit("bind-", 1)[1]
@@ -909,6 +958,34 @@ class TestTheJoinPathThroughTheDoors:
             == "unbound_chat"
         )
         assert count() == before, "an unbound chat must add no membership anywhere"
+
+    def test_a_disabled_person_joins_nothing_and_keeps_what_they_had(self, world):
+        """A disabled person is refused where the join's caller resolves them
+        (#1572, `07` §14): the door is never asked. The same linked person
+        joins workspace A's group while active, so it is their state that
+        refuses them in workspace B's; the membership they had survives (053)."""
+        _bind(world, "-1009000000110")
+        _bind(world, "-1009000000111", ids=world["b"])
+        person = str(uuid.uuid4())
+        _migrate(world, "INSERT INTO users (id) VALUES (%s)", (person,))
+        self._link(world, person, "tg-joiner-disabled")
+        first = self._observe(
+            world, external_ref="-1009000000110", tg_user_id="tg-joiner-disabled"
+        )
+        assert first.outcome == "joined", first.outcome
+
+        _migrate(world, "UPDATE users SET state = 'disabled' WHERE id = %s", (person,))
+        second = self._observe(
+            world, external_ref="-1009000000111", tg_user_id="tg-joiner-disabled"
+        )
+
+        assert (second.outcome, second.handled, second.reply) == (
+            "disabled_user",
+            False,
+            None,
+        )
+        assert self._role(world, world["b"]["ws"], person) is None
+        assert self._role(world, world["a"]["ws"], person) == "member"
 
     def test_a_revoked_binding_is_named_for_the_join_path(self, world):
         _bind(world, "-1009000000103")

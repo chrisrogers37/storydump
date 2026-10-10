@@ -61,7 +61,8 @@ The tap (`_tap`, `:360`): parse the token (`callback_tokens.parse`,
 `v1:<action>:<intent-uuid>`; actions `post`, `posted`, `skip`, `reject`, and the
 review card's `itposted`, `notposted`, `giveup`) → resolve the chat
 (`tenant_resolution.resolve_chat`, the `fn_resolve_binding` door) → resolve the
-tapper (`user_identities`; none is `unlinked`) → `apply_gucs` with the tenant,
+tapper (`user_identities`, read with `users.state`; none is `unlinked`, a
+disabled person is `disabled_user`) → `apply_gucs` with the tenant,
 the actor and a 2 s `lock_timeout` → `commands.execute` as that member, inside a
 savepoint. Action → command is `ACTION_TO_COMMAND` (`:82`); the review buttons
 all run `resolve_review` with the resolution in `args`, and `notposted` carries

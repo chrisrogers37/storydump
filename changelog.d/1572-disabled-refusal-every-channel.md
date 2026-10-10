@@ -1,0 +1,7 @@
+### Security
+
+- **A disabled person is refused on Telegram as on the web (#1572).** A person whose account is disabled (`users.state`) is refused wherever a Telegram update is tied to them: a card tap, the group-binding link, the Telegram-link prompt and its Confirm, and the group join. The two reads that name a person from a Telegram identity (`identity.user_for_identity`, `identity.tapper_for_identity`) read the person's state in the same statement and refuse a person who is not active as `disabled_user`, the reason the session and token gates already give. `identity.link_identity` attaches no identity to a disabled account, and the link prompt names no such account. A refused tap reads what an unlinked tapper's does, so the chat is not told which, as the web answers both with one 401; the other doors stay silent, as their refusals are. Memberships are untouched. The group join already refused: its outcome is now `disabled_user` (it was `user_inactive`), and it no longer reads the state a second time. No migration.
+
+### Tests
+
+- **Every channel has a refusal case for a disabled person (#1572).** Unit and database cases cover the tap, the binding link, the link prompt and its Confirm, and the group join; in each database case the same person acts first while active, so it is their state that refuses them. The session gate gains a unit case beside its database one, and the tap gate's statement pin holds the person's state to the tap's one identity read.

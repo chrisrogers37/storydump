@@ -20,7 +20,8 @@ import logging
 
 from sqlalchemy import text
 
-from src.services.target import bindings, identity, readers
+from src.exceptions.tenancy import TenantResolutionError
+from src.services.target import bindings, identity
 from src.services.target.start_router import StartResult, sent_as_a_chat
 
 logger = logging.getLogger(__name__)
@@ -70,17 +71,17 @@ async def observe(
     conn, *, chat_type: str, external_ref: str, telegram_user_id: str
 ) -> StartResult:
     """One person seen speaking in one group. Idempotent."""
-    user_id = await identity.user_for_identity(
-        conn, provider=PROVIDER, external_id=telegram_user_id
-    )
+    try:
+        user_id = await identity.user_for_identity(
+            conn, provider=PROVIDER, external_id=telegram_user_id
+        )
+    except TenantResolutionError as exc:
+        # A disabled account keeps its memberships (053) but is minted no new
+        # ones. The door takes its caller's word for the person and reads no
+        # `users` row (`07` §14), so this is the caller's refusal.
+        return StartResult(outcome=exc.reason, handled=False)
     if user_id is None:
         return StartResult(outcome="unknown_identity", handled=False)
-    # A disabled account keeps its memberships (053) but is minted no new
-    # ones. `users` is user-plane and readable here; the door holds no grant
-    # on it, so this is the caller's refusal.
-    state = await readers.row(conn, "SELECT state FROM users WHERE id = :u", u=user_id)
-    if state is None or state["state"] != "active":
-        return StartResult(outcome="user_inactive", handled=False)
     try:
         channel = bindings.channel_for_chat_type(chat_type)
     except bindings.BindingRefused as exc:

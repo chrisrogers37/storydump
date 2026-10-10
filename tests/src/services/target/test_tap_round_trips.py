@@ -43,14 +43,19 @@ class _Ex:
 
 class TestTheTapperInOneRead:
     async def test_the_identity_and_its_name_come_back_together(self):
-        ex = _Ex(row=("u-1", "Dana"))
+        """One read, and the person's state rides in it too (#1572): the
+        refusal of a disabled tapper costs no second statement."""
+        ex = _Ex(row=("u-1", "Dana", "active"))
         got = await identity.tapper_for_identity(
             ex, provider="telegram", external_id="555"
         )
         assert got == ("u-1", "Dana")
         assert len(ex.statements) == 1
         sql, params = ex.statements[0]
-        assert "SELECT user_id, display_name FROM user_identities" in sql
+        assert (
+            "SELECT i.user_id, i.display_name, u.state"
+            " FROM user_identities i JOIN users u ON u.id = i.user_id" in sql
+        )
         assert params == {"p": "telegram", "sub": "555"}
 
     async def test_an_unlinked_identity_is_none(self):
@@ -63,7 +68,7 @@ class TestTheTapperInOneRead:
 
     async def test_an_empty_name_is_none_so_the_long_way_is_asked(self):
         got = await identity.tapper_for_identity(
-            _Ex(row=("u-1", "")), provider="telegram", external_id="555"
+            _Ex(row=("u-1", "", "active")), provider="telegram", external_id="555"
         )
         assert got == ("u-1", None)
 

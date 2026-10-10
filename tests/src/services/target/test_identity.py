@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import identity
 
 
@@ -154,6 +155,88 @@ class TestUnlinkTelegram:
         assert await identity.unlink_telegram(ex, user_id="user-1") == "last_identity"
 
         assert len(ex.statements) == 1
+
+
+class TestAChatResolvesAPersonWithTheirState:
+    """`user_for_identity` and `tapper_for_identity` are how a chat names a
+    person. Both read `users.state` WITH the identity and refuse a person who
+    is not `active`, so no caller resolves one without it (#1572)."""
+
+    RESOLVERS = [
+        (identity.user_for_identity, "user-1"),
+        (identity.tapper_for_identity, ("user-1", "Ada")),
+    ]
+
+    @pytest.mark.parametrize("resolver,resolved", RESOLVERS)
+    async def test_an_active_person_resolves_in_one_read(self, resolver, resolved):
+        ex = _Scripted(("user-1", "Ada", "active"))
+
+        assert await resolver(ex, provider="telegram", external_id="42") == resolved
+
+        ((sql, params),) = ex.statements
+        assert "FROM user_identities i JOIN users u ON u.id = i.user_id" in sql
+        assert "u.state" in sql
+        assert params == {"p": "telegram", "sub": "42"}
+
+    @pytest.mark.parametrize("resolver,_resolved", RESOLVERS)
+    async def test_a_disabled_person_is_refused_by_name(self, resolver, _resolved):
+        ex = _Scripted(("user-1", "Ada", "disabled"))
+
+        with pytest.raises(TenantResolutionError) as refused:
+            await resolver(ex, provider="telegram", external_id="42")
+
+        assert refused.value.reason == "disabled_user"
+
+    @pytest.mark.parametrize("resolver,_resolved", RESOLVERS)
+    async def test_an_identity_nobody_holds_is_none(self, resolver, _resolved):
+        ex = _Scripted(None)
+        assert await resolver(ex, provider="telegram", external_id="42") is None
+
+
+class TestADisabledPersonIsAttachedNoIdentity:
+    """The `link-` lane's person is pinned by its state, not resolved from an
+    identity, so the writer asks for the person's state itself (#1572)."""
+
+    @pytest.mark.parametrize("state", ["disabled", None])
+    async def test_a_person_who_is_not_active_is_refused(self, state):
+        ex = _Scripted(state)
+
+        with pytest.raises(TenantResolutionError) as refused:
+            await identity.refuse_unless_active(ex, user_id="user-1")
+
+        assert refused.value.reason == "disabled_user"
+        ((sql, params),) = ex.statements
+        assert "SELECT state FROM users WHERE id = :u" in sql
+        assert params == {"u": "user-1"}
+
+    async def test_an_active_person_passes(self):
+        assert (
+            await identity.refuse_unless_active(_Scripted("active"), user_id="user-1")
+            is None
+        )
+
+    async def test_linking_refuses_before_it_locks_reads_or_writes(self):
+        ex = _Scripted("disabled")
+
+        with pytest.raises(TenantResolutionError) as refused:
+            await identity.link_identity(
+                ex, user_id="user-1", provider="telegram", external_id="42"
+            )
+
+        assert refused.value.reason == "disabled_user"
+        assert len(ex.statements) == 1, "only the state was read"
+        assert not any("INSERT INTO" in s for s in ex.sql())
+
+    async def test_linking_an_active_person_writes_the_identity(self):
+        # state, the lock, nobody holds the identity, the person has none, the insert
+        ex = _Scripted("active", None, None, None, None)
+
+        assert await identity.link_identity(
+            ex, user_id="user-1", provider="telegram", external_id="42"
+        )
+
+        assert "SELECT state FROM users" in ex.sql()[0]
+        assert "INSERT INTO user_identities" in ex.sql()[-1]
 
 
 class TestTelegramIdsFor:

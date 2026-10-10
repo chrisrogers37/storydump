@@ -12,7 +12,9 @@ the shape the ingress opens (no tenant, no GUCs):
 - the masked email comes from `users.primary_email` through the real query;
 - Confirm consumes the state by the CAS and writes the identity; a second
   Confirm is refused by the same CAS;
-- Cancel spends the state and writes nothing, so a later Confirm is refused.
+- Cancel spends the state and writes nothing, so a later Confirm is refused;
+- a disabled account's link is refused at both steps, on the real
+  `users.state` the ingress role reads.
 
 Each test mints its own user and state: every driver call commits, and
 `uq_users_primary_email` / `uq_identity_per_provider` are global.
@@ -30,6 +32,7 @@ from src.services.target.start_router import StartContext
 from tests.scripts.conftest import (
     _scratch,
     as_user,
+    execute,
     fetch_one,
     in_user_plane,
     replay_advertised_stream,
@@ -134,6 +137,12 @@ def live(world, state):
     return bool(row and row[0])
 
 
+def disable(world, user_id):
+    execute(
+        world["stream"], "UPDATE users SET state = 'disabled' WHERE id = %s", (user_id,)
+    )
+
+
 class TestTheTwoSteps:
     def test_opening_asks_and_links_nothing(self, world):
         user_id, email, state = minted(world)
@@ -182,3 +191,35 @@ class TestTheTwoSteps:
     def test_a_refused_open_is_silent(self, world):
         r = open_link(world, "no-such-state", telegram_user())
         assert (r.outcome, r.handled, r.reply) == ("state_refused", False, None)
+
+
+class TestADisabledAccountsLink:
+    """A disabled person is refused at both steps (#1572), on the real `users`
+    row as `svc_ingress`. Each link is offered first while its account is
+    active, so it is the account's state that refuses it afterwards."""
+
+    def test_opening_it_offers_nothing_and_names_no_account(self, world):
+        user_id, _, state = minted(world)
+        uid = telegram_user()
+        assert open_link(world, state, uid).outcome == "confirmation_offered"
+
+        disable(world, user_id)
+        r = open_link(world, state, uid)
+
+        assert (r.outcome, r.handled, r.reply) == ("disabled_user", False, None)
+        assert r.reply_markup is None
+        assert linked_to(world, uid) is None
+
+    def test_a_confirm_for_an_account_disabled_since_links_nothing(self, world):
+        user_id, _, state = minted(world)
+        uid = telegram_user()
+        assert open_link(world, state, uid).outcome == "confirmation_offered"
+
+        disable(world, user_id)
+        r = tap(world, "linkok", state, offered_to=uid, by=uid)
+
+        assert r.outcome == "disabled_user"
+        assert r.answer_text == identity_link.REFUSAL
+        assert r.edit_text == identity_link.REFUSAL
+        assert linked_to(world, uid) is None
+        assert not live(world, state), "the refused Confirm left the link live"

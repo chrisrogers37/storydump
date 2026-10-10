@@ -78,7 +78,8 @@ async def handle_bind(conn, ctx: StartContext) -> StartResult:
     admin of the workspace when the link is used, not only when it was
     minted. The tapper is known by their linked Telegram identity, so an
     admin links (clause 1) before they bind; the mint route refuses up front
-    when they have not.
+    when they have not. That resolution refuses a disabled person
+    (`disabled_user`), so a disabled admin's own link binds nothing.
 
     Once all three hold, refusals may speak: a link opened in a DM and a
     group another workspace holds are answered, because the person reading
@@ -105,9 +106,14 @@ async def handle_bind(conn, ctx: StartContext) -> StartResult:
     if workspace_id is None or minter is None:
         logger.error("group bind: bind state without workspace/user — CHECK missing?")
         return StartResult(outcome="state_without_workspace", handled=False)
-    tapper = await identity.user_for_identity(
-        conn, provider=PROVIDER, external_id=ctx.telegram_user_id
-    )
+    try:
+        tapper = await identity.user_for_identity(
+            conn, provider=PROVIDER, external_id=ctx.telegram_user_id
+        )
+    except TenantResolutionError as exc:
+        # A disabled person binds nothing, the minting admin included.
+        logger.warning("group bind: the tapper is refused (%s)", exc.reason)
+        return StartResult(outcome=exc.reason, handled=False)
     if tapper != str(minter):
         logger.warning("group bind: the tapper is not the admin who minted the link")
         return StartResult(outcome="tapper_not_minter", handled=False)

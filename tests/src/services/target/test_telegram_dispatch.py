@@ -377,7 +377,10 @@ def seams(monkeypatch):
         return state["user"]
 
     async def tapper_for_identity(executor, *, provider, external_id):
-        # The tapper and their display name in one read (#1286).
+        # The tapper and their display name in one read (#1286), which is also
+        # where a person who is not active is refused (#1572).
+        if state.get("refused"):
+            raise TenantResolutionError(state["refused"])
         if state["user"] is None:
             return None
         return state["user"], state.get("label", "Chris")
@@ -527,6 +530,22 @@ class TestTheTap:
         assert seams["log"]["executed"] == []
 
     @pytest.mark.asyncio
+    async def test_a_disabled_tapper_is_refused_and_reads_what_an_unlinked_one_does(
+        self, seams
+    ):
+        """A disabled person is refused where the tapper is resolved (#1572),
+        before a tenant or an actor is set. The outcome is named for the log;
+        the chat reads the unlinked answer, as the web answers a dead session
+        and a disabled person with one 401 (`07` §5)."""
+        seams["refused"] = "disabled_user"
+        d = telegram_dispatch.TelegramDispatcher()
+        r = await d(None, tap())
+        assert r.outcome == "disabled_user" and r.handled is True
+        assert (r.answer_text, r.show_alert) == telegram_dispatch.ANSWERS["unlinked"]
+        assert seams["log"]["gucs"] == [], "a tenant or an actor was set"
+        assert seams["log"]["executed"] == [] and seams["log"]["debits"] == []
+
+    @pytest.mark.asyncio
     async def test_a_member_below_the_floor_is_answered(self, seams):
         seams["raise"] = TenantResolutionError("insufficient_role", "member < admin")
         d = telegram_dispatch.TelegramDispatcher()
@@ -577,6 +596,7 @@ class TestEveryReasonHasAnAnswer:
     @pytest.mark.parametrize(
         "reason",
         [
+            "disabled_user",
             "not_a_member",
             "insufficient_role",
             "unknown_binding",

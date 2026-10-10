@@ -40,6 +40,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import (
     callback_tokens,
     identity,
@@ -209,6 +210,13 @@ async def handle_link(conn, ctx: StartContext) -> StartResult:
         logger.error("identity link: link state with NULL user_id — CHECK missing?")
         return StartResult(outcome="state_without_user", handled=False)
 
+    try:
+        # A disabled person's link offers nothing, and names no account.
+        await identity.refuse_unless_active(conn, user_id=str(user_id))
+    except TenantResolutionError as exc:
+        logger.warning("identity link refused: %s", exc.reason)
+        return StartResult(outcome=exc.reason, handled=False)
+
     label = await account_label(conn, user_id=str(user_id))
     return StartResult(
         outcome="confirmation_offered",
@@ -306,6 +314,11 @@ async def handle_tap(
             True,
             edit_text=ALREADY_LINKED_ELSEWHERE,
         )
+    except TenantResolutionError as exc:
+        # The account was disabled after the prompt was offered. The state is
+        # spent, so the prompt reads as any dead link does.
+        logger.warning("identity link refused: %s", exc.reason)
+        return LinkTapOutcome(exc.reason, REFUSAL, True, edit_text=REFUSAL)
 
     label = await account_label(conn, user_id=str(user_id))
     done = f"✅ This Telegram account is now linked to the Storydump account {label}."

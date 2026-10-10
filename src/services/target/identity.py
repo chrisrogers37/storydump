@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from src.exceptions.base import StorydumpError
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import _dbapi, oauth_states, readers, vocabulary
 
 logger = logging.getLogger(__name__)
@@ -230,21 +231,43 @@ async def _refresh_primary_email(executor, *, user_id: str, email: str) -> None:
     logger.info("identity: user %s's primary email now follows the claim", user_id)
 
 
+async def _person_for_identity(executor, *, provider: str, external_id: str):
+    """The `(user_id, display_name)` row a `(provider, external_id)` belongs
+    to, or None — and the chat side's half of "the ONE ingress gate" (`02` §1,
+    `053`'s comment on `users.state`): the person's state is read WITH the
+    identity, in one statement, so nothing resolves a person from a chat
+    without it. A person who is not `active` is refused by name, as
+    `sessions.resolve` and the token resolver refuse them on the web."""
+    row = (
+        await executor.execute(
+            text(
+                "SELECT i.user_id, i.display_name, u.state"
+                "  FROM user_identities i JOIN users u ON u.id = i.user_id"
+                " WHERE i.provider = :p AND i.external_id = :sub"
+            ),
+            {"p": provider, "sub": external_id},
+        )
+    ).first()
+    if row is None:
+        return None
+    if row[2] != "active":
+        raise TenantResolutionError("disabled_user")
+    return row
+
+
 async def user_for_identity(
     executor, *, provider: str, external_id: str
 ) -> Optional[str]:
     """The user a `(provider, external_id)` belongs to, or None. User-plane and
     role-open, so a door may ask this BEFORE any tenant context exists — the
-    `bind-` lane checks the tapper against the minting admin with it."""
-    row = (
-        await executor.execute(
-            text(
-                "SELECT user_id FROM user_identities"
-                " WHERE provider = :p AND external_id = :sub"
-            ),
-            {"p": provider, "sub": external_id},
-        )
-    ).first()
+    `bind-` lane checks the tapper against the minting admin with it.
+
+    Raises `TenantResolutionError("disabled_user")` for a person who is not
+    `active` (:func:`_person_for_identity`): a caller names that outcome, and
+    one that forgets to still refuses."""
+    row = await _person_for_identity(
+        executor, provider=provider, external_id=external_id
+    )
     return None if row is None else str(row[0])
 
 
@@ -255,20 +278,29 @@ async def tapper_for_identity(
     for a tap, whose outcome line names the tapper (#1286: the name was a
     second query, inside the flip). The Telegram identity's name is the one a
     group already sees, which is exactly `display_name_for`'s first choice;
-    an empty name here means "ask the long way" (`_actor_name`)."""
-    row = (
-        await executor.execute(
-            text(
-                "SELECT user_id, display_name FROM user_identities"
-                " WHERE provider = :p AND external_id = :sub"
-            ),
-            {"p": provider, "sub": external_id},
-        )
-    ).first()
+    an empty name here means "ask the long way" (`_actor_name`). Refuses a
+    person who is not `active` exactly as `user_for_identity` does."""
+    row = await _person_for_identity(
+        executor, provider=provider, external_id=external_id
+    )
     if row is None:
         return None
     name = row[1]
     return str(row[0]), (str(name) if name else None)
+
+
+async def refuse_unless_active(executor, *, user_id: str) -> None:
+    """Refuse *user_id* as `disabled_user` unless that person is `active` —
+    :func:`_person_for_identity`'s rule for a door that holds a user id no
+    identity read resolved: the `link-` lane's person is pinned by its state.
+    A row that is gone refuses the same way."""
+    state = (
+        await executor.execute(
+            text("SELECT state FROM users WHERE id = :u"), {"u": str(user_id)}
+        )
+    ).scalar()
+    if state != "active":
+        raise TenantResolutionError("disabled_user")
 
 
 async def identity_for_user(executor, *, user_id: str, provider: str) -> Optional[str]:
@@ -372,7 +404,9 @@ async def link_identity(
 
     Idempotent on the exact pair, so a double-tap of the same deep link is not
     an error — but linking a DIFFERENT account, or an account already held by
-    another user, is refused by name.
+    another user, is refused by name. So is a pinned user who is not `active`
+    (`TenantResolutionError("disabled_user")`): a disabled person is attached
+    no identity.
 
     Serialized per (provider, subject) with a transaction-scoped advisory lock,
     the same discipline `upsert_google_identity` uses and for the same reason:
@@ -380,6 +414,7 @@ async def link_identity(
     """
     if not user_id or not external_id:
         raise ValueError("user_id and external_id are required")
+    await refuse_unless_active(executor, user_id=user_id)
 
     # The same 32-bit width, and it must stay the same as the site above:
     # both lock the `identity:` namespace, so they only exclude each other

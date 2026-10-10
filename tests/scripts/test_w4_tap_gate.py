@@ -33,6 +33,7 @@ from tests.scripts.conftest import (
 )
 
 TAPPER_TG_ID = "7007"
+MEMBER_TG_ID = "8008"
 STRANGER_TG_ID = "9009"
 CHAT_A = "-1001"
 CHAT_B = "-1002"
@@ -166,6 +167,28 @@ def _intent(world, tag: str, *, state="awaiting_approval", origin="cadence") -> 
         )
         cards[name] = ref
     return {"id": str(intent), "media": str(media), "cards": cards}
+
+
+def _member(world, tg_id: str) -> str:
+    """A second person in the workspace, at the member role, LINKED to
+    Telegram id *tg_id* as "Bo"."""
+    ((user,),) = _write(
+        world, "INSERT INTO users DEFAULT VALUES RETURNING id", fetch=True
+    )
+    _write(
+        world,
+        "INSERT INTO user_identities"
+        " (user_id, provider, external_id, display_name, verified_at)"
+        " VALUES (%s, 'telegram', %s, 'Bo', now())",
+        (user, tg_id),
+    )
+    _write(
+        world,
+        "INSERT INTO workspace_members (workspace_id, user_id, role)"
+        " VALUES (%s, %s, 'member')",
+        (world["ws"], user),
+    )
+    return str(user)
 
 
 def _tap_payload(
@@ -641,6 +664,34 @@ class TestWhoMayTap:
         assert _state(world, i["id"]) == "awaiting_approval"
         assert _audit(world, i["id"]) == []
 
+    def test_a_disabled_tapper_flips_nothing_and_keeps_their_membership(self, world):
+        """A disabled person is refused where the tapper is resolved (#1572),
+        as `svc_ingress` on the real join to `users`. The same member taps
+        first while active, so it is their state that refuses them and not the
+        fixture; afterwards they read what an unlinked tapper reads, and the
+        membership survives (053)."""
+        member = _member(world, MEMBER_TG_ID)
+        live = _intent(world, "member-live")
+        assert (
+            tap(world, "skip", live["id"], tg_user=MEMBER_TG_ID).outcome == "executed"
+        )
+
+        _write(world, "UPDATE users SET state = 'disabled' WHERE id = %s", (member,))
+        i = _intent(world, "member-disabled")
+        r = tap(world, "post", i["id"], tg_user=MEMBER_TG_ID)
+
+        assert r.outcome == "disabled_user" and r.show_alert is True
+        unlinked = tap(world, "post", i["id"], tg_user=STRANGER_TG_ID)
+        assert unlinked.outcome == "unlinked"
+        assert r.answer_text == unlinked.answer_text, "the chat can tell them apart"
+        assert _state(world, i["id"]) == "awaiting_approval"
+        assert _audit(world, i["id"]) == []
+        assert _one(
+            world,
+            "SELECT role FROM workspace_members WHERE workspace_id = %s AND user_id = %s",
+            (world["ws"], member),
+        ) == ("member",)
+
     def test_an_unbound_chat_is_answered_not_connected(self, world):
         i = _intent(world, "nochat-1")
         r = tap(world, "post", i["id"], chat="-1999")
@@ -890,17 +941,23 @@ class TestATapIsCheapOnRealRows:
         assert len(statements) <= TAP_STATEMENT_BUDGET, "\n".join(statements)
         # The shape, not just the count: each fold is present as ONE statement.
         assert sum("set_config(" in s for s in statements) == 1
-        # The tapper and their name, in ONE read: every statement that reads
-        # `user_identities`, bar the supersede, whose push predicate reads it
-        # inside its own one statement (`bindings.deliverable_binding_where`).
-        # Counted by exclusion, so a read added anywhere else is counted too.
+        # The tapper, their name and their state (#1572), in ONE read: every
+        # statement that reads `user_identities`, bar the supersede, whose push
+        # predicate reads it inside its own one statement
+        # (`bindings.deliverable_binding_where`). Counted by exclusion, so a
+        # read added anywhere else is counted too.
         identity_reads = [
             s
             for s in statements
             if "user_identities" in s and "'prompt_supersede'" not in s
         ]
         assert len(identity_reads) == 1, "\n".join(identity_reads)
-        assert "SELECT user_id, display_name FROM" in identity_reads[0]
+        assert (
+            "SELECT i.user_id, i.display_name, u.state FROM user_identities i"
+            " JOIN users u ON u.id = i.user_id" in identity_reads[0]
+        )
+        # No second read of the person's state: it rode in the one above.
+        assert sum("FROM users" in s for s in statements) == 0, "\n".join(statements)
         assert sum("has_ig_credential" in s for s in statements) == 1
         assert sum("'prompt_supersede'" in s for s in statements) == 1
         assert not any(s.startswith("SET LOCAL") for s in statements)

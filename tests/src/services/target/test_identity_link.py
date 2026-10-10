@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import callback_tokens, identity, identity_link
 from src.services.target.start_router import REFUSAL as StartRouter_REFUSAL
 from src.services.target.start_router import StartContext, StartRouter
@@ -58,6 +59,10 @@ class _Fake:
             "primary_email": "ada.lovelace@example.com",
             "display_name": None,
         }
+        #: The reason the pinned account is refused for, when it is.
+        self.refused: str | None = None
+        self.asked_active: list[str] = []
+        self.named: list[dict] = []
 
 
 @pytest.fixture()
@@ -84,11 +89,20 @@ def patched(monkeypatch):
         return f.link
 
     async def row(conn, sql, **params):
+        f.named.append(params)
         return f.account
+
+    async def refuse_unless_active(conn, *, user_id):
+        f.asked_active.append(user_id)
+        if f.refused:
+            raise TenantResolutionError(f.refused)
 
     monkeypatch.setattr(identity_link.oauth_states, "peek_live_state", peek)
     monkeypatch.setattr(identity_link.oauth_states, "consume_state", consume)
     monkeypatch.setattr(identity_link.identity, "link_identity", link)
+    monkeypatch.setattr(
+        identity_link.identity, "refuse_unless_active", refuse_unless_active
+    )
     monkeypatch.setattr(identity_link.readers, "row", row)
     return f
 
@@ -277,6 +291,40 @@ class TestCancellingAndRefusing:
         assert r.outcome == "state_without_user" and r.handled is False
         assert (await tapped()).outcome == "state_without_user"
         assert patched.linked == [], "wrote an identity for a NULL user"
+
+
+class TestADisabledAccountsLink:
+    """A disabled person is refused at both steps (#1572): opening their link
+    offers nothing and names no account, and a Confirm for an account disabled
+    after the prompt was offered links nothing."""
+
+    @pytest.mark.asyncio
+    async def test_opening_it_offers_nothing_and_names_no_account(self, patched):
+        patched.refused = "disabled_user"
+        r = await identity_link.handle_link(None, ctx())
+        assert (r.outcome, r.handled) == ("disabled_user", False)
+        assert r.reply is None and r.reply_markup is None
+        assert patched.asked_active == ["user-1"], "the pinned account was asked about"
+        assert patched.named == [], "the account was read for its name"
+        assert patched.linked == [] and patched.consumed == []
+
+    @pytest.mark.asyncio
+    async def test_an_active_account_is_asked_about_before_it_is_named(self, patched):
+        r = await identity_link.handle_link(None, ctx())
+        assert r.outcome == "confirmation_offered"
+        assert patched.asked_active == ["user-1"] and len(patched.named) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_confirm_for_an_account_disabled_since_links_nothing(self, patched):
+        """The writer refuses (`identity.link_identity`); the state is spent,
+        so the prompt reads as any dead link does."""
+        patched.link = TenantResolutionError("disabled_user")
+        r = await tapped()
+        assert r.outcome == "disabled_user"
+        assert r.answer_text == identity_link.REFUSAL and r.show_alert is True
+        assert r.edit_text == identity_link.REFUSAL
+        assert STATE not in patched.live
+        assert (await tapped()).outcome == "state_refused"
 
 
 class TestTheMask:

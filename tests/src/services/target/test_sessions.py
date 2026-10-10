@@ -4,7 +4,10 @@ the token resolver and the session would fail every server-side call."""
 
 from __future__ import annotations
 
+import pytest
+
 from src.config.settings import Settings, settings
+from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import sessions, vocabulary
 
 
@@ -77,6 +80,27 @@ class TestTheAbsoluteLifetime:
         """30 days: the cookie's Max-Age and the Privacy page's "30 days"."""
         default = Settings.model_fields["SESSION_MAX_AGE_SECONDS"].default
         assert default == sessions.SESSION_TTL_SECONDS == 30 * 24 * 3600
+
+
+class TestADisabledPersonIsRefusedAtTheGate:
+    """The web's half of "a disabled person is refused on every channel"
+    (#1572): a live, unexpired session of a person who is not `active` is
+    refused by name, and its slide is gated on the same state. The DB gate
+    (`test_identity_writers.py`) proves it against PostgreSQL."""
+
+    async def test_a_live_session_of_a_disabled_person_is_refused(self):
+        ex = _Recorder(row=("sess-1", "user-1", False, False, "disabled"))
+
+        with pytest.raises(TenantResolutionError) as refused:
+            await sessions.resolve(ex, token_hash="h")
+
+        assert refused.value.reason == "disabled_user"
+        sql, _ = ex.calls[0]
+        assert "AND s.state = 'active'" in sql, "the slide is not gated on the state"
+
+    async def test_the_same_session_resolves_while_the_person_is_active(self):
+        session = await sessions.resolve(_Recorder(row=LIVE_ROW), token_hash="h")
+        assert (session.id, session.user_id) == ("sess-1", "user-1")
 
 
 class TestRevokeAllForUser:

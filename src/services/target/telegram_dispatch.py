@@ -109,6 +109,15 @@ TAP_OUTCOMES = (
 
 _WEB = "open the queue on the web"
 FALLBACK_ANSWER = (f"Couldn't do that — {_WEB}.", True)
+#: What a tapper this adapter cannot act for reads. One answer for the two
+#: reasons — no linked identity, and a disabled person — as the web answers a
+#: dead session and a disabled person with one 401 (`07` §5): the named
+#: outcome tells them apart in the log, never in the chat.
+_NOT_ACTED_FOR = (
+    "Link your Telegram account first: sign in on the web and open"
+    " Settings › Integrations → Link Telegram.",
+    True,
+)
 
 #: outcome / refusal reason → (what the tapper reads, whether as an alert).
 #: `show_alert` is for what the tapper must ACT on; a toast otherwise.
@@ -121,11 +130,7 @@ ANSWERS: dict[str, tuple[str, bool]] = {
         True,
     ),
     "no_message": (f"This card can't be acted on from here — {_WEB}.", True),
-    "unlinked": (
-        "Link your Telegram account first: sign in on the web and open"
-        " Settings › Integrations → Link Telegram.",
-        True,
-    ),
+    "unlinked": _NOT_ACTED_FOR,
     "tap_failed": (
         f"Something went wrong on our side — try again in a moment, or {_WEB}.",
         True,
@@ -137,6 +142,7 @@ ANSWERS: dict[str, tuple[str, bool]] = {
     ),
     "revoked_binding": ("This chat is no longer connected to a workspace.", True),
     "unknown_channel": FALLBACK_ANSWER,
+    "disabled_user": _NOT_ACTED_FOR,
     "not_a_member": ("You're not a member of this workspace.", True),
     "insufficient_role": ("Your role in this workspace can't do that.", True),
     # command refusals (`commands.REASONS`)
@@ -429,13 +435,17 @@ class TelegramDispatcher:
                 return done(exc.reason)
             workspace = tenant.workspace_id
             from_id = (cq.get("from") or {}).get("id")
-            tapper = (
-                None
-                if from_id is None
-                else await identity.tapper_for_identity(
-                    conn, provider="telegram", external_id=str(from_id)
+            try:
+                tapper = (
+                    None
+                    if from_id is None
+                    else await identity.tapper_for_identity(
+                        conn, provider="telegram", external_id=str(from_id)
+                    )
                 )
-            )
+            except TenantResolutionError as exc:
+                # A disabled person: refused before any tenant or actor is set.
+                return done(exc.reason)
             if tapper is None:
                 return done("unlinked")
             user_id, actor_label = tapper
