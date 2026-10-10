@@ -137,9 +137,13 @@ class WorkerConfig:
     # unless this is set AND an email provider and `web_app_origin` exist, and
     # the entrypoint sets it only from TARGET_ACTIVATION_NUDGE_ENABLED.
     activation_nudge_enabled: bool = False
-    # Emails per daily run. `email_sender`'s 90/day is shared with
-    # invitations, and a person waiting on an invite comes first.
-    activation_nudge_limit: int = 20
+    # Emails per daily run, TARGET_ACTIVATION_NUDGE_LIMIT when set. Small by
+    # default because the latch is set as each email is queued, not as it is
+    # sent: a provider mistake on an armed day uses up that day's nudges, so
+    # the first armed run should risk few (#1653). Raise it once one has been
+    # delivered. `email_sender`'s 90/day is shared with invitations, and a
+    # person waiting on an invite comes first.
+    activation_nudge_limit: int = 3
     # Only people who signed up this recently, so switching the nudge on does
     # not mail everyone who ever stopped part-way.
     activation_nudge_since_days: int = 30

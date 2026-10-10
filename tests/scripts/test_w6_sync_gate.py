@@ -1947,13 +1947,37 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         }, "the same row, under the reference still in the folder"
 
     @pytest.mark.asyncio
+    async def test_a_file_two_connected_folders_list_keeps_one_owner(
+        self, lane_db, sync_conn
+    ):
+        """One Drive file reachable from two connected folders (two parents,
+        or a folder connected inside another) keeps its first owner while
+        that folder still lists it: four whole walks, alternating between the
+        folders, and no owner flip (#1645)."""
+        chain = seed_workspace_chain(sync_conn, "w6-two-parents")
+        [seeded] = _media_rows(sync_conn, chain["ws"])
+        other = _second_source(sync_conn, chain["ws"], "merch")
+        here = _item(seeded["ref"], h=seeded["hash"])
+        there = _item(seeded["ref"], h=seeded["hash"])
+        there["category"], there["folder_path"] = "merch", ""
+        owners = []
+        for src, item in ((chain["src"], here), (other, there)) * 2:
+            await _whole_walk(lane_db, sync_conn, src, [item])
+            [row] = _media_rows(sync_conn, chain["ws"])
+            owners.append(row["source_id"])
+        assert owners == [str(chain["src"])] * 4, (
+            "the first owner keeps a file it still lists"
+        )
+
+    @pytest.mark.asyncio
     async def test_a_file_moved_to_another_connected_folder_is_adopted_there(
         self, lane_db, sync_conn
     ):
         """A move keeps the Drive id. The old folder's whole walk misses the
         file once, which judges nothing, and the new folder's walk takes the
-        live row over by that id, so the file never passes through
-        `missing` and the old folder's walks no longer judge it."""
+        live row over by that id, because a whole walk of the old folder has
+        missed it (#1645). The file never passes through `missing`, and the
+        old folder's walks no longer judge it."""
         chain = seed_workspace_chain(sync_conn, "w6-moved")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         other = _second_source(sync_conn, chain["ws"], "merch")

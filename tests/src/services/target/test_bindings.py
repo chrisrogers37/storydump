@@ -8,7 +8,10 @@ type added to the mapping reaches every reader at once.
 
 from __future__ import annotations
 
+import pytest
+
 from src.services.target import bindings, channel_bind, membership_sync
+from tests.src.services.target.test_provisioning import _ScriptedExecutor
 
 
 class TestTheGroupChatTypesDeriveFromTheMapping:
@@ -74,3 +77,66 @@ class TestRevokeForWorkspace:
         )
         assert moved is False
         assert len(session.statements) == 1, "a queue was touched for no binding"
+
+
+class TestBindWritesOnlyAChatTypeItsCallerNames:
+    """The writer's own rule: the mapping knows every bindable chat type, and
+    a binding is written only for a type the caller names. That is a group's
+    by default, and a private chat's only when asked for. The database half,
+    the asked-for row really written beside a group's, is the gate's
+    (`tests/scripts/test_channel_bindings_writer.py`)."""
+
+    #: `bind`'s two statements for a chat nobody holds: no revoked row to
+    #: bring back, then the insert reporting a new row.
+    FRESH = ((0, None), (1, (True,)))
+
+    async def test_a_private_chat_is_refused_before_the_database_sees_it(self):
+        session = _ScriptedExecutor()
+        with pytest.raises(bindings.BindingRefused) as refused:
+            await bindings.bind(
+                session, workspace_id="ws-1", chat_type="private", external_ref="42"
+            )
+        assert refused.value.reason == "chat_type_not_accepted"
+        assert session.statements == [], "a refused bind reached the database"
+
+    async def test_a_caller_that_names_a_private_chat_gets_it_bound(self):
+        session = _ScriptedExecutor(*self.FRESH)
+        outcome = await bindings.bind(
+            session,
+            workspace_id="ws-1",
+            chat_type="private",
+            external_ref="42",
+            accepts=("private",),
+        )
+        assert outcome == bindings.BOUND
+        (_, looked_up), (insert_sql, inserted) = session.statements
+        assert "INSERT INTO channel_bindings" in insert_sql
+        assert looked_up == inserted == {"ws": "ws-1", "ch": "telegram_dm", "ref": "42"}
+
+    async def test_naming_a_private_chat_does_not_admit_a_group(self):
+        """*accepts* selects, it does not widen: a caller that binds private
+        chats cannot bind a group through the same call."""
+        session = _ScriptedExecutor()
+        with pytest.raises(bindings.BindingRefused) as refused:
+            await bindings.bind(
+                session,
+                workspace_id="ws-1",
+                chat_type="supergroup",
+                external_ref="-10042",
+                accepts=("private",),
+            )
+        assert refused.value.reason == "chat_type_not_accepted"
+        assert session.statements == []
+
+    @pytest.mark.parametrize("chat_type", bindings.GROUP_CHAT_TYPES)
+    async def test_a_group_is_bound_without_asking(self, chat_type):
+        session = _ScriptedExecutor(*self.FRESH)
+        outcome = await bindings.bind(
+            session, workspace_id="ws-1", chat_type=chat_type, external_ref="-10042"
+        )
+        assert outcome == bindings.BOUND
+        assert session.statements[-1][1] == {
+            "ws": "ws-1",
+            "ch": "telegram_group",
+            "ref": "-10042",
+        }

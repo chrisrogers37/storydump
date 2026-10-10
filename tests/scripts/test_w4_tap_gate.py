@@ -890,15 +890,17 @@ class TestATapIsCheapOnRealRows:
         assert len(statements) <= TAP_STATEMENT_BUDGET, "\n".join(statements)
         # The shape, not just the count: each fold is present as ONE statement.
         assert sum("set_config(" in s for s in statements) == 1
-        # The tapper and their name, in ONE read. (The supersede's push
-        # predicate reads `user_identities` too, inside its own one statement.)
-        assert (
-            sum(
-                "SELECT user_id, display_name FROM user_identities" in s
-                for s in statements
-            )
-            == 1
-        )
+        # The tapper and their name, in ONE read: every statement that reads
+        # `user_identities`, bar the supersede, whose push predicate reads it
+        # inside its own one statement (`bindings.deliverable_binding_where`).
+        # Counted by exclusion, so a read added anywhere else is counted too.
+        identity_reads = [
+            s
+            for s in statements
+            if "user_identities" in s and "'prompt_supersede'" not in s
+        ]
+        assert len(identity_reads) == 1, "\n".join(identity_reads)
+        assert "SELECT user_id, display_name FROM" in identity_reads[0]
         assert sum("has_ig_credential" in s for s in statements) == 1
         assert sum("'prompt_supersede'" in s for s in statements) == 1
         assert not any(s.startswith("SET LOCAL") for s in statements)

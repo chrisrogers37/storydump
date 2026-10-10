@@ -26,7 +26,9 @@ It records no analytics and adds nothing client-side: whether a nudged person
 went on is read from the funnel against `activation_nudge_at`. A failed send
 is not followed by a second nudge: the latch is set as the job is enqueued,
 and `send_email`'s own ladder is the only retry. One reminder, best effort,
-never two.
+never two. So a provider mistake on an armed day uses up that day's nudges,
+which is why the daily cap starts small (`WorkerConfig.activation_nudge_limit`,
+#1653).
 """
 
 from __future__ import annotations
