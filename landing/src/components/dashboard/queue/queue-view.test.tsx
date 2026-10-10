@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { DialogDescription } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/dashboard/empty-state";
 import { ItemLink } from "@/components/dashboard/item-link";
-import type { Intent } from "@/lib/intents";
+import { formatSlot, type Intent } from "@/lib/intents";
 import { QueueView, type RowNote } from "./queue-view";
 import { RescheduleDialog } from "./reschedule-dialog";
 
@@ -162,6 +162,15 @@ describe("QueueView", () => {
     const outcome = line({ text: "Done.", tone: "status" });
     expect(outcome.props.role).toBe("status");
     expect(outcome.props.className).not.toMatch(/\btext-destructive\b/);
+  });
+
+  it("keeps a slot's date and time on one line, so a narrow row cannot break mid-date", () => {
+    const tree = view({ intents: [intent({ category: "Memes" })] });
+    const when = [...walk(tree)].find(
+      (el) => el.type === "span" && text(el) === formatSlot("2026-10-01T14:00:00+00:00", "UTC"),
+    );
+    expect(when, "the slot's date and time are one element").toBeDefined();
+    expect(String((when!.props as { className?: string }).className)).toContain("whitespace-nowrap");
   });
 
   it("says nothing is waiting when there are no rows", () => {

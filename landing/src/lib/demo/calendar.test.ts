@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Intent, IntentState } from "@/lib/intents";
-import { demoCalendarLanes } from "./calendar";
+import { demoCalendarLanes, demoDayStories, demoOpenDay } from "./calendar";
 
 function story(file: string, state: IntentState): Intent {
   return {
@@ -127,5 +127,46 @@ describe("the sample's calendar lanes", () => {
       year: 2026,
       month: 10,
     });
+  });
+});
+
+describe("the sample's open day", () => {
+  const at = (file: string, state: IntentState, slot: string) => ({
+    ...story(file, state),
+    schedule_slot_at: slot,
+  });
+  const queue = [
+    at("waiting.jpg", "awaiting_approval", "2026-10-15T08:00:00.000Z"),
+    at("later.jpg", "scheduled", "2026-10-15T18:00:00.000Z"),
+    at("tomorrow.jpg", "scheduled", "2026-10-16T08:00:00.000Z"),
+  ];
+  const history = [
+    at("posted.jpg", "posted", "2026-10-15T10:00:00.000Z"),
+    at("skipped.jpg", "skipped", "2026-10-15T12:00:00.000Z"),
+    // Half past midnight on the 15th in London, which is still the 14th in UTC.
+    at("past-midnight.jpg", "rejected", "2026-10-14T23:30:00.000Z"),
+    at("yesterday.jpg", "posted", "2026-10-14T12:00:00.000Z"),
+  ];
+
+  it("lists every story of the day in slot order, whatever its state: what the month keeps under \"+N more\"", () => {
+    const listed = demoDayStories(queue, history, "2026-10-15");
+    expect(listed.map((s) => [s.file_name, s.state])).toEqual([
+      ["past-midnight.jpg", "rejected"],
+      ["waiting.jpg", "awaiting_approval"],
+      ["posted.jpg", "posted"],
+      ["skipped.jpg", "skipped"],
+      ["later.jpg", "scheduled"],
+    ]);
+  });
+
+  it("opens a real day on the month's grid, and no other", () => {
+    const october = { year: 2026, month: 10 };
+    expect(demoOpenDay("2026-10-10", october)).toBe("2026-10-10");
+    // October 2026 starts on a Thursday, so its first week reaches back to Monday the 28th.
+    expect(demoOpenDay("2026-09-28", october)).toBe("2026-09-28");
+    expect(demoOpenDay("2026-09-27", october)).toBeNull();
+    expect(demoOpenDay("2026-10-32", october)).toBeNull();
+    expect(demoOpenDay("today", october)).toBeNull();
+    expect(demoOpenDay(null, october)).toBeNull();
   });
 });

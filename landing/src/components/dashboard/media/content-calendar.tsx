@@ -301,6 +301,7 @@ export function ContentCalendar({
   incompleteFrom = null,
   tz = "UTC",
   navigable = false,
+  monthLinks = true,
   selected = null,
   workspaceId = null,
 }: {
@@ -327,9 +328,14 @@ export function ContentCalendar({
   tz?: string;
   /**
    * Previous and next month, and each day a link to its day view, through
-   * `?month=` and `?day=` (#1634). The sample workspace draws without them.
+   * `?month=` and `?day=` (#1634).
    */
   navigable?: boolean;
+  /**
+   * The links to the months either side, when it can be navigated. The sample
+   * workspace opens its days and draws one month, so it turns them off.
+   */
+  monthLinks?: boolean;
   /** The day whose list is open, marked on the grid. */
   selected?: string | null;
   /**
@@ -358,9 +364,9 @@ export function ContentCalendar({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          {navigable && <MonthLink month={month} direction={-1} />}
+          {navigable && monthLinks && <MonthLink month={month} direction={-1} />}
           <CardTitle>{monthName}</CardTitle>
-          {navigable && <MonthLink month={month} direction={1} />}
+          {navigable && monthLinks && <MonthLink month={month} direction={1} />}
         </div>
         <div className="flex gap-4 text-xs text-muted-foreground">
           <span className="flex items-center gap-1">

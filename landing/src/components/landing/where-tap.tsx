@@ -48,9 +48,8 @@ export function WhereTap() {
 
           <figure className="flex flex-col rounded-3xl border border-ink/10 p-5 sm:p-7">
             <div className="flex-1 rounded-2xl border border-ink/10 bg-[#fbfaf7]">
-              <div className="flex items-center justify-between border-b border-ink/10 px-4 py-3 text-sm">
+              <div className="border-b border-ink/10 px-4 py-3 text-sm">
                 <span className="font-semibold text-ink">Queue</span>
-                <span className="text-ink/60">Today</span>
               </div>
               <div className="flex gap-4 p-4">
                 <StoryArt

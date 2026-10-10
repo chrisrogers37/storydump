@@ -1,5 +1,6 @@
 import { cardButtons, type CardAction } from "@/components/landing/approval-card"
 import { ACTION_LABELS, actionsFor } from "@/lib/intents"
+import { formatCalendarDate } from "@/lib/zoned-dates"
 
 const explain: Partial<Record<CardAction, string>> = {
   post: "Publishes it to your Story through Instagram’s official API.",
@@ -26,3 +27,9 @@ export function joinWithAnd(items: readonly string[]): string {
 
 /** The time slot the demo cards show. */
 export const DEMO_SLOT = "2026-10-02 09:00 Europe/London"
+
+/**
+ * The slot's day, as a chat heads that day's messages. Taken from the slot, so
+ * the two cannot disagree: a fixed date is an example, and never "Today".
+ */
+export const DEMO_DAY = formatCalendarDate(DEMO_SLOT.slice(0, 10), { month: "long", day: "numeric" })
