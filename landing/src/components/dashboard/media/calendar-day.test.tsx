@@ -158,3 +158,39 @@ describe("the day view's predicted slots (#1634 Phase 3b)", () => {
     expect(textOf(day([], [slot("2026-10-09T12:00:00+00:00")]))).not.toContain("No stories");
   });
 });
+
+describe("the day view on a phone", () => {
+  // At 390 px the picture, the time and "awaiting approval" left a name 39 px:
+  // "m…". A story's row and a predicted slot's are separate branches, so both are read.
+  const classOf = (el: ReactElement) =>
+    String((el.props as { className?: string }).className ?? "").split(/\s+/);
+  const rows = () =>
+    [...walk(day([story("a")], [slot("2026-10-09T16:00:00+00:00")]))].filter(
+      (el) => el.type === "li",
+    );
+  /** Each row's name: the one piece of the row that grows. */
+  const names = () =>
+    rows().map((row) =>
+      [...walk(row)]
+        .filter((el) => el.type === "span")
+        .map(classOf)
+        .filter((classes) => classes.includes("grow")),
+    );
+
+  it("wraps a row, so its state drops below the name rather than squeezing it", () => {
+    expect(rows()).toHaveLength(2);
+    for (const row of rows()) expect(classOf(row)).toContain("flex-wrap");
+  });
+
+  it("cuts a name with an ellipsis from sm up, and never below it", () => {
+    for (const found of names()) {
+      expect(found).toHaveLength(1);
+      expect(found[0]).toContain("sm:truncate");
+      expect(found[0]).not.toContain("truncate");
+    }
+  });
+
+  it("breaks a long name onto a second line rather than letting it run out of the row", () => {
+    for (const found of names()) expect(found[0]).toContain("break-words");
+  });
+});

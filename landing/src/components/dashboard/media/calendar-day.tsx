@@ -23,6 +23,14 @@ export type DayStory = Pick<Intent, "id" | "state" | "schedule_slot_at" | "file_
   ThumbnailMedia;
 
 /**
+ * A row's name, sized for a phone: the row wraps, so a state that does not fit
+ * drops below the name instead of squeezing it to a letter, and a long name
+ * takes a second line instead of being cut, since a phone has no hover to read
+ * the rest. From `sm` up the name is one line, cut with an ellipsis.
+ */
+const NAME = "min-w-0 grow basis-24 break-words sm:truncate";
+
+/**
  * One day of the calendar, opened from its cell (#1634): every story the day
  * holds and every slot the cadence will open on it, in time order, each time
  * in the workspace's zone. A story shows its picture and its state. A
@@ -86,7 +94,7 @@ export function CalendarDay({
               "kind" in row ? (
                 <li
                   key={`${row.ig_account_id}@${row.schedule_slot_at}`}
-                  className="flex items-center gap-3 py-2 text-sm"
+                  className="flex flex-wrap items-center gap-3 py-2 text-sm"
                 >
                   <div
                     className="h-10 w-10 shrink-0 rounded-md border border-dashed border-muted-foreground/40"
@@ -95,7 +103,7 @@ export function CalendarDay({
                   <span className="w-20 shrink-0 tabular-nums text-muted-foreground">
                     {time(row.schedule_slot_at)}
                   </span>
-                  <span className="min-w-0 grow truncate text-muted-foreground">
+                  <span className={cn(NAME, "text-muted-foreground")}>
                     {accountOf(row)}
                   </span>
                   <span
@@ -105,7 +113,7 @@ export function CalendarDay({
                   </span>
                 </li>
               ) : (
-                <li key={row.id} className="flex items-center gap-3 py-2 text-sm">
+                <li key={row.id} className="flex flex-wrap items-center gap-3 py-2 text-sm">
                   {mediaTile({
                     media: row,
                     workspaceId,
@@ -115,7 +123,7 @@ export function CalendarDay({
                   <span className="w-20 shrink-0 tabular-nums text-muted-foreground">
                     {time(row.schedule_slot_at)}
                   </span>
-                  <span className="min-w-0 grow truncate" title={row.file_name}>
+                  <span className={NAME} title={row.file_name}>
                     {row.file_name}
                   </span>
                   <span
