@@ -36,10 +36,12 @@ function story(file: string, state: IntentState): Intent {
 describe("the sample's calendar lanes", () => {
   /** Marked Posted myself by the visitor, a day after its slot. */
   const marked = { ...story("marked.jpg", "posted"), entered_state_at: "2026-10-16T09:30:00.000Z" };
+  /** Scheduled for the next day's first slot, so its lane cannot be mistaken for the waiting story's. */
+  const later = { ...story("later.jpg", "scheduled"), schedule_slot_at: "2026-10-16T08:00:00.000Z" };
   const lanes = demoCalendarLanes(
     [
       story("waiting.jpg", "awaiting_approval"),
-      story("later.jpg", "scheduled"),
+      later,
       marked,
       story("skipped.jpg", "skipped"),
       story("rejected.jpg", "rejected"),
@@ -51,7 +53,7 @@ describe("the sample's calendar lanes", () => {
     ],
   );
 
-  it("queues a story waiting for a tap under its own name, in its slot, as the Queue lists it", () => {
+  it("queues the stories waiting for a tap and the ones scheduled, each under its own name, in its slot, as the Queue lists them", () => {
     expect(lanes.queue).toEqual([
       {
         scheduled_for: "2026-10-15T14:00:00.000Z",
@@ -60,12 +62,18 @@ describe("the sample's calendar lanes", () => {
         status: "awaiting_approval",
         planned: false,
       },
+      {
+        scheduled_for: "2026-10-16T08:00:00.000Z",
+        media_name: "later.jpg",
+        category: "Memes",
+        status: "scheduled",
+        planned: false,
+      },
     ]);
   });
 
-  it("counts a scheduled story as a predicted slot on its day, as the real Calendar counts its cadence's (#1634)", () => {
-    // 3 PM in London: a count per day, with no file and no folder.
-    expect(lanes.predicted).toEqual([{ date: "2026-10-15", count: 1 }]);
+  it("predicts nothing: every slot the sample plans already holds a story its Queue names (#1634)", () => {
+    expect(lanes.predicted).toEqual([]);
   });
 
   it("groups what posted by its slot's day, as the real month read does (#1634): a marked story beside the month's posts", () => {
@@ -104,8 +112,8 @@ describe("the sample's calendar lanes", () => {
     for (const gone of ["skipped.jpg", "rejected.jpg", "old-skip.jpg", "old-reject.jpg"]) {
       expect(named).not.toContain(gone);
     }
-    // Scheduled is Predicted only, never In Queue as well.
-    expect(named).not.toContain("later.jpg");
+    // A scheduled story is In Queue under its name, as the Queue lists it.
+    expect(named).toContain("later.jpg");
     expect(new Set(named).size).toBe(named.length);
   });
 

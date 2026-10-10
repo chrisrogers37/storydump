@@ -367,17 +367,30 @@ describe("what is coming on the month (#1634 Phase 3b)", () => {
     expect(calendar.incompleteFrom).toBeNull();
   });
 
-  it("marks the month from the first day a cut list may be short on", async () => {
+  it("marks the month from the first day a cut list may be short on, whichever list it is", async () => {
+    const planned = (day: string) => [{ ...story("p", { origin: "planned" }), day }];
+    const predicted = [slot("2026-10-20", 13), slot("2026-10-22", 13)];
+
     answer({
       upcoming: coming({
-        planned: [{ ...story("p", { origin: "planned" }), day: "2026-10-25" }],
+        planned: planned("2026-10-25"),
         planned_truncated: true,
-        predicted: [slot("2026-10-20", 13), slot("2026-10-22", 13)],
+        predicted,
         predicted_truncated: true,
       }),
     });
-    const calendar = propsOf<CalendarProps>(await page(), ContentCalendar);
-    expect(calendar.incompleteFrom).toBe("2026-10-22");
+    expect(propsOf<CalendarProps>(await page(), ContentCalendar).incompleteFrom).toBe("2026-10-22");
+
+    // The planned cut first: the month is marked from it, not from the predicted one.
+    answer({
+      upcoming: coming({
+        planned: planned("2026-10-21"),
+        planned_truncated: true,
+        predicted,
+        predicted_truncated: true,
+      }),
+    });
+    expect(propsOf<CalendarProps>(await page(), ContentCalendar).incompleteFrom).toBe("2026-10-21");
   });
 
   it("lists a day's predicted slots in its day view, and says when they were cut", async () => {
@@ -392,6 +405,23 @@ describe("what is coming on the month (#1634 Phase 3b)", () => {
     expect(before.predictedCut).toBe(false);
     const after = propsOf<DayProps>(await page({ month: "2026-10", day: "2026-10-21" }), CalendarDay);
     expect(after.predictedCut).toBe(true);
+  });
+
+  it("keeps an opened day's predicted slots whole when only the planned list was cut", async () => {
+    const predicted = [slot("2026-10-22", 13)];
+    answer({
+      upcoming: coming({
+        planned: [{ ...story("p", { origin: "planned" }), day: "2026-10-20" }],
+        planned_truncated: true,
+        predicted,
+      }),
+    });
+    const elements = await page({ month: "2026-10", day: "2026-10-22" });
+    // The month may hold more planned stories from the 20th; the day's slots are all here.
+    expect(propsOf<CalendarProps>(elements, ContentCalendar).incompleteFrom).toBe("2026-10-20");
+    const opened = propsOf<DayProps>(elements, CalendarDay);
+    expect(opened.predicted).toEqual(predicted);
+    expect(opened.predictedCut).toBe(false);
   });
 
   it("renders the unavailable state, not a calendar, when the upcoming read fails", async () => {
