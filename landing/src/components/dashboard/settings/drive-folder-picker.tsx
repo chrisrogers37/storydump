@@ -10,6 +10,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   addDriveFolder,
@@ -202,141 +203,133 @@ export function DriveFolderPickerDialog({
   }
 
   return (
-    <>
-      <Button
-        size="sm"
-        variant="outline"
-        onClick={openPicker}
-        disabled={disabled}
-      >
-        Add folder
-      </Button>
-
-      <Dialog
-        open={open}
-        onOpenChange={(next) => {
-          if (!next) closePicker();
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Pick a Drive folder</DialogTitle>
-            <DialogDescription>
-              Each folder you connect is a group of its own: everything inside
-              it syncs, at any depth. Open a folder to pick one of its
-              subfolders — to weight two subfolders separately, connect each as
-              its own folder.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              variant={root === "mine" ? "default" : "outline"}
-              onClick={() => switchRoot("mine")}
-              disabled={loading}
-            >
-              My Drive
-            </Button>
-            <Button
-              size="sm"
-              variant={root === "shared" ? "default" : "outline"}
-              onClick={() => switchRoot("shared")}
-              disabled={loading}
-            >
-              Shared with me
-            </Button>
-          </div>
-          <div className="flex flex-wrap items-center gap-1 text-sm">
-            <button
-              type="button"
-              className="underline-offset-2 hover:underline"
-              onClick={() => goTo(-1)}
-            >
-              {driveRootLabel(root)}
-            </button>
-            {stack.map((f, i) => (
-              <span key={f.id} className="flex items-center gap-1">
-                <span className="text-muted-foreground">›</span>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => (next ? openPicker() : closePicker())}
+    >
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline" disabled={disabled}>
+          Add folder
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Pick a Drive folder</DialogTitle>
+          <DialogDescription>
+            Each folder you connect is a group of its own: everything inside
+            it syncs, at any depth. Open a folder to pick one of its
+            subfolders — to weight two subfolders separately, connect each as
+            its own folder.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant={root === "mine" ? "default" : "outline"}
+            onClick={() => switchRoot("mine")}
+            disabled={loading}
+          >
+            My Drive
+          </Button>
+          <Button
+            size="sm"
+            variant={root === "shared" ? "default" : "outline"}
+            onClick={() => switchRoot("shared")}
+            disabled={loading}
+          >
+            Shared with me
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-1 text-sm">
+          <button
+            type="button"
+            className="underline-offset-2 hover:underline"
+            onClick={() => goTo(-1)}
+          >
+            {driveRootLabel(root)}
+          </button>
+          {stack.map((f, i) => (
+            <span key={f.id} className="flex items-center gap-1">
+              <span className="text-muted-foreground">›</span>
+              <button
+                type="button"
+                className="underline-offset-2 hover:underline"
+                onClick={() => goTo(i)}
+              >
+                {f.name}
+              </button>
+            </span>
+          ))}
+        </div>
+        {error && <p className="text-sm text-red-700">{error}</p>}
+        {truncated && (
+          <p className="text-xs text-muted-foreground">
+            Showing the first folders alphabetically — this level has more.
+            Open a folder to narrow the list.
+          </p>
+        )}
+        <div className="max-h-72 overflow-y-auto rounded-md border">
+          {loading ? (
+            <p className="p-3 text-sm text-muted-foreground">
+              Loading folders...
+            </p>
+          ) : folders !== null && folders.length === 0 ? (
+            <p className="p-3 text-sm text-muted-foreground">
+              No folders inside this one.
+            </p>
+          ) : (
+            (folders ?? []).map((f) => (
+              <div
+                key={f.id}
+                className="flex items-center justify-between gap-2 border-b px-3 py-2 last:border-b-0"
+              >
                 <button
                   type="button"
-                  className="underline-offset-2 hover:underline"
-                  onClick={() => goTo(i)}
+                  className="flex min-w-0 flex-1 items-center gap-1 text-left text-sm hover:underline"
+                  onClick={() => enterFolder(f)}
+                  aria-label={`Open ${f.name}`}
+                  title="Open this folder"
                 >
-                  {f.name}
+                  <span className="truncate">{f.name}</span>
+                  <ChevronRight
+                    className="size-4 shrink-0 text-muted-foreground"
+                    aria-hidden
+                  />
                 </button>
-              </span>
-            ))}
-          </div>
-          {error && <p className="text-sm text-red-700">{error}</p>}
-          {truncated && (
-            <p className="text-xs text-muted-foreground">
-              Showing the first folders alphabetically — this level has more.
-              Open a folder to narrow the list.
-            </p>
-          )}
-          <div className="max-h-72 overflow-y-auto rounded-md border">
-            {loading ? (
-              <p className="p-3 text-sm text-muted-foreground">
-                Loading folders...
-              </p>
-            ) : folders !== null && folders.length === 0 ? (
-              <p className="p-3 text-sm text-muted-foreground">
-                No folders inside this one.
-              </p>
-            ) : (
-              (folders ?? []).map((f) => (
-                <div
-                  key={f.id}
-                  className="flex items-center justify-between gap-2 border-b px-3 py-2 last:border-b-0"
-                >
-                  <button
-                    type="button"
-                    className="flex min-w-0 flex-1 items-center gap-1 text-left text-sm hover:underline"
-                    onClick={() => enterFolder(f)}
-                    aria-label={`Open ${f.name}`}
-                    title="Open this folder"
+                {folderAlreadyConnected(connectedRefs, f) ? (
+                  <span className="text-xs text-muted-foreground">
+                    Already connected
+                  </span>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => pickFolder(f)}
+                    disabled={pickingId !== null}
                   >
-                    <span className="truncate">{f.name}</span>
-                    <ChevronRight
-                      className="size-4 shrink-0 text-muted-foreground"
-                      aria-hidden
-                    />
-                  </button>
-                  {folderAlreadyConnected(connectedRefs, f) ? (
-                    <span className="text-xs text-muted-foreground">
-                      Already connected
-                    </span>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => pickFolder(f)}
-                      disabled={pickingId !== null}
-                    >
-                      {pickingId === f.id ? "Adding..." : "Use this folder"}
-                    </Button>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-          <DialogFooter>
-            {current && (
-              <Button
-                onClick={() => pickFolder(current)}
-                disabled={pickingId !== null}
-              >
-                {pickingId === current.id
-                  ? "Adding..."
-                  : `Use "${current.name}"`}
-              </Button>
-            )}
-            <Button variant="ghost" onClick={closePicker}>
-              Cancel
+                    {pickingId === f.id ? "Adding..." : "Use this folder"}
+                  </Button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+        <DialogFooter>
+          {current && (
+            <Button
+              onClick={() => pickFolder(current)}
+              disabled={pickingId !== null}
+            >
+              {pickingId === current.id
+                ? "Adding..."
+                : `Use "${current.name}"`}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+          )}
+          <Button variant="ghost" onClick={closePicker}>
+            Cancel
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

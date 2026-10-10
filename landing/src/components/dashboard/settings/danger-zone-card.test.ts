@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToString } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
 
-import { deletionConfirmed, restoreDeadlineCopy } from "./danger-zone-card";
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: () => {} }) }));
+
+import { DangerZoneCard, deletionConfirmed, restoreDeadlineCopy } from "./danger-zone-card";
 
 /**
  * The two pure decisions behind the Delete / Restore card (#1127, `06` §1).
@@ -39,5 +43,41 @@ describe("restoreDeadlineCopy", () => {
 
   it("says the window exists without inventing a date when the server gave none", () => {
     expect(restoreDeadlineCopy(null)).toBe("until the grace period ends");
+  });
+});
+
+/**
+ * The card's one button, which is where focus has to end up (#1577).
+ *
+ * Rendered to a string, which is as far as this suite's `environment: "node"`
+ * goes. It shows what each button is. It does not show focus moving: that
+ * takes a DOM.
+ */
+describe("the card's button", () => {
+  const card = (state: string) =>
+    renderToString(
+      createElement(DangerZoneCard, {
+        workspaceId: "ws-1",
+        workspaceName: "Northside Coffee",
+        state,
+        restorableUntil: "2026-11-08T15:00:00Z",
+      }),
+    );
+
+  /** The opening tag of the button that holds exactly this label. */
+  const button = (html: string, label: string) =>
+    html.match(new RegExp(`<button[^>]*>${label}</button>`))?.[0] ?? "";
+
+  it("opens the confirmation as its trigger, which is where Radix returns focus on close", () => {
+    expect(button(card("active"), "Delete this workspace\\.\\.\\.")).toContain(
+      'aria-haspopup="dialog"',
+    );
+  });
+
+  it("is described, as Restore, by what deleting did: what is heard when focus lands on it", () => {
+    const html = card("offboarding");
+    const describedBy = button(html, "Restore workspace").match(/aria-describedby="([^"]+)"/)?.[1];
+    expect(describedBy).toBeDefined();
+    expect(html).toContain(`<p id="${describedBy}"`);
   });
 });
