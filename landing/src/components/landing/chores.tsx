@@ -7,7 +7,7 @@ const chores = [
   {
     chore: "Crop it to fit.",
     answer:
-      "Tap Post now and photos and videos are sized for Stories, 9:16, without cropping.",
+      "With direct posting switched on, Post now sizes photos and videos for Stories, 9:16, without cropping.",
   },
   {
     chore: "Remember to post today.",
@@ -49,6 +49,10 @@ export function Chores() {
             <span className="whitespace-nowrap rounded-lg bg-tap px-2.5">
               one tap.
             </span>
+          </p>
+          <p className="mt-3 max-w-lg leading-relaxed text-ink/80">
+            With direct posting switched on, that tap posts it. Otherwise your
+            team posts it and taps Posted myself.
           </p>
         </div>
       </div>

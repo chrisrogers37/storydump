@@ -16,7 +16,8 @@ export const evergreen: UseCaseContent = {
       Storydump turns the photos and videos you already have into Instagram
       Stories, one or a few a day, each in its turn.{" "}
       <UseCaseLink slug="approve-instagram-stories-in-telegram">Your team taps</UseCaseLink>{" "}
-      to post.
+      to post it when direct posting is switched on; otherwise they post it
+      and tap Posted myself.
     </>
   ),
   visual: (
@@ -86,7 +87,8 @@ export const evergreen: UseCaseContent = {
         <p>
           <UseCaseLink slug="instagram-stories-for-online-stores">Online shops</UseCaseLink>
           , niche and community pages, creators, and freelancers with a few
-          accounts, each with its own schedule and rotation.
+          accounts, each in its own workspace with its own schedule and
+          posting mix.
         </p>
       </Section>
     </>

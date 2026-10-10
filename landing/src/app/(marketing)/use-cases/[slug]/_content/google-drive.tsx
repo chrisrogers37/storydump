@@ -7,8 +7,11 @@ export const googleDrive: UseCaseContent = {
   lede: (
     <>
       Connect a Google Drive folder, read-only. Storydump picks today’s Story
-      from it, gets it ready and brings it to your team right on time. Tap{" "}
+      from it, gets it ready and brings it to your team right on time. With
+      direct posting switched on, tap{" "}
       <strong className="font-semibold text-ink">Post now</strong> and it’s up.
+      Otherwise your team posts it and taps{" "}
+      <strong className="font-semibold text-ink">Posted myself</strong>.
     </>
   ),
   visual: (
@@ -37,13 +40,15 @@ export const googleDrive: UseCaseContent = {
             At each time slot Storydump picks today’s Story: anything never
             posted first, then whatever has waited longest (here’s{" "}
             <UseCaseLink slug="evergreen-instagram-stories">how Storydump picks what’s next</UseCaseLink>
-            ). Post now sizes it for Stories, 9:16, with nothing cropped.
+            ). With direct posting switched on, Post now sizes it for
+            Stories, 9:16, with nothing cropped.
           </li>
           <li>
             Your team gets it as a card in{" "}
             <UseCaseLink slug="approve-instagram-stories-in-telegram">your team’s Telegram group</UseCaseLink>{" "}
-            or as a row in the Queue on the web. Tap Post now, or post it
-            yourself and tap Posted myself. You can{" "}
+            or as a row in the Queue on the web. With direct posting switched
+            on, Post now on the card or Approve in the Queue puts it on your
+            Story; otherwise post it yourself and tap Posted myself. You can{" "}
             <TextLink href="/">try the card on the home page</TextLink>.
           </li>
         </ol>

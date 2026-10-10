@@ -22,7 +22,7 @@ export const faqs = [
   {
     question: "Can I manage multiple Instagram accounts?",
     answer:
-      "Yes. Add each one in the dashboard under Settings › Accounts with Connect Instagram. Each account maintains its own posting schedule and content rotation.",
+      "Yes. Add each one in the dashboard under Settings › Accounts with Connect Instagram. A workspace has one posting schedule and one posting mix for all its accounts, so an account that needs its own schedule gets its own workspace.",
   },
   {
     question: "What happens if I skip or reject a story?",
@@ -32,7 +32,7 @@ export const faqs = [
   {
     question: "Is my content stored on your servers?",
     answer:
-      "Not permanently. Your media stays in your Google Drive. To post a story, Storydump uploads a copy of the file to its media processor, which frames it for Instagram; the copy is deleted as soon as the story posts or is cancelled, and any copy left over is deleted once it is 48 hours old. If you link the Telegram bot, each approval card also carries a copy of the story's photo or video into your chat, where it stays like any other message. What we keep is a reference to each file (its Drive ID, name, type, folder and checksum), not the file.",
+      "Not permanently. Your media stays in your Google Drive. To post a story, Storydump uploads a copy of the file to its media processor, which frames it for Instagram; the copy is deleted as soon as the story posts, fails or is cancelled, and any copy left over is deleted once it is 48 hours old. If you link the Telegram bot, each approval card also carries a copy of the story's photo or video into your chat, where it stays like any other message. What we keep is a reference to each file (its Drive ID, name, type, folder and checksum), not the file.",
   },
   {
     question: "Who built this?",

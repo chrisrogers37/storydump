@@ -24,7 +24,7 @@ const audiences: { art: ArtKind; name: string; text: string; useCase?: UseCaseSl
   {
     art: "mug",
     name: "Freelancers",
-    text: "A few accounts, each with its own schedule and rotation.",
+    text: "A few accounts, each in its own workspace with its own schedule and posting mix.",
   },
 ]
 

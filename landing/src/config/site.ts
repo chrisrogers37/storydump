@@ -1,7 +1,7 @@
 export const siteConfig = {
   name: "Storydump",
   description:
-    "Storydump turns your Google Drive folder into daily Instagram Stories and brings each one to your team in Telegram or on the web. One tap posts it.",
+    "Storydump turns your Google Drive folder into daily Instagram Stories and brings each to your team in Telegram or on the web, to post with one tap or by hand.",
   url: "https://storydump.app",
   author: {
     name: "Chris Rogers",
