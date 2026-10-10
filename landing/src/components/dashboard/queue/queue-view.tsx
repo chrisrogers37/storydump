@@ -1,6 +1,6 @@
 "use client";
 
-import { ImageIcon, ListChecks, Loader2, Video } from "lucide-react";
+import { ListChecks, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/dashboard/empty-state";
 import { ItemLink } from "@/components/dashboard/item-link";
-import { MediaThumbnail } from "@/components/dashboard/media/media-thumbnail";
+import { mediaTile } from "@/components/dashboard/media/media-tile";
 import { RescheduleDialog } from "@/components/dashboard/queue/reschedule-dialog";
 import { INTENT_STATE_TONE, TONE_CLASS } from "@/components/dashboard/tone";
 import {
@@ -27,7 +27,6 @@ import {
   type IntentState,
   type QueueAction,
 } from "@/lib/intents";
-import { thumbnailSrc } from "@/lib/thumbnails";
 import { cn } from "@/lib/utils";
 
 /**
@@ -162,35 +161,15 @@ export function QueueView({
         {intents.map((intent) => {
           const actions = actionsOf(intent);
           const note = noteFor(intent);
-          const MediaGlyph = intent.media_kind === "video" ? Video : ImageIcon;
-          const glyph = (
-            <MediaGlyph className="h-5 w-5 text-muted-foreground" aria-hidden />
-          );
-          const thumbnail =
-            workspaceId && intent.has_thumbnail
-              ? thumbnailSrc(
-                  workspaceId,
-                  intent.media_item_id,
-                  intent.thumbnail_version,
-                )
-              : null;
-
           return (
             <li key={intent.id} className="p-4">
               <div className="flex flex-wrap items-center gap-4">
-                <div className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted">
-                  {thumbnail ? (
-                    <MediaThumbnail
-                      key={thumbnail}
-                      src={thumbnail}
-                      alt={intent.file_name}
-                      video={intent.media_kind === "video"}
-                      fallback={glyph}
-                    />
-                  ) : (
-                    glyph
-                  )}
-                </div>
+                {mediaTile({
+                  media: intent,
+                  workspaceId,
+                  box: "h-10 w-10 rounded-md",
+                  glyph: "h-5 w-5",
+                })}
 
                 <div className="min-w-0 grow basis-32">
                   <p className="truncate font-medium">{intent.file_name}</p>

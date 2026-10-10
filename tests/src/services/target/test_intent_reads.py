@@ -73,6 +73,12 @@ class TestTheMonthRead:
             "schedule_slot_at": slot,
             "file_name": name,
             "category": "memes",
+            "media_item_id": f"media-{name}",
+            "media_kind": "image",
+            "has_thumbnail": True,
+            "thumbnail_version": "0123456789abcdef",
+            # A column the read never selects, so a link cannot ride along.
+            "thumbnail_url": "https://drive.example/thumbnail",
         }
 
     async def _days(self, ex, states=("posted",)):
@@ -129,4 +135,18 @@ class TestTheMonthRead:
             "schedule_slot_at": "2026-10-03T20:00:00+00:00",
             "file_name": "c.jpg",
             "category": "memes",
+            "media_item_id": "media-c.jpg",
+            "media_kind": "image",
+            "has_thumbnail": True,
+            "thumbnail_version": "0123456789abcdef",
         }
+
+    async def test_each_newest_carries_a_thumbnail_flag_never_its_link(self):
+        """The calendar draws a thumbnail through the route (#1634 Phase 4),
+        from the flag and version the intents read carries, never the link."""
+        ex = _Executor()
+        await self._days(ex)
+        ((sql, _),) = ex.statements
+        assert "m.thumbnail_url IS NOT NULL AS has_thumbnail" in sql
+        assert "AS thumbnail_version" in sql
+        assert "thumbnail_url" not in workspaces.INTENT_DAY_FIELDS

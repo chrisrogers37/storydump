@@ -125,6 +125,7 @@ export default async function CalendarPage({
     ...laneItem(i),
     scheduled_for: i.schedule_slot_at,
     planned: i.origin === "planned",
+    media: i,
   }));
 
   const scheduleSlots = (scheduleResult.data.intents ?? []).map((i) => ({
@@ -195,6 +196,7 @@ export default async function CalendarPage({
         tz={tz}
         navigable
         selected={day}
+        workspaceId={workspaceId}
       />
 
       {day !== null && dayResult?.ok && (
@@ -202,6 +204,7 @@ export default async function CalendarPage({
           date={day}
           intents={dayIntents}
           tz={tz}
+          workspaceId={workspaceId}
           closeHref={`?month=${monthParam(month)}`}
           truncatedAt={
             dayIntents.length >= dayResult.data.limit ? dayResult.data.limit : null

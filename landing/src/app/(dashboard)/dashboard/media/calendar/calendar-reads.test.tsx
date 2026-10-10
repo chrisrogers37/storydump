@@ -267,6 +267,21 @@ describe("the calendar's upcoming reads", () => {
     ]);
   });
 
+  it("hands the month and the day view the workspace, and each queued story its picture (#1634 Phase 4)", async () => {
+    const pictured = story("pictured", { has_thumbnail: true, thumbnail_version: "v9" });
+    answer({ queue: rows(pictured) });
+    const elements = await page({ month: "2026-10", day: "2026-10-03" });
+    const calendar = propsOf<CalendarProps>(elements, ContentCalendar);
+    expect(calendar.workspaceId).toBe("ws-1");
+    expect(calendar.queue[0].media).toMatchObject({
+      file_name: "pictured.jpg",
+      media_item_id: pictured.media_item_id,
+      has_thumbnail: true,
+      thumbnail_version: "v9",
+    });
+    expect(propsOf<DayProps>(elements, CalendarDay).workspaceId).toBe("ws-1");
+  });
+
   it("renders the unavailable state, not a calendar, when the planned read fails", async () => {
     answer({ planned: DOWN });
     const elements = await page();

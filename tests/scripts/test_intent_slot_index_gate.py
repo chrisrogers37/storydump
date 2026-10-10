@@ -46,6 +46,8 @@ from tests.scripts.conftest import (
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 INDEX = "ix_intents_workspace_slot"
+#: A provider's thumbnail link, which no read may hand to the page.
+THUMBNAIL_LINK = "https://lh3.googleusercontent.com/drive-thumbnail-link"
 BULK_POSTED = 3000
 
 
@@ -161,6 +163,12 @@ def _seed(conn) -> dict:
                 at=f"2026-07-15 {13 + hour}:00+00",
                 state="posted",
             )
+        # One picture with a link the server keeps (#1634 Phase 4).
+        cur.execute(
+            "UPDATE media_items SET thumbnail_url = %s"
+            " WHERE workspace_id = %s AND file_name = 'late.jpg'",
+            (THUMBNAIL_LINK, ny["ws"]),
+        )
     conn.commit()
     with conn.cursor() as cur:
         cur.execute("ANALYZE post_intents")
@@ -343,6 +351,22 @@ def test_the_month_counts_each_local_day_in_the_workspaces_zone(world):
         "busy-2.jpg",
     ]
     assert {n["state"] for n in busy["newest"]} == {"posted"}
+
+
+def test_the_month_names_each_newest_picture_by_flag_never_by_link(world):
+    """#1634 Phase 4: a chip's thumbnail comes through the route, from the
+    flag and version the month read carries. The provider's link stays here."""
+    days = asyncio.run(_as_tenant(world["ingress"], world["ny"], _july(world["ny"])))
+    by_date = {d["date"]: d for d in days}
+    (late,) = by_date["2026-07-09"]["newest"]
+    (early,) = by_date["2026-07-10"]["newest"]
+    assert late["has_thumbnail"] is True and early["has_thumbnail"] is False
+    assert late["media_kind"] == "image" and late["media_item_id"]
+    assert late["thumbnail_version"]
+    for day in days:
+        for item in day["newest"]:
+            assert set(item) == set(workspaces.INTENT_DAY_FIELDS)
+            assert not any(THUMBNAIL_LINK in str(v) for v in item.values())
 
 
 def test_the_month_counts_whichever_outcomes_it_is_asked_for(world):

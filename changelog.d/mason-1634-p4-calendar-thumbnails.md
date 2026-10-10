@@ -1,0 +1,3 @@
+### Added
+
+- **The calendar shows each story's thumbnail (#1634, Phase 4).** A small picture sits beside each story's name on the month's chips, and a row-size one beside each story in the day view. They come through the same authenticated route as the Queue's, with the same lazy loading and skeleton, and the Queue now draws the same shared box. A story without a picture, such as a video Drive has not finished processing, draws its image or video glyph, as every story in the sample workspace does. The month read now carries each listed story's `has_thumbnail`, version, media id and kind, never the provider's link.
