@@ -3835,3 +3835,30 @@ GRANT EXECUTE ON FUNCTION fn_activation_stalled(p_since timestamptz, p_stall int
 
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 ```
+
+### §50. The ledger indexed by workspace and slot (107, #1640)
+
+**Why:** the calendar's month, its day view and the Overview's recent activity read a workspace's
+stories by `schedule_slot_at`: a month or a day at a time, or newest first. No index served
+`workspace_id = $1` in slot order: `uq_intent_slot` leads with the account and is cadence-only,
+`ix_intents_reap_slot` holds `scheduled` and `prompt_pending` rows only,
+`uq_intent_live_subject` holds no terminal state, and the primary key is the id. `post_intents` is
+kept forever (055's retention), so each of these reads walked a workspace's whole history.
+
+**No predicate.** #1640 proposed a partial index on the outcomes, `posted`, `skipped` and
+`rejected`. PostgreSQL uses a partial index only for a query whose WHERE implies its predicate, so
+that index would not serve the day view, which reads every state. Nor would it serve the
+Overview under a generic plan, because the Overview binds its states as an array. The table keeps
+every outcome while a workspace's queue stays short, so the rows a predicate would leave out are
+expected to be few.
+
+**The columns.** The tenant first, as every read names it, then the slot, so a month or a day is
+one range of the index and newest first is a backward walk of it.
+
+```sql
+-- [§50 the ledger indexed by workspace and slot: the calendar's month, its day view and the Overview's recent activity read a workspace's stories by schedule_slot_at]
+-- An index on post_intents (workspace_id, schedule_slot_at) over every state, so a month or a day
+-- of a workspace is one range of it and newest first is a backward walk of it, rather than a walk
+-- of the workspace's whole history (#1640).
+CREATE INDEX ix_intents_workspace_slot ON post_intents (workspace_id, schedule_slot_at);
+```

@@ -501,6 +501,27 @@ def _states(state: Optional[str]) -> list[str]:
     return wanted
 
 
+#: The widest local-date range a read takes: a calendar month drawn in whole
+#: weeks is at most six of them (#1634).
+RANGE_MAX_DAYS = 45
+
+#: The most intents one day of `GET …/intents/days` carries.
+PER_DAY_MAX = 10
+
+
+def _check_date_range(from_: Optional[date], to: Optional[date]) -> None:
+    """``?from=&to=``, the workspace's local days ``[from, to)``: both or
+    neither, ``to`` after ``from``, at most :data:`RANGE_MAX_DAYS` apart."""
+    if (from_ is None) != (to is None):
+        raise HTTPException(status_code=422, detail="from and to come together")
+    # A difference, not from + 45 days: that sum overflows near year 9999.
+    if from_ is not None and not 0 < (to - from_).days <= RANGE_MAX_DAYS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"to must be after from and within {RANGE_MAX_DAYS} days of it",
+        )
+
+
 @router.get("/workspaces/{ws}/intents")
 async def list_intents(
     ws: uuid.UUID,
@@ -510,18 +531,22 @@ async def list_intents(
     origin: Optional[str] = Query(None),
     order: str = Query("asc"),
     limit: int = Query(LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
+    from_: Optional[date] = Query(None, alias="from"),
+    to: Optional[date] = Query(None),
 ):
     """The ledger read model — X.2's "reads pending approvals from the ledger"
     is ``?state=awaiting_approval``; a history tab is
     ``?state=posted,skipped,rejected`` (one call, several states); what is
     coming is ``?origin=planned&state=scheduled``, and the latest misses
-    ``?origin=planned&state=expired&order=desc``. A token reads it too (the
-    CLI's ``planned``), as it reads the ops views."""
+    ``?origin=planned&state=expired&order=desc``; one day of the calendar is
+    ``?from=2026-10-03&to=2026-10-04``, local days in the workspace's zone. A
+    token reads it too (the CLI's ``planned``), as it reads the ops views."""
     states = _states(state)
     if origin is not None and origin not in workspaces.INTENT_ORIGINS:
         raise HTTPException(status_code=422, detail=f"unknown origin: {origin!r}")
     if order not in ("asc", "desc"):
         raise HTTPException(status_code=422, detail=f"order is asc or desc: {order!r}")
+    _check_date_range(from_, to)
     async with principal_mod.reader_session(request, str(ws), principal) as session:
         rows = await workspaces.list_intents(
             session,
@@ -530,8 +555,42 @@ async def list_intents(
             origin=origin,
             newest_first=order == "desc",
             limit=limit,
+            from_date=from_,
+            to_date=to,
         )
     return {"intents": rows, "limit": limit}
+
+
+@router.get("/workspaces/{ws}/intents/days")
+async def intent_days(
+    ws: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_session),
+    state: Optional[str] = Query(None),
+    from_: date = Query(..., alias="from"),
+    to: date = Query(...),
+    per_day: int = Query(3, ge=1, le=PER_DAY_MAX),
+):
+    """The calendar's month (#1634): for each local day in ``[from, to)`` that
+    holds an intent in ``state``, how many it holds and its ``per_day`` newest
+    — ``?state=posted&from=2026-09-29&to=2026-11-02``. ``state`` is required: a
+    count of every state at once is not a question the calendar asks. The
+    web's read alone: a token is refused, as on every route outside its
+    allowlist."""
+    states = _states(state)
+    if not states:
+        raise HTTPException(status_code=422, detail="state is required")
+    _check_date_range(from_, to)
+    async with principal_mod.reader_session(request, str(ws), principal) as session:
+        days = await workspaces.intent_days(
+            session,
+            workspace_id=str(ws),
+            states=states,
+            from_date=from_,
+            to_date=to,
+            per_day=per_day,
+        )
+    return {"days": days, "per_day": per_day}
 
 
 @router.get("/workspaces/{ws}/media")
