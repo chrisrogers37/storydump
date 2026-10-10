@@ -73,12 +73,14 @@ export function AutomateInstagramStories() {
         the safety net, and it should take one tap.
       </p>
       <p>
-        In Storydump each Story arrives as a card, in your team&apos;s
-        Telegram group or in the Queue on the web, with four choices:{" "}
-        <strong>Post now</strong> publishes it, <strong>Posted myself</strong>{" "}
-        records that you posted it by hand, <strong>Skip</strong> puts it
-        back for later, and <strong>Reject</strong> means it never comes up
-        again. The first tap settles it, and the card says who tapped.
+        In Storydump each Story arrives when it is due: in the Queue on the
+        web and, if your team uses Telegram, as a card in your group. Post it
+        and tap <strong>Posted myself</strong>, tap <strong>Skip</strong> to
+        put it back for later, or tap <strong>Reject</strong> so it never
+        comes up again. When direct posting is switched on for your
+        workspace, one tap puts it on your Story for you:{" "}
+        <strong>Post now</strong> on the card, or <strong>Approve</strong> in
+        the Queue. The first tap settles it, and the card says who tapped.
         Nothing posts without a tap.
       </p>
 
@@ -107,23 +109,39 @@ export function AutomateInstagramStories() {
         Instagram fetches the file itself, so it has to sit somewhere
         reachable for a moment. Storydump puts a private, temporary copy on
         Cloudinary, framed to the 9:16 Story size without cropping, and
-        deletes it once the Story posts or is cancelled; any copy left over
-        is deleted once it is 48 hours old. For how your data is handled, see
-        the <Link href="/privacy">Privacy page</Link>.
+        deletes it once the Story posts, fails or is cancelled; any copy left
+        over is deleted once it is 48 hours old. For how your data is
+        handled, see the <Link href="/privacy">Privacy page</Link>.
+      </p>
+      <p>
+        In Storydump you connect your account with Instagram&apos;s own
+        login, and no Facebook Page is needed. When direct posting is
+        switched on for your workspace, Storydump makes these calls for you.
       </p>
 
       <h2>Putting it together</h2>
       <p>
-        The whole loop: your library in Google Drive, a schedule you set
-        (how many Stories a day, the hours they can go out, your time zone),
-        a card for your team when each one is due, and one tap to post it.
+        The whole loop: your library in Google Drive; a schedule you set (how
+        many Stories a day, the hours they can go out, your time zone); a
+        card for your team when each one is due; and one tap to settle it.
+      </p>
+      <p>
+        Storydump checks Drive about every six hours, and{" "}
+        <strong>Sync Now</strong> in the dashboard checks right away. Want a
+        particular Story at a particular time? Pick it in the Media library
+        and choose the time; it still waits for a tap. The Queue lists what
+        is coming in slot order, and the Calendar shows what has posted and
+        what is planned.
       </p>
       <p>
         That is what <Link href="/">Storydump</Link> does. It is in a free
         beta and invites people in small batches;{" "}
         <TrackedLink href="/#waitlist" track={blogCta}>
           join the waitlist
-        </TrackedLink> to get a spot.
+        </TrackedLink>{" "}
+        to get a spot, or{" "}
+        <Link href="/demo">see a sample workspace</Link>{" "}
+        first. Nothing in it is real, and nothing posts.
       </p>
     </>
   )

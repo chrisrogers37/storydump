@@ -1,3 +1,5 @@
+import { formatCalendarDate } from "@/lib/zoned-dates"
+
 export interface BlogPost {
   slug: string
   title: string
@@ -19,7 +21,7 @@ export const posts: BlogPost[] = [
     description:
       "Automate everything up to the tap: a Google Drive library, a schedule you set and a one-tap approval in Telegram or on the web, step by step.",
     date: "2026-05-25",
-    updated: "2026-10-02",
+    updated: "2026-10-07",
     readTime: "6 min read",
     keywords: [
       "automate instagram stories",
@@ -35,7 +37,7 @@ export const posts: BlogPost[] = [
     description:
       "Your media lives in Google Drive and your audience on Instagram. Here's how to post Stories from a Drive folder without downloading and re-uploading.",
     date: "2026-05-25",
-    updated: "2026-10-02",
+    updated: "2026-10-07",
     readTime: "5 min read",
     keywords: [
       "google drive instagram integration",
@@ -48,9 +50,9 @@ export const posts: BlogPost[] = [
     slug: "telegram-instagram-approval-workflow",
     title: "Approving Instagram Stories in Telegram",
     description:
-      "A one-tap approval step for your team's Instagram Stories, in a Telegram group or on the web: see the photo, tap Post now, and everyone sees who did.",
+      "A one-tap approval step for your team's Instagram Stories, in a Telegram group or on the web: see the real photo, decide, and everyone sees who did.",
     date: "2026-05-25",
-    updated: "2026-10-02",
+    updated: "2026-10-07",
     readTime: "4 min read",
     keywords: [
       "telegram bot for instagram",
@@ -63,4 +65,10 @@ export const posts: BlogPost[] = [
 
 export function getPost(slug: string): BlogPost | undefined {
   return posts.find((p) => p.slug === slug)
+}
+
+/** The date a reader sees: "Updated …" once a post has been revised, or else when it was first published. */
+export function postDateLabel(post: BlogPost): string {
+  const date = formatCalendarDate(post.updated ?? post.date, { year: "numeric", month: "long", day: "numeric" })
+  return post.updated ? `Updated ${date}` : date
 }

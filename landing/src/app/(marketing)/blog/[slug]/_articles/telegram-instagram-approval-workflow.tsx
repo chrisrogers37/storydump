@@ -62,14 +62,16 @@ export function TelegramInstagramApproval() {
         <li>
           The card arrives in your team&apos;s Telegram group: the photo,
           the account it&apos;s for, its time slot, and the buttons{" "}
-          <strong>Post now</strong>, <strong>Posted myself</strong>,{" "}
-          <strong>Skip</strong>, <strong>Reject</strong> and{" "}
-          <strong>Open Instagram</strong>.
+          <strong>Posted myself</strong>, <strong>Skip</strong>,{" "}
+          <strong>Reject</strong> and <strong>Open Instagram</strong>, with{" "}
+          <strong>Post now</strong> when direct posting is switched on for
+          your workspace.
         </li>
         <li>
           Someone taps. <strong>Post now</strong> publishes it to your Story
-          through Instagram&apos;s official API. <strong>Posted myself</strong>{" "}
-          records that you posted it by hand. <strong>Skip</strong> puts it
+          through Instagram&apos;s official API. Without that button,
+          someone posts the Story by hand (<strong>Open Instagram</strong> is
+          the shortcut) and taps <strong>Posted myself</strong>. <strong>Skip</strong> puts it
           back for later, and <strong>Reject</strong> means it won&apos;t
           come up again.
         </li>
@@ -80,28 +82,51 @@ export function TelegramInstagramApproval() {
       </ol>
       <p>Nothing posts without a tap.</p>
 
+      <h2>Setting it up</h2>
+      <p>
+        An admin adds your Telegram group to the workspace once. Each
+        teammate links their own Telegram account to Storydump, so a tap
+        counts as theirs; a tap from someone who hasn&apos;t linked asks
+        them to link first.
+      </p>
+
       <h2>Several accounts</h2>
       <p>
-        Each card names the Instagram account it&apos;s for, and each
-        account has its own schedule and rotation.
+        Every card names the Instagram account it&apos;s for. A workspace has
+        one schedule and one posting mix, so a brand that needs its own
+        schedule gets its own workspace, and its own Telegram group.
       </p>
 
       <h2>Not on Telegram?</h2>
       <p>
         Telegram is optional. The same Story waits in your Queue on the web,
-        with the same choices, so a team can work from either or both. More
-        on the{" "}
+        with the same decisions, so a team can work from either or both.
+        More on the{" "}
         <Link href="/use-cases/approve-instagram-stories-in-telegram">
           Instagram Story approval in Telegram
         </Link>
         .
       </p>
       <p>
+        Want the cards on your phone? Get the free app from{" "}
+        <a
+          href="https://telegram.org/apps"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Telegram&apos;s apps page
+        </a>
+        , create your account in it, then link it to Storydump.
+      </p>
+      <p>
         <Link href="/">Storydump</Link> is in a free beta and invites people
-        in small batches; <TrackedLink href="/#waitlist" track={blogCta}>
+        in small batches;{" "}
+        <TrackedLink href="/#waitlist" track={blogCta}>
           join the waitlist
-        </TrackedLink> to
-        get a spot.
+        </TrackedLink>{" "}
+        to get a spot, or{" "}
+        <Link href="/demo">see a sample workspace</Link>{" "}
+        first. Nothing in it is real, and nothing posts.
       </p>
     </>
   )

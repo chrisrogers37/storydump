@@ -2,7 +2,7 @@ import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 import Link from "next/link"
 import { ArrowLeft } from "lucide-react"
-import { posts, getPost } from "@/lib/blog"
+import { posts, getPost, postDateLabel } from "@/lib/blog"
 import { noindexMetadata, pageMetadata } from "@/lib/seo"
 import { blogPosting, breadcrumbList } from "@/lib/json-ld"
 import { TrackedLink } from "@/components/analytics/tracked-link"
@@ -75,13 +75,7 @@ export default async function BlogPost({ params }: { params: Params }) {
 
       <header className="mb-10">
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
-          <time dateTime={post.date}>
-            {new Date(post.date).toLocaleDateString("en-US", {
-              year: "numeric",
-              month: "long",
-              day: "numeric",
-            })}
-          </time>
+          <time dateTime={post.updated ?? post.date}>{postDateLabel(post)}</time>
           <span aria-hidden="true">&middot;</span>
           <span>{post.readTime}</span>
         </div>
@@ -102,7 +96,7 @@ export default async function BlogPost({ params }: { params: Params }) {
         <p className="mt-2 text-muted-foreground">
           Storydump picks today&apos;s Story from your own photos and videos and
           brings it to your team on time, in Telegram or on the web. One tap
-          posts it. Free during beta.
+          settles it. Free during beta.
         </p>
         <TrackedLink
           href="/#waitlist"
