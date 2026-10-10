@@ -711,7 +711,9 @@ async def get_upcoming(
     cadence will open, ``?from=2026-10-26&to=2026-12-07``. A predicted slot is
     projected with the clock's own function and says ``kind: predicted``,
     never a state (`upcoming.upcoming`). ``to`` is after ``from`` and at most
-    :data:`RANGE_MAX_DAYS` days from it. The web's read alone."""
+    :data:`RANGE_MAX_DAYS` days from it. Each list says when it was cut at its
+    limit, and a cut list is whole up to its last row's day. The web's read
+    alone."""
     _check_date_range(from_, to)
     async with principal_mod.member_session(request, str(ws), principal) as session:
         coming = await upcoming.upcoming(

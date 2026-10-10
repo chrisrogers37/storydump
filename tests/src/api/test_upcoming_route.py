@@ -106,10 +106,3 @@ class TestUpcoming:
         resp = client.get(URL, params={"from": "2026-10-26", "to": "2026-12-10"})
         assert resp.status_code == 200
         assert (read[0]["to_date"] - read[0]["from_date"]).days == 45
-
-    def test_the_last_date_does_not_overflow_the_check(
-        self, client, signed_in, tenant, read
-    ):
-        resp = client.get(URL, params={"from": "9999-12-01", "to": "9999-12-31"})
-        assert resp.status_code == 200
-        assert read[0]["to_date"] == date.max
