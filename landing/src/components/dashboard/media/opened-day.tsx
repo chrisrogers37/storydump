@@ -57,7 +57,7 @@ export function returnToDay(links: DayLink[]) {
  * however the day arrives: from the query string in the sample workspace, in
  * the server's answer for a workspace, or by a link straight to an open day.
  */
-export function OpenedDayTitle({ date, children }: { date: string; children: ReactNode }) {
+export function OpenedDayTitle({ date, children }: { date: string; children?: ReactNode }) {
   const title = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

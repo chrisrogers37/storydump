@@ -60,9 +60,7 @@ describe("a day view that has closed", () => {
 
 describe("the day view's title", () => {
   const html = () =>
-    renderToString(
-      createElement(OpenedDayTitle, { date: "2026-10-09", children: "Friday, October 9" }),
-    );
+    renderToString(createElement(OpenedDayTitle, { date: "2026-10-09" }, "Friday, October 9"));
 
   it("can be given focus, and is not a stop of the Tab key", () => {
     expect(html()).toMatch(/<div[^>]*tabindex="-1"[^>]*>Friday, October 9</);
