@@ -160,7 +160,7 @@ describe("the day view's predicted slots (#1634 Phase 3b)", () => {
 });
 
 describe("the day view on a phone", () => {
-  // At 390 px the picture, the time and "awaiting approval" left a name 39 px:
+  // At 390 px the picture, the time and "awaiting approval" left a name 22 px:
   // "m…". A story's row and a predicted slot's are separate branches, so both are read.
   const classOf = (el: ReactElement) =>
     String((el.props as { className?: string }).className ?? "").split(/\s+/);
