@@ -52,6 +52,8 @@ const SHARED_FILES = [
   path.join("lib", "thumbnails.ts"),
   // The sample's Calendar opens the product's day view over its own stories.
   path.join("components", "dashboard", "media", "calendar-day.tsx"),
+  // The day view draws its title with it, so the sample imports it too.
+  path.join("components", "dashboard", "media", "opened-day.tsx"),
 ];
 
 const BANNED_MODULES = ["bff", "workspaces", "page-guards", "target-api", "db"].map(

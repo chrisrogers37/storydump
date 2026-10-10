@@ -109,6 +109,14 @@ describe("the sample's Calendar opens its days", () => {
     expect(count(dayView(html), "Close")).toBe(1);
   });
 
+  it("draws the open day's title so that it can take focus, and marks the day's links in the month", () => {
+    search.value = "month=2026-10&day=2026-10-10";
+    const html = render(DemoCalendar);
+    expect(html).toMatch(/<div[^>]*tabindex="-1"[^>]*>Saturday, October 10</);
+    // The list row and the grid cell: Close hands the visitor back to the one on screen.
+    expect(html.split('aria-current="date"').length - 1).toBe(2);
+  });
+
   it("opens no day the month does not draw", () => {
     search.value = "month=2026-10&day=2026-11-20";
     const html = render(DemoCalendar);
