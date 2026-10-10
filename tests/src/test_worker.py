@@ -237,6 +237,23 @@ def test_a_card_is_late_only_past_what_the_worker_s_own_beats_explain():
     )
 
 
+def test_a_stopped_loop_is_restarted_before_the_monitor_pages_for_it():
+    """`loop_stall_seconds` is when the watchdog ends a worker whose event loop
+    stopped turning (`loop_watchdog`). The restart and its first beats have to
+    fit inside the fleet monitor's worker-down threshold too, or the page
+    arrives for a stall that was already being repaired: so the bound takes at
+    most half of it. And it spans three of the loop's own beats, two plus one
+    of slack, the rule the monitor's threshold follows above, so one late beat
+    never ends a healthy worker. Raise the bound and this fails until the
+    monitor's threshold rises with it.
+    """
+    from scripts.scheduling_monitor import DEFAULT_WORKER_STALE_S
+
+    cfg = WorkerConfig()
+    assert 2 * cfg.loop_stall_seconds <= DEFAULT_WORKER_STALE_S
+    assert 3 * cfg.loop_beat_seconds <= cfg.loop_stall_seconds
+
+
 class TestEngineUrlFromEnv:
     """TARGET_DATABASE_URL is the branch-soak/deploy door: a plain postgres URL
     in, an asyncpg-dialect URL out, with the libpq-only params asyncpg refuses
@@ -543,6 +560,28 @@ class TestSweeperObservables:
 
         line = status_line(loops=[_L], clock=None, heartbeat=_H, sweeper=_S)
         assert "sweeps=7" in line and "mints=2" in line
+
+    def test_status_line_carries_the_watchdog_and_says_when_it_is_gone(self):
+        # The watchdog is a thread, so `supervise` cannot see it die. The line
+        # is where that shows: `armed=False` on a running worker is a worker
+        # nothing would end if its loop stopped.
+        from src.worker import status_line
+
+        class _L:
+            lane, processed, parked, failures, fenced = "bulk", 0, 0, 0, 0
+
+        class _H:
+            beats, short_beats, consecutive_failures = 0, 0, 0
+
+        class _W:
+            alive, beats = True, 41
+
+        line = status_line(loops=[_L], clock=None, heartbeat=_H, watchdog=_W)
+        assert "watchdog[armed=True beats=41]" in line
+        _W.alive = False
+        line = status_line(loops=[_L], clock=None, heartbeat=_H, watchdog=_W)
+        assert "watchdog[armed=False beats=41]" in line
+        assert "watchdog" not in status_line(loops=[_L], clock=None, heartbeat=_H)
 
 
 class TestPromptSweeperConsumesTheSweep:
