@@ -200,7 +200,8 @@ def _tenant_session_factory(outbox_db, sessionmaker):
 def _new_binding(outbox_db, external_ref=None, *, channel="telegram_group") -> str:
     """A binding nobody else is using — on *external_ref* when the scenario
     needs a real chat id. A `telegram_dm` one is seeded here because no code
-    path writes one (the bind door refuses a private chat).
+    path writes one: the writer refuses a private chat unless its caller asks
+    for one, and the bind door, its one caller, never asks.
 
     The fixture is module-scoped (a role-carrying template cannot be held),
     so every scenario mints its own binding rather than sharing one — the
@@ -793,20 +794,46 @@ class TestAPrivateChatIsClaimedOnlyForItsMember:
 
 
 class TestAnOutcomeQueuesNoEditForAChatNoCardMayGoTo:
-    """An outcome supersedes a card in every live binding but queues the edit
+    """An outcome reaches a card in every live binding but queues the edit
     only where a card may go: a private chat whose person does not belong
-    gets its card superseded and no edit, from the tap's one-statement door
-    and from the settled sweep's per-binding one alike. A group beside it
-    gets both: the positive control."""
+    gets its card superseded, or restated, and no edit. That holds for the
+    tap's one-statement door, the settled sweep's per-binding one and the
+    review resolutions' restate door alike. A group and a member's private
+    chat beside it get both: the positive controls, run as `svc_ingress`
+    like the refusal."""
+
+    @staticmethod
+    def _three_chats(outbox_db) -> tuple[str, str, str]:
+        """Three live bindings: a private chat whose person is linked and a
+        member of nothing here (refused), a member's private chat, and a
+        group."""
+        refused_chat, member_chat = _dm_chat(), _dm_chat()
+        refused = _new_binding(outbox_db, refused_chat, channel="telegram_dm")
+        _person(outbox_db, chat=refused_chat)
+        member = _new_binding(outbox_db, member_chat, channel="telegram_dm")
+        _person(outbox_db, chat=member_chat, member_of=(outbox_db["ws"],))
+        group = _new_binding(outbox_db, f"-100{uuid.uuid4().int % 10**10:010d}")
+        return refused, member, group
+
+    @staticmethod
+    def _edited(outbox_db, intent) -> set[str]:
+        """The bindings an edit was queued for, for *intent*."""
+        return {
+            str(binding)
+            for (binding,) in _owner_exec(
+                outbox_db,
+                "SELECT binding_id FROM channel_outbox"
+                " WHERE kind = 'prompt_supersede' AND intent_id = %s",
+                (intent,),
+                fetch=True,
+            )
+        }
 
     @pytest.mark.asyncio
     async def test_the_card_is_superseded_and_no_edit_is_queued(self, outbox_db):
         from src.services.target import outbox
 
-        chat = _dm_chat()
-        dm = _new_binding(outbox_db, chat, channel="telegram_dm")
-        _person(outbox_db, chat=chat)  # linked, and a member of nothing here
-        group = _new_binding(outbox_db, f"-100{uuid.uuid4().int % 10**10:010d}")
+        refused, member, group = self._three_chats(outbox_db)
         tap, swept = (
             str(
                 seed_intent(
@@ -820,14 +847,14 @@ class TestAnOutcomeQueuesNoEditForAChatNoCardMayGoTo:
         cards = {
             (intent, binding): _sent_card(outbox_db, binding, intent)
             for intent in (tap, swept)
-            for binding in (dm, group)
+            for binding in (refused, member, group)
         }
 
         async def outcome(session):
             await outbox.supersede_everywhere(
                 session, workspace_id=outbox_db["ws"], intent_id=tap, outcome_text="x"
             )
-            for binding in (dm, group):
+            for binding in (refused, member, group):
                 await outbox.supersede_all(
                     session,
                     workspace_id=outbox_db["ws"],
@@ -842,19 +869,54 @@ class TestAnOutcomeQueuesNoEditForAChatNoCardMayGoTo:
 
         for key, card in cards.items():
             assert _state(outbox_db, card)[0] == "superseded", key
-        edits = {
-            (str(intent), str(binding))
-            for intent, binding in _owner_exec(
+        for intent in (tap, swept):
+            assert self._edited(outbox_db, intent) == {member, group}, intent
+
+    @pytest.mark.asyncio
+    async def test_a_restated_card_queues_no_edit_for_the_refused_chat(self, outbox_db):
+        """`restate_everywhere_touched`, the review resolutions' door, through
+        its count form. It writes the outcome onto the card in every live
+        binding, changes no card's state, and queues the edit that shows it
+        only where a card may go."""
+        from src.services.target import outbox
+
+        refused, member, group = self._three_chats(outbox_db)
+        intent = str(
+            seed_intent(
+                outbox_db["owner_stream"],
+                outbox_db["ws"],
+                f"dm-restate-{uuid.uuid4().hex[:6]}",
+            )["intent"]
+        )
+        for binding in (refused, member, group):
+            _sent_card(outbox_db, binding, intent)
+
+        queued = await in_tenant(
+            outbox_db["ingress"],
+            outbox_db["ws"],
+            outbox_db["ws_owner"],
+            lambda session: outbox.restate_everywhere(
+                session,
+                workspace_id=outbox_db["ws"],
+                intent_id=intent,
+                outcome_text="x",
+            ),
+        )
+
+        assert queued == 2, "one edit each for the group and the member's chat"
+        cards = {
+            str(binding): (state, said)
+            for binding, state, said in _owner_exec(
                 outbox_db,
-                "SELECT intent_id, binding_id FROM channel_outbox"
-                " WHERE kind = 'prompt_supersede' AND intent_id IN (%s, %s)",
-                (tap, swept),
+                "SELECT binding_id, state, payload->>'outcome_text'"
+                " FROM channel_outbox"
+                " WHERE kind = 'approval_prompt' AND intent_id = %s",
+                (intent,),
                 fetch=True,
             )
         }
-        assert edits == {(tap, group), (swept, group)}, (
-            f"edits were queued for {edits}; only the group may get one"
-        )
+        assert cards == dict.fromkeys((refused, member, group), ("sent", "x"))
+        assert self._edited(outbox_db, intent) == {member, group}
 
 
 class TestARemovedPersonsPrivateChatGetsNoQueuedCard:

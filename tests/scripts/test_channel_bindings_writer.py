@@ -93,14 +93,19 @@ def run(world, fn, *, ids=None):
     return asyncio.run(_in_uow(world["ingress"], str(ids["ws"]), str(ids["user"]), fn))
 
 
-def _bind(world, ref, *, ids=None, chat_type="supergroup"):
+def _bind(world, ref, *, ids=None, chat_type="supergroup", **named):
     """Default `supergroup` deliberately: it is the most common real group type
-    and the one a two-of-three mapping drops."""
+    and the one a two-of-three mapping drops. *named* is passed on, for a
+    caller that names the chat types it binds (`accepts`)."""
     ids = ids or world["a"]
     return run(
         world,
         lambda s: bindings.bind(
-            s, workspace_id=str(ids["ws"]), chat_type=chat_type, external_ref=ref
+            s,
+            workspace_id=str(ids["ws"]),
+            chat_type=chat_type,
+            external_ref=ref,
+            **named,
         ),
         ids=ids,
     )
@@ -198,10 +203,18 @@ class TestBind:
     def test_the_two_channels_are_separate_bindings_of_one_chat_id(self, world):
         """`uq_binding_external` is `(channel, external_ref)`, so the same id in
         a DM and a group are two rows. Pinned because reading the constraint as
-        "one row per chat id" would make the DM path silently TAKEN."""
+        "one row per chat id" would make the DM path silently TAKEN. The DM is
+        asked for by name: the writer binds a private chat for no other call."""
         ref = _chat()
         assert _bind(world, ref, chat_type="group") == BOUND
-        assert _bind(world, ref, chat_type="private") == BOUND
+        assert _bind(world, ref, chat_type="private", accepts=("private",)) == BOUND
+        (channels,) = fetch_one(
+            world["stream"],
+            "SELECT array_agg(channel ORDER BY channel) FROM channel_bindings"
+            " WHERE external_ref = %s",
+            (ref,),
+        )
+        assert channels == ["telegram_dm", "telegram_group"]
 
 
 class TestZeroToN:
@@ -265,6 +278,18 @@ class TestRefusals:
             with pytest.raises(BindingRefused) as e:
                 _bind(world, bad)
             assert e.value.reason == reason, bad
+
+    def test_a_chat_type_the_caller_did_not_name_is_refused_by_name(self, world):
+        """The writer's own rule: a mapped chat type is bound only for a caller
+        that names it. A private chat is not named by default, and a caller
+        that names only a private chat cannot bind a group."""
+        for chat_type, named in (
+            ("private", {}),
+            ("supergroup", {"accepts": ("private",)}),
+        ):
+            with pytest.raises(BindingRefused) as e:
+                _bind(world, _chat(), chat_type=chat_type, **named)
+            assert e.value.reason == "chat_type_not_accepted", chat_type
 
     def test_revoking_a_chat_this_workspace_never_held_is_false_not_an_error(
         self, world

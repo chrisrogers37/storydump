@@ -19,8 +19,8 @@ parses them is the W4 increment, gated on #854.
 
 `prompt_intent` implements the `02` §4 `scheduled → prompt_pending` edge:
 the transition commits in the SAME transaction as its outbox rows ("outbox
-rows created for active push bindings, same tx"), one card per active push
-binding — and the transition happens whether or not a binding exists. The
+rows created for active push bindings, same tx"), one card per binding a push
+may reach — and the transition happens whether or not a binding exists. The
 advance edge, `prompt_pending → awaiting_approval`, reads "delivered on ≥ 1
 binding, **or** workspace has web access": since the web queue (#1033)
 every workspace has web access by construction, so the second disjunct is
@@ -362,8 +362,9 @@ def _sweep_order(row: dict) -> tuple:
 
 
 async def prompt_intent(session, intent_row: dict, bindings: list) -> None:
-    """`scheduled → prompt_pending` + one card per active push binding, in
-    the CALLER's transaction — and the transition happens whether or not a
+    """`scheduled → prompt_pending` + one card per binding in *bindings*, in
+    the CALLER's transaction. The sweep passes :func:`push_bindings`' answer,
+    the bindings a push may reach. The transition happens whether or not a
     binding exists: the web queue is the surface (module docstring).
     """
     intent_id = str(intent_row["id"])

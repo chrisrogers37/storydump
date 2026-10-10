@@ -146,7 +146,10 @@ TAKEN = "taken"
 
 class BindingRefused(RefusalError):
     """A caller-supplied value the boundary refuses, before the database sees
-    it (`provisioning.ProvisioningRefused`'s shape)."""
+    it (`provisioning.ProvisioningRefused`'s shape).
+
+    The reasons: ``chat_type_unsupported``, ``external_ref_required``,
+    ``external_ref_malformed`` and ``chat_type_not_accepted``."""
 
     _prefix = "binding refused"
 
@@ -206,9 +209,24 @@ def _clean(chat_type: object, external_ref: object) -> tuple[str, str]:
     return channel, ref
 
 
-async def bind(session, *, workspace_id: str, chat_type: str, external_ref: str) -> str:
+async def bind(
+    session,
+    *,
+    workspace_id: str,
+    chat_type: str,
+    external_ref: str,
+    accepts: tuple[str, ...] = GROUP_CHAT_TYPES,
+) -> str:
     """Bind one chat to one workspace. Returns :data:`BOUND`, :data:`REBOUND`
     or :data:`TAKEN`.
+
+    **A chat is bound only when its type is one the caller names** in
+    *accepts*: a group's by default, so a private chat is bound only for a
+    caller that asks for one by name. :data:`_CHAT_TYPES` knows every bindable
+    type, so the mapping alone would write a row for whatever a caller passed
+    on. This is the writer's own rule, so it does not rest on each caller
+    remembering to refuse. The group door names nothing
+    (`channel_bind.handle_bind`), and it answers the person itself first.
 
     Runs in the caller's transaction — a binding created by the delivery that
     announced it must roll back with it, the same rule `outbox.enqueue` states.
@@ -223,6 +241,10 @@ async def bind(session, *, workspace_id: str, chat_type: str, external_ref: str)
     read-then-write that another transaction could interleave.
     """
     channel, ref = _clean(chat_type, external_ref)
+    if chat_type not in accepts:
+        raise BindingRefused(
+            "chat_type_not_accepted", f"{chat_type!r} is not a type this caller binds"
+        )
     params = {"ws": str(workspace_id), "ch": channel, "ref": ref}
     # A removed group coming back: its old queue is retired before it is
     # active again, so nothing left over from before the removal is sent.
