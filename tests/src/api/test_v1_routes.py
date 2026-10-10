@@ -10,6 +10,7 @@ in `tests/scripts/`.
 
 from __future__ import annotations
 
+from datetime import date
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -154,6 +155,8 @@ class TestWorkspaceReads:
             origin=None,
             newest_first=False,
             limit=50,
+            from_date=None,
+            to_date=None,
         ):
             seen.update(states=list(states), limit=limit)
             return []
@@ -191,6 +194,8 @@ class TestWorkspaceReads:
             origin=None,
             newest_first=False,
             limit=50,
+            from_date=None,
+            to_date=None,
         ):
             seen.update(states=list(states), origin=origin, newest_first=newest_first)
             return []
@@ -211,6 +216,75 @@ class TestWorkspaceReads:
         }
         client.get(f"/api/v1/workspaces/{WS}/intents?state=expired&order=desc")
         assert seen["origin"] is None and seen["newest_first"] is True
+
+    def test_a_date_range_is_local_days_both_or_neither_and_bounded(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        """The calendar's day view (#1634): ``from`` and ``to`` are the
+        workspace's local days, half-open, and reach the read as dates."""
+        seen = {}
+
+        async def list_intents(session, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(workspaces, "list_intents", list_intents)
+        url = f"/api/v1/workspaces/{WS}/intents"
+        for bad in (
+            "from=2026-10-03",
+            "to=2026-10-04",
+            "from=2026-10-04&to=2026-10-04",
+            "from=2026-10-05&to=2026-10-04",
+            "from=2026-10-01&to=2026-11-16",
+            "from=2026-13-01&to=2026-13-02",
+        ):
+            assert client.get(f"{url}?{bad}").status_code == 422, bad
+        assert seen == {}
+        assert client.get(f"{url}?from=2026-10-03&to=2026-10-04").status_code == 200
+        assert (seen["from_date"], seen["to_date"]) == (
+            date(2026, 10, 3),
+            date(2026, 10, 4),
+        )
+        client.get(url)
+        assert (seen["from_date"], seen["to_date"]) == (None, None)
+        # The span is a difference: a sum would overflow at the calendar's end.
+        assert client.get(f"{url}?from=9999-12-30&to=9999-12-31").status_code == 200
+        assert seen["to_date"] == date(9999, 12, 31)
+
+    def test_the_month_read_needs_a_state_and_a_range_and_bounds_its_names(
+        self, client, signed_in, tenant, monkeypatch
+    ):
+        """``GET …/intents/days`` (#1634): the month's count and newest names
+        per local day. Registered before ``/intents/{intent_id}``, which would
+        otherwise read ``days`` as an id."""
+        seen = {}
+        day = {"date": "2026-10-03", "count": 15, "newest": []}
+
+        async def intent_days(session, **kwargs):
+            seen.update(kwargs)
+            return [day]
+
+        monkeypatch.setattr(workspaces, "intent_days", intent_days)
+        url = f"/api/v1/workspaces/{WS}/intents/days"
+        month = "from=2026-09-28&to=2026-11-02"
+        for bad in (
+            month,
+            f"state=frobnicated&{month}",
+            "state=posted",
+            f"state=posted&{month}&per_day=0",
+            f"state=posted&{month}&per_day=11",
+        ):
+            assert client.get(f"{url}?{bad}").status_code == 422, bad
+        assert seen == {}
+        resp = client.get(f"{url}?state=posted&{month}")
+        assert resp.status_code == 200
+        assert resp.json() == {"days": [day], "per_day": 3}
+        assert seen["states"] == ["posted"]
+        assert (seen["from_date"], seen["to_date"]) == (
+            date(2026, 9, 28),
+            date(2026, 11, 2),
+        )
+        assert seen["per_day"] == 3
 
     def test_media_reads_pass_the_gate_and_validate_the_state(
         self, client, signed_in, tenant, monkeypatch
@@ -303,9 +377,7 @@ class TestWorkspaceReads:
     ):
         """A member: the gate passes the member floor and refuses any higher."""
 
-        async def as_a_member(
-            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
-        ):
+        async def as_a_member(session, workspace_id, user_id, minimum_role="member"):
             if minimum_role != "member":
                 raise TenantResolutionError("insufficient_role")
 
@@ -329,16 +401,14 @@ def port(monkeypatch):
     log = {
         "admit": [],
         "execute": [],
-        "execute_kw": [],
         "outcome": CommandResult("executed", {"state": "approved"}),
     }
 
     async def admit(session, *, channel, external_ref, payload, principal):
         log["admit"].append((channel, external_ref, payload, principal))
 
-    async def execute(session, command, **kw):
+    async def execute(session, command):
         log["execute"].append(command)
-        log["execute_kw"].append(kw)
         result = log["outcome"]
         if isinstance(result, Exception):
             raise result
@@ -394,7 +464,6 @@ class TestCommands:
         )
         assert cmd.args == {"intent_id": INTENT}
         assert tenant[0] == ("uow", WS, PRINCIPAL.user_id)
-        assert port["execute_kw"] == [{"tenant_bound": True}]
 
     def test_an_enqueued_outcome_is_202(self, client, signed_in, tenant, port):
         port["outcome"] = CommandResult("enqueued", {"job": "publish_pipeline"})
@@ -510,8 +579,6 @@ class TestCreateWorkspace:
             ("uow", preassigned, PRINCIPAL.user_id)
         ]  # no gate: no membership yet
         assert port["admit"][0][1] == "k-1"
-        # The workspace is not the tenant, so the port does not vouch for it.
-        assert port["execute_kw"] == [{"tenant_bound": False}]
 
     def test_a_client_supplied_id_is_ignored(self, client, signed_in, tenant, port):
         port["outcome"] = CommandResult("executed", {"workspace_id": "x"})

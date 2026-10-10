@@ -9,9 +9,20 @@ import {
   type WorkspaceConfig,
 } from "@/lib/dashboard-payloads";
 import { LIST_LIMIT_MAX, type Intent, type IntentsResponse } from "@/lib/intents";
+import {
+  addDays,
+  monthGrid,
+  monthOf,
+  monthParam,
+  NAMES_PER_DAY,
+  parseDay,
+  parseMonth,
+  type IntentDaysResponse,
+} from "@/lib/calendar-month";
 import { postingIntervalMinutes } from "@/lib/schedule";
 import { dateInZone } from "@/lib/zoned-dates";
 import { RouterUnavailable } from "@/components/workspace/router-unavailable";
+import { CalendarDay } from "@/components/dashboard/media/calendar-day";
 import { ContentCalendar } from "@/components/dashboard/media/content-calendar";
 import { StatCard } from "@/components/ui/card";
 
@@ -23,24 +34,46 @@ const laneItem = (i: Intent) => ({
 });
 
 /**
- * The calendar's four bounded reads (`01` H5). Every COUNT on this page comes
- * from `stats`, never from these lists.
+ * The calendar's bounded reads (`01` H5). Every COUNT on this page is one the
+ * API counted: `stats`, or the month read's count per day. None is a list's
+ * length.
  *
- * Posted and planned each ask for the API's ceiling. The API sorts by slot,
- * soonest first, unless asked otherwise, so Posted asks for newest first: the
- * oldest outcomes fall before any month on screen. At 15 to 20 posts a day,
- * 200 is about ten days.
+ * The month on screen is one read (#1634): every local day on its grid with
+ * how many stories it posted and the newest names (`intents/days`), so a day
+ * early in a busy month is counted as fully as yesterday. A day opened from
+ * its cell is one more read: that day's stories, every state, in time order.
  */
 const CALENDAR_QUEUE_LIMIT = 10;
 const CALENDAR_SCHEDULE_LIMIT = 15;
 
-export default async function CalendarPage() {
+export default async function CalendarPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ month?: string; day?: string }>;
+}) {
   const { workspaceId } = await requireWorkspacePage();
+  const params = await searchParams;
 
-  const [historyResult, queueResult, plannedResult, scheduleResult, statsResult, configResult] =
+  // Which month to draw depends on today in the WORKSPACE's zone, so its
+  // config is read first.
+  const configResult = await workspaceFetch<WorkspaceConfig>("", workspaceId);
+  if (!configResult.ok) {
+    return <RouterUnavailable what="Your calendar" />;
+  }
+  const config = configResult.data;
+  const tz = config.tz ?? "UTC";
+  const today = dateInZone(new Date(), tz);
+
+  const asked = parseDay(params.day);
+  const month = parseMonth(params.month) ?? monthOf(asked ?? today);
+  const grid = monthGrid(month);
+  // A day off the grid is not this month's to open.
+  const day = asked !== null && grid.dates.includes(asked) ? asked : null;
+
+  const [historyResult, queueResult, plannedResult, scheduleResult, statsResult, dayResult] =
     await Promise.all([
-      workspaceFetch<IntentsResponse>(
-        `intents?state=${POSTED_STATES}&order=desc&limit=${LIST_LIMIT_MAX}`,
+      workspaceFetch<IntentDaysResponse>(
+        `intents/days?state=${POSTED_STATES}&from=${grid.from}&to=${grid.to}&per_day=${NAMES_PER_DAY}`,
         workspaceId,
       ),
       // The upcoming stories are split by origin, so each is in one read: the
@@ -61,7 +94,12 @@ export default async function CalendarPage() {
         workspaceId,
       ),
       workspaceFetch<StatsResponse>("stats", workspaceId),
-      workspaceFetch<WorkspaceConfig>("", workspaceId),
+      day === null
+        ? null
+        : workspaceFetch<IntentsResponse>(
+            `intents?from=${day}&to=${addDays(day, 1)}&order=asc&limit=${LIST_LIMIT_MAX}`,
+            workspaceId,
+          ),
     ]);
 
   // The calendar is these side by side. One missing leaves a column of zeros
@@ -73,18 +111,12 @@ export default async function CalendarPage() {
     !plannedResult.ok ||
     !scheduleResult.ok ||
     !statsResult.ok ||
-    !configResult.ok
+    (dayResult !== null && !dayResult.ok)
   ) {
     return <RouterUnavailable what="Your calendar" />;
   }
 
   const stats = statsResult.data;
-  const config = configResult.data;
-
-  const historyItems = (historyResult.data.intents ?? []).map((i) => ({
-    ...laneItem(i),
-    posted_at: i.entered_state_at,
-  }));
 
   const queueItems = [
     ...(queueResult.data.intents ?? []),
@@ -102,8 +134,6 @@ export default async function CalendarPage() {
 
   // Counted where the rows are, not re-summed from the bounded lists above.
   // Today is the WORKSPACE's: `daily_post_counts.local_date` is its own date.
-  const tz = config.tz ?? "UTC";
-  const today = dateInZone(new Date(), tz);
   const postsToday =
     (stats.posts_by_day ?? []).find((d) => d.local_date.startsWith(today))
       ?.count ?? 0;
@@ -132,6 +162,8 @@ export default async function CalendarPage() {
     perDay,
   );
 
+  const dayIntents = dayResult?.ok ? (dayResult.data.intents ?? []) : [];
+
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
@@ -156,11 +188,26 @@ export default async function CalendarPage() {
       </div>
 
       <ContentCalendar
-        history={historyItems}
+        month={month}
+        history={historyResult.data.days ?? []}
         queue={queueItems}
         schedule={scheduleSlots}
         tz={tz}
+        navigable
+        selected={day}
       />
+
+      {day !== null && dayResult?.ok && (
+        <CalendarDay
+          date={day}
+          intents={dayIntents}
+          tz={tz}
+          closeHref={`?month=${monthParam(month)}`}
+          truncatedAt={
+            dayIntents.length >= dayResult.data.limit ? dayResult.data.limit : null
+          }
+        />
+      )}
     </div>
   );
 }

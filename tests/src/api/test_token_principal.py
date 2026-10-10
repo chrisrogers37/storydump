@@ -354,10 +354,8 @@ class TestTheTenantSeamsResolveThroughTheModule:
             seen.append(("uow", workspace_id, who.user_id))
             yield "session"
 
-        async def fake_gate(
-            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
-        ):
-            seen.append(("gate", workspace_id, user_id, minimum_role, tenant_bound))
+        async def fake_gate(session, workspace_id, user_id, minimum_role="member"):
+            seen.append(("gate", workspace_id, user_id, minimum_role))
 
         monkeypatch.setattr(principal, "open_tenant", fake_open_tenant)
         monkeypatch.setattr(tenant_resolution, "authorize_member", fake_gate)
@@ -366,7 +364,7 @@ class TestTheTenantSeamsResolveThroughTheModule:
             assert session == "session"
         assert seen == [
             ("uow", WS, PRINCIPAL.user_id),
-            ("gate", WS, PRINCIPAL.user_id, floor, True),
+            ("gate", WS, PRINCIPAL.user_id, floor),
         ]
 
     @pytest.mark.parametrize("router", ["v1", "tokens", "ops"])
@@ -394,10 +392,8 @@ class TestAConnectLegChecksItsPurposesFloor:
 
         seen = []
 
-        async def fake_gate(
-            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
-        ):
-            seen.append((session, workspace_id, user_id, minimum_role, tenant_bound))
+        async def fake_gate(session, workspace_id, user_id, minimum_role="member"):
+            seen.append((session, workspace_id, user_id, minimum_role))
 
         monkeypatch.setattr(tenant_resolution, "authorize_member", fake_gate)
         return seen
@@ -413,4 +409,4 @@ class TestAConnectLegChecksItsPurposesFloor:
 
         monkeypatch.setitem(commands.ROLE_FLOOR, "reconnect_account", "owner")
         await principal.require_connect_floor("session", WS, PRINCIPAL, "reconnect")
-        assert gate == [("session", WS, PRINCIPAL.user_id, "owner", True)]
+        assert gate == [("session", WS, PRINCIPAL.user_id, "owner")]

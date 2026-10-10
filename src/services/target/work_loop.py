@@ -569,7 +569,8 @@ def build_registry(deps: WorkerDeps) -> dict:
                 (
                     await reader.execute(
                         text(
-                            "SELECT external_ref, workspace_id, state"
+                            "SELECT external_ref, workspace_id, state,"
+                            f" ({bindings.DELIVERABLE_BINDING_WHERE}) AS deliverable"
                             " FROM channel_bindings WHERE id = :b"
                         ),
                         {"b": binding_id},
@@ -582,16 +583,18 @@ def build_registry(deps: WorkerDeps) -> dict:
             raise RuntimeError(
                 f"deliver_outbox {job['id']}: binding {binding_id} has no row"
             )
-        if row["state"] != "active":
-            # Revoked after this job was minted — an admin removed the group
-            # or the bot was kicked. The claim refuses it anyway
-            # (`outbox.claim_next`); ending here spends no hold on a chat the
-            # workspace let go of, and retiring what is left of its queue
-            # keeps a later re-bind from posting it as stale cards.
+        if not row["deliverable"]:
+            # Revoked after this job was minted (an admin removed the group,
+            # the bot was kicked), or a private chat whose person does not
+            # belong (`bindings.deliverable_binding_where`). The claim refuses
+            # it anyway (`outbox.claim_next`); ending here spends no hold, and
+            # retiring its queue keeps a stale card from going out later, a
+            # re-bind's included, and leaves the sweep nothing to mint for.
             async with short(session, job) as writer:
                 retired = await bindings.retire_unsettled(writer, binding_id=binding_id)
             logger.info(
-                "deliver_outbox %s: binding %s is %s — nothing sent, %d retired",
+                "deliver_outbox %s: binding %s (%s) is not deliverable — nothing"
+                " sent, %d retired",
                 job["id"],
                 binding_id,
                 row["state"],
@@ -1271,7 +1274,8 @@ async def ensure_sender_jobs(
     # because the sweep runs with no tenant and every table it reads is
     # policy-covered. The key prefix, the lane budget and the bound stay
     # spelled once here; the binding predicate is `bindings.push_binding_where`,
-    # pinned to the door's body by a test.
+    # pinned to the door's body by a test — the live set, which
+    # `bindings.deliverable_binding_where` narrows at the sender.
     result = await session.execute(
         text("SELECT fn_sender_sweep(:prefix, :attempts, :deadline, :age, :lim)"),
         {

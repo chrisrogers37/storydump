@@ -1625,6 +1625,16 @@ GRANT EXECUTE ON FUNCTION fn_stranded_sources(p_age numeric, p_limit int) TO svc
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
 ```
 
+**The sender re-checks what the sweep cannot.** `fn_sender_sweep` mints on
+`bindings.push_binding_where`, the live set: its owner role reads no membership. Every
+statement that queues or claims a card routes on `bindings.deliverable_binding_where`, which
+adds that a card goes to a private chat (`telegram_dm`) only while the person whose chat it is,
+the linked Telegram identity with that chat's id, belongs to the binding's workspace. An outcome
+still supersedes a card in every live binding, and queues its edit only where a card may go. So
+a sender minted for a binding the deliverable predicate refuses claims nothing and retires that
+binding's queue (`work_loop.deliver_outbox`), and the sweep has nothing left to mint for. The
+door's body is unchanged.
+
 ### §26. The clock's five legs mint with a deadline (083, #1381; the SQL half of #1361)
 
 **Why:** `jobs.enqueue` has written `deadline_at` since #1288, and `budget_exhausted` ends a job on
@@ -3035,8 +3045,9 @@ The table carries no audit trigger, so the door sets no actor.
 **What unlinking does not touch.** Memberships stay. A workspace joined from a Telegram group
 stays joined: unlinking an identity is not leaving a workspace, and removal is
 `fn_member_remove`'s. What changes is that the Telegram account resolves to no Storydump user, so
-its card taps are refused as `unlinked` and its group messages join nobody until the person links
-again, which works as a first link does.
+its card taps are refused as `unlinked`, its group messages join nobody, and no workspace's card
+reaches its private chat (§25's deliverable predicate finds no linked member) until the person
+links again, which works as a first link does.
 
 ```sql
 -- [§42 a person can unlink their own Telegram identity]
@@ -3823,6 +3834,33 @@ REVOKE ALL ON FUNCTION fn_activation_stalled(p_since timestamptz, p_stall interv
 GRANT EXECUTE ON FUNCTION fn_activation_stalled(p_since timestamptz, p_stall interval, p_limit int) TO svc_worker;
 
 REVOKE CREATE ON SCHEMA public FROM svc_maintenance;
+```
+
+### §50. The ledger indexed by workspace and slot (107, #1640)
+
+**Why:** the calendar's month, its day view and the Overview's recent activity read a workspace's
+stories by `schedule_slot_at`: a month or a day at a time, or newest first. No index served
+`workspace_id = $1` in slot order: `uq_intent_slot` leads with the account and is cadence-only,
+`ix_intents_reap_slot` holds `scheduled` and `prompt_pending` rows only,
+`uq_intent_live_subject` holds no terminal state, and the primary key is the id. `post_intents` is
+kept forever (055's retention), so each of these reads walked a workspace's whole history.
+
+**No predicate.** #1640 proposed a partial index on the outcomes, `posted`, `skipped` and
+`rejected`. PostgreSQL uses a partial index only for a query whose WHERE implies its predicate, so
+that index would not serve the day view, which reads every state. Nor would it serve the
+Overview under a generic plan, because the Overview binds its states as an array. The table keeps
+every outcome while a workspace's queue stays short, so the rows a predicate would leave out are
+expected to be few.
+
+**The columns.** The tenant first, as every read names it, then the slot, so a month or a day is
+one range of the index and newest first is a backward walk of it.
+
+```sql
+-- [§50 the ledger indexed by workspace and slot: the calendar's month, its day view and the Overview's recent activity read a workspace's stories by schedule_slot_at]
+-- An index on post_intents (workspace_id, schedule_slot_at) over every state, so a month or a day
+-- of a workspace is one range of it and newest first is a backward walk of it, rather than a walk
+-- of the workspace's whole history (#1640).
+CREATE INDEX ix_intents_workspace_slot ON post_intents (workspace_id, schedule_slot_at);
 ```
 
 ### §51. PKCE on the Drive connect flow: the code is exchanged with the verifier minted beside its state (108)

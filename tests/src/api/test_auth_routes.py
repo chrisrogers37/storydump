@@ -594,9 +594,9 @@ class TestInstagramCallback:
                 return _cm()
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+            session, workspace_id, user_id, minimum_role="member"
         ):
-            log.append(("gate", workspace_id, user_id, minimum_role, tenant_bound))
+            log.append(("gate", workspace_id, user_id, minimum_role))
             return "owner"
 
         async def store_credential(
@@ -687,7 +687,7 @@ class TestInstagramCallback:
         )
         assert writes["log"] == [
             ("uow", WS, USER, "web"),
-            ("gate", WS, USER, "admin", True),
+            ("gate", WS, USER, "admin"),
             ("connect", WS, None, "17841400000000001", "exampleshop"),
             ("store", WS, "acct-adopted", "IGQVJ-long"),
         ]
@@ -801,7 +801,7 @@ class TestInstagramCallback:
         )
         assert writes["log"] == [
             ("uow", WS, USER, "web"),
-            ("gate", WS, USER, "admin", True),
+            ("gate", WS, USER, "admin"),
             ("connect", WS, ACCOUNT, "17841400000000001", "exampleshop"),
             ("store", WS, ACCOUNT, "IGQVJ-long"),
         ]
@@ -824,7 +824,7 @@ class TestInstagramCallback:
         monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
         self._return(client)
         assert [e for e in writes["log"] if e[0] == "gate"] == [
-            ("gate", WS, USER, floor, True)
+            ("gate", WS, USER, floor)
         ]
 
     def test_reconnect_takes_the_same_single_write_as_connect(
@@ -842,7 +842,7 @@ class TestInstagramCallback:
         from src.exceptions.tenancy import TenantResolutionError
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+            session, workspace_id, user_id, minimum_role="member"
         ):
             raise TenantResolutionError("insufficient_role")
 
@@ -953,9 +953,9 @@ class TestDriveCallback:
                 return _cm()
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+            session, workspace_id, user_id, minimum_role="member"
         ):
-            log.append(("gate", workspace_id, user_id, minimum_role, tenant_bound))
+            log.append(("gate", workspace_id, user_id, minimum_role))
             return "owner"
 
         async def store_credential(session, *, workspace_id, grant, granted_by):
@@ -987,7 +987,7 @@ class TestDriveCallback:
         assert exchanged == [APPENDIX_B_VERIFIER]
         assert writes == [
             ("uow", WS, USER, "web"),
-            ("gate", WS, USER, "admin", True),
+            ("gate", WS, USER, "admin"),
             # 091: the state's user — the returning browser, checked — is
             # the granter, the one person who may browse this Drive.
             ("store", WS, "ya29.access", USER),
@@ -1012,9 +1012,7 @@ class TestDriveCallback:
         drive_row["purpose"] = carried
         monkeypatch.setitem(commands.ROLE_FLOOR, moved, "owner")
         self._return(client)
-        assert [e for e in writes if e[0] == "gate"] == [
-            ("gate", WS, USER, floor, True)
-        ]
+        assert [e for e in writes if e[0] == "gate"] == [("gate", WS, USER, floor)]
 
     @pytest.mark.parametrize(
         "field, value",
@@ -1117,7 +1115,7 @@ class TestDriveCallback:
         from src.exceptions.tenancy import TenantResolutionError
 
         async def authorize_member(
-            session, workspace_id, user_id, minimum_role="member", *, tenant_bound=False
+            session, workspace_id, user_id, minimum_role="member"
         ):
             raise TenantResolutionError("insufficient_role")
 

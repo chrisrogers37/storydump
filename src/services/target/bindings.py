@@ -89,20 +89,44 @@ CHANNELS: tuple[str, ...] = ("telegram_group", "telegram_dm")
 
 
 def push_binding_where(alias: str = "") -> str:
-    """The predicate, optionally qualified for a table alias."""
+    """A LIVE binding — active and Telegram — optionally qualified for a table
+    alias. It is the set the sender sweep mints for (`fn_sender_sweep`, 082,
+    whose body is pinned to this) and the set an outcome supersedes cards in:
+    a superset of where a card may go. Nothing queues or claims a card on it;
+    that is :func:`deliverable_binding_where`."""
     p = f"{alias}." if alias else ""
     return f"{p}state = 'active' AND {p}channel LIKE 'telegram%'"
 
 
-#: "Where can we say this": the bindings a push may go to. ONE owner for the
-#: predicate — the W3 sweep, the two one-statement outbox doors and
-#: `prompts.push_bindings` all route on it, and four spellings is how they
-#: drift apart the day a second push channel lands
-#: (`invitation_cards.py:126-131` names that exact risk). A fragment, not a
-#: bound parameter: it is SQL, and no user input reaches it.
-#:
-#: The unqualified form, for a statement with one `channel_bindings`.
-PUSH_BINDING_WHERE = push_binding_where()
+def deliverable_binding_where(alias: str = "channel_bindings") -> str:
+    """ "Where can we say this": a live binding, and for a private chat
+    (`telegram_dm`) only while the person whose chat it is — the linked
+    Telegram identity with that chat's id — belongs to the binding's
+    workspace.
+
+    ONE owner: every statement that queues or claims a card routes on it, at
+    use time, so it holds however the binding or the membership came to be,
+    and several spellings is how they drift apart the day a second push
+    channel lands (`invitation_cards.py:126-131` names that exact risk). The
+    sender sweep's door mints on the live set and reads no membership; a
+    sender it mints for a binding this refuses retires that binding's queue
+    (`work_loop.deliver_outbox`). A fragment, not a bound parameter: it is
+    SQL, and no user input reaches it. *alias* qualifies every column, as the
+    subquery needs: a bare ``workspace_id`` there would bind to
+    ``workspace_members``."""
+    return (
+        f"{push_binding_where(alias)}"
+        f" AND ({alias}.channel <> 'telegram_dm' OR EXISTS ("
+        "SELECT 1 FROM user_identities dm_ui"
+        " JOIN workspace_members dm_wm ON dm_wm.user_id = dm_ui.user_id"
+        " WHERE dm_ui.provider = 'telegram'"
+        f" AND dm_ui.external_id = {alias}.external_ref"
+        f" AND dm_wm.workspace_id = {alias}.workspace_id))"
+    )
+
+
+#: The form for a statement whose one `channel_bindings` is unaliased.
+DELIVERABLE_BINDING_WHERE = deliverable_binding_where()
 
 #: A Telegram chat id as text — negative for groups and supergroups. Both
 #: members of :data:`CHANNELS` are Telegram, which is what makes this shape
@@ -310,7 +334,8 @@ async def revoke_for_workspace(session, *, workspace_id: str, binding_id: str) -
 
 async def retire_unsettled(session, *, binding_id: str) -> int:
     """Supersede every unsettled card (`pending`, `sending`, `ambiguous`) of a
-    binding that is not active. Returns how many moved.
+    binding a push may no longer reach: not active, or refused by
+    :func:`deliverable_binding_where`. Returns how many moved.
 
     :func:`revoke_for_workspace` supersedes `pending` and `ambiguous` at the
     removal but leaves `sending` to a live sender, and that row can still end
@@ -318,7 +343,7 @@ async def retire_unsettled(session, *, binding_id: str) -> int:
     (the sender died). The claim refuses a revoked binding, so nothing settles
     it; a re-bind would send it as a stale card. Run by :func:`bind` before a
     revoked binding is re-activated, and by `work_loop.deliver_outbox` when
-    its binding is no longer active. Safe for a `sending` row:
+    the deliverable predicate refuses its binding. Safe for a `sending` row:
     `outbox._leave_sending` is fenced against a row superseded in flight.
     """
     result = await session.execute(

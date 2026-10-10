@@ -90,8 +90,9 @@ Rules the code keeps:
 `render_card` (`:210`) builds the approval card: **Post now** only when the
 workspace has `api_publishing_enabled`, **Posted myself**, **Skip**, **Reject**,
 and a link to Instagram. `prompt_intent` (`:268`) flips `scheduled →
-prompt_pending` and writes one `approval_prompt` outbox row per active push
-binding in the SAME transaction; the sweep advances to `awaiting_approval` in
+prompt_pending` and writes one `approval_prompt` outbox row per binding a push
+may reach (`bindings.deliverable_binding_where`: active, Telegram, and a private
+chat only while its person belongs to the workspace) in the SAME transaction; the sweep advances to `awaiting_approval` in
 the same pass whether or not a card was delivered, because the web queue is a
 surface every workspace has. A workspace with no Telegram binding gets no card
 and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
@@ -106,7 +107,10 @@ and loses nothing. The words a card shows for a state are `OUTCOME_WORDS`
   `superseded`. The payload is channel-neutral (`{"v": 1, "text", …}`).
 - One sender per chat: the `deliver_outbox` job is keyed `tg:<binding_id>`, so
   `uq_jobs_serialized_lease` admits one live sender per binding. The sender
-  sweeper mints it while pending rows exist (`work_loop.ensure_sender_jobs`).
+  sweeper mints it while pending rows exist (`work_loop.ensure_sender_jobs`);
+  its door reads no membership, so the sender re-checks
+  `bindings.deliverable_binding_where` at claim and retires the queue of a
+  binding it refuses.
   Every write out of `sending` is a CAS on `sending`.
 - The sender commits per checkpoint: pace-and-claim, commit, call Telegram with
   no transaction open, settle in another. A row left `sending` by a dead

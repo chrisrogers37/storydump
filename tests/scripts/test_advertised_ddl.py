@@ -310,8 +310,9 @@ class TestAgainstTheRealDocs:
         # and §47's activation funnel door (104, #1481) makes it 54; and §48's
         # tombstone for a file a whole walk no longer lists (105, #1545) makes it 55;
         # and §49's activation nudge, built off (106, #1481), makes it 56;
-        # and §51's PKCE code verifier on the Drive connect state makes it 57.
-        assert classes.count("normative") == 57
+        # and §50's outcomes indexed by slot (#1640) make it 57;
+        # and §51's PKCE code verifier on the Drive connect state makes it 58.
+        assert classes.count("normative") == 58
         assert classes.count("illustrative") == 4
 
     def test_real_stream_expands_the_fifteen_policies(self):
