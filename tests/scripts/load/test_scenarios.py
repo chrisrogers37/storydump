@@ -30,7 +30,7 @@ import pytest
 
 from tests.scripts.conftest import (
     _scratch,
-    replay_advertised_stream,
+    build_world,
 )
 
 from . import harness as h
@@ -68,7 +68,7 @@ def stage(admin_conn, owner_actor):
     db = next(gen)
     fake = server = api = worker = proxy = None
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         name = dsn.rsplit("/", 1)[-1]
         admin_conn.autocommit = True
         with admin_conn.cursor() as cur:

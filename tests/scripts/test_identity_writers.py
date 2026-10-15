@@ -65,7 +65,7 @@ from tests.scripts.conftest import (
     fetch_one,
     in_tenant,
     in_user_plane,
-    replay_advertised_stream,
+    build_world,
     txn,
 )
 
@@ -83,7 +83,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         yield {"stream": stream, "ingress": as_user(db, "svc_ingress")}
     finally:
         gen.close()

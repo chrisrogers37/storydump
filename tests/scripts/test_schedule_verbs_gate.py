@@ -46,6 +46,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 
 from src.services.target import commands  # noqa: I001 — the port first: the registry cycle
 from src.services.target import (
@@ -967,7 +968,7 @@ def _refused_as_owner(world, w, kind, foreign, **args) -> CommandRefused:
                 go,
                 channel="cli",
                 # the login that ran the schema's DDL, so the tables' owner
-                expect_user="svc_migration",
+                expect_user=make_url(world["owner"]).username,
             )
         )
     return err.value

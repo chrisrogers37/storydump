@@ -27,7 +27,7 @@ from tests.scripts.conftest import (
     fetch_all,
     fetch_one,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     run_as_worker,
     seed_workspace_chain,
 )
@@ -53,7 +53,7 @@ def migrated_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             chain = seed_workspace_chain(conn, "retention-gate")

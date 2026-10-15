@@ -84,9 +84,9 @@ def _assert_no_stranded_lease(conn, *, allowed: int = 0):
     assert leased == allowed, f"{leased} leased rows linger (allowed {allowed})"
 
 
-async def _run_once(lane_db, *, registry_override=None, config=None):
+async def _run_once(world_db, *, registry_override=None, config=None):
     """One WorkLoop cycle on the bulk lane against the real database."""
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     try:
         app = compose(engine=engine, config=config or WorkerConfig(), env={})
         wl = next(wl_ for wl_ in app.loops if wl_.lane == "bulk")
@@ -105,7 +105,7 @@ async def _run_once(lane_db, *, registry_override=None, config=None):
 
 class TestPlanSlotEndToEnd:
     async def test_a_claimed_plan_slot_job_mints_the_intent_and_finalizes(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w1gate")
         # The chain's one media item is bound to the chain's own live intent;
@@ -129,7 +129,7 @@ class TestPlanSlotEndToEnd:
             % (chain["iga"], slot.isoformat()),
         )
 
-        wl, claimed = await _run_once(lane_db)
+        wl, claimed = await _run_once(world_db)
 
         assert claimed is True and wl.processed == 1
         row = _job_row(sync_conn, job_id)
@@ -145,7 +145,7 @@ class TestPlanSlotEndToEnd:
         _assert_no_stranded_lease(sync_conn)
 
     async def test_a_mint_whose_runway_notice_reaches_nobody_still_succeeds(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The runway notice never decides the slot (#1478), end to end at the
         worker's default level. Minting the world's one free file leaves the
@@ -181,7 +181,7 @@ class TestPlanSlotEndToEnd:
             % (chain["iga"], slot.isoformat()),
         )
 
-        wl, claimed = await _run_once(lane_db)
+        wl, claimed = await _run_once(world_db)
 
         assert claimed is True
         assert (wl.processed, wl.undeliverable) == (1, 0)
@@ -210,7 +210,7 @@ class TestPlanSlotEndToEnd:
 
 class TestParkingOnTheRealMachinery:
     async def test_an_executor_less_kind_is_rescheduled_alive_with_attempt_restored(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w1park")
         job_id = _insert_job(
@@ -220,7 +220,7 @@ class TestParkingOnTheRealMachinery:
             payload='{"v": 1, "source_id": "%s", "reason": "baseline"}' % uuid.uuid4(),
         )
 
-        wl, claimed = await _run_once(lane_db)
+        wl, claimed = await _run_once(world_db)
 
         assert claimed is True and wl.parked == 1
         row = _job_row(sync_conn, job_id)
@@ -232,7 +232,7 @@ class TestParkingOnTheRealMachinery:
         _assert_no_stranded_lease(sync_conn)
 
     async def test_a_parked_job_carries_its_deadline_past_the_reaper(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """#1429: a deferral moves the job's deadline with its `run_at`, so the
         parking contract's "never finalized dead" survives the reaper's
@@ -254,7 +254,7 @@ class TestParkingOnTheRealMachinery:
         )
         deadline, run_at = _deadline_and_run_at(sync_conn, job_id)
 
-        wl, claimed = await _run_once(lane_db)
+        wl, claimed = await _run_once(world_db)
 
         assert claimed is True and wl.parked == 1
         moved_deadline, moved_run_at = _deadline_and_run_at(sync_conn, job_id)
@@ -271,7 +271,7 @@ class TestParkingOnTheRealMachinery:
 
 class TestFailureBackoffOnTheRealMachinery:
     async def test_an_adapter_failure_keeps_the_consumed_attempt_and_backs_off(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w1fail")
         job_id = _insert_job(
@@ -282,7 +282,7 @@ class TestFailureBackoffOnTheRealMachinery:
             % uuid.uuid4(),  # no such account -> the adapter raises
         )
 
-        wl, claimed = await _run_once(lane_db)
+        wl, claimed = await _run_once(world_db)
 
         assert claimed is True and wl.failures == 1
         row = _job_row(sync_conn, job_id)
@@ -299,7 +299,7 @@ class TestFailureBackoffOnTheRealMachinery:
 
 class TestFencingOnTheRealMachinery:
     async def test_a_lease_lost_mid_run_is_counted_and_the_row_left_to_its_new_owner(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w1fence")
         job_id = _insert_job(
@@ -312,14 +312,16 @@ class TestFencingOnTheRealMachinery:
         foreign = str(uuid.uuid4())
 
         async def usurped(session, job):
-            with psycopg2.connect(lane_db) as c2, c2.cursor() as cur:
+            with psycopg2.connect(world_db) as c2, c2.cursor() as cur:
                 cur.execute(
                     "UPDATE jobs SET lease_token = %s WHERE id = %s",
                     (foreign, str(job["id"])),
                 )
                 c2.commit()
 
-        wl, claimed = await _run_once(lane_db, registry_override={"plan_slot": usurped})
+        wl, claimed = await _run_once(
+            world_db, registry_override={"plan_slot": usurped}
+        )
 
         assert claimed is True and wl.fenced == 1 and wl.processed == 0
         row = _job_row(sync_conn, job_id)
@@ -330,9 +332,9 @@ class TestFencingOnTheRealMachinery:
 
 class TestIdleClaim:
     async def test_an_empty_lane_claims_nothing_and_strands_nothing(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
-        wl, claimed = await _run_once(lane_db)
+        wl, claimed = await _run_once(world_db)
         assert claimed is False and wl.processed == 0
         _assert_no_stranded_lease(sync_conn)
 
@@ -344,7 +346,7 @@ class TestTheWorkerIdlesVisibly:
     this same shape at full scale."""
 
     async def test_clock_mints_loops_process_parked_parks_and_nothing_strands(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         import asyncio
 
@@ -379,7 +381,7 @@ class TestTheWorkerIdlesVisibly:
             heartbeat_interval_seconds=0.5,
             loop_beat_seconds=0.5,
         )
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         app = compose(engine=engine, config=cfg, env={})
         stop = asyncio.Event()
         runner = asyncio.create_task(run(app, stop=stop))
@@ -463,7 +465,7 @@ class TestJsonbTimestampWidths:
     ]
 
     async def test_every_fraction_width_postgres_renders_mints_the_intent(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w1widths")
         with sync_conn.cursor() as cur:
@@ -488,7 +490,7 @@ class TestJsonbTimestampWidths:
             )
 
         for _ in self.WIDTHS:
-            wl, claimed = await _run_once(lane_db)
+            wl, claimed = await _run_once(world_db)
             assert claimed is True
             assert wl.failures == 0, (
                 "a fraction width Postgres rendered must never strand the clock"
@@ -546,7 +548,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
     its budget is spent instead of retrying forever."""
 
     async def test_the_last_attempt_ends_failed_and_the_workspace_hears(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w1ceil")
         _binding(sync_conn, chain["ws"])
@@ -559,7 +561,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
             raise RuntimeError("the adapter is down")
 
         wl, claimed = await _run_once(
-            lane_db, registry_override={"sync_media_source": failing}
+            world_db, registry_override={"sync_media_source": failing}
         )
 
         assert claimed is True and wl.failures == 1 and wl.exhausted == 1
@@ -571,7 +573,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         _assert_no_stranded_lease(sync_conn)
 
     async def test_a_notice_that_cannot_be_written_keeps_the_re_arm(
-        self, lane_db, sync_conn, monkeypatch
+        self, world_db, sync_conn, monkeypatch
     ):
         """The notice rides a savepoint and the re-arm does not. When the
         notice cannot be written, PostgreSQL rolls its savepoint back, and the
@@ -597,7 +599,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
 
         monkeypatch.setattr(outbox, "fanout_notification", refused)
         wl, claimed = await _run_once(
-            lane_db, registry_override={"sync_media_source": failing}
+            world_db, registry_override={"sync_media_source": failing}
         )
 
         assert claimed is True and wl.exhausted == 1
@@ -618,7 +620,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         )
         _assert_no_stranded_lease(sync_conn)
 
-    async def test_a_fenced_finalize_takes_the_re_arm_back(self, lane_db, sync_conn):
+    async def test_a_fenced_finalize_takes_the_re_arm_back(self, world_db, sync_conn):
         """The re-arm commits only with the finalize. A worker that lost its
         lease finds the finalize fenced and its whole transaction rolled back:
         it must not re-arm a source whose job now belongs to another owner."""
@@ -633,7 +635,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         foreign = str(uuid.uuid4())
 
         async def usurped_then_failing(session, job):
-            with psycopg2.connect(lane_db) as c2, c2.cursor() as cur:
+            with psycopg2.connect(world_db) as c2, c2.cursor() as cur:
                 cur.execute(
                     "UPDATE jobs SET lease_token = %s WHERE id = %s",
                     (foreign, str(job["id"])),
@@ -642,7 +644,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
             raise RuntimeError("the adapter is down")
 
         wl, claimed = await _run_once(
-            lane_db, registry_override={"sync_media_source": usurped_then_failing}
+            world_db, registry_override={"sync_media_source": usurped_then_failing}
         )
 
         assert claimed is True and wl.fenced == 1 and wl.exhausted == 0
@@ -657,7 +659,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         _assert_no_stranded_lease(sync_conn, allowed=1)  # the usurper's, not ours
 
     async def test_a_passed_deadline_ends_the_job_on_its_first_failure(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w1dead")
         job_id = _insert_job(
@@ -669,7 +671,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
             raise RuntimeError("still down")
 
         wl, _ = await _run_once(
-            lane_db, registry_override={"sync_media_source": failing}
+            world_db, registry_override={"sync_media_source": failing}
         )
 
         assert wl.exhausted == 1
@@ -678,7 +680,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         _assert_no_stranded_lease(sync_conn)
 
     async def test_under_budget_the_backoff_is_the_lane_s_rung_with_jitter(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain = seed_workspace_chain(sync_conn, "w1rung")
         job_id = _insert_job(
@@ -691,7 +693,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         _set(sync_conn, job_id, "deadline_at = now() + interval '1 hour'")
         deadline, _ = _deadline_and_run_at(sync_conn, job_id)
         wl, _ = await _run_once(
-            lane_db, registry_override={"sync_media_source": failing}
+            world_db, registry_override={"sync_media_source": failing}
         )
 
         assert wl.exhausted == 0
@@ -704,7 +706,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         assert 40 < eta <= 75, f"bulk rung 1 is 60 s ± 20 %, got {eta}"
         assert _notices(sync_conn, chain["ws"]) == []
 
-    async def test_a_re_minted_kind_fails_without_a_notice(self, lane_db, sync_conn):
+    async def test_a_re_minted_kind_fails_without_a_notice(self, world_db, sync_conn):
         chain = seed_workspace_chain(sync_conn, "w1quiet")
         _binding(sync_conn, chain["ws"])
         job_id = _insert_job(sync_conn, kind="plan_slot", workspace_id=chain["ws"])
@@ -713,13 +715,13 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         async def failing(session, job):
             raise RuntimeError("down")
 
-        wl, _ = await _run_once(lane_db, registry_override={"plan_slot": failing})
+        wl, _ = await _run_once(world_db, registry_override={"plan_slot": failing})
 
         assert wl.exhausted == 1 and _job_row(sync_conn, job_id)["state"] == "failed"
         assert _notices(sync_conn, chain["ws"]) == []
 
     async def test_enqueue_writes_the_lane_s_deadline_and_ceiling(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from sqlalchemy import text as _t
         from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -727,7 +729,7 @@ class TestTheBudgetCeilingOnTheRealMachinery:
         from src.services.target import jobs
 
         chain = seed_workspace_chain(sync_conn, "w1mint")
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session:
@@ -793,7 +795,7 @@ class TestTheBackpressureSignalOnRealRows:
     proves the shape."""
 
     async def test_depth_age_pending_hold_and_oldest_wait_read_true(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from sqlalchemy import text as _t
 
@@ -816,7 +818,7 @@ class TestTheBackpressureSignalOnRealRows:
         sync_conn.commit()
 
         now = datetime.now(timezone.utc)
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             async with engine.connect() as conn:
                 await conn.execute(_t("SET app.actor_kind = 'migration'"))
@@ -869,7 +871,7 @@ class TestASenderPacedByTheProvider:
     no failure counted, no second finalize, no in-task sleep."""
 
     async def test_the_sender_job_comes_back_when_telegram_said(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from src.services.target.outbox import ChannelPaced
         from src.services.target.work_loop import WorkerDeps, build_registry
@@ -903,7 +905,7 @@ class TestASenderPacedByTheProvider:
 
                 return send
 
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             cfg = WorkerConfig(poller_interval_seconds=0.05, sender_hold_seconds=5.0)
             registry = build_registry(
@@ -967,7 +969,7 @@ class TestKLoopsOnOneLane:
     the pool's measured peak recorded."""
 
     async def test_k_tasks_claim_distinct_keys_and_never_two_of_one(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from src.services.target import unit_of_work
         from src.services.target.work_loop import WorkerConfig as _Cfg
@@ -990,7 +992,7 @@ class TestKLoopsOnOneLane:
             await asyncio.sleep(0.3)
             runs.append((job["serialization_key"], started, time.monotonic()))
 
-        engine = create_async_engine(async_url(lane_db), pool_size=10, max_overflow=0)
+        engine = create_async_engine(async_url(world_db), pool_size=10, max_overflow=0)
         watch = unit_of_work.PoolWatch(engine)
         try:
             cfg = _Cfg(
@@ -1045,7 +1047,7 @@ class TestNoLeaseExpiresDuringAWait:
     lease intact and finalizes unfenced."""
 
     async def test_the_heartbeat_outlives_the_lease_during_a_slow_run(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         from src.services.target.work_loop import WorkerConfig as _Cfg
 
@@ -1057,7 +1059,7 @@ class TestNoLeaseExpiresDuringAWait:
         async def waits(session, job):
             await asyncio.sleep(4.0)
 
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             cfg = _Cfg(
                 lease_seconds=3.0,

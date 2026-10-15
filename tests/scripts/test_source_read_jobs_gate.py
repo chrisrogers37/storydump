@@ -72,7 +72,7 @@ async def test_demand_on_captures_authority_and_clock_closed_by_default(
 
 
 async def test_clock_injected_activation_mints_capture_but_off_never_mints(
-    lane_db, archive_engine, origin, sync_conn
+    world_db, archive_engine, origin, sync_conn
 ):
     assert "capability" in inspect.signature(scheduler.tick).parameters, (
         "clock source read admission missing"
@@ -88,7 +88,7 @@ async def test_clock_injected_activation_mints_capture_but_off_never_mints(
             (origin["ws"],),
         )
     sync_conn.commit()
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     try:
         async with engine.begin() as conn:
             await scheduler.tick(
@@ -123,7 +123,7 @@ async def test_clock_injected_activation_mints_capture_but_off_never_mints(
 
 @pytest.mark.parametrize("missing_capture", [False, True])
 async def test_claim_refuses_off_or_inherited_capture_and_still_claims_drive(
-    lane_db, archive_engine, origin, sync_conn, missing_capture
+    world_db, archive_engine, origin, sync_conn, missing_capture
 ):
     assert "capability" in inspect.signature(jobs.claim_job).parameters, (
         "outer claim admission missing"
@@ -156,7 +156,7 @@ async def test_claim_refuses_off_or_inherited_capture_and_still_claims_drive(
             serialization_key="src:" + str(origin["src"]),
             payload=dict(v=1, source_id=str(origin["src"])),
         )
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     try:
         async with engine.connect() as conn:
             claimed = await jobs.claim_job(
@@ -271,7 +271,7 @@ async def test_legacy_clock_keeps_adoption_evidence_and_same_orchestration(
     ],
 )
 async def test_clock_limit_one_ignores_unreadable_archive(
-    lane_db,
+    world_db,
     archive_engine,
     origin,
     sync_conn,
@@ -322,7 +322,7 @@ async def test_clock_limit_one_ignores_unreadable_archive(
         )
         before = cur.fetchone()[0]
     sync_conn.commit()
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     try:
         for expected in (1, 2):
             with sync_conn.cursor() as cur:
@@ -362,7 +362,7 @@ async def test_clock_limit_one_ignores_unreadable_archive(
 
 @pytest.mark.parametrize("arity", [3, 4])
 async def test_clock_limit_one_rechecks_after_wait_and_keeps_frozen_workspaces(
-    lane_db, archive_engine, origin, sync_conn, arity
+    world_db, archive_engine, origin, sync_conn, arity
 ):
     import asyncio
     from tests.scripts.conftest import seed_workspace_chain
@@ -379,7 +379,7 @@ async def test_clock_limit_one_rechecks_after_wait_and_keeps_frozen_workspaces(
             (first,),
         )
     sync_conn.commit()
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     started = asyncio.Event()
     backend = []
 

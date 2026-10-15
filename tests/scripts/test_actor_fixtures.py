@@ -1,26 +1,20 @@
-"""The declared actors as test machinery (#753: the actor split).
-
-The lineage seeds under a database-owner-shaped actor
-(non-superuser + CREATEROLE — so legacy tables carry *real legacy ownership*,
-not the gate runner's), the step-0 bootstrap runs as that owner, and window
-steps run as ``svc_migration``. These tests pin the fixtures that make every
-other suite able to say "as the declared actor" and mean it.
-"""
+"""The owner and runtime actors used by schema-backed tests."""
 
 import uuid
 
 import psycopg2
 import pytest
+from sqlalchemy import create_engine
 
-from scripts.migration_runner import apply_pending
+from src.models.target.ddl import NotEmpty, build
 from tests.scripts.conftest import (
-    SETUP_SQL,
+    SERVICE_ROLES,
     _dsn,
     as_user,
+    build_world,
     drop_service_roles,
     fetch_one,
-    psql_apply,
-    window_actor,
+    maintenance_conn,
 )
 
 pytestmark = pytest.mark.integration
@@ -35,10 +29,7 @@ class TestOwnerActor:
                 (owner_actor,),
             )
             superuser, createrole, canlogin = cur.fetchone()
-        assert superuser is False, (
-            "the owner actor must be non-superuser — a superuser-only replay"
-            " tests an environment production does not have"
-        )
+        assert superuser is False
         assert createrole is True
         assert canlogin is True
 
@@ -49,71 +40,78 @@ class TestOwnerActor:
         )
         assert row[0] == owner_actor
 
-    def test_seed_as_owner_gives_legacy_tables_real_legacy_ownership(
-        self, owner_actor, owner_db
-    ):
-        """The seed runs connected AS the owner through `psql`
-        — including CREATE EXTENSION "uuid-ossp", which is trusted on PG13+
-        and must succeed for a non-superuser database owner. Measured here,
-        not assumed."""
-        psql_apply(as_user(owner_db, owner_actor), [SETUP_SQL])
 
-        row = fetch_one(
-            owner_db,
-            "SELECT tableowner FROM pg_tables"
-            " WHERE schemaname = 'public' AND tablename = 'posting_queue'",
+class TestBuiltWorld:
+    def test_schema_and_ledger_are_owned_by_the_owner(self, world_db, owner_actor):
+        for schema, table in (
+            ("public", "workspaces"),
+            ("runner", "schema_migrations"),
+        ):
+            row = fetch_one(
+                world_db,
+                "SELECT tableowner FROM pg_tables WHERE schemaname = %s AND tablename = %s",
+                (schema, table),
+            )
+            assert row == (owner_actor,)
+        assert fetch_one(
+            world_db,
+            "SELECT version, status FROM runner.schema_migrations ORDER BY version",
+        ) == (0, "adopted")
+
+    @pytest.mark.parametrize("login", ["svc_ingress", "svc_worker", "svc_migration"])
+    def test_service_login_connects_after_build(self, world_db, login):
+        assert fetch_one(as_user(world_db, login), "SELECT current_user") == (login,)
+
+    def test_build_refuses_a_built_world_and_leaves_it_unchanged(self, world_db):
+        before = fetch_one(
+            world_db, "SELECT count(*) FROM public.post_intent_transitions"
         )
-        assert row[0] == owner_actor, (
-            "legacy tables must carry real legacy ownership, not the gate runner's"
-        )
-        ext = fetch_one(
-            owner_db,
-            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp')",
-        )
-        assert ext[0] is True
-
-
-class TestSvcMigrationAsWindowActor:
-    def test_svc_migration_connects_after_bootstrap(
-        self, owner_actor, owner_window_db, admin_conn
-    ):
-        as_svc = window_actor(owner_window_db, owner_actor, admin_conn)
-
-        conn = psycopg2.connect(as_svc)
+        engine = create_engine(world_db)
         try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT current_user")
-                assert cur.fetchone()[0] == "svc_migration"
+            with engine.connect() as conn, pytest.raises(NotEmpty):
+                build(conn)
         finally:
-            conn.close()
-
-    def test_ledger_created_by_svc_migration_is_owned_by_it(
-        self, owner_actor, owner_window_db, admin_conn, tmp_path
-    ):
-        """First runner contact as svc_migration creates the ledger — and
-        must own it (production first-contact shape; bootstrap grants CREATE
-        on the database)."""
-        as_svc = window_actor(owner_window_db, owner_actor, admin_conn)
-
-        apply_pending(as_svc, tmp_path)
-
-        row = fetch_one(
-            owner_window_db,
-            "SELECT tableowner FROM pg_tables"
-            " WHERE schemaname = 'runner' AND tablename = 'schema_migrations'",
+            engine.dispose()
+        assert (
+            fetch_one(world_db, "SELECT count(*) FROM public.post_intent_transitions")
+            == before
         )
-        assert row[0] == "svc_migration"
+
+    def test_builder_refuses_a_connection_outside_the_cluster_lock(
+        self, owner_world_db, owner_actor
+    ):
+        outsider = maintenance_conn()
+        try:
+            with pytest.raises(
+                RuntimeError, match="does not hold SUITE_CLUSTER_LOCK_KEY"
+            ):
+                build_world(owner_world_db, owner_actor, outsider)
+        finally:
+            outsider.close()
+        assert fetch_one(
+            owner_world_db,
+            "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'",
+        ) == (0,)
+
+    def test_service_roles_are_bracketed(self, owner_world_db, owner_actor, admin_conn):
+        assert fetch_one(
+            owner_world_db,
+            "SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s)",
+            (list(SERVICE_ROLES),),
+        ) == (0,)
+        build_world(owner_world_db, owner_actor, admin_conn)
+        assert fetch_one(
+            owner_world_db,
+            "SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s)",
+            (list(SERVICE_ROLES),),
+        ) == (len(SERVICE_ROLES),)
 
 
 class TestSweepOwnershipGuard:
     def test_role_drop_refuses_to_touch_a_non_suite_database(
-        self, owner_actor, owner_window_db, admin_conn
+        self, world_db, admin_conn
     ):
-        """THE data-loss guard, behaviorally: the step-0 bootstrap is a
-        deployment artifact, so a dev/staging database it was run against
-        holds the same svc_* grants — a test sweep must refuse it by name
-        and fail loudly, never drop it, live backends or not."""
-        window_actor(owner_window_db, owner_actor, admin_conn)
+        """Role cleanup never drops databases outside the suite's namespace."""
         foreign = f"defo_not_ours_{uuid.uuid4().hex[:8]}"
         with admin_conn.cursor() as cur:
             cur.execute(f'CREATE DATABASE "{foreign}"')
@@ -121,16 +119,11 @@ class TestSweepOwnershipGuard:
         try:
             with pytest.raises(psycopg2.errors.DependentObjectsStillExist):
                 drop_service_roles(admin_conn)
-
-            row = fetch_one(
+            assert fetch_one(
                 _dsn("postgres"),
                 "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)",
                 (foreign,),
-            )
-            assert row[0] is True, (
-                "the sweep dropped a database outside its own naming"
-                " convention — the one thing it must never do"
-            )
+            ) == (True,)
         finally:
             with admin_conn.cursor() as cur:
                 cur.execute(f'REVOKE CREATE ON DATABASE "{foreign}" FROM svc_migration')

@@ -12,9 +12,8 @@ when it is observed, and production
 cannot demonstrate either of these: it holds 0 workspaces and 0 media sources,
 and `ig_accounts WHERE state = 'active'` returns nothing, so no slot is ever
 planned and no intent is ever parked. A real schema with real rows is the only
-place the producers can be watched running. `lane_db` applies the REAL migration
-corpus (`run_lane` → `apply_pending(MIGRATIONS_DIR)`), so 066's column is here
-because the migration put it here, not because a fixture declared it.
+place the producers can be watched running. The world builder creates the
+schema from `src/models/target/ddl/`, including the notification columns.
 
 EVERY NEGATIVE CARRIES A POSITIVE CONTROL. A dedup test that never sees the
 notice fire cannot tell "deduped correctly" from "never produced anything".
@@ -33,15 +32,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from tests.scripts.conftest import (
     _scratch,
-    actor_lacks_createrole,
     as_user,
+    build_world,
     async_url,
     in_tenant,
-    run_bootstrap,
     seed_workspace_chain,
-    set_test_passwords,
 )
-from tests.scripts.test_lineage_lane import run_lane
 
 pytestmark = [pytest.mark.integration]
 
@@ -71,38 +67,18 @@ def _unique_slot() -> datetime:
 
 
 @pytest.fixture(scope="module")
-def notice_lane(admin_conn, owner_actor):
-    """The real migration corpus, replayed ONCE.
-
-    Module-scoped for `clock_db`'s reason: `run_lane` applies 001–066 end to
-    end, and paying that per test is thirteen full replays against a shared
-    cluster. Isolation comes from each scenario minting its own
-    workspace below — the same trade `clock_db` documents ("scenarios keep it
-    safe by minting their own accounts, kinds and slots rather than sharing").
-
-    Not built on `bootstrapped_db`: that fixture is function-scoped, so
-    depending on it would pin this to function scope too. Same two steps,
-    taken directly — then the LOGIN roles' test passwords, so a scenario can
-    act as the production roles (`svc_worker`, `svc_ingress`) the bootstrap
-    created.
-    """
-    reason = actor_lacks_createrole(admin_conn)
-    if reason:
-        pytest.skip(reason)
-    extra: list[str] = []
-    gen = _scratch(admin_conn, roles=extra)
-    dsn = next(gen)
+def notice_world(admin_conn, owner_actor):
+    """A schema built once, with isolated workspace rows in each scenario."""
+    gen = _scratch(admin_conn, owner=owner_actor, roles=[])
+    db = next(gen)
     try:
-        run_bootstrap(admin_conn, dsn)
-        run_lane(dsn)
-        set_test_passwords(admin_conn)
-        yield dsn
+        yield build_world(db, owner_actor, admin_conn)
     finally:
         gen.close()
 
 
 @pytest.fixture()
-def notice_db(notice_lane):
+def notice_db(notice_world):
     """A FRESH workspace chain plus one ACTIVE telegram binding, per test.
 
     The binding is the sink both producers write to: `prompts.push_bindings`
@@ -118,7 +94,7 @@ def notice_db(notice_lane):
     worker runs `plan_slot` as: what the executor reads and writes is held to
     that role's grants and to the tenant its session claims.
     """
-    conn = psycopg2.connect(notice_lane)
+    conn = psycopg2.connect(notice_world)
     try:
         chain = seed_workspace_chain(conn, f"notice-{uuid.uuid4().hex[:8]}")
         conn.autocommit = False
@@ -134,8 +110,8 @@ def notice_db(notice_lane):
     finally:
         conn.close()
     return {
-        "dsn": notice_lane,
-        "worker": as_user(notice_lane, "svc_worker"),
+        "dsn": notice_world,
+        "worker": as_user(notice_world, "svc_worker"),
         "binding": str(binding),
         **chain,
     }

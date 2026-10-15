@@ -45,7 +45,7 @@ from tests.scripts.conftest import (
     SERVICE_ROLES,
     _scratch,
     as_user,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -978,13 +978,13 @@ def target(admin_conn, owner_actor):
     Module-scoped (the per-test template idiom cannot hold a role-carrying
     template: grants to cluster roles make drop_service_roles destroy it —
     see conftest's hardened-drop notes). ``_scratch`` is driven directly the
-    way ``roleless_db`` does; everything after the first ``next`` sits inside
+    way the shared database fixtures do; everything after the first ``next`` sits inside
     the try so a failed replay or seed cannot leak the scratch DB and roles
     into the session (the documented cascade class)."""
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
-    owner_window_db = next(gen)
+    owner_world_db = next(gen)
     try:
-        dsn = replay_advertised_stream(owner_window_db, owner_actor, admin_conn)
+        dsn = build_world(owner_world_db, owner_actor, admin_conn)
         conn = psycopg2.connect(dsn)
         try:
             a = _seed_tenant(conn, WS_A_NAME)
@@ -993,8 +993,8 @@ def target(admin_conn, owner_actor):
         finally:
             conn.close()
         yield {
-            "worker": as_user(owner_window_db, "svc_worker"),
-            "ingress": as_user(owner_window_db, "svc_ingress"),
+            "worker": as_user(owner_world_db, "svc_worker"),
+            "ingress": as_user(owner_world_db, "svc_ingress"),
             "owner_stream": dsn,
             "a": a,
             "b": b,
@@ -1689,22 +1689,33 @@ class TestDirectPathsAreShut:
         for role in sorted(set(SERVICE_ROLES) - {"svc_worker"}):
             with pytest.raises(psycopg2.errors.InsufficientPrivilege):
                 _exec(target["worker"], f'SET ROLE "{role}"')
+        version = int(_scalar(target["owner_stream"], "SHOW server_version_num"))
+        options = ", m.inherit_option, m.set_option" if version >= 160000 else ""
         rows = _exec(
             target["owner_stream"],
-            "SELECT r.rolname, g.rolname FROM pg_auth_members m"
+            "SELECT r.rolname, g.rolname, m.admin_option"
+            + options
+            + " FROM pg_auth_members m"
             " JOIN pg_roles r ON r.oid = m.roleid"
             " JOIN pg_roles g ON g.oid = m.member"
             " WHERE r.rolname LIKE 'svc_%' OR g.rolname LIKE 'svc_%'",
             fetch=True,
         )
-        # The bootstrap's two documented grants, exactly, and nothing else:
-        # door-owner roles to the window actor (function-ownership machinery)
-        # and the transient owner self-grant (revoked by the stand-down a
-        # test world never runs). The runtime logins appear on neither side
-        # of any membership.
-        assert set(rows) == {(r, "svc_migration") for r in NOLOGIN_ROLES} | {
+        creator_grants = {
+            row
+            for row in rows
+            if version >= 160000
+            and row[1] == owner_actor
+            and row[2:] == (True, False, False)
+        }
+        if version >= 160000:
+            assert {row[0] for row in creator_grants} == set(SERVICE_ROLES)
+        # PostgreSQL's creator grants carry administration without inheritance
+        # or SET ROLE. The schema's memberships provide the operational access.
+        memberships = {(row[0], row[1]) for row in rows if row not in creator_grants}
+        assert memberships == {(r, "svc_migration") for r in NOLOGIN_ROLES} | {
             ("svc_migration", owner_actor)
-        }, f"unexpected service-role memberships: {sorted(rows)}"
+        }, f"unexpected service-role memberships: {sorted(memberships)}"
 
 
 class TestAuthPlaneMaintenanceOnlyThroughTheSweep:

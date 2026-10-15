@@ -57,7 +57,7 @@ from tests.scripts.conftest import (
     fetch_all,
     in_user_plane,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     rows_holding,
     seed_workspace_chain,
 )
@@ -72,7 +72,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        owner_dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        owner_dsn = build_world(db, owner_actor, admin_conn)
         yield {
             "owner": owner_dsn,
             "ingress": as_user(db, "svc_ingress"),

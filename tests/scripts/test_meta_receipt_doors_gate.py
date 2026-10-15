@@ -32,12 +32,12 @@ REFUSED = psycopg2.errors.RaiseException
 
 
 @pytest.fixture
-def db(lane_db, admin_conn):
+def db(world_db, admin_conn):
     set_test_passwords(admin_conn)
     return {
-        "owner": lane_db,
-        "ingress": as_user(lane_db, "svc_ingress"),
-        "worker": as_user(lane_db, "svc_worker"),
+        "owner": world_db,
+        "ingress": as_user(world_db, "svc_ingress"),
+        "worker": as_user(world_db, "svc_worker"),
     }
 
 

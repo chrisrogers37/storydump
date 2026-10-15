@@ -42,7 +42,7 @@ pytestmark = [pytest.mark.integration]
 
 
 @pytest.fixture
-def registry_world(lane_db, sync_conn):
+def registry_world(world_db, sync_conn):
     chain = seed_workspace_chain(sync_conn, "registry")
     with sync_conn.cursor() as cur:
         cur.execute("ALTER TABLE media_sources DROP CONSTRAINT ck_sources_provider")
@@ -60,11 +60,11 @@ def registry_world(lane_db, sync_conn):
 
 
 @pytest.fixture(params=("owner", "svc_worker"))
-def registry_actor(request, lane_db, admin_conn):
+def registry_actor(request, world_db, admin_conn):
     if request.param == "owner":
-        return lane_db, None
+        return world_db, None
     set_test_passwords(admin_conn)
-    return as_user(lane_db, "svc_worker"), "svc_worker"
+    return as_user(world_db, "svc_worker"), "svc_worker"
 
 
 async def _enqueue_registry_sync(engine, chain):
@@ -132,7 +132,7 @@ class ArchiveAdapter:
 
 
 async def test_non_drive_checkpoint_resumes_two_chunks_without_tombstoning(
-    lane_db, sync_conn, registry_world, registry_actor
+    world_db, sync_conn, registry_world, registry_actor
 ):
     chain = registry_world
     dsn, expected_role = registry_actor
@@ -195,11 +195,11 @@ async def test_non_drive_checkpoint_resumes_two_chunks_without_tombstoning(
 
 
 async def test_unknown_provider_retries_job_without_marking_source_error(
-    lane_db, sync_conn, registry_world, caplog
+    world_db, sync_conn, registry_world, caplog
 ):
     chain = registry_world
     before = datetime.now(timezone.utc)
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     try:
         await _enqueue_registry_sync(engine, chain)
         app = worker.compose(
@@ -223,7 +223,7 @@ async def test_unknown_provider_retries_job_without_marking_source_error(
 
 
 async def test_old_card_ids_resolve_config_only_in_the_named_workspace(
-    lane_db, sync_conn, registry_world, registry_actor
+    world_db, sync_conn, registry_world, registry_actor
 ):
     chain = registry_world
     other = seed_workspace_chain(sync_conn, "registry-other")
@@ -262,7 +262,7 @@ async def test_old_card_ids_resolve_config_only_in_the_named_workspace(
 
 
 async def test_equal_file_refs_from_different_providers_cannot_move_a_live_row(
-    lane_db, sync_conn, registry_world
+    world_db, sync_conn, registry_world
 ):
     from src.services.target.google_drive_adapter import GoogleDriveAdapter
     from tests.scripts.conftest import seed_intent_chain
@@ -282,7 +282,7 @@ async def test_equal_file_refs_from_different_providers_cannot_move_a_live_row(
             (owner["src"],),
         )
     sync_conn.commit()
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     adapter = ArchiveAdapter(engine)
     deps = SimpleNamespace(
         engine=engine, adapters={"gdrive": GoogleDriveAdapter, "fake_archive": adapter}
@@ -317,12 +317,12 @@ async def test_equal_file_refs_from_different_providers_cannot_move_a_live_row(
     ],
 )
 async def test_persistent_errors_never_copy_provider_secrets_to_alerts_or_logs(
-    lane_db, sync_conn, registry_world, caplog, error_type, recovery
+    world_db, sync_conn, registry_world, caplog, error_type, recovery
 ):
     chain = registry_world
     binding = _bind(sync_conn, chain["ws"])
     secret = "https://provider.invalid/media?access_token=private-provider-secret"
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
 
     class BrokenAdapter(ArchiveAdapter):
         async def list_changes(self, *args, **kwargs):
@@ -363,10 +363,10 @@ async def test_persistent_errors_never_copy_provider_secrets_to_alerts_or_logs(
     "error_type", [media_adapters.MediaRetryableError, media_adapters.MediaLostResponse]
 )
 async def test_retryable_provider_errors_do_not_leak_through_work_loop_logs(
-    lane_db, sync_conn, registry_world, caplog, error_type
+    world_db, sync_conn, registry_world, caplog, error_type
 ):
     chain = registry_world
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     secret = "https://provider.invalid/media?access_token=private-provider-secret"
 
     class BrokenAdapter(ArchiveAdapter):
@@ -396,7 +396,7 @@ async def test_retryable_provider_errors_do_not_leak_through_work_loop_logs(
 
 
 async def test_publish_source_join_reads_only_its_tenant_as_worker(
-    lane_db, sync_conn, registry_world, admin_conn
+    world_db, sync_conn, registry_world, admin_conn
 ):
     chain = registry_world
     other = seed_workspace_chain(sync_conn, "registry-publish-other")
@@ -416,7 +416,7 @@ async def test_publish_source_join_reads_only_its_tenant_as_worker(
         job_id = cur.fetchone()[0]
     sync_conn.commit()
     set_test_passwords(admin_conn)
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     job = {
         "id": str(job_id),
         "lease_token": lease,
@@ -445,12 +445,12 @@ async def test_publish_source_join_reads_only_its_tenant_as_worker(
 
 @pytest.mark.parametrize("failure_at", ["persist_source_error", "reschedule_job"])
 async def test_a_nested_database_failure_cannot_log_the_original_provider_secret(
-    lane_db, sync_conn, registry_world, monkeypatch, caplog, failure_at
+    world_db, sync_conn, registry_world, monkeypatch, caplog, failure_at
 ):
     from sqlalchemy.ext.asyncio import AsyncSession
 
     chain = registry_world
-    engine = create_async_engine(async_url(lane_db))
+    engine = create_async_engine(async_url(world_db))
     secret = "https://provider.invalid/media?access_token=private-provider-secret"
     fault_type = (
         media_adapters.MediaSourceGone

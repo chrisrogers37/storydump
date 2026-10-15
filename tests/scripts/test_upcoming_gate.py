@@ -33,7 +33,7 @@ from tests.scripts.conftest import (
     as_user,
     in_tenant,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 from tests.scripts.test_ops_views_gate import _sql
@@ -88,7 +88,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         yield {
             "stream": stream,
             "ingress": as_user(db, "svc_ingress"),

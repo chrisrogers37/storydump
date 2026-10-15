@@ -20,9 +20,9 @@ pytestmark = [pytest.mark.integration]
 
 
 @pytest.fixture(params=("svc_ingress", "svc_worker"))
-async def archive_engine(request, lane_db, admin_conn):
+async def archive_engine(request, world_db, admin_conn):
     set_test_passwords(admin_conn)
-    engine = create_async_engine(async_url(as_user(lane_db, request.param)))
+    engine = create_async_engine(async_url(as_user(world_db, request.param)))
     try:
         async with engine.connect() as conn:
             assert (

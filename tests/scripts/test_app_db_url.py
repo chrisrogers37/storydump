@@ -1,20 +1,9 @@
-"""Connection URLs built from `DB_*` fields: `make init-db`'s and the harness's.
+"""Connection URLs shared by the schema builder, runner and test harness.
 
-`make init-db` connects twice — psql builds the by-hand base, then the migration
-runner applies every file. A password carrying ``@``, ``/`` or ``%`` pasted raw
-into a ``postgresql://`` URL is misread by libpq (#1394), so the recipe and the
-test harness encode every URL through ``src.config.db_url``, and every
-assertion reads the URL back through the parser that will read it — libpq's
-(``psycopg2.extensions.parse_dsn``) or SQLAlchemy's (``make_url``) — never
-``urllib``, which is not what connects.
-
-For init-db, three layers: the helper alone; the Makefile's text (each field
-reaches the helper quoted exactly as psql gets it, no field pasted into a URL,
-no export of the ``?=`` defaults); and the Makefile run by ``make`` itself,
-with a probe target built from init-db's own psql arguments and runner URL —
-copied from the Makefile — asserting the two steps connect with the same user,
-host, port, database and password however a ``.env`` spells them. Local
-development only: deployed services carry their URLs whole.
+Every database command in `make init-db` receives one encoded URL from
+`src.config.db_url`. The tests parse that URL with libpq and SQLAlchemy and
+run the Makefile recipe with command probes to verify hostile synthetic
+credentials and dotenv values reach all three steps consistently.
 """
 
 from __future__ import annotations
@@ -181,31 +170,24 @@ def makefile() -> str:
 
 
 def _runner_line(makefile: str) -> str:
-    lines = [
-        ln for ln in makefile.splitlines() if "scripts.migration_runner apply" in ln
-    ]
+    lines = [ln for ln in makefile.splitlines() if '@URL="$$(' in ln]
     assert len(lines) == 1, lines
     return lines[0]
 
 
-def test_init_db_hands_the_helper_each_field_as_psql_gets_it(makefile):
-    """`$$(` is make's escape for the shell's `$(` (with one `$` make reads an
-    empty make variable and the runner gets no URL). The password reaches the
-    helper double-quoted, as in psql's `PGPASSWORD="$(DB_PASSWORD)"`; the other
-    four bare, as in `PG_OPTS` and `-d $(DB_NAME)`."""
+def test_init_db_encodes_the_fields_once_and_shares_the_url(makefile):
+    """The helper receives each field before every schema command uses its URL."""
     line = _runner_line(makefile)
-    assert '@DATABASE_URL="$$(' in line and 'python -m scripts.app_db_url)"' in line, (
-        line
-    )
+    assert '@URL="$$(' in line and 'python -m scripts.app_db_url)"' in line
     assert 'DB_PASSWORD="$(DB_PASSWORD)"' in line
-    bare = [
-        f
-        for f in ("DB_USER", "DB_HOST", "DB_PORT", "DB_NAME")
-        if f"{f}=$({f}) " not in line
-    ]
-    assert bare == [], bare
-    assert "PG_OPTS = -h $(DB_HOST) -p $(DB_PORT) -U $(DB_USER)" in makefile
-    assert 'PGPASSWORD="$(DB_PASSWORD)" psql $(PG_OPTS) -d $(DB_NAME) -q' in makefile
+    for field in ("DB_USER", "DB_HOST", "DB_PORT", "DB_NAME"):
+        assert f"{field}=$({field}) " in line
+    for command in (
+        "src.models.target.ddl init",
+        "scripts.migration_runner adopt",
+        "scripts.migration_runner apply",
+    ):
+        assert f'DATABASE_URL="$$URL" python -m {command}' in makefile
 
 
 def test_the_makefile_pastes_no_field_into_a_url(makefile):
@@ -227,52 +209,35 @@ def test_the_makefile_exports_no_db_field(makefile):
 MAKE = shutil.which("make")
 needs_make = pytest.mark.skipif(MAKE is None, reason="no make on this host")
 
-#: What the probe prints: psql's own arguments (`PG_OPTS` and `-d`, word-split
-#: exactly as psql receives them) with its `PGPASSWORD`, beside libpq's parse
-#: of the runner's URL.
+#: Each command probe reports the exact URL libpq receives.
 _SHOW = """\
 import json, os, sys
 from psycopg2.extensions import parse_dsn
-flags = {"-h": "host", "-p": "port", "-U": "user", "-d": "dbname"}
-psql, args, i = {}, sys.argv[1:], 0
-while i < len(args):
-    if args[i] in flags and i + 1 < len(args):
-        psql[flags[args[i]]] = args[i + 1]
-        i += 2
-    else:
-        psql.setdefault("extra", []).append(args[i])
-        i += 1
-psql["password"] = os.environ["PGPASSWORD"]
-print(json.dumps({"psql": psql, "runner": parse_dsn(os.environ["DATABASE_URL"])}))
+print(json.dumps({sys.argv[1]: parse_dsn(os.environ["DATABASE_URL"])}))
 """
 
 
 def _through_make(tmp_path, *, args=(), dotenv=None, target="probe"):
-    """`make` run on the repository's Makefile from *tmp_path* (so its
-    `include .env` reads *dotenv*), with a probe target built from init-db's
-    own psql line — its `PGPASSWORD` and its arguments — and its runner URL,
-    all copied from the Makefile."""
+    """Run the init recipe with probes in place of database commands."""
     text = (ROOT / "Makefile").read_text()
-    url_expr = re.search(
-        r'DATABASE_URL="(.*?)" python -m scripts\.migration_runner apply', text
-    )
-    psql = re.search(
-        r'PGPASSWORD="(.*?)" psql (\$\(PG_OPTS\) -d \$\(DB_NAME\)) -q', text
-    )
-    assert url_expr is not None and psql is not None, "init-db changed shape"
+    start = text.index('\t@URL="$$(')
+    end = text.index("\n\t@echo", start)
+    recipe = text[start:end]
     show = tmp_path / "show.py"
     show.write_text(_SHOW)
+    for command, phase in (
+        ("src.models.target.ddl init", "builder"),
+        ("scripts.migration_runner adopt", "adopt"),
+        ("scripts.migration_runner apply", "runner"),
+    ):
+        recipe = recipe.replace(f"python -m {command}", f"python {show} {phase}")
     fields = tmp_path / "fields.py"
     fields.write_text(
         "import json, os\n"
         "print(json.dumps(sorted(k for k in os.environ if k.startswith('DB_'))))\n"
     )
     probe = tmp_path / "probe.mk"
-    probe.write_text(
-        f'probe:\n\t@PGPASSWORD="{psql.group(1)}" '
-        f'DATABASE_URL="{url_expr.group(1)}" python {show} {psql.group(2)}\n'
-        f"fields:\n\t@python {fields}\n"
-    )
+    probe.write_text(f"probe:\n{recipe}\nfields:\n\t@python {fields}\n")
     if dotenv is not None:
         (tmp_path / ".env").write_text(dotenv)
     run_env = {
@@ -290,22 +255,21 @@ def _through_make(tmp_path, *, args=(), dotenv=None, target="probe"):
         timeout=60,
     )
     assert out.returncode == 0, out.stderr
-    return json.loads(out.stdout.strip().splitlines()[-1])
+    lines = out.stdout.strip().splitlines()
+    if target == "fields":
+        return json.loads(lines[-1])
+    return {key: value for line in lines for key, value in json.loads(line).items()}
 
 
 def _agree(got: dict) -> None:
-    """psql and the runner connect with the same five values (libpq leaves an
-    empty password out of the URL)."""
-    psql, runner = got["psql"], got["runner"]
-    assert "extra" not in psql, psql
-    for key in ("user", "host", "port", "dbname"):
-        assert runner.get(key) == psql.get(key), (key, got)
-    assert runner.get("password", "") == psql["password"], got
+    """The builder, adoption and apply commands receive the same database URL."""
+    assert set(got) == {"builder", "adopt", "runner"}
+    assert got["builder"] == got["adopt"] == got["runner"], got
 
 
 @needs_make
 def test_make_hands_the_runner_a_hostile_command_line_intact(tmp_path):
-    name = "café-db@x"  # psql gets the name bare, so no space
+    name = "café-db@x"
     got = _through_make(
         tmp_path,
         args=(
@@ -326,12 +290,7 @@ def test_make_hands_the_runner_a_hostile_command_line_intact(tmp_path):
     }
 
 
-#: How a `.env` may spell the fields, and the password the shell makes of each
-#: in psql's step — and so in the runner's. The shell's answer is not
-#: always the value meant (single quotes are literal inside psql's double
-#: quotes; a comment's leading space stays): that is every psql recipe's limit,
-#: recorded here, and the property pinned is that the two steps agree. Built
-#: from constants, never a literal.
+#: Dotenv spellings and the password the recipe's shell expansion produces.
 DOTENV_CASES = {
     "bare password": (f"DB_USER=dev\nDB_PASSWORD={AT_VALUE}\n", AT_VALUE),
     "double-quoted password": (f'DB_USER=dev\nDB_PASSWORD="{AT_VALUE}"\n', AT_VALUE),
@@ -361,22 +320,21 @@ DOTENV_CASES = {
 
 @needs_make
 @pytest.mark.parametrize("case", sorted(DOTENV_CASES))
-def test_the_runner_connects_with_what_psql_does(tmp_path, case):
+def test_every_init_step_connects_with_the_same_dotenv_values(tmp_path, case):
     dotenv, password = DOTENV_CASES[case]
     got = _through_make(tmp_path, dotenv=dotenv)
     _agree(got)
-    assert got["psql"]["password"] == password
+    assert got["builder"].get("password", "") == password
 
 
 @needs_make
 def test_a_dollar_that_starts_a_name_is_expanded_in_both_steps_alike(tmp_path):
-    """make turns `$$` into `$`, then the shell line expands `$cd` — in psql's
-    step and the runner's alike. What is pinned is that neither step disagrees."""
+    """Make and shell expansion reach every init step consistently."""
     got = _through_make(
         tmp_path, args=("DB_USER=dev", f"DB_PASSWORD={DOLLAR_ON_THE_COMMAND_LINE}")
     )
     _agree(got)
-    assert got["psql"]["password"] == "ab"
+    assert got["builder"].get("password", "") == "ab"
 
 
 @needs_make

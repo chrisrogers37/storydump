@@ -72,10 +72,10 @@ async def _sweep(engine, tenant_id=""):
 
 class TestDueScheduledGainsItsCard:
     async def test_sweep_prompts_transitions_and_enqueues_in_one_pass(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain, binding = _seed_world(sync_conn, "w3due")
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             counts = await _sweep(engine)
             assert counts["prompted"] == 1
@@ -115,10 +115,10 @@ class TestDueScheduledGainsItsCard:
             await engine.dispose()
 
     async def test_api_enabled_workspace_gets_the_post_now_button(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain, binding = _seed_world(sync_conn, "w3api", api_enabled=True)
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             await _sweep(engine)
             payload = _cards(sync_conn, chain["intent"])[0][2]
@@ -133,9 +133,9 @@ class TestTheWebIsASurface:
     construction (the web queue, #1033), so delivery evidence does not gate
     the edge."""
 
-    async def test_delivery_after_the_fact_changes_nothing(self, lane_db, sync_conn):
+    async def test_delivery_after_the_fact_changes_nothing(self, world_db, sync_conn):
         chain, binding = _seed_world(sync_conn, "w3adv")
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             await _sweep(engine)
             assert _intent_state(sync_conn, chain["intent"]) == "awaiting_approval"
@@ -155,13 +155,13 @@ class TestTheWebIsASurface:
             await engine.dispose()
 
     async def test_every_card_failed_leaves_the_intent_actionable(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The web queue (#1033) is reachable regardless of what Telegram did
         with the card, so the `prompt_pending → failed` edge has no producer —
         the intent waits for a person, or for `approval_ttl` to expire it."""
         chain, binding = _seed_world(sync_conn, "w3fail")
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             await _sweep(engine)
             with sync_conn.cursor() as cur:
@@ -179,13 +179,13 @@ class TestTheWebIsASurface:
             await engine.dispose()
 
     async def test_a_workspace_without_push_bindings_reaches_awaiting_approval(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """The Google-only workspace — no Telegram binding, ever. Its intent is
         prompted to `awaiting_approval` for the web queue (#1033), with no
         card."""
         chain = seed_workspace_chain(sync_conn, "w3nobind")
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             counts = await _sweep(engine)
             assert counts == {"prompted": 1, "advanced": 1, "approved": 0}

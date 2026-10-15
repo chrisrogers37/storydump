@@ -43,7 +43,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     fetch_one,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -55,7 +55,7 @@ def off_db(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        owner_stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        owner_stream = build_world(db, owner_actor, admin_conn)
         yield {
             "owner_stream": owner_stream,
             "ingress": as_user(db, "svc_ingress"),
