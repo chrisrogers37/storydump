@@ -219,8 +219,8 @@ class TestTheIdentityWriter:
             owner(world, "SELECT count(*) FROM users WHERE id = %s", (first,))[0] == 1
         )
         # STRICTLY greater — the test's own name says "refreshes", and `>=`
-        # does not assert a refresh (: the same weak comparison lets a
-        # mutant that stops touching the row entirely go green).
+        # does not assert a refresh: the same weak comparison lets a
+        # mutant that stops touching the row entirely go green.
         assert after > before and display == "new"
 
     def test_an_absent_display_name_KEEPS_the_stored_one(self, world):

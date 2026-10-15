@@ -170,7 +170,7 @@ async def _actor_name(
 ) -> Optional[str]:
     """The name a shared chat may see for the actor: never an email. A
     tap carries the tapper's name on the command (`Command.actor_label`, read
-    with the identity —) and passes it as *label*; anything else asks
+    with the identity) and passes it as *label*; anything else asks
     the identity table. `args` is never consulted: the web route fills it
     from the request body."""
     if label:
@@ -290,7 +290,7 @@ async def _adopt_touched(
     with *line* — the same line every known card carries, and the story's
     keyboard as the sender claims the edit — so every later line reaches it
     too. Every tap that writes a line calls this: the deciding tap, a
-    resolution, a repeat on a settled story (: the deciding tap is as
+    resolution, a repeat on a settled story (the deciding tap is as
     likely to come from the twin). A web command carries no card and adopts
     nothing."""
     if not (command.card_ref and command.binding_id):
@@ -311,8 +311,8 @@ async def _supersede_and_adopt(
     """Supersede every known card with *line*, and — when the card the tap
     came from was not among them — adopt it (:func:`_adopt_touched`). The
     every-binding door answers both in its one statement, so the ordinary
-    tap, from a card the ledger knows, reads nothing more ('s budget
-    holds). Returns whether a card was adopted."""
+    tap, from a card the ledger knows, needs no further read. Returns whether
+    a card was adopted."""
     if not (command.card_ref and command.binding_id):
         await _supersede_everywhere(
             session,
@@ -856,7 +856,7 @@ async def cancel(session, command: Command) -> CommandResult:
 _LOCAL_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?")
 
 #: The wall time :local_at in the zone :tz as an instant, NULL when the
-#: clocks skip it: `fn_wall_instant` (repeat rules), the reading the repeat grid
+#: clocks skip it: `fn_wall_instant`, the reading the repeat grid
 #: (`fn_repeat_times`) also takes, so a one-off time and a repeat's time never
 #: disagree. Two readings are candidates: Postgres's own (a skipped time takes
 #: the offset before the jump, an ambiguous one the offset after it — its
@@ -995,7 +995,7 @@ async def _audit_same_state(
     )
 
 
-#: The CHECKs that judge a repeat rule (repeat rules), matched by name: the terminal
+#: The CHECKs that judge a repeat rule, matched by name: the terminal
 #: guard raises the same SQLSTATE (23514) and names no constraint.
 _REPEAT_CHECKS = ("ck_intent_repeat", "ck_intent_repeat_unit")
 

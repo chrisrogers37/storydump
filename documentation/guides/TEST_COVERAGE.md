@@ -110,12 +110,11 @@ PostgreSQL:
 - CI sets `REQUIRE_TEST_DATABASE: "1"` (in `ci.yml`). Set it locally whenever
   a green result is going to be reported anywhere.
 
-What a laptop with no PostgreSQL sees: the root suite's database tests skip
+What a laptop with no PostgreSQL sees: database tests skip
 (in `tests/test_stray_database_reaping.py`,
 `tests/src/services/target/test_unit_of_work.py` and
-`tests/test_integration_coverage_policy.py`), and a gate under
-`tests/scripts/` that takes a database fixture **errors** at `admin_conn`
-(`tests/scripts/conftest.py`) rather than skipping.
+`tests/test_integration_coverage_policy.py`), including gates under
+`tests/scripts/` that take a database fixture through the root harness.
 [`testing-guide.md`](testing-guide.md#giving-the-gates-a-server) has the
 throwaway-server recipe that runs them.
 

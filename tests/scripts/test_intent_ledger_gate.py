@@ -583,9 +583,8 @@ class TestActorLessGovernanceMutationsRaiseOnAllFiveTables:
     }
 
     #: Writes that move only a dual-role table's machinery columns. The trigger
-    #: exits before its audit INSERT for these, so its actor test is the only
-    #: thing that refuses them: on a reused connection under `intent_ledger.py`, nothing did
-    #:.
+    #: exits before its audit INSERT for these, so its actor check must reject
+    #: an unset actor on both fresh and reused connections.
     MACHINERY = {
         "ig_accounts": "UPDATE ig_accounts SET next_slot_at = now() WHERE workspace_id=%s",
         "oauth_credentials": (
@@ -628,7 +627,9 @@ class TestActorLessGovernanceMutationsRaiseOnAllFiveTables:
 
 
 class TestEveryGucReadTreatsEmptyAsUnset:
-    """'s class. A `SET LOCAL`'s value dies with its transaction but the
+    """Unset settings behave consistently on fresh and reused connections.
+
+    A `SET LOCAL` value dies with its transaction but the
     setting stays defined, so a pooled connection reads an unset `app.*` setting
     as '', and a read that tests only for NULL is right on a fresh connection
     alone. Every `current_setting('app.…', true)` in the live schema, in a
@@ -955,7 +956,7 @@ class TestTheGuardsAreLoadBearing:
         assert ok2 and rows2 == 1, f"still refused without the guard: {msg2}"
 
     def test_the_self_transition_guard_is_what_refuses_a_same_state_write(self, ledger):
-        """'s trigger, held to the same standard as the other four."""
+        """The same-state trigger is necessary for refusing an unchanged state."""
         intent = _new_intent(ledger, "scheduled")
         ok, msg, _ = _attempt(
             ledger, "UPDATE post_intents SET state='scheduled' WHERE id=%s", (intent,)

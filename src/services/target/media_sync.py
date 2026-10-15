@@ -1,4 +1,4 @@
-"""The media-sync executors (seam:).
+"""The media-sync executors.
 
 Two executors over one shared body. `sync_media_source` consumes the clock's
 baseline mints (leg 4 nulls `next_sync_at` at mint and ONLY this executor

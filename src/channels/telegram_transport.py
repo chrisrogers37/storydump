@@ -395,8 +395,8 @@ class TelegramTransport:
         ref = str(payload["supersedes_ref"])
         message_id = _message_id(ref)
         outcome = payload.get("outcome_text")
-        # The story's keyboard, which the sender gave the edit at claim
-        # ; an invitation's edit leaves none.
+        # The story's keyboard, which the sender gave the edit at claim;
+        # an invitation's edit leaves none.
         markup = payload.get("reply_markup") or _EMPTY_KEYBOARD
         if outcome:
             body = _with_line(payload.get("header"), outcome)
@@ -499,8 +499,8 @@ class TelegramTransport:
             data["reply_markup"] = json.dumps(reply_markup)
         files = {part: (filename, content, mime or "application/octet-stream")}
         # ONE attempt: the floor retries a POST whose answer was lost, and a
-        # re-sent upload is a second card the supersede path cannot see
-        # . A lost answer propagates as ambiguous instead.
+        # re-sent upload is a second card the supersede path cannot see.
+        # A lost answer propagates as ambiguous instead.
         policy = _replace(
             self._policy,
             timeout_class="upload",

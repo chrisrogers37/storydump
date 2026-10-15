@@ -520,7 +520,7 @@ def _source_facts(row, account_id, *, assignable, exclusions, archive):
 #: alone, its own `ig_login` grant (`CREDENTIAL_STATUS_SQL`), and the sources
 #: whose scope admits it. A Drive folder is workspace-wide; an archive serves
 #: only its origin, through an active self-assignment, which is the v1
-#: `origin_only` rule `fn_source_asset_suitability` applies to each item (`fn_source_asset_suitability`).
+#: `origin_only` rule `fn_source_asset_suitability` applies to each item.
 _DESTINATIONS_SQL = (
     "SELECT a.id::text AS account_id, a.handle, a.display_name, a.state,"
     "       a.provider_account_ref LIKE 'manual:%' AS handle_only,"

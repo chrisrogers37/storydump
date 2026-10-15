@@ -1,4 +1,4 @@
-"""The checkpointed publish-pipeline executor body (/).
+"""The checkpointed publish-pipeline executor body.
 
 The `publish_pipeline` job kind's executor: claimed via `fn_claim_job` by the
 composition root (this module is the callable it dispatches to), run here
@@ -500,8 +500,8 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                         "       COALESCE(a.tz, w.tz) AS eff_tz,"
                         "       a.next_slot_at, w.repost_ttl_days,"
                         "       m.media_kind, m.provider_file_ref, m.file_name,"
-                        # The rule that approved it, which its lines name
-                        # ; NULL for a person.
+                        # The rule that approved it, which its lines name;
+                        # NULL for a person.
                         "       i.approval_rule"
                         "  FROM post_intents i"
                         "  JOIN ig_accounts a ON a.id = i.ig_account_id"
@@ -1312,7 +1312,7 @@ async def _ladder(
                 not_ready["error"]["probe"] = probe
                 # A 404 after the probe's budget is an asset the CDN does not
                 # know — swept while the story waited past the transit TTL (a
-                # weekend without slots, a long pause;) — so the story
+                # weekend without slots, a long pause) — so the story
                 # steps back to step `none` without its ref and the next run
                 # uploads again. Any other answer is "not yet": the asset and
                 # the step stay.
@@ -1777,11 +1777,11 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
 
 async def _defer_paused(uow, ctx: _Ctx, now_fn) -> str:
     """The workspace is paused: reschedule without spending an attempt. A
-     fresh `approved` row carries nothing; a stepped-back one (the float)
-     carries its progress and its debit and waits with them; from the
-     post-flip hold (step `none`, no permits) the row is `publishing` with its
-     debit — it steps back and waits with it, so no wait holds the slot
-    ; the re-entrant flip takes it in again. Resume is a fresh run."""
+    fresh `approved` row carries nothing; a stepped-back one (the float)
+    carries its progress and its debit and waits with them; from the
+    post-flip hold (step `none`, no permits) the row is `publishing` with its
+    debit — it steps back and waits with it, so no wait holds the slot;
+    the re-entrant flip takes it in again. Resume is a fresh run."""
     async with _leased_tx(uow, ctx.job) as session:
         if ctx.intent["state"] == "publishing":
             await _step_back(session, ctx)
@@ -2138,7 +2138,7 @@ async def park_stale_approved(session, *, older_than_seconds: int, limit: int) -
 
     The reap job is a system singleton (`app.tenant_id = ''`), under which a
     plain SELECT here matches nothing on the deployed `svc_worker` connection
-    (`p_tenant`;). So the stale rows are listed through
+    (`p_tenant`). So the stale rows are listed through
     `fn_reaper_stale_approved` (`post_intent_transitions`, SECURITY DEFINER) and each row's tenant
     is asserted before it is touched, under a savepoint per row (one story's
     fault must not roll back the door's sweep), and the session's own scope

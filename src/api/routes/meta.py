@@ -202,40 +202,40 @@ async def deauthorize(request: Request):
 async def data_deletion(request: Request):
     """Record a deletion request and return Meta's receipt. Deletes nothing here.
 
-     **This is deferred-with-receipt on purpose, and the shape is Meta's own.**
-     The response contract is a `url` plus a `confirmation_code` precisely so
-     the work can be asynchronous — returning a receipt is what the integration
-     specifies, not a way around it.
+    **This is deferred-with-receipt on purpose, and the shape is Meta's own.**
+    The response contract is a `url` plus a `confirmation_code` precisely so
+    the work can be asynchronous — returning a receipt is what the integration
+    specifies, not a way around it.
 
-     Three reasons it must not delete inline, in increasing order of weight:
+    Three reasons it must not delete inline, in increasing order of weight:
 
-     1. **The subject cannot be reliably identified here.** Meta sends an
-        app-scoped person id; which accounts it names is what the verified
-        identity mappings record (`meta_identity_mappings`), and the request's scope is frozen
-        against them inside the receipt door.
-     2. **The blast radius is not the requester's to spend.** An Instagram
-        account lives inside a workspace that may hold other members' content.
-     3. **The product already has the right door, and it is deliberately not
-        automatic.** `offboard_workspace` is owner-only, demands an explicit
-        `confirm`, and runs a 30-day grace window. An unauthenticated external
-        caller must not reach a stronger deletion than the owner's own
-        confirmed one.
+    1. **The subject cannot be reliably identified here.** Meta sends an
+       app-scoped person id; which accounts it names is what the verified
+       identity mappings record (`meta_identity_mappings`), and the request's scope is frozen
+       against them inside the receipt door.
+    2. **The blast radius is not the requester's to spend.** An Instagram
+       account lives inside a workspace that may hold other members' content.
+    3. **The product already has the right door, and it is deliberately not
+       automatic.** `offboard_workspace` is owner-only, demands an explicit
+       `confirm`, and runs a 30-day grace window. An unauthenticated external
+       caller must not reach a stronger deletion than the owner's own
+       confirmed one.
 
-     **With the archive's key ring configured the receipt is durable** (Meta deletion receipt functions,
-    ): a tenant-free door records the request under a keyed
-     fingerprint of its signed payload — never the payload, the subject or a
-     secret — freezes which authorizations are in scope, and the response
-     carries a fresh random capability, of which the database keeps only the
-     digest. An exact retry is the same receipt behind a new capability; a
-     request made after a reconnect is a new one. The cleanup is the worker's
-     and happens afterwards; the status endpoint reports it.
+    **With the archive's key ring configured the receipt is durable**:
+    a tenant-free door records the request under a keyed
+    fingerprint of its signed payload — never the payload, the subject or a
+    secret — freezes which authorizations are in scope, and the response
+    carries a fresh random capability, of which the database keeps only the
+    digest. An exact retry is the same receipt behind a new capability; a
+    request made after a reconnect is a new one. The cleanup is the worker's
+    and happens afterwards; the status endpoint reports it.
 
-     **Without the key ring nothing changes:** the receipt is derived from the
-     app secret, logged and not stored, and the status page says only that the
-     request was received. A deletion request does not itself revoke the
-     publishing credential (deauthorize does).
+    **Without the key ring nothing changes:** the receipt is derived from the
+    app secret, logged and not stored, and the status page says only that the
+    request was received. A deletion request does not itself revoke the
+    publishing credential (deauthorize does).
 
-     A door failure is a 500, which Meta retries.
+    A door failure is a 500, which Meta retries.
     """
     subject, verified = _verified_subject(await _signed_request(request))
     status_url = request.url_for("data_deletion_status")

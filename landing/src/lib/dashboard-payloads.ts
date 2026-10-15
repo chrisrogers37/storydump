@@ -351,7 +351,7 @@ export function deriveSummary(stats: StatsResponse): SummaryView {
     skipped: s.skipped ?? 0,
     rejected: s.rejected ?? 0,
     total: sum(s),
-    // Publish outcomes only (/): Telegram delivery is not an intent
+    // Publish outcomes only: Telegram delivery is not an intent
     // state, so there is nothing of the other kind in the divisor.
     success_rate: attempts === 0 ? null : posted / attempts,
     // From the cap ledger, not from a bounded list. Zero days means no window

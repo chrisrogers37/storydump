@@ -23,14 +23,14 @@ refuse every new sign-up.
 
 The lookup runs on a raw engine connection rather than a unit of work: the UoW
 is unconstructible without a tenant, and authentication precedes tenancy by
-definition (`session_tokens` and `users` are user-plane — `07_row_security.sql` class 3,
-`auth_plane.py` — readable before any ``app.tenant_id`` exists).
+definition. The user-plane `session_tokens` and `users` tables are readable
+before any ``app.tenant_id`` exists; see `07_row_security.sql`.
 
 Refusals are the `TenantResolutionError` the resolver raises; the app maps that
 type once (invalid/expired/revoked session → 401), so this module speaks no
 HTTP except for the one condition that is the deployment's rather than the
 caller's: no target database configured, which is a 503 named after the
-variable, never a silent fallback to the settings-built URL ('s class).
+variable, never a silent fallback to the settings-built URL.
 """
 
 from __future__ import annotations
@@ -583,7 +583,7 @@ def address_key(raw: Optional[str]) -> Optional[str]:
 def client_ip(request: Request) -> str:
     """The attributed peer as a counter key (:func:`address_key`) —
     `request.client.host` AFTER ProxyHeadersMiddleware has applied the
-    trusted-proxy walk (/), which is the client-IP source
+    trusted-proxy walk, which is the client-IP source
     rule. Never a header read here; the one other address a counter may key
     on is :func:`preauth_guard`'s *client*, which a caller passes only after
     verifying who sent it."""

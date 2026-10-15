@@ -38,8 +38,8 @@ def test_composition_parks_only_for_a_named_reason():
     - any OTHER reason marks a seam this deployment did not wire.
 
     The invariant is that those two sets account for EVERY difference between a
-    bare composition and a fully-configured one. A new seam-free kind ('s
-    `revoke_workspace_credentials` is one) changes both sides equally and this
+    bare composition and a fully-configured one. A new seam-free kind such as
+    `revoke_workspace_credentials` changes both sides equally and this
     test does not move. A kind that starts parking for no stated reason does.
 
     What it deliberately does not pin: WHICH kinds are live. That would be a
@@ -590,8 +590,8 @@ class TestSweeperObservables:
 
 class TestPromptSweeperConsumesTheSweep:
     """The sweep's count vocabulary is the sweeper's contract. It has no
-    `failed_no_surface` leg (: the web queue is a surface every workspace
-    has, so "no reachable surface" cannot occur); a sweeper reaching
+    `failed_no_surface` leg: the web queue is a surface every workspace
+    has, so "no reachable surface" cannot occur. A sweeper reaching
     for that key would raise INSIDE its own `except Exception` — the sweep
     itself committed, the counters before the bad read still moved, and the
     only symptom is a "prompt sweep failed" line on every cadence. So the

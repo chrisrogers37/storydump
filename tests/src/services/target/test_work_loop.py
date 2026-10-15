@@ -94,23 +94,21 @@ async def _in_progress(*, intent_id, workspace_id):
 class TestEveryProviderFacingExecutorOwnsItsTransactions:
     """An executor that reaches the egress floor runs with NO job session.
 
-     `own_transactions` exists so "a task waiting on a provider holds no
-     pooled connection while it waits" (its own docstring). Without the mark
-     the loop would hold a transaction open across a Drive call, a token
-     refresh or a revoke, and hand the executor a session it never touches
-    .
+    `own_transactions` exists so "a task waiting on a provider holds no
+    pooled connection while it waits" (its own docstring). Without the mark
+    the loop would hold a transaction open across a Drive call, a token
+    refresh or a revoke, and hand the executor a session it never touches.
 
-     It is also the precondition for arming `_IN_TRANSACTION` in
-     `make_session_for`. The flag is set for an executor's whole body, so an
-     unmarked executor that reaches the floor would raise
-     `TransactionDisciplineError` on a production path. The suite cannot
-     see that on its own: the gates inject provider stubs (`refresh=_fake_seam`
-     here, `refresh=refresh_stub` in `test_w5de_credential_lifecycle.py`), so
-     nothing in the test tree reaches `egress.request` from a worker session.
+    It is also the precondition for arming `_IN_TRANSACTION` in
+    `make_session_for`. The flag is set for an executor's whole body, so an
+    unmarked executor that reaches the floor would raise
+    `TransactionDisciplineError` on a production path. The suite cannot
+    see that on its own: the gates inject provider stubs (`refresh=_fake_seam`
+    here, `refresh=refresh_stub` in `test_w5de_credential_lifecycle.py`), so
+    nothing in the test tree reaches `egress.request` from a worker session.
 
-     THE LIST IS EXPLICIT AND MEANT TO NEED EDITING, the way the lineage
-     lane's file list is: a new executor that calls a provider has to
-     say so here once.
+    The executor list is explicit: each new provider-facing executor must
+    declare that it owns its transactions.
     """
 
     #: Every registry kind whose executor can reach `egress.request`.

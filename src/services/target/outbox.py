@@ -204,7 +204,7 @@ class ChannelRefused(ChannelSendError):
     """The provider answered, and said no for good — a 4xx that is neither a
     gone destination, a dead credential nor a flood limit. DEFINITIVE, like
     :class:`DestinationGone`: the message as shaped never landed, so the row
-    fails outright instead of entering the ambiguity policy (: a
+    fails outright instead of entering the ambiguity policy (a
     refused edit retried to the resend cap would be four paced calls for
     nothing)."""
 
@@ -416,7 +416,7 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
         "attempts": row[3],
         "intent_id": None if row[4] is None else str(row[4]),
         # The row's own tenant, for the transport to hold a payload against
-        # (a media block naming another workspace is refused —).
+        # (a media block naming another workspace is refused).
         "workspace_id": str(row[5]),
         # Its binding, for the sender's own post-send edit.
         "binding_id": str(row[6]),
@@ -570,10 +570,9 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
 
 def _supersede_payload(ref: str, payload: Any, outcome_text: Optional[str]) -> dict:
     """What the sender needs to edit the card it names: the ref, the outcome
-     line, the original header (a media card's caption or a text card's text —
-     the edit keeps it and appends the outcome), and how the card went out. No
-     keyboard: the sender gives the edit its story's when it claims it
-    ."""
+    line, the original header (a media card's caption or a text card's text —
+    the edit keeps it and appends the outcome), and how the card went out. No
+    keyboard: the sender gives the edit its story's when it claims it."""
     payload = _json(payload)
     body: dict = {"v": 1, "supersedes_ref": str(ref)}
     if outcome_text:
@@ -597,30 +596,29 @@ async def supersede_all(
 ) -> int:
     """Supersede every live card for *intent_id* and queue the supersede rows.
 
-     On any intent state change, `prompt_supersede` rows target **every
-     known** `external_message_ref`; a card whose ref was lost waits for its
-     first touch (:func:`adopt_card`). Returns the number of cards superseded.
+    On any intent state change, `prompt_supersede` rows target **every
+    known** `external_message_ref`; a card whose ref was lost waits for its
+    first touch (:func:`adopt_card`). Returns the number of cards superseded.
 
-     This is also the only edit path — "edits always go supersede-then-send,
-     never edit-in-place on an ambiguous ref". With *outcome_text* the edit
-     writes the card's header plus that line under it; without it only the
-     keyboard is edited, to the story's as the sender claims the row
-    .
+    This is also the only edit path — "edits always go supersede-then-send,
+    never edit-in-place on an ambiguous ref". With *outcome_text* the edit
+    writes the card's header plus that line under it; without it only the
+    keyboard is edited, to the story's as the sender claims the row.
 
-     A row in `sending` is superseded too: the sender commits its claim before
-     the provider call, so `sending` is a committed state a
-     tap can meet; the sender finds its `mark_sent` fenced and edits the card
-     it just sent itself (`OutboxPoller`).
+    A row in `sending` is superseded too: the sender commits its claim before
+    the provider call, so `sending` is a committed state a
+    tap can meet; the sender finds its `mark_sent` fenced and edits the card
+    it just sent itself (`OutboxPoller`).
 
-     The edit is queued only where a card may go
-     (`bindings.deliverable_binding_where`); elsewhere the card is superseded
-     and nothing is queued.
+    The edit is queued only where a card may go
+    (`bindings.deliverable_binding_where`); elsewhere the card is superseded
+    and nothing is queued.
 
-     *spare_pending* leaves a card younger than that alone while it still waits
-     to go out — `pending`, or `ambiguous` and owed its resend: the settled-card
-     sweep passes `prompts.SETTLED_CARD_GRACE` for a card the sender will send
-     settled, so a story that posts before its card goes out still
-     sends one card that says so.
+    *spare_pending* leaves a card younger than that alone while it still waits
+    to go out — `pending`, or `ambiguous` and owed its resend: the settled-card
+    sweep passes `prompts.SETTLED_CARD_GRACE` for a card the sender will send
+    settled, so a story that posts before its card goes out still
+    sends one card that says so.
     """
     spare = (
         "   AND NOT (state IN ('pending', 'ambiguous')"
@@ -908,7 +906,7 @@ async def restate_everywhere_touched(
     one statement — the review resolutions' door: the card a
     `review_required` intent shows was superseded by the approve tap, so the
     resolution's line reaches it by ref, and the shape is
-    `supersede_everywhere`'s (: one round trip inside the transaction).
+    `supersede_everywhere`'s: one round trip inside the transaction.
     Returns the edits queued — only where a card may go."""
     row = (
         await session.execute(

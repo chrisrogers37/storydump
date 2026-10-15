@@ -16,7 +16,7 @@ double-insert happens at `state = 'ready'`. Two concurrent ticks both insert —
 measured here with the election removed — so the election is the mechanism, and
 it is proven by removal like every other guard in this suite.
 
-Concurrency rules (//):
+Concurrency rules:
 
 * Every race runs on REAL concurrent connections at **READ COMMITTED**,
   asserted in its own test — a race test can pass at REPEATABLE READ while
@@ -359,7 +359,7 @@ class TestAFailingTickIsVisibleInBothTheCounterAndTheLog:
     failing `0 >= 1` instead of as a named constraint violation.
 
     The failure is induced with a recurring kind absent from `ck_jobs_kind`,
-    which is not a contrived fault: it is's defect exactly.
+    exercising a worker that is alive but cannot dispatch jobs.
     """
 
     def _clock(self, engine, clock_db, conn, *, recurring):

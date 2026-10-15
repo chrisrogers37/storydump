@@ -11,7 +11,7 @@ const UUID = "3f8a1c2e-5b4d-4e6f-9a1b-7c2d3e4f5a6b";
 const UUID2 = "9c1b2a3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d";
 
 /**
- * The command schema's pure decisions (/).
+ * The command schema's pure decisions.
  *
  * The load-bearing tests here are the STRUCTURAL ones. One route serves every
  * command, and the way that quietly becomes two dialects is a per-command

@@ -326,8 +326,8 @@ async def delivery_health_check(request: Request):
 
     The last hour's outbox rows whose last failure fell in it, by class and the
     provider's code, how many of them ended `failed` or sit `ambiguous`, and how
-    many rows were sent in the same hour (`delivery_health`, through outbox failure records'
-    doors). NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: any
+    many rows were sent in the same hour (`delivery_health`'s definer functions).
+    NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: any
     alert on it belongs outside the app. Unauthenticated,
     so AGGREGATES ONLY: counts and codes, never a workspace, a chat or a message.
 
@@ -339,8 +339,8 @@ async def delivery_health_check(request: Request):
 
     async def read():
         # A direct connection, as on `/health/posting`: the read is estate-wide
-        # and has no tenant, its cross-tenant reach is outbox failure records' doors, and its
-        # statements are capped the same way (`health_reads`).
+        # and has no tenant. Definer functions provide its cross-tenant reach,
+        # and its statements are capped the same way (`health_reads`).
         async with health_reads.connect(engine) as conn:
             return await delivery_health.outbox_failures(conn)
 

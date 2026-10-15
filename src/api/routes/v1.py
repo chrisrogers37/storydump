@@ -340,7 +340,7 @@ async def telegram_link(
     One transaction — the state row commits before the link is handed back,
     so a tap can never arrive ahead of the row it consumes. The link is good
     for `STATE_TTL_SECONDS`; a second click mints a fresh one and retires the
-    user's earlier live link (one live link per user —).
+    user's earlier live link, leaving one live link per user.
     """
     bot_username = _target_bot_username()
     engine = require_engine(request)
@@ -1433,7 +1433,8 @@ async def connect_account(
     principal: Principal = Depends(require_session),
 ):
     """Start the Instagram Login grant for ONE destination: mint the state the
-    callback will consume and hand back where the browser goes (). The Drive connect route's shape, exactly.
+    callback will consume, then return the browser's redirect URL, just as the
+    Drive connect route does.
 
     An OAuth leg is a browser redirect, which the command port cannot express,
     so it lives here as a resource route at the floor of the command its

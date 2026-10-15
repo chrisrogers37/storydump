@@ -193,7 +193,7 @@ class Command:
     channel: str
     args: Mapping[str, Any] = field(default_factory=dict)
     #: The actor's display name as the ADAPTER resolved it (the tap reads it
-    #: with the tapper's identity —), never from `args`: the web route
+    #: with the tapper's identity), never from `args`: the web route
     #: passes the request body into `args` verbatim, and a name there would
     #: be a member's own choice of what the group reads after "by".
     actor_label: Optional[str] = None
@@ -311,8 +311,8 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "revoke_invitation": ex.revoke_invitation,
             "rename_workspace": ex.rename_workspace,
             # The offboarding entry edge. The DOOR that finishes the job
-            # (`fn_offboard_finalize`) is `04_functions.sql`'s, and the job kind is `machinery.py`'s
-            # .
+            # (`fn_offboard_finalize`) is in `04_functions.sql`; the job kind
+            # is declared in `machinery.py`.
             "offboard_workspace": ex.offboard_workspace,
             "restore_workspace": ex.restore_workspace,
             "resolve_review": ex.resolve_review,

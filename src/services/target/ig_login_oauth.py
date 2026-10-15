@@ -296,7 +296,7 @@ async def mark_dead(conn, *, credential_id) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The connect leg ( /): the code exchange and the route's
+# The connect leg: the code exchange and the route's
 # three-way "which state do I mint" — the Drive leg's shape, on Instagram.
 # ---------------------------------------------------------------------------
 

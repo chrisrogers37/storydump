@@ -95,8 +95,8 @@ class IngressRuntime:
     process-lifetime, never request- or job-scoped: this object lives as long
     as the app does.
 
-    `dispatch` is's slot. It receives the open connection and the admitted
-    payload, and owns resolution and the command flips. Nothing about its
+    `dispatch` is the command handler. It receives the open connection and the
+    admitted payload, and owns resolution and the command flips. Nothing about its
     contract beyond that is decided here.
     """
 

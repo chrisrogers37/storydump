@@ -148,7 +148,7 @@ class TestSignin:
         self, app, configured, counter, state_store
     ):
         """A caller who is NOT a trusted proxy cannot choose their own bucket
-        by writing X-Forwarded-For: the key is the raw peer (/)."""
+        by writing X-Forwarded-For: the key is the raw peer."""
         client = TestClient(app, client=("203.0.113.9", 4321))
         client.get(
             "/auth/google",

@@ -6,8 +6,8 @@ part of the dead-token symptom gate that belongs to the OAuth flow.
 
 **What is NOT claimed here, stated rather than left to inference.** The gate's
 first clause — *"a fresh Professional account connects with zero Facebook
-surface"* — is unprovable for an arbitrary account without Meta App Review
-, an external gate with a human owner, not something tests close.
+surface"* — requires Meta App Review for an arbitrary account. That external
+gate has a human owner and cannot be closed by tests.
 And the dead-token symptom gate's other two halves (the dispatcher minting no
 further intents, the publish pipeline recording the fault) belong to those
 components' gates. Nothing below pretends otherwise.

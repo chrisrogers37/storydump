@@ -1,7 +1,7 @@
 /**
  * The web adapter's command schema — one entry per command the dashboard offers.
  *
- * ## Why this exists ( /)
+ * ## Why this exists
  *
  * One route fronts every command, and commands differ in body: an intent
  * command carries `intent_id`, a settings write carries a settings object and

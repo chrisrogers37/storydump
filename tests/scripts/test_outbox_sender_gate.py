@@ -7,7 +7,7 @@ on supersede)."*
 THE HAZARD THE OUTBOX AND SENDER CLOSE. `channel_outbox` carries no unique index
 and no lease token, so the argument that makes `jobs` safe does NOT
 transfer: `jobs` has both and this table has neither. An outbox exists to
-make a send happen exactly once, so's failure — two writers both told they
+make a send happen exactly once, so a failure — two writers both told they
 won — reads here as the machine believing it sent something it did not, or sending
 twice while believing it sent once.
 
@@ -20,7 +20,7 @@ real database as the real `svc_worker` login:
    rows rather than being handed a phantom win — `TestTheClaimIsSingleWinner`,
    `TestAStaleSenderCannotOverwriteALiveOne`.
 
-Concurrency rules (/), all load-bearing:
+Concurrency rules, all exercised by the tests:
 
 * Every race runs on REAL concurrent connections at **READ COMMITTED**,
   asserted in its own test — a race test can pass at REPEATABLE READ while
@@ -28,7 +28,7 @@ Concurrency rules (/), all load-bearing:
   level proves nothing about production.
 * No refusal is inferred from a bare rowcount alone. Where rowcount IS the
   discriminator, the docstring says why it can be: a predicate miss on a
-  column the winner changed, not's self-transition no-op.
+  column the winner changed, rather than a self-transition no-op.
 * Every refusal carries a positive control — the row being refused exists and
   is visible to the refusing connection.
 * Every guard is proven load-bearing by removing it and watching the refusal
@@ -415,7 +415,7 @@ class TestTheLevelIsReadCommitted:
 
 
 class TestOneSenderPerBinding:
-    """Mechanism 1, for a table with no unique index or lease token (/).
+    """Mechanism 1, for a table with no unique index or lease token.
 
     `channel_outbox` needs no guard of its own for concurrent senders because
     the SENDER is serialized: `deliver_outbox` keys on `tg:<binding_id>` and
@@ -586,7 +586,7 @@ class TestTheClaimIsSingleWinner:
 
         Driven directly rather than through the race, because SKIP LOCKED
         hides the predicate — the interesting case is a claimer whose
-        candidate row moved underneath it, which is's exact window.
+        candidate row changes between selection and the state update.
         """
         outbox_id = _enqueue(outbox_db)
         _owner_exec(
@@ -2404,9 +2404,10 @@ class TestACardIsRenderedAgainAtClaimTime:
 
 
 class TestTheSenderFollowsAGroupThatMoved:
-    """'s backstop on the real worker: a group that became a supergroup
-    and whose migration notice never reached the ingress is found by its next
-    delivery — Telegram refuses the send to the old id and names the new one.
+    """The sender discovers a group that becomes a supergroup.
+
+    If its migration notice never reaches the ingress, the next delivery
+    discovers the new id: Telegram refuses the old id and names the new one.
     The binding follows, and the chat keeps receiving: the worker's own sender
     sweep mints the binding's next sender, which delivers to the successor.
     (The row that discovered the move is the settle taxonomy's — a gone

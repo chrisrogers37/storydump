@@ -98,7 +98,7 @@ PAYLOAD_VERSION = 1
 GOOGLE_ACCESS_TOKEN_SECONDS = 3600
 
 #: A `gdrive` credential names no owner column — the WORKSPACE is its owner
-#: (workspace Drive grant), and this predicate is that ownership rule, in one place for
+#: and this predicate is that ownership rule, in one place for
 #: six readers; one of them omitting `media_source_id IS NULL` the day a
 #: source-owned row returns is exactly how a workspace reads another owner's
 #: grant. A fragment, spliced — there is no caller input in it. The writer

@@ -780,7 +780,7 @@ class TestAStrandedSourceKeepsSayingSo:
 
 
 class TestTheConnectReArmMeetsTheAlertBeat:
-    """The connect re-arm against's beat — the two halves meeting.
+    """The connect re-arm and stranded-source alert beat work together.
 
     The beat keeps a stranded source from going silent; the re-arm
     lets it recover. Both directions are checked against the real re-arm.

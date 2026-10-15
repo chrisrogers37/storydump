@@ -389,7 +389,7 @@ class GoogleDriveAdapter:
         page_size: int = DEFAULT_PAGE_SIZE,
     ) -> None:
         # `client` optional and per-call by default, following
-        # `credential_lifecycle.ig_refresh` (:84-99) rather than inventing a
+        # `credential_lifecycle.ig_refresh` rather than inventing a
         # lifecycle: a long-lived client would need closing on shutdown, and
         # the sync cadence is minutes, so a per-call pool costs nothing. The
         # thumbnail route calls far more often, so every client opened here

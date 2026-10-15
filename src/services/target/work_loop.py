@@ -413,7 +413,7 @@ def build_registry(deps: WorkerDeps) -> dict:
 
         **A failed row fails alone**. The sweep reads in one short
         transaction and each row runs in a transaction of its own, so a row
-        that raises — a verdict whose flip matched no row is's alarm —
+        that raises — including a verdict whose flip matched no row —
         rolls back alone, and the rows behind it still land rather than wait
         behind it (an unresolved ambiguity holds its account's next publish,
         `uq_publish_exclusive`). Not a savepoint per row in one transaction: a
@@ -1438,7 +1438,7 @@ async def ensure_sender_jobs(
 
     The sweep-driven cycle is the design: a sender hold drains and the job
     finalizes `succeeded`; the next sweep re-mints only while pending rows
-    exist — or an `ambiguous` row has waited the resolution backoff (:
+    exist — or an `ambiguous` row has waited the resolution backoff (
     a live sender's lost answer is resolved by the binding's sender, and a
     quiet binding has none) — so an empty outbox mints nothing and a busy
     one always has exactly one live sender per binding.

@@ -251,7 +251,7 @@ async def tapper_for_identity(
     executor, *, provider: str, external_id: str
 ) -> Optional[tuple[str, Optional[str]]]:
     """`user_for_identity` plus the identity's own display name, in ONE read —
-    for a tap, whose outcome line names the tapper (: not a second query
+    for a tap, whose outcome line names the tapper (without a second query
     inside the flip). The Telegram identity's name is the one a group already
     sees, which is exactly `display_name_for`'s first choice; an empty name
     here means "ask the long way" (`_actor_name`)."""

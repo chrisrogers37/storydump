@@ -129,7 +129,7 @@ class ServiceToken(TargetBase):
     revoked_at = Column(TZ, nullable=True)
     last_used_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
-    #: Exactly one subject (`ck_service_token_subject` `ck_service_token_subject`): a person, or a
+    #: Exactly one subject (`ck_service_token_subject`): a person, or a
     #: workspace. A person-bound token acts as the person across their
     #: memberships; a workspace service identity reads its one workspace.
     user_id = fk("users.id", "CASCADE", nullable=True)

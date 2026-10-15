@@ -44,8 +44,7 @@ CONTAINER_EXPIRY_SECONDS = 24 * 60 * 60
 #: non-event, which is the one wrong answer that is worse than no answer.
 #:
 #: The second mode and the stories observation are driven by
-#: `tests/scripts/test_l3_permit_rail.py`; production passes neither
-#:.
+#: `tests/scripts/test_l3_permit_rail.py`; production passes neither.
 EVIDENCE_MODES: dict[str, dict[str, frozenset]] = {
     "container_verdict": {
         "positive": frozenset({"PUBLISHED"}),
@@ -258,11 +257,11 @@ async def notify_parked_customer(
     the workspace gets "one workspace notification (\"a post needs attention\",
     deep link to the web queue)". `fn_reconciler_sweep` (`04_functions.sql`) already selects
     exactly these rows — state `review_required`, past the window, not yet
-    notified — and tags them ``notify_window``, and **this consumes that tag**
-    for's notice.
+    notified — and tags them ``notify_window``. **This consumes that tag**
+    to notify the customer.
 
     **The stamp is an atomic claim, and it MERGES.** Two things matter here.
-    The claim (``NOT... customer_notified`` inside the UPDATE) closes the
+    The claim (``NOT ... customer_notified`` inside the UPDATE) closes the
     window between the sweep's read and this write — the door's own filter
     cannot, because the loop runs between them. The merge preserves
     ``last_error->'evidence'``: that object carries ``checks``,
@@ -370,7 +369,7 @@ async def _record_evidence(conn, *, intent_id, checks: int, trail: list) -> None
 
 async def observe(poll: Callable[..., Any], *, intent_id, workspace_id):
     """Ask the provider for an ambiguous intent's container status, with NO
-        transaction open: the egress floor refuses a provider call inside one.
+    transaction open: the egress floor refuses a provider call inside one.
     *poll* may be sync or async."""
     status = poll(intent_id=intent_id, workspace_id=workspace_id)
     if hasattr(status, "__await__"):
@@ -443,7 +442,7 @@ async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:
 
     The flip must land before the op is closed. A flip that matched no row —
     the intent left `publishing_ambiguous`, or the session's tenant cannot see
-    it ('s shape) — raises instead, so the verdict never closes the op of
+    it — raises instead, so the verdict never closes the op of
     an intent that stayed put.
     """
     from src.services.target import provider_ops

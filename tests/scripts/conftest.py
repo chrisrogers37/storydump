@@ -1,4 +1,4 @@
-"""Shared fixtures and helpers for the migration-runner suites.
+"""Shared fixtures and helpers for the database gate suites.
 
 Real-PostgreSQL scratch databases, one per test, dropped on teardown — never
 the shared per-session application database. Connection parameters come from
@@ -6,9 +6,9 @@ the same settings the rest of the suite uses (``.env.test`` via the root
 conftest), so a credential or port move breaks every suite the same way
 instead of this one differently.
 
-Host model (// — several runs share this cluster): the DATABASE
-half of isolation is per-session naming ('s session suffix, reused here
-so one run has one identity); the ROLE half cannot be namespaced — the seven
+Several pytest runs can share this cluster. Database isolation uses
+``SESSION_DB_SUFFIX`` from the root conftest, so each run has one identity.
+Roles cannot be namespaced — the seven
 ``svc_*`` roles are cluster-scoped spec names — so this suite SERIALIZES on
 the cluster's own advisory lock and QUEUES behind concurrent runs instead of
 corrupting them. Every cleanup path is scoped to this suite's own database
@@ -119,7 +119,8 @@ def pytest_configure(config):
 
 
 #: Scratch-database naming: ONE home for the convention every sweep predicate
-#: derives from. The session token is's — one pytest run, one identity,
+#: derives from. The session token is the root suite's SESSION_DB_SUFFIX:
+#: one pytest run, one identity,
 #: correlatable across the root suite's databases and these.
 TEST_DB_PREFIX = "runner_test_"
 SUITE_DB_PREFIXES = (TEST_DB_PREFIX, "runner_tpl_")

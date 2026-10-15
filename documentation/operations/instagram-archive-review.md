@@ -61,7 +61,7 @@ Between them, they cover these properties:
   - The ordinary fixture has three slides per carousel.
   - The carousel-heavy fixture cycles through 2, 3, 5, 10 and 20 slides, with mixed
     video, one empty carousel and one truncated page.
-- **The sizes:** the defaults are `waitlist_entries`, 500 and 2,000 posts. The 10,000-post case needs
+- **The sizes:** the defaults are 100, 500 and 2,000 posts. The 10,000-post case needs
   `RUN_ONBOARDING_10K=1`.
 - **The ceilings** are counted in posts: `3N+64` Graph requests and `N+128` turns.
   Indexing makes zero CDN requests, downloads or decodes. Candidates, item exclusions

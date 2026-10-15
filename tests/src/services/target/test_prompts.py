@@ -43,7 +43,7 @@ class TestStringSlotWidths:
     Postgres strips trailing fractional zeros in timestamptz text/jsonb
     rendering, so a microsecond value arrives at any width 0-6; at the
     repository's 3.10 floor a bare ``fromisoformat`` rejects widths 1, 2,
-    4 and 5. Width 5 is's real shape (``.05024``).
+    4 and 5. The five-digit fraction ``.05024`` exercises that case.
 
     Bound, stated rather than implied: the call-site leg below has teeth
     ONLY at the 3.10 floor — on 3.11+ every width parses natively, so a

@@ -45,7 +45,7 @@ def _redact_opaque(exc: ValueError) -> str:
     neither named class matches.
 
     It is the same shape as the ``.doc`` leak and strictly worse on both axes:
-    the payload is ``UnicodeDecodeError.object``, the ENTIRE.env file, and it
+    the payload is ``UnicodeDecodeError.object``, the ENTIRE .env file, and it
     fires on the shipped configuration at import — no subclass and no complex
     field required. It carries every byte of the file, credentials included,
     and ZERO of them reach ``str()`` or the rendered traceback. A message-only
@@ -154,7 +154,7 @@ class Settings(BaseSettings):
         Pinned by tests/src/config/test_settings_never_echo_values.py.
 
         THE RAISE HAPPENS OUTSIDE THE except BLOCK, and that is the subtle
-        half. ``raise... from exc`` would chain the original ValidationError
+        half. ``raise ... from exc`` would chain the original ValidationError
         and Python prints __cause__, putting input_value straight back on
         screen under "The above exception was the direct cause" -- a redaction
         that redacts nothing. But ``from None`` is not sufficient either: it
@@ -300,7 +300,7 @@ class Settings(BaseSettings):
     # NEVER set this to "*". The wildcard makes uvicorn take the LEFTMOST
     # X-Forwarded-For entry, which is wholly caller-supplied, so every
     # IP-keyed control in the app (rate limiting, auth-failure alerting)
-    # becomes attacker-partitionable. See issue.
+    # becomes attacker-partitionable.
     TRUSTED_PROXY_HOSTS: str = (
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.1,::1,fd00::/8"
     )

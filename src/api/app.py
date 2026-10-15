@@ -30,9 +30,8 @@ process-local mutable singleton): pre-auth admission is the durable
 
 The engine comes from `TARGET_DATABASE_URL` and from nothing else. Unset means
 ``app.state.engine is None`` and every data route answers 503 naming the
-variable — never the settings-built URL, which on the deployed service points
-at nothing and on a misconfigured one would point at a legacy-shaped database
-('s class of silent misdirection).
+variable. It never falls back to the settings-built URL, which could point
+at the wrong database on a misconfigured service.
 """
 
 from __future__ import annotations
@@ -153,7 +152,7 @@ class DropAmbiguousForwardedForMiddleware:
     path it already takes when there is no X-Forwarded-For header at all.
     Under normal operation behind a single well-behaved proxy this never
     triggers; it exists for the anomalous case, and failing closed to the
-    shared edge IP beats failing open to an attacker-chosen identity. See.
+    shared edge IP beats failing open to an attacker-chosen identity.
     """
 
     _XFF = b"x-forwarded-for"
@@ -520,8 +519,8 @@ def _source_policy_body(exc, status: int) -> dict:
     return body
 
 
-#: `ConnectChoiceRefused.reason` → status, total over `connect_choice.REASONS`
-#:. A start's stale On preview is `MixConflict`'s 409, above.
+#: `ConnectChoiceRefused.reason` → status, total over `connect_choice.REASONS`.
+#: A start's stale On preview is `MixConflict`'s 409, above.
 _ARCHIVE_CHOICE_STATUS = {
     "invalid_archive_choice": 400,
     "archive_not_activated": 503,
@@ -908,8 +907,8 @@ def create_app(
             "TARGET_SIGNUP_OPEN is on: any Google account can create a user, "
             "admitted or not"
         )
-    # Which database login this process holds, and whether it bypasses RLS
-    # . Sampled ONCE, in the background, after startup — the
+    # Which database login this process holds, and whether it bypasses RLS.
+    # Sampled ONCE, in the background, after startup — the
     # operating details (`/api/v1/ops/health`) report the cached answer and
     # still opens no connection of its own, so a database blip cannot fail the
     # probe. None means "not sampled", never "safe": a login with BYPASSRLS
@@ -929,8 +928,8 @@ def create_app(
     # app, so every app a test builds starts empty.
     app.state.health_cache = AnswerCache()
 
-    # The ingress seam: the `/start` door and the group join path
-    # , beside the resolver door `fn_resolve_binding`.
+    # The ingress seam: the `/start` door and the group join path,
+    # beside the resolver door `fn_resolve_binding`.
     #
     # ⚠ THIS DOES NOT DISPATCH CHAT-INBOUND COMMANDS. A `/start` payload
     # carries its own resolution; a group message resolves its chat through
@@ -1003,8 +1002,8 @@ def create_app(
 
     # Middleware. Starlette prepends, so the LAST added runs FIRST on the
     # request path: CORS outermost, then the ambiguous-XFF drop and
-    # the removal of Railway's edge hop ahead of the trusted-proxy walk
-    # , then the body limit — after the walk,
+    # the removal of Railway's edge hop ahead of the trusted-proxy walk,
+    # then the body limit — after the walk,
     # so its refusal names the attributed client, and ahead of everything
     # that could read a body — then security headers innermost.
     app.add_middleware(SecurityHeadersMiddleware)

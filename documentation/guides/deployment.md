@@ -96,10 +96,10 @@ TARGET_DATABASE_URL=postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=req
   [`instagram-login-setup.md`](instagram-login-setup.md)
   → `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`
 - [ ] **Google** — one OAuth client with both redirect URIs (sign-in and
-  Drive): [`cloud-deployment.md`](cloud-deployment.md#telegram)
+  Drive): [`cloud-deployment.md`](cloud-deployment.md#6-google-oauth-setup)
   → `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
 - [ ] **Cloudinary** — the transit store a story's frame rides to Meta:
-  the Instagram login setup in `cloud-deployment.md`
+  [Cloudinary setup](cloud-deployment.md#7-cloudinary-setup)
   → `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
 
 ---
@@ -316,7 +316,7 @@ owner; there is no product door for it. In order:
   working with no minter recorded, the invitations they sent pending with no
   inviter, and an invitation to them able to bring them back.
 - [ ] **Their Google Drive**, when they connected a workspace's
-  (`oauth_credentials.granted_by_user_id` names them, `oauth_credentials.granted_by_user_id`): disconnect it
+  (`oauth_credentials.granted_by_user_id` names them): disconnect it
   (Settings › Integrations → Google Drive → Disconnect). Otherwise `ON DELETE
   SET NULL` clears the granter and leaves the grant active, still holding the
   deleted person's Google token, and a grant with no granter is browsable by

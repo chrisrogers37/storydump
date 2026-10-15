@@ -977,7 +977,7 @@ class TestTypedDestination:
 class TestTelegramGroupBindLink:
     """`POST /workspaces/{ws}/telegram/bind-link` — the admin's one-shot link
     that opens Telegram's group picker and binds the chosen group to THIS
-    workspace (: a token, and the same flow for the Nth group). Admin
+    workspace. It issues a token for each group through the same flow. Admin
     floor: deciding where a workspace's cards go is an admin act."""
 
     URL = f"/api/v1/workspaces/{WS}/telegram/bind-link"
@@ -1103,10 +1103,11 @@ class TestRemoveTelegramGroup:
 
 
 class TestTelegramLink:
-    """`POST /me/telegram/link` — the link a signed-in user taps to attach
-     their Telegram identity (only from an authenticated session; the row pins
-     the user). The service half is `identity_link`; this is its route
-    ."""
+    """`POST /me/telegram/link` attaches the signed-in user's Telegram identity.
+
+    The authenticated session pins the user. The service half is
+    `identity_link`; this test exercises its route.
+    """
 
     URL = "/api/v1/me/telegram/link"
 

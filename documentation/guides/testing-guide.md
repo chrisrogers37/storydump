@@ -70,9 +70,8 @@ PostgreSQL recipe below for the required-database run.
 | `tests/` (top level) | The harness's own policy tests: mostly pure; the ones that need a server skip without it |
 | `tests/scripts/` | **Yes** — the DB gates. Each builds its world in a scratch database and acts as the production roles. A few files are database-free (`test_telegram_ratchet.py`, `test_pr_ready.py`) |
 
-With no PostgreSQL at `DB_HOST:DB_PORT` the root suite's database tests
-**skip**, and a gate under `tests/scripts/` that takes a database fixture
-**errors** at `admin_conn` (`tests/scripts/conftest.py`). With
+With no PostgreSQL at `DB_HOST:DB_PORT`, database tests in both the root suite
+and `tests/scripts/` **skip** through the root database fixture. With
 `REQUIRE_TEST_DATABASE=1` a missing server fails the session instead: that is
 CI's setting, and the one to use locally whenever a green result is going to be
 reported anywhere.
@@ -143,7 +142,7 @@ pytest tests/scripts
 ### Configuration (`.env.test`)
 
 The harness loads `.env.test` over the environment before any application
-import (`tests/scripts/conftest.py`). It is gitignored.
+import (`tests/conftest.py`). It is gitignored.
 
 ```bash
 DB_HOST=localhost
@@ -247,7 +246,7 @@ chain. Mark database gates `integration`, and `slow` when appropriate.
   (deprecation and future warnings excepted): an unclosed socket or event loop fails the
   test that happens to be running when it is collected. Close what you open.
 - **`asyncio_mode = auto`**: an `async def test_…` needs no decorator.
-- **A legitimate new skip raises `MAX_EXPECTED_SKIPS`** (`tests/scripts/conftest.py`)
+- **A legitimate new skip raises `MAX_EXPECTED_SKIPS`** (`tests/conftest.py`)
   on purpose; where the database is required, skips above it fail the run.
 - **Do not make real provider calls.** CI holds no provider credential.
 

@@ -230,15 +230,15 @@ _NO_INVISIBLE = (
 class SignupAdmission(TargetBase):
     """An email the owner let in (`fn_signup_admitted`): a new Google account with this verified
     address may create its user. Global, not tenant-plane; read and written
-    only through `svc_membership`'s definer functions (`fn_signup_admitted`,
-    signup admission functions' admission doors, and `trg_signup_admission_consume`'s trigger on `users`), so the runtime roles
-    hold no grant on it.
+    only through `svc_membership`'s definer functions and the
+    `trg_users_consume_admission` trigger function on `users`, so the runtime
+    roles hold no grant on it.
 
-    signup admission functions: the admission's email carries a one-time claim link. Only its
-    token's SHA-256 is stored, with `emailed_at`, once the provider accepted
-    the email. `claimed_at` records that the spot was used, by its link (signup admission functions)
-    or by an account created at its address (`trg_signup_admission_consume`), and the link is
-    cleared with it; the spot then admits nobody (one spot, one account).
+    The admission's email carries a one-time claim link. Only its token's
+    SHA-256 is stored, with `emailed_at`, once the provider accepted the email.
+    `claimed_at` records that the spot was used, either by its link or by an
+    account created at its address, and the link is cleared with it; the spot
+    then admits nobody (one spot, one account).
     A consumed admission admits no additional account."""
 
     __tablename__ = "signup_admissions"
