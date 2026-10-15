@@ -1,8 +1,8 @@
-"""Gate: a planned story repeats (repeat rules;).
+"""A planned story repeats according to its repeat rule.
 
 `post_intents` carries a four-column repeat rule. `fn_repeat_times` gives the rule's grid, reading
 local times through `fn_wall_instant`, and `tg_intent_repeat` makes the next occurrence in the
-transaction that ends one. Each ending is driven against the replayed advertised stream, under the
+transaction that ends one. Each ending is driven against the code-built schema, under the
 role that causes it in production:
 
 - the port, as `svc_ingress`: skip, reject, posted by a person, and the cancel a person asks for;
