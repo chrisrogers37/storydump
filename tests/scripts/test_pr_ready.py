@@ -20,7 +20,7 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "pr_ready.sh"
 
-#: The six job names `ci.yml` declares. The gate pins its list against the real
+#: The job names `ci.yml` declares. The gate pins its list against the real
 #: file, so a fixture workflow must agree or the drift gate (correctly) refuses.
 JOBS = [
     "Lint",
@@ -29,6 +29,7 @@ JOBS = [
     "Security Scan",
     "Front End",
     "Changelog Check",
+    "Schema consistency",
 ]
 
 
@@ -79,6 +80,13 @@ def run(tmp_path, workflow, payload, behind="0", *names):
 
 
 class TestItSaysReadyWhenItShould:
+    def test_the_repository_workflow_matches_the_default_required_checks(
+        self, tmp_path
+    ):
+        workflow = SCRIPT.parents[1] / ".github" / "workflows" / "ci.yml"
+        result = run(tmp_path, workflow, _rollup())
+        assert result.returncode == 0, result.stdout + result.stderr
+
     def test_a_current_mergeable_all_green_pr_is_ready(self, tmp_path, workflow):
         r = run(tmp_path, workflow, _rollup())
         assert r.returncode == 0, r.stdout + r.stderr
