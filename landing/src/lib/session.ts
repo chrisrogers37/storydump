@@ -69,7 +69,7 @@ export interface SessionUser {
   telegramDisplayName: string | null;
   /**
    * Whether the API counts this person among the deployment's operators
-   * (`/me`'s `ops`, `OPS_USER_IDS`;). It decides two things here and no
+   * (`/me`'s `ops`, `OPS_USER_IDS`). It decides two things here and no
    * more: whether `/ops` renders or is the site's 404, and whether the
    * dashboard header links to it. Nothing is read on its strength: every
    * owner route is the API's to refuse (`require_ops`).

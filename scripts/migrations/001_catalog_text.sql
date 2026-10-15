@@ -4,6 +4,8 @@
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_description d JOIN pg_class c ON d.classoid = 'pg_class'::regclass AND d.objoid = c.oid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public')
 -- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prosecdef AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) setting WHERE setting LIKE 'search_path=%'))
 
+SET LOCAL search_path = public, pg_temp;
+
 LOCK TABLE public.post_intents IN ACCESS EXCLUSIVE MODE;
 
 DO $guard$

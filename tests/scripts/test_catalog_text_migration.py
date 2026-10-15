@@ -190,6 +190,51 @@ def test_catalog_refresh_guard_rolls_back_every_change(base_world, guard):
     assert schema_diff(before_schema, schema_signature(base_world)) == []
 
 
+def test_catalog_refresh_targets_public_with_an_alternate_search_path(base_world):
+    from psycopg2.extensions import make_dsn
+
+    from scripts.migration_runner import _apply_one
+
+    grants_query = (
+        "SELECT p.oid, p.proowner, p.proacl::text AS acl FROM pg_proc p"
+        " JOIN pg_namespace n ON n.oid = p.pronamespace"
+        " WHERE n.nspname = 'public' ORDER BY p.oid"
+    )
+    before_grants = fetch_all(base_world, grants_query)
+    migration = next(m for m in discover_migrations(MIGRATIONS_DIR) if m.version == 1)
+    connection = psycopg2.connect(
+        make_dsn(base_world, options="-csearch_path=catalog_refresh_shadow,public")
+    )
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cur:
+            cur.execute("CREATE SCHEMA catalog_refresh_shadow")
+            cur.execute("SHOW search_path")
+            original_path = cur.fetchone()[0]
+        _apply_one(connection, migration)
+        with connection.cursor() as cur:
+            cur.execute("SHOW search_path")
+            assert cur.fetchone()[0] == original_path
+        assert fetch_all(base_world, grants_query) == before_grants
+        assert fetch_one(
+            base_world,
+            "SELECT count(*) FROM pg_proc p JOIN pg_namespace n"
+            " ON n.oid = p.pronamespace WHERE n.nspname = 'catalog_refresh_shadow'",
+        ) == (0,)
+        assert fetch_one(
+            base_world,
+            "SELECT prosrc LIKE '%rate_counters%' AND prosrc NOT LIKE '%jobs_ok%'"
+            " FROM pg_proc WHERE oid ="
+            " 'public.fn_retention_batch(text,interval,integer)'::regprocedure",
+        ) == (True,)
+        assert fetch_one(
+            base_world,
+            "SELECT status FROM runner.schema_migrations WHERE version = 1",
+        ) == ("applied",)
+    finally:
+        connection.close()
+
+
 def test_partial_schema_does_not_adopt_catalog_refresh(base_world):
     report = adopt(
         base_world,
