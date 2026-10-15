@@ -307,7 +307,7 @@ is removed:
 
 Durable receipts and the worker's cleanup need `ARCHIVE_HMAC_KEYS`. Its shape, how to
 rotate it without splitting a request into two receipts, and what happens without it are
-in [`instagram-archive-review.md`](instagram-archive-review.md-the-key-ring).
+in [`instagram-archive-review.md`](instagram-archive-review.md#5-the-key-ring).
 Without a transit store the worker still runs `meta_deletion_cleanup`: it asks the
 provider nothing, so it completes only scopes that hold no unresolved upload.
 
