@@ -1,4 +1,4 @@
-"""The `reconcile_ambiguous` executor (#860).
+"""The `reconcile_ambiguous` executor.
 
 The permit rail is what manufactures ``publishing_ambiguous`` intents, and an
 ambiguity producer without its resolver strands every artefact the kill tests
@@ -45,7 +45,7 @@ CONTAINER_EXPIRY_SECONDS = 24 * 60 * 60
 #:
 #: The second mode and the stories observation are driven by
 #: `tests/scripts/test_l3_permit_rail.py`; production passes neither
-#: (#1325).
+#:.
 EVIDENCE_MODES: dict[str, dict[str, frozenset]] = {
     "container_verdict": {
         "positive": frozenset({"PUBLISHED"}),
@@ -103,7 +103,7 @@ def next_delay_seconds(checks: int) -> Optional[int]:
 
 
 async def sweep_due(conn, *, limit: int, notify_after_seconds: int) -> list[dict]:
-    """Call the `fn_reconciler_sweep` door (shipped in migration 059).
+    """Call the `fn_reconciler_sweep` function in `src/models/target/ddl/04_functions.sql`.
 
     The door owns the budget: ``p_lim`` bounds the WHOLE sweep across both
     reasons, ladder-due rows taking priority over notify-window rows. This
@@ -126,7 +126,7 @@ async def sweep_due(conn, *, limit: int, notify_after_seconds: int) -> list[dict
     # binds `interval[]` from a Python sequence of timedeltas and REFUSES a
     # str outright ("a sized iterable container expected"), so the literal
     # form would make this door raise `DataError` on its first statement —
-    # every call, not an edge case (#1090).
+    # every call, not an edge case.
     rungs = [timedelta(seconds=s) for s in LADDER_SECONDS]
     result = await conn.execute(
         text(
@@ -148,12 +148,12 @@ async def checks_so_far(conn, *, intent_id) -> int:
 
     The door says WHICH rows are due; without this every step would count as
     the first, the ladder would never exhaust, and an intent whose poll stays
-    inconclusive would never reach `review_required` (#1276) — silently
+    inconclusive would never reach `review_required` — silently
     holding its account's next publish. It is read HERE, per row, and the
     caller claims the row's workspace first: `post_intents` is policy-covered
     and the sweep's session carries no tenant, so one read for the whole sweep
     before any claim would see nothing under `svc_worker` and answer 0 for
-    every row — the same ladder that never exhausts (#1349).
+    every row — the same ladder that never exhausts.
     """
     row = (
         await conn.execute(
@@ -256,13 +256,13 @@ async def notify_parked_customer(
 
     A `review_required` row: after the customer-notification window
     the workspace gets "one workspace notification (\"a post needs attention\",
-    deep link to the web queue)". `fn_reconciler_sweep` (059) already selects
+    deep link to the web queue)". `fn_reconciler_sweep` (`04_functions.sql`) already selects
     exactly these rows — state `review_required`, past the window, not yet
     notified — and tags them ``notify_window``, and **this consumes that tag**
-    for #1090's notice.
+    for's notice.
 
     **The stamp is an atomic claim, and it MERGES.** Two things matter here.
-    The claim (``NOT ... customer_notified`` inside the UPDATE) closes the
+    The claim (``NOT... customer_notified`` inside the UPDATE) closes the
     window between the sweep's read and this write — the door's own filter
     cannot, because the loop runs between them. The merge preserves
     ``last_error->'evidence'``: that object carries ``checks``,
@@ -284,7 +284,7 @@ async def notify_parked_customer(
     `reconcile_ambiguous` is a SYSTEM singleton: it carries `workspace_id
     NULL`, so `make_session_for` gives it ``app.tenant_id = ''``. The sweep
     reads cross-tenant because `fn_reconciler_sweep` is SECURITY DEFINER —
-    and 059's own comment says the notification WRITE "then runs tenant-scoped
+    and `04_functions.sql`'s own comment says the notification WRITE "then runs tenant-scoped
     as svc_worker". Under an empty tenant every
     statement below is invisible to `p_tenant`: the UPDATE matches no row,
     `push_bindings` returns nothing, and this reports success having written
@@ -303,7 +303,7 @@ async def notify_parked_customer(
     # Bindings BEFORE the claim, and here the ordering matters more than it
     # does for the no-media notice: `customer_notified` is a permanent latch
     # rather than a window, so stamping it for a workspace with no push
-    # binding (#1090) would spend the ONE allowed notification on an
+    # binding would spend the ONE allowed notification on an
     # audience that cannot hear it, and the customer would never be told a
     # post is stuck. Left unstamped, the row stays due — it is a genuinely
     # outstanding condition — and the notice lands whenever a surface exists.
@@ -370,8 +370,8 @@ async def _record_evidence(conn, *, intent_id, checks: int, trail: list) -> None
 
 async def observe(poll: Callable[..., Any], *, intent_id, workspace_id):
     """Ask the provider for an ambiguous intent's container status, with NO
-    transaction open: the egress floor refuses a provider call inside one
-    (#1508). *poll* may be sync or async."""
+        transaction open: the egress floor refuses a provider call inside one.
+    *poll* may be sync or async."""
     status = poll(intent_id=intent_id, workspace_id=workspace_id)
     if hasattr(status, "__await__"):
         return await status
@@ -443,8 +443,8 @@ async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:
 
     The flip must land before the op is closed. A flip that matched no row —
     the intent left `publishing_ambiguous`, or the session's tenant cannot see
-    it (#1349's shape) — raises instead, so the verdict never closes the op of
-    an intent that stayed put (#1438).
+    it ('s shape) — raises instead, so the verdict never closes the op of
+    an intent that stayed put.
     """
     from src.services.target import provider_ops
 
@@ -495,7 +495,7 @@ async def _park_review_required(conn, *, intent_id, workspace_id) -> None:
     workspace resolves its own `review_required` intent, so every card of it
     is restated with the review line and the three resolution buttons. The
     notice keeps the notify window (`notify_parked`). A park that matched no
-    row raises, as `_terminalize`'s flip does (#1438)."""
+    row raises, as `_terminalize`'s flip does."""
     from datetime import datetime, timezone  # noqa: PLC0415 — local, as the module's other imports
 
     from src.services.target import outbox, prompts  # noqa: PLC0415 — cycle

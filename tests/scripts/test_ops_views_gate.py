@@ -664,10 +664,11 @@ def test_the_routes_admit_tokens_by_their_scope_and_refuse_strangers(
 def test_the_predicates_confine_rows_even_without_row_level_security(
     world, google_configured, seeded
 ):
-    """Production's API connects as the owner role with BYPASSRLS, so every
-    view must confine rows by its own WHERE — the policies are the belt,
-    the predicate the braces. The same reads through a superuser: only A's
-    rows, and B's story is not readable through A's route."""
+    """Each view's workspace predicates also confine a privileged caller.
+
+    The deployed API uses `svc_ingress` with RLS. This superuser control
+    proves the predicates independently: A's route returns only A's rows.
+    """
     a, b = seeded["a"], seeded["b"]
 
     async def main():

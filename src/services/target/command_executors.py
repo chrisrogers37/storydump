@@ -41,7 +41,7 @@ Every intent edge's side effects:
   honorable). Refused if the intent is already terminal.
 
 `sync_now` mints the `sync_media_source{reason:'demand'}` job in the exact
-shape `fn_clock_tick` mints the baseline one (`059:271`) — same lane, key,
+shape `fn_clock_tick` mints the baseline one (`04_functions.sql`) — same lane, key,
 attempts — and declines to mint a second while one is pending for that
 source, since the serialization key would only queue it behind the first.
 Both job rows go through `jobs.enqueue`, which is this module's only INSERT
@@ -134,7 +134,7 @@ async def _intent_row(session, command: Command) -> dict[str, Any]:
         "       COALESCE(a.posts_per_day, w.posts_per_day) AS eff_ppd,"
         "       COALESCE(a.tz, w.tz) AS eff_tz, a.handle,"
         # The publish precondition, read with the row rather than after it
-        # (#1286): a usable Instagram Login token for this account.
+        # a usable Instagram Login token for this account.
         "       "
         + ig_credentials.usable_login_sql(
             workspace="i.workspace_id", account="i.ig_account_id"
@@ -170,7 +170,7 @@ async def _actor_name(
 ) -> Optional[str]:
     """The name a shared chat may see for the actor: never an email. A
     tap carries the tapper's name on the command (`Command.actor_label`, read
-    with the identity — #1286) and passes it as *label*; anything else asks
+    with the identity —) and passes it as *label*; anything else asks
     the identity table. `args` is never consulted: the web route fills it
     from the request body."""
     if label:
@@ -201,9 +201,9 @@ async def _supersede_everywhere(
     """Every live card for the intent, in EVERY binding of the workspace,
     gains the outcome line and the story's keyboard as the sender claims the
     edit (its decision buttons go; ⚙️ Configure stays on a settled card, and
-    a rejected story's or a removed item's card keeps none, #1477) — in
+    a rejected story's or a removed item's card keeps none) — in
     the caller's transaction, so a rolled-back flip takes its edits with it.
-    One statement for all bindings (#1286)."""
+    One statement for all bindings."""
     return await outbox.supersede_everywhere(
         session,
         workspace_id=workspace_id,
@@ -259,14 +259,14 @@ async def _settle(
         adopted = await _supersede_and_adopt(session, intent, command, line)
     else:
         # The adopted card's keyboard is the sender's to render, from the
-        # story as it is when the edit goes (#1477).
+        # story as it is when the edit goes.
         adopted = await _adopt_touched(session, intent, command, line)
     return CommandResult(
         "answered",
         {
             "intent_id": str(intent["id"]),
             # A repeat tap that adopted a card WROTE (a row and a paced edit):
-            # the tap's admission spends on it (#1308).
+            # the tap's admission spends on it.
             "adopted": adopted,
             "state": state,
             "settled_by": found["by"],
@@ -283,14 +283,14 @@ async def _adopt_touched(
     command: Command,
     line: str,
 ) -> bool:
-    """Restate-by-ref on touch (#1271). The message a tap came from may be
+    """Restate-by-ref on touch. The message a tap came from may be
     one the ledger never learned — a resend's twin, left with live buttons
     through Approved and Posted because no edit could name it. The tap is
     the moment its id is known: adopt it as a card of the story and edit it
     with *line* — the same line every known card carries, and the story's
     keyboard as the sender claims the edit — so every later line reaches it
     too. Every tap that writes a line calls this: the deciding tap, a
-    resolution, a repeat on a settled story (#1308: the deciding tap is as
+    resolution, a repeat on a settled story (: the deciding tap is as
     likely to come from the twin). A web command carries no card and adopts
     nothing."""
     if not (command.card_ref and command.binding_id):
@@ -311,7 +311,7 @@ async def _supersede_and_adopt(
     """Supersede every known card with *line*, and — when the card the tap
     came from was not among them — adopt it (:func:`_adopt_touched`). The
     every-binding door answers both in its one statement, so the ordinary
-    tap, from a card the ledger knows, reads nothing more (#1286's budget
+    tap, from a card the ledger knows, reads nothing more ('s budget
     holds). Returns whether a card was adopted."""
     if not (command.card_ref and command.binding_id):
         await _supersede_everywhere(
@@ -404,7 +404,7 @@ async def _restate_outcome(
     """After a review resolution, or a stop sent while a cancel lands: the
     outcome line, written by ref onto every card of the intent. The review
     buttons go with the review: the sender gives each edit the story's
-    keyboard as it is then (#1477).
+    keyboard as it is then.
     *series* says the act ended the story's series (`prompts.outcome_line`)."""
     line = prompts.outcome_line(
         state,
@@ -443,11 +443,11 @@ async def approve(session, command: Command) -> CommandResult:
         )
     # A dry run posts nowhere, so it needs no token: the owner can rehearse
     # the whole flow before Instagram is connected. The token's presence was
-    # read with the intent (`_intent_row`, #1286).
+    # read with the intent (`_intent_row`).
     if not intent.get("dry_run_mode") and not intent.get("has_ig_credential"):
         # Said at the tap, not an hour later: without a token the publish leg
         # cannot post, and a job minted anyway would only burn its ladder and
-        # land on a human (#1276).
+        # land on a human.
         raise CommandRefused(
             "not_connected",
             "Instagram is not connected for this account — connect it in"
@@ -786,8 +786,8 @@ async def _give_up(
 async def cancel(session, command: Command) -> CommandResult:
     """Cancel a story. With `stop_repeat` it also ends the story's series:
     the rule is cleared in this transaction, before the ending that would
-    make its next occurrence (`tg_intent_repeat`, 116). Without it, the
-    series goes on from the next time (#485)."""
+    make its next occurrence (`tg_intent_repeat`). Without it, the
+    series goes on from the next time."""
     stop_repeat = _flag_arg(command, "stop_repeat")
     intent = await _intent_row(session, command)
     # A parked row has no worker checkpoint to honour a flag at; the cancel IS
@@ -843,12 +843,12 @@ async def cancel(session, command: Command) -> CommandResult:
     )
     # The card loses its decision buttons now: a cancelling card offers no
     # lever but ⚙️ Configure (`prompts.card_keyboard`'s *cancelling*), and the
-    # worker's terminalization is a later checkpoint (the reaper, 087).
+    # worker's terminalization is a later checkpoint (the reaper, `fn_reaper_sweep cancel leg`).
     await _record_outcome(session, intent, command, "cancelled", series=series)
     return _result(intent, intent["state"], cancel_requested=True, **stopped)
 
 
-# --- a planned story (#1413) ---------------------------------------------------
+# --- a planned story ---------------------------------------------------
 
 #: A planned story's time as the person gives it: a date and a clock time,
 #: seconds optional, and NO offset — the account's zone makes it an instant.
@@ -856,7 +856,7 @@ async def cancel(session, command: Command) -> CommandResult:
 _LOCAL_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?")
 
 #: The wall time :local_at in the zone :tz as an instant, NULL when the
-#: clocks skip it: `fn_wall_instant` (116), the reading the repeat grid
+#: clocks skip it: `fn_wall_instant` (`intent repeat constraints`), the reading the repeat grid
 #: (`fn_repeat_times`) also takes, so a one-off time and a repeat's time never
 #: disagree. Two readings are candidates: Postgres's own (a skipped time takes
 #: the offset before the jump, an ambiguous one the offset after it — its
@@ -995,7 +995,7 @@ async def _audit_same_state(
     )
 
 
-#: The CHECKs that judge a repeat rule (116), matched by name: the terminal
+#: The CHECKs that judge a repeat rule (`intent repeat constraints`), matched by name: the terminal
 #: guard raises the same SQLSTATE (23514) and names no constraint.
 _REPEAT_CHECKS = ("ck_intent_repeat", "ck_intent_repeat_unit")
 
@@ -1146,7 +1146,7 @@ async def schedule_item(session, command: Command) -> CommandResult:
     """A planned story: this item, to this account, at this wall time in the
     account's zone. It is born `scheduled` with `origin = 'planned'`,
     is served at its time or missed out loud, and only a person
-    approves it (088).
+    approves it (`post_intents.origin`).
 
     The database decides what it can: the account must be live here, and
     its row is held (`FOR SHARE`) until the story is in, so a removal that
@@ -1158,7 +1158,7 @@ async def schedule_item(session, command: Command) -> CommandResult:
     that would miss it at its time), and `override_locks` gets past only its
     warnings.
 
-    A `repeat` rule rides on the story (116, #485). Nothing is computed
+    A `repeat` rule rides on the story (`intent repeat constraints`). Nothing is computed
     here: the first occurrence is the chosen time, and each one's ending
     makes the next (`tg_intent_repeat`)."""
     account_id = _id_arg(command, "ig_account_id")
@@ -1325,7 +1325,7 @@ async def reschedule_item(session, command: Command) -> CommandResult:
     a weekly series' day: one of its days, or its only day carried along
     (`_on_its_day`). A weekly rule set without days keeps a weekly series'
     days. `repeat: null` clears the rule in any live state, a story being
-    cancelled included, and the story stays where it is (#485)."""
+    cancelled included, and the story stays where it is."""
     moving = command.args.get("local_at") is not None
     ruling = "repeat" in command.args
     setting = ruling and command.args["repeat"] is not None
@@ -1347,7 +1347,7 @@ async def reschedule_item(session, command: Command) -> CommandResult:
     if waiting:
         # Clearing a rule is no lever on the story: it posts nothing.
         _refuse_if_cancelling(intent)
-        # Nor does a cleared rule ask the item's media to be postable (#1644).
+        # Nor does a cleared rule ask the item's media to be postable.
         await _admit_media(session, command, intent, require_validation=False)
     tz = _tz(intent)
     ids = {"id": str(intent["id"]), "ws": command.workspace_id}
@@ -1463,7 +1463,7 @@ def _link_url(command: Command) -> Optional[str]:
 
 
 async def set_item_link(session, command: Command) -> CommandResult:
-    """The link a story of this item asks a person to add by hand (#1413).
+    """The link a story of this item asks a person to add by hand.
     A story published through the API cannot carry a
     link sticker, so the card names the link instead. The link is the
     item's: every story of it, planned or from the cadence, asks for the
@@ -1502,7 +1502,7 @@ async def set_item_link(session, command: Command) -> CommandResult:
 
 
 async def set_item_auto_approve(session, command: Command) -> CommandResult:
-    """The item's Auto-approve flag (#1477): a member's standing Approve.
+    """The item's Auto-approve flag: a member's standing Approve.
     While it is on, a story of the item is approved when it is served, unless
     `auto_approval.decide` finds the story not eligible (a pending cancel, API
     posting off, no working login outside dry run, a link to add). It applies
@@ -1565,13 +1565,13 @@ async def set_item_auto_approve(session, command: Command) -> CommandResult:
 
 
 async def set_source_approval(session, command: Command) -> CommandResult:
-    """A folder's own approval position (#1477): `manual` (ask every
+    """A folder's own approval position: `manual` (ask every
     time), `returning`, `auto` (YOLO), or None for the workspace's. The serve
     step reads the folder's position over the workspace's
     (`auto_approval.decide`), from the next serve on; it decides no card
     already waiting.
 
-    The value is checked here, by name, and `ck_source_approval_mode` (110)
+    The value is checked here, by name, and `ck_source_approval_mode` (`approval position constraints`)
     bounds it again. One UPDATE of the workspace's own CONNECTED source, with
     the tenant's policy as the second fence: a removed folder's position went
     with its removal (`provisioning.pause_media_source`), and a stale page
@@ -1685,7 +1685,7 @@ _LINK_PURPOSE = {kind: purpose for purpose, kind in CONNECT_PURPOSE_KIND.items()
 
 async def _begin_drive_link(session, command: Command) -> CommandResult:
     """Shared body of `connect_account` / `reconnect_account` — the chat-side
-    start of the WORKSPACE's Drive grant (069: one Google grant per
+    start of the WORKSPACE's Drive grant (`workspace Drive grant`: one Google grant per
     workspace, folders picked under it).
 
     THIN BY DESIGN. The OAuth leg is the API route's; this door only
@@ -1777,7 +1777,7 @@ async def disable_account(session, command: Command) -> CommandResult:
     The audit row is the governance trigger's, under this unit of work's
     actor. No provider call — the same scope statement as `disconnect_account`.
 
-    The account's archive goes first (#1644): the canonical source
+    The account's archive goes first: the canonical source
     prefix, then the archive it originates retired through the epoch writer
     (`archive_lifecycle.remove_account_archive`), and only then the account,
     credential and intent rows below. Every other source is untouched, and the
@@ -1798,7 +1798,7 @@ async def disable_account(session, command: Command) -> CommandResult:
             ) from exc
         raise CommandRefused("not_found", f"destination {account_id}") from exc
     # Its live cards lose their decision buttons, keeping ⚙️ Configure
-    # (#1477): the flagged intents are the ones the worker will
+    # the flagged intents are the ones the worker will
     # terminalize.
     live = await readers.rows(
         session,
@@ -1851,11 +1851,11 @@ async def disable_account(session, command: Command) -> CommandResult:
 
 
 async def disconnect_account(session, command: Command) -> CommandResult:
-    """For the WORKSPACE's Drive grant (069): revoke the one
+    """For the WORKSPACE's Drive grant (`workspace Drive grant`): revoke the one
     credential, KEEP the row, and pause every folder under it.
 
     `paused`, deliberately not `error`. A disconnect is a decision, not a
-    fault, and reserving `error` for faults is what keeps the #1061 disconnect
+    fault, and reserving `error` for faults is what keeps the disconnect
     alert meaningful — if a user disconnecting produced `error`, that beat
     would re-alert them every day about something they chose, and someone
     would eventually silence it, taking the real faults with it. `paused` is
@@ -1892,7 +1892,7 @@ async def disconnect_account(session, command: Command) -> CommandResult:
         ),
         {"ws": command.workspace_id, "provider": vocabulary.PROVIDER_GDRIVE},
     )
-    # The remote half (#1083), enqueued rather than called. Everything above
+    # The remote half, enqueued rather than called. Everything above
     # is the atomic pair; this rides a separate transaction so a Google that
     # is slow, angry or absent cannot roll back a disconnect the user has
     # already been told succeeded — which is what "best-effort"
@@ -1931,9 +1931,9 @@ async def settings_change(session, command: Command) -> CommandResult:
 
 
 async def account_settings_change(session, command: Command) -> CommandResult:
-    """One account's schedule overrides (#1175).
+    """One account's schedule overrides.
 
-    `054` gives every account its own `posts_per_day`,
+    `accounts_sources_media.py` gives every account its own `posts_per_day`,
     `posting_hours_start/end` and `tz`, the account is the
     unit of scheduling, and `fn_clock_tick` resolves the ladder per
     row on every tick. Those four columns are written
@@ -1975,7 +1975,7 @@ async def invite_member(session, command: Command) -> CommandResult:
     once, its link; the email itself goes after the commit.
 
     **The accept half is the reference** — `fn_invitation_accept` and
-    `/join/[token]` (#1090) — so this is built to the acceptor's
+    `/join/[token]` — so this is built to the acceptor's
     contract: the token is hashed with `sessions.token_hash` because that door
     resolves by `token_hash` alone, and `invitations.create` writes every column
     its identity check reads.
@@ -1989,7 +1989,7 @@ async def invite_member(session, command: Command) -> CommandResult:
     **Per person, by email.** `delivery_channel` must be `email`: a Telegram or
     hint-only invitation names no address, and the web's accept takes it with
     no identity proof (`invitations.accept` passes Google, no Telegram id) — an
-    open link by another name. That arm has no caller (#1331), though
+    open link by another name. That arm has no caller, though
     `invitations.create` accepts the channel.
 
     `role` defaults to `member` and is a CEILING, never a grant: the acceptor
@@ -2109,7 +2109,7 @@ async def restore_workspace(session, command: Command) -> CommandResult:
     Two writes, and the second one is the whole point.
 
     **THE CLOCK NEVER CONSULTS CREDENTIAL STATE.** `fn_clock_tick`'s due-scan
-    (`059`) selects `WHERE a.state = 'active' AND ... AND w.state = 'active'`,
+    (`04_functions.sql`) selects `WHERE a.state = 'active' AND... AND w.state = 'active'`,
     and `ix_ig_accounts_due` is partial on the same account predicate. Nothing
     in that path looks at `oauth_credentials`. Offboarding, for its part, never
     touches `ig_accounts.state` at all — leg 2 revokes credentials and stops.
@@ -2122,7 +2122,7 @@ async def restore_workspace(session, command: Command) -> CommandResult:
     mechanism in the schema that expresses it, because it is the one the
     dispatcher predicate actually reads.
 
-    A derived `credential_status` badge (#1078) renders `revoked` as
+    A derived `credential_status` badge renders `revoked` as
     reconnect-needed and is genuinely useful, but it is a DISPLAY fact. **A badge
     does not stop the clock.**
 

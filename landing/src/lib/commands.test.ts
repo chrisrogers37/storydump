@@ -11,7 +11,7 @@ const UUID = "3f8a1c2e-5b4d-4e6f-9a1b-7c2d3e4f5a6b";
 const UUID2 = "9c1b2a3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d";
 
 /**
- * The command schema's pure decisions (#1057/#1063).
+ * The command schema's pure decisions (/).
  *
  * The load-bearing tests here are the STRUCTURAL ones. One route serves every
  * command, and the way that quietly becomes two dialects is a per-command
@@ -236,7 +236,7 @@ describe("the key derivation", () => {
 });
 
 describe("rename_workspace", () => {
-  // #1152: the command is built at the port — `admin` floor, executor wired —
+  //: the command is built at the port — `admin` floor, executor wired —
   // and this allowlist is what offers it. `/welcome` promises "You can rename
   // it later"; the spec is what makes the promise true.
   const spec = COMMAND_SPECS.rename_workspace;
@@ -272,9 +272,9 @@ describe("rename_workspace", () => {
 });
 
 describe("disconnect_account", () => {
-  // #1155: built at all three layers (#1083) — command, executor, and the
+  //: built at all three layers — command, executor, and the
   // background Google revoke — and this table is what offers it.
-  // `storydump.app/privacy` §13 commits to the disconnect publicly.
+  // the privacy page's disconnect description commits to the disconnect publicly.
   const spec = COMMAND_SPECS.disconnect_account;
 
   it("offers disconnect_account", () => {
@@ -377,7 +377,7 @@ describe("account_settings_change", () => {
 });
 
 describe("schedule_item", () => {
-  // #1413: the Media Library's Schedule…. The port reads the wall
+  //: the Media Library's Schedule…. The port reads the wall
   // time in the account's zone and owns every rule about it; this tier
   // checks shape.
   const spec = COMMAND_SPECS.schedule_item;
@@ -738,7 +738,7 @@ describe("an item's Auto-approve flag — set_item_auto_approve (#1477)", () => 
 });
 
 describe("offboard_workspace", () => {
-  // #1127: the executor is built and owner-gated at the port, and this row is
+  //: the executor is built and owner-gated at the port, and this row is
   // its web surface — an owner action, explicit and confirmed.
   const spec = COMMAND_SPECS.offboard_workspace;
 

@@ -8,10 +8,10 @@ only ever been unit-tested has not met the policy that decides whether its
 INSERT lands, and every one of these three writes into a table whose policy is
 doing real work.
 
-These are the async writers production runs (#1325).
+These are the async writers production runs.
 
 **Two doors, because sign-in precedes tenancy.** `identity` and `sessions`
-write user/auth-plane tables (`058` class 3: role-scoped `USING (true)`) before
+write user/auth-plane tables (`07_row_security.sql` class 3: role-scoped `USING (true)`) before
 any workspace exists, which is what `conftest.in_user_plane` opens — the shape
 `src/api/routes/auth.py` and `src/api/principal.py` open, an `engine.begin()`
 with no GUCs. `workspaces.create_workspace` runs inside a claimed tenant, which
@@ -32,17 +32,10 @@ ownerless workspace, and RLS refusing a foreign tenant. Both are paired with
 the corresponding success on the same connection in the same schema, so a
 failure to insert for some unrelated reason cannot read as the guard working.
 
-**`svc_ingress` is the INTENDED posture, not the role production connects
-as, and the tenant-isolation assertions here therefore do not transfer to the
-deployed configuration.** The deployed API connects as the database
-owner, which owns the tenant tables and carries BYPASSRLS; no
-migration sets FORCE ROW LEVEL SECURITY, and nothing in `src/` issues
-`SET ROLE`. So `p_tenant` is inert on the deployed path and
-`test_rls_refuses_a_workspace_that_is_not_the_claimed_tenant` proves a property
-of `svc_ingress`, not of production. It is deliberate: ENABLE without FORCE is
-allowed (#751). Running this file under `svc_ingress` is still worth doing — it
-is the only place the intended posture is exercised at all — but it must not be
-read as evidence about the running system.
+The deployed API connects as `svc_ingress`, and the worker as `svc_worker`.
+The owner role applies schema changes. These tests exercise the ingress
+connection's role-scoped user-plane policies and tenant-scoped workspace
+policies, with a foreign workspace as the isolation control.
 """
 
 from __future__ import annotations
@@ -226,7 +219,7 @@ class TestTheIdentityWriter:
             owner(world, "SELECT count(*) FROM users WHERE id = %s", (first,))[0] == 1
         )
         # STRICTLY greater — the test's own name says "refreshes", and `>=`
-        # does not assert a refresh (#1364: the same weak comparison lets a
+        # does not assert a refresh (: the same weak comparison lets a
         # mutant that stops touching the row entirely go green).
         assert after > before and display == "new"
 
@@ -237,7 +230,7 @@ class TestTheIdentityWriter:
         ``None`` before the writer sees it, so ``None`` here means exactly one
         thing: *this token told us nothing about the name*. Telling us nothing
         is not the same as telling us the name is empty, and only the second
-        would justify a write (#1364).
+        would justify a write.
         """
         upsert(world, sub="sub-keep", display_name="kept")
         upsert(world, sub="sub-keep", display_name=None)
@@ -278,7 +271,7 @@ class TestTheIdentityWriter:
         assert after > before and display == "kept"
 
     def test_primary_email_fills_when_empty_and_follows_the_claim(self, world):
-        """#1579: the stored address follows the verified claim at every
+        """The stored address follows the verified claim at every
         sign-in — filled when empty, rewritten when the Google address
         changes, and left alone by a token that carries no email."""
         first = upsert(world, sub="sub-mail")
@@ -333,7 +326,7 @@ class TestTheIdentityWriter:
     def test_a_returning_user_whose_new_email_is_taken_signs_in_and_keeps_theirs(
         self, world, caplog
     ):
-        """The clash rule (#1579), for both shapes of returning user: one
+        """The clash rule, for both shapes of returning user: one
         with no stored address and one whose address changed. Each signs in
         as themselves, keeps what they had, and the clash is logged by user id
         with no address in the line. Nothing is merged: the holder is
@@ -439,9 +432,9 @@ class TestTheIdentityWriter:
         """**Asserted rather than fixed.**
 
         The live writer refuses only a FALSY subject, with a `ValueError`, and
-        `user_identities.external_id` carries no non-blank CHECK — so a `"   "`
+        `user_identities.external_id` carries no non-blank CHECK — so a `" "`
         subject is written. The database is the authority and no Python
-        pre-check is added here (#1325).
+        pre-check is added here.
         """
         before = owner(world, "SELECT count(*) FROM users")[0]
         with pytest.raises(ValueError):
@@ -503,7 +496,7 @@ class TestTheSessionWriter:
 
     def test_revoke_is_idempotent_and_keeps_the_first_instant(self, world):
         """`sessions.revoke` returns a bool and keeps the first instant: the
-        live statement's ``WHERE ... revoked_at IS NULL`` is what guarantees
+        live statement's ``WHERE... revoked_at IS NULL`` is what guarantees
         it."""
         user_id = self._user(world, "revoke")
         value = self._issue(world, user_id)
@@ -759,7 +752,7 @@ class TestTheSessionWriter:
 
     def test_a_disabled_user_is_refused_at_the_one_ingress_gate(self, world):
         """`sessions.resolve` denies a `disabled` user by name — "the ONE
-        ingress gate" `053`'s comment on `users.state` names — so a disabled
+        ingress gate" `identity_and_tenancy.py`'s comment on `users.state` names — so a disabled
         account cannot reach any route, workspace-scoped or not.
         """
         user_id = self._user(world, "disabled")
@@ -913,7 +906,7 @@ class TestTheWorkspaceWriter:
         """**Asserted rather than fixed.** The live writer has no Python check
         on an empty `owner_user_id`, and the refusal is the `workspace_members`
         insert failing on the uuid column. A typed Python pre-check is a
-        behaviour change and is not added here (#1325)."""
+        behaviour change and is not added here."""
         with pytest.raises(Exception) as err:
             self._make(world, name="ownerless", owner_user_id="")
         assert not isinstance(err.value, InvalidWorkspaceArgs), (
@@ -939,7 +932,7 @@ class TestTheWorkspaceWriter:
         """**The default's second home.** The live writer spells
         ``COALESCE(:tz, 'UTC')`` in Python, and the column carries the same
         default. The stored value is the same either way, so nothing changes
-        here — but it is a second home for a default the schema owns (#1325),
+        here — but it is a second home for a default the schema owns,
         and removing the COALESCE would change what a NULL `tz` writes."""
         _user, ws_id = self._make(world, name="default tz", sub="sub-nulltz", tz=None)
         assert owner(world, "SELECT tz FROM workspaces WHERE id = %s", (ws_id,))[0] == (

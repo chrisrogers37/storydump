@@ -56,7 +56,7 @@ export default async function WorkspacesPage() {
   if (workspaces.data.length === 0) redirect("/welcome");
 
   // An invitation to another workspace, for someone who signed in without the
-  // link (115). Shown above the list: it is the one thing here that is new.
+  // link (`invitee invitation functions`). Shown above the list: it is the one thing here that is new.
   const invitations = await invitationsRead;
 
   return (

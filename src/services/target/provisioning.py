@@ -1,5 +1,5 @@
 """Provisioning — the two row writers a workspace needs before it can schedule
-anything (#1041).
+anything.
 
 ## What it provisions and changes
 
@@ -33,25 +33,25 @@ intents that await approval, and `mark_posted` is how a human closes them. That
 is why this module is scoped to destinations and sources.
 
 Connections are minted elsewhere: the Instagram grant is minted by
-`ig_login_oauth` (the redirect flow of #1041, `INSERT INTO oauth_credentials`)
+`ig_login_oauth` (the redirect flow of, `INSERT INTO oauth_credentials`)
 behind the `connect_account` / `reconnect_account` / `disconnect_account`
 commands (`command_executors`), and this module only revokes one, in
 `disable_destination`. `publish_pipeline` is unparked whenever `media_fetch`,
 `meta` and `transit` are wired — the worker wires the real Graph adapter. The
-defaults above are what keep a new workspace off Meta (#1325).
+defaults above are what keep a new workspace off Meta.
 
 ## The seeding rule, which is the whole reason this writer is not a bare INSERT
 
 `fn_clock_tick` selects `WHERE state = 'active' AND next_slot_at IS NOT NULL
 AND next_slot_at <= now()` and then ADVANCES the cursor with
 `fn_next_slot(a.next_slot_at, …)`. Every one of the three places that writes
-`next_slot_at` in the whole schema (059, 062, 063) is that same advance —
+`next_slot_at` in the whole schema (`04_functions.sql`, `fn_clock_tick reauthentication leg`, `fn_clock_tick provider guards`) is that same advance —
 **nothing anywhere seeds the first value.** A destination created with
 `next_slot_at = NULL` is therefore invisible to the clock forever, and
 `plan_slot` stays built-and-dead.
 
 So the destination writer seeds the cursor, using the SHIPPED `fn_next_slot`
-against the SHIPPED effective-settings expression (059's own
+against the SHIPPED effective-settings expression (`04_functions.sql`'s own
 `COALESCE(account, workspace)` ladder) rather than a second copy of either. A
 private copy of the slot arithmetic is how the clock and the writer come to
 disagree about when a workspace posts.
@@ -69,12 +69,12 @@ get a NULL cursor, which nothing will ever advance.
 `media_items.source_id` is NOT NULL, so **every** media item hangs off a
 source of one of the two. There is no upload path without a migration, and
 this module does not pretend otherwise: it writes the Drive source ROW.
-Reading the folder is the Drive seam (`WorkerDeps.drive`, #982).
+Reading the folder is the Drive seam (`WorkerDeps.drive`).
 
 ## What audits, and what does not
 
 `ig_accounts` is one of the five governance tables carrying
-`trg_governance_audit` (055), so a destination write audits itself provided the
+`trg_governance_audit` (`intent_ledger.py`), so a destination write audits itself provided the
 actor GUCs are set — which the unit of work does. **Nothing here writes
 `audit_events` by hand**; a hand-written row would be a second, divergent trail.
 `media_sources` deliberately carries no such trigger, so creating a source is
@@ -101,7 +101,7 @@ logger = logging.getLogger(__name__)
 #: `ck_sources_provider` allows.
 GDRIVE_PROVIDER = vocabulary.PROVIDER_GDRIVE
 
-#: `media_sources.config` shape for a `gdrive` source, per 054's own column
+#: `media_sources.config` shape for a `gdrive` source, per `accounts_sources_media.py`'s own column
 #: comment: `{v:1, folder_ref:text, root_name?:text}`.
 GDRIVE_CONFIG_VERSION = 1
 
@@ -110,10 +110,10 @@ GDRIVE_CONFIG_VERSION = 1
 #: never to reject a real one and small enough that the column cannot be used
 #: as storage. Length only — asserting a digits-only shape here would refuse a
 #: provider id format Meta has not shipped yet, on a column deliberately left
-#: open (054: "the REAL account", opaque to us).
+#: open (`accounts_sources_media.py`: "the REAL account", opaque to us).
 ACCOUNT_REF_MAX = 255
 
-#: `ig_accounts.handle` is `VARCHAR(50)` (054), so this is the COLUMN's bound
+#: `ig_accounts.handle` is `VARCHAR(50)` (`accounts_sources_media.py`), so this is the COLUMN's bound
 #: rather than a policy of ours: a longer handle is refused by name here instead
 #: of arriving at Postgres to be rejected as a 500. Deliberately not Instagram's
 #: own 30-character limit — that is a provider rule this tier cannot verify, and
@@ -121,10 +121,10 @@ ACCOUNT_REF_MAX = 255
 HANDLE_MAX = 50
 
 #: The provisional-identity prefix for a destination created from a TYPED handle
-#: rather than from an OAuth connection (#1089, shape (b)).
+#: rather than from an OAuth connection (shape (b)).
 #:
 #: `uq_ig_account_live (workspace_id, provider_account_ref)` keys destination
-#: identity on a column 054 calls "the REAL account" — a Meta id. Manual mode has
+#: identity on a column `accounts_sources_media.py` calls "the REAL account" — a Meta id. Manual mode has
 #: no Meta id and must still produce one row per feed, so the handle stands in.
 #: Writing it BARE would collide the day OAuth supplies the real id: the same
 #: feed would arrive under a different ref, producing two destinations and two
@@ -215,17 +215,17 @@ def _identity_for(
     Four cases, enumerable on purpose — the shape a signature with two optional
     arguments cannot state:
 
-    ==========================  ============================================
-    supplied                    result
-    ==========================  ============================================
-    a reference key at all      `account_ref_from` decides — it is the one
+    ========================== ============================================
+    supplied result
+    ========================== ============================================
+    a reference key at all `account_ref_from` decides — it is the one
                                 owner of what a reference may be, so a
                                 malformed one is REFUSED rather than quietly
                                 replaced by a derived handle. Any handle is
                                 stored AS GIVEN.
-    handle alone                a derived `manual:<handle>`, handle normalised
-    neither                     `account_ref_required`
-    ==========================  ============================================
+    handle alone a derived `manual:<handle>`, handle normalised
+    neither `account_ref_required`
+    ========================== ============================================
 
     **An explicit reference wins for VALIDATION as well as for storage**, and
     that is the whole reason this is a function. Normalising the handle before
@@ -269,7 +269,7 @@ async def create_destination(
     destination returns the existing row rather than a second schedule against
     one real Instagram feed. A `moved` row is invisible to the index, so a
     destination that once moved away and returns gets a NEW row rather than
-    reviving a tombstone — 054's stated intent.
+    reviving a tombstone — `accounts_sources_media.py`'s stated intent.
 
     *provider_account_ref* is optional: supply it when a real Meta id is known
     (the OAuth path), or supply only *handle* and this derives a provisional
@@ -282,7 +282,7 @@ async def create_destination(
     that failure would leave no trace anywhere.
     """
     ref, display_handle = _identity_for(provider_account_ref, handle)
-    # `fn_next_slot(now(), …)` against 059's effective-settings ladder. Written
+    # `fn_next_slot(now(), …)` against `04_functions.sql`'s effective-settings ladder. Written
     # as a scalar subquery over `workspaces` because the settings live there
     # and the account row does not exist yet to join to.
     seed = (
@@ -309,7 +309,7 @@ async def create_destination(
             "ref": ref,
             "handle": display_handle,
             # Per-account overrides are not settable at creation; NULL means
-            # "inherit the workspace column", which is what 054's schedule
+            # "inherit the workspace column", which is what `accounts_sources_media.py`'s schedule
             # columns document NULL to mean.
             "tz": None,
             "hs": None,
@@ -326,21 +326,16 @@ async def create_destination(
         #
         # NO CURRENTLY REACHABLE PATH PRODUCES IT — "the workspace was not
         # visible" is provably wrong:
-        #   - workspace absent    → `ig_accounts_workspace_id_fkey` violation
-        #     fires first (asyncpg ForeignKeyViolationError).
-        #   - claim ≠ workspace_id → refused by `authorize_member`, which binds
-        #     BOTH keys in its WHERE (`workspace_id = :ws AND user_id = :u`)
-        #     and is what actually holds tenant isolation on this route.
-        #     The `p_tenant` WITH CHECK on `ig_accounts` would refuse it too —
-        #     but NOT ON THE DEPLOYED PATH, and that leg is therefore not load
-        #     bearing here: production connects as `neondb_owner`, which owns
-        #     these tables and is BYPASSRLS, and no migration sets FORCE ROW
-        #     LEVEL SECURITY, so the policy is inert (#751: ENABLE-without-FORCE
-        #     is the schema's posture). It would stand only under a runtime
-        #     login with a definer door, no owner role and no BYPASSRLS.
-        #   - a NULL settings column → `posts_per_day`, `posting_hours_*` and
-        #     `tz` are all NOT NULL on `workspaces` (053), and `fn_safe_tz`
-        #     degrades a decayed zone to UTC rather than returning NULL.
+        # - workspace absent → `ig_accounts_workspace_id_fkey` violation
+        # fires first (asyncpg ForeignKeyViolationError).
+        # - claim ≠ workspace_id → refused by `authorize_member`, which binds
+        # BOTH keys in its WHERE (`workspace_id = :ws AND user_id = :u`)
+        # and is what actually holds tenant isolation on this route.
+        # The `p_tenant` WITH CHECK on `ig_accounts` also confines the
+        # deployed `svc_ingress` connection to its claimed workspace.
+        # - a NULL settings column → `posts_per_day`, `posting_hours_*` and
+        # `tz` are all NOT NULL on `workspaces` (`identity_and_tenancy.py`), and `fn_safe_tz`
+        # degrades a decayed zone to UTC rather than returning NULL.
         # The check is cheap, and without it a schema change that breaks the
         # seed would ship silently — the defect this writer exists to prevent.
         raise ProvisioningRefused(
@@ -376,7 +371,7 @@ def folder_ref_from(value: object) -> str:
     Two guards. A denylist of characters no Drive id carries catches what still
     looks like a URL; then the id must fit the shape the adapter itself
     requires (`google_drive_adapter.FOLDER_ID_RE` — the same shape the folder
-    browser lists, #1246, and the walk splices into its `q` strings, #1256).
+    browser lists, and the walk splices into its `q` strings).
     A value the adapter would refuse must be refused HERE, at the pick, rather
     than become a source that errors on every sync forever. Refusing costs a
     person one clear error; accepting costs them a dead source.
@@ -446,7 +441,7 @@ async def refuse_nested_pick(
     """Connected folders are DISJOINT: a folder
     inside a connected one is already synced by its parent, and one that
     contains a connected folder would make two sources share rows and freeze
-    attribution to whichever listed first (#1256). Refuses by name
+    attribution to whichever listed first. Refuses by name
     (`source_nested`, the detail naming the other folder) when the candidate's
     parent chain holds a connected folder, or a connected folder's chain holds
     the candidate. A re-pick of the same folder asks nothing; a removed folder
@@ -554,7 +549,7 @@ async def attach_connected_identity(
     provider_account_ref: str,
     handle: Optional[str],
 ) -> None:
-    """A destination becomes a CONNECTED destination (#1220).
+    """A destination becomes a CONNECTED destination.
 
     The row was created from a typed handle with a provisional
     ``manual:<handle>`` reference (`MANUAL_REF_PREFIX`); the OAuth callback now
@@ -781,10 +776,10 @@ async def disable_destination(
     are flagged `cancel_requested`, the overlay `cancel` uses (the
     user never writes a terminal state; the pipeline honours the flag at
     admission, the Queue offers a flagged card no action, and the reaper's
-    cancel leg (087) ends the waiting states); and any grant issued for
+    cancel leg (`fn_reaper_sweep cancel leg`) ends the waiting states); and any grant issued for
     the row before the removal is retired, so it cannot land afterwards. A
     planned story it flags before its time is served is told about in this
-    transaction (089, `account_removed`): flagged, it will never reach the
+    transaction (`fn_planned_serve / fn_planned_misses`, `account_removed`): flagged, it will never reach the
     miss door, which lists no flagged row, so this is its one notice.
 
     The row stays. `oauth_credentials` and the intent history hang off it, and
@@ -829,7 +824,7 @@ async def disable_destination(
     # actor is the worker, and the user never writes a terminal state (the
     # rule `cancel` follows). The pipeline honours the flag at admission; the
     # Queue shows a flagged card as cancelling and offers it no action; the
-    # reaper's cancel leg (087) ends the WAITING states at its next sweep;
+    # reaper's cancel leg (`fn_reaper_sweep cancel leg`) ends the WAITING states at its next sweep;
     # the caller retires the cards now (`_supersede_everywhere`).
     flagged = await executor.execute(
         text(
@@ -874,7 +869,7 @@ async def pause_media_source(session, *, workspace_id: str, source_id: str) -> b
     meaningful — and `config.removed` is what keeps a later RECONNECT from
     reviving it alongside the folders a dead grant had paused.
 
-    The folder's approval position goes with the removal (#1477): picking it
+    The folder's approval position goes with the removal: picking it
     again follows the workspace, as any new folder does, so a folder that was
     on YOLO never comes back on YOLO without someone choosing it again, and
     the clearing is audited as `set_source_approval`'s changes are. A

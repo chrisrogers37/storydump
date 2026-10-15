@@ -61,7 +61,7 @@ def world(admin_conn, owner_actor):
                     (chain["ws"],),
                 )
                 # `approve` refuses a `post` tap without a usable Instagram
-                # token (#1276): the API workspace here is connected.
+                # token: the API workspace here is connected.
                 cur.execute(
                     "INSERT INTO oauth_credentials (workspace_id, ig_account_id,"
                     " provider, encrypted_payload, state)"
@@ -119,7 +119,7 @@ def _one(world, sql, params=()):
 
 def _intent(world, tag: str, *, state="awaiting_approval", origin="cadence") -> dict:
     """An intent on the chain's account, on its own media item, with a SENT
-    card in both groups (refs 1xxx in A, 2xxx in B). A planned story (088) is
+    card in both groups (refs 1xxx in A, 2xxx in B). A planned story (`post_intents.origin`) is
     born planned: its origin cannot change afterwards."""
     ((media,),) = _write(
         world,
@@ -257,7 +257,7 @@ def _card_states(world, intent_id):
 
 class TestATapFlipsOnceAndEditsEveryCard:
     def test_a_planned_story_is_approved_by_the_tapper_like_any_other(self, world):
-        """088 lets only a person approve a planned story. A tap is a person:
+        """`post_intents.origin` lets only a person approve a planned story. A tap is a person:
         the dispatcher stamps the tapper as `user` with their linked id, so
         the trigger admits it, and the audit row says who."""
         i = _intent(world, "post-planned", origin="planned")
@@ -448,12 +448,12 @@ class TestARepeatOrLateTapAnswers:
         ]
         assert len(sup) == 1
         # The adopted twin's edit stores no keyboard: the sender renders the
-        # review buttons when it claims it, from the story's state (#1477),
+        # review buttons when it claims it, from the story's state,
         # so the twin gets them as the known card does.
         assert "reply_markup" not in sup[0], sup[0]
 
     def test_a_deciding_tap_from_a_twin_edits_the_twin_too(self, world):
-        """#1308: the tap that FLIPS the story is as likely to come from the
+        """The tap that FLIPS the story is as likely to come from the
         twin as from the known card (they sit side by side). The flip's
         outcome edits every known card; the twin is adopted and edited in the
         same transaction, not on a second tap."""
@@ -486,7 +486,7 @@ class TestARepeatOrLateTapAnswers:
         assert _card_states(world, i["id"])["4646"] == "superseded"
 
     def test_a_tap_naming_another_stories_message_adopts_nothing(self, world):
-        """#1308: Telegram does not bind a callback's intent token to its
+        """Telegram does not bind a callback's intent token to its
         message id — a modified client can send story X's token with story
         Y's message. A message the ledger already owns (any row on the
         binding: a card, an invitation, a notice) is never adopted by
@@ -540,7 +540,7 @@ class TestARepeatOrLateTapAnswers:
         assert adopted == [("superseded",)], adopted
 
     def test_a_card_sent_once_has_no_twin_to_adopt(self, world):
-        """#1308: a twin exists only per lost answer. A card whose row shows
+        """A twin exists only per lost answer. A card whose row shows
         ONE send cannot have a twin, so a tap from an unknown message id — a
         forged callback, a forwarded copy — adopts nothing and edits
         nothing."""
@@ -677,7 +677,7 @@ class TestATapNeverWaitsOnASend:
 def _sweep_settled(world) -> int:
     """`prompts.sweep_settled_cards` the way the reaper runs it: as the
     worker's login, in its own session with the EMPTY tenant and the `system`
-    actor. The selection is a door the worker reads through (082); each row
+    actor. The selection is a door the worker reads through (`worker sweep functions`); each row
     is healed under its own workspace, and the caller's scope handed back."""
     from src.services.target import prompts, unit_of_work
 
@@ -714,7 +714,7 @@ class TestCardsEndInEveryTerminalState:
 
     def test_a_revoked_bindings_cards_do_not_starve_the_sweep(self, world):
         """A revoked group's cards cannot be edited and are not selected; the
-        second beat finds nothing left to heal (#1271)."""
+        second beat finds nothing left to heal."""
         i = _intent(world, "revoked-1", state="awaiting_approval")
         ((revoked,),) = _write(
             world,
@@ -791,7 +791,7 @@ class TestTapAdmissionOnTheLedger:
     def test_an_adopting_tap_spends_one_unit_and_a_plain_repeat_none(self, world):
         """An answered tap that adopted a twin wrote a row and a paced edit:
         it spends one unit of admission on the ledger; the next tap from the
-        same, now-known, message spends nothing (#1308)."""
+        same, now-known, message spends nothing."""
         i = _intent(world, "adm-adopt", state="posted")
         _lost_answer(world, i["id"])
         before = self._count(world) or 0
@@ -842,7 +842,7 @@ class TestTapAdmissionOnTheLedger:
 
 
 class TestTheConfigureMenuOnTheLedger:
-    """#1477, as the production ingress role through the real
+    """As the production ingress role through the real
     dispatcher: Configure, Back and the item's Auto-approve flag. Every menu
     tap passes the flag's gate and spends one unit of admission on the real
     `rate_counters` row; the toggle writes the flag and names the person;
@@ -1046,7 +1046,7 @@ class TestDryRunLeavesTheTapOnTheJob:
             )
 
 
-#: #1286 — the tap's statement budget, counted at the cursor: the GUCs and
+#: — the tap's statement budget, counted at the cursor: the GUCs and
 #: lock timeout in one, the tapper and their name in one, the intent and its
 #: token in one, the flip, the job, the supersede of every binding in one,
 #: the admission debit, and the savepoint pair. The route adds its dedup

@@ -4,7 +4,7 @@ import { MEDIA_CHECKED_COPY, bareHandle, type DestinationSourceView } from "./so
 
 /**
  * Destination readiness, as the overview says it (the mix resource's
- * `destinations` and `guidance`, #1644).
+ * `destinations` and `guidance`).
  *
  * THE SERVER DECIDES, THIS SAYS. A converted workspace's mix resource lists
  * every listed account with its `state`, `tone` and `remedy`, computed from the
@@ -199,7 +199,7 @@ export function parseReadiness(data: unknown): Readiness | null {
 // ── Saying it ───────────────────────────────────────────────────────────────
 
 /** Why a matching post is left out, after "because". The reasons are the
- *  suitability function's (138); one this page does not know is said plainly. */
+ * suitability function's (`fn_source_asset_suitability`); one this page does not know is said plainly. */
 const EXCLUSION_COPY: Record<string, string> = {
   too_recent: "they are newer than the minimum age",
   slide_not_first: "this source uses only the first slide of each carousel",

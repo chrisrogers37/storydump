@@ -1,49 +1,17 @@
-"""The intent ledger service (#858).
+"""The intent ledger service.
 
-A deliberately thin layer over `post_intents`. Everything that *enforces*
-anything lives in the database: migration `055` ships `trg_intent_guard`,
-`trg_intent_audit` and `trg_intent_insert_guard`, `061` adds
-`trg_intent_no_self_transition` (#883), and **the trigger, not the service, is
-the authority**.
+The database enforces the state machine in `post_intent_transitions` through
+`trg_intent_guard`, `trg_intent_no_self_transition`, `trg_intent_audit` and
+`trg_intent_insert_guard`, defined in `src/models/target/ddl/`.
 
-## Why this module validates nothing
+This module issues an UPDATE and translates a database refusal into a typed
+error. It keeps no Python copy of the legal edges. `legal_transitions` reads
+the edge table for display, never to validate a write.
 
-The obvious convenience here is to load the legal edges once and check a
-transition in Python before issuing the UPDATE — friendlier errors, one fewer
-round trip. **That would be a second authority**, and the failure it invites is
-not hypothetical: the Python copy and `post_intent_transitions` drift, the
-service starts refusing a transition the database allows (or worse, permitting
-one it forbids), and every test that goes through the service keeps passing
-because it is asserting the copy.
-
-So this module issues the UPDATE and lets the trigger decide. Its only job
-beyond that is to translate the database's refusal into a typed error, which
-is a *presentation* concern and cannot disagree with the authority.
-
-:func:`legal_transitions` exists for callers that need to *show* the edge set —
-a UI, an operator report. It reads the table. It is never consulted before a
-write, and no caller should make it so.
-
-## Which guarantees are the database's
-
-What a replayed target schema does:
-
-* **Terminal rows reject EVERY update**, not only state changes — an attempt to
-  set `ig_permalink` on a `cancelled` intent raises. The guard tests
-  `OLD.state` first, before it looks at what changed.
-* **A same-state write is refused** (#883, migration `061`). `trg_intent_guard`
-  compares only when `NEW.state IS DISTINCT FROM OLD.state`, so under `055`
-  alone `scheduled → scheduled` succeeded as a no-op — and the loser of a
-  concurrent transition, re-evaluated against the winner's row, was told it
-  had won. `061`'s `BEFORE UPDATE OF state` trigger refuses any write that
-  names `state` with its current value; an update that never names `state` (a
-  checkpoint) does not fire it. The gate asserts both halves.
-* **An actor-less state change raises, from `trg_intent_audit`, on every
-  connection.** A pooled connection that has carried an actor reads the unset
-  `app.actor_kind` as `''`, not NULL. Under `055` the trigger's `IS NULL` test
-  let that through, and only `ck_audit_actor` refused the change; `085`
-  (#1421) reads `''` as unset, in `trg_governance_audit` too. The gate pins
-  both connection states.
+Terminal rows reject every update. A write naming `state` rejects the current
+state, while a checkpoint that leaves `state` unnamed can update a live row.
+Audit triggers require an actor and treat both NULL and an empty actor GUC
+as unset, including on pooled connections.
 """
 
 from __future__ import annotations
@@ -62,7 +30,7 @@ from src.services.target._dbapi import driver_error_is
 
 class IntentNotVisible(StorydumpError):
     """The UPDATE matched no row: the intent does not exist, or row-level
-    security hides it from this session's tenant (#1423).
+    security hides it from this session's tenant.
 
     A caller's bug, not a ledger refusal, so it is deliberately not an
     :class:`IntentTransitionRefused`: the callers that catch a refusal and
@@ -90,11 +58,11 @@ class IntentTransitionRefused(StorydumpError):
 async def legal_transitions(session) -> set:
     """The edge set, read from `post_intent_transitions`.
 
-    For display only, and nothing displays it: the one caller is
-    `tests/scripts/test_intent_ledger_gate.py`, which uses it to prove the edge
-    set is READ from `post_intent_transitions` rather than kept in Python
-    (#1325). Never call this to pre-validate a write — see the
-    module docstring on why a second authority is the thing this module avoids.
+        For display only, and nothing displays it: the one caller is
+        `tests/scripts/test_intent_ledger_gate.py`, which uses it to prove the edge
+        set is READ from `post_intent_transitions` rather than kept in Python.
+    Never call this to pre-validate a write — see the
+        module docstring on why a second authority is the thing this module avoids.
     """
     rows = await session.execute(
         text("SELECT from_state, to_state FROM post_intent_transitions")
@@ -107,7 +75,7 @@ async def legal_transitions(session) -> set:
 #: services), because two spellings of the set have to AGREE for a
 #: workflow to converge at all: `offboarding.drain` selects `NOT terminal` and
 #: cancels it,
-#: and `fn_offboard_finalize` (`059`) refuses while any `NOT terminal` row
+#: and `fn_offboard_finalize` (`04_functions.sql`) refuses while any `NOT terminal` row
 #: survives, so a state one list carries and the other does not is an offboard
 #: that mints successors forever. The database is still the authority — this is
 #: a name for `trg_intent_guard`'s set, not a second one.
@@ -129,7 +97,7 @@ LIVE_SUBJECT = (
 
 #: An account a story may still post to, as SQL on the account's alias ``a``:
 #: one spelling for the schedule verbs' account read, the serve and miss doors,
-#: the successor trigger (116), which the schedule gate pins against their
+#: the successor trigger (`intent repeat constraints`), which the schedule gate pins against their
 #: bodies, and the calendar's projection of a series (`upcoming`).
 LIVE_ACCOUNT = (
     "a.state IN (" + ", ".join(f"'{s}'" for s in vocabulary.LIVE_ACCOUNT_STATES) + ")"
@@ -137,7 +105,7 @@ LIVE_ACCOUNT = (
 
 
 def repeat_sql(prefix: str = "") -> str:
-    """A story's repeat rule as one value, NULL for none (116, #485): the one
+    """A story's repeat rule as one value, NULL for none (`intent repeat constraints`): the one
     shape every read and every answer carries, ``{unit, every, days, at}``
     with ``at`` as ``HH:MM``. *prefix* is the table's alias (``"i."``), or
     nothing for a bare row (a RETURNING)."""
@@ -177,11 +145,11 @@ async def transition(
     back as :class:`IntentTransitionRefused`. A refusal is a Postgres error, so
     it aborts the caller's transaction: to go on after catching one, call this
     inside `session.begin_nested()` and catch the refusal outside that block,
-    so the savepoint rolls back (#1422).
+    so the savepoint rolls back.
 
-    *approval_rule* is the automatic approval's stamp (#1477): the serve step
+    *approval_rule* is the automatic approval's stamp: the serve step
     passes it with `approved`, and the same UPDATE writes it, because
-    `tg_intent_person_or_rule` (110) admits a rule only on the approval it
+    `tg_intent_person_or_rule` (`approval position constraints`) admits a rule only on the approval it
     names. This is the column's one writer.
 
     The caller must be inside a unit of work that has set `app.actor_kind` —
@@ -191,7 +159,7 @@ async def transition(
 
     An UPDATE that matches no row (an id that does not exist, or a row this
     session's tenant cannot see) raises :class:`IntentNotVisible` instead of
-    passing as a success (#1423).
+    passing as a success.
     """
     sets, params = "state = :s", {"s": to_state, "i": intent_id}
     if approval_rule is not None:
@@ -224,7 +192,7 @@ async def settlement(session, *, workspace_id: str, intent_id: str) -> dict:
     the intent that MOVED it (`ix_audit_entity`, bound on `workspace_id`;
     `audit.moved`), or the row's own `entered_state_at` when no audit row
     exists (a clock or reaper move records `actor_user_id` NULL).
-    ``approval_rule`` is the rule that approved it, None for a person (#1477):
+    ``approval_rule`` is the rule that approved it, None for a person:
     a line names the mechanism with it (`prompts.outcome_line`)."""
     row = (
         (

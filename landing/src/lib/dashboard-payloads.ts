@@ -1,5 +1,5 @@
 /**
- * The shapes the dashboard screens read from the target router (#1044).
+ * The shapes the dashboard screens read from the target router.
  *
  * Every type below is read off the route that serves it and named for it.
  *
@@ -13,7 +13,7 @@
  *
  * ── UNAVAILABLE is not zero, and the type system enforces it ───────────────
  *
- * The `times_posted` buckets have NO source on the target tier (#1048), so
+ * The `times_posted` buckets have NO source on the target tier, so
  * they are `null`, NOT `0` and NOT omitted. The configured category mix has
  * one, the category-mix route, which the overview's mix card reads.
  *
@@ -64,7 +64,7 @@ export type StatsResponse = {
  *
  * A second declaration or import path for one contract is how two copies
  * come to disagree: structural typing keeps both compiling while they drift
- * (#1338). The signpost is this paragraph, which cannot be imported.
+ *. The signpost is this paragraph, which cannot be imported.
  */
 
 /** A row of `GET …/media?state=&never_posted=&limit=` — `_MEDIA_COLUMNS`. */
@@ -101,7 +101,7 @@ export type MediaRow = {
   /** The link its stories ask a person to add by hand; shown only through `httpsHref`. */
   link_url: string | null;
   /**
-   * Its Auto-approve flag (#1477): each of its stories is approved
+   * Its Auto-approve flag: each of its stories is approved
    * automatically when served, whatever its folder's position. False until a
    * member turns it on. An API that does not send it yet leaves it out, and
    * `MediaCard` reads that as off.
@@ -135,11 +135,11 @@ export type WorkspaceConfig = {
   enable_ai_captions: boolean | null;
   api_publishing_enabled: boolean | null;
   offboarding_at: string | null;
-  /** When an offboarding workspace can last be restored; server-computed (#1127). */
+  /** When an offboarding workspace can last be restored; server-computed. */
   restorable_until: string | null;
-  /** The deployment's fallbacks for the columns `053` declares NULL, served
-   *  rather than retyped here — the settings cards show them and must not
-   *  hold a copy (#1366; the same reason as `restorable_until`). */
+  /** The deployment's fallbacks for the columns `identity_and_tenancy.py` declares NULL, served
+   * rather than retyped here — the settings cards show them and must not
+   * hold a copy (the same reason as `restorable_until`). */
   defaults: { repost_ttl_days: number; skip_ttl_days: number };
   created_at: string;
   updated_at: string | null;
@@ -161,8 +161,8 @@ export type SourceRow = {
   /** Removed under Integrations (a pause with a flag); false = connected. */
   removed?: boolean;
   /**
-   * The folder's own approval position (110 `ck_source_approval_mode`), or
-   * null for Workspace default: its stories follow the workspace's (#1477).
+   * The folder's own approval position (`ck_source_approval_mode`), or
+   * null for Workspace default: its stories follow the workspace's.
    * Typed as the wire carries it, as `WorkspaceConfig.approval_mode` is: an API
    * that does not send it yet leaves it out, and it may be a position this tier
    * does not know. `folderPositionOf` narrows it and shows either as unavailable.
@@ -173,7 +173,7 @@ export type SourceRow = {
 export type SourcesResponse = { sources: SourceRow[] };
 
 /**
- * `GET /workspaces/{ws}/drive` — the WORKSPACE's Google Drive grant (069:
+ * `GET /workspaces/{ws}/drive` — the WORKSPACE's Google Drive grant (`workspace Drive grant`:
  * one per workspace, every folder under it), projected as the
  * destinations' credentials are. `none` = never connected; `expired` and
  * `revoked` = reconnect needed. Never a token.
@@ -192,7 +192,7 @@ export type DriveStatusResponse = { drive: DriveStatus };
 // because three screens ask the same questions and a hand-written list at each
 // call site is how two of them quietly diverge.
 
-/** What a history tab means: the terminal outcomes (#1044). */
+/** What a history tab means: the terminal outcomes. */
 export const HISTORY_STATES = "posted,skipped,rejected";
 
 /**
@@ -206,7 +206,7 @@ export const POSTED_STATES = "posted";
  * What a queue means: everything before a terminal outcome — all seven.
  *
  * The queue's read is `intents?state=`, which names no set of its own
- * (#1044), so the set is this file's. A card that undercounts without
+ *, so the set is this file's. A card that undercounts without
  * disclosing is worse than one that errors, because nothing on the page
  * invites the reader to doubt it.
  *
@@ -228,12 +228,12 @@ export const POSTED_STATES = "posted";
 export const QUEUE_STATES = NON_TERMINAL_STATES.join(",");
 
 /**
- * The terminal outcomes — the other half of the partition. Migration `055`
+ * The terminal outcomes — the other half of the partition. `intent_ledger.py`
  * labels these `TERMINAL` in `ck_intent_state` itself, so this is the schema's
  * classification rather than one invented here.
  *
  * Deliberately a SUPERSET of `HISTORY_STATES`: `expired`, `failed` and
- * `cancelled` are terminal, and the history tab does not show them (#1044).
+ * `cancelled` are terminal, and the history tab does not show them.
  * Naming them here is what lets the contract test account for all thirteen
  * states rather than for thirteen minus whatever the history tab happens to
  * render.
@@ -260,7 +260,7 @@ export const REVIEW_REQUIRED_STATE = "review_required";
 /**
  * A figure no target route serves. NEVER rendered as a number.
  *
- * Greppable on purpose (#1048): `grep -rn -w Unavailable landing/src/` finds
+ * Greppable on purpose: `grep -rn -w Unavailable landing/src/` finds
  * every place the screens type or render a figure as unavailable.
  */
 export type Unavailable = null;
@@ -277,7 +277,7 @@ export type SummaryView = {
    * `Unavailable` when there have been NO publish attempts. A rate over an
    * empty divisor is not a low rate, and `0%` on this card reads as a verdict
    * on the workspace rather than as the absence of anything to judge. Same
-   * rule as the unsourced columns (#1048), different cause: this one resolves
+   * rule as the unsourced columns, different cause: this one resolves
    * itself the moment one publish is attempted.
    */
   success_rate: number | Unavailable;
@@ -317,14 +317,14 @@ export type PoolHealthView = {
   total_active: number;
   never_posted: number;
   by_category: { name: string; count: number }[];
-  /** #1048: `times_posted` buckets have no target-side source. */
+  /**: `times_posted` buckets have no target-side source. */
   posted_once: number | Unavailable;
-  /** #1048: `times_posted` buckets have no target-side source. */
+  /**: `times_posted` buckets have no target-side source. */
   posted_multiple: number | Unavailable;
   /**
    * Eligible to post now — available, and past its repost TTL.
    *
-   * No target route serves it (#1048): `stats` serves `media_by_state`,
+   * No target route serves it: `stats` serves `media_by_state`,
    * which is a different axis, and the TTL lives on the workspace config
    * rather than the item.
    */
@@ -351,7 +351,7 @@ export function deriveSummary(stats: StatsResponse): SummaryView {
     skipped: s.skipped ?? 0,
     rejected: s.rejected ?? 0,
     total: sum(s),
-    // Publish outcomes only (#466/#467): Telegram delivery is not an intent
+    // Publish outcomes only (/): Telegram delivery is not an intent
     // state, so there is nothing of the other kind in the divisor.
     success_rate: attempts === 0 ? null : posted / attempts,
     // From the cap ledger, not from a bounded list. Zero days means no window
@@ -467,7 +467,7 @@ export function derivePoolHealth(stats: StatsResponse): PoolHealthView {
 }
 
 /**
- * What the Settings screen can HONESTLY show from the routes that exist (#1063).
+ * What the Settings screen can HONESTLY show from the routes that exist.
  *
  * ── Why this is a derivation and not four reads spread across the page ──────
  *
@@ -479,7 +479,7 @@ export function derivePoolHealth(stats: StatsResponse): PoolHealthView {
  * `settings/page.tsx` warns about in its own comment.
  *
  * So every field is resolved in one place, and a field with no source is
- * `Unavailable` — never a default. The type is non-optional `null` (#1051): an
+ * `Unavailable` — never a default. The type is non-optional `null`: an
  * optional field invites `?? 0` at the consumer, while a non-optional null
  * makes the compiler stop at every consumer until it says what it shows
  * instead. Sourcing one later is then a VISIBLE type change rather than a
@@ -490,14 +490,14 @@ export type SettingsView = {
   posts_per_day: number | null;
   posting_hours_start: number | null;
   posting_hours_end: number | null;
-  /** IANA zone the window is read in (`workspaces.tz`, `059` `fn_next_slot`). */
+  /** IANA zone the window is read in (`workspaces.tz`, `04_functions.sql` `fn_next_slot`). */
   tz: string | null;
   is_paused: boolean | null;
   dry_run_mode: boolean | null;
   /** The workspace row calls this `api_publishing_enabled`. Renamed once, here. */
   enable_instagram_api: boolean | null;
   /**
-   * The workspace's approval position (#1477): what its stories do when they
+   * The workspace's approval position: what its stories do when they
    * are served, unless a folder has its own. Null when the row's value is not
    * one of the three, never Ask every time in its place.
    */
@@ -506,10 +506,10 @@ export type SettingsView = {
   repost_ttl_days: number | null;
   skip_ttl_days: number | null;
   /** Carried but NOT rendered: no code in the tier reads `caption_style`, so
-   *  its card is not shown (#1366). */
+   * its card is not shown. */
   caption_style: string | null;
   /** The deployment's fallbacks for the two NULL-on-purpose TTL columns.
-   *  Served, never retyped here (#1366). */
+   * Served, never retyped here. */
   defaults: { repost_ttl_days: number; skip_ttl_days: number };
 
   // ── From `sources` and `stats` ───────────────────────────────────────────
@@ -521,7 +521,7 @@ export type SettingsView = {
   // ── NO SOURCE ON THE TARGET TIER. `Unavailable`, never a default. ────────
   //
   // Greppable on purpose (see `Unavailable`): these are the Settings fields no
-  // target route serves (#1063).
+  // target route serves.
   show_verbose_notifications: Unavailable;
   send_lifecycle_notifications: Unavailable;
   media_sync_enabled: Unavailable;
@@ -565,9 +565,9 @@ export function deriveSettings(
     defaults: config.defaults,
 
     /*
-     * This is the CREDENTIAL's answer rather than the source row's (#1081): a
+     * This is the CREDENTIAL's answer rather than the source row's: a
      * folder pasted by link can exist before any grant does. The credential
-     * is the WORKSPACE's (069, #1165) — one grant, every folder under it — so
+     * is the WORKSPACE's (`workspace Drive grant`) — one grant, every folder under it — so
      * the answer comes from `GET /workspaces/{ws}/drive`, and a source row
      * says nothing about it either way.
      *
@@ -593,5 +593,5 @@ export function deriveSettings(
 }
 
 // The target returns `handle`/`state`, not `instagram_username`/`is_active`,
-// so a row is a `Destination` (#1048, #1089).
+// so a row is a `Destination`.
 export type AccountsResponse = { accounts: import("./types").Destination[] };

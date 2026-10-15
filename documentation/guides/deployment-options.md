@@ -1,5 +1,11 @@
 # Deployment Options
 
+A new database starts with `make init-db`: build from the models and
+`src/models/target/ddl/`, adopt the empty `000_initial.sql` base marker,
+then apply later migrations. The marker is never executed. The owner
+role performs schema changes; the API uses `svc_ingress` and the worker
+uses `svc_worker`. `make reset-db` drops and rebuilds a local database.
+
 **Repository Status**: PUBLIC
 
 ---
@@ -21,7 +27,7 @@ Railway automatically deploys when changes are pushed to `main`:
 
 `railway.toml` (build, pre-deploy, health check, restart and draining policy)
 and the `Procfile` (the two process commands) are the whole deployment
-configuration; `cloud-deployment.md` §2 walks through them.
+configuration; the runtime-login section in `cloud-deployment.md` walks through them.
 
 ### Pros
 - **Automated** -- deploy on every push to main

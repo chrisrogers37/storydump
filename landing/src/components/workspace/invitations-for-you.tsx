@@ -15,7 +15,7 @@ import {
 } from "@/lib/invitations";
 
 /**
- * The invitations waiting for the signed-in person (115), on /welcome
+ * The invitations waiting for the signed-in person (`invitee invitation functions`), on /welcome
  * and /workspaces: someone who signed in without the link learns one exists.
  *
  * The token is still the only way in, so nothing here joins. Each

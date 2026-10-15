@@ -19,10 +19,10 @@ export type Linked = { lead: string; link: string; tail: string };
 
 /**
  * `auth.py` sends `error=not_admitted` when a NEW Google account's email was
- * neither admitted by the owner nor invited to a workspace (migration 092),
+ * neither admitted by the owner nor invited to a workspace (`fn_signup_admitted`),
  * and `error=claim_refused` when such an account came through a claim link
  * from an admission's email that cannot be used: used already, replaced by a
- * newer email, or its spot taken (129, #1723). Nothing was created either way,
+ * newer email, or its spot taken (`signup admission functions`). Nothing was created either way,
  * and an existing account sees neither.
  */
 export const LOGIN_ERRORS = {
@@ -58,7 +58,7 @@ function pick<T>(map: Record<string, T>, code: string | null | undefined): T | n
  * - `unconfirmed`: a plain sign-out the API never confirmed.
  * - `incomplete`: "Sign out of all devices" could not reach the API.
  * - `stale`: "Sign out of all devices" from a browser whose session had
- *   already ended, so there was no session to say whose devices to sign out.
+ * already ended, so there was no session to say whose devices to sign out.
  */
 export const SIGNOUT_NOTICES = {
   unconfirmed:

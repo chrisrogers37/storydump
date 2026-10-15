@@ -1,4 +1,4 @@
-"""Meta's two policy callbacks, as routes. Required for Meta App Review (#410).
+"""Meta's two policy callbacks, as routes. Required for Meta App Review.
 
 Both doors verify a `signed_request` before doing anything else — reading no
 more of the body than that one field needs (`_signed_request`) — and both
@@ -10,8 +10,8 @@ treats them as different events and so do we:
   **Deletes nothing synchronously**; see the module docstring in
   `services/target/meta_callbacks.py` and the runbook for why. With the
   archive's key ring configured the receipt is durable: a row behind a random
-  capability, its cleanup done afterwards by the worker (#1644).
-* `GET  /webhooks/meta/data-deletion/status` — what Meta's returned URL points
+  capability, its cleanup done afterwards by the worker.
+* `GET /webhooks/meta/data-deletion/status` — what Meta's returned URL points
   at, so a person can check a request they made: `in_progress` or `completed`.
 
 Registering the URLs with Meta is a submission step, not a deploy step; this
@@ -108,7 +108,7 @@ def _verified_subject(
     except meta_callbacks.SignedRequestInvalid as exc:
         logger.warning("meta callback rejected: %s", exc)
         raise HTTPException(status_code=400, detail="invalid signed_request")
-    # The instrument for #739: which setting signed this — by name and
+    # The instrument for: which setting signed this — by name and
     # position, never by value. Which Meta app the URLs are registered under
     # is a dashboard fact; this line and one press of Meta's test button
     # answer it. The Instagram secret is tried first, then the Facebook one,
@@ -138,7 +138,7 @@ async def deauthorize(request: Request):
     is not a deletion request, and the one bug worth engineering against here
     is treating it as one.
 
-    The subject is matched through verified identity mappings (142, #1644):
+    The subject is matched through verified identity mappings (`meta_identity_mappings`):
     the (app, subject) a same-token OAuth exchange proved, never
     `provider_account_ref`, which names an account rather than the person
     Meta's id names. Each account's current authorization is revoked only when
@@ -160,7 +160,7 @@ async def deauthorize(request: Request):
     nothing to retry: a subject we hold no credential for is a completed no-op.
     **A miss on the account-reference lookup is logged as "not established"
     rather than "none"**: the lookup reads every workspace through its door
-    (081), but the subject Meta sends names a person while
+    (`fleet health functions`), but the subject Meta sends names a person while
     `provider_account_ref` names an account — sometimes a provisional
     `manual:<handle>` no Meta id equals — see `resolve_ig_accounts`.
     """
@@ -202,40 +202,40 @@ async def deauthorize(request: Request):
 async def data_deletion(request: Request):
     """Record a deletion request and return Meta's receipt. Deletes nothing here.
 
-    **This is deferred-with-receipt on purpose, and the shape is Meta's own.**
-    The response contract is a `url` plus a `confirmation_code` precisely so
-    the work can be asynchronous — returning a receipt is what the integration
-    specifies, not a way around it.
+     **This is deferred-with-receipt on purpose, and the shape is Meta's own.**
+     The response contract is a `url` plus a `confirmation_code` precisely so
+     the work can be asynchronous — returning a receipt is what the integration
+     specifies, not a way around it.
 
-    Three reasons it must not delete inline, in increasing order of weight:
+     Three reasons it must not delete inline, in increasing order of weight:
 
-    1. **The subject cannot be reliably identified here.** Meta sends an
-       app-scoped person id; which accounts it names is what the verified
-       identity mappings record (142), and the request's scope is frozen
-       against them inside the receipt door.
-    2. **The blast radius is not the requester's to spend.** An Instagram
-       account lives inside a workspace that may hold other members' content.
-    3. **The product already has the right door, and it is deliberately not
-       automatic.** `offboard_workspace` is owner-only, demands an explicit
-       `confirm`, and runs a 30-day grace window. An unauthenticated external
-       caller must not reach a stronger deletion than the owner's own
-       confirmed one.
+     1. **The subject cannot be reliably identified here.** Meta sends an
+        app-scoped person id; which accounts it names is what the verified
+        identity mappings record (`meta_identity_mappings`), and the request's scope is frozen
+        against them inside the receipt door.
+     2. **The blast radius is not the requester's to spend.** An Instagram
+        account lives inside a workspace that may hold other members' content.
+     3. **The product already has the right door, and it is deliberately not
+        automatic.** `offboard_workspace` is owner-only, demands an explicit
+        `confirm`, and runs a 30-day grace window. An unauthenticated external
+        caller must not reach a stronger deletion than the owner's own
+        confirmed one.
 
-    **With the archive's key ring configured the receipt is durable** (143,
-    #1644): a tenant-free door records the request under a keyed
-    fingerprint of its signed payload — never the payload, the subject or a
-    secret — freezes which authorizations are in scope, and the response
-    carries a fresh random capability, of which the database keeps only the
-    digest. An exact retry is the same receipt behind a new capability; a
-    request made after a reconnect is a new one. The cleanup is the worker's
-    and happens afterwards; the status endpoint reports it.
+     **With the archive's key ring configured the receipt is durable** (`Meta deletion receipt functions`,
+    ): a tenant-free door records the request under a keyed
+     fingerprint of its signed payload — never the payload, the subject or a
+     secret — freezes which authorizations are in scope, and the response
+     carries a fresh random capability, of which the database keeps only the
+     digest. An exact retry is the same receipt behind a new capability; a
+     request made after a reconnect is a new one. The cleanup is the worker's
+     and happens afterwards; the status endpoint reports it.
 
-    **Without the key ring nothing changes:** the receipt is derived from the
-    app secret, logged and not stored, and the status page says only that the
-    request was received. A deletion request does not itself revoke the
-    publishing credential (deauthorize does).
+     **Without the key ring nothing changes:** the receipt is derived from the
+     app secret, logged and not stored, and the status page says only that the
+     request was received. A deletion request does not itself revoke the
+     publishing credential (deauthorize does).
 
-    A door failure is a 500, which Meta retries.
+     A door failure is a 500, which Meta retries.
     """
     subject, verified = _verified_subject(await _signed_request(request))
     status_url = request.url_for("data_deletion_status")

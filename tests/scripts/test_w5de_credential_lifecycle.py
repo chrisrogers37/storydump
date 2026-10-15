@@ -1,4 +1,4 @@
-"""Gate — the credential lifecycle against the real machinery (#942).
+"""Gate — the credential lifecycle against the real machinery.
 
 Two pins pulled: without the refresh executor every credential silently
 reaches `mark_dead` at ~60d, and without arming at store a
@@ -44,7 +44,7 @@ def _due_now(conn, cred_id) -> None:
     """Bring a freshly stored credential's first refresh forward to now.
 
     `store_credential` arms the first refresh ~7 days out — Meta refuses to
-    refresh a long-lived token younger than 24 hours (#1221) — so a test that
+    refresh a long-lived token younger than 24 hours — so a test that
     exercises the refresh leg itself must make the credential due first."""
     with conn.cursor() as cur:
         cur.execute(
@@ -93,7 +93,7 @@ def _jobs_of_kind(conn, kind: str) -> list[dict]:
 
 
 class TestTheClockMintsTheReauthLeg:
-    """Migration 062: fn_clock_tick gains the reauth-prompt cadence leg."""
+    """`fn_clock_tick reauthentication leg`: fn_clock_tick gains the reauth-prompt cadence leg."""
 
     def test_a_reauth_required_account_is_prompted_and_an_active_one_is_not(
         self, world_db, sync_conn
@@ -160,9 +160,9 @@ class TestTheClockMintsTheReauthLeg:
 
 
 class TestTheRefreshLegIsProviderGuarded:
-    """Migration 063 (#982, #978).
+    """`fn_clock_tick provider guards`.
 
-    062's refresh leg selected due credentials on `state`/`next_refresh_at` with
+    `fn_clock_tick reauthentication leg`'s refresh leg selected due credentials on `state`/`next_refresh_at` with
     NO provider filter, and `ig_refresh` then builds IG-shaped params against
     graph.instagram.com unconditionally. That was safe BY CONSTRUCTION ONLY:
     `store_credential` takes no provider argument and binds `PROVIDER =
@@ -176,7 +176,7 @@ class TestTheRefreshLegIsProviderGuarded:
     THE GUARD IS ONLY WORTH ANYTHING IF IT CAN GO RED, so this drives both
     providers through one tick: the ig_login row must still mint (or the guard
     is refusing everything and would pass by breaking the feature), and the
-    gdrive row must not. Deleting `AND provider = 'ig_login'` from 063 turns the
+    gdrive row must not. Deleting `AND provider = 'ig_login'` from `fn_clock_tick provider guards` turns the
     second assertion red.
     """
 
@@ -189,7 +189,7 @@ class TestTheRefreshLegIsProviderGuarded:
         reach the state under test at all.
 
         The owner column differs by provider and the schema enforces it —
-        `ck_credentials_one_owner` (069) requires an `ig_login` credential to
+        `ck_credentials_one_owner` (`workspace Drive grant`) requires an `ig_login` credential to
         name its account and a `gdrive` credential to name NOTHING (the
         workspace is its owner). Writing a Drive credential account-owned
         raises CheckViolation rather than reaching the leg under test.
@@ -284,7 +284,7 @@ class TestStoreArmsTheTick:
         # Armed for LATER, not for now: Meta refuses to refresh a long-lived
         # token younger than 24 hours, so a credential due on the very
         # next tick would be refreshed into a definitive 400 and marked dead
-        # minutes after it was connected (#1221). The first refresh is
+        # minutes after it was connected. The first refresh is
         # one refresh cadence out; the tick must NOT mint yet.
         with sync_conn.cursor() as cur:
             cur.execute(
@@ -413,7 +413,7 @@ class TestRefreshExecutorOnTheRealMachinery:
     async def test_definitive_rejection_flips_both_and_the_cadence_prompts(
         self, world_db, sync_conn
     ):
-        """The whole refresh→062→prompt arc, end to end on the real schema."""
+        """The whole refresh→`fn_clock_tick reauthentication leg`→prompt arc, end to end on the real schema."""
         import uuid as uuidlib
 
         from src.services.target.credential_lifecycle import RefreshRejected
@@ -440,7 +440,7 @@ class TestRefreshExecutorOnTheRealMachinery:
             "a definitive rejection is handled work, not a retry"
         )
 
-        # The 062 leg is the single prompt producer: next tick mints.
+        # The `fn_clock_tick reauthentication leg` leg is the single prompt producer: next tick mints.
         _tick(sync_conn)
         prompts_minted = _jobs_of_kind(sync_conn, "reauth_prompt")
         assert len(prompts_minted) == 1
@@ -532,7 +532,7 @@ class TestRefreshExecutorOnTheRealMachinery:
 
 
 class TestTheRevokeDispositionIsDecidedByTheCaller:
-    """#1088: `revoke_workspace_credentials` decides its own revoke
+    """`revoke_workspace_credentials` decides its own revoke
     disposition, and this class covers that decision directly: mutate the
     retryable branch to swallow instead of raise and these go red.
 
@@ -673,7 +673,7 @@ class TestTheRevokeDispositionIsDecidedByTheCaller:
     async def test_the_revoke_failed_record_survives_the_workers_transaction(
         self, world_db, sync_conn
     ):
-        """#1123. This row is the ONLY trace of the disposition: the payload
+        """This row is the ONLY trace of the disposition: the payload
         cannot be decrypted, so the grant cannot be revoked, and the branch
         deliberately lets the job SUCCEED. Abandoning without a record is the
         swallowed failure this module's own docstring says it exists to stop.

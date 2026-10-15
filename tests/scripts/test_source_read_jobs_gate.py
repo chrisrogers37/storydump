@@ -240,7 +240,7 @@ async def test_legacy_clock_keeps_adoption_evidence_and_same_orchestration(
             .mappings()
             .one()
         )
-        # Immutable 062/083 adoption probes still describe the actual bodies.
+        # Immutable `fn_clock_tick reauthentication leg`/`fn_clock_tick deadlines` adoption probes still describe the actual bodies.
         assert legacy["prosrc"].count("deadline_at") >= 5
         assert activated["prosrc"].count("deadline_at") >= 5
         assert legacy["proargnames"][-1] == "o_reauth_jobs"

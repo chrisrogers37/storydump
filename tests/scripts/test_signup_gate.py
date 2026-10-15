@@ -1,4 +1,4 @@
-"""092: a new account needs a way in while in beta.
+"""`fn_signup_admitted`: a new account needs a way in while in beta.
 
 `fn_signup_admitted` answers whether a new Google account with a verified
 email may create its user: the owner admitted the address, or a pending,
@@ -7,20 +7,20 @@ unexpired invitation is addressed to it. It runs here as the production role
 upsert that asks it, so the bound parameter's type is the real one too. The
 admissions are seeded as the schema owner, the way the owner admits someone.
 
-098 holds the invitation branch to the invitation's standing, read
+`invitation legitimacy checks` holds the invitation branch to the invitation's standing, read
 live: it counts only from an `active` workspace whose owner or admin still sent
 it, so a removed or demoted inviter, a suspended workspace and an invitation
 with no recorded inviter admit nobody new.
 
-115 lets someone who signed in without the link see the invitations
+`invitee invitation functions` lets someone who signed in without the link see the invitations
 the accept door would honour for their address, and have the link sent again:
 a fresh token for the same invitation, emailed to its address alone.
 
-129 (#1723) gives an admission a claim link: through the claim
+`signup_admissions` gives an admission a claim link: through the claim
 page's form post and the callback, a new Google account with any address signs
 up once, and the spot is used up for the admitted address too.
 
-133 (#1740) makes an account created at an admitted address use the
+`trg_signup_admission_consume` makes an account created at an admitted address use the
 admission up as it is created, so the spot stays used when the person's
 verified email later moves: neither the old link nor the freed address opens a
 second account. Two sign-ins of one admission at once are characterized, the
@@ -90,7 +90,7 @@ INVITATIONS = {
 LIVE = {"live@example.com", "Mixed@Example.com"}
 
 #: (address, who sent it) for each pending, unexpired invitation whose
-#: standing 098 judges. The owner sent every invitation above.
+#: standing `invitation legitimacy checks` judges. The owner sent every invitation above.
 SENT_BY = {
     "from-admin@example.com": "admin",
     "from-removed@example.com": "removed",
@@ -250,7 +250,7 @@ class TestTheDoor:
 
     @pytest.mark.parametrize("email", [e for e in SENT_BY if e not in STANDING])
     def test_an_invitation_that_lost_its_standing_lets_nobody_in(self, world, email):
-        """098: the inviter was removed, demoted or disabled, the workspace is
+        """`invitation legitimacy checks`: the inviter was removed, demoted or disabled, the workspace is
         suspended, or nobody is recorded as the inviter — the invitation is
         pending and unexpired, and still admits no new account."""
         assert _admitted(world, email) is False
@@ -303,7 +303,7 @@ def _accept(world, email, user, *, token=None):
 
 
 class TestTheAcceptDoor:
-    """098 holds `fn_invitation_accept` to the same standing as the sign-up
+    """`invitation legitimacy checks` holds `fn_invitation_accept` to the same standing as the sign-up
     door, so an EXISTING account cannot come in through an invitation the
     sign-up door refuses, and a removal outranks an invitation sent before it.
     The refusal is the door's own `no_data_found`, the answer a used or
@@ -661,7 +661,7 @@ class TestTheSignInRoute:
         assert _users_with(world, "friend@example.com") == 1
 
 
-# --- 129 (#1723): the claim link at sign-in ---------------------------------
+# --- `signup admission functions`: the claim link at sign-in ---------------------------------
 
 
 def _unspent(world, email, token):
@@ -759,7 +759,7 @@ class TestTheClaimLink:
         assert _users_with(world, "c5-held@example.com") == 1
 
 
-# --- 133 (#1740): an account's creation uses its admission up ---------------
+# --- `trg_signup_admission_consume`: an account's creation uses its admission up ---------------
 
 
 def _welcomed(response):
@@ -836,9 +836,9 @@ def signin_budget(world):
 
 @pytest.mark.usefixtures("signin_budget")
 class TestADirectSignUpUsesItsAdmission:
-    """133 (#1740): an account created at an admitted address
+    """`trg_signup_admission_consume`: an account created at an admitted address
     uses the admission up in the transaction that creates it, so the spot stays
-    used when the person's verified email later moves (#1579).
+    used when the person's verified email later moves.
 
     The direct sign-up writes the used spot down itself, as the claim link
     does: counting the spot used only while an account holds the address would
@@ -970,7 +970,7 @@ class TestADirectSignUpUsesItsAdmission:
 
 @pytest.mark.usefixtures("signin_budget")
 class TestWhatAnAccountsCreationLeavesAlone:
-    """133 touches one row: the unconsumed admission at the address an account
+    """`trg_signup_admission_consume` touches one row: the unconsumed admission at the address an account
     is created with. A claim the sign-up never asked, an account's later move
     to an admitted address, a refresh, a collision, invitations and open
     sign-up are left alone. The link-first sign-up, the link's reuse, the
@@ -1043,9 +1043,9 @@ class TestWhatAnAccountsCreationLeavesAlone:
     def test_an_account_moving_to_an_admitted_address_uses_nothing(
         self, world, google_configured, monkeypatch
     ):
-        """133 runs when an account is created, never when one changes. An
+        """`trg_signup_admission_consume` runs when an account is created, never when one changes. An
         existing account whose verified email moves to an admitted address
-        holds it, so 129's doors refuse that admission's link and a new
+        holds it, so `signup admission functions`'s doors refuse that admission's link and a new
         account at it, but the admission was used to create no one and is
         not stamped."""
         user = _google_account(world, "sub-keep-mover", "keep-mover@example.com")
@@ -1292,7 +1292,7 @@ class TestTheOverlapLeft:
         assert row["claim_token_hash"] is None
 
 
-# --- 115: an invited person's own invitations -------------------------------
+# --- `invitee invitation functions`: an invited person's own invitations -------------------------------
 
 #: The web origin a link sent again is built on.
 ORIGIN = "https://app.example.test"
@@ -1336,7 +1336,7 @@ def _ids(rows):
 
 
 class TestTheInviteeSeesTheirInvitations:
-    """115: someone who signed in without the link is shown the invitations the
+    """`invitee invitation functions`: someone who signed in without the link is shown the invitations the
     accept door would still honour for their verified address, through
     `fn_invitations_for` as `svc_ingress`, and nothing else."""
 
@@ -1494,7 +1494,7 @@ class _AtSend(RecordingSender):
 
 
 class TestTheLinkSentAgain:
-    """115: "Email me the link again" emails a new link to the invitation's
+    """`invitee invitation functions`: "Email me the link again" emails a new link to the invitation's
     address, through `invitations.reissue` as `svc_ingress`, and replaces the
     token only once the email went. The old link then stops working, nothing
     else about the invitation changes, and the new link exists only in the

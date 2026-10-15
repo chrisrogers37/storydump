@@ -10,7 +10,7 @@ import type { BadgeTone } from "@/components/dashboard/tone";
 
 /**
  * Google Drive, browser side — the WORKSPACE's grant and the folders picked
- * under it (#1165).
+ * under it.
  *
  * Connect once, then pick folders from a browser of that Drive. The grant
  * is one per workspace; the same Google account connected from another
@@ -149,7 +149,7 @@ export function driveConnectControl(
     case "active":
       // Offered while live too: Google can revoke a grant on its side without
       // the projection knowing until the next call, and Disconnect → Connect
-      // is a worse road back (#1246).
+      // is a worse road back.
       return { label: "Reconnect Google Drive", kind: "reconnect" };
   }
   return { label: "Connect Google Drive", kind: "connect" };
@@ -158,7 +158,7 @@ export function driveConnectControl(
 /**
  * What a person should know BEFORE the browser leaves for Google.
  *
- * The Drive scope is not verified (#333), so Google may put its own "hasn't
+ * The Drive scope is not verified, so Google may put its own "hasn't
  * verified this app" page in front of the consent screen (the page is
  * Google's, worded and shown at its discretion, so the copy says "if"), and
  * the way on is Advanced, then the link that page labels "Go to storydump
@@ -230,7 +230,7 @@ export function driveFoldersRefusalCopy(reason: unknown): string {
     case "drive_unavailable":
       return "Google did not answer just now. Try again in a moment.";
     case "drive_not_yours":
-      // The grant reads one person's whole Drive (migration 091): only they browse it.
+      // The grant reads one person's whole Drive (`oauth_credentials.granted_by_user_id`): only they browse it.
       return "Only the person who connected Google Drive can browse it. Ask them to add the folder. Reconnecting Drive with your own account moves every connected folder onto your Drive, and folders you can't see there stop syncing.";
     case "invalid_parent":
       return "That folder could not be opened.";

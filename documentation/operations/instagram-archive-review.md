@@ -61,7 +61,7 @@ Between them, they cover these properties:
   - The ordinary fixture has three slides per carousel.
   - The carousel-heavy fixture cycles through 2, 3, 5, 10 and 20 slides, with mixed
     video, one empty carousel and one truncated page.
-- **The sizes:** the defaults are 100, 500 and 2,000 posts. The 10,000-post case needs
+- **The sizes:** the defaults are `waitlist_entries`, 500 and 2,000 posts. The 10,000-post case needs
   `RUN_ONBOARDING_10K=1`.
 - **The ceilings** are counted in posts: `3N+64` Graph requests and `N+128` turns.
   Indexing makes zero CDN requests, downloads or decodes. Candidates, item exclusions
@@ -152,7 +152,7 @@ process, at the path its variable names.
 ```
 
 - `lease_disposition` is `exhausted` or `fenced`.
-- Each evidence text is 1-2,048 characters.
+- Each evidence text is 1-2,`queue delivery state` characters.
 - `rollback_releases` names at least one release a rollback may return to. Each one
   carries the same protocol fields.
 
@@ -177,7 +177,7 @@ process, at the path its variable names.
 }
 ```
 
-- Each evidence string attests one prerequisite in 1-2,048 characters. The code checks
+- Each evidence string attests one prerequisite in 1-2,`queue delivery state` characters. The code checks
   only that it is present, and never stores, returns or logs it, because it may carry
   private references. Keep it out of the repository.
 - `conversion_run_digest` is the SHA-256 of the mix-conversion record file's bytes, as

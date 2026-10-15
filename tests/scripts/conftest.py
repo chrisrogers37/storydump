@@ -6,15 +6,15 @@ the same settings the rest of the suite uses (``.env.test`` via the root
 conftest), so a credential or port move breaks every suite the same way
 instead of this one differently.
 
-Host model (#758/#763/#768 — several runs share this cluster): the DATABASE
-half of isolation is per-session naming (#763's session suffix, reused here
+Host model (// — several runs share this cluster): the DATABASE
+half of isolation is per-session naming ('s session suffix, reused here
 so one run has one identity); the ROLE half cannot be namespaced — the seven
 ``svc_*`` roles are cluster-scoped spec names — so this suite SERIALIZES on
 the cluster's own advisory lock and QUEUES behind concurrent runs instead of
 corrupting them. Every cleanup path is scoped to this suite's own database
 prefixes; nothing here can touch a database it did not name.
 
-ONE lock, not two (#785). The mutex is ``SUITE_CLUSTER_LOCK_KEY``, held
+ONE lock, not two. The mutex is ``SUITE_CLUSTER_LOCK_KEY``, held
 session-wide by ``admin_conn``. It reaches every process that can reach the
 cluster, which is the scope the guarded resource actually has.
 """
@@ -52,13 +52,13 @@ psycopg2.extensions.register_adapter(uuid.UUID, UUID_adapter)
 
 
 def pytest_configure(config):
-    """Refuse this directory under pytest-xdist (#809).
+    """Refuse this directory under pytest-xdist.
 
     WHAT THIS IS AND IS NOT. It makes an unsafe invocation fail in under a
     second instead of producing a twenty-minute silent queue; it does NOT make
     this directory parallel-safe, and nothing here moves it toward that. The
     seven ``svc_*`` roles are cluster-scoped spec names that cannot be
-    namespaced per session (#768), which is why the suite serializes on
+    namespaced per session, which is why the suite serializes on
     ``SUITE_CLUSTER_LOCK_KEY`` in the first place. Under ``-n`` each worker is a
     separate process with its own session, so workers 2..N queue on a lock the
     first one holds until the session ends — they do not corrupt each other,
@@ -119,7 +119,7 @@ def pytest_configure(config):
 
 
 #: Scratch-database naming: ONE home for the convention every sweep predicate
-#: derives from. The session token is #763's — one pytest run, one identity,
+#: derives from. The session token is's — one pytest run, one identity,
 #: correlatable across the root suite's databases and these.
 TEST_DB_PREFIX = "runner_test_"
 SUITE_DB_PREFIXES = (TEST_DB_PREFIX, "runner_tpl_")
@@ -130,25 +130,25 @@ SUITE_DB_PREFIXES = (TEST_DB_PREFIX, "runner_tpl_")
 #: shared resource, so PostgreSQL's lock is the mutex that actually reaches
 #: every process that can reach it, whichever bot or host owns it.
 #:
-#: THE SINGLE PRIMITIVE (#785). This lock alone guards the role lifecycle, with
+#: THE SINGLE PRIMITIVE. This lock alone guards the role lifecycle, with
 #: no `flock` keyed on the same cluster alongside it, for reasons that are
 #: properties of the two mechanisms and not of any one deployment:
 #:
 #: - **Scope.** The roles are CLUSTER-scoped; a `flock` is HOST-scoped. Two
-#:   containers or hosts pointing at one cluster do not share a temp directory,
-#:   so the file lock silently fails to serialise them while this one still
-#:   does. `tempfile.gettempdir()` also follows `TMPDIR`, so the same divergence
-#:   is reachable on a single host.
+#: containers or hosts pointing at one cluster do not share a temp directory,
+#: so the file lock silently fails to serialise them while this one still
+#: does. `tempfile.gettempdir()` also follows `TMPDIR`, so the same divergence
+#: is reachable on a single host.
 #: - **Coverage by container, not by enumeration.** This lock is held for the
-#:   whole session, so it covers `_sweep_leftovers` — which drops OTHER
-#:   sessions' suite-prefixed databases and is the most destructive thing here.
-#:   Widening a per-fixture lock means maintaining a list of fixture names that
-#:   goes stale the next time one is added.
+#: whole session, so it covers `_sweep_leftovers` — which drops OTHER
+#: sessions' suite-prefixed databases and is the most destructive thing here.
+#: Widening a per-fixture lock means maintaining a list of fixture names that
+#: goes stale the next time one is added.
 #: - **Crash safety is not a discriminator.** Measured on this cluster: SIGKILL
-#:   the holder with no cleanup path and the lock clears anyway (the backend
-#:   sees EOF and exits). Both mechanisms have the property.
+#: the holder with no cleanup path and the lock clears anyway (the backend
+#: sees EOF and exits). Both mechanisms have the property.
 #: - **It can name its holder.** The wait below prints pid/user/application
-#:   from `pg_locks`; a file lock cannot say who holds it.
+#: from `pg_locks`; a file lock cannot say who holds it.
 SUITE_CLUSTER_LOCK_KEY = 753_2026
 SUITE_LOCK_WAIT_SECONDS = 1200
 
@@ -201,7 +201,7 @@ def as_user(dsn: str, user: str) -> str:
 def sweep_as_worker(dsn: str) -> int:
     """`work_loop.ensure_sender_jobs` the way the worker runs it: as the login
     *dsn* names (the worker's), in its own session with the EMPTY tenant and
-    the `system` actor — the sweep's cross-tenant read is the door's (082).
+    the `system` actor — the sweep's cross-tenant read is the door's (`worker sweep functions`).
     Run it AFTER the transaction that enqueued the cards has committed: a
     second session cannot see an uncommitted row."""
     import asyncio
@@ -325,13 +325,13 @@ def assert_holds_cluster_lock(admin_conn, door: str) -> None:
     """Refuse a cluster-scoped door unless the connection handed in IS a holder
     of ``SUITE_CLUSTER_LOCK_KEY``.
 
-    WHY THE PARAMETER IS CHECKED RATHER THAN DECORATIVE (#808). The cheap fix
+    WHY THE PARAMETER IS CHECKED RATHER THAN DECORATIVE. The cheap fix
     for a door that does not declare its mutex is to put the connection in the
     signature and never use it, so the fixture graph forces the dependency. That
     is a marker: nothing goes red when a later author deletes an argument the
     body ignores.
 
-    The alternative is impossible for a helper holding only a DSN (#808), in
+    The alternative is impossible for a helper holding only a DSN, in
     both of the forms available to it. Measured on this cluster:
 
     - ``pg_try_advisory_lock(SUITE_CLUSTER_LOCK_KEY)`` returns True when called
@@ -460,7 +460,7 @@ def _create_db(admin_conn, name: str, owner: str | None = None) -> str:
 def _drop_db(admin_conn, name: str, timeout_s: float = 20.0) -> None:
     """Drop a scratch database, tolerating backends we are not allowed to kill.
 
-    **A failure here is not local** (#758): teardown drops the database
+    **A failure here is not local**: teardown drops the database
     *before* the roles, because a grant inside a database is a catalog
     dependency on the role. So a drop that raises leaves the database standing,
     which leaves the roles undroppable, which fails the SETUP of every
@@ -554,7 +554,7 @@ def owner_actor(admin_conn):
     Session-scoped like the service roles (roles are cluster objects); the
     admin is granted membership so it can create databases OWNED by it.
     Teardown goes through the hardened drop so a leaked owner-owned database
-    cannot strand the role (#768's class, for the role this suite adds).
+    cannot strand the role.
     """
     reason = actor_lacks_createrole(admin_conn)
     if reason:
@@ -682,7 +682,7 @@ def seed_intent_chain(
     ``app.actor_kind``). ``state`` overrides the intent's column default
     (``'scheduled'``) for a suite that needs, say, ``'awaiting_approval'``;
     ``origin`` likewise (``'cadence'``) for a planned story, which must be
-    BORN planned: the ledger refuses changing it afterwards (088, 110).
+    BORN planned: the ledger refuses changing it afterwards (`post_intents.origin`, `approval position constraints`).
     Split out of :func:`seed_workspace_chain` so an API-created workspace can
     be seeded with the same spelling rather than a copy."""
     cur.execute(
@@ -756,12 +756,12 @@ def _drop_roles_hardened(cur, roles: tuple) -> None:
     must never be touched by a test sweep, live backends or not. A non-suite
     blocker is therefore named and the failure re-raised, loudly.
 
-    THE MUTEX IS CHECKED HERE rather than at `drop_service_roles` (#808) because
+    THE MUTEX IS CHECKED HERE rather than at `drop_service_roles` because
     this is the primitive all role dropping funnels through, and the other two
     callers are the ones worth covering: `_sweep_leftovers`, which this file's
     own header calls the most destructive thing here, and the `owner_actor`
     teardown. Guarding the public door instead would cover one of three and
-    leave the destructive path on call-path coverage, exactly the #808 shape.
+    leave the destructive path on call-path coverage, exactly the shape.
     Enumerating doors is the shape `SUITE_CLUSTER_LOCK_KEY`'s own docstring
     warns against — coverage by container, not by enumeration.
     """
@@ -821,7 +821,7 @@ def drop_service_roles(admin_conn, extra=()) -> None:
     `_scratch` lifecycle sequences it correctly.
 
     Having ``admin_conn`` in the signature made this door DECLARE the mutex, not
-    hold one; it is verified in `_drop_roles_hardened`, below (#808).
+    hold one; it is verified in `_drop_roles_hardened`, below.
     """
     with admin_conn.cursor() as cur:
         _drop_roles_hardened(cur, tuple(extra) + SERVICE_ROLES)
@@ -966,7 +966,7 @@ def txn(dsn, expect_user=None):
     """A NON-autocommit connection (SET LOCAL needs a transaction block),
     subject-gated when a login is named.
 
-    ONE spelling for the whole suite — the #852 subject discipline every
+    ONE spelling for the whole suite — the subject discipline every
     target-tier suite cites lives in this assertion, and two copies of it is
     how one file learns a stricter version and the other silently does not.
     Rolled back on exit unless the test committed.
@@ -1023,7 +1023,7 @@ async def in_user_plane(dsn, fn, *, actor_user_id=None):
 
     `in_tenant`'s sibling, for the writers that run BEFORE any workspace
     exists. Identity upsert and session mint are user/auth-plane
-    (`058` class 3: role-scoped `USING (true)`), so there is no tenant to
+    (`07_row_security.sql` class 3: role-scoped `USING (true)`), so there is no tenant to
     claim, and `unit_of_work` cannot be borrowed for them: its constructor
     raises `TenantContextRequired` on an empty tenant id by design (a
     tenant-less unit of work would be a widened query). Production opens

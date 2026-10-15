@@ -8,7 +8,7 @@ break.
 
 * `POST /public/waitlist` — add an address to the marketing waitlist. The
   landing site calls it server-side; it held a database credential of its own
-  for this write until 100. Each accepted address is also a Telegram message
+  for the marketing waitlist write. Each accepted address is also a Telegram message
   to each operator who has linked Telegram
   (`src/channels/telegram_waitlist_ping.py`), sent after the answer.
 """

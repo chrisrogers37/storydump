@@ -58,7 +58,7 @@ def world(admin_conn, owner_actor):
         yield {
             "stream": stream,
             "ingress": as_user(db, "svc_ingress"),
-            # the sender sweep is the worker's (082: a door granted to
+            # the sender sweep is the worker's (`worker sweep functions`: a door granted to
             # svc_worker alone), run here the way the worker runs it
             "worker": as_user(db, "svc_worker"),
             "a": a,
@@ -161,7 +161,7 @@ class TestBind:
         assert n == 1
 
     def test_re_adding_the_bot_flips_revoked_back_to_active(self, world):
-        """053's DDL comment specifies exactly this: `uq_binding_external`
+        """`identity_and_tenancy.py`'s DDL comment specifies exactly this: `uq_binding_external`
         holds across states, so the row is reactivated rather than replaced and
         the history survives."""
         ref = _chat()
@@ -306,7 +306,7 @@ class TestRefusals:
 
 class TestItAuditsAndUnInertsTheChain:
     def test_a_bind_writes_a_governance_audit_row(self, world):
-        """`055` attaches `tg_audit_channel_bindings` on INSERT/UPDATE/DELETE
+        """`intent_ledger.py` attaches `tg_audit_channel_bindings` on INSERT/UPDATE/DELETE
         with `entity_kind = 'channel_binding'`. Asserted rather than assumed —
         the trail this writer needs already exists in the schema."""
         ref = _chat()
@@ -328,7 +328,7 @@ class TestItAuditsAndUnInertsTheChain:
     def test_a_binding_lets_the_already_built_sweep_mint_a_sender_job(self, world):
         """**The keystone claim, driven rather than asserted.**
 
-        `ensure_sender_jobs` selects `FROM channel_bindings ... WHERE EXISTS
+        `ensure_sender_jobs` selects `FROM channel_bindings... WHERE EXISTS
         (pending outbox row)`, so it mints nothing until a binding exists. This
         binds, enqueues one row through the real `outbox.enqueue`, and asserts
         the sweep mints — which is the whole reason bindings need a writer.
@@ -379,7 +379,7 @@ class TestItAuditsAndUnInertsTheChain:
             return None
 
         # The enqueue commits with the ingress unit of work; the sweep is the
-        # worker's (082) — its own login, its own session, after the commit.
+        # worker's (`worker sweep functions`) — its own login, its own session, after the commit.
         run(world, enqueue_and_sweep)
         assert sweep_as_worker(world["worker"]) >= 1
         (jobs,) = fetch_one(
@@ -470,7 +470,7 @@ class TestAFreedChatIsBindableAgain:
 
 
 class TestTheStartDoorBindsAsSvcIngressWithNoContextOfItsOwn:
-    """The lane on the door's own connection shape (#1240): a bare
+    """The lane on the door's own connection shape: a bare
     `svc_ingress` connection with NO GUCs set by the caller — the state row
     supplies them. A run as the schema owner with the actor preset is exactly
     not the door."""
@@ -645,7 +645,7 @@ class TestRetiringAndFollowingAChat:
         and the migration notice — so when `_repoint` swallows the unique
         violation and answers False, the very next statement runs on a
         transaction Postgres has already aborted unless the savepoint scoped
-        it (#1362). Every other test here calls `_repoint` in a session of its
+        it. Every other test here calls `_repoint` in a session of its
         own, which is why this survived: the abort is invisible once the
         session ends.
 
@@ -1183,7 +1183,7 @@ def _resolve(world, ref: str):
 
 
 class TestAGroupThatBecameASupergroupKeepsItsWorkspace:
-    """#743 on the target tier. Telegram retires a group's chat id when the
+    """on the target tier. Telegram retires a group's chat id when the
     group is upgraded to a supergroup, and says so twice as it happens: a
     service message in the old group naming its successor, and one in the new
     supergroup naming its predecessor. Everything inbound resolves through the
@@ -1285,7 +1285,7 @@ class TestAGroupThatBecameASupergroupKeepsItsWorkspace:
     def test_a_chat_nobody_bound_is_followed_nowhere(self, world):
         """Guards over-reach, and passes against a handler that does nothing,
         so it is no evidence for the real handler: a migration of a chat no
-        workspace holds must never mint a binding for the new id (#743)."""
+        workspace holds must never mint a binding for the new id."""
         old, new = _basic_group(), _chat()
 
         _dispatch(world, _migrated_to(old, new, 700041))

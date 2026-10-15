@@ -5,7 +5,7 @@ import { targetFetch } from "@/lib/target-api";
 
 /**
  * POST /api/me/invitations/[invitationId]/resend — "Email me the link again"
- * (115).
+ * (`invitee invitation functions`).
  *
  * The API mints a fresh link for one of the signed-in person's invitations and
  * emails it to the invited address; the old link stops working. The answer is

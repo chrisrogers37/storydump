@@ -1,11 +1,11 @@
-"""Verified Meta identity mappings: which person a Meta callback names (#1644).
+"""Verified Meta identity mappings: which person a Meta callback names.
 
 A Meta callback's `signed_request` names an app-scoped id (`user_id`), which is
 not the account id `ig_accounts.provider_account_ref` holds and is not derivable
 from it. The only proof of which account an app-scoped id belongs to is the
 OAuth exchange itself: the long-lived token it produced, read once at `/me`
 (`ig_login_oauth.read_identity`), says both. One row of `meta_identity_mappings`
-(142) records that, bound to the credential and the authorization it was
+(`meta_identity_mappings`) records that, bound to the credential and the authorization it was
 verified for. A row is evidence: it never changes, and only its `is_current`
 flag falls, when a newer authorization replaces it.
 
@@ -13,7 +13,7 @@ The connect callback writes the row where the archive is live, in the same unit
 of work as the credential and under the source prefix it already holds. The
 bounded reconciliation of older credentials writes `reconciled_read` rows
 through the same writer. Reading is the callbacks' own: `fn_meta_subject_mappings`
-and `fn_meta_deletion_receive`, tenant-free doors (142, 143).
+and `fn_meta_deletion_receive`, tenant-free doors (`meta_identity_mappings`, `Meta deletion receipt functions`).
 """
 
 from __future__ import annotations

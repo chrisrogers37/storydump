@@ -1,5 +1,5 @@
 """Gate — the checkpointed publish-pipeline executor against a
-real database (#915, #862).
+real database.
 
 The gate, verbatim where it binds: *"pipeline resumes correctly from EVERY
 checkpoint kill (via provider_ops.resume_unresolved — a kill between permit
@@ -209,8 +209,8 @@ def _new_intent(
         vals += ", %s"
         params.append(transit_ref)
     if approval_rule:
-        # Born approved by a rule (#1477): the stamp is written only at birth
-        # or by the approval it names (110's `tg_intent_person_or_rule`).
+        # Born approved by a rule: the stamp is written only at birth
+        # or by the approval it names (`approval position constraints`'s `tg_intent_person_or_rule`).
         cols += ", approval_rule"
         vals += ", %s"
         params.append(approval_rule)
@@ -516,7 +516,7 @@ class TestTheFlipIntegration:
         an attempt on the failure ladder. The flip runs in a savepoint, and
         the sibling waits a few seconds and tries again — NOT the account's
         next product slot, hours away, which a cap denial rightly waits for
-        (#1301) — attempt restored, no error."""
+         — attempt restored, no error."""
         from src.services.target.publish_pipeline import (
             BUSY_RETRY_SECONDS,
             DEFERRED_BUSY,
@@ -626,10 +626,10 @@ class TestTheHappyPath:
         the best-effort inline destroy after commit."""
         intent, ref = _new_intent(pipe_db)
         job = _leased_job(pipe_db, intent, ref=ref)
-        # The approval card exactly as the TAP leaves it (#1276): the
+        # The approval card exactly as the TAP leaves it: the
         # card row is already `superseded` with "✅ Approved by Ada" and the
         # tap's own edit row has been sent. The leg must finish that sentence
-        # on a card whose buttons are already gone (#1220).
+        # on a card whose buttons are already gone.
         binding = _exec(
             pipe_db,
             "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
@@ -716,7 +716,7 @@ class TestTheHappyPath:
         )
         assert len(lock) == 1 and lock[0][0] == "recent"
         assert lock[0][1] is not None and lock[0][2] is not None
-        # The SPAN, not merely that one exists (#1365). This workspace has no
+        # The SPAN, not merely that one exists. This workspace has no
         # `repost_ttl_days`, so the lock is the product default — and it must
         # be the SAME default the manual `posted` path applies, which is the
         # one `posted_effects` documents and the Settings card shows. A worker
@@ -791,7 +791,7 @@ class TestTheHappyPath:
 
 
 class TestTheLinesNameTheRule:
-    """#1477: the lines the pipeline writes for a story a rule approved name
+    """The lines the pipeline writes for a story a rule approved name
     the rule where a person's name would stand — the posted line and a dry
     run's here; the waiting line beside the cap wait's own test — read from the
     story's own `approval_rule`."""
@@ -819,7 +819,7 @@ class TestTheLinesNameTheRule:
 
 
 class TestTheFetchRung:
-    """The fetch and the upload are provider calls too (#1276): a file
+    """The fetch and the upload are provider calls too: a file
     that is gone or too large fails the intent with its refund; anything else
     rides the ladder; a dead credential skips the ladder and lands on a human.
     None of them may reach the loop's blanket reschedule, which would hold the
@@ -1040,7 +1040,7 @@ class TestTheReadinessPoll:
     def test_a_ready_checkpoint_that_matches_no_row_stops_before_the_publish(
         self, pipe_db
     ):
-        """#1438: the `container_ready` checkpoint is state-guarded: a miss
+        """The `container_ready` checkpoint is state-guarded: a miss
         raises, as the checkpoints either side of it do, before the publish
         permit and the provider's publish call."""
         intent, ref = _new_intent(
@@ -1198,7 +1198,7 @@ class TestPauseAndDryRun:
 
     def test_a_pause_that_lands_after_the_flip_steps_back_at_step_none(self, pipe_db):
         """A pause that lands after the flip steps the story back with its
-        debit (#1306), so no wait holds the account's slot."""
+        debit, so no wait holds the account's slot."""
         from src.services.target.publish_pipeline import DEFERRED_PAUSED
 
         self._flag(pipe_db, "is_paused", True)
@@ -1511,7 +1511,7 @@ class TestError9:
             fetch=True,
         )
         # The wait's audit row names the state the story waits in: it steps
-        # back before the row is written (#1306).
+        # back before the row is written.
         assert audits == [("error_9", "approved")]
 
         job2 = _reclaim(pipe_db, job["id"])
@@ -1573,7 +1573,7 @@ class TestDefinitiveFailureClassification:
         assert _job_row(pipe_db, job["id"])["state"] == "review_required"
         # The card keeps buttons: the workspace resolves its own
         # review. The restate stores no keyboard; the sender renders the three
-        # resolutions when it claims the edit, from the story's state (#1477).
+        # resolutions when it claims the edit, from the story's state.
         edit = _review_edit(pipe_db, intent, binding)
         assert "Needs review" in edit["outcome_text"]
         assert "reply_markup" not in edit
@@ -1612,7 +1612,7 @@ class TestDefinitiveFailureClassification:
         assert outcome == RETRY_SCHEDULED
         row = _intent_row(pipe_db, intent)
         assert row["publish_step"] == "transit_uploaded"
-        # #938: the rewound row carries no container id. The dead one is not
+        # the rewound row carries no container id. The dead one is not
         # merely unused — it is a pointer to a resource that no longer exists,
         # and the next reader is a human. The id itself is not lost: the
         # container_create op records it in `response_ref` under its own
@@ -1633,7 +1633,7 @@ class TestDefinitiveFailureClassification:
 
 
 class TestADeadContainerIdDoesNotOutliveItsContainer:
-    """#938: on the RETRY path a stale container id lives only "between two
+    """On the RETRY path a stale container id lives only "between two
     instants" — the step-back and the next run.
 
     On the POISON path the early `return POISONED` means the step-back UPDATE is
@@ -1675,7 +1675,7 @@ class TestADeadContainerIdDoesNotOutliveItsContainer:
         Poison is shared by every retryable class. A poison after a failed
         PUBLISH leaves a container that is still LIVE and reusable — nulling its
         id there would throw away a valid pointer, and the resulting row would
-        be no more honest than a row that keeps a dead id (#938), only wrong in
+        be no more honest than a row that keeps a dead id, only wrong in
         the other direction. Only a caller that rewound past the container rung
         is saying the container is gone.
         """
@@ -1903,7 +1903,7 @@ class TestThePrecheck:
         assert transit.upload_calls == [] and meta.create_calls == []
         # The adapter is addressed by the ACCOUNT's live identity, not the
         # intent's snapshot of it (a pre-connect intent carries the manual
-        # placeholder; the connect rewrites only the account, #1276).
+        # placeholder; the connect rewrites only the account).
         account_ref = _exec(
             pipe_db,
             "SELECT provider_account_ref FROM ig_accounts WHERE id = %s",
@@ -1940,7 +1940,7 @@ class TestThePrecheck:
     def test_a_dry_run_never_reads_usage_even_with_the_check_armed(self, pipe_db):
         """Dry Run Mode's contract is that nothing reaches Instagram; the
         usage read is a Meta call with the account's token, and Meta's cap
-        must not hold a rehearsal that spends none of it (#1299)."""
+        must not hold a rehearsal that spends none of it."""
         from src.services.target.publish_pipeline import POSTED_DRY_RUN
 
         intent, ref = _new_intent(pipe_db)
@@ -2102,7 +2102,7 @@ class TestTheFirstFetch:
         row = _intent_row(pipe_db, intent)
         # A 404 after the whole probe budget is an asset the CDN does not
         # know: the story steps back to step `none` without its ref and the
-        # next run uploads afresh (#1306) — still on
+        # next run uploads afresh — still on
         # the ladder, still never handed to Meta.
         assert row["state"] == "approved" and row["publish_step"] == "none"
         assert row["transit_asset_ref"] is None
@@ -2604,10 +2604,10 @@ class TestTheFirstFetch:
             "nobody could hear: the latch must stay off"
         )
 
-    # -- step-backs, waits and cancels (#1306) --------------------------------
+    # -- step-backs, waits and cancels --------------------------------
 
     def test_a_swept_asset_is_uploaded_again_never_reported(self, pipe_db):
-        """#1306: a story that waited past the transit sweep (48 h — a weekend
+        """A story that waited past the transit sweep (48 h — a weekend
         without slots, a long pause) re-enters to a frame the CDN no longer
         knows. A 404 after the probe's budget means the asset is gone: the
         story steps back to step `none` without its ref and the next run
@@ -2661,7 +2661,7 @@ class TestTheFirstFetch:
         assert row["transit_asset_ref"] == "ws/x/slow"
 
     def test_a_fallback_wait_says_nothing_on_the_card(self, pipe_db):
-        """#1306: with no slot stamped, a cap deferral re-checks in a minute
+        """With no slot stamped, a cap deferral re-checks in a minute
         (the fallback rung). A wait of a minute is not said on the card —
         twenty deferred stories would otherwise edit their cards every
         minute all day."""
@@ -2687,7 +2687,7 @@ class TestTheFirstFetch:
         "rule, line",
         [
             (None, "✅ Approved · posts tomorrow"),
-            # A rule-approved story's waiting line names the rule (#1477).
+            # A rule-approved story's waiting line names the rule.
             ("returning", "✅ Approved by Returning items · posts tomorrow"),
         ],
     )
@@ -2918,7 +2918,7 @@ class TestTheFirstFetch:
         assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
 
     def test_a_pause_at_the_post_flip_hold_steps_back(self, pipe_db):
-        """#1306: a pause landing between the flip and the ladder steps the
+        """A pause landing between the flip and the ladder steps the
         story back too, so no wait holds the slot; the re-entrant flip takes
         it in again with its debit."""
         from src.services.target.publish_pipeline import DEFERRED_PAUSED
@@ -2952,7 +2952,7 @@ class TestTheFirstFetch:
         assert _bucket(pipe_db, DAY) == 1, "no second debit on re-entry"
 
     def test_a_bump_keeps_keys_another_writer_added_meanwhile(self, pipe_db):
-        """#1306: the counters are merged onto the row,
+        """The counters are merged onto the row,
         never written wholesale from the pipeline's copy, so a key another
         writer adds while the story is held survives the bump."""
         intent, ref = _new_intent(pipe_db)
@@ -3048,7 +3048,7 @@ class TestTheFloatsSafetyNets:
         assert row["last_error"]["evidence"]["customer_notified"] is True
 
     def test_a_dead_job_parks_a_waiting_story_for_review(self, pipe_db):
-        """From a stepped-back `approved` row: the second edge of 076."""
+        """From a stepped-back `approved` row: the second edge of `post_intent_transitions publish wait edges`."""
 
         intent, ref = _new_intent(pipe_db)
         binding = _seed_card(pipe_db, intent)
@@ -3223,7 +3223,7 @@ class TestTheFloatsSafetyNets:
     def test_the_reaper_lists_through_a_door_and_parks_as_the_worker_role(
         self, pipe_db
     ):
-        """#1306: the reap job is a system singleton, so with
+        """The reap job is a system singleton, so with
         `app.tenant_id = ''` a plain SELECT over post_intents matches
         nothing under `p_tenant` once the worker runs as svc_worker — the
         reconciler's case too. The leg lists through a SECURITY DEFINER
@@ -3274,7 +3274,7 @@ class TestTheFloatsSafetyNets:
     def test_the_reaper_leaves_a_paused_workspaces_stories_alone(self, pipe_db):
         """A paused workspace's approvals wait on purpose: the safety net is
         for a story the system lost track of, not one the workspace
-        parked (#1306)."""
+        parked."""
         from src.services.target.scheduler import execute_reap_expired
 
         stale, ref = _new_intent(pipe_db)
@@ -3312,7 +3312,7 @@ class TestTheFloatsSafetyNets:
         """A stale approved story flagged `cancel_requested` has no job left
         to honour the flag: the reaper honours it — the refund it carries
         first, then `cancelled` — rather than parking a story the workspace
-        already gave up on (#1306)."""
+        already gave up on."""
         from src.services.target.scheduler import execute_reap_expired
 
         stale, ref = _new_intent(pipe_db, cancel_requested=True, debited=True)
@@ -3338,7 +3338,7 @@ class TestTheFloatsSafetyNets:
         assert _notices(pipe_db, stale, binding) == [], "nothing to review"
 
     def test_one_stale_rows_fault_does_not_fail_the_sweep(self, pipe_db, monkeypatch):
-        """#1306: a savepoint per row, as the settled-cards sweep has — one
+        """A savepoint per row, as the settled-cards sweep has — one
         story's fault (a zone, a lost binding) must not roll back the door's
         expiries and re-crash the reap job every tick."""
         from src.services.target import publish_pipeline
@@ -3382,9 +3382,9 @@ class TestTheFloatsSafetyNets:
         assert len(_notices(pipe_db, good, binding)) == 1
 
 
-# --- #1235: the reaper's cancel leg (087) ---------------------------------------
+# ---: the reaper's cancel leg (`fn_reaper_sweep cancel leg`) ---------------------------------------
 
-#: The four states a cancel the user asked for waits in (055's seeded edges).
+#: The four states a cancel the user asked for waits in (`intent_ledger.py`'s seeded edges).
 WAITING_STATES = ("scheduled", "prompt_pending", "awaiting_approval", "approved")
 
 
@@ -3425,7 +3425,7 @@ def _sweep(pipe_db, lim):
 
 
 class TestTheReapersCancelLeg:
-    """087 (#1235): a cancel the user asked for ends `cancelled` at the
+    """`fn_reaper_sweep cancel leg`: a cancel the user asked for ends `cancelled` at the
     reaper's next sweep in every waiting state, ahead of the expiry legs —
     never for a row carrying a debit, which only the paths that refund it may
     cancel."""
@@ -3458,7 +3458,7 @@ class TestTheReapersCancelLeg:
 
     def test_a_flag_outranks_an_expiry_in_the_same_sweep(self, pipe_db):
         """A flagged row past its slot or its approval TTL ends `cancelled`,
-        the label the reaper's cancel leg applies (#1235). Its unflagged twin
+        the label the reaper's cancel leg applies. Its unflagged twin
         still expires — the expiry legs' positive control."""
         past = {
             flagged: [
@@ -3487,7 +3487,7 @@ class TestTheReapersCancelLeg:
         assert _states(pipe_db, rows) == ["cancelled", "cancelled", "expired"]
 
     def test_a_debited_story_is_left_for_the_path_that_refunds_it(self, pipe_db):
-        """A floating story steps back to `approved` with its cap debit (076).
+        """A floating story steps back to `approved` with its cap debit (`post_intent_transitions publish wait edges`).
         The sweep leaves it — cancelled there, the debit would be stranded —
         and its own job refunds it and cancels it, as
         `test_a_cancel_while_floating_refunds_and_destroys` pins."""
@@ -3609,9 +3609,9 @@ class TestTheReapersCancelLeg:
 
 
 class TestEveryLegRunsInTheFinalBody:
-    """The stream's last definition of `fn_reaper_sweep` carries every leg: 089
-    redefines it on 087's body (#1413), so one file holds 076's six, 086's
-    deadline leg (#1429), 087's cancel leg (#1235) and 089's cadence-only slot
+    """The stream's last definition of `fn_reaper_sweep` carries every leg: `fn_planned_serve / fn_planned_misses`
+    redefines it on `fn_reaper_sweep cancel leg`'s body, so one file holds `post_intent_transitions publish wait edges`'s six, `fn_reaper_sweep deadline leg`'s
+    deadline leg, `fn_reaper_sweep cancel leg`'s cancel leg and `fn_planned_serve / fn_planned_misses`'s cadence-only slot
     expiry. One sweep, as the worker runs it, over a world holding one row for
     each leg to take, and one test per leg reading its row: a body that dropped
     a leg fails by the leg's name."""
@@ -3720,7 +3720,7 @@ class TestEveryLegRunsInTheFinalBody:
 
 
 class TestAPlannedStoryOutsideTheCap:
-    """Through the real ladder (#1413): a
+    """Through the real ladder: a
     planned story neither spends the account's daily cap nor waits on it, so
     a spent day posts it at once and the day's cadence is what it would have
     been without it. Meta's own limit still holds it."""
@@ -3893,7 +3893,7 @@ def _sessions_left(pipe_db, user):
 
 class TestTheSweepsLegOrder:
     """The order the legs run in decides who gets a short budget. The lease leg
-    goes first (liveness comes first, 059) and 086's deadline leg last, so a
+    goes first (liveness comes first, `04_functions.sql`) and `fn_reaper_sweep deadline leg`'s deadline leg last, so a
     backlog of expired jobs cannot take the budget of the legs above; a test
     per adjacency that a large budget cannot tell apart."""
 

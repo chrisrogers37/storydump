@@ -1,4 +1,4 @@
-"""Invitation acceptance — the `fn_invitation_accept` door (`059:533`), wrapped
+"""Invitation acceptance — the `fn_invitation_accept` door (`04_functions.sql`), wrapped
 once, in the tier where the driver's refusals are translated.
 
 The door owns everything that matters: it resolves the workspace from the
@@ -11,7 +11,7 @@ module turns them into a typed :class:`InvitationRefused` the adapter maps by
 the SQLAlchemy→asyncpg chain is walked (`intent_ledger` precedent); an HTTP
 layer sniffing SQLSTATEs was the shape this replaces.
 
-The token's stored form is `sessions.token_hash` on purpose: `053` describes
+The token's stored form is `sessions.token_hash` on purpose: `identity_and_tenancy.py` describes
 the invite token as the "credential idiom as session_tokens", and the
 `invite_member` executor that mints it must hash the same way.
 """
@@ -58,22 +58,22 @@ REASONS = (
 )
 
 #: An address an invitation can be emailed to: the waitlist CHECK's shape
-#: (`100`) — one "@", no whitespace, a dot in the domain — and nothing
+#: (`ck_waitlist_email`) — one "@", no whitespace, a dot in the domain — and nothing
 #: invisible (``isprintable``, a little stricter than that CHECK). Invitations
 #: have no CHECK of their own, so this writer holds the rule.
 _EMAIL_SHAPE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 
-#: `053`'s `ck_invite_channel`, mirrored so the refusal can name the field. A
+#: `identity_and_tenancy.py`'s `ck_invite_channel`, mirrored so the refusal can name the field. A
 #: tuple rather than a set so the refusal message has a stable order.
 CHANNELS = ("email", "telegram")
 
-#: `053`'s own words: "now() + 7 days at insert". Named here
+#: `identity_and_tenancy.py`'s own words: "now() + 7 days at insert". Named here
 #: because the DDL states it as a default in prose, not as a column default —
 #: the writer owns it, and there is exactly one writer.
 INVITE_TTL_SECONDS = 7 * 24 * 3600
 
 #: The caller's verified address, read in the statement that asks a door: the
-#: accept door, and the invitee's two (115). `users` is user-plane, so the
+#: accept door, and the invitee's two (`invitee invitation functions`). `users` is user-plane, so the
 #: API's login reads it and the doors' owner never needs to.
 _THEIR_ADDRESS = "(SELECT primary_email FROM users WHERE id = :u)"
 
@@ -129,7 +129,7 @@ async def revoke_on_removal(executor, *, workspace_id: str, user_id: str) -> int
 
     Sent: the removed member's invitations no longer speak for the workspace.
     Addressed: the accept door already refuses an invitation older than the
-    removal (098), so neither arm should stay listed as pending; an email one
+    removal (`invitation legitimacy checks`), so neither arm should stay listed as pending; an email one
     would also hold `uq_invite_live` and block the fresh invitation that is
     meant to bring the person back. The Telegram id is compared as text
     because that is how `user_identities` stores it. Returns how many moved."""
@@ -183,7 +183,7 @@ async def create(
     `fn_invitation_accept` resolves by `token_hash` alone, so the hash is the
     whole credential and possession is the whole authorization.
 
-    **DELIVERY-AGNOSTIC ON PURPOSE.** `053` closes `delivery_channel` at
+    **DELIVERY-AGNOSTIC ON PURPOSE.** `identity_and_tenancy.py` closes `delivery_channel` at
     `email | telegram` and gives each its own acceptance value — `email`
     for a verified Google claim, `invited_tg_user_id` for the provider's
     immutable numeric id. Both are columns on one row, so an email invitation
@@ -193,7 +193,7 @@ async def create(
     parts that are authorization rather than display.
 
     **What is NOT decided here.** `role` is the invitation's CEILING, not a
-    grant (`053`): `fn_invitation_accept` grants `admin` only when the
+    grant (`identity_and_tenancy.py`): `fn_invitation_accept` grants `admin` only when the
     identity proof matched, and `member` plus an elevation-pending
     notification otherwise. Nothing in this function can widen that, which is
     why an admin invite is safe to mint without knowing who will accept it.
@@ -242,7 +242,7 @@ async def create(
     # stops working and the new one carries this send's role and inviter. The
     # addressee is the email or the Telegram id, as `revoke_on_removal` reads
     # it. The old one may also be one the accept door now refuses (its sender
-    # demoted or removed, or its addressee removed since, 098), which for an
+    # demoted or removed, or its addressee removed since, `invitation legitimacy checks`), which for an
     # email would otherwise hold `uq_invite_live` until the reaper expires it.
     #
     # Sends to one addressee are serialized for the rest of the transaction:
@@ -360,7 +360,7 @@ def email_params(
 
 
 def _delivery(**outcome: str) -> dict[str, Any]:
-    """An invitation email's answer, ``{"delivery": {"channel": "email", ...}}``,
+    """An invitation email's answer, ``{"delivery": {"channel": "email",...}}``,
     with *outcome* a state from `vocabulary.INVITATION_DELIVERY_STATES` and, for
     `over_budget` and `failed`, its reason."""
     return {"delivery": {"channel": "email", **outcome}}
@@ -506,7 +506,7 @@ def _invitation_email(
 
 
 # ---------------------------------------------------------------------------
-# The invitee's own (115): what they could accept, and a fresh link
+# The invitee's own (`invitee invitation functions`): what they could accept, and a fresh link
 # ---------------------------------------------------------------------------
 
 

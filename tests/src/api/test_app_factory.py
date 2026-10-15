@@ -177,8 +177,8 @@ class TestTheVersionIsThePackages:
     """`/health.version` and the OpenAPI document both report the package.
 
     Neither is hand-typed: a typed string does not move when `src.__version__`
-    does (#1035), and `/health` and `storydump doctor`, which prints it, would
-    then tell whoever is debugging a deploy the wrong number (#1359).
+    does, and `/health` and `storydump doctor`, which prints it, would
+    then tell whoever is debugging a deploy the wrong number.
     """
 
     def test_health_reports_the_package_version(self):
@@ -330,7 +330,7 @@ class TestRefusalMappingsAreTotal:
     def test_invitation_reasons(self):
         """Both dicts, because BOTH are indexed on the refusal path.
 
-        A reason reaching `REASONS` without a status (#1172) is a coupling
+        A reason reaching `REASONS` without a status is a coupling
         invisible at the point the reason is added, in a file the change does
         not touch. The handler reads `_INVITATION_STATUS.get(...)` and falls
         back to a logged 500, but then indexes `_INVITATION_DETAIL[...]` BARE,
@@ -506,15 +506,15 @@ async def _fake_snapshot(executor, **kwargs):
 
 @pytest.mark.usefixtures("stubbed_bound")
 class TestSchedulingHealthIsASecondSurface:
-    """#1090. `/health` is Railway's liveness gate and must not open a
-    connection; this is the dependency-touching check (#1026), and the two
+    """`/health` is Railway's liveness gate and must not open a
+    connection; this is the dependency-touching check, and the two
     being separate endpoints is the design rather than an accident."""
 
     def test_it_is_not_the_railway_probe(self):
         """If these were one endpoint, either liveness opens a connection — and a
         database blip takes the service down for a fault no restart repairs — or
         the scheduling check touches nothing and reports healthy through any
-        outage, which is #1026 exactly."""
+        outage, which is exactly."""
         app = create_app(env={})
         paths = {r.path for r in app.routes}
         assert "/health" in paths
@@ -522,7 +522,7 @@ class TestSchedulingHealthIsASecondSurface:
 
     def test_it_refuses_rather_than_reassures_when_it_cannot_look(self):
         """A monitor must distinguish "scheduling is fine" from "I could not
-        look" (#1090), so an absent engine is a 503 and never a cheerful
+        look", so an absent engine is a 503 and never a cheerful
         zero."""
         app = create_app(env={})
         assert app.state.engine is None
@@ -551,7 +551,7 @@ class TestSchedulingHealthIsASecondSurface:
             return {"stalled": 0, "accounts_active": 7, "max_lag_seconds": None}
 
         async def fake_worker(executor):
-            # This route has a SECOND seam (#1120). A route unit test has to
+            # This route has a SECOND seam. A route unit test has to
             # stub both or it reaches SQL, which this class's own fixture guard
             # catches.
             seen.append(executor)
@@ -582,7 +582,7 @@ class TestSchedulingHealthIsASecondSurface:
         assert hasattr(seen[0], "execute")
 
     def test_scheduling_health_serves_the_worker_axis_too(self, client, monkeypatch):
-        """#1120: both axes on ONE payload, deliberately.
+        """Both axes on ONE payload, deliberately.
 
         An external poller of this endpoint reads both axes from one URL, and
         the cursor axis keeps its keys beside the worker axis.
@@ -708,7 +708,7 @@ class TestTheQueueMovedToTheDetails:
 
 @pytest.mark.usefixtures("stubbed_bound")
 class TestPostingHealthIsATHIRDSurface:
-    """#1268. `/health/scheduling` reads the clock and the worker, and both
+    """`/health/scheduling` reads the clock and the worker, and both
     can stay true while nothing posts. This route answers the one question
     they cannot: did a post LAND."""
 
@@ -811,7 +811,7 @@ class TestPostingHealthIsATHIRDSurface:
         assert all(hasattr(ex, "execute") for _, ex in seen)
 
     def test_the_payload_satisfies_the_pollers_strictness(self, client, monkeypatch):
-        """The route and the poller's classifier (#1268) are one repo and one
+        """The route and the poller's classifier are one repo and one
         test suite on purpose, so the wire contract cannot drift. `classify`
         rejects a missing or mistyped key as `unreachable`; this drives the
         REAL classifier over the REAL route body rather than asserting a
@@ -844,7 +844,7 @@ class TestPostingHealthIsATHIRDSurface:
 
 @pytest.mark.usefixtures("stubbed_bound")
 class TestDeliveryHealthIsAFOURTHSurface:
-    """#1482. Deliveries failing and posts not landing are independent causes,
+    """Deliveries failing and posts not landing are independent causes,
     so the outbox's failures get their own surface rather than a key in either
     of the other two payloads, which would rank one cause against the other."""
 
@@ -884,7 +884,7 @@ class TestDeliveryHealthIsAFOURTHSurface:
 
     @staticmethod
     def _get(engine, client, failures, sent=40):
-        """The REAL `delivery_health` behind the route, over 101's doors
+        """The REAL `delivery_health` behind the route, over `outbox failure records`'s doors
         scripted on the conftest engine's connection."""
         engine.session = doors = _Doors(failures, sent)
         resp = client.get("/health/delivery")
@@ -957,11 +957,11 @@ def _wait_for_role(client, timeout=2.0):
 
 class TestHealthReportsTheDatabaseRole:
     """The operating details say which database login the API holds, and
-    whether that login bypasses row-level security (#751).
+    whether that login bypasses row-level security.
 
-    Production connects as `neondb_owner` with `BYPASSRLS`, so every `p_tenant`
-    policy is inert on the deployed path — and nothing could say so. The switch
-    to `svc_ingress` is verified by reading this field back after the deploy.
+    The deployed API connects as `svc_ingress`. The owner role applies schema
+    changes. Reporting the login and its RLS attributes exposes an accidental
+    privileged runtime connection.
 
     The value is sampled ONCE, at startup, in the background. The probe itself
     still opens no connection: that property is what keeps a database blip from

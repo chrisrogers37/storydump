@@ -52,7 +52,7 @@ HEALTH = {
     "pool": {"size": 10, "checked_out": 1, "checked_out_peak": 3},
     "ingress_workers": 1,
     # `TapMetrics.snapshot()`'s real shape: two scalars and the per-outcome
-    # map nested under `taps` (#1360).
+    # map nested under `taps`.
     "taps": {
         "taps_total": 13,
         "taps": {"executed": 12, "older_card": 1},
@@ -1270,7 +1270,7 @@ def gate(directory: Path, *versions: int) -> None:
 def test_doctor_reports_a_gated_migration_as_owed_not_as_a_deployment_behind(
     tmp_path,
 ):
-    """079 and 080 carry the runner's `manual` directive: every deploy owes
+    """`legacy schema removal` and `schema initialization` carry the runner's `manual` directive: every deploy owes
     them and they are applied only by hand (`apply --manual`), so until that
     window runs they are in the checkout and not in the ledger BY DESIGN.
     "Deploy main" would be the wrong fix, and exit 4 a standing false alarm."""
@@ -1372,7 +1372,7 @@ def test_the_health_renderer_reads_the_taps_real_keys(tmp_path):
     (`TAP_OUTCOMES`). A fixture spelled the renderer's way cannot catch a
     renderer reaching for a key the API does not emit, so this binds the
     renderer to the API's own snapshot, as the pool block's test binds
-    `POOL_FACTS` (#1324)."""
+    `POOL_FACTS`."""
     from src.api.routes.webhooks import TapMetrics
     from storydump_cli.output import TAP_FACTS, TAP_OUTCOMES
 

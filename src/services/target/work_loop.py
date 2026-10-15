@@ -1,10 +1,15 @@
-"""The worker's kind→executor registry and per-lane claim loop (#942, #903).
+"""The worker's kind→executor registry and per-lane claim loop.
 
 This is the tier half of the composition root: `src.worker` (the entrypoint)
 builds engines, connections, `Clock`, `LeaseHeartbeat` and the seams, then
 runs one :class:`WorkLoop` per lane over the registry built here. Nothing in
 this module knows a channel — the transport arrives as an injected callable
 (`outbox.deliver`'s contract: takes the row, returns the external ref).
+
+The deployed worker uses `svc_worker`. System selections use bounded
+SECURITY DEFINER functions; tenant writes run with the selected workspace.
+Publish jobs are minted by approval, review resolution, automatic approval
+and give-up handling through `jobs.mint_publish_job`.
 
 **Parking is the registry's honest state, not an error path.** A claimed job
 whose kind cannot run here is RESCHEDULED with its attempt restored: alive,
@@ -86,7 +91,7 @@ class WorkerConfig:
     # leases, and under the pinned pool (`POOL_SIZE_SEAM`) one process never
     # runs more tasks per lane than these — `assert_concurrency_fits` checks
     # the pool, not the caps — so on a single worker one workspace can hold
-    # a whole lane (#1428).
+    # a whole lane.
     ws_lane_cap_interactive: int = 5
     ws_lane_cap_bulk: int = 3
     claim_idle_seconds: float = 1.0  # sleep when a lane has nothing runnable
@@ -99,7 +104,7 @@ class WorkerConfig:
     sender_mint_limit: int = 200
     prompt_sweep_seconds: float = 5.0  # cadence of the prompt sweep
     prompt_sweep_limit: int = 50  # sweep batch (`prompts.sweep_due_prompts`)
-    # The late window (#1413): a planned story is still served up to
+    # The late window: a planned story is still served up to
     # an hour after its time — the worker down, or a pause that ended inside
     # the hour; past it, it is missed and its bound chats are told. Passed to
     # both doors (`fn_prompts_due`, `fn_planned_misses`), so a new value needs
@@ -135,32 +140,32 @@ class WorkerConfig:
     reconcile_limit: int = 50
     reconcile_notify_after_seconds: int = 6 * 3600
     transit_reap_older_than_seconds: int = 48 * 3600
-    stranded_alert_after_seconds: int = 24 * 3600  # re-alert cadence (#1061)
+    stranded_alert_after_seconds: int = 24 * 3600  # re-alert cadence
     stranded_alert_limit: int = 200  # rows re-alerted per beat
     # The "no media available" notice for a missed slot: once per account per 24 h.
     no_media_notice_after_seconds: int = 24 * 3600
-    # The runway notice's level, in days of eligible content (#1478): told once
+    # The runway notice's level, in days of eligible content: told once
     # below it, re-armed a margin above it (`content_runway.REARM_MARGIN_DAYS`).
     low_runway_days: int = content_runway.LOW_RUNWAY_DAYS
     # The front end's origin (`settings.web_app_origin`), for the deep link in
     # the parked-intent notice. None = the notice still fires,
     # without a link: being told late beats not being told.
     web_app_origin: Optional[str] = None
-    # The activation nudge (#1481), built off: `build_registry` parks its sweep
+    # The activation nudge, built off: `build_registry` parks its sweep
     # unless this is set AND an email provider and `web_app_origin` exist, and
     # the entrypoint sets it only from TARGET_ACTIVATION_NUDGE_ENABLED.
     activation_nudge_enabled: bool = False
     # Emails per daily run, TARGET_ACTIVATION_NUDGE_LIMIT when set. Small by
     # default because the latch is set as each email is queued, not as it is
     # sent: a provider mistake on an armed day uses up that day's nudges, so
-    # the first armed run should risk few (#1653). Raise it once one has been
+    # the first armed run should risk few. Raise it once one has been
     # delivered. `email_sender`'s 90/day is shared with invitations, and a
     # person waiting on an invite comes first.
     activation_nudge_limit: int = 3
     # Only people who signed up this recently, so switching the nudge on does
     # not mail everyone who ever stopped part-way.
     activation_nudge_since_days: int = 30
-    # Idle this long before a nudge: 104's stall window for the funnel.
+    # Idle this long before a nudge: `fn_activation_funnel`'s stall window for the funnel.
     activation_nudge_stall_seconds: int = 72 * 3600
 
     def concurrency_for(self, lane: str) -> int:
@@ -268,7 +273,7 @@ class WorkerDeps:
     #: The archive adapter's HTTP client, closed at shutdown, or None.
     archive_client: Any = None
     mix_conversion_evidence: Any = None
-    #: The EmailSender port, or None when no provider is wired (#1092).
+    #: The EmailSender port, or None when no provider is wired.
     email: Optional[Any] = None
     transport: Optional[Callable[[dict], Any]] = None
     poll: Optional[Callable[..., Any]] = None
@@ -290,7 +295,7 @@ _UNBUILT_REASON = (
 
 #: Kinds the tier has never carried an executor for. The registry parks them
 #: unconditionally; the schema-derived completeness test keeps this honest.
-#: (The three archive lifecycle kinds of migration 145 all have executors; the
+#: (The three archive lifecycle kinds of `archive lifecycle job kinds` all have executors; the
 #: existing-account reconciliation parks only while the archive is not armed.)
 UNBUILT_KINDS = ("reencrypt_credentials",)
 
@@ -310,7 +315,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         session.info["archive_capability"] = deps.archive_capability
         payload = job.get("payload") or {}
         # The slot rides jsonb as a string Postgres rendered, so POSTGRES
-        # parses it back (#969): PG strips trailing fractional zeros when
+        # parses it back: PG strips trailing fractional zeros when
         # rendering timestamptz into jsonb, and CPython's fromisoformat is
         # version-sensitive about fraction widths (3.10, the repo floor,
         # rejects most of them — a stranding clock, not an outage, because
@@ -398,7 +403,7 @@ def build_registry(deps: WorkerDeps) -> dict:
         informational. Feeding the second into `reconcile_intent` — ignoring
         the tag — polls a provider about an intent whose ladder is already
         spent, and produces no notification at all. So a notify row, by the tag
-        the 059 door sets, goes to `reconciler.notify_parked_customer` (#1090).
+        the `04_functions.sql` door sets, goes to `reconciler.notify_parked_customer`.
 
         **The poll seam parks the LADDER half, not the kind.** The module
         docstring's rule is that a missing seam parks its *dependent* kind; the
@@ -406,21 +411,21 @@ def build_registry(deps: WorkerDeps) -> dict:
         the ladder over-parks: a deployment with no poll seam would lose the
         customer notification too.
 
-        **A failed row fails alone** (#1492). The sweep reads in one short
+        **A failed row fails alone**. The sweep reads in one short
         transaction and each row runs in a transaction of its own, so a row
-        that raises — a verdict whose flip matched no row is #1438's alarm —
+        that raises — a verdict whose flip matched no row is's alarm —
         rolls back alone, and the rows behind it still land rather than wait
         behind it (an unresolved ambiguity holds its account's next publish,
         `uq_publish_exclusive`). Not a savepoint per row in one transaction: a
         batch larger than `offboarding.MAX_WRITING_SAVEPOINTS` overflows the
-        backend's subtransaction cache (#1441). After the beat the first
+        backend's subtransaction cache. After the beat the first
         failure is re-raised, so the job still fails and retries. A notice
         nobody can hear is recorded only by a beat that returns
         (`reconciler.record_no_surface` says why), so a failing beat leaves
         none behind. A caller that passes its own session (the unit seam) gets
         a savepoint per row on it instead.
 
-        **The provider is asked with no transaction open** (#1508). A ladder
+        **The provider is asked with no transaction open**. A ladder
         row asks the provider (`reconciler.observe`) before its transaction
         opens, then claims its workspace, reads how far its ladder has climbed
         and records the answer in it: the egress floor refuses a provider call
@@ -454,12 +459,12 @@ def build_registry(deps: WorkerDeps) -> dict:
                         workspace_id=op["workspace_id"],
                         web_app_origin=cfg.web_app_origin,
                     )
-            # Asked before the row's transaction opens (#1508, the docstring).
+            # Asked before the row's transaction opens (the docstring).
             status_code = await reconciler.observe(
                 deps.poll, intent_id=op["intent_id"], workspace_id=op["workspace_id"]
             )
             async with row_transaction() as session:
-                # Scope the ladder row too. 059 says every write from this sweep
+                # Scope the ladder row too. `04_functions.sql` says every write from this sweep
                 # "runs tenant-scoped as svc_worker": the session carries
                 # `app.tenant_id = ''` because this is a system singleton, so an
                 # unscoped write here is invisible to `p_tenant`. On the unit
@@ -468,7 +473,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 # whichever row preceded it. The ladder's count is read AFTER
                 # the claim for the same reason: `post_intents` is
                 # policy-covered, and a read with no tenant answers 0 for every
-                # row — a ladder that never exhausts (#1349).
+                # row — a ladder that never exhausts.
                 await unit_of_work.apply_gucs(
                     session,
                     tenant_id=str(op["workspace_id"]),
@@ -514,7 +519,7 @@ def build_registry(deps: WorkerDeps) -> dict:
                 ladder_skipped,
             )
         if failures:
-            # Loud (#1438): the job fails and retries. The rows that resolved
+            # Loud: the job fails and retries. The rows that resolved
             # have committed, so only the failed rows come round again.
             logger.error(
                 "reconcile_ambiguous: %d of %d row(s) failed this beat; the"
@@ -543,7 +548,7 @@ def build_registry(deps: WorkerDeps) -> dict:
 
     async def alert_stranded_sources(session, job):
         # Alert-only: nothing here re-arms a source or enqueues a sync. The
-        # re-arm belongs to the connect flow (#1061).
+        # re-arm belongs to the connect flow.
         await media_sync.alert_stranded_sources(
             session,
             stale_after_seconds=cfg.stranded_alert_after_seconds,
@@ -806,7 +811,7 @@ def build_registry(deps: WorkerDeps) -> dict:
     registry["reap_expired"] = reap_expired
     registry["retention_sweep"] = retention_sweep
     # No `deps.adapters` gate: this path makes no provider call, and a fleet with
-    # no adapter wired is exactly the one whose sources are stranded (#1061).
+    # no adapter wired is exactly the one whose sources are stranded.
     registry["alert_stranded_sources"] = alert_stranded_sources
     # NOT parked on `deps.poll`: the executor's notify half needs no provider
     # seam and its ladder half skips loudly without one. See the handler.
@@ -818,7 +823,7 @@ def build_registry(deps: WorkerDeps) -> dict:
     )
     # The ladder calls all three — fetch, transit.upload, meta.create_container
     # — so it is live only when all three are wired, and parks naming the
-    # first one missing (#1220, #982).
+    # first one missing.
     _missing = next(
         (
             name
@@ -846,8 +851,8 @@ def build_registry(deps: WorkerDeps) -> dict:
         else Parked("no channel transport configured")
     )
 
-    # `own_transactions` (#1368): this opens its own `poller_session_factory`
-    # and commits Phase 1 before `deps.refresh` — "outside any transaction",
+    # `own_transactions`: this opens its own `poller_session_factory`
+    # and commits the credential claim before `deps.refresh` — "outside any transaction",
     # as its comment says. It never touches the session passed here.
     @own_transactions
     async def refresh_credential(session, job):
@@ -856,7 +861,7 @@ def build_registry(deps: WorkerDeps) -> dict:
     async def reauth_prompt(session, job):
         return await credential_lifecycle.reauth_prompt(deps, session, job)
 
-    # `own_transactions` (#1368): its docstring states that a provider call
+    # `own_transactions`: its docstring states that a provider call
     # inside a unit of work violates this codebase's checkpoint discipline,
     # and lists "a floor refusal" among its retryable dispositions — so it
     # reaches the floor, and did so with the loop's session open.
@@ -893,7 +898,7 @@ def build_registry(deps: WorkerDeps) -> dict:
 
     async def activation_nudge_sweep(session, job):
         # Enqueues `send_email` jobs and sets each person's latch in the same
-        # transaction; no provider call happens here (#1481).
+        # transaction; no provider call happens here.
         await activation_nudge.sweep_stalled(
             session,
             since_days=cfg.activation_nudge_since_days,
@@ -902,7 +907,7 @@ def build_registry(deps: WorkerDeps) -> dict:
             web_app_origin=cfg.web_app_origin,
         )
 
-    # Built off (#1481). Three gates, each named when it is the one missing: the
+    # Built off. Three gates, each named when it is the one missing: the
     # switch, a provider to send through, and an origin for the email's link.
     nudge_closed = [
         reason
@@ -936,24 +941,24 @@ def build_registry(deps: WorkerDeps) -> dict:
     registry["reauth_prompt"] = reauth_prompt
     # Needs no `deps` seam: it talks to Google through the egress floor with a
     # per-call client, the way `ig_refresh` does. Nothing to wire, so nothing
-    # to park behind (#1083).
+    # to park behind.
     registry["revoke_workspace_credentials"] = revoke_workspace_credentials
 
-    # `own_transactions` (#1368): `_run_sync` resolves the provider adapter
+    # `own_transactions`: `_run_sync` resolves the provider adapter
     # and owns its sessions around, never across, that adapter's calls;
     # the session passed here is unused.
     @own_transactions
     async def sync_media_source(session, job):
         return await media_sync.sync_media_source(deps, session, job)
 
-    # `own_transactions` (#1368): the same `_run_sync`, one page at a time.
+    # `own_transactions`: the same `_run_sync`, one page at a time.
     @own_transactions
     async def first_ingest_chunk(session, job):
         return await media_sync.first_ingest_chunk(deps, session, job)
 
     # Seam-blocked, not unbuilt, and the difference is visible to whoever reads
     # the park reason: an executor that does not exist needs building, an absent
-    # seam needs WIRING (#982). A silent park would be indistinguishable from a
+    # seam needs WIRING. A silent park would be indistinguishable from a
     # kind nobody has started.
     _NO_ADAPTERS = Parked("no media adapters configured (registry #1644)")
     registry["sync_media_source"] = sync_media_source if deps.adapters else _NO_ADAPTERS
@@ -1433,13 +1438,13 @@ async def ensure_sender_jobs(
 
     The sweep-driven cycle is the design: a sender hold drains and the job
     finalizes `succeeded`; the next sweep re-mints only while pending rows
-    exist — or an `ambiguous` row has waited the resolution backoff (#1297:
+    exist — or an `ambiguous` row has waited the resolution backoff (:
     a live sender's lost answer is resolved by the binding's sender, and a
     quiet binding has none) — so an empty outbox mints nothing and a busy
     one always has exactly one live sender per binding.
     """
     attempts, deadline_seconds = jobs.LANE_BUDGETS["interactive"]
-    # The statement is `fn_sender_sweep`'s body (082): one INSERT … SELECT whose
+    # The statement is `fn_sender_sweep`'s body (`worker sweep functions`): one INSERT … SELECT whose
     # NOT EXISTS live-job check is its idempotence, a SECURITY DEFINER door
     # because the sweep runs with no tenant and every table it reads is
     # policy-covered. The key prefix, the lane budget and the bound stay

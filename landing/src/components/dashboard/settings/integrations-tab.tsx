@@ -16,8 +16,8 @@ import { TelegramCard } from "./telegram-card";
 /**
  * Integrations — Google Drive and Telegram, both live.
  *
- * Every action here is wired: Drive connect is the per-workspace grant (069,
- * #1165), disconnect is the `disconnect_account` command, and sync is
+ * Every action here is wired: Drive connect is the per-workspace grant (`workspace Drive grant`,
+ *), disconnect is the `disconnect_account` command, and sync is
  * `sync_now`. Nothing on this tab is held off.
  *
  * The connection facts are real: `gdrive_connected` and the source's own
@@ -27,7 +27,7 @@ import { TelegramCard } from "./telegram-card";
  * disabled", which is a claim about the workspace made from a column that
  * does not exist.
  *
- * ── Composition, like the two tabs beside it (#1216) ─────────────────────
+ * ── Composition, like the two tabs beside it ─────────────────────
  *
  * Each card holds the state it reads — `TelegramCard`, `DriveCard` and
  * `DriveFolderPickerDialog` — as the cards of `general-tab.tsx` and
@@ -64,7 +64,7 @@ export function IntegrationsTab({
   mix: SourceMix | null;
   workspaceId: string;
   /** Whether the signed-in USER has a Telegram identity attached — a fact
-   *  about the person, not this workspace (#1172). */
+   * about the person, not this workspace. */
   telegramLinked: boolean;
   /** The Telegram chats this WORKSPACE's cards go to; null = could not be loaded. */
   bindings?: ChannelBinding[] | null;

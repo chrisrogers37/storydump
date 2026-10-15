@@ -1,4 +1,4 @@
-"""The checkpointed publish-pipeline executor body (#915/#862).
+"""The checkpointed publish-pipeline executor body (/).
 
 The `publish_pipeline` job kind's executor: claimed via `fn_claim_job` by the
 composition root (this module is the callable it dispatches to), run here
@@ -14,22 +14,22 @@ egress floor enforces it from the other side for floor-routed calls; the
 injected adapters here are called with no UoW open, which the gate proves by
 running the real ladder.
 
-    [flip tx]     approved → publishing (CTE: cap debit + key-4), step none
-    ...           media_fetch + transit.upload            (no tx open)
-    [checkpoint]  transit_asset_ref + step transit_uploaded
-    [permit tx]   container_create permit (lease CAS inside acquire_permit)
-    ...           meta.create_container                   (no tx open)
-    [checkpoint]  resolve permit + ig_container_id + step container_created
-    ...           meta.container_status poll              (no tx open)
-    [checkpoint]  step container_ready
-    [permit tx]   publish permit — acquire_permit itself advances step
+    [flip tx] approved → publishing (CTE: cap debit + key-4), step none
+   ... media_fetch + transit.upload (no tx open)
+    [checkpoint] transit_asset_ref + step transit_uploaded
+    [permit tx] container_create permit (lease CAS inside acquire_permit)
+   ... meta.create_container (no tx open)
+    [checkpoint] resolve permit + ig_container_id + step container_created
+   ... meta.container_status poll (no tx open)
+    [checkpoint] step container_ready
+    [permit tx] publish permit — acquire_permit itself advances step
                   publish_called (the permit IS the durable record)
-    ...           meta.publish                            (no tx open)
+   ... meta.publish (no tx open)
     [terminal tx] resolve permit + state posted + effect_confirmed +
                   ig_media_id + times_posted/recent-lock/last_posted_at +
                   finalize_job — ONE transaction ("the domain
                   transaction and job finalization commit together")
-    ...           best-effort transit.destroy             (after commit)
+   ... best-effort transit.destroy (after commit)
 
 Every checkpoint transaction re-CASes the lease (`assert_lease`),
 so a fenced worker can neither advance the ladder nor record outcomes.
@@ -52,7 +52,7 @@ precedes that work. The intent is `publishing` throughout the ladder.
 **A story never waits inside the slot (the float).**
 Every wait between attempts — a refused fetch's round spent, a container Meta
 cannot find, a rate limit, a pending poll, error 9 — steps the intent back
-`publishing → approved` (edge 076) with `publish_step`, the transit asset and
+`publishing → approved` (edge `post_intent_transitions publish wait edges`) with `publish_step`, the transit asset and
 the cap debit intact, so key 4 is held only for the seconds of a call and any
 number of stories wait side by side; re-entry is `flip_to_publishing`, made
 re-entrant (no second debit). Error 9's permit resolves `failed` (Meta saying
@@ -78,12 +78,12 @@ from a second counter: the ops table is the durable record, and
 ## What this module deliberately does not do
 
 No claim loop, no process root, no adapter construction and no heartbeat
-wiring — all four belong to `src/worker.py`, the composition root (#903),
+wiring — all four belong to `src/worker.py`, the composition root,
 which wires the REAL Graph adapter (`instagram_graph`) into the seam
 `meta_adapter` declares. What this module owns is the ladder between them:
 it is handed `meta` and never builds one, which is why the same body runs
-against the stub in the gate and against Meta in production
-(#1325). Unexpected
+against the stub in the gate and against Meta in production.
+Unexpected
 exceptions PROPAGATE — a crashed worker must look crashed, so the lease
 expires, the reaper re-readies, and resume-from-checkpoint does its job;
 a blanket except here would convert crash-safety into silent corruption.
@@ -142,7 +142,7 @@ logger = logging.getLogger(__name__)
 
 #: Bulk lane: backoff 1/5/15/60 min for retryable failures — the
 #: ladder `jobs.BACKOFF_SECONDS` owns, as floats because this pipeline's rungs
-#: go straight into `timedelta(seconds=…)` (#1325).
+#: go straight into `timedelta(seconds=…)`.
 DEFAULT_BACKOFF_SECONDS = tuple(float(s) for s in jobs.BACKOFF_SECONDS["bulk"])
 
 #: For rendering a retention window in days.
@@ -171,7 +171,7 @@ DEFERRED_CAP = "deferred_cap"
 #: Key 4 (`uq_publish_exclusive`): a sibling of the real account is publishing
 #: right now. The story waits this long and tries again — seconds, because a
 #: publish takes seconds; a cap denial waits for the next product slot
-#: instead, which is hours (#1301).
+#: instead, which is hours.
 DEFERRED_BUSY = "deferred_busy"
 #: A busy re-check backs off (the float): a flat 20 s behind a long
 #: hold would turn N waiting siblings into thousands of claims a day each.
@@ -501,7 +501,7 @@ async def _load(uow, job: dict) -> Optional[_Ctx]:
                         "       a.next_slot_at, w.repost_ttl_days,"
                         "       m.media_kind, m.provider_file_ref, m.file_name,"
                         # The rule that approved it, which its lines name
-                        # (#1477); NULL for a person.
+                        # ; NULL for a person.
                         "       i.approval_rule"
                         "  FROM post_intents i"
                         "  JOIN ig_accounts a ON a.id = i.ig_account_id"
@@ -560,7 +560,7 @@ def _slot_at(ctx: _Ctx, now_fn) -> Optional[datetime]:
     """The account's next product slot when the clock has stamped one that
     is still ahead; None when it has not (the caller waits one fallback rung
     and says nothing on the card — a wait of a minute is not a wait the user
-    should know about, #1306)."""
+    should know about)."""
     slot = ctx.intent["next_slot_at"]
     if slot is not None and slot > now_fn():
         return slot
@@ -575,7 +575,7 @@ def _next_slot(
     `slot` is the account's next product slot when the clock has stamped one
     and None otherwise — the three callers each branch their card line on it,
     which is why this returns the pair rather than the target alone. `run_at`
-    is that slot, or one backoff rung (#1325).
+    is that slot, or one backoff rung.
     """
     slot = _slot_at(ctx, now_fn)
     return slot, slot or now_fn() + timedelta(seconds=backoff_seconds[0])
@@ -639,8 +639,8 @@ async def _advisory_precheck(
         # A provider read — deliberately OUTSIDE any transaction
         # ("immediately before the flip transaction"). Never for a dry run:
         # nothing reaches Instagram in a rehearsal, and Meta's cap must not
-        # hold one that spends none of it (#1299). The workspace names
-        # whose credential pays for the read (#1369): every other Meta call
+        # hold one that spends none of it. The workspace names
+        # whose credential pays for the read: every other Meta call
         # in this pipeline passes it, and unscoped the token read crosses
         # tenants by ordering.
         verdict = await precheck.check(
@@ -754,7 +754,7 @@ async def _flip_to_publishing(
                     session, ctx.job["id"], ctx.job["lease_token"], "cancelled"
                 )
             elif row.state == "approved" and row.cancel_requested:
-                # The cancel landed inside the flip's window (#1306): the flip's own
+                # The cancel landed inside the flip's window: the flip's own
                 # WHERE refused it and the debit rolled back. The route is the
                 # cancel's — the refund and the destroy a stepped-back story carries
                 # — never a crash rung.
@@ -790,7 +790,7 @@ async def _cancel_in(session, ctx: _Ctx) -> None:
         )
     ).fetchone()
     if cancelled is None:
-        # The reaper's cancel leg (087) ends a flagged story that owes no
+        # The reaper's cancel leg (`fn_reaper_sweep cancel leg`) ends a flagged story that owes no
         # refund; a sweep landing after this job's load leaves the row already
         # `cancelled`, and the job's work is done. A debited row never gets
         # here: its refund above meets the terminal freeze first.
@@ -943,7 +943,7 @@ async def _retry_or_poison(
         # retryable class: a poison after a failed PUBLISH leaves a container
         # that is still live and reusable, and nulling its id there would throw
         # away a valid pointer. Only a caller that rewound past the container
-        # rung is telling us the container is gone (#938).
+        # rung is telling us the container is gone.
         drop_container = ", ig_container_id = NULL" if step_back_to else ""
         # A step back to `none` is the caller saying the UPLOAD is abandoned
         # too (the swept asset): the ref goes with the container, and the next
@@ -1050,7 +1050,7 @@ def _poison_notice(ctx: _Ctx, now: datetime) -> str:
 async def _bump(session, ctx: _Ctx, **changes) -> dict:
     """Merge *changes* into the story's `attempts_by_step`, on the row (`||`,
     never a wholesale write from this copy, so a key another writer adds
-    while the job holds the story survives, #1306) and on the context."""
+    while the job holds the story survives) and on the context."""
     merged = {**ctx.counters(), **changes}
     await session.execute(
         text(
@@ -1065,7 +1065,7 @@ async def _bump(session, ctx: _Ctx, **changes) -> dict:
 
 
 async def _step_back(session, ctx: _Ctx) -> None:
-    """`publishing → approved` (edge 076): the story waits outside the
+    """`publishing → approved` (edge `post_intent_transitions publish wait edges`): the story waits outside the
     account's slot with its progress and its debit intact. A zero-row update
     is a race the caller must hear about, as every checkpoint's is."""
     moved = (
@@ -1219,7 +1219,7 @@ async def _ladder(
         # and a typed failure out of this rung would otherwise reach the
         # loop's blanket reschedule — every minute, forever, the intent stuck
         # in `publishing` with its cap debit and `uq_publish_exclusive` held,
-        # so every later intent on the account is deferred (#1276). A
+        # so every later intent on the account is deferred. A
         # file that is gone or too large is terminal: fail + refund. Every
         # other TYPED failure (Drive's, the transit store's, the floor's, the
         # transport's) rides the ladder and, exhausted, lands on a human. An
@@ -1312,7 +1312,7 @@ async def _ladder(
                 not_ready["error"]["probe"] = probe
                 # A 404 after the probe's budget is an asset the CDN does not
                 # know — swept while the story waited past the transit TTL (a
-                # weekend without slots, a long pause; #1306) — so the story
+                # weekend without slots, a long pause;) — so the story
                 # steps back to step `none` without its ref and the next run
                 # uploads again. Any other answer is "not yet": the asset and
                 # the step stay.
@@ -1777,11 +1777,11 @@ async def _await_ready(ctx: _Ctx, meta, sleep) -> str:
 
 async def _defer_paused(uow, ctx: _Ctx, now_fn) -> str:
     """The workspace is paused: reschedule without spending an attempt. A
-    fresh `approved` row carries nothing; a stepped-back one (the float)
-    carries its progress and its debit and waits with them; from the
-    post-flip hold (step `none`, no permits) the row is `publishing` with its
-    debit — it steps back and waits with it, so no wait holds the slot
-    (#1306); the re-entrant flip takes it in again. Resume is a fresh run."""
+     fresh `approved` row carries nothing; a stepped-back one (the float)
+     carries its progress and its debit and waits with them; from the
+     post-flip hold (step `none`, no permits) the row is `publishing` with its
+     debit — it steps back and waits with it, so no wait holds the slot
+    ; the re-entrant flip takes it in again. Resume is a fresh run."""
     async with _leased_tx(uow, ctx.job) as session:
         if ctx.intent["state"] == "publishing":
             await _step_back(session, ctx)
@@ -1833,7 +1833,7 @@ async def _confirm_dry_run(uow, ctx: _Ctx, *, now_fn) -> str:
             # fallback (`DEFAULT_REPOST_TTL_DAYS`) for all three of its writers.
             # Resolving it here with a default of this function's own would
             # make a worker publish lock for 7 days and a human's "mark as
-            # posted" for 30, for the same `kind` (#1365).
+            # posted" for 30, for the same `kind`.
             ttl_days=ctx.intent["repost_ttl_days"],
         )
         line = prompts.outcome_line(
@@ -1970,7 +1970,7 @@ async def _restate_and_notify(
     notice: str,
 ) -> int:
     """The card's keyboard is the sender's to render, from the story as it is
-    when the edit goes (#1477): a parked story's card keeps its review
+    when the edit goes: a parked story's card keeps its review
     buttons because it is `review_required`."""
     line = prompts.outcome_line(state, by=None, at=at, tz=tz)
     bindings = await prompts.push_bindings(session, workspace_id)
@@ -2007,7 +2007,7 @@ _INTENT_FOR_PARK = (
 
 
 async def flip_to_review(session, *, intent_id: str, from_state: str) -> bool:
-    """`from_state → review_required` (edges 055 and 076), in the caller's
+    """`from_state → review_required` (edges `intent_ledger.py` and `post_intent_transitions publish wait edges`), in the caller's
     transaction. False when the row had already moved on."""
     moved = (
         await session.execute(
@@ -2137,9 +2137,9 @@ async def park_stale_approved(session, *, older_than_seconds: int, limit: int) -
     purpose and are not listed. Returns how many rows were moved.
 
     The reap job is a system singleton (`app.tenant_id = ''`), under which a
-    plain SELECT here matches nothing once the worker runs as `svc_worker`
-    (`p_tenant`; #1306). So the stale rows are listed through
-    `fn_reaper_stale_approved` (076, SECURITY DEFINER) and each row's tenant
+    plain SELECT here matches nothing on the deployed `svc_worker` connection
+    (`p_tenant`;). So the stale rows are listed through
+    `fn_reaper_stale_approved` (`post_intent_transitions publish wait edges`, SECURITY DEFINER) and each row's tenant
     is asserted before it is touched, under a savepoint per row (one story's
     fault must not roll back the door's sweep), and the session's own scope
     is restored after — the settled-cards sweep reads across tenants in this
@@ -2321,7 +2321,7 @@ async def _confirm(
             # fallback (`DEFAULT_REPOST_TTL_DAYS`) for all three of its writers.
             # Resolving it here with a default of this function's own would
             # make a worker publish lock for 7 days and a human's "mark as
-            # posted" for 30, for the same `kind` (#1365).
+            # posted" for 30, for the same `kind`.
             ttl_days=ctx.intent["repost_ttl_days"],
         )
         # The card said "✅ Approved by … — posting shortly"; now it says

@@ -1,9 +1,9 @@
-"""#1090 gate — the two customer-notification producers, OBSERVED.
+"""gate — the two customer-notification producers, OBSERVED.
 
 *"When selection finds no media, you are told once — not silently nothing."*
 *"A post needing attention notifies you within 24h with a link to it."*
 
-Both windows are 24 h. The DDL for the attention notice is 059's
+Both windows are 24 h. The DDL for the attention notice is `04_functions.sql`'s
 (`fn_reconciler_sweep` tags rows `notify_window`), and the producer consumes
 the tag.
 
@@ -59,7 +59,7 @@ def _unique_slot() -> datetime:
     A `datetime`, never an ISO string: asyncpg binds `timestamptz` from a
     datetime and refuses a str. Production's `plan_slot` adapter reaches the
     same place from the other side — its payload IS a string, so it casts in
-    SQL (`CAST(CAST(:slot AS text) AS timestamptz)`, #969) rather than letting
+    SQL (`CAST(CAST(:slot AS text) AS timestamptz)`) rather than letting
     the driver infer. This gate has a real datetime to hand and passes one.
     """
     n = next(_SLOT)
@@ -83,7 +83,7 @@ def notice_db(notice_world):
 
     The binding is the sink both producers write to: `prompts.push_bindings`
     selects active `telegram%` rows only, so a workspace without one is the
-    #1090 gap and neither notice would have anywhere to land. Seeding it here
+    gap and neither notice would have anywhere to land. Seeding it here
     keeps THIS gate about the producers rather than about that gap.
 
     A fresh workspace per test is what makes the shared schema safe: every
@@ -230,7 +230,7 @@ class TestTheNoMediaNotice:
         assert len(rows) == 2, f"past the window a second notice is due: {rows}"
 
     async def test_no_binding_reports_undeliverable_not_a_quiet_zero(self, notice_db):
-        """A workspace with no push binding (#1090)
+        """A workspace with no push binding
         cannot receive this, and that must be distinguishable from having been
         told. The two live producers collapse it — `credential_lifecycle` logs
         and returns success, `media_sync` iterates an empty list in silence —
@@ -317,7 +317,7 @@ class TestTheParkedIntentNotice:
         carrying the evidence trail the operator surface reads.
 
         **Born in the state, never UPDATEd into it**, as the pipeline gates'
-        intents are. `tg_intent_no_self_transition` (061) and the 055 matrix
+        intents are. `tg_intent_no_self_transition` (`trg_intent_guard`) and the `intent_ledger.py` matrix
         guard `post_intents.state`, so driving a seeded `scheduled` row into
         `review_required` with an UPDATE is refused by the database. Fresh
         media item and account ref per intent for `uq_intent_live_subject`,
@@ -449,7 +449,7 @@ class TestTheParkedIntentNotice:
     async def test_a_parked_intent_past_the_window_notifies_with_a_link(
         self, notice_db
     ):
-        """THE OBSERVATION, end to end: the 059 door selects the row, tags
+        """THE OBSERVATION, end to end: the `04_functions.sql` door selects the row, tags
         it `notify_window`, and the producer turns that tag into a message the
         customer receives."""
         intent = self._park(notice_db, age_hours=25)
@@ -501,7 +501,7 @@ class TestTheParkedIntentNotice:
         self, notice_db
     ):
         """`customer_notified` is a LATCH, not a window — it never reopens. A
-        workspace with no active push binding (#1090) must therefore not
+        workspace with no active push binding must therefore not
         consume it: stamping with nothing to send would mean the customer is
         never told, and the sweep would stop offering the row. Proven by
         restoring the binding and watching the same intent still notify."""
@@ -567,7 +567,7 @@ class TestTheParkedIntentNotice:
         assert len(rows) == 1 and "http" not in rows[0][0]
 
 
-# --- #1478: the runway — the figure, and the one notice when it runs low ---
+# ---: the runway — the figure, and the one notice when it runs low ---
 
 
 def _files(notice_db, n, *, source=None, state="available"):
@@ -600,7 +600,7 @@ def _folder(notice_db, *, state="active", removed=False):
 
 def _cadence(notice_db, posts_per_day):
     """The account's own posts per day (None inherits the workspace's) and a
-    slot cursor, so the clock posts for it (`fn_clock_tick`, 084)."""
+    slot cursor, so the clock posts for it (`fn_clock_tick`, `fn_clock_tick singleton lease recovery`)."""
     _sql(
         notice_db,
         "UPDATE ig_accounts SET posts_per_day = %s, next_slot_at = now() WHERE id = %s",
@@ -667,7 +667,7 @@ def _latch(notice_db):
 
 
 class TestTheRunwayNotice:
-    """#1478 — told BEFORE the library runs dry: once, when a mint leaves the
+    """— told BEFORE the library runs dry: once, when a mint leaves the
     account under a week of content, through the empty library's own path (the
     push bindings' outbox), by the executor running as `svc_worker`. The
     chain's own file is held by its seeded intent, so every file below is one
@@ -758,7 +758,9 @@ class TestTheRunwayNotice:
     async def test_the_workspace_cadence_divides_when_the_account_has_none(
         self, notice_db
     ):
-        _cadence(notice_db, None)  # the workspace's 3 a day (053's default)
+        _cadence(
+            notice_db, None
+        )  # the workspace's 3 a day (`identity_and_tenancy.py`'s default)
         _files(notice_db, 22)
         await _mint(notice_db)  # 21 left: exactly a week at 3 a day
         assert _runway_told(notice_db) == []
@@ -896,7 +898,7 @@ class TestTheRunwayNotice:
 
 
 class TestTheRunwayRead:
-    """#1478 — the Overview's figure is the planner's own pool, read as the API
+    """— the Overview's figure is the planner's own pool, read as the API
     reads it: `svc_ingress`, under the member's tenant."""
 
     @pytest.fixture()

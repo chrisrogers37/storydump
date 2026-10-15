@@ -1,4 +1,4 @@
-"""Did a post actually LAND? (#1268)
+"""Did a post actually LAND?
 
 ## The axis this module watches
 
@@ -26,7 +26,7 @@ landed*, which is what this module measures.
 
 ## THE EVIDENCE IS `post_intents`, NOT the cap ledger
 
-The cap ledger, `daily_post_counts`, is read here and returned (#1268). But
+The cap ledger, `daily_post_counts`, is read here and returned. But
 it **cannot be the thing the verdict rests on**, because of when it is
 written.
 
@@ -67,7 +67,7 @@ reason. `published_via` accepts `legacy_backfill` (`ck_intent_via`), and
 `ck_posted_complete` **exempts** such a row from every evidence requirement:
 
     state <> 'posted'
-    OR published_via = 'legacy_backfill'          <-- no evidence required
+    OR published_via = 'legacy_backfill' <-- no evidence required
     OR (published_via = 'manual' AND cap_consumed_on IS NOT NULL)
     OR (published_via = 'api' AND ig_container_id IS NOT NULL
         AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL)
@@ -104,17 +104,17 @@ poller must not consult it for the verdict.
 ## Bounds, stated because they will not be obvious later
 
 **Cross-tenant reach is a door, not a privilege.** Each read here is a
-SECURITY DEFINER function owned by `svc_maintenance` (081) with
+SECURITY DEFINER function owned by `svc_maintenance` (`fleet health functions`) with
 EXECUTE for the runtime logins — the same footing `scheduling_lag` and the
 backpressure snapshot stand on. Without it, under `svc_ingress` every
 policy-covered table reads empty to these tenant-less queries, `posted_ever`
 reads 0 for a live estate, and a poller's verdict becomes *never-posted* —
-the alarm direction, but for the wrong reason, and blind to a real silence
-(#751). `tests/scripts/test_fleet_health_doors_gate.py`
+the alarm direction, but for the wrong reason, and blind to a real silence.
+`tests/scripts/test_fleet_health_doors_gate.py`
 runs this module as `svc_ingress` against a seeded estate.
 
 **A retention door exists for the cap ledger, and nothing runs it.**
-`059`'s `fn_retention_batch` holds a `DELETE FROM daily_post_counts`, but
+`04_functions.sql`'s `fn_retention_batch` holds a `DELETE FROM daily_post_counts`, but
 the `retention_sweep` executor runs only the `rate_counters` class
 (`scheduler.execute_retention_sweep`), so no cap-ledger row has ever aged
 out. If that class is ever swept, `debited_total` and `ledger_days` become
@@ -153,7 +153,7 @@ async def posting_freshness(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    # The door's body (081): min-of-ages, not max-of-times,
+                    # The door's body (`fleet health functions`): min-of-ages, not max-of-times,
                     # because FILTER binds to the AGGREGATE — the freshest
                     # landing is the SMALLEST age.
                     "SELECT o_posted_ever AS posted_ever,"
@@ -178,7 +178,7 @@ async def posting_freshness(executor) -> dict[str, Any]:
 
 
 async def publish_attempts(executor) -> dict[str, Any]:
-    """The cap ledger (#1268) — what TRIED, against what landed.
+    """The cap ledger — what TRIED, against what landed.
 
     `daily_post_counts` is debited at the `approved → publishing` flip, before
     the publish call, and refunded on a failure after debit. So this is the
@@ -249,7 +249,7 @@ async def destinations(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    # max-of-ages, not min-of-times, inside the door (081):
+                    # max-of-ages, not min-of-times, inside the door (`fleet health functions`):
                     # the OLDEST destination is the LARGEST age, and it is the
                     # rung that dates the estate's expectation to post.
                     "SELECT o_accounts_active AS accounts_active,"

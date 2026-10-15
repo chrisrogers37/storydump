@@ -45,7 +45,7 @@ export async function listWorkspaces(): Promise<TargetResult<Workspace[]>> {
 
 /**
  * The invitations addressed to this user that they could still accept
- * (`GET /api/v1/me/invitations`, 115), for /welcome and /workspaces, or null
+ * (`GET /api/v1/me/invitations`, `fn_invitations_for_invitee`), for /welcome and /workspaces, or null
  * when they could not be read: "we couldn't check" and "there are none" are
  * different screens, as with the workspaces above.
  */

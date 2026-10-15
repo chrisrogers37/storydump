@@ -365,7 +365,7 @@ class TestIngestOwnsTheOrder:
 
 
 class TestSetItemLinkIsInThePort:
-    """#1413: a member gives an item the link its story
+    """A member gives an item the link its story
     asks a person to add by hand, since a story published through the API
     cannot carry one. The floor of `schedule_item`, with an executor."""
 
@@ -377,7 +377,7 @@ class TestSetItemLinkIsInThePort:
 
 
 class TestSetItemAutoApproveIsInThePort:
-    """#1477: the item's Auto-approve flag, a member's standing Approve, set
+    """The item's Auto-approve flag, a member's standing Approve, set
     from Configure on a card and from the library. The floor of `approve`,
     with an executor. It has no CLI verb: the CLI's own pin on its verbs
     (`test_every_verb_maps_to_a_port_command`) holds that."""
@@ -395,7 +395,7 @@ class TestSetItemAutoApproveIsInThePort:
 
 
 class TestSetSourceApprovalIsInThePort:
-    """#1477: a folder's approval position, set from the web's Approvals
+    """A folder's approval position, set from the web's Approvals
     card. Admin, like every position, with an executor, and no CLI verb."""
 
     def test_named_at_the_admin_floor_with_an_executor(self):
@@ -716,13 +716,13 @@ class TestRemoveMemberGoesThroughTheDoor:
         ) = ex.calls
         assert "fn_member_remove(" in sql and "DELETE" not in sql.upper()
         assert params == {"ws": "ws", "u": "u2", "by": "u1"}
-        # 090: the service identities the removed person minted go with them,
+        # `workspace member removal`: the service identities the removed person minted go with them,
         # in the same transaction — this workspace's, and only theirs.
         assert "UPDATE service_tokens SET revoked_at = now()" in revoke_sql
         assert "created_by_user_id = :u" in revoke_sql
         assert "workspace_id = :ws" in revoke_sql
         assert revoke_params == {"ws": "ws", "u": "u2"}
-        # 098: so do the pending invitations they sent or were sent.
+        # `invitation legitimacy checks`: so do the pending invitations they sent or were sent.
         assert "UPDATE workspace_invitations SET state = 'revoked'" in invites_sql
         assert "invited_by_user_id = :u" in invites_sql
         assert "SELECT lower(primary_email) FROM users" in invites_sql

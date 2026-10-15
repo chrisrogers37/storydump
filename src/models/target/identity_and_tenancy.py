@@ -1,31 +1,9 @@
-"""The identity and tenancy models (migration 053).
+"""The identity and tenancy table definitions.
 
-The mirror of `053_identity_and_tenancy_tables.sql`, and mirror is the whole
-job: these models are not an independent design, they are the second side of
-the parity gate. The migration file installs the schema; `create_all`
-on `TargetBase` re-derives it; `scripts/schema_parity.py` requires the two to be
-equal on tables, columns (type + nullability), CHECK constraints (by name AND
-normalized definition), uniqueness semantics and foreign keys. So a column
-retyped, a constraint renamed or a partial predicate reworded on one side alone
-is a red test, not a discovery for later.
-
-**Each table 053 creates has its model here.** Lane parity compares the
-replayed `public` against `create_all` output, and 053 puts seven tables in
-the first, so a table left without its model would run the gate knowingly red
-— a "red and known" cost (#806).
-
-**What is deliberately NOT here.** Triggers, trigger functions and RLS. The
-parity comparator is relation-scoped and reads none of them, so restating them
-would be an unchecked second copy — the drift class this file exists to
-prevent. `trg_touch_updated_at` fires on every table below, is declared once in
-052, and is deliberately NOT mirrored as a SQLAlchemy `onupdate`: the database
-owns `updated_at` on every write path, including the ones that never go through
-the ORM, and a Python-side duplicate would be a second answer to a question
-that has one.
-
-**Names are unprefixed on purpose.** These are the application's models, named
-for what they are (`User`, `Workspace`); a `Target` prefix would name the tier
-at every call site, and there is only one tier (#1216).
+`ddl.build()` creates these tables through `TargetBase.metadata`. Their touch
+triggers, ownership checks, admission functions and row policies live in
+`src/models/target/ddl/`. The database owns `updated_at` on every write path;
+there is no Python `onupdate` duplicate.
 """
 
 from sqlalchemy import (
@@ -62,7 +40,7 @@ class User(TargetBase):
     created_at, updated_at = timestamps()
     #: When this person was sent the activation nudge: set once, in the same
     #: transaction that enqueues the email, and never cleared, so nobody is
-    #: nudged twice (106, #1481).
+    #: nudged twice (`users.activation_nudge_at`).
     activation_nudge_at = Column(TZ, nullable=True)
 
     __table_args__ = (
@@ -121,7 +99,7 @@ class Workspace(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'active'"))
 
     # IANA zone name, workspace default. The CHECK is a write-time backstop
-    # calling 052's fn_safe_tz — the service boundary validates first, and the
+    # calling `trg_touch_updated_at / fn_safe_tz`'s fn_safe_tz — the service boundary validates first, and the
     # read-side decay case (a zone withdrawn from tzdata after a valid write)
     # is what fn_safe_tz's fallback exists for.
     tz = Column(Text, nullable=False, server_default=text("'UTC'"))
@@ -198,7 +176,7 @@ class Workspace(TargetBase):
 class WorkspaceMember(TargetBase):
     """Membership, and the structural home of ownership.
 
-    Exactly one owner at every commit, by two mechanisms that 053 installs
+    Exactly one owner at every commit, by two mechanisms that `identity_and_tenancy.py` installs
     together: ``uq_members_one_owner`` is "at most one", and the deferred
     constraint-trigger PAIR is "at least one" on every path — demotion, removal
     and workspace creation alike. Only the index is a relation, so only the
@@ -229,7 +207,7 @@ class WorkspaceMember(TargetBase):
 
 
 class WorkspaceMemberRemoval(TargetBase):
-    """The record that an admin removed a person (090). The Telegram join path
+    """The record that an admin removed a person (`workspace member removal`). The Telegram join path
     (`fn_group_member_seen`) honours it: a removed non-member is refused until
     invited back. Written only by `fn_member_remove`; an invitation accepted
     later makes it inert, and a second removal stamps it again."""
@@ -242,7 +220,7 @@ class WorkspaceMemberRemoval(TargetBase):
     removed_at = Column(TZ, nullable=False, server_default=NOW)
 
 
-#: The invisible characters an address may not carry (092, 100).
+#: The invisible characters an address may not carry (`fn_signup_admitted`, `waitlist_entries`).
 _NO_INVISIBLE = (
     "email !~ '[\\u0080-\\u00a0\\u00ad\\u180e\\u2000-\\u200f\\u2028-\\u202f"
     "\\u205f-\\u2064\\u3000\\ufeff]'"
@@ -250,19 +228,18 @@ _NO_INVISIBLE = (
 
 
 class SignupAdmission(TargetBase):
-    """An email the owner let in (092): a new Google account with this verified
+    """An email the owner let in (`fn_signup_admitted`): a new Google account with this verified
     address may create its user. Global, not tenant-plane; read and written
     only through `svc_membership`'s definer functions (`fn_signup_admitted`,
-    129's admission doors, and 133's trigger on `users`), so the runtime roles
+    `signup admission functions`'s admission doors, and `trg_signup_admission_consume`'s trigger on `users`), so the runtime roles
     hold no grant on it.
 
-    129: the admission's email carries a one-time claim link. Only its
+    `signup admission functions`: the admission's email carries a one-time claim link. Only its
     token's SHA-256 is stored, with `emailed_at`, once the provider accepted
-    the email. `claimed_at` records that the spot was used, by its link (129)
-    or by an account created at its address (133), and the link is
+    the email. `claimed_at` records that the spot was used, by its link (`signup admission functions`)
+    or by an account created at its address (`trg_signup_admission_consume`), and the link is
     cleared with it; the spot then admits nobody (one spot, one account).
-    An admission an account held when 133 ran was stamped with that
-    migration's time, since when it was used is not recorded."""
+    A consumed admission admits no additional account."""
 
     __tablename__ = "signup_admissions"
 
@@ -290,9 +267,9 @@ class SignupAdmission(TargetBase):
 
 
 class WaitlistEntry(TargetBase):
-    """An address that joined the marketing waitlist (100). Global, not
+    """An address that joined the marketing waitlist (`waitlist_entries`). Global, not
     tenant-plane; the API (`svc_ingress`) may INSERT and nothing else, and the
-    list is read only through `fn_waitlist` (129). `utm` is the campaign the
+    list is read only through `fn_waitlist` (`signup admission functions`). `utm` is the campaign the
     visitor came from."""
 
     __tablename__ = "waitlist_entries"
@@ -435,9 +412,8 @@ class ChannelBinding(TargetBase):
 class OnboardingSession(TargetBase):
     """One live onboarding session per user.
 
-    Printed after ``workspaces`` in the advertised stream because
-    ``pending_workspace_id`` references it — the ordering is load-bearing and
-    the migration preserves it.
+    `pending_workspace_id` references `workspaces`. SQLAlchemy orders the
+    tables by their foreign-key dependencies when the schema builder runs.
     """
 
     __tablename__ = "onboarding_sessions"

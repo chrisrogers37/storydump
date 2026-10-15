@@ -1,4 +1,4 @@
-"""The channel outbox and its sender (#861).
+"""The channel outbox and its sender.
 
 The rule: **the outbox row IS the delivery record and the only
 authority on "did this send" — the sender job carries execution state only.**
@@ -6,11 +6,11 @@ Everything here follows from that sentence.
 
 ## The mechanism question
 
-`channel_outbox` carries no unique index and no lease token (#886), so the
-argument making `jobs` safe does **not** transfer (#887): `jobs` has
+`channel_outbox` carries no unique index and no lease token, so the
+argument making `jobs` safe does **not** transfer: `jobs` has
 `uq_jobs_serialized_lease` on `ready → leased` and a token CAS on
 `leased → terminal`, and this table has neither. An outbox exists to make a
-send happen exactly once, so "two writers both told they won" (#883) means the
+send happen exactly once, so "two writers both told they won" means the
 machine believing it sent something it did not, or sending twice while
 believing it sent once.
 
@@ -27,8 +27,8 @@ them on `channel_outbox`:
 2. **Every write out of `sending` is a CAS on the state it is leaving**, so
    it is re-evaluation-correct at READ COMMITTED: `sending → *` requires
    `state = 'sending'`. A loser gets zero rows — a predicate miss on a column
-   the winner changed, a discrimination that a bare `WHERE id = :id` cannot make
-   (#883). (Entering `sending` is single-winner by ``FOR UPDATE SKIP
+   the winner changed, a discrimination that a bare `WHERE id = :id` cannot make.
+   (Entering `sending` is single-winner by ``FOR UPDATE SKIP
    LOCKED`` instead; :func:`claim_next` says why its CAS clause is redundant
    rather than claiming credit for it.)
 
@@ -41,7 +41,7 @@ running. Its `sending → sent` finds the row no longer `sending` and refuses.
 transaction, speaks to the provider with none open, and settles in another —
 the rule that a transaction never spans a provider call, and what keeps
 the fleet-wide `tg_global` rate row and the claimed row unlocked across an
-upload (#1260). The guarantee against a stale or dead sender is therefore NOT
+upload. The guarantee against a stale or dead sender is therefore NOT
 a co-located commit: it is `recover_stranded` (a `sending` row seen by the
 lease holder belongs to a predecessor → `ambiguous`, per-kind policy) plus the
 `_leave_sending` CAS. `deliver` remains the single-transaction composition of
@@ -87,9 +87,11 @@ Both scopes, in one transaction with the send that they admit:
 **defer**, not a failure — the row stays `pending` and the next poll takes it,
 which is slip-a-slot rather than pile-up.
 
-Every number arrives as a parameter — poll cadence 2 s, 20 msgs/min/group,
-30/s global, retention 30 d / 90 d. A hardcoded number in this module would be
-the same defect as one in a door body.
+Every number arrives as a parameter. `WorkerConfig` defaults to a 2 s poll,
+18 sends per minute per chat and 25 per second globally. These worker budgets
+leave room below Telegram's limits of 20 messages per minute per group and
+30 messages per second globally. Retention is passed to the retention worker;
+this module does not own a retention duration.
 """
 
 from __future__ import annotations
@@ -111,7 +113,7 @@ logger = logging.getLogger(__name__)
 #: Two live cards are tolerable; a duplicate notification is not. A card EDIT
 #: (`prompt_supersede`) is idempotent — "not modified" is success — so a lost
 #: answer costs one paced call to resend; and since the route edits a card
-#: only for a menu tap (#1297, #1477), this row is the only path that removes
+#: only for a menu tap, this row is the only path that removes
 #: the buttons of a card nobody taps, so it may not die after the
 #: notification's single retry.
 RESEND_KINDS = frozenset({"approval_prompt", "invitation", "prompt_supersede"})
@@ -130,7 +132,7 @@ MEDIA_ADMISSION_PASS_LIMIT = 25
 class ChannelSendError(StorydumpError):
     """What a channel's transport raises instead of a receipt.
 
-    ``failure_class`` is what the outbox records the attempt as (101, #1482):
+    ``failure_class`` is what the outbox records the attempt as (`outbox failure records`):
     each definitive answer below names its own, and anything else is a lost
     answer, ``ambiguous``. ``code`` is the provider's own code when it answered
     with one: an int or nothing, never invented."""
@@ -162,7 +164,7 @@ class ChannelPaced(ChannelSendError):
     go) and not a fault of the row: the row returns to
     `pending`, and the budget the provider named is written as a DURABLE hold
     on the pacing rows so every replica's poller defers until it passes —
-    never an in-task sleep (#1035). `scope` is `global` or `chat`."""
+    never an in-task sleep. `scope` is `global` or `chat`."""
 
     failure_class = "rate_limited"
 
@@ -202,7 +204,7 @@ class ChannelRefused(ChannelSendError):
     """The provider answered, and said no for good — a 4xx that is neither a
     gone destination, a dead credential nor a flood limit. DEFINITIVE, like
     :class:`DestinationGone`: the message as shaped never landed, so the row
-    fails outright instead of entering the ambiguity policy (#1297: a
+    fails outright instead of entering the ambiguity policy (: a
     refused edit retried to the resend cap would be four paced calls for
     nothing)."""
 
@@ -250,7 +252,7 @@ class CredentialDead(ChannelSendError):
     channel (`TelegramAuthDead` subclasses it).
 
     DEFINITIVE, like :class:`ChannelRefused`: the row fails after its one
-    attempt, and the binding stays (#1493)."""
+    attempt, and the binding stays."""
 
     failure_class = "credential_dead"
 
@@ -414,7 +416,7 @@ async def claim_next(session, *, binding_id: str) -> Optional[dict]:
         "attempts": row[3],
         "intent_id": None if row[4] is None else str(row[4]),
         # The row's own tenant, for the transport to hold a payload against
-        # (a media block naming another workspace is refused — #1259).
+        # (a media block naming another workspace is refused —).
         "workspace_id": str(row[5]),
         # Its binding, for the sender's own post-send edit.
         "binding_id": str(row[6]),
@@ -426,10 +428,10 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
 
     One spelling so the fence cannot be present on some edges and absent on
     others — the divergence that made the intent ledger's CAS and its test copy
-    two independent statements (#890).
+    two independent statements.
 
     ``failure=(class, code)`` records why the attempt failed in the SAME
-    statement (101, #1482): the record is written exactly when, and only if, the
+    statement (`outbox failure records`): the record is written exactly when, and only if, the
     state change is, so a fenced writer records nothing.
     """
     sets = ["state = :s"]
@@ -520,8 +522,8 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
             text(
                 "SELECT o.kind, o.attempts,"
                 # A later edit of the SAME message (any state): resending this
-                # one would land its older line over the newer (#1297). Joined
-                # on the intent so it rides `ix_outbox_intent` (072); an
+                # one would land its older line over the newer. Joined
+                # on the intent so it rides `ix_outbox_intent` (`ix_outbox_intent`); an
                 # intent-less edit (an invitation card's) has no such check.
                 "       EXISTS (SELECT 1 FROM channel_outbox n"
                 "                WHERE n.intent_id = o.intent_id"
@@ -568,10 +570,10 @@ async def resolve_ambiguous(session, *, outbox_id: str) -> str:
 
 def _supersede_payload(ref: str, payload: Any, outcome_text: Optional[str]) -> dict:
     """What the sender needs to edit the card it names: the ref, the outcome
-    line, the original header (a media card's caption or a text card's text —
-    the edit keeps it and appends the outcome), and how the card went out. No
-    keyboard: the sender gives the edit its story's when it claims it
-    (#1477)."""
+     line, the original header (a media card's caption or a text card's text —
+     the edit keeps it and appends the outcome), and how the card went out. No
+     keyboard: the sender gives the edit its story's when it claims it
+    ."""
     payload = _json(payload)
     body: dict = {"v": 1, "supersedes_ref": str(ref)}
     if outcome_text:
@@ -595,30 +597,30 @@ async def supersede_all(
 ) -> int:
     """Supersede every live card for *intent_id* and queue the supersede rows.
 
-    On any intent state change, `prompt_supersede` rows target **every
-    known** `external_message_ref`; a card whose ref was lost waits for its
-    first touch (:func:`adopt_card`). Returns the number of cards superseded.
+     On any intent state change, `prompt_supersede` rows target **every
+     known** `external_message_ref`; a card whose ref was lost waits for its
+     first touch (:func:`adopt_card`). Returns the number of cards superseded.
 
-    This is also the only edit path — "edits always go supersede-then-send,
-    never edit-in-place on an ambiguous ref". With *outcome_text* the edit
-    writes the card's header plus that line under it; without it only the
-    keyboard is edited, to the story's as the sender claims the row
-    (#1477).
+     This is also the only edit path — "edits always go supersede-then-send,
+     never edit-in-place on an ambiguous ref". With *outcome_text* the edit
+     writes the card's header plus that line under it; without it only the
+     keyboard is edited, to the story's as the sender claims the row
+    .
 
-    A row in `sending` is superseded too: the sender commits its claim before
-    the provider call, so `sending` is a committed state a
-    tap can meet; the sender finds its `mark_sent` fenced and edits the card
-    it just sent itself (`OutboxPoller`).
+     A row in `sending` is superseded too: the sender commits its claim before
+     the provider call, so `sending` is a committed state a
+     tap can meet; the sender finds its `mark_sent` fenced and edits the card
+     it just sent itself (`OutboxPoller`).
 
-    The edit is queued only where a card may go
-    (`bindings.deliverable_binding_where`); elsewhere the card is superseded
-    and nothing is queued.
+     The edit is queued only where a card may go
+     (`bindings.deliverable_binding_where`); elsewhere the card is superseded
+     and nothing is queued.
 
-    *spare_pending* leaves a card younger than that alone while it still waits
-    to go out — `pending`, or `ambiguous` and owed its resend: the settled-card
-    sweep passes `prompts.SETTLED_CARD_GRACE` for a card the sender will send
-    settled (#1477), so a story that posts before its card goes out still
-    sends one card that says so.
+     *spare_pending* leaves a card younger than that alone while it still waits
+     to go out — `pending`, or `ambiguous` and owed its resend: the settled-card
+     sweep passes `prompts.SETTLED_CARD_GRACE` for a card the sender will send
+     settled, so a story that posts before its card goes out still
+     sends one card that says so.
     """
     spare = (
         "   AND NOT (state IN ('pending', 'ambiguous')"
@@ -678,7 +680,7 @@ class Touched(NamedTuple):
     came from: how many cards it edited, and whether that card was among
     them. When it was not, the caller adopts it (:func:`adopt_card`) — a
     twin the ledger never learned — without a second read of the ledger on
-    the ordinary tap (the #1286 statement budget holds)."""
+    the ordinary tap (the statement budget holds)."""
 
     count: int
     touched_known: bool
@@ -693,7 +695,7 @@ _TOUCHED_FLAG = (
 
 def _touched_params(touched: Optional[tuple[str, str]]) -> dict:
     """The flag's parameters — none when no card was named, so the count
-    form's statement and parameters are exactly what they were (#1286)."""
+    form's statement and parameters are exactly what they were."""
     if touched is None:
         return {}
     return {"tb": str(touched[0]), "tref": str(touched[1])}
@@ -703,7 +705,7 @@ async def supersede_everywhere(
     session, *, workspace_id: str, intent_id: str, outcome_text: Optional[str]
 ) -> int:
     """`supersede_all` for EVERY active Telegram binding of the workspace, in
-    one statement (#1286): the bindings, the supersede of every live card and
+    one statement: the bindings, the supersede of every live card and
     the `prompt_supersede` rows are one round trip inside the tap's
     transaction instead of one read plus two writes per binding. The payload
     is `_supersede_payload`'s, built in SQL. Returns the cards superseded."""
@@ -726,7 +728,7 @@ async def supersede_everywhere_touched(
     outcome_text: Optional[str],
     touched: Optional[tuple[str, str]],
 ) -> Touched:
-    """:func:`supersede_everywhere`, also answering whether *touched* — the
+    """Func:`supersede_everywhere`, also answering whether *touched* — the
     `(binding_id, external_message_ref)` a tap came from — was among the
     cards it superseded. Cards are superseded in every live
     binding; the edit is queued only where a card may go."""
@@ -819,7 +821,7 @@ async def adopt_card(
         )
     ).fetchall()
     if not known:
-        # A twin exists only where the story's card was sent (#1308): no card
+        # A twin exists only where the story's card was sent: no card
         # on this binding, nothing to adopt.
         return False
     owned = (
@@ -837,14 +839,14 @@ async def adopt_card(
         # a modified client can send this story's token with another bot
         # message's id. A message the ledger already owns on this binding —
         # this story's own known card, another story's card, an invitation,
-        # a notice — is never adopted (#1308).
+        # a notice — is never adopted.
         return False
     sends = max(int(r[2] or 0) for r in known)
     if len(known) >= sends:
         # A twin exists only per lost answer: the card's row counts its send
         # attempts, so a card sent once has no twin and a row showing two
         # sends can have one. Adoption stays within that evidence — a forged
-        # callback with a fresh message id adopts nothing past it (#1308).
+        # callback with a fresh message id adopts nothing past it.
         return False
     template = dict(_json(known[0][0]))
     template.setdefault("v", 2)
@@ -906,7 +908,7 @@ async def restate_everywhere_touched(
     one statement — the review resolutions' door: the card a
     `review_required` intent shows was superseded by the approve tap, so the
     resolution's line reaches it by ref, and the shape is
-    `supersede_everywhere`'s (#1286: one round trip inside the transaction).
+    `supersede_everywhere`'s (: one round trip inside the transaction).
     Returns the edits queued — only where a card may go."""
     row = (
         await session.execute(
@@ -973,7 +975,7 @@ async def restate_cards(
     `supersede_all` is the tap's door: it takes a LIVE card's buttons away and
     says what happened. By the time the publish leg confirms a post, the tap
     has already done that (the card reads "✅ Approved by …"), so the card is
-    `superseded` and `supersede_all` would find nothing (#1276). This
+    `superseded` and `supersede_all` would find nothing. This
     door addresses the ref instead of the state: an `approval_prompt` row with
     an `external_message_ref` in any settled state gets the line and a
     `prompt_supersede` row per ref; the poller edits the message under the
@@ -1021,7 +1023,7 @@ def _needs_refresh(row: dict) -> bool:
 
 
 def _takes_the_storys_keyboard(row: dict) -> bool:
-    """Whether a claimed row leaves with its story's keyboard (#1477): an
+    """Whether a claimed row leaves with its story's keyboard: an
     approval card, or an edit of one — a `prompt_supersede` with an intent.
     An invitation's edit carries no intent, and is left as it was."""
     return row.get("kind") in ("approval_prompt", "prompt_supersede") and bool(
@@ -1081,7 +1083,7 @@ async def _claim_current(
 
 async def _with_the_storys_keyboard(session, row: dict) -> dict:
     """*row* as it leaves: an approval card or its edit gets the keyboard of
-    its story as it is now (`prompts.card_keyboard_for`, #1477). No caller
+    its story as it is now (`prompts.card_keyboard_for`). No caller
     picks one, so a rejected card loses its buttons because it is rejected. A
     card's record is rewritten with it through the one fence, so the
     ambiguous path and the later edits read what was sent; an edit's is not,
@@ -1112,7 +1114,7 @@ async def resolve_aged_ambiguous(session, *, binding_id: str) -> list:
     waited the backoff. Returns the ids resolved, oldest first.
 
     `settle` marks a live sender's lost answer `ambiguous`, and the binding's
-    sender brings it back here on a later tick (`pace_and_claim`, #1297), so
+    sender brings it back here on a later tick (`pace_and_claim`), so
     the resend policy reaches a live sender's rows as well as the rows a DEAD
     sender stranded. Bounded per tick; the binding's sender is single
     (`tg:<binding_id>`), so no other writer races the rows."""
@@ -1197,7 +1199,7 @@ async def deliver(
     every gate test a network test.
 
     Production runs :meth:`OutboxPoller.tick`; this is the same sequence as ONE
-    transaction, kept as the seam the settle-taxonomy tests drive (#1325 —
+    transaction, kept as the seam the settle-taxonomy tests drive ( —
     not a second production path).
     """
     row = await pace_and_claim(
@@ -1243,7 +1245,7 @@ async def pace_and_claim(
     """Recover → pace → claim: everything BEFORE the provider is spoken to,
     in the caller's transaction, the claimed card's keyboard last. The poller
     commits this before it sends, so the `tg_global` rate row and the
-    claimed row are never locked across the call (#1260)."""
+    claimed row are never locked across the call."""
     await _lock_binding_sources(session, binding_id=binding_id)
     stranded = await recover_stranded(session, binding_id=binding_id)
     for outbox_id in stranded:
@@ -1254,7 +1256,7 @@ async def pace_and_claim(
     # Claim FIRST, then pace: nothing pending means nothing debited, so an
     # idle poller never spends the chat's (or the fleet's) window on empty
     # ticks — at the 2 s cadence that would burn a 20/min chat budget in 40 s
-    # of silence and defer the card that then arrives (#1271). A
+    # of silence and defer the card that then arrives. A
     # paced claim raises, and the caller's rollback un-claims the row — the
     # order was always a preference, never the guard (see `deliver`).
     row = await _claim_current(
@@ -1352,7 +1354,7 @@ async def settle(
             "external_message_ref": None,
             "preparation_failed": error.preparation_failed,
         }
-    # What a failed attempt is recorded as (101): the transport's own class and
+    # What a failed attempt is recorded as (`outbox failure records`): the transport's own class and
     # code, or a lost answer with no code for anything else.
     failure = (
         (error.failure_class, error.code)
@@ -1395,7 +1397,7 @@ async def settle(
             )
         # The row goes back to `pending` with the attempt the claim consumed
         # restored: the provider's limit is not this row's failure. It is
-        # still RECORDED (a deferral, never counted as a failure — 101).
+        # still RECORDED (a deferral, never counted as a failure).
         await _leave_sending(
             session,
             row["id"],
@@ -1436,7 +1438,7 @@ async def settle(
     if row.get("kind") == "approval_prompt" and _json(row.get("payload")).get(
         "outcome_text"
     ):
-        # A card sent settled (#1477) went out with its line, so it is
+        # A card sent settled went out with its line, so it is
         # recorded `superseded` with its ref: a restate by ref still reaches it,
         # and the settled-card sweep no longer selects it. It is still a card
         # that was SENT, which is what the caller is told, so its after-send
@@ -1476,7 +1478,7 @@ async def _edit_sent_card(session, row: dict, receipt, *, force: bool) -> bool:
     that supersede carried; a row a successor moved to `ambiguous`
     (`recover_stranded`, a partition) is the successor's to resend and is left
     alone. *receipt* is the `SendReceipt` (its `sent_as` decides caption vs
-    text). A card sent settled (#1477) is owed the edit only when its story
+    text). A card sent settled is owed the edit only when its story
     has moved on from the state its line reads. Returns whether an edit was
     queued."""
     if row.get("kind") != "approval_prompt" or not row.get("intent_id"):
@@ -1520,7 +1522,7 @@ async def _edit_sent_card(session, row: dict, receipt, *, force: bool) -> bool:
         )
     payload = _json(row.get("payload"))
     if not force and outcome == payload.get("outcome_text"):
-        return False  # sent settled (#1477), and its line is still true
+        return False  # sent settled, and its line is still true
     sent_as = getattr(receipt, "sent_as", None) or payload.get("sent_as")
     await enqueue(
         session,
@@ -1601,7 +1603,7 @@ class OutboxPoller:
         """One poll, transaction-per-checkpoint: pace and claim,
         COMMIT, speak to the
         provider with no transaction open, then settle in a fresh one. The
-        `tg_global` rate row is never held across the call (#1260), and the
+        `tg_global` rate row is never held across the call, and the
         claimed row's `sending` is a committed state a tap can supersede.
         Never raises: a tick that failed is an observable, not an exception
         the loop has to survive twice."""

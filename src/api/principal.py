@@ -23,14 +23,14 @@ refuse every new sign-up.
 
 The lookup runs on a raw engine connection rather than a unit of work: the UoW
 is unconstructible without a tenant, and authentication precedes tenancy by
-definition (`session_tokens` and `users` are user-plane — `058` class 3,
-`060` — readable before any ``app.tenant_id`` exists).
+definition (`session_tokens` and `users` are user-plane — `07_row_security.sql` class 3,
+`auth_plane.py` — readable before any ``app.tenant_id`` exists).
 
 Refusals are the `TenantResolutionError` the resolver raises; the app maps that
 type once (invalid/expired/revoked session → 401), so this module speaks no
 HTTP except for the one condition that is the deployment's rather than the
 caller's: no target database configured, which is a 503 named after the
-variable, never a silent fallback to the settings-built URL (#1010's class).
+variable, never a silent fallback to the settings-built URL ('s class).
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ TOKEN_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/workspaces/{ws}/tokens"),
         ("DELETE", "/api/v1/workspaces/{ws}/tokens/{token_id}"),
         ("POST", "/api/v1/workspaces/{ws}/commands/{command}"),
-        # the Queue read, for the CLI's `planned` (#1413)
+        # the Queue read, for the CLI's `planned`
         ("GET", "/api/v1/workspaces/{ws}/intents"),
         # the read views (`src/api/routes/ops.py`)
         ("GET", "/api/v1/ops/workspaces/{ws}/story/{intent_id}"),
@@ -97,7 +97,7 @@ TOKEN_ROUTES: frozenset[tuple[str, str]] = frozenset(
         # the operating details (`require_ops`)
         ("GET", "/api/v1/ops/health"),
         # the owner's waitlist and an admission off it, for the CLI's
-        # `waitlist` and `admit` (#1723; `require_ops`)
+        # `waitlist` and `admit` (`require_ops`)
         ("GET", "/api/v1/ops/waitlist"),
         ("POST", "/api/v1/admissions"),
     }
@@ -180,7 +180,7 @@ def session_delivery_gap() -> Optional[str]:
     the sign-in succeeds, the cookie is set, and the front end simply never sees
     it, so the person is bounced back to `/login` having just signed in.
 
-    That state is not hypothetical (#1117): it goes unnoticed because every
+    That state is not hypothetical: it goes unnoticed because every
     individual part of it works.
 
     ``WEB_APP_URL`` unset is NOT a gap here. It is the documented fail-closed
@@ -583,7 +583,7 @@ def address_key(raw: Optional[str]) -> Optional[str]:
 def client_ip(request: Request) -> str:
     """The attributed peer as a counter key (:func:`address_key`) —
     `request.client.host` AFTER ProxyHeadersMiddleware has applied the
-    trusted-proxy walk (#726/#765), which is the client-IP source
+    trusted-proxy walk (/), which is the client-IP source
     rule. Never a header read here; the one other address a counter may key
     on is :func:`preauth_guard`'s *client*, which a caller passes only after
     verifying who sent it."""

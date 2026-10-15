@@ -54,14 +54,12 @@ TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN=<python -c "import secrets; print(secrets.t
 
 ### Initialize Schema
 
-A fresh database is built by four files applied by hand and then the migration runner — the same
-sequence `make init-db` runs locally (the `Makefile`'s `init-db` target). The sequence, why each file is needed
-(without step 0 the runner stops at 050; without the hand-made table, at 078) and what `apply`
-prints for the two gated files (`owed (manual) 079 …`, `owed (manual) 080 …`) are written down
-ONCE, in [`cloud-deployment.md` › Build the schema on a fresh database](cloud-deployment.md#build-the-schema-on-a-fresh-database).
-Export the OWNER connection string as `DATABASE_URL` first: the runner applies DDL with it, and
-keeps the ledger `storydump posture` and `storydump doctor` read. The sequence ends with
-`python -m scripts.migration_runner apply`; the check below reads what it wrote.
+Build a fresh database from the models and `src/models/target/ddl/`, then
+adopt the empty `000_initial.sql` marker and apply later migrations. The
+owner login applies schema changes and needs `CREATEROLE`. Locally,
+`make create-db init-db` runs the sequence; `make reset-db` drops and rebuilds.
+The explicit commands are in
+[Build the schema on a fresh database](cloud-deployment.md#build-the-schema-on-a-fresh-database).
 
 ### Verify Setup
 
@@ -98,10 +96,10 @@ TARGET_DATABASE_URL=postgresql://app:pass@ep-xxx.neon.tech/storydump?sslmode=req
   [`instagram-login-setup.md`](instagram-login-setup.md)
   → `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`
 - [ ] **Google** — one OAuth client with both redirect URIs (sign-in and
-  Drive): [`cloud-deployment.md`](cloud-deployment.md) §6
+  Drive): [`cloud-deployment.md`](cloud-deployment.md#telegram)
   → `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
 - [ ] **Cloudinary** — the transit store a story's frame rides to Meta:
-  `cloud-deployment.md` §7
+  the Instagram login setup in `cloud-deployment.md`
   → `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
 
 ---
@@ -135,7 +133,7 @@ the pre-deploy migration step, the `/health` check and the restart policy.
 
 ### Configure Environment Variables
 
-The table, by service, is `cloud-deployment.md` §3; `.env.example` names every
+The table, by service, is the environment table in `cloud-deployment.md`; `.env.example` names every
 variable the tree reads and is the reference. A second environment (staging, a
 preview) must also set `TARGET_TELEGRAM_WEBHOOK_URL` — its default is
 production's `https://api.storydump.app/webhooks/telegram` — and use its own
@@ -191,14 +189,14 @@ storydump doctor            # this laptop: token, API, config, Railway, the ledg
 
 Everything here happens on the web front end, signed in with Google.
 
-- [ ] Admit your own email first: sign-up is invite-only (092), and on a fresh
+- [ ] Admit your own email first: sign-up is invite-only (`fn_signup_admitted`), and on a fresh
   database nobody is admitted, the first account included. As the owner (the
   `DATABASE_URL` login), in lower case:
   `psql "$DATABASE_URL" -c "INSERT INTO signup_admissions (email) VALUES ('you@example.com');"`
   By hand this once only: until your account exists and the API's
   `OPS_USER_IDS` names it (`cloud-deployment.md`'s Quick Start, step 11),
   nothing else can admit anyone. Every later admission is `storydump admit`,
-  the ping's Admit or the site's `/ops/waitlist` (§6).
+  the ping's Admit or the site's `/ops/waitlist`.
 - [ ] Sign in with that Google account and create a workspace
 - [ ] **Settings › Integrations → Link Telegram** — attaches your Telegram
   account to your user (the link opens the bot with a `/start link-…` payload)
@@ -236,15 +234,15 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 ## 6. Team Onboarding (5 minutes per person)
 
 - [ ] Each person signs in on the web with Google and links their Telegram
-  (Settings › Integrations → Link Telegram). Sign-up is gated (092): a new
+  (Settings › Integrations → Link Telegram). Sign-up is gated (`fn_signup_admitted`): a new
   account needs a pending invitation addressed to its email, sent from an
-  active workspace by someone still its owner or an admin (098), or an
+  active workspace by someone still its owner or an admin (`invitation legitimacy checks`), or an
   admission: `storydump admit <email>`, for any address, on the waitlist or
   not (yours to run, as a person in the API's `OPS_USER_IDS`), tap Admit
   on the waitlist ping, or use the site's `/ops/waitlist` (the dashboard
   header's Owner link, or the ping's Open waitlist ↗), which admits any
   address too. `storydump waitlist` and `/ops/waitlist` show where each
-  address stands. An admission's email, once the worker sends it (#1723),
+  address stands. An admission's email, once the worker sends it,
   carries a one-time link: through it the person signs up with any Google
   account, and the one they choose becomes their sign-in. Signing in as the
   admitted address needs no link until the spot is used.
@@ -276,7 +274,7 @@ owner; there is no product door for it. In order:
   General) and let its grace window end, or keep the person.
 - [ ] **What nothing ties to them.** Two things can outlive the person
   without a record naming them, so list both before the removals:
-  - Workspace service tokens minted before 090 record no minter, so neither a
+  - Workspace service tokens with no recorded minter, so neither a
     removal nor the delete below can tell whether this person minted one,
     even in a workspace they have since left. The first query lists every
     live one, with `theirs` true in a workspace the person ever belonged to
@@ -318,7 +316,7 @@ owner; there is no product door for it. In order:
   working with no minter recorded, the invitations they sent pending with no
   inviter, and an invitation to them able to bring them back.
 - [ ] **Their Google Drive**, when they connected a workspace's
-  (`oauth_credentials.granted_by_user_id` names them, 091): disconnect it
+  (`oauth_credentials.granted_by_user_id` names them, `oauth_credentials.granted_by_user_id`): disconnect it
   (Settings › Integrations → Google Drive → Disconnect). Otherwise `ON DELETE
   SET NULL` clears the granter and leaves the grant active, still holding the
   deleted person's Google token, and a grant with no granter is browsable by
@@ -328,7 +326,7 @@ owner; there is no product door for it. In order:
   anything the removals missed on the way, dropping the owner's admission
   of their email (`signup_admissions`), which would otherwise let a new
   account with that address straight back in unless the admission is already
-  marked used (an account created at an admitted address marks it, 133), and
+  marked used (an account created at an admitted address marks it, `trg_signup_admission_consume`), and
   ending every workspace's
   Telegram binding to their private chat, which no card reaches once they are
   gone but which would otherwise stay active; its queued cards are superseded

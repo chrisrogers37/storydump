@@ -92,7 +92,7 @@ export function AcceptRefusal({
   }
   if (reason === "not_acceptable") {
     // A newer link may have replaced this one, and the person's waiting
-    // invitations, with "Email me the link again", are one page away (115).
+    // invitations, with "Email me the link again", are one page away (`invitee invitation functions`).
     return (
       <div className="space-y-1">
         <p role="alert" className="text-sm text-destructive">

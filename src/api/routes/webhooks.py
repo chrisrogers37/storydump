@@ -1,8 +1,8 @@
-"""The Telegram webhook ingress route (#942).
+"""The Telegram webhook ingress route.
 
 This route mounts `webhook_ingress`'s `verify_secret_token`, `fingerprint`
-and `admit` (#865). It stops at the resolution seam: tenant resolution belongs
-to `tenant_resolution` and its resolver door (`fn_resolve_binding`, 068, #854),
+and `admit`. It stops at the resolution seam: tenant resolution belongs
+to `tenant_resolution` and its resolver door (`fn_resolve_binding`, `fn_channel_join / fn_channel_leave`),
 and none of it is here.
 
 ## Why admission needs no tenant
@@ -44,7 +44,7 @@ the webhook — two deliberate acts.
 
 ## Why `dispatch` receives the connection
 
-Admission and effect are **one transaction** (#854): `admit` and `dispatch`
+Admission and effect are **one transaction**: `admit` and `dispatch`
 run on one connection, and the route commits once. If the route committed
 admission and then called a dispatcher on its own connection, a dispatch
 failure would leave the key committed and the command unexecutable —
@@ -79,7 +79,7 @@ router = APIRouter(tags=["webhooks"])
 #: The header Telegram echoes back the registered secret in. The vocabulary
 #: owns the spelling — the CLI's `webhook status` SENDS it and this route
 #: READS it, so a second literal here is how `storydump webhook status`
-#: starts reporting a refusal the live deliveries never see (#1325).
+#: starts reporting a refusal the live deliveries never see.
 #: The route's tests import the name from here, as `v1.py` re-exports
 #: `IDEMPOTENCY_HEADER = vocabulary.IDEMPOTENCY_HEADER`.
 SECRET_HEADER = vocabulary.WEBHOOK_SECRET_HEADER
@@ -95,7 +95,7 @@ class IngressRuntime:
     process-lifetime, never request- or job-scoped: this object lives as long
     as the app does.
 
-    `dispatch` is #854's slot. It receives the open connection and the admitted
+    `dispatch` is's slot. It receives the open connection and the admitted
     payload, and owns resolution and the command flips. Nothing about its
     contract beyond that is decided here.
     """
@@ -103,7 +103,7 @@ class IngressRuntime:
     connect: Callable[[], Any]
     dispatch: Callable[[Any, dict[str, Any]], Awaitable[Any]]
     #: Send *text* to a chat id — the acknowledgement a HANDLED `/start` gets
-    #: after its delivery is committed (#1224). None means the door
+    #: after its delivery is committed. None means the door
     #: stays silent by construction, which is what a deployment without the
     #: bot token gets. Best-effort: a failure here is logged, never surfaced.
     reply: Optional[Callable[[str, str], Awaitable[Any]]] = None
@@ -111,7 +111,7 @@ class IngressRuntime:
     #: show_alert) -> bool`. Best effort, after the commit. None = silent.
     answer_callback: Optional[Callable[[str, str, bool], Awaitable[bool]]] = None
     #: Edit a tapped message — `(chat_id, message_id, *, text=None,
-    #: markup=None)`, the one seam (#1477). The identity link's
+    #: markup=None)`, the one seam. The identity link's
     #: confirmation prompt passes `text` (`TapResult.edit_text`: its buttons
     #: go); a card's Configure menu passes `markup` (`TapResult.edit_markup`).
     #: A card's outcome edit is the outbox's, paced. Best effort, after the
@@ -140,7 +140,7 @@ class TapMetrics:
 
 
 @router.post("/telegram")
-# No per-IP ceiling on this route (#1028): the secret token is the real
+# No per-IP ceiling on this route: the secret token is the real
 # authentication control. If a ceiling is wanted, it is a durable
 # `rate_counters` scope, sized from measured delivery rates -- not a
 # process-local bucket here.
@@ -260,7 +260,7 @@ async def telegram_webhook(
         return {"status": "replayed"}
 
     # AFTER the commit, outside the connection, and after the 200 has gone
-    # out (#1284): the link is durable before any provider is spoken to, so a
+    # out: the link is durable before any provider is spoken to, so a
     # Telegram hiccup can neither roll it back nor make Telegram redeliver —
     # and the request does not wait on Telegram's reply to the answer
     # before it returns (the task still runs to completion on this worker).
@@ -280,7 +280,7 @@ BUSY_TEXT = "Busy — tap again."
 async def _answer_busy(
     runtime: IngressRuntime, callback_query_id: str, metrics: Optional[TapMetrics]
 ) -> None:
-    """The busy toast, behind the 200 (#1284): the transport answers False
+    """The busy toast, behind the 200: the transport answers False
     rather than raising; both are an answer that did not land, and the
     bound is read from `answer_failed` either way."""
     try:

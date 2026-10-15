@@ -1,6 +1,6 @@
 /**
  * `POST /api/me/invitations/[invitationId]/resend` — "Email me the link again"
- * (115).
+ * (`invitee invitation functions`).
  *
  * Pinned: another site's request and no session reach nothing; only an id's
  * shape goes on to the API; the answer is the email's delivery and never a

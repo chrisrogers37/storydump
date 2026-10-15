@@ -5,7 +5,7 @@ import type { InvitationForYou } from "@/lib/invitations";
 import { InvitationsForYouList } from "./invitations-for-you";
 
 /**
- * The invitee's panel (115): someone who signed in without the link sees the
+ * The invitee's panel (`invitee invitation functions`): someone who signed in without the link sees the
  * invitations waiting for them, where each link is, and one control each. No
  * DOM, as in `invite-member.test.ts`: the hook-free list reads as a tree.
  */

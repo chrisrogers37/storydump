@@ -5,7 +5,7 @@ const sentence = (c: { lead: string; link: string; tail: string }) =>
   `${c.lead}${c.link}${c.tail}`;
 
 /**
- * Sign-up is gated (migration 092): a new account nobody admitted or invited
+ * Sign-up is gated (`fn_signup_admitted`): a new account nobody admitted or invited
  * lands on `/login?error=not_admitted`. The page must say why, and send the
  * person to the waitlist rather than back to a button that will refuse them
  * again.
@@ -22,7 +22,7 @@ describe("the sign-in page explains the sign-up gate", () => {
   });
 
   it("says a refused claim link was used or replaced, and how to sign in instead", () => {
-    // #1723: a claim link from an admission's email that cannot be used.
+    //: a claim link from an admission's email that cannot be used.
     const copy = loginError("claim_refused");
     expect(copy).toBe(LOGIN_ERRORS.claim_refused);
     expect(sentence(copy!)).toBe(

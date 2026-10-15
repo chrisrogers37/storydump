@@ -1,21 +1,15 @@
-"""The worker's tenant-less sweeps answer under `svc_worker` (#751).
+"""The worker's tenant-free sweeps run as `svc_worker`.
 
-The worker issues no direct DELETE and touches none of the tables
-its role cannot see; what blocks its switch is six paths that open a
-session with an EMPTY tenant and the `system`
-actor and then run SQL on policy-covered tables — the outbox sender sweep,
-the prompt sweep, the settled-card sweep, the stranded-source alert, the
-reconciler's container poll and the reconciler's ladder count — and one
-scope leak: `plan_slot` runs the prompt sweep inside a TENANT job's
-transaction, and a sweep that left the session under the last workspace it
-prompted would fence that job's own finalization. Under the owner login they
-all work because the owner bypasses row-level security; under `svc_worker`
-the reads see nothing. This gate runs each path as `svc_worker` against a
-seeded estate of three workspaces and expects what the owner gets — asserting
-the EFFECT under the workspace's own tenant, never the count a sweep reports
-— beside a plain read that expects nothing and the owner actor as the
-control. Every sweep runs in a transaction that is rolled back, so each login
-sees the same estate.
+The deployed worker connects as `svc_worker`; the owner role applies schema
+changes. System sweeps select work through SECURITY DEFINER functions, then
+write each row under its workspace tenant. Plain runtime reads without a
+tenant return no tenant rows.
+
+This gate runs the outbox, prompt, settled-card, stranded-source and reconciler
+paths against three workspaces and compares their effects with an owner
+control. `plan_slot` also retains its caller's tenant while sweeping, so the
+job can finalize. Each sweep rolls back to keep the estate identical for
+both actors.
 """
 
 from __future__ import annotations
@@ -327,7 +321,7 @@ def test_the_prompt_sweep_hands_the_callers_scope_back_so_plan_slot_can_finalize
     estate is B's, so the sweep prompts it under B's claim; left there, the
     finalization — `UPDATE jobs … WHERE id = :id AND lease_token = :token` —
     matches no row under the policies and raises `JobFenced`: every planned
-    slot would fail after the switch. The sweep hands the caller's scope
+    slot would fail without restoring the tenant. The sweep hands the caller's scope
     back, and the finalization lands."""
 
     async def plan_then_finalize(dsn):

@@ -1,4 +1,4 @@
-"""Instagram Login OAuth, target-side (#863).
+"""Instagram Login OAuth, target-side.
 
 The flow runs on the target tables — `oauth_states` and `oauth_credentials`.
 Each deliberate choice is named below so a reader can tell a decision from a
@@ -35,7 +35,7 @@ drift.
 The dead-token symptom gate has three halves, and this module owns one. The
 credential flip to `expired` / `reauth_required` is here; the **dispatcher**
 declining to mint further intents and the **publish pipeline** recording the
-fault are elsewhere (#863). Nothing here pretends to close the chain.
+fault are elsewhere. Nothing here pretends to close the chain.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 #: A PostgreSQL interval literal; the value is pinned by test.
 FIRST_REFRESH_INTERVAL = "7 days"
 
-#: The scopes the flow requests. Meta App Review (#410) turns on the app's
+#: The scopes the flow requests. Meta App Review turns on the app's
 #: *use case*, not on this list.
 REQUIRED_SCOPES = ("instagram_business_basic", "instagram_business_content_publish")
 
@@ -209,7 +209,7 @@ async def load_credential(conn, *, credential_id, captured) -> str:
     ciphertext — the exception carries the credential id and nothing else.
 
     **The flip is `archive_lifecycle.credential_rejected`'s, the one door every
-    definitive rejection takes** (#1644), so it keeps the common lock
+    definitive rejection takes**, so it keeps the common lock
     order and moves an archive's epoch like the others. A caller passes the
     credential's `captured` (`archive_lifecycle.capture_credential`), read
     BEFORE this call: the flip then takes the account's source prefix first,
@@ -267,7 +267,7 @@ async def mark_dead(conn, *, credential_id) -> None:
     """The half that IS this module's: the credential and account state flip.
 
     The other two halves — the dispatcher minting no further intents, and the
-    publish pipeline recording the fault — are theirs (#863), and this
+    publish pipeline recording the fault — are theirs, and this
     function deliberately does not reach into either.
     """
     result = await conn.execute(
@@ -296,7 +296,7 @@ async def mark_dead(conn, *, credential_id) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The connect leg (#1220 / #1041): the code exchange and the route's
+# The connect leg ( /): the code exchange and the route's
 # three-way "which state do I mint" — the Drive leg's shape, on Instagram.
 # ---------------------------------------------------------------------------
 
@@ -330,7 +330,7 @@ class IgIdentity:
     """Who one token is for, as one `/me` read of that same token says.
 
     `user_id` is the REAL account id `ig_accounts.provider_account_ref` keys on
-    (054). `app_scoped_id` is `id`: the person's id inside THIS Meta app, which
+    (`accounts_sources_media.py`). `app_scoped_id` is `id`: the person's id inside THIS Meta app, which
     is what a Meta callback's `signed_request.user_id` names — a different
     value from `user_id`, never derived from it and never assumed equal. It is
     None unless the answer carried digits, because a mapping is only worth
@@ -344,7 +344,7 @@ class IgIdentity:
 @dataclass(frozen=True)
 class IgGrant:
     """A long-lived Instagram Login token and who it is for. `ig_user_id` is
-    the REAL account id `ig_accounts.provider_account_ref` keys on (054);
+    the REAL account id `ig_accounts.provider_account_ref` keys on (`accounts_sources_media.py`);
     `username` is display, and may be None if the profile read omitted it.
     `app_scoped_id` is the identity read's `id` (see `IgIdentity`), last and
     optional so a constructor may omit it."""

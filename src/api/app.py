@@ -1,4 +1,4 @@
-"""The Storydump API — the target tier's web surface (#1028, #1015).
+"""The Storydump API — the target tier's web surface.
 
 `create_app()` is a factory because an engine, a settings snapshot and a
 middleware stack assembled at import time cannot be handed a test double. The
@@ -10,12 +10,12 @@ What it mounts, and why each lives where it does:
 - ``/auth`` — sign-in hosted on the API, see `routes/auth.py`.
 - ``/api/v1`` — reads as resources, writes as the closed vocabulary, see
   `routes/v1.py`.
-- ``/webhooks/telegram`` — the ingress route: the `/start` door (#1183)
-  and the group join path (#1242). A delivery is admitted only when it
+- ``/webhooks/telegram`` — the ingress route: the `/start` door
+  and the group join path. A delivery is admitted only when it
   carries the secret `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` holds (unset, every
   delivery is refused), and is dispatched through `app.state.ingress`, which
   the factory wires whenever an engine exists.
-  Chat-inbound COMMANDS are not dispatched (#854).
+  Chat-inbound COMMANDS are not dispatched.
 - ``/health`` — Railway's probe (`railway.toml`): ok, the version and the
   commit, nothing else; the operating details (whether a target engine is
   configured, the login, the pool, the webhook) are ``/api/v1/ops/health``,
@@ -32,7 +32,7 @@ The engine comes from `TARGET_DATABASE_URL` and from nothing else. Unset means
 ``app.state.engine is None`` and every data route answers 503 naming the
 variable — never the settings-built URL, which on the deployed service points
 at nothing and on a misconfigured one would point at a legacy-shaped database
-(#1010's class of silent misdirection).
+('s class of silent misdirection).
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ class DropAmbiguousForwardedForMiddleware:
     path it already takes when there is no X-Forwarded-For header at all.
     Under normal operation behind a single well-behaved proxy this never
     triggers; it exists for the anomalous case, and failing closed to the
-    shared edge IP beats failing open to an attacker-chosen identity. See #765.
+    shared edge IP beats failing open to an attacker-chosen identity. See.
     """
 
     _XFF = b"x-forwarded-for"
@@ -370,7 +370,7 @@ _COMMAND_STATUS = {
     "media_unsuitable": 409,
 }
 
-#: `ProvisioningRefused.reason` → status (#1041).
+#: `ProvisioningRefused.reason` → status.
 #:
 #: A caller-supplied value we will not store is 400 and NAMES which one, so a
 #: front end can point at the field rather than say "invalid".
@@ -386,7 +386,7 @@ _PROVISIONING_STATUS = {
     "account_ref_too_long": 400,
     # Raised by the typed route itself (`v1.create_account`).
     "account_ref_requires_connect": 400,
-    # The typed-handle path (#1089). Mapped for the same reason as those
+    # The typed-handle path. Mapped for the same reason as those
     # above: these are values a person typed into a field, so the answer has to
     # be a 400 naming which one. An unmapped reason falls through to `_unmapped`
     # and is answered 500 — correct for a broken invariant, wrong for a typo.
@@ -403,7 +403,7 @@ _PROVISIONING_STATUS = {
     # (two admins at once): a conflict to retry, not a typo.
     "sources_changed": 409,
     # An admin who is not the person who connected Drive, at the folder
-    # browser or the pick (091): a floor, like `insufficient_role`.
+    # browser or the pick (`oauth_credentials.granted_by_user_id`): a floor, like `insufficient_role`.
     "drive_not_yours": 403,
 }
 
@@ -411,7 +411,7 @@ _PROVISIONING_STATUS = {
 _INVITATION_STATUS = {
     "not_acceptable": 404,
     "identity_mismatch": 403,
-    # The CREATE half's refusals (#1172). Each is the caller's input being
+    # The CREATE half's refusals. Each is the caller's input being
     # wrong rather than a state or an authorization fact, so 400 — and
     # `already_invited` stays 400 rather than 409 for the same reason. A send
     # replaces the address's pending invitation (`invitations.create`, under a
@@ -521,7 +521,7 @@ def _source_policy_body(exc, status: int) -> dict:
 
 
 #: `ConnectChoiceRefused.reason` → status, total over `connect_choice.REASONS`
-#: (#1644). A start's stale On preview is `MixConflict`'s 409, above.
+#:. A start's stale On preview is `MixConflict`'s 409, above.
 _ARCHIVE_CHOICE_STATUS = {
     "invalid_archive_choice": 400,
     "archive_not_activated": 503,
@@ -716,7 +716,7 @@ async def _sample_webhook_live(app: FastAPI, env: Mapping[str, str]) -> None:
 async def _sample_db_role(app: FastAPI) -> None:
     """Fill `app.state.db_role` once, from the catalog; never raise.
 
-    Diagnostic (#751): a login with BYPASSRLS makes every tenant policy inert,
+    Diagnostic: a login with BYPASSRLS makes every tenant policy inert,
     and this is how the login a deploy runs under is verified. A failure
     leaves None — "not sampled" — never a guessed-safe value.
     """
@@ -902,14 +902,14 @@ def create_app(
     else:
         logger.info("invitation email is configured")
     if settings.TARGET_SIGNUP_OPEN:
-        # A local stack's switch (092): said at startup, so it is never on
+        # A local stack's switch (`fn_signup_admitted`): said at startup, so it is never on
         # in production unnoticed.
         logger.warning(
             "TARGET_SIGNUP_OPEN is on: any Google account can create a user, "
             "admitted or not"
         )
     # Which database login this process holds, and whether it bypasses RLS
-    # (#751). Sampled ONCE, in the background, after startup — the
+    # . Sampled ONCE, in the background, after startup — the
     # operating details (`/api/v1/ops/health`) report the cached answer and
     # still opens no connection of its own, so a database blip cannot fail the
     # probe. None means "not sampled", never "safe": a login with BYPASSRLS
@@ -929,12 +929,12 @@ def create_app(
     # app, so every app a test builds starts empty.
     app.state.health_cache = AnswerCache()
 
-    # The ingress seam: the `/start` door (#1183) and the group join path
-    # (#1242), beside the resolver door `fn_resolve_binding` (#854).
+    # The ingress seam: the `/start` door and the group join path
+    # , beside the resolver door `fn_resolve_binding`.
     #
     # ⚠ THIS DOES NOT DISPATCH CHAT-INBOUND COMMANDS. A `/start` payload
     # carries its own resolution; a group message resolves its chat through
-    # `fn_group_member_seen`. An "approve" typed in a group is not dispatched (#854).
+    # `fn_group_member_seen`. An "approve" typed in a group is not dispatched.
     #
     # Wired only when an engine exists: without one there is nothing to
     # `connect` to, and a runtime whose `connect` fails would convert the
@@ -957,7 +957,7 @@ def create_app(
             return await identity.telegram_ids_for(conn, operators)
 
     def signup_keyboard(address: str) -> dict:
-        # ✅ Admit (#1723) carries the address's ref, never the address: the
+        # ✅ Admit carries the address's ref, never the address: the
         # tap reads the entry back through `fn_waitlist`. Open waitlist ↗ is
         # the owner area's page, only for an https origin, which is all
         # Telegram takes in a URL button, as Configure's Approval settings ↗.
@@ -1002,9 +1002,9 @@ def create_app(
     _register_handlers(app)
 
     # Middleware. Starlette prepends, so the LAST added runs FIRST on the
-    # request path: CORS outermost, then the ambiguous-XFF drop (#765) and
+    # request path: CORS outermost, then the ambiguous-XFF drop and
     # the removal of Railway's edge hop ahead of the trusted-proxy walk
-    # (#726), then the body limit — after the walk,
+    # , then the body limit — after the walk,
     # so its refusal names the attributed client, and ahead of everything
     # that could read a body — then security headers innermost.
     app.add_middleware(SecurityHeadersMiddleware)
@@ -1032,11 +1032,11 @@ def create_app(
     # The read views: one file for the
     # operator surface, tenant-scoped, admitted to tokens.
     app.include_router(ops_router, prefix="/api/v1")
-    # The owner's admission off the waitlist (#1723): a write, so not among
+    # The owner's admission off the waitlist: a write, so not among
     # the `/ops` reads; for `OPS_USER_IDS`, admitted to tokens.
     app.include_router(admissions_router, prefix="/api/v1")
     app.include_router(webhooks.router, prefix="/webhooks")
-    # Meta's policy callbacks (#410). Under the same prefix as the other
+    # Meta's policy callbacks. Under the same prefix as the other
     # provider-called doors. Registering the URLs with Meta is a submission
     # step, not a deploy step; this code does not do it.
     app.include_router(meta_router, prefix="/webhooks/meta")

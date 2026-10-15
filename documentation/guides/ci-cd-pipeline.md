@@ -1,5 +1,11 @@
 # GitHub Actions CI/CD
 
+A new database starts with `make init-db`: build from the models and
+`src/models/target/ddl/`, adopt the empty `000_initial.sql` base marker,
+then apply later migrations. The marker is never executed. The owner
+role performs schema changes; the API uses `svc_ingress` and the worker
+uses `svc_worker`. `make reset-db` drops and rebuilds a local database.
+
 ## Overview
 
 Storydump uses GitHub Actions for continuous integration and Railway for continuous deployment. Since the project is hosted on a public repository, all CI runs on GitHub's cloud runners (`ubuntu-latest`).

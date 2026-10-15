@@ -1,5 +1,10 @@
 # Test Coverage
 
+Database gates build the models and `src/models/target/ddl/` as the owner,
+then adopt the empty `000_initial.sql` base marker. `make init-db` uses the same
+build/adopt sequence and applies later migrations; `make reset-db` drops and
+rebuilds a local database. The base marker is never executed.
+
 What the suite covers, how coverage is measured, and the policy that stops a
 green run from claiming coverage it never took. Running and writing tests is
 [`testing-guide.md`](testing-guide.md).
@@ -20,7 +25,7 @@ pytest --collect-only -qqq --no-cov tests/    # one `path: count` line per file
 
 | Directory | What it covers |
 |---|---|
-| `tests/scripts/` | The DB gates: the migration runner and the lineage lane, the advertised DDL, row-level security, the command port, the job lanes, the publish pipeline, the outbox, the ops views, and the real `storydump` CLI against the real app — on scratch PostgreSQL databases, one per test or module. A few files here need no database (the ratchets, `test_pr_ready.py`) |
+| `tests/scripts/` | The DB gates: the migration runner, the schema-code world builder and catalog parity, row-level security, the command port, the job lanes, the publish pipeline, the outbox, the ops views, and the real `storydump` CLI against the real app — on scratch PostgreSQL databases, one per test or module. A few files here need no database (the ratchets, `test_pr_ready.py`) |
 | `tests/src/services/target/` | The target tier's services with their seams patched (the egress floor, Meta, Drive, Telegram) |
 | `tests/storydump_cli/` | The `storydump` console against a scripted API — no network, no database |
 | `tests/src/api/` | The API's routes over a fake engine whose session refuses SQL (`tests/src/api/conftest.py`) |
@@ -35,7 +40,7 @@ Outside the table:
 
 - **`tests/scripts/load/`** — the load harness. Its scenarios carry the `load`
   marker and are *deselected* at collection unless `RUN_LOAD_HARNESS=1`
-  (`tests/scripts/load/conftest.py:13`) — deselected rather than skipped, so
+  (`tests/scripts/load/conftest.py`) — deselected rather than skipped, so
   they do not count against the skip ceiling below.
 - **`landing/`** — the front end has its own tests (`npm test`, vitest), run by
   CI's `front-end` job.
@@ -76,7 +81,7 @@ would be stale at the next merge.
 
 The number that matters more than a percentage is whether the database-backed
 tests ran at all. Without a policy, a run whose database never came up
-reports `N passed, M skipped` at exit 0 (#758). The policy lives in
+reports `N passed, M skipped` at exit 0. The policy lives in
 `tests/conftest.py` as pure functions, and
 `tests/test_integration_coverage_policy.py` pins its truth table without a
 PostgreSQL:
@@ -87,13 +92,12 @@ PostgreSQL:
 | nothing listening | unset | **skip** — the one honest skip: a contributor with no PostgreSQL |
 | nothing listening | `1` / `true` / `yes` | **fail** — the session fixture raises, so every test errors instead of skipping |
 
-- The verdict is `integration_verdict` (`tests/conftest.py:98`); the session
-  fixture `setup_test_database` (`:708`) applies it.
+- The verdict is `integration_verdict` (`tests/conftest.py`); the session
+  fixture `setup_test_database` applies it.
 - "Answered" includes a server that *refused* the connection: a bad password
   or a connection limit is a configured database that failed, not an absent
-  one, so the tests run and fail rather than skip (`server_answered`, `:233`;
-  #769). `TestTheRefusalAgainstARealServer` re-proves that premise against a
-  real server with no mocks (#804).
+  one, so the tests run and fail rather than skip (`server_answered`). `TestTheRefusalAgainstARealServer` re-proves that premise against a
+  real server with no mocks.
 - **The skip ceiling**: where the database is required, more than
   `MAX_EXPECTED_SKIPS = 1` skipped tests fails the session at
   `pytest_sessionfinish` (`:88`, `:149`). The ceiling is hand-maintained: a
@@ -101,7 +105,7 @@ PostgreSQL:
 - A missing precondition in the root suite — a test role without `CREATEROLE`
   or `CREATEDB` — skips locally and fails where the database is required
   (`precondition_absent`, `:331`). `tests/scripts/` skips on the same missing
-  privilege (`owner_actor`, `tests/scripts/conftest.py:575`); where the
+  privilege (`owner_actor`, `tests/scripts/conftest.py`); where the
   database is required it is the skip ceiling that turns that into a failure.
 - CI sets `REQUIRE_TEST_DATABASE: "1"` (in `ci.yml`). Set it locally whenever
   a green result is going to be reported anywhere.
@@ -111,7 +115,7 @@ What a laptop with no PostgreSQL sees: the root suite's database tests skip
 `tests/src/services/target/test_unit_of_work.py` and
 `tests/test_integration_coverage_policy.py`), and a gate under
 `tests/scripts/` that takes a database fixture **errors** at `admin_conn`
-(`tests/scripts/conftest.py:380`) rather than skipping.
+(`tests/scripts/conftest.py`) rather than skipping.
 [`testing-guide.md`](testing-guide.md#giving-the-gates-a-server) has the
 throwaway-server recipe that runs them.
 

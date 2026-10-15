@@ -5,11 +5,9 @@ boots, so it imports nothing from ``src`` (a predeploy step must not depend on
 the application's import closure or its configuration) and depends only on the
 standard library plus psycopg2. The database is addressed by ``DATABASE_URL`` or ``--database-url``.
 
-The ledger lives in a dedicated ``runner`` schema — never ``public`` — because
-the schema-move file renames ``public`` wholesale, and a ledger living there
-would ride into ``legacy`` mid-run, severing the migration history from the
-very invocation writing it. The ``runner`` schema is invariant across every
-schema-level operation, identically in CI and production.
+The ledger lives in the dedicated `runner` schema, separate from application
+objects in `public`. Schema operations therefore preserve the ledger and the
+history that the current runner invocation records.
 
 Conventions a migration file may carry (this list is the contract; the ops
 runbook cites it):
@@ -25,7 +23,7 @@ runbook cites it):
   postconditions also needs no adoption-manifest entry: its adoption probe
   derives from them (one predicate, one home).
 - ``-- runner:reapply-safe`` — for idempotent data migrations whose applied
-  state is undecidable in place (048's class): adopt may leave them pending
+  state is undecidable in place: adopt may leave them pending
   below an adopted head without calling the chain incoherent, and apply
   re-runs them there.
 ``000_initial.sql`` is empty and is never executed. A database built from the
@@ -43,10 +41,10 @@ A file's execution mode is a declared discovery-time fact — ``wrapped`` (the
 runner owns one transaction, ledger row inside it), ``self-managed`` (the file
 carries its own BEGIN/COMMIT, the legacy corpus shape, run with psql
 semantics), or ``no-transaction`` — visible in ``status`` output. New files
-(051+) should be ``wrapped``.
+use ``wrapped`` unless their SQL requires another mode.
 
 A wrapped file's lock waits are bounded, and a failure on one is tried again
-(``LOCK_TIMEOUT``, ``LOCK_RETRY_DELAYS_S``; #1515). Self-managed and
+(``LOCK_TIMEOUT``, ``LOCK_RETRY_DELAYS_S``). Self-managed and
 no-transaction files run without the bound: their statements and their
 transactions are their own.
 """
@@ -79,14 +77,14 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 #: ``adopt`` on a database built from the schema code and never executed.
 INITIAL_VERSION = 0
 
-#: The longest a wrapped file waits for any one lock (#1515). A file that
+#: The longest a wrapped file waits for any one lock. A file that
 #: must wait for ACCESS EXCLUSIVE holds its place in the table's lock queue,
 #: and every later statement on the table, readers included, queues behind
 #: it. Bounded, the file fails with SQLSTATE 55P03 instead, having stalled the
 #: table for at most this long: under the app's own lock bound (the tap
 #: path's 2 s), so a statement queued behind it does not fail on its own. A
-#: failed apply aborts the deploy with the old version serving (078's
-#: header), so failing fast on a lock is safe.
+#: failed apply aborts the deploy with the old version serving, so a lock
+#: timeout preserves the running service.
 LOCK_TIMEOUT = "1s"
 
 #: The pauses before each new attempt at a wrapped file that failed on its
@@ -125,9 +123,9 @@ _KNOWN_WORDS = {m.split(":", 1)[1] for m in KNOWN_MARKERS}
 #: in a frame the grammar does not read — three dashes, a doubled `-- --` (an
 #: editor's "comment this line" on a comment), a `/* */` or `#` frame, a
 #: missing colon or a dash or `=` in its place, a marker after code on the
-#: same line. Each of these once
-#: read as PROSE, which for a `manual` file is the whole hazard: the next
-#: predeploy applies it. Refused at discovery instead. A mention mid-sentence
+#: same line. Discovery refuses these forms because treating a malformed
+#: `manual` marker as prose would let a predeploy apply a gated file.
+#: A mention mid-sentence
 #: (`-- the runner:manual marker is what …`) is not a near miss: the
 #: opener is followed by a word, not by `runner`.
 _NEAR_MISS_RE = re.compile(
@@ -372,12 +370,10 @@ def _acquire_lock(conn) -> None:
         cur.execute("SELECT pg_advisory_lock(%s)", (RUNNER_LOCK_KEY,))
 
 
-#: The API reads the ledger for `storydump posture`: the grant is the
-#: runner's own, made where the ledger is made and
-#: re-asserted on every run, because the advertised stream replays into a
-#: database that has no `runner` schema — a GRANT there would fail every
-#: gate — and because the role may not exist yet the first time the ledger
-#: is created (057 creates it). Idempotent; guarded on the role.
+#: The API reads the ledger for `storydump posture`. The runner creates the
+#: ledger independently of the application schema and grants read access on
+#: every run when `svc_ingress` exists. Schema construction creates the role
+#: in `ddl/01_roles.sql`; the conditional also supports an earlier ledger run.
 LEDGER_GRANT_SQL = """
 DO $$
 BEGIN
@@ -736,12 +732,12 @@ def adopt(
 
     Probe-decided per file, never trusted: a probe returning true adopts the
     file; a false probe leaves it pending **only** when every later probe is
-    also false (a contiguous unapplied tail — the at-45 world). A false at or
+    also false (a contiguous unapplied tail). A false at or
     below the manifest's required floor, a false below a true (an incoherent
     chain), or a probe that errors is a hard failure naming the version — and
     a failed adopt writes nothing, so there is no partial adoption to reason
-    about. The legacy ``schema_version`` table is never read; its known
-    010/034 gaps are exactly the hazard this replaces.
+    about. Adoption reads schema probes and never trusts the legacy
+    `schema_version` table as evidence that a migration is present.
     """
     corpus = discover_migrations(migrations_dir)
     migrations = _within(corpus, max_version)

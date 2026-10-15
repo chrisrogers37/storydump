@@ -79,7 +79,7 @@ REASONS: tuple[str, ...] = (
     "media_unsuitable",
 )
 
-#: `post_intents.state` (055 ``ck_intent_state``), in the migration's order.
+#: `post_intents.state` (`intent_ledger.py` ``ck_intent_state``), in the CHECK's order.
 INTENT_STATES: tuple[str, ...] = (
     "scheduled",
     "prompt_pending",
@@ -108,18 +108,18 @@ TERMINAL_STATES: tuple[str, ...] = (
     "cancelled",
 )
 
-#: `post_intents.origin` (088 ``ck_intent_origin``): a ``cadence`` story is
+#: `post_intents.origin` (`post_intents.origin` ``ck_intent_origin``): a ``cadence`` story is
 #: minted by the clock for a slot, a ``planned`` one by a person who chose the
 #: item, the account and the time (`schedule_item`).
 INTENT_ORIGINS: tuple[str, ...] = ("cadence", "planned")
 
-#: An approval position (110 ``ck_ws_approval_mode`` and ``ck_source_approval_mode``):
+#: An approval position (``ck_ws_approval_mode`` and ``ck_source_approval_mode``):
 #: ``manual`` asks every time, ``returning`` approves an item that has posted
 #: through the API before, and ``auto`` (YOLO) approves every story. A folder's
 #: own position is one of these, or NULL for the workspace's.
 APPROVAL_POSITIONS: tuple[str, ...] = ("manual", "returning", "auto")
 
-#: The rule that approved a story (110 ``ck_intent_approval_rule``); NULL when a
+#: The rule that approved a story (``ck_intent_approval_rule``); NULL when a
 #: person did. ``auto`` is YOLO, ``item`` the item's flag, ``returning`` an item
 #: posted through the API before.
 APPROVAL_RULES: tuple[str, ...] = ("auto", "item", "returning")
@@ -138,7 +138,7 @@ def rule_label(rule: str) -> str:
     return RULE_LABELS.get(rule, rule)
 
 
-#: A planned story's repeat units (116 ``ck_intent_repeat_unit``, #485): every N
+#: A planned story's repeat units (``ck_intent_repeat_unit``): every N
 #: days, or every N weeks on chosen weekdays.
 REPEAT_UNITS: tuple[str, ...] = ("day", "week")
 
@@ -152,7 +152,7 @@ def describe_repeat(rule: Mapping[str, Any]) -> str:
     09:00", "every 3 days at 09:00", "every week on Mon and Thu at 16:07",
     "every 2 weeks on Tue at 16:07". *rule* is the rule's one shape,
     ``{unit, every, days, at}`` with ``at`` as ``HH:MM``
-    (`intent_ledger.repeat_sql`). It is one the CHECKs admitted (116), so an
+    (`intent_ledger.repeat_sql`). It is one the CHECKs admitted (`intent repeat constraints`), so an
     unknown unit is a bug, raised."""
     unit, every, at = rule["unit"], rule["every"], rule["at"]
     if unit == "day":
@@ -166,7 +166,7 @@ def describe_repeat(rule: Mapping[str, Any]) -> str:
     raise ValueError(f"unknown repeat unit {unit!r}")
 
 
-#: The `ig_accounts.state`s a story is served on (054 ``ck_ig_accounts_state`` less
+#: The `ig_accounts.state`s a story is served on (`accounts_sources_media.py` ``ck_ig_accounts_state`` less
 #: `disabled` and `moved`): a planned story is scheduled only on one of
 #: these, and served only while its account is still in one.
 LIVE_ACCOUNT_STATES: tuple[str, ...] = ("active", "reauth_required")
@@ -214,7 +214,7 @@ READINESS_INCOMPLETE_ORDER: tuple[str, ...] = (
 #: A workspace whose setup is idle by choice rather than unfinished.
 READINESS_INTENTIONAL: tuple[str, ...] = ("all_inactive", "all_sources_off")
 #: The `fn_source_asset_suitability` reasons a source's own policy decides
-#: (138): its minimum age, and the opt-ins for credited and for
+#: (`fn_source_asset_suitability`): its minimum age, and the opt-ins for credited and for
 #: unknown-attribution posts.
 POLICY_EXCLUSIONS: tuple[str, ...] = (
     "too_recent",
@@ -226,7 +226,7 @@ POLICY_EXCLUSIONS: tuple[str, ...] = (
 #: How far ahead a story may be planned.
 PLAN_HORIZON_DAYS = 365
 
-#: The longest link an item may carry (`set_item_link`, #1413), in
+#: The longest link an item may carry (`set_item_link`), in
 #: characters: an address that long is no longer one a person adds by hand.
 LINK_URL_MAX = 2048
 
@@ -249,10 +249,10 @@ INVITATION_DELIVERY_STATES: tuple[str, ...] = (
 EMAIL_BUDGET_REASONS: tuple[str, ...] = ("person_limit", "daily_limit")
 
 #: The longest email address a row may hold, the bound of the waitlist's
-#: CHECK (`100`) and of an invitation's address.
+#: CHECK (`ck_waitlist_email`) and of an invitation's address.
 MAX_EMAIL_LENGTH = 254
 
-#: What admitting an address came to (`signup_admissions.admit`, #1723), which
+#: What admitting an address came to (`signup_admissions.admit`), which
 #: the CLI prints: admitted, with its email queued; an email queued again to
 #: an address admitted before (the owner's send-again), whether this call
 #: queued it or one was already waiting; already admitted, nothing queued;
@@ -270,19 +270,19 @@ ADMIT_OUTCOMES: tuple[str, ...] = (
 )
 
 #: The hex characters of an address's SHA-256 that stand for it where the
-#: address itself must not travel (#1723): `fn_waitlist`'s `p_ref` (129), and
+#: address itself must not travel: `fn_waitlist`'s `p_ref` (`signup admission functions`), and
 #: the waitlist ping's Admit button. One spelling for `signup_admissions.ref`,
 #: which cuts it, and `callback_tokens`, which checks it.
 WAITLIST_REF_HEX = 32
 
-#: `post_locks.kind` (054 ``ck_locks_kind``), split by the lock and item
-#: rule (#1413). A blocking kind refuses a planned story, and at its
+#: `post_locks.kind` (`accounts_sources_media.py` ``ck_locks_kind``), split by the lock and item
+#: rule. A blocking kind refuses a planned story, and at its
 #: time the serve door turns it into a miss; a warning kind refuses a
 #: schedule only until the person overrides it, and never causes a miss.
 BLOCKING_LOCKS: tuple[str, ...] = ("reject", "unsupported", "hold", "seasonal")
 WARNING_LOCKS: tuple[str, ...] = ("skip", "recent")
 
-#: `media_items.state` (105 ``ck_media_state``). Only `available` is drawn.
+#: `media_items.state` (``ck_media_state``). Only `available` is drawn.
 #: `unsupported` is the sync's judgment that the publish could never fetch the
 #: file (past its byte cap); `removed` is the folder's retirement, which a
 #: re-pick undoes; `missing` is the file's own absence from its folder, which
@@ -330,7 +330,7 @@ PUBLISH_MAX_BYTES: Mapping[str, int] = {
     "video": 40 * 1000 * 1000,
 }
 
-#: `post_intents.publish_step` (055 ``ck_intent_step``).
+#: `post_intents.publish_step` (`intent_ledger.py` ``ck_intent_step``).
 PUBLISH_STEPS: tuple[str, ...] = (
     "none",
     "transit_uploaded",
@@ -340,7 +340,7 @@ PUBLISH_STEPS: tuple[str, ...] = (
     "effect_confirmed",
 )
 
-#: `audit_events.actor_kind` (055 ``ck_audit_actor``).
+#: `audit_events.actor_kind` (`intent_ledger.py` ``ck_audit_actor``).
 AUDIT_ACTOR_KINDS: tuple[str, ...] = (
     "user",
     "system",
@@ -351,14 +351,14 @@ AUDIT_ACTOR_KINDS: tuple[str, ...] = (
     "migration",
 )
 
-#: `audit_events.channel` (055 ``ck_audit_channel``); the admission channels
+#: `audit_events.channel` (`intent_ledger.py` ``ck_audit_channel``); the admission channels
 #: are the first three (``webhook_ingress.CHANNELS``).
 AUDIT_CHANNELS: tuple[str, ...] = ("telegram", "web", "cli", "system")
 
-#: `service_tokens.role` (060 ``ck_service_token_role``).
+#: `service_tokens.role` (`auth_plane.py` ``ck_service_token_role``).
 TOKEN_ROLES: tuple[str, ...] = ("operator", "readonly")
 
-#: `channel_outbox.last_failure_class` (101 ``ck_outbox_failure_class``): why a
+#: `channel_outbox.last_failure_class` (``ck_outbox_failure_class``): why a
 #: row's last send failed. `rate_limited` is a 429 (a deferral, never counted as
 #: a failure); `destination_gone`, `refused` and `credential_dead` (a dead
 #: token's 401) are the definitive answers, which fail the row; `ambiguous` is a
@@ -412,7 +412,7 @@ TOKEN_RESOLUTION_REASONS: tuple[str, ...] = (
 #: `credentials.provider` / `media_sources.provider` / `oauth_states.provider`
 #: — the values `ck_credentials_provider`, `ck_sources_provider` and
 #: `ck_oauth_state_provider` admit. Spelled here, the one dependency-free
-#: module, so no module keeps a hand copy (#1325).
+#: module, so no module keeps a hand copy.
 PROVIDER_IG_LOGIN = "ig_login"
 PROVIDER_GDRIVE = "gdrive"
 #: `identities.provider` — who verified the person.
@@ -573,7 +573,7 @@ REASON_SENTENCES: Mapping[str, str] = {
     "readonly_token": "this token is read-only",
     "wrong_workspace": "this token belongs to another workspace",
     "not_ops": "only the people in OPS_USER_IDS may use this",
-    # an admission's refusals (`POST /admissions`, #1723; `ADMIT_OUTCOMES`)
+    # an admission's refusals (`POST /admissions`; `ADMIT_OUTCOMES`)
     "signed_up": (
         "already signed up — an account was created at or holds that address,"
         " or its link was used"
@@ -634,8 +634,8 @@ AT_RULE_SENTENCES: Mapping[str, str] = {
     "horizon": f"that time is more than {PLAN_HORIZON_DAYS} days ahead",
 }
 
-#: Why the port refused a repeat rule (its `repeat` fact, #485), in the CLI's
-#: words: the CHECKs judged its shape (116), and the port the story's day,
+#: Why the port refused a repeat rule (its `repeat` fact), in the CLI's
+#: words: the CHECKs judged its shape (`intent repeat constraints`), and the port the story's day,
 #: which a weekly series' days must include.
 REPEAT_SENTENCES: Mapping[str, str] = {
     "invalid": "that repeat is not one a story can keep",
@@ -687,7 +687,7 @@ def write_sentence(command: str, outcome: str) -> str:
 
 
 #: What `storydump admit` says for each of :data:`ADMIT_OUTCOMES` that leaves
-#: the address admitted, the only answers it takes as one (#1723); a refusal
+#: the address admitted, the only answers it takes as one; a refusal
 #: is the API's, in :data:`REASON_SENTENCES`.
 ADMIT_SENTENCES: Mapping[str, str] = {
     "admitted": "admitted — the email is queued",
@@ -813,7 +813,7 @@ FLOATING_LIMIT_MAX = 500
 LIST_LIMIT_DEFAULT = 50
 LIST_LIMIT_MAX = 200
 #: The widest range of local days a date-ranged read takes: a calendar month
-#: drawn in whole weeks is at most six of them (#1634). The API's 422, and
+#: drawn in whole weeks is at most six of them. The API's 422, and
 #: the bound a read that walks its range holds a direct caller to.
 RANGE_MAX_DAYS = 45
 #: Two clocks judge one window — the CLI computes a span's start, the API
@@ -835,7 +835,7 @@ def window_start(value: str, now: dt.datetime) -> dt.datetime:
     else: that one truncates a datetime to its fixed counter bucket
     (`(now, window_seconds)`), this one PARSES a caller's string. They are
     never interchangeable, and renaming either moves a name the API routes,
-    the CLI and the `rate_counters` PK all spell (#1325).
+    the CLI and the `rate_counters` PK all spell.
     """
     text = value.strip()
     anchor = now.astimezone(dt.timezone.utc).replace(microsecond=0)

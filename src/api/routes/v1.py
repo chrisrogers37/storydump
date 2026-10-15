@@ -1,6 +1,6 @@
 """The `/api/v1` surface: reads as resources, writes as the closed vocabulary.
 
-The router's shape (#1015):
+The router's shape:
 
 - **Reads are resources** because the web surface is *pull* — it
   reads ledger state, it does not receive interaction requests. Every read is
@@ -26,7 +26,7 @@ The router's shape (#1015):
 The tenant-less reads (``/me``, ``/workspaces``) run on a raw connection: the
 unit of work is unconstructible without a tenant by design, and these are
 user-plane reads — the membership list goes through the
-`fn_memberships_for_caller()` door (`064`, #1037), which reads the caller
+`fn_memberships_for_caller()` door (`fn_memberships_for_caller`), which reads the caller
 from `app.actor_user_id` and answers under the production role.
 """
 
@@ -304,11 +304,11 @@ def _render(result: CommandResult, *, status: Optional[int] = None) -> JSONRespo
 @router.get("/me")
 async def me(request: Request, principal: Principal = Depends(require_session)):
     """The user, their identities, and their memberships (through the
-    memberships door, `064`). A user with zero workspaces is the normal first
+    memberships door, `fn_memberships_for_caller`). A user with zero workspaces is the normal first
     state on the greenfield, not an error.
 
     ``ops`` says whether they are one of the deployment's operators
-    (`Settings.is_ops`, #1723): the person's own fact, which the site reads to
+    (`Settings.is_ops`): the person's own fact, which the site reads to
     show its owner area at all. It opens nothing: every owner route is still
     gated by `require_ops`."""
     engine = require_engine(request)
@@ -333,14 +333,14 @@ async def telegram_link(
     user). The bot's `/start` door names that user's account and offers
     Confirm; only the Confirm, pressed by the person the offer was made to in
     their own private chat with the bot, attaches their identity to exactly
-    that user. The service half is `identity_link` (#1180); this route is its
-    web half (#1172, #1157).
+    that user. The service half is `identity_link`; this route is its
+    web half.
 
     Tenant-less, like `/me`: an identity belongs to a user, not a workspace.
     One transaction — the state row commits before the link is handed back,
     so a tap can never arrive ahead of the row it consumes. The link is good
     for `STATE_TTL_SECONDS`; a second click mints a fresh one and retires the
-    user's earlier live link (one live link per user — #1224).
+    user's earlier live link (one live link per user —).
     """
     bot_username = _target_bot_username()
     engine = require_engine(request)
@@ -355,7 +355,7 @@ async def telegram_link(
 async def telegram_unlink(
     request: Request, principal: Principal = Depends(require_session)
 ):
-    """The signed-in user removes their own Telegram identity (099).
+    """The signed-in user removes their own Telegram identity (`fn_identity_unlink`).
     Tenant-less, like the link it reverses. Idempotent: with nothing
     linked the answer is `not_linked`, still 200. The one refusal is
     `last_identity` (409) — the Telegram identity is the account's only one,
@@ -676,7 +676,7 @@ async def intent_days(
     to: date = Query(...),
     per_day: int = Query(3, ge=1, le=PER_DAY_MAX),
 ):
-    """The calendar's month (#1634): for each local day in ``[from, to)`` that
+    """The calendar's month: for each local day in ``[from, to)`` that
     holds an intent in ``state``, how many it holds and its ``per_day`` newest
     — ``?state=posted&from=2026-09-29&to=2026-11-02``. ``state`` is required: a
     count of every state at once is not a question the calendar asks. The
@@ -707,7 +707,7 @@ async def list_media(
     never_posted: bool = Query(False),
     limit: int = Query(LIST_LIMIT_DEFAULT, ge=1, le=LIST_LIMIT_MAX),
 ):
-    """The media pool (#1044): the workspace's library, whether or not an
+    """The media pool: the workspace's library, whether or not an
     intent exists for an item."""
     if state is not None and state not in workspaces.MEDIA_STATES:
         raise HTTPException(status_code=422, detail=f"unknown media state {state!r}")
@@ -820,7 +820,7 @@ async def _archive_thumbnail(
 async def get_stats(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
-    """Server-side aggregates (#1044). A bounded list cannot answer an
+    """Server-side aggregates. A bounded list cannot answer an
     aggregate question, so these are counted where the rows are."""
     async with principal_mod.member_session(request, str(ws), principal) as session:
         return await workspaces.stats(session, workspace_id=str(ws))
@@ -830,7 +830,7 @@ async def get_stats(
 async def get_runway(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
-    """Days of content left per account (#1478): the eligible files over the
+    """Days of content left per account: the eligible files over the
     posts per day they are spent at, counted by the planner's own rule. An
     account is marked low at the worker's own level, so the card marks the
     accounts the notice is about."""
@@ -850,9 +850,9 @@ async def get_upcoming(
     from_: date = Query(..., alias="from"),
     to: date = Query(...),
 ):
-    """What is coming on the calendar (#1634): for the workspace's local days
+    """What is coming on the calendar: for the workspace's local days
     ``[from, to)``, the planned stories still scheduled, the slots the cadence
-    will open, and each repeating series' later occurrences (#485),
+    will open, and each repeating series' later occurrences,
     ``?from=2026-10-26&to=2026-12-07``. A predicted slot is projected with the
     clock's own function and says ``kind: predicted``, and a later occurrence
     with the series' own (``kind: repeat``), never a state
@@ -884,7 +884,7 @@ async def get_intent(
     return row
 
 
-# --- provisioning: a destination and a source (#1041) ---
+# --- provisioning: a destination and a source ---
 #
 # RESOURCE-shaped and NOT `POST …/commands/{command}`, because the vocabulary
 # is closed — `commands.VOCABULARY` has no name for either of these
@@ -908,7 +908,7 @@ async def create_account(
     `provider_account_ref`, and a workspace with `api_publishing_enabled` false
     (the default) publishes through a human rather than through the API.
 
-    **A handle only (#1089).** A destination's real Instagram account id is
+    **A handle only.** A destination's real Instagram account id is
     written only by connecting the account: `connect_workspace_account` below
     (``POST …/accounts/connect``, the route the web uses) and its callback.
     The CLI does not call this route. It is the API's typed path, for a
@@ -935,7 +935,7 @@ async def create_account(
     # The handle passes through RAW. Coercing a blank handle to None here would
     # be this route holding a second copy of "what counts as a handle" — the
     # thing the sibling `sources` route's comment forbids — and the copy already
-    # disagreed: `{"handle": "   "}` answered `account_ref_required` while
+    # disagreed: `{"handle": " "}` answered `account_ref_required` while
     # `{"handle": "@"}` answered `handle_required`, one user error with two
     # reasons. `provisioning` owns presence for both columns.
     async with principal_mod.admin_session(request, str(ws), principal) as session:
@@ -960,7 +960,7 @@ async def create_account(
 async def create_source(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
-    """Pick a Drive folder UNDER the workspace's grant (#1165).
+    """Pick a Drive folder UNDER the workspace's grant.
 
     `ck_sources_provider` allows `gdrive` and `instagram_archive`, and
     `media_items.source_id` is NOT NULL, so every media item hangs off a
@@ -970,7 +970,7 @@ async def create_source(
     workspace's, refused by name when there is no usable grant to read it
     with (`drive_not_connected`, 409): a folder nobody can list is not a
     source, it is a promise. And only by the person who granted it
-    (`drive_not_yours`, 403; 091): a pick reads that person's Drive
+    (`drive_not_yours`, 403; `oauth_credentials.granted_by_user_id`): a pick reads that person's Drive
     and adds a folder from it, so it is the folder browser's rule, re-pick and
     revival included. With a grant the row is ARMED for its first sync in this
     transaction (`media_sync.rearm_after_connect`), which also revives a
@@ -991,7 +991,7 @@ async def create_source(
     # Connected folders are DISJOINT: a folder
     # inside a connected one is already synced by its parent, and a folder
     # that contains one would make two sources share rows and freeze
-    # attribution to whichever listed first (#1256). The chains are
+    # attribution to whichever listed first. The chains are
     # read through the grant OUTSIDE the unit of work, like the folder
     # browser's read; a re-pick of the same folder asks nothing. Only active
     # sources take part: a removed folder blocks nothing.
@@ -1092,7 +1092,7 @@ async def get_category_mix(
 
 
 def _mix_response(rows: list[dict]) -> dict:
-    # The `{"rows": ...}` envelope; no route returns it (#1262, #1263).
+    # The `{"rows":...}` envelope; no route returns it.
     return {"rows": rows}
 
 
@@ -1163,7 +1163,7 @@ async def connect_drive(
     ws: uuid.UUID, request: Request, principal: Principal = Depends(require_session)
 ):
     """Start the Drive grant for the WORKSPACE: mint the state the callback
-    will consume and hand back where the browser goes (#1165 — one Google
+    will consume and hand back where the browser goes ( — one Google
     grant per workspace, folders picked under it).
 
     An OAuth leg is a browser redirect, which the command port cannot express,
@@ -1226,7 +1226,7 @@ def _drive_adapter(request: Request):
 
 def _drive_not_yours() -> provisioning.ProvisioningRefused:
     """The folder browser's and the pick's refusal of an admin who is not the
-    granter (091): the grant is the workspace's, the Drive it reads
+    granter (`oauth_credentials.granted_by_user_id`): the grant is the workspace's, the Drive it reads
     is a person's. A `ProvisioningRefused`, not an `HTTPException`, because
     that refusal carries its `reason` to the web (`app._reason_detail`), whose
     picker then says who can browse instead. A function, like `not_found`."""
@@ -1243,11 +1243,11 @@ async def list_drive_folders(
     parent: Optional[str] = Query(default=None),
 ):
     """The folders under `parent` (the Drive root when absent), read through
-    the workspace's grant — what the picker shows (#1165).
+    the workspace's grant — what the picker shows.
 
     Admin floor, deliberately above `drive_status`'s: the grant is the
     workspace's, but the tree it lists is a PERSON's Drive, and members have
-    no business browsing it — nor does any admin but that person (091). The
+    no business browsing it — nor does any admin but that person (`oauth_credentials.granted_by_user_id`). The
     provider call sits outside the unit of work (the checkpoint
     discipline every provider door keeps); admission and the status read
     happen first. Refusals by name: `invalid_parent` (400) before any request,
@@ -1268,7 +1268,7 @@ async def list_drive_folders(
     # Admission first, then the shape check: a non-admin learns nothing about
     # the parent it sent. Then the grant, by its projected status, so "never
     # connected" and "Google now refuses the grant" are different answers
-    # (#1246): the former is `drive_not_connected`, the latter
+    # the former is `drive_not_connected`, the latter
     # `drive_grant_refused` below, and a grant the projection already knows
     # is dead is `drive_reconnect_needed` before any request.
     if parent is not None and not (
@@ -1311,8 +1311,7 @@ async def connect_workspace_account(
     are independent one-shots) — so its floor is `connect`'s
     (`commands.connect_floor`).
 
-    The optional body carries the history choice (#1644,
-    `connect_choice.start_fields`); without one no choice is recorded. It is
+    The optional body carries the history choice (`connect_choice.start_fields`); without one no choice is recorded. It is
     read and parsed before the session opens (`_archive_choice`).
     """
     app_id, _, redirect_uri = instagram_client.configured()
@@ -1399,7 +1398,7 @@ async def connect_preview(
     account_id: Optional[uuid.UUID] = Query(default=None),
 ):
     """What a connect start would do to the history choice and the mix
-    (#1644): the entry it is, whether Use my past posts is a choice, its
+    the entry it is, whether Use my past posts is a choice, its
     default or the saved setting a reconnect keeps, the revision a choice is
     checked against, and the equal shares an On choice would leave
     (`connect_choice.preview`). Writes nothing.
@@ -1434,8 +1433,7 @@ async def connect_account(
     principal: Principal = Depends(require_session),
 ):
     """Start the Instagram Login grant for ONE destination: mint the state the
-    callback will consume and hand back where the browser goes (#1220,
-    #1041). The Drive connect route's shape, exactly.
+    callback will consume and hand back where the browser goes (). The Drive connect route's shape, exactly.
 
     An OAuth leg is a browser redirect, which the command port cannot express,
     so it lives here as a resource route at the floor of the command its
@@ -1480,7 +1478,7 @@ async def get_connection_result(
     request: Request,
     principal: Principal = Depends(require_session),
 ):
-    """What one Instagram connect's callback applied (#1644) — read by
+    """What one Instagram connect's callback applied — read by
     the person who started it, in the session that came back from Instagram,
     for fifteen minutes (`connect_choice.result`). Member floor; anyone else,
     any other session and an expired result read the house 404. Carries the

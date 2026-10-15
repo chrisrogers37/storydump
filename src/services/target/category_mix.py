@@ -3,7 +3,7 @@ on the CONNECTED FOLDER (sources are the groups),
 and the ONE service that writes it.
 
 A workspace connects folders (`media_sources`); everything inside a connected
-folder syncs, at any depth (the walk of #1256); and the workspace weights how
+folder syncs, at any depth (the walk of); and the workspace weights how
 often each connected folder posts: announcements 70 / behind-the-scenes 30. To
 weight two subfolders separately, connect each as its own folder. `scheduler.
 execute_plan_slot` draws a folder by these weights before it picks a file —
@@ -26,8 +26,7 @@ rounding tolerance; the web converts percentages. An empty mix is legal and
 means every folder is automatic.
 
 `category` stays on the row as the LABEL the card shows — the source's
-folder name at save time — never a key. A row written before 071 carries no
-`source_id`: the planner ignores it, the first save supersedes it.
+folder name at save time — never a key. The planner ignores a row with no `source_id`; the first save supersedes it.
 """
 
 from __future__ import annotations
@@ -65,7 +64,7 @@ _LABEL = "COALESCE(s.config->>'folder_name', s.config->>'folder_ref', 'folder')"
 
 #: A source's CURRENT mix row, `x`, joined after ``FROM media_sources s``: the
 #: row keyed on that source, in the source's own workspace, still in effect.
-#: :func:`pool_folders` and :func:`mix_view` both read the mix through it.
+#:func:`pool_folders` and :func:`mix_view` both read the mix through it.
 _CURRENT_MIX_JOIN = (
     "  LEFT JOIN category_post_case_mix x"
     "    ON x.workspace_id = s.workspace_id AND x.source_id = s.id"
@@ -80,7 +79,7 @@ def _ratio(value: Any, label: str) -> float:
         or not math.isfinite(float(value))
     ):
         # NaN passes every comparison and NUMERIC stores it; the sum-to-one
-        # invariant would be bypassable by one JSON `NaN` (#1251).
+        # invariant would be bypassable by one JSON `NaN`.
         raise MixInvalid("bad_ratio", label)
     ratio = round(float(value), 4)
     if ratio < 0 or ratio > 1:
@@ -193,7 +192,7 @@ ELIGIBLE_SQL = (
 class Pool:
     """What one account can post from right now, folder by folder."""
 
-    #: :func:`weights` over the connected folders, in the order read.
+    #:func:`weights` over the connected folders, in the order read.
     weights: dict[str, float]
     #: Eligible files per folder a draw can land on, and only those: a
     #: connected folder with no ratio or a ratio above 0 (0 when nothing in it
@@ -242,8 +241,8 @@ class Pool:
 async def pool_folders(executor, *, workspace_id: str) -> list[dict]:
     """The folders a draw can land on, with their current ratios — `source_id`,
     `ratio`. A folder in `error` or removed is not among them; the mix is keyed
-    on the source (a name is a label), so a mix row without a source_id (set
-    before 071) is not joined and shapes nothing. The same for every account
+    on the source (a name is a label), so a mix row with no `source_id`
+    is not joined and shapes nothing. The same for every account
     of the workspace, so a read over several accounts passes it to
     :func:`pool` once."""
     return await readers.rows(
@@ -372,7 +371,7 @@ async def set_mix(
     executor, *, workspace_id: str, mix: Any, by_user_id: Optional[str]
 ) -> list[dict]:
     """Replace the workspace's current mix: supersede every current row (the
-    id-less ones from before 071 included), then insert the new ones — in the
+    rows with no `source_id` included), then insert the new ones — in the
     CALLER's transaction, so the table never shows half a mix. Every id must
     be a connected folder of THIS workspace (`unknown_source` otherwise,
     before anything is written). Returns the mix as stored."""
@@ -521,7 +520,7 @@ def _source_facts(row, account_id, *, assignable, exclusions, archive):
 #: alone, its own `ig_login` grant (`CREDENTIAL_STATUS_SQL`), and the sources
 #: whose scope admits it. A Drive folder is workspace-wide; an archive serves
 #: only its origin, through an active self-assignment, which is the v1
-#: `origin_only` rule `fn_source_asset_suitability` applies to each item (138).
+#: `origin_only` rule `fn_source_asset_suitability` applies to each item (`fn_source_asset_suitability`).
 _DESTINATIONS_SQL = (
     "SELECT a.id::text AS account_id, a.handle, a.display_name, a.state,"
     "       a.provider_account_ref LIKE 'manual:%' AS handle_only,"

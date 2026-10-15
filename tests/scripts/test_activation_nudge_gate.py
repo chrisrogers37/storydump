@@ -1,11 +1,11 @@
-"""The activation nudge's door and latch, against PostgreSQL (106, #1481).
+"""The activation nudge's door and latch, against PostgreSQL (`users.activation_nudge_at`).
 
 `fn_activation_stalled(p_since, p_stall, p_limit)` lists who is owed the
 nudge: active people who signed up since `p_since`, have an email and were
 never nudged, whose first missing stage is 3 (Instagram), 4 (a folder) or 5 (a
 first approval, only once a card was offered), and who have done nothing for
 `p_stall`. It reads `fn_activation_stages`, the stage definition it shares with
-104's funnel, whose counts `test_activation_funnel_gate.py` pins.
+`fn_activation_funnel`'s funnel, whose counts `test_activation_funnel_gate.py` pins.
 
 One estate, seeded through the stream login with every timestamp relative to
 `now()`, each person with an address unless the name says otherwise:
@@ -331,7 +331,7 @@ class _LatchedInBetween:
 
 
 def test_overlapping_sweeps_nudge_a_person_once_by_the_updates_predicate(world):
-    """#1653: the door listed AT_INSTAGRAM, and another sweep latched them
+    """The door listed AT_INSTAGRAM, and another sweep latched them
     before this one's UPDATE ran. The UPDATE's predicate, not the door's
     filter, is what keeps this sweep from stamping them again and queueing a
     second email."""

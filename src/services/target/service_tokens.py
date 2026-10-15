@@ -11,7 +11,7 @@ One table, two principal kinds:
   writes (the command port authorizes writes by membership, and a
   service identity has none).
 
-``ck_service_token_subject`` (077) makes "exactly one subject" a database
+``ck_service_token_subject`` (`ck_service_token_subject`) makes "exactly one subject" a database
 fact. The secret is ``sdt_`` + 32 url-safe random bytes, shown once by the
 minting route and stored only as its SHA-256 — the pattern sessions use — so
 a database read never yields a usable credential. Minting is the caller's
@@ -115,7 +115,7 @@ async def mint(
     """Mint one token. Returns ``(secret, row)`` — the secret exactly once.
 
     *created_by_user_id* names the person who minted a workspace service
-    identity (090), so removing that person can revoke it
+    identity (`workspace member removal`), so removing that person can revoke it
     (`revoke_minted_by`). A person-bound token's ``user_id`` already says it.
 
     Validation happens here, before SQL: the table's CHECKs would refuse the
@@ -192,7 +192,7 @@ _RESOLVE = text(
 #: transaction-local GUC `p_tenant` filters on); two statements, because a
 #: `set_config` in the same WHERE would run after the policy's quals — and
 #: `apply_gucs` issues its own statement, so that reasoning holds with the
-#: claim read from the one home instead of hand-rolled here (#1325).
+#: claim read from the one home instead of hand-rolled here.
 #: Its stamp comes after that read passes: `last_used_at` means
 #: "authenticated". A refused attempt never persists a stamp either way — the
 #: resolver runs inside the authentication transaction, which rolls back on
@@ -325,7 +325,7 @@ async def revoke(
 
 async def revoke_minted_by(executor, *, workspace_id: str, user_id: str) -> int:
     """Revoke every live service identity *user_id* minted for *workspace_id*
-    — the removal's other half (090): a workspace token is revoked with the
+    — the removal's other half (`workspace member removal`): a workspace token is revoked with the
     membership of the person who minted it. Returns how many were revoked."""
     result = await executor.execute(
         text(

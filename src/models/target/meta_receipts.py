@@ -1,9 +1,9 @@
-"""Migrations 142-143: verified Meta identity mappings and durable deletion receipts.
+"""Verified Meta identity mappings and durable deletion receipts.
 
-Schema definitions only. Services use hand-written SQL under the tenant UoW and
-the receipt doors. Triggers, RLS and the doors are owned by the migrations.
-The receipt tables carry no foreign key to ``workspaces`` on purpose: a receipt
-outlives the workspace it scoped.
+`ddl.build()` creates these tables through `TargetBase.metadata`. Services use
+SQL under the tenant unit of work and the receipt functions in
+`src/models/target/ddl/04_functions.sql`. The receipt tables have no foreign
+key to `workspaces` so a receipt outlives the workspace it describes.
 """
 
 from sqlalchemy import (

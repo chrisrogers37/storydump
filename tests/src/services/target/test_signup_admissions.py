@@ -1,4 +1,4 @@
-"""The admission core (#1723, migration 129), over a scripted connection.
+"""The admission core (`signup admission functions`), over a scripted connection.
 
 The SQL's truth (what each door decides, the grants, the hash the list
 matches) is the gate's, `tests/scripts/test_waitlist_gate.py`, and so is

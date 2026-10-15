@@ -3,18 +3,18 @@
  *
  * ── Why an opaque token rather than a JWT ───────────────────────────────────
  *
- * The schema (`session_tokens`, migration 060) makes a session an opaque value
+ * The schema (`session_tokens`, `auth_plane.py`) makes a session an opaque value
  * whose SHA256 is a row, with `expires_at` sliding on use and a `revoked_at`
  * column. Two properties follow that a self-contained JWT cannot have at any
  * price:
  *
- *   1. It can be REVOKED. A JWT is valid until it expires because there is
- *      nothing to mark; sign-out can only delete the cookie, which does nothing
- *      to a copy of it.
- *   2. It can name a UUID user. `users.id` is a UUID; a numeric `userId`
- *      cannot hold one.
+ * 1. It can be REVOKED. A JWT is valid until it expires because there is
+ * nothing to mark; sign-out can only delete the cookie, which does nothing
+ * to a copy of it.
+ * 2. It can name a UUID user. `users.id` is a UUID; a numeric `userId`
+ * cannot hold one.
  *
- * THE COOKIE NAME IS THE API'S. Sign-in is API-hosted (#1032) and nothing here
+ * THE COOKIE NAME IS THE API'S. Sign-in is API-hosted and nothing here
  * writes the session, so this tier reads the cookie under the name the API
  * writes it; a name of its own would leave the gate blind to a real session
  * and bounce a completed sign-in to /login.
@@ -69,7 +69,7 @@ export interface SessionUser {
   telegramDisplayName: string | null;
   /**
    * Whether the API counts this person among the deployment's operators
-   * (`/me`'s `ops`, `OPS_USER_IDS`; #1723). It decides two things here and no
+   * (`/me`'s `ops`, `OPS_USER_IDS`;). It decides two things here and no
    * more: whether `/ops` renders or is the site's 404, and whether the
    * dashboard header links to it. Nothing is read on its strength: every
    * owner route is the API's to refuse (`require_ops`).

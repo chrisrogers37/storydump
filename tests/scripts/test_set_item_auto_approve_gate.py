@@ -1,11 +1,11 @@
-"""An item's Auto-approve flag (#1477), EXECUTED — as `svc_ingress`,
+"""An item's Auto-approve flag, EXECUTED — as `svc_ingress`,
 through the real port, on the replayed target schema.
 
 What only PostgreSQL can say, and so is pinned here rather than in
 `tests/src/services/target/test_command_executors.py`:
 
 - **The login may write it.** `svc_ingress` holds UPDATE on `media_items`
-  (057), so 110's column needs no grant of its own.
+  (`09_grants.sql`), so `approval position constraints`'s column needs no grant of its own.
 - **A member may set it**: the port's gate admits the `member` floor.
 - **Only this workspace's item.** Under the tenant's policy another
   workspace's item is `not_found`, and it keeps its flag.

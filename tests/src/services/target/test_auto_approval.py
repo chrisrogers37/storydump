@@ -1,4 +1,4 @@
-"""The serve step's decision (#1477): `auto_approval.decide` over its truth
+"""The serve step's decision: `auto_approval.decide` over its truth
 table, the one read it decides from, and the approval it takes.
 
 `decide` is pure, so the order is pinned here: the first match wins, and
@@ -194,7 +194,7 @@ class TestTheFactsRead:
             "p.workspace_id = :ws",
         ):
             assert binding in sql, binding
-        # The probe repeats `ix_intents_api_posted`'s predicate (110), so the
+        # The probe repeats `ix_intents_api_posted`'s predicate (`approval position constraints`), so the
         # planner can use the partial index.
         assert "p.state = 'posted' AND p.published_via = 'api'" in sql
         assert "_CARD_SELECT" not in sql and "fn_prompts_due" not in sql

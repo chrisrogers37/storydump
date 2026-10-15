@@ -1,4 +1,4 @@
-"""The backpressure signal (#716): what the
+"""The backpressure signal: what the
 worker's status line and the operating details (`/api/v1/ops/health`) say
 about the queue, from one read.
 
@@ -39,7 +39,7 @@ async def snapshot(
     public axes do.
 
     The three tenant-wide reads (the ready lanes, the pending outbox, the
-    longest-waiting tenant) are doors owned by `svc_maintenance` (081) so the
+    longest-waiting tenant) are doors owned by `svc_maintenance` (`fleet health functions`) so the
     signal holds under `svc_ingress` and `svc_worker`; the `tg_global` counter
     is read direct, `p_rate` being `USING (true)` for both. The tenant's NAME
     comes through a door granted to `svc_worker` alone, and only when
@@ -92,7 +92,7 @@ async def snapshot(
         (
             await executor.execute(
                 text(
-                    # Two doors for one question (081): the NAMED one is the
+                    # Two doors for one question (`fleet health functions`): the NAMED one is the
                     # worker's alone — `svc_ingress` never holds a foreign
                     # workspace id — and `identify` is what picks it.
                     "SELECT o_workspace_id AS workspace_id, o_wait AS wait"

@@ -1,5 +1,5 @@
 """Archive lifecycle entry points: removal, revocation, refresh rejection and
-offboarding, through the common source lock order (#1644).
+offboarding, through the common source lock order.
 
 Each entry point takes the canonical prefix first (`source_state`: the
 workspace's sources and case-mix advisory locks, its row, its accounts, then
@@ -195,7 +195,7 @@ class SubjectRevocation:
 
 
 #: Each workspace's current authorizations for the subject, classified the way
-#: `fn_meta_deletion_receive` classifies a deletion (143) against the order
+#: `fn_meta_deletion_receive` classifies a deletion (`Meta deletion receipt functions`) against the order
 #: evidence: in scope when the authorization certainly predates the request,
 #: excluded when it certainly follows it, held otherwise. With no evidence, an
 #: account's only authorization for the subject is in scope; where it has more
@@ -231,7 +231,7 @@ async def revoke_subject_authorizations(
 ) -> SubjectRevocation:
     """Deauthorize: revoke each account's current authorization for the subject.
 
-    The tenant-free door names the workspaces (142). Each workspace runs in its
+    The tenant-free door names the workspaces (`meta_identity_mappings`). Each workspace runs in its
     own transaction, in ascending order, under its own tenant and the `system`
     actor. Each takes its prefix before anything else and classifies under it,
     so a reconnect that lands first is the authorization judged. Only an in-scope

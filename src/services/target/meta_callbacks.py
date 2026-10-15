@@ -102,7 +102,7 @@ def app_secret_names() -> list[str]:
     For the one line the route logs after a callback verifies: WHICH setting
     signed it, by name and position, never by value. Which Meta app the
     callback URLs are registered under is a dashboard fact this code cannot
-    read (#739); one press of Meta's test button and this line answer it. A
+    read; one press of Meta's test button and this line answer it. A
     callback verifies against `INSTAGRAM_APP_SECRET` first, then
     `FACEBOOK_APP_SECRET`, each only when it is set.
     """
@@ -110,7 +110,7 @@ def app_secret_names() -> list[str]:
 
 
 #: How far a verified payload's `issued_at` may sit from a grant's time and still
-#: order the two (#1644): closer than this, the order is ambiguous. The
+#: order the two: closer than this, the order is ambiguous. The
 #: database's clock judges it, inside the deletion door and the deauthorize
 #: classification, both of which take this value.
 ORDERING_SKEW_SECONDS = 300
@@ -128,7 +128,7 @@ def app_identity(setting_name: str) -> str:
     value. The Instagram app is `instagram:<INSTAGRAM_APP_ID>`, or
     `instagram:unconfigured` while the id is unset or not an app id; the legacy
     Facebook secret is `facebook:legacy`. Only `instagram:<digits>` identities
-    are ever mapped to an account (142), so the two apps cannot alias on a raw
+    are ever mapped to an account (`meta_identity_mappings`), so the two apps cannot alias on a raw
     subject.
     """
     from src.config.settings import settings
@@ -377,13 +377,13 @@ async def resolve_ig_accounts(conn, subject: str) -> list[AccountRef]:
     `provider_account_ref`, which names an ACCOUNT rather than a person and is
     sometimes a provisional `manual:<handle>` no Meta id will ever equal.
 
-    Second: **`ig_accounts` is tenant-scoped under RLS** (`058`, `p_tenant`
+    Second: **`ig_accounts` is tenant-scoped under RLS** (`07_row_security.sql`, `p_tenant`
     for `svc_ingress`/`svc_worker`), and a Meta callback names no workspace,
     so there is no tenant to set: a SELECT at the table returns zero rows
     under the runtime login regardless of what is stored, and the route
     reports a miss as "not established" rather than "none". It reads
     through `fn_meta_accounts_for_ref`, a SECURITY DEFINER door
-    owned by `svc_maintenance` (081): an equality on one bound value,
+    owned by `svc_maintenance` (`fleet health functions`): an equality on one bound value,
     every workspace's accounts, EXECUTE for `svc_ingress`. The first reason
     stands, so an empty answer is still not proof of absence.
     """
@@ -418,7 +418,7 @@ async def revoke_for_accounts(conn, accounts: list[AccountRef]) -> int:
     Under the owner login the tenant claim is inert and the pair predicate
     still bounds the write to the workspace; under `svc_ingress` it is what
     makes the UPDATE reach its rows at all — without it the policy filters
-    everything and this truthfully updates nothing (081). The actor is
+    everything and this truthfully updates nothing (`fleet health functions`). The actor is
     `system`, as the worker's own writes claim: `trg_governance_audit`
     refuses an anonymous mutation of this table under EVERY login, so a
     matched deauthorize without an actor would raise, and Meta would retry
@@ -486,7 +486,7 @@ async def receive_deletion(
     subject: str,
     issued_at: Any,
 ) -> DeletionReceipt:
-    """Record a verified deletion request through the tenant-free door (143) and
+    """Record a verified deletion request through the tenant-free door (`Meta deletion receipt functions`) and
     mint the capability that reads its status back.
 
     One transaction, as the API's own login with no tenant: the door classifies

@@ -1,5 +1,5 @@
 /**
- * `listMyInvitations` (115): the read behind the invitee's panel. "We couldn't
+ * `listMyInvitations` (`invitee invitation functions`): the read behind the invitee's panel. "We couldn't
  * check" and "there are none" are different screens, so a read that could not
  * be made or answered is null, never `[]`.
  */

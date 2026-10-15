@@ -1,4 +1,4 @@
-"""The workspace-level Drive grant (069; #1165).
+"""The workspace-level Drive grant (`workspace Drive grant`;).
 
 One Google grant per WORKSPACE, every folder under it. Pinned here, against
 scripted executors: the connect leg reads and writes the workspace's ownerless
@@ -116,7 +116,7 @@ class TestTheConnectLegOwnsTheWorkspaceRow:
         assert params["ws"] == WS and params["provider"] == "gdrive"
         assert "src" not in params
         assert params["payload"].startswith("ct:")
-        # 091: the granter is written, and a reconnect replaces it — the
+        # `oauth_credentials.granted_by_user_id`: the granter is written, and a reconnect replaces it — the
         # person who reconnected is the one who may browse now.
         assert "granted_by_user_id" in columns and params["by"] == USER
         assert "granted_by_user_id = EXCLUDED.granted_by_user_id" in sql
@@ -169,7 +169,7 @@ class TestTheReadDoorResolvesByWorkspace:
         assert "media_source_id IS NULL" in sql and "ig_account_id IS NULL" in sql
         assert "media_source_id = " not in sql
         # The WHERE binds the row to its workspace — production connects as
-        # the owner role with BYPASSRLS, so the tenant GUC alone binds nothing.
+        # `svc_ingress`; the explicit WHERE also confines an owner caller.
         assert "workspace_id = :ws" in sql
         assert params == {"ws": WS, "provider": "gdrive"}
 
@@ -197,7 +197,7 @@ class TestTheReadDoorResolvesByWorkspace:
 
 
 class TestAnExpiredAccessTokenIsMintedOnTheReadPath:
-    """#1247: the stored grant's ACCESS token expires hourly; the
+    """The stored grant's ACCESS token expires hourly; the
     read door refreshes it from the refresh token, writes the new payload in
     place, and hands back the fresh token — so "connects once" is true."""
 
@@ -471,7 +471,7 @@ class TestTheWorkspaceStatusProjection:
 
 
 class TestOnlyTheGranterBrowses:
-    """091: the grant is the workspace's, the Drive is a person's.
+    """`oauth_credentials.granted_by_user_id`: the grant is the workspace's, the Drive is a person's.
     The decision is one statement; its truth on a real row is the Drive gate's
     (`tests/scripts/test_gdrive_oauth_gate.py`)."""
 
@@ -495,7 +495,7 @@ class TestOnlyTheGranterBrowses:
         )
         assert seen["params"] == {"ws": WS, "u": USER, "provider": "gdrive"}
         assert "granted_by_user_id = :u" in seen["sql"]
-        # A grant from before 091 names nobody: the owner, and only the owner.
+        # A grant with no recorded granter names nobody: the owner, and only the owner.
         assert "granted_by_user_id IS NULL" in seen["sql"]
         assert "m.role = 'owner'" in seen["sql"]
         assert google_drive_oauth.WORKSPACE_GRANT_WHERE in seen["sql"]
@@ -511,7 +511,7 @@ class TestRemovingAFolderPausesIt:
         (sql, params), (media_sql, media_params) = ex.calls
         assert "UPDATE media_sources s" in sql and "FOR UPDATE" in sql
         assert "state = 'paused'" in sql and "DELETE" not in sql.upper()
-        # Its approval position goes with it (#1477): a re-pick follows the
+        # Its approval position goes with it: a re-pick follows the
         # workspace. None was set here, so nothing is audited.
         assert "approval_mode = NULL" in sql
         assert '"removed": true' in sql, "a removal is marked, so a reconnect skips it"

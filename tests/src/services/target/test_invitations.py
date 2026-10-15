@@ -5,7 +5,7 @@ sends once, and answers a delivery state rather than raising, because by then
 the invitation exists and the inviter holds its link. Nothing it logs or shows
 in its ``repr`` carries the address or the link.
 
-`invitations.reissue` is "Email me the link again" (115): the invitee's day
+`invitations.reissue` is "Email me the link again" (`invitee invitation functions`): the invitee's day
 and the provider's are debited before the door rotates the token, so a spent
 day leaves the old link working; its answer never carries the new link.
 """

@@ -8,7 +8,7 @@ import {
 
 /**
  * The Settings screen's honesty rests on one property: A FIELD WITH NO SOURCE
- * IS NEVER RENDERED AS A VALUE (#1063).
+ * IS NEVER RENDERED AS A VALUE.
  *
  * Coalescing every field (`setup.X ?? default`) is the half the hard bail
  * cannot catch: the bail fires when a fetch FAILS, while a defaulted field
@@ -23,7 +23,7 @@ import {
 const CONFIG: WorkspaceConfig = {
   // Deliberately not 30/45: the fixture must not agree with the deployment's
   // real fallbacks by accident, or a view that dropped `defaults` and a card
-  // that retyped them would look identical here (#1366).
+  // that retyped them would look identical here.
   defaults: { repost_ttl_days: 11, skip_ttl_days: 12 },
   id: "w1",
   name: "Stub",
@@ -139,8 +139,8 @@ describe("deriveSettings keeps the unsourced fields unsourced", () => {
 
   it("derives the Drive connection from the WORKSPACE's grant, not from the source row", () => {
     /*
-     * The answer is the credential's, not a source row's (#1081), and the
-     * credential is the workspace's (069), so the answer comes from
+     * The answer is the credential's, not a source row's, and the
+     * credential is the workspace's (`workspace Drive grant`), so the answer comes from
      * `GET /workspaces/{ws}/drive` and a source row says nothing about it.
      */
     const connected = deriveSettings(CONFIG, [DRIVE], STATS, GRANT);

@@ -1,65 +1,18 @@
-"""Is scheduling still advancing? (#1090)
+"""Is scheduling still advancing?
 
-## Why this exists
+`fn_clock_tick` advances due active account cursors. A cursor that remains in
+the past reveals a scheduling failure whether the worker is down or the tick
+aborts. Heartbeat presence alone cannot distinguish a working scheduler from
+an idle one.
 
-Scheduling can stop in two shapes, and neither raises an alert by itself:
+`fn_health_scheduling_lag`, defined in `src/models/target/ddl/04_functions.sql`
+and owned by `svc_maintenance`, returns an estate-wide aggregate to
+`svc_ingress`. `worker_freshness` reads tenant-free system job rows directly.
+Both return counts and ages without workspace or account identifiers.
 
-- **#1026** — the worker DIES. `service_runs` stops gaining rows.
-- **`065`** — the worker LIVES, but an unapplied migration leaves `ck_jobs_kind`
-  refusing a kind the deployed worker mints, so every clock tick aborts.
-
-They have opposite mechanisms and one observable in common, which is what this
-module watches.
-
-## The signal: a DUE CURSOR THAT IS NOT ADVANCING
-
-`fn_clock_tick` selects `WHERE state = 'active' AND next_slot_at IS NOT NULL AND
-next_slot_at <= now()` and then ADVANCES the cursor. **All three places in the
-whole schema that write `next_slot_at` (059, 062, 063) are that same advance**
-(`provisioning`'s module docstring records this). So a cursor sitting in the past
-is proof the advance is not happening — and it does not matter why.
-
-That is the point. A MECHANISM detector — "did a tick run", "is the heartbeat
-alive" — only catches the failure shape whoever wrote it had in mind. A
-heartbeat-absence check is the natural detector for a dead worker (#1026), and
-it is **blind to `065`**: a worker alive and writing its heartbeat while doing
-no work. Watching the OUTCOME needs no imagination about causes: a dead worker,
-an aborting tick, a stuck lane, a cause nobody has thought of yet all leave the
-same footprint.
-
-## What it deliberately does NOT do
-
-**It raises nothing.** The check is PULLED, never pushed.
-
-A monitor whose INPUT is produced by the system it monitors cannot detect that
-system stopping — that is why this reads cursors rather than job rows. The same
-applies one step later to OUTPUT: an alert whose SENDING is performed by the
-system it monitors cannot fire when that system is down. So this module answers a
-question and an external poller decides whether the answer is an alarm. Silence
-then becomes alarming rather than ambiguous (#1026) — a heartbeat nobody checks
-for silence is a log line, not a monitor.
-
-The obvious implementation, a system job, would be wrong twice: it needs a new
-`ck_jobs_kind` value (a migration) and it would share a failure mode with the
-thing it watches: an alerting job the schema cannot mint is dead in exactly the
-situation it exists to detect.
-
-## Two bounds, stated because they will not be obvious later
-
-**It cannot see a failure PAST the mint.** Cursors advancing while nothing posts
-is a different outage and wants its own signal.
-
-**It reads across tenants through a door.** The aggregate is estate-wide by
-nature, and `scheduling_lag` reads it through `fn_health_scheduling_lag`, a
-SECURITY DEFINER function owned by `svc_maintenance` (081). Without
-it, under `svc_ingress` the read returns `accounts_active 0` for a live estate
-and a poller's verdict becomes `no-signal`, which it never pages on (#751). `worker_freshness` stays a direct read: its rows carry
-`workspace_id IS NULL` and `p_jobs` admits them to every runtime login.
-`tests/scripts/test_fleet_health_doors_gate.py` runs both as `svc_ingress`.
-
-**Nothing identifying is returned** — counts and a lag, never a workspace, an
-account or a handle. The endpoint that serves this is unauthenticated by design,
-so the aggregate has to be safe to say out loud.
+These reads apply no alert threshold. An external poller interprets them so
+the monitor does not depend on the worker it observes. Advancing cursors do
+not prove posts land; posting health supplies that separate signal.
 """
 
 from __future__ import annotations
@@ -89,7 +42,7 @@ async def scheduling_lag(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    # The door's body (081): FILTER binds to the AGGREGATE,
+                    # The door's body (`fleet health functions`): FILTER binds to the AGGREGATE,
                     # so the seconds are computed inside the max.
                     "SELECT o_stalled AS stalled,"
                     "   o_accounts_active AS accounts_active,"
@@ -116,7 +69,7 @@ async def worker_freshness(executor) -> dict[str, Any]:
     estate with no destinations that population is empty, so it answers
     `no-signal` — correctly, and the poller says so. But `no-signal` is then the
     answer whether the worker is healthy or **dead**, which means the one
-    monitored axis covers nothing at all until the first tenant arrives (#1120).
+    monitored axis covers nothing at all until the first tenant arrives.
 
     This reads the population that is NOT empty. System jobs run on a cadence
     regardless of how many tenants exist: production carried 78 successes over
@@ -141,7 +94,7 @@ async def worker_freshness(executor) -> dict[str, Any]:
 
     - ``last_success_age_seconds`` — how long since any system job finished.
       Catches the failure where **nothing is enqueued at all**: an aborting
-      clock tick (#1026) mints no rows, so a backlog check finds an empty set.
+      clock tick mints no rows, so a backlog check finds an empty set.
     - ``overdue_ready`` / ``max_overdue_seconds`` — due jobs nobody claimed.
       Catches a worker that is alive and minting but not *working* — a stuck
       lane, a poisoned claim — where recent successes from other kinds keep the

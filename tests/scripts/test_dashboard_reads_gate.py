@@ -1,4 +1,4 @@
-"""The dashboard reads (#1044), measured as `svc_ingress` on the replayed schema.
+"""The dashboard reads, measured as `svc_ingress` on the replayed schema.
 
 Three reads the dashboard's held screens need: the media pool, a server-side
 stats aggregate, and a multi-state intents filter. Each is asserted with exact
@@ -230,7 +230,7 @@ class TestMultiStateIntents:
         }
         rows = _read(world, a, workspaces.list_intents)
         assert len(rows) == 3
-        # the queue's account column (#1033): present on every row, NULL when
+        # the queue's account column: present on every row, NULL when
         # the seeded account carries no handle — never a missing key
         assert all("account_handle" in r and "account_display_name" in r for r in rows)
 
@@ -255,7 +255,7 @@ class TestTheItemsLink:
 
 
 class TestTheApprovalFields:
-    """#1477: the web's three reads carry what the Approvals card,
+    """The web's three reads carry what the Approvals card,
     the library's toggle and the Queue's by-line show — a folder's own
     position (NULL for the workspace's), an item's Auto-approve flag, and the
     rule that approved a story (NULL for a person, or none yet). In a
@@ -282,7 +282,7 @@ class TestTheApprovalFields:
             conn.commit()
             with conn.cursor() as cur:
                 # The serve step's approval: the system, the rule stamped in
-                # the same UPDATE (110's trigger admits nothing else).
+                # the same UPDATE (`approval position constraints`'s trigger admits nothing else).
                 cur.execute("SET LOCAL app.actor_kind = 'system'")
                 cur.execute(
                     "UPDATE post_intents SET state = 'approved', approval_rule = 'item'"
@@ -309,7 +309,7 @@ class TestTheApprovalFields:
 
 
 class TestTheThumbnailFlag:
-    """#1634: the library and the queue say whether an item has a thumbnail,
+    """The library and the queue say whether an item has a thumbnail,
     and the version its URL carries, but never the provider's link. Only the
     thumbnail route's read selects the link, and only inside its workspace."""
 

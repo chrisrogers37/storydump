@@ -1,4 +1,4 @@
-"""Gate — the media-sync executors against the real machinery (#942, #982).
+"""Gate — the media-sync executors against the real machinery.
 
 The clock's leg 4 nulls `next_sync_at` at mint and ONLY the sync executor
 re-arms it; without it a minted sync job parks forever and its source drops
@@ -9,7 +9,7 @@ schema enforces → checkpoint persisted → next_sync_at re-armed with the
 baseline → first_ingest_chunk chained while pages remain → the error/probe
 state machine (the sync IS the probe).
 
-The drive door is the #982 seam; a scripted stub drives every scenario and
+The drive door is the seam; a scripted stub drives every scenario and
 each stub outcome can go red on its own (the controls-can-fail standard).
 """
 
@@ -118,7 +118,7 @@ def _media_row(conn, ws, ref):
 
 
 class ScriptedDrive:
-    """The #982 seam, scripted. `pages` is a list of (items, next_page_token);
+    """The seam, scripted. `pages` is a list of (items, next_page_token);
     an exception instance anywhere in the list is RAISED at that call.
     `final` rides the completed cursor (`{"truncated": True}`: a walk that
     did not see the whole tree)."""
@@ -280,7 +280,7 @@ class TestBaselineSyncEndToEnd:
 
 
 class TestTheProviderContentTypeReachesTheColumn:
-    """`media_items.mime_type` exists in `054` and the media read already
+    """`media_items.mime_type` exists in `accounts_sources_media.py` and the media read already
     serves it. The seam derived `kind` from `mimeType` and then dropped it, so
     the column was NULL for every provider-sourced row and recoverable only by
     re-listing the folder.
@@ -377,12 +377,12 @@ class TestChunkChaining:
         assert len(chunks) == 1 and chunks[0]["payload"]["walk"] == walk, (
             "a page remaining must chain a first_ingest_chunk naming the walk"
         )
-        # #1361: `jobs.enqueue` writes the chain, so a chained chunk carries
-        # the lane's deadline (#1288) beside its attempt budget, and a failing
+        # `jobs.enqueue` writes the chain, so a chained chunk carries
+        # the lane's deadline beside its attempt budget, and a failing
         # chunk ends at whichever bound it reaches first. The lane's budget,
         # both halves, asserted as VALUES. `is not None` would accept any
         # interval at all — including one measured from the wrong instant
-        # (#1361). Same reason `max_attempts` is compared rather than merely
+        # . Same reason `max_attempts` is compared rather than merely
         # checked for presence.
         budget_attempts, budget_seconds = jobs.LANE_BUDGETS["bulk"]
         assert chunks[0]["deadline_at"] - chunks[0]["run_at"] == timedelta(
@@ -418,7 +418,7 @@ class TestChunkChaining:
 
 
 def _credential(conn, ws, state="active"):
-    """The WORKSPACE's gdrive credential row (069: one per workspace, no
+    """The WORKSPACE's gdrive credential row (`workspace Drive grant`: one per workspace, no
     owner column), so `connect_purpose` reports `reconnect`."""
     with conn.cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
@@ -486,7 +486,7 @@ async def _rearm(world_db, workspace_id, source_id) -> bool:
 
 
 async def _sweep(world_db, *, age_seconds=0, limit=200) -> int:
-    """Run the #1061 re-alert beat against the real database."""
+    """Run the re-alert beat against the real database."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from src.services.target import media_sync
@@ -541,7 +541,7 @@ def _strand(conn, source_id, *, state="error", alerted="now()"):
 
 
 class TestAStrandedSourceKeepsSayingSo:
-    """#1061 — the self-silencing stranded source.
+    """— the self-silencing stranded source.
 
     The persistent branch alerts once. Recovery to `active` happens only on a
     successful sync, and the clock enqueues only `active` sources, so the
@@ -780,9 +780,9 @@ class TestAStrandedSourceKeepsSayingSo:
 
 
 class TestTheConnectReArmMeetsTheAlertBeat:
-    """The connect re-arm against #1061's beat — the two halves meeting.
+    """The connect re-arm against's beat — the two halves meeting.
 
-    The beat keeps a stranded source from going silent (#1061); the re-arm
+    The beat keeps a stranded source from going silent; the re-arm
     lets it recover. Both directions are checked against the real re-arm.
     """
 
@@ -883,7 +883,7 @@ class TestTheConnectReArmMeetsTheAlertBeat:
 
     @pytest.mark.asyncio
     async def test_the_re_arm_is_bound_to_its_tenant(self, world_db, sync_conn):
-        """RLS is inert under the deployed owner role (#751), so the WHERE
+        """The explicit workspace predicate supplements runtime RLS, so the WHERE
         clause is what binds the row to its workspace. Another tenant's id must
         move nothing — and the row must be left exactly as it was."""
         a = seed_workspace_chain(sync_conn, "p4-tenant-a")
@@ -931,7 +931,7 @@ class TestTheConnectTrioIsThinAndTenantBound:
     async def test_a_disconnected_source_is_silent_to_the_alerting_beat(
         self, world_db, sync_conn
     ):
-        """Why a disconnect pauses and why it matters to the beat (#1061): it
+        """Why a disconnect pauses and why it matters to the beat: it
         scans `error`. A user who disconnects on purpose must not then be
         alerted daily about it — that is how a real alert gets silenced."""
         chain = seed_workspace_chain(sync_conn, "p4-disc-quiet")
@@ -945,9 +945,9 @@ class TestTheConnectTrioIsThinAndTenantBound:
     async def test_a_disconnect_touches_only_this_workspaces_grant_and_folders(
         self, world_db, sync_conn
     ):
-        """069: the grant is the workspace's, so the disconnect names no
+        """`workspace Drive grant`: the grant is the workspace's, so the disconnect names no
         source — and the executor's own WHERE is the tenant bind (RLS is inert
-        under the deployed owner role, #751): B's disconnect leaves A whole."""
+        on the deployed runtime connection): B's disconnect leaves A whole."""
         a = seed_workspace_chain(sync_conn, "p4-x-a")
         b = seed_workspace_chain(sync_conn, "p4-x-b")
         _credential(sync_conn, a["ws"])
@@ -995,7 +995,7 @@ class TestTheConnectTrioIsThinAndTenantBound:
         self, world_db, sync_conn
     ):
         """Initiating IS minting the state row: `connect_account` is the start
-        leg of a Drive connect, and the callback (#1065) consumes what it mints.
+        leg of a Drive connect, and the callback consumes what it mints.
         The result carries the state and NOT a URL: composing one needs the
         redirect URI that `src/api/google_client.py` owns, and no service
         module imports from `src.api`."""
@@ -1041,7 +1041,7 @@ def _remove_source(conn, source_id):
 
 
 class TestASyncLandingAfterARemovalChangesNothing:
-    """Remove is a first-class button (#1246), and a job minted
+    """Remove is a first-class button, and a job minted
     before the click still runs. Neither its success stamp nor its error
     branch may un-pause the folder — or alert about it."""
 
@@ -1307,7 +1307,7 @@ def _set_cursor(conn, src, cursor):
 
 def _enqueue_chunk(conn, ws, src, walk, *, payload=None):
     """A first_ingest_chunk as the sync chains it (media_sync `_run_sync`);
-    `payload` overrides the shape (the pre-#1256 chunk carried a page token)."""
+    `payload` overrides the shape (the pre- chunk carried a page token)."""
     body = payload if payload is not None else {"v": 2, "source_id": src, "walk": walk}
     with conn.cursor() as cur:
         cur.execute(
@@ -1336,7 +1336,7 @@ IN_FLIGHT = {
 
 
 class TestAChunkCarriesOneWalk:
-    """#1256: a chunk is a carrier for the walk it names. On another
+    """A chunk is a carrier for the walk it names. On another
     walk, or a completed one, it does nothing — above all it never mints a
     walk, which would re-walk the whole tree once per stray chunk."""
 
@@ -1394,7 +1394,7 @@ class TestAChunkCarriesOneWalk:
     async def test_a_pre_v2_chain_in_flight_at_deploy_starts_over_from_its_chunk(
         self, world_db, sync_conn
     ):
-        """#1256: the one-level chain still in flight at deploy has a chunk
+        """The one-level chain still in flight at deploy has a chunk
         queued with no walk and a row with `next_sync_at` NULL. That chunk is
         the chain's only carrier, so it starts the walk over rather than being
         dropped as stale — which would leave the source silently dead."""
@@ -1757,7 +1757,7 @@ _VIDEO_CAP = vocabulary.PUBLISH_MAX_BYTES["video"]
 
 
 class TestTheSyncRetiresWhatThePublishCanNeverFetch:
-    """#1545: a Drive file the publish can never fetch — deleted from Drive
+    """A Drive file the publish can never fetch — deleted from Drive
     after it synced, or over the publish's byte cap — stalled its folder:
     every slot redrew it until someone tapped Skip. The sync, where Drive's
     state enters, records each file's size, lands a file over the cap
@@ -1809,7 +1809,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
     async def test_a_row_synced_before_sizes_were_kept_is_judged_when_next_listed(
         self, world_db, sync_conn
     ):
-        """Every row synced before #1545 has no size. The next walk that lists
+        """Every row synced before has no size. The next walk that lists
         it records the size and, past the cap, takes it out of the draw."""
         chain = seed_workspace_chain(sync_conn, "w6-judged")
         [seeded] = _media_rows(sync_conn, chain["ws"])
@@ -1971,7 +1971,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         """One Drive file reachable from two connected folders (two parents,
         or a folder connected inside another) keeps its first owner while
         that folder still lists it: four whole walks, alternating between the
-        folders, and no owner flip (#1645)."""
+        folders, and no owner flip."""
         chain = seed_workspace_chain(sync_conn, "w6-two-parents")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         other = _second_source(sync_conn, chain["ws"], "tips")
@@ -1994,7 +1994,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         """A move keeps the Drive id. The old folder's whole walk misses the
         file once, which judges nothing, and the new folder's walk takes the
         live row over by that id, because a whole walk of the old folder has
-        missed it (#1645). The file never passes through `missing`, and the
+        missed it. The file never passes through `missing`, and the
         old folder's walks no longer judge it."""
         chain = seed_workspace_chain(sync_conn, "w6-moved")
         [seeded] = _media_rows(sync_conn, chain["ws"])
@@ -2053,7 +2053,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
     ):
         """A partial walk judges nothing and is not a whole walk's start: the
         next whole walk still judges against the whole walk before the partial
-        one, so a file one whole walk missed stays (#1628)."""
+        one, so a file one whole walk missed stays."""
         chain = seed_workspace_chain(sync_conn, "w6-partial-between")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         kept = _item(seeded["ref"], h=seeded["hash"])
@@ -2073,7 +2073,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
     ):
         """A partial walk carries the last whole walk's start on, so a file
         two whole walks missed is retired even with a partial walk between
-        them (#1628)."""
+        them."""
         chain = seed_workspace_chain(sync_conn, "w6-partial-carry")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         kept = _item(seeded["ref"], h=seeded["hash"])
@@ -2184,7 +2184,7 @@ class TestTheSyncRetiresWhatThePublishCanNeverFetch:
         """now() is a transaction's start: a writer through this upsert that
         opened before a walk and lands after a page re-stamped the row would
         write an older stamp. The stamp is monotonic, so the newer one
-        stands (#1548)."""
+        stands."""
         chain = seed_workspace_chain(sync_conn, "w6-monotonic")
         [seeded] = _media_rows(sync_conn, chain["ws"])
         with sync_conn.cursor() as cur:
@@ -2216,7 +2216,7 @@ def _thumbnail_links(conn, ws):
 
 
 class TestTheThumbnailLinkReachesTheColumn:
-    """#1634: the sync stores the provider's thumbnail link in
+    """The sync stores the provider's thumbnail link in
     `media_items.thumbnail_url`, which only the thumbnail route reads. The
     link is short-lived, so each listing's replaces the stored one, and a
     listing without one clears it. Asserted at the database: a key carried as

@@ -1,6 +1,6 @@
-"""The one resolver, driven against the real replayed schema (#842).
+"""The one resolver, driven against the real replayed schema.
 
-Subject discipline throughout (#852): every connection that claims
+Subject discipline throughout: every connection that claims
 to act as a login asserts ``current_user`` before any assertion rides on it,
 and every which-workspace-resolved assertion is made against TWO seeded
 workspaces so the answer's identity is checked, not its existence.
@@ -10,7 +10,7 @@ The privilege facts are measured here, not narrated: the WEB half runs as
 ``svc_ingress``, resolves a bound chat through the ``fn_resolve_binding``
 door and refuses an unknown one by name.
 
-The resolver is async (the tier's shape, #1028); seeding stays psycopg2 —
+The resolver is async (the tier's shape); seeding stays psycopg2 —
 the seeds are fixtures, the resolver is the subject, and only the subject
 needs the production driver. Each call opens its own asyncpg connection,
 asserts the login it claims, runs in ONE transaction, and rolls back.
@@ -184,7 +184,7 @@ class TestChatResolutionAsAPrivilegedReader:
 
 class TestChatResolutionAsIngressGoesThroughTheDoor:
     """svc_ingress resolves a bound chat pre-context through
-    `fn_resolve_binding` (068, #854), exposing exactly one row; an unknown chat
+    `fn_resolve_binding` (`fn_channel_join / fn_channel_leave`), exposing exactly one row; an unknown chat
     refuses by name."""
 
     async def test_existing_active_binding_resolves_as_ingress(self, world):
@@ -278,7 +278,7 @@ class TestWebSessionResolutionAsIngress:
 
 
 class TestTheGateBindsNoTenant:
-    """#1632: the gate reads under its caller's binding and sets none, so a
+    """The gate reads under its caller's binding and sets none, so a
     caller that skips the binding is refused under `p_tenant`, not admitted."""
 
     async def test_a_transaction_bound_to_no_tenant_refuses(self, world):

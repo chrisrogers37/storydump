@@ -1,4 +1,4 @@
-"""The `channel_bindings` writer (#1172).
+"""The `channel_bindings` writer.
 
 ## What this is
 
@@ -11,7 +11,7 @@ consumes its one-shot state. Routing every write through one module is what
 makes `uq_binding_external` (a chat binds once) and `0..n` bindings per
 workspace hold by construction rather than by review.
 
-`0..n` bindings per workspace are deliberate (#721), and the table's shape
+`0..n` bindings per workspace are deliberate, and the table's shape
 encodes it: no constraint limits a workspace to a single binding.
 Everything downstream depends on a row here: `work_loop`'s sweep mints
 `deliver_outbox` jobs `FROM channel_bindings`, the `deliver_outbox` handler
@@ -80,7 +80,7 @@ CHANNELS: tuple[str, ...] = ("telegram_group", "telegram_dm")
 
 def push_binding_where(alias: str = "") -> str:
     """A LIVE binding — active and Telegram — optionally qualified for a table
-    alias. It is the set the sender sweep mints for (`fn_sender_sweep`, 082,
+    alias. It is the set the sender sweep mints for (`fn_sender_sweep`, `worker sweep functions`,
     whose body is pinned to this) and the set an outcome supersedes cards in:
     a superset of where a card may go. Nothing queues or claims a card on it;
     that is :func:`deliverable_binding_where`."""
@@ -160,7 +160,7 @@ _CHAT_TYPES: dict[str, str] = {
 }
 
 #: The chat types that map to `telegram_group` — derived from the mapping
-#: above so a new group-shaped type is added once (#1325).
+#: above so a new group-shaped type is added once.
 GROUP_CHAT_TYPES: tuple[str, ...] = tuple(
     t for t, channel in _CHAT_TYPES.items() if channel == "telegram_group"
 )
@@ -187,7 +187,7 @@ def _clean(chat_type: object, external_ref: object) -> tuple[str, str]:
     than a convenience.** The `/start` router passes what Telegram sent
     precisely because the mapping is this module's domain rule; a writer that
     demanded an already-mapped value would leave the rule owned here and
-    implemented nowhere (#1178).
+    implemented nowhere.
     """
     channel = channel_for_chat_type(chat_type)
     if not isinstance(external_ref, str) or not external_ref.strip():
@@ -319,7 +319,7 @@ async def revoke_for_workspace(session, *, workspace_id: str, binding_id: str) -
     (`outbox.claim_next`), and superseding the rows is what keeps a later
     re-bind from posting a backlog of stale cards into the group. `pending`
     and `ambiguous` only — a `sending` row is the live sender's, and its CAS
-    out of `sending` settles it; `ck_outbox_state` (056) admits `superseded`
+    out of `sending` settles it; `ck_outbox_state` (`machinery.py`) admits `superseded`
     and no trigger guards outbox transitions.
     """
     params = {"ws": str(workspace_id), "b": str(binding_id)}
@@ -377,7 +377,7 @@ async def _repoint(session, *, binding_id: str, external_ref: str) -> bool:
     revokes the row."""
     _, ref = _clean("supergroup", external_ref)
     try:
-        # SAVEPOINT, not a bare statement (#1362): answering False here is only
+        # SAVEPOINT, not a bare statement: answering False here is only
         # useful if the caller can still act on it, and :func:`follow_or_retire`
         # does exactly that — it revokes the binding on THIS session. A unique
         # violation aborts the whole transaction in Postgres, so without the

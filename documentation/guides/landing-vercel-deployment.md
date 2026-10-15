@@ -20,7 +20,7 @@ file and the reads in agreement both ways).
 
 The landing app holds no database credential. The waitlist form's server route
 (`landing/src/app/api/waitlist/route.ts`) hands the address to the API's `POST /public/waitlist`
-over `TARGET_API_URL`, and the API writes `waitlist_entries` (migration 100). Nothing in
+over `TARGET_API_URL`, and the API writes `waitlist_entries` (`waitlist_entries`). Nothing in
 `landing/` reads `DATABASE_URL`.
 
 ### Client vs Server Variables

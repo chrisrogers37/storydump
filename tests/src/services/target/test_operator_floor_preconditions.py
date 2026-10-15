@@ -1,4 +1,4 @@
-"""#1090 — the preconditions behind `resolve_review` and `clear_quarantine`, pinned.
+"""— the preconditions behind `resolve_review` and `clear_quarantine`, pinned.
 
 `review_required` is the state of a story that needs a human decision, and
 `resolve_review` acts on it; `clear_quarantine` acts on `provider_quarantine`.
@@ -8,10 +8,10 @@ The two are differently built and differently reachable:
   workspace's to resolve, with `retry`, `posted` or `cancel`. `failed` (a
   refund) is not offered; it stays the operator's.
 * `clear_quarantine` — NOT built, on the operator floor, which no principal
-  this tier can build satisfies (#1124). It has nothing to act on either:
+  this tier can build satisfies. It has nothing to act on either:
   `provider_quarantine` has **no writer in the codebase at all**, so no
   column, no seam and no configuration creates a row; only new code does. An
-  executor for it would advertise a capability nothing performs — the #1090
+  executor for it would advertise a capability nothing performs — the
   defect.
 
 **`review_required` is reachable through a chain, and the first gate is NOT
@@ -23,7 +23,7 @@ it: on its own that gate is configuration, not structure. The structural gate
 is the composition. Both `review_required` producers sit behind worker seams:
 under the DEFAULT seam set `publish_pipeline` is `Parked` and
 `reconcile_ambiguous`'s ladder half skips without a `poll`; under the
-production composition (#1276) both are live wherever a Drive adapter and the
+production composition both are live wherever a Drive adapter and the
 `CLOUDINARY_*` trio are configured, because `src/worker.py`'s `compose`
 always builds the Instagram Graph adapter and its `poll`, the media fetch
 from the Drive adapter, and the transit store from `CLOUDINARY_*`. So a
@@ -95,7 +95,7 @@ class _NullSession:
 def test_nothing_writes_provider_quarantine_so_there_is_nothing_to_clear():
     """`clear_quarantine`'s whole subject is a `provider_quarantine` row.
 
-    `054` documents entry as "the adapter upserts the row" and the only reader
+    `accounts_sources_media.py` documents entry as "the adapter upserts the row" and the only reader
     is `fn_claim_job`'s deferral predicate — but no adapter does. A row cannot
     be cleared before anything creates one, so the command has no work.
     """
@@ -115,7 +115,7 @@ def test_nothing_writes_provider_quarantine_so_there_is_nothing_to_clear():
 
 
 def test_the_review_producers_park_only_under_the_default_seam_set():
-    """The STRUCTURAL half (#1276, the publish leg).
+    """The STRUCTURAL half (the publish leg).
 
     Both `review_required` producers sit behind worker seams:
     `publish_pipeline` parks unless `media_fetch`, `meta` and `transit` are
@@ -204,10 +204,10 @@ def test_the_publish_pipeline_has_exactly_one_producer_and_it_is_manual_mode_gat
     `publish_pipeline` job. So the reachability of the whole parked-intent state
     reduces to who mints that job — and every door that does refuses unless the
     workspace has `api_publishing_enabled`: `approve` and the review retry by
-    `manual_mode`, and the serve step's automatic approval (#1477) by its
+    `manual_mode`, and the serve step's automatic approval by its
     decision's first step.
 
-    In a manual-mode workspace (#1090), no intent can be parked.
+    In a manual-mode workspace, no intent can be parked.
 
     **This is the WEAK gate of the two** — `api_publishing_enabled` is a
     `settings_change` key and that command is built, so an admin can flip it
