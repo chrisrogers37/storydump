@@ -468,6 +468,8 @@ ENV_READ_OUTSIDE_SETTINGS = {
     # the deployed roots' database, and the runner's and the schema builder's
     "TARGET_DATABASE_URL",
     "DATABASE_URL",
+    # the independent disposable replay cluster used by schema consistency
+    "REPLAY_DATABASE_URL",
     # a local database's fields, for `make init-db`'s URL (`scripts/app_db_url.py`,
     # which init-db's recipe hands them with psql's own quoting) — the names
     # `Settings` declares

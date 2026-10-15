@@ -20,24 +20,16 @@ be its normal state, and a gate whose normal state is red gets weakened by
 whoever hits it first. It therefore SKIPS unless a DSN is supplied, and FAILS
 when `REQUIRE_SCHEMA_DRIFT_CHECK=1` is set without one.
 
-## Bounds: what this cannot see
+## Compared and reported catalogs
 
-- **`public` only.** `schema_parity` scopes every query to `public`, so every
-  other schema, `archive` and the runner's ledger among them, is outside the
-  comparison.
-- **Structure, not data.** Tables, columns (type and nullability), CHECK
-  constraints, uniqueness and foreign keys: the dimensions `schema_parity`
-  compares, whose own docstring lists what it leaves out (column defaults,
-  non-unique indexes and the rest).
-- **The signature reads no function, trigger, row-level security setting,
-  policy, grant, sequence or materialized view.** The builder creates every
-  kind but the last on the expected side, and a change to any of them reports
-  clean.
-- **Views are compared by their columns only.** `information_schema.columns`
-  includes views, so one gained or dropped is caught, while one whose
-  definition changed behind an unchanged column list is not.
-- **It never writes to the audited database.** Both sides are read with
-  catalog queries; the expected side is built in a scratch database.
+The signature compares the user catalog, including function bodies, policies,
+RLS, grants, sequences, types, indexes and view definitions. Each side must meet
+the catalog count floors. Archive and runner relations, extension members and
+system objects are excluded. Archive relation names, descriptions, unrelated
+roles and membership options are reported for review. Transition reference rows
+are compared; their creation timestamps are runtime metadata and are reported.
+Both extractions run in one read-only transaction and roll it back.
+
 """
 
 import os
@@ -103,6 +95,12 @@ def built_db(drift_dsn, admin_conn):
                 build(conn)
         finally:
             engine.dispose()
+        from pathlib import Path
+
+        from scripts.migration_runner import adopt
+
+        migrations = Path(__file__).resolve().parents[2] / "scripts/migrations"
+        adopt(dsn, migrations, migrations / "adoption_manifest.json")
         yield dsn
     finally:
         gen.close()
