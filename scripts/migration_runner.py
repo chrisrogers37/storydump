@@ -943,7 +943,7 @@ def main(argv=None) -> int:
     subparsers.add_parser("status", help="read-only ledger vs tree report")
     parity_parser = subparsers.add_parser(
         "parity",
-        help="compare this database's public schema against another's",
+        help="compare the full catalog against a database built from schema code",
     )
     parity_parser.add_argument(
         "--against", required=True, help="connection string to compare against"
@@ -1017,17 +1017,12 @@ def main(argv=None) -> int:
             if status_report.discrepancies:
                 return 1
         elif args.command == "parity":
-            from scripts.schema_parity import schema_diff, schema_signature
+            from scripts.schema_parity import print_comparison, schema_signature
 
-            diffs = schema_diff(
-                schema_signature(args.database_url),
-                schema_signature(args.against),
+            return print_comparison(
+                schema_signature(args.database_url, read_only=True),
+                schema_signature(args.against, read_only=True),
             )
-            for diff in diffs:
-                print(diff)
-            print(f"{len(diffs)} difference(s)")
-            if diffs:
-                return 1
     except MigrationRunnerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
