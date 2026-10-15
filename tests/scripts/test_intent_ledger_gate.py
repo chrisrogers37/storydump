@@ -49,7 +49,7 @@ from tests.scripts.conftest import (
     as_user,
     async_url,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -68,9 +68,9 @@ TERMINAL = ("posted", "skipped", "rejected", "expired", "failed", "cancelled")
 
 
 @pytest.fixture()
-def ledger(owner_window_db, owner_actor, admin_conn):
+def ledger(owner_world_db, owner_actor, admin_conn):
     """A replayed target schema plus the facts the matrix is derived from."""
-    dsn = replay_advertised_stream(owner_window_db, owner_actor, admin_conn)
+    dsn = build_world(owner_world_db, owner_actor, admin_conn)
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
     with conn.cursor() as cur:

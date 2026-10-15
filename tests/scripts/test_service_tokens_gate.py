@@ -30,7 +30,7 @@ from sqlalchemy import text
 from tests.scripts.conftest import (
     _scratch,
     as_user,
-    replay_advertised_stream,
+    build_world,
     seed_intent_chain,
 )
 from tests.src.api import conftest as api_conftest
@@ -46,7 +46,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         yield {"stream": stream, "ingress": as_user(db, "svc_ingress")}
     finally:
         gen.close()

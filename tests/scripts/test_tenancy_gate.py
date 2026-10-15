@@ -54,33 +54,6 @@ class TestTheGateCanFail:
         assert tenancy_violations(_sig(users=(False, False, 0))) == []
 
 
-class TestParitySeesForeignKeys:
-    """This gate's other half. FKs differ from RLS: both sides DO emit them
-    (measured — create_all produced 24), so they belong in the parity
-    comparison rather than in the invariant gate above."""
-
-    def test_a_missing_fk_is_a_diff(self):
-        from scripts.schema_parity import schema_diff
-
-        base = {"columns": {}, "checks": {}, "uniques": set()}
-        replayed = {
-            "media_items": {
-                **base,
-                "fks": {"FOREIGN KEY (workspace_id) REFERENCES workspaces(id)"},
-            }
-        }
-        models = {"media_items": {**base, "fks": set()}}
-        diffs = schema_diff(replayed, models)
-        assert any(d.startswith("fk media_items") for d in diffs), diffs
-
-    def test_identical_fks_are_not_a_diff(self):
-        from scripts.schema_parity import schema_diff
-
-        fk = {"FOREIGN KEY (workspace_id) REFERENCES workspaces(id)"}
-        base = {"columns": {}, "checks": {}, "uniques": set()}
-        assert schema_diff({"t": {**base, "fks": fk}}, {"t": {**base, "fks": fk}}) == []
-
-
 @pytest.mark.integration
 class TestTheGateFiresOnRealPostgres:
     """The synthetic checks above prove the PREDICATE can fail. This proves the

@@ -21,8 +21,6 @@ cluster, which is the scope the guarded resource actually has.
 
 import contextlib
 import json
-import shutil
-import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -32,7 +30,7 @@ import psycopg2.sql
 import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import RealDictCursor, UUID_adapter
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -124,8 +122,7 @@ def pytest_configure(config):
 #: derives from. The session token is #763's — one pytest run, one identity,
 #: correlatable across the root suite's databases and these.
 TEST_DB_PREFIX = "runner_test_"
-TPL_DB_PREFIX = "runner_tpl_"
-SUITE_DB_PREFIXES = (TEST_DB_PREFIX, TPL_DB_PREFIX)
+SUITE_DB_PREFIXES = (TEST_DB_PREFIX, "runner_tpl_")
 
 #: Advisory-lock key for "a tests/scripts suite is using this cluster's
 #: shared objects (service roles, scratch namespaces)". Distinct from the
@@ -163,21 +160,9 @@ SUITE_LOCK_WAIT_SECONDS = 1200
 SCRATCH_LOCK_KEY = 785_2026
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
+ROLES_SQL = REPO_ROOT / "src" / "models" / "target" / "ddl" / "01_roles.sql"
 
-BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
-
-#: The step-0 companion artifact (#787): the window's legacy-DDL definer
-#: door. Applied by the owner actor immediately after the bootstrap, and by
-#: any owner-world stand-up that will replay 050 — 050 calls the door rather
-#: than issuing owner DDL itself, so a world without it cannot apply 050 at
-#: all. Deliberately a SECOND file rather than more of the bootstrap: the
-#: bootstrap is cluster-scoped (it provisions the seven svc_* roles and so
-#: needs the suite mutex), this is per-database and needs none, which is what
-#: lets the owner-world sites apply it through `psql_apply`.
-DOOR_SQL = REPO_ROOT / "scripts" / "window" / "step0_legacy_ddl_door.sql"
-
-#: The seven service roles, split as the step-0 bootstrap provisions them.
+#: The seven service roles declared by the schema code.
 #: Held here rather than re-listed per test so the inventory has one home on
 #: the test side too.
 LOGIN_ROLES = ("svc_ingress", "svc_worker", "svc_migration")
@@ -391,7 +376,7 @@ def assert_holds_cluster_lock(admin_conn, door: str) -> None:
 
 
 @pytest.fixture(scope="session")
-def admin_conn():
+def admin_conn(setup_test_database):
     """One session-wide connection to the maintenance database.
 
     Serializes the whole session on ``SUITE_CLUSTER_LOCK_KEY`` — visibly
@@ -402,6 +387,8 @@ def admin_conn():
     lock is released by the connection closing, which the ``finally``
     guarantees even if setup dies after acquisition.
     """
+    if setup_test_database is None:
+        pytest.skip("Database not available - skipping integration test")
     conn = maintenance_conn()
     try:
         with conn.cursor() as cur:
@@ -463,11 +450,8 @@ def _sweep_leftovers(cur) -> None:
         _drop_roles_hardened(cur, tuple(strays))
 
 
-def _create_db(
-    admin_conn, name: str, template: str | None = None, owner: str | None = None
-) -> str:
-    clause = f' TEMPLATE "{template}"' if template else ""
-    clause += f' OWNER "{owner}"' if owner else ""
+def _create_db(admin_conn, name: str, owner: str | None = None) -> str:
+    clause = f' OWNER "{owner}"' if owner else ""
     with admin_conn.cursor() as cur:
         cur.execute(f'CREATE DATABASE "{name}"{clause}')
     return _dsn(name)
@@ -528,7 +512,6 @@ def _drop_db(admin_conn, name: str, timeout_s: float = 20.0) -> None:
 
 def _scratch(
     admin_conn,
-    template: str | None = None,
     owner: str | None = None,
     roles: list | None = None,
 ):
@@ -539,7 +522,7 @@ def _scratch(
     if roles is not None:
         drop_service_roles(admin_conn)
     name = _scratch_name()
-    dsn = _create_db(admin_conn, name, template, owner)
+    dsn = _create_db(admin_conn, name, owner)
     try:
         yield dsn
     finally:
@@ -560,12 +543,8 @@ def second_scratch_db(admin_conn):
     yield from _scratch(admin_conn)
 
 
-# --- the declared actors (#753: the actor split) -----------------------------
-#
-# Three actors, three jobs: the lineage seeds under a database-owner-shaped
-# actor (non-superuser + CREATEROLE, so legacy tables carry real legacy
-# ownership); the step-0 bootstrap runs as that owner; window steps run as
-# svc_migration.
+# The database owner applies schema code and ledger changes. Runtime services
+# connect through their restricted service logins.
 
 
 @pytest.fixture(scope="session")
@@ -599,60 +578,49 @@ def owner_db(admin_conn, owner_actor):
 
 
 @pytest.fixture()
-def owner_window_db(admin_conn, owner_actor):
-    """An owner-owned database plus the service-role bracket — for tests
-    that run the bootstrap and act as the window actor."""
+def owner_world_db(admin_conn, owner_actor):
+    """An empty owner database with service roles absent before and after."""
     yield from _scratch(admin_conn, owner=owner_actor, roles=[])
 
 
 def set_test_passwords(admin_conn) -> None:
-    """Give the LOGIN service roles their test password — the step the
-    bootstrap deliberately leaves to deployment env."""
+    """Set the service login passwords supplied by the test environment."""
     with admin_conn.cursor() as cur:
         for role in LOGIN_ROLES:
             cur.execute(f'ALTER ROLE "{role}" PASSWORD %s', (TEST_ACTOR_PASSWORD,))
 
 
-def replay_advertised_stream(db_dsn: str, owner_actor: str, admin_conn) -> str:
-    """Bootstrap as the owner, then replay the advertised stream as
-    svc_migration into the empty public. Returns the window actor's DSN. The
-    canonical full-schema stand-up: suites call this, never inline the
-    sequence (test_advertised_ddl_replay imports it, per the window_actor rule
-    below)."""
-    import psycopg2 as _psycopg2
+def build_world(db_dsn: str, owner_actor: str, admin_conn) -> str:
+    """Build a complete test database as its owner and adopt the base marker.
 
-    from scripts.advertised_ddl import (
-        DEFAULT_DOCS,
-        DEFAULT_MANIFEST,
-        build_stream,
-        load_manifest,
-    )
+    The caller brackets the database and service roles with ``_scratch``.
+    Role creation uses the schema's roles step under the suite cluster lock;
+    the schema and ledger use the same non-superuser owner as deployment.
+    """
+    from scripts.migration_runner import MIGRATIONS_DIR, adopt
+    from src.models.target.ddl import build
 
-    manifest = load_manifest(DEFAULT_MANIFEST)
-    stream = build_stream(DEFAULT_DOCS, manifest)
-    as_svc = window_actor(db_dsn, owner_actor, admin_conn)
-    conn = _psycopg2.connect(as_svc)
-    conn.autocommit = True
+    assert_holds_cluster_lock(admin_conn, "build_world")
+    owner = as_user(db_dsn, owner_actor)
+    provision_roles(admin_conn, owner)
+    engine = create_engine(owner)
     try:
-        with conn.cursor() as cur:
-            cur.execute(stream)
+        with engine.connect() as conn:
+            build(conn)
+        adopt(owner, MIGRATIONS_DIR, MIGRATIONS_DIR / "adoption_manifest.json")
+        set_test_passwords(admin_conn)
     finally:
-        conn.close()
-    return as_svc
+        engine.dispose()
+    return owner
 
 
 @pytest.fixture(scope="module")
 def ingress_world(admin_conn, owner_actor):
-    """A replayed schema, as its owner (`svc_migration`, which owns the tables)
-    and as `svc_ingress`: the world of a gate that runs commands through the
-    real port, replayed once per module. A gate re-registers it as its own
-    `world` (``world = ingress_world``), the way `test_repeat_verbs_gate.py`
-    takes the repeat gate's. It is not named `world`: most gate modules
-    define a `world` of their own, which would shadow it."""
+    """A schema built once per module, addressed as owner and API login."""
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        owner = replay_advertised_stream(db, owner_actor, admin_conn)
+        owner = build_world(db, owner_actor, admin_conn)
         yield {"owner": owner, "ingress": as_user(owner, "svc_ingress")}
     finally:
         gen.close()
@@ -755,29 +723,11 @@ def seed_intent_chain(
     return {"src": src, "iga": iga, "media": mi, "intent": intent}
 
 
-def window_actor(db_dsn: str, owner_actor: str, admin_conn) -> str:
-    """Stand the window up: bootstrap as the owner, then
-    act as ``svc_migration``. Returns the window actor's DSN. The canonical
-    actor hand-off — suites call this, never inline the sequence."""
-    run_bootstrap(admin_conn, as_user(db_dsn, owner_actor))
-    set_test_passwords(admin_conn)
-    return as_user(db_dsn, "svc_migration")
-
-
-# --- the step-0 window bootstrap (#746) -------------------------------------
-#
-# Service roles are CLUSTER-scoped, so they outlive the per-test scratch
-# databases every other fixture here relies on. That is not an inconvenience to
-# work around — it is why role provisioning cannot be a runner migration in the
-# first place. The helpers below own the lifecycle explicitly instead of
-# leaning on database teardown.
-
-
 def actor_lacks_createrole(admin_conn) -> str | None:
-    """The reason the current actor cannot run the bootstrap, or None.
+    """The reason the current actor cannot provision roles, or None.
 
     Returned as a reason string rather than a bool so the skip names the
-    missing privilege. CI's `postgres:15` service makes `POSTGRES_USER` the
+    missing privilege. CI's PostgreSQL service makes `POSTGRES_USER` the
     cluster superuser, so the gate genuinely runs there; a local PostgreSQL
     whose test role was created by hand usually has neither flag, and a silent
     pass would read as coverage this suite did not have.
@@ -854,9 +804,6 @@ def _drop_roles_hardened(cur, roles: tuple) -> None:
                     " without the lock?"
                 )
                 continue
-            if stale.startswith(TPL_DB_PREFIX) and _is_mine(stale):
-                print(f"conftest: NOT dropping own template {stale}")
-                continue
             cur.execute(f'DROP DATABASE IF EXISTS "{stale}"')
         _drop_all()
 
@@ -870,7 +817,7 @@ def drop_service_roles(admin_conn, extra=()) -> None:
     `DependentObjectsStillExist` while that database is still there. Dropping
     the database first discards the dependencies with it.
     Callers must not hand-roll this order; use the role-bracketed fixtures
-    (`roleless_db`, `owner_window_db`, ...), whose shared
+    (`owner_world_db`, `world_db`, ...), whose shared
     `_scratch` lifecycle sequences it correctly.
 
     Having ``admin_conn`` in the signature made this door DECLARE the mutex, not
@@ -880,159 +827,34 @@ def drop_service_roles(admin_conn, extra=()) -> None:
         _drop_roles_hardened(cur, tuple(extra) + SERVICE_ROLES)
 
 
-def run_bootstrap(admin_conn, dsn: str) -> None:
-    """Apply the step-0 artifact as the current (owner) actor.
-
-    Executed through psycopg2 rather than `psql_apply` so a guard's RAISE
-    surfaces as an exception the caller can assert the *message* of — the
-    precondition is the point of the artifact, not an incidental failure mode.
-
-    ``admin_conn`` is the CREATE side of the mutex declaration `drop_service_roles`
-    has on the DROP side (#808), and it is checked rather than merely
-    named — see `assert_holds_cluster_lock`. It is deliberately not the
-    connection the bootstrap RUNS on: the artifact must execute as the owner
-    actor, which is what ``dsn`` carries.
-    """
-    assert_holds_cluster_lock(admin_conn, "run_bootstrap")
+def provision_roles(admin_conn, dsn: str) -> None:
+    """Create the schema's service roles as the database owner under the lock."""
+    assert_holds_cluster_lock(admin_conn, "provision_roles")
     conn = psycopg2.connect(dsn)
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
     try:
-        with conn.cursor() as cur:
-            cur.execute(BOOTSTRAP_SQL.read_text())
-            # The step-0 COMPANION (#787), right after the bootstrap:
-            # the door's EXECUTE grant names svc_migration, which the bootstrap
-            # above is what creates. Applied here rather than left to callers so
-            # every window fixture stands the window up whole — a bootstrap
-            # without its door is a window that still dies at 050.
-            cur.execute(DOOR_SQL.read_text())
+        with conn, conn.cursor() as cur:
+            cur.execute(ROLES_SQL.read_text())
     finally:
         conn.close()
 
 
 @pytest.fixture()
-def roleless_db(admin_conn):
-    """A fresh database with the seven service roles guaranteed ABSENT.
-
-    Yields ``(dsn, extra_roles)`` — append any test-local role name to
-    ``extra_roles`` and teardown drops it in the right order too. Roles are
-    cluster-scoped, so "absent" has to be established at setup rather than
-    assumed from a fresh database.
-    """
-    reason = actor_lacks_createrole(admin_conn)
-    if reason:
-        pytest.skip(reason)
-    # No lock is taken HERE, by design rather than by omission (#785):
-    # depending on `admin_conn` already places this fixture inside the
-    # session-wide `SUITE_CLUSTER_LOCK_KEY`, which is held from before the
-    # first fixture runs until the session ends. The #768 collision is this
-    # fixture's SETUP against another session's in-use roles, and a
-    # session-wide lock covers setup by construction — earlier and wider than
-    # a per-fixture lock, not later or narrower.
-    extra: list[str] = []
-    gen = _scratch(admin_conn, roles=extra)
-    dsn = next(gen)
+def world_db(admin_conn, owner_actor):
+    """A complete schema and adopted base marker in a fresh owner database."""
+    gen = _scratch(admin_conn, owner=owner_actor, roles=[])
+    db = next(gen)
     try:
-        yield dsn, extra
+        yield build_world(db, owner_actor, admin_conn)
     finally:
         gen.close()
 
 
 @pytest.fixture()
-def bootstrapped_db(admin_conn, roleless_db):
-    """A fresh database with the seven service roles provisioned.
-
-    What a policy-carrying table needs: a policy naming `svc_ingress` is
-    uncreatable until the role exists, so every such replay runs through here.
-
-    Built on `roleless_db` so the capability skip and the drop-database-then-
-    drop-roles teardown order have exactly one home — the same reason the
-    scratch fixtures above share `_scratch`.
-    """
-    dsn, _ = roleless_db
-    run_bootstrap(admin_conn, dsn)
-    return dsn
-
-
-@pytest.fixture()
-def lane_db(bootstrapped_db):
-    """The full-lineage world (legacy schema + target public), once per test.
-
-    The parenthetical still holds after 079. That file carries `runner:manual`,
-    so `apply_pending` — which is all `run_lane` invokes — reports it OWED and
-    never applies it; `test_lineage_lane.py` pins both halves (owed == [79, 80],
-    and `legacy` holds exactly the sixteen inventory tables at the end of the
-    lane). The `DROP SCHEMA legacy CASCADE` belongs to a deploy window and does
-    not run here.
-
-    `run_lane` is imported inside the body rather than at module scope because
-    `tests/scripts/test_lineage_lane.py` imports a dozen names from THIS file:
-    a module-level import would close the cycle and the conftest would fail to
-    load for the whole directory. The six gate files that each carried a copy
-    of this fixture could import it at the top only because none of them is
-    what the lane imports.
-    """
-    from tests.scripts.test_lineage_lane import run_lane
-
-    run_lane(bootstrapped_db)
-    return bootstrapped_db
-
-
-@pytest.fixture()
-def sync_conn(lane_db):
-    """A plain psycopg2 connection to the lane world, closed on teardown."""
-    conn = psycopg2.connect(lane_db)
+def sync_conn(world_db):
+    """A plain psycopg2 connection to the built world, closed on teardown."""
+    conn = psycopg2.connect(world_db)
     yield conn
     conn.close()
-
-
-def psql_apply(dsn: str, files) -> None:
-    """Hand-apply SQL files the way production history was actually built.
-
-    REFUSES ``BOOTSTRAP_SQL``. That artifact provisions the seven
-    cluster-scoped ``svc_*`` roles, and this door cannot check the suite mutex
-    for the reason the door exists — it holds a DSN, not a connection, and a
-    DSN cannot be asked what locks anyone holds. Its callers apply files INTO
-    one scratch database, which is per-database and needs no cluster mutex, so
-    the one cluster-scoped file is turned away toward `run_bootstrap`, which
-    checks the mutex on the connection it is handed.
-
-    Keying the refusal on the ARTIFACT rather than on a door is what stops the
-    hole reopening: the inventory of ways to reach a file is unbounded, so the
-    check belongs where the file is named.
-
-    The subprocess gets a MINIMAL environment, not the inherited shell:
-    external code under an ambient environment is how credential names
-    collide into error output. psql
-    needs PATH and its own options; everything else it needs is in the DSN.
-    """
-    if any(Path(f) == BOOTSTRAP_SQL for f in files):
-        raise RuntimeError(
-            "psql_apply: BOOTSTRAP_SQL provisions the CLUSTER-scoped svc_*"
-            " roles, so it must go through `run_bootstrap`, which verifies"
-            " SUITE_CLUSTER_LOCK_KEY. This door only has a DSN, so it cannot"
-            " check the mutex itself."
-        )
-    _psql_run(dsn, files)
-
-
-def _psql_run(dsn: str, files) -> None:
-    """The subprocess invocation itself — the one spelling, behind the
-    `psql_apply` door, so its refusal cannot be sidestepped by rebuilding the
-    command somewhere else."""
-    cmd = ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1"]
-    for f in files:
-        cmd += ["-f", str(f)]
-    # A minimal PATH, widened only by the directory of the psql the developer's
-    # own PATH resolves (a Homebrew keg on a Mac); CI's lives in /usr/bin.
-    found = shutil.which("psql")
-    path = "/usr/bin:/bin" if not found else f"{Path(found).parent}:/usr/bin:/bin"
-    env = {
-        "PATH": path,
-        "PGOPTIONS": "-c client_min_messages=warning",
-        "LC_ALL": "C.UTF-8",
-    }
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    assert result.returncode == 0, f"hand-apply failed: {result.stderr[-2000:]}"
 
 
 # --- plain helpers shared across the runner suites ---

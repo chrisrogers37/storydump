@@ -28,7 +28,7 @@ def service():
     return instagram_sync
 
 
-async def leased(lane_db, engine, origin, src):
+async def leased(world_db, engine, origin, src):
     capture = await admission.capture(engine, origin, src)
     async with obs.uow(engine, origin) as conn:
         jid = await jobs.enqueue(
@@ -42,7 +42,7 @@ async def leased(lane_db, engine, origin, src):
                 "source_read_capture": capture.payload(),
             },
         )
-    worker = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    worker = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     async with worker.connect() as conn:
         job = await jobs.claim_job(
             conn,
@@ -140,11 +140,11 @@ async def state(engine, origin, src):
 
 
 async def test_atomic_bundle_checkpoint_progress_and_continuation(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         adapter = Adapter(page(obs.bundle()))
         result = await m.run_sync(worker, job, ports=await ports(m, adapter, c))
@@ -163,10 +163,10 @@ async def test_atomic_bundle_checkpoint_progress_and_continuation(
 @pytest.mark.parametrize(
     "stage", ["observation", "progress", "checkpoint", "continuation", "before_commit"]
 )
-async def test_fault_rolls_back_whole_landing(lane_db, archive_engine, origin, stage):
+async def test_fault_rolls_back_whole_landing(world_db, archive_engine, origin, stage):
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         before = await state(archive_engine, origin, src)
 
@@ -192,11 +192,11 @@ async def test_fault_rolls_back_whole_landing(lane_db, archive_engine, origin, s
 
 @pytest.mark.parametrize("mutation", ["off", "off_on", "generation"])
 async def test_held_page_never_lands_across_source_fence(
-    lane_db, archive_engine, origin, mutation
+    world_db, archive_engine, origin, mutation
 ):
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         before = await state(archive_engine, origin, src)
 
@@ -245,10 +245,12 @@ async def test_held_page_never_lands_across_source_fence(
         await worker.dispose()
 
 
-async def test_missing_capture_refuses_before_provider(lane_db, archive_engine, origin):
+async def test_missing_capture_refuses_before_provider(
+    world_db, archive_engine, origin
+):
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         job = {
             **job,
@@ -322,11 +324,11 @@ async def test_supplementary_evidence_cannot_survive_reobservation(
 
 
 async def test_lease_loss_during_provider_rolls_back_without_continuation(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         before = await state(archive_engine, origin, src)
 
@@ -345,12 +347,12 @@ async def test_lease_loss_during_provider_rolls_back_without_continuation(
         await worker.dispose()
 
 
-async def test_late_persistent_error_is_source_fenced(lane_db, archive_engine, origin):
+async def test_late_persistent_error_is_source_fenced(world_db, archive_engine, origin):
     from src.services.target.media_adapters import MediaCredentialDead
 
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         before = await state(archive_engine, origin, src)
 
@@ -381,7 +383,7 @@ async def test_late_persistent_error_is_source_fenced(lane_db, archive_engine, o
 
 
 async def test_real_metadata_indexing_never_downloads_or_decodes(
-    lane_db, archive_engine, origin, monkeypatch
+    world_db, archive_engine, origin, monkeypatch
 ):
     from datetime import datetime, timedelta, timezone
     import httpx
@@ -400,7 +402,7 @@ async def test_real_metadata_indexing_never_downloads_or_decodes(
             dict(ref=account, id=str(origin["iga"])),
         )
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     now = datetime.now(timezone.utc)
     decoder_calls = []
 
@@ -600,13 +602,13 @@ async def test_validation_capture_cannot_name_another_or_missing_identity(
 
 
 async def test_media_executor_uses_injected_archive_turn(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     from src.services.target import media_sync, work_loop
 
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         adapter = Adapter(page(obs.bundle()))
         deps = work_loop.WorkerDeps(
@@ -619,12 +621,12 @@ async def test_media_executor_uses_injected_archive_turn(
         await worker.dispose()
 
 
-async def test_same_checkpoint_race_commits_once(lane_db, archive_engine, origin):
+async def test_same_checkpoint_race_commits_once(world_db, archive_engine, origin):
     import asyncio
 
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         arrivals = 0
         both = asyncio.Event()
@@ -653,11 +655,11 @@ async def test_same_checkpoint_race_commits_once(lane_db, archive_engine, origin
 
 
 async def test_completed_lanes_rearm_baseline_and_new_sync_refreshes(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         empty = MediaPage([], {"v": 2, "more": False}, outcome="metadata_page")
         adapter = Adapter(empty)
@@ -723,11 +725,11 @@ async def test_completed_lanes_rearm_baseline_and_new_sync_refreshes(
 
 
 async def test_missing_parent_enrichment_yields_to_baseline_after_finite_work(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     m = service()
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
 
     class Missing(Adapter):
         async def enrich_parents(self, parent_media_ids, **kwargs):
@@ -763,10 +765,10 @@ async def test_missing_parent_enrichment_yields_to_baseline_after_finite_work(
 
 
 async def test_selected_child_change_clears_all_inherited_format_evidence(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         await obs.observe(archive_engine, origin, src, obs.bundle())
         async with obs.uow(worker, origin) as conn:
@@ -797,7 +799,7 @@ async def test_selected_child_change_clears_all_inherited_format_evidence(
 
 
 async def test_index_only_conflict_helper_finishes_metadata(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     m = service()
     src = await admission.ready(archive_engine, origin)
@@ -808,7 +810,7 @@ async def test_index_only_conflict_helper_finishes_metadata(
             ),
             dict(ws=str(origin["ws"]), sid=str(origin["src"])),
         )
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     try:
         adapter = EnrichingAdapter(page(obs.bundle()))
         injected = await ports(m, adapter, c)
@@ -826,7 +828,7 @@ async def test_index_only_conflict_helper_finishes_metadata(
     "history_seen", [0, 1, "counter_behind_lane", "raw_v1", "raw_v2"]
 )
 async def test_recent_history_share_one_adapter_listing_ceiling(
-    lane_db, archive_engine, origin, history_seen
+    world_db, archive_engine, origin, history_seen
 ):
     from datetime import datetime, timezone
     import httpx
@@ -841,7 +843,7 @@ async def test_recent_history_share_one_adapter_listing_ceiling(
             dict(id=str(origin["iga"])),
         )
     src = await admission.ready(archive_engine, origin)
-    worker, job, c = await leased(lane_db, archive_engine, origin, src)
+    worker, job, c = await leased(world_db, archive_engine, origin, src)
     upper = int(datetime.now(timezone.utc).timestamp()) + 1
     cp = m._envelope(None, c)
     cp.pop("scan_seen", None)  # Existing envelopes have separate lane counters.
@@ -1009,7 +1011,7 @@ async def quality_ports(module, capture, response):
     )
 
 
-async def quality_source(lane_db, engine, origin):
+async def quality_source(world_db, engine, origin):
     async with obs.uow(engine, origin) as conn:
         await conn.execute(
             text(
@@ -1018,7 +1020,7 @@ async def quality_source(lane_db, engine, origin):
             dict(id=str(origin["iga"])),
         )
     src = await admission.ready(engine, origin)
-    worker, job, capture = await leased(lane_db, engine, origin, src)
+    worker, job, capture = await leased(world_db, engine, origin, src)
     return src, worker, job, capture
 
 
@@ -1083,12 +1085,12 @@ async def quality_checkpoint(
 
 
 async def test_real_permanent_helper_failure_retires_without_partial_observation(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(lane_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
     await obs.observe(
         archive_engine, origin, src, obs.bundle("111", attribution="not_detected")
     )
@@ -1214,12 +1216,12 @@ async def batch_state(engine, origin, src):
 
 
 async def test_a_helper_turn_enriches_every_parent_its_request_budget_affords(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(lane_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
     queued = [str(1001 + i) for i in range(25)]
     for parent in queued:
         await obs.observe(archive_engine, origin, src, obs.bundle(parent))
@@ -1249,7 +1251,7 @@ async def test_a_helper_turn_enriches_every_parent_its_request_budget_affords(
 
 
 async def test_a_helper_turn_reads_one_parent_until_the_source_has_a_candidate(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     """A turn commits only when it ends, and the first card waits for the first
     candidate. So while the stored summary reports none the turn reads a single
@@ -1257,7 +1259,7 @@ async def test_a_helper_turn_reads_one_parent_until_the_source_has_a_candidate(
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(lane_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
     queued = [str(1001 + i) for i in range(25)]
     for parent in queued:
         await obs.observe(archive_engine, origin, src, obs.bundle(parent))
@@ -1302,7 +1304,7 @@ async def test_a_helper_turn_reads_one_parent_until_the_source_has_a_candidate(
 
 
 async def test_a_source_with_no_candidate_reads_its_parents_in_doubling_turns(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     """Reading small must not cost a source that never has a candidate a turn per
     parent: the batch follows the requests the helper lane has made (1, 1, 2, 4,
@@ -1310,7 +1312,7 @@ async def test_a_source_with_no_candidate_reads_its_parents_in_doubling_turns(
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(lane_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
     queued = [str(1001 + i) for i in range(25)]
     for parent in queued:
         await obs.observe(archive_engine, origin, src, obs.bundle(parent))
@@ -1356,12 +1358,12 @@ async def test_a_source_with_no_candidate_reads_its_parents_in_doubling_turns(
 
 
 async def test_one_bad_parent_does_not_starve_the_rest_of_a_batch(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(lane_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
     queued = ["111", "222", "333"]
     for parent in queued:
         await obs.observe(archive_engine, origin, src, obs.bundle(parent))
@@ -1396,12 +1398,12 @@ async def test_one_bad_parent_does_not_starve_the_rest_of_a_batch(
 
 
 async def test_a_retryable_read_defers_its_parent_and_ends_the_batch(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(lane_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
     queued = ["111", "222", "333"]
     for parent in queued:
         await obs.observe(archive_engine, origin, src, obs.bundle(parent))
@@ -1430,14 +1432,14 @@ async def test_a_retryable_read_defers_its_parent_and_ends_the_batch(
 
 
 async def test_malformed_child_identity_defers_proven_carousel_without_retirement(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     import httpx
     from dataclasses import replace
     from src.services.target.instagram_catalog import ArchiveAsset
 
     m = service()
-    src, worker, job, c = await quality_source(lane_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
     known = replace(
         obs.bundle("111"),
         assets=(
@@ -1511,12 +1513,12 @@ async def test_malformed_child_identity_defers_proven_carousel_without_retiremen
 @pytest.mark.parametrize("kind", ["listing", "helper_fallback"])
 @pytest.mark.parametrize("landing", ["error", "source", "checkpoint", "lease"])
 async def test_real_grant_death_reports_actual_attempts(
-    lane_db, archive_engine, origin, kind, landing, monkeypatch
+    world_db, archive_engine, origin, kind, landing, monkeypatch
 ):
     import httpx
 
     m = service()
-    src, worker, job, c = await quality_source(lane_db, archive_engine, origin)
+    src, worker, job, c = await quality_source(world_db, archive_engine, origin)
     if kind == "helper_fallback":
         await obs.observe(
             archive_engine, origin, src, obs.bundle("111", attribution="not_detected")

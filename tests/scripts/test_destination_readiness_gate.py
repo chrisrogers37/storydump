@@ -1239,8 +1239,9 @@ async def a_request_waits_on_a_lock(sync_conn, *, timeout=10.0):
     while time.monotonic() < deadline:
         with sync_conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM pg_stat_activity"
-                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                "SELECT count(*) FROM pg_locks l"
+                " JOIN pg_stat_activity a ON a.pid = l.pid"
+                " WHERE a.datname = current_database() AND NOT l.granted"
             )
             if cur.fetchone()[0]:
                 return

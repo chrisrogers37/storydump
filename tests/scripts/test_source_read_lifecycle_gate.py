@@ -110,7 +110,7 @@ async def test_invoker_is_tenant_bound_and_door_metadata_grants_are_minimal(
 
 
 async def test_claim_waits_for_workspace_before_holding_job_row(
-    lane_db, archive_engine, origin
+    world_db, archive_engine, origin
 ):
     assert "capability" in __import__("inspect").signature(jobs.claim_job).parameters
     async with obs.uow(archive_engine, origin) as conn:
@@ -121,7 +121,7 @@ async def test_claim_waits_for_workspace_before_holding_job_row(
             serialization_key="src:" + str(origin["src"]),
             payload=dict(v=1, source_id=str(origin["src"])),
         )
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     started = asyncio.Event()
 
     async def claim():
@@ -161,7 +161,7 @@ async def test_claim_waits_for_workspace_before_holding_job_row(
 
 @pytest.mark.parametrize("off", [False, True])
 async def test_reaper_refuses_off_capture_and_never_rearms_it(
-    lane_db, archive_engine, origin, sync_conn, off
+    world_db, archive_engine, origin, sync_conn, off
 ):
     with sync_conn.cursor() as cur:
         cur.execute(
@@ -191,7 +191,7 @@ async def test_reaper_refuses_off_capture_and_never_rearms_it(
             ),
             dict(id=jid),
         )
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     try:
         async with engine.begin() as conn:
             await conn.execute(
@@ -257,7 +257,7 @@ async def test_exhausted_rearm_requires_capture_and_current_on(archive_engine, o
 
 @pytest.mark.parametrize("door", ["clock", "reaper"])
 async def test_outer_discovery_scope_stays_frozen_across_lock_wait(
-    lane_db, archive_engine, origin, sync_conn, door
+    world_db, archive_engine, origin, sync_conn, door
 ):
     """A newly due tenant waits for the next turn; no prefix is acquired late."""
     from src.services.target.unit_of_work import unit_of_work
@@ -291,7 +291,7 @@ async def test_outer_discovery_scope_stays_frozen_across_lock_wait(
                 )
                 ids.append(cur.fetchone()[0])
     sync_conn.commit()
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     started = asyncio.Event()
     backend = []
 

@@ -43,7 +43,7 @@ from tests.scripts.conftest import (
     in_tenant,
     ingress_engine,
     reap_as_worker,
-    replay_advertised_stream,
+    build_world,
     txn,
 )
 
@@ -58,7 +58,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         yield {"owner": dsn}
     finally:
         gen.close()

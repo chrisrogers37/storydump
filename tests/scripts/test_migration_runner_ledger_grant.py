@@ -1,10 +1,8 @@
 """The runner grants its own ledger to the API role.
 
-`storydump posture` reads `runner.schema_migrations` as `svc_ingress`. The
-grant cannot live in the advertised stream — the gates replay that stream
-into a database with no `runner` schema — so the runner makes it where it
-makes the ledger, on every run, guarded on the role existing (the first
-ledger is created before 057 creates the roles).
+`storydump posture` reads `runner.schema_migrations` as `svc_ingress`.
+The runner grants access when it creates or opens the ledger and tolerates
+databases where the API role does not exist.
 """
 
 from __future__ import annotations
@@ -12,7 +10,7 @@ from __future__ import annotations
 import psycopg2
 import pytest
 
-from scripts.migration_runner import apply_pending
+from scripts.migration_runner import MIGRATIONS_DIR, apply_pending
 
 pytestmark = pytest.mark.integration
 
@@ -24,28 +22,26 @@ def _one(dsn: str, sql: str):
 
 
 class TestTheLedgerGrant:
-    def test_the_api_role_may_read_the_ledger_once_it_exists(
-        self, bootstrapped_db, tmp_path
-    ):
-        apply_pending(bootstrapped_db, tmp_path)
+    def test_the_api_role_may_read_the_ledger_once_it_exists(self, world_db):
+        apply_pending(world_db, MIGRATIONS_DIR)
         (usage, select) = _one(
-            bootstrapped_db,
+            world_db,
             "SELECT has_schema_privilege('svc_ingress', 'runner', 'USAGE'),"
             " has_table_privilege('svc_ingress', 'runner.schema_migrations', 'SELECT')",
         )
         assert usage and select, (usage, select)
         (insert,) = _one(
-            bootstrapped_db,
+            world_db,
             "SELECT has_table_privilege('svc_ingress', 'runner.schema_migrations',"
             " 'INSERT')",
         )
         assert not insert, "read only: the ledger is the runner's to write"
 
-    def test_a_second_run_is_idempotent(self, bootstrapped_db, tmp_path):
-        apply_pending(bootstrapped_db, tmp_path)
-        apply_pending(bootstrapped_db, tmp_path)
+    def test_a_second_run_is_idempotent(self, world_db):
+        apply_pending(world_db, MIGRATIONS_DIR)
+        apply_pending(world_db, MIGRATIONS_DIR)
         (select,) = _one(
-            bootstrapped_db,
+            world_db,
             "SELECT has_table_privilege('svc_ingress', 'runner.schema_migrations',"
             " 'SELECT')",
         )

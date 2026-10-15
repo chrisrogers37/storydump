@@ -123,11 +123,17 @@ class TestTheEnvelope:
         self, client, as_principal, tenant, views
     ):
         as_principal(PERSON_TOKEN)
-        client.get(f"/api/v1/ops/workspaces/{WS}/jobs?since=72h")
-        client.get(f"/api/v1/ops/workspaces/{WS}/jobs?since=2026-09-15T14:50:00Z")
+        absolute = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).replace(
+            microsecond=0
+        )
+        relative_response = client.get(f"/api/v1/ops/workspaces/{WS}/jobs?since=72h")
+        absolute_response = client.get(
+            f"/api/v1/ops/workspaces/{WS}/jobs", params={"since": absolute.isoformat()}
+        )
+        assert relative_response.status_code == absolute_response.status_code == 200
         (_, a), (_, b) = views
         assert dt.datetime.now(dt.timezone.utc) - a["since"] >= dt.timedelta(hours=71)
-        assert b["since"] == dt.datetime(2026, 9, 15, 14, 50, tzinfo=dt.timezone.utc)
+        assert b["since"] == absolute
 
     def test_a_bad_window_is_422(self, client, as_principal, tenant, views):
         as_principal(PERSON_TOKEN)

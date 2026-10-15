@@ -100,10 +100,10 @@ def picture() -> bytes:
 
 
 @pytest.fixture
-async def ingress(lane_db, admin_conn):
+async def ingress(world_db, admin_conn):
     """The API's own login: every read and lock below is `svc_ingress`'s."""
     set_test_passwords(admin_conn)
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_ingress")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_ingress")))
     try:
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT current_user"))).scalar_one() == (

@@ -28,9 +28,9 @@ archive_engine = foundation.archive_engine
 
 
 @pytest.fixture
-async def converter_engine(lane_db, admin_conn):
+async def converter_engine(world_db, admin_conn):
     set_test_passwords(admin_conn)
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     try:
         yield engine
     finally:
@@ -242,9 +242,10 @@ async def test_converter_waiting_on_prefix_cannot_commit_after_lease_expiry(
         while True:
             with sync_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s", (pid,)
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=%s AND NOT granted)",
+                    (pid,),
                 )
-                waiting = cur.fetchone()[0] == "Lock"
+                waiting = cur.fetchone()[0]
                 cur.execute(
                     "SELECT locked_until<clock_timestamp() FROM jobs WHERE id=%s",
                     (str(job["id"]),),

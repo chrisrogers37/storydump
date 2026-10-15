@@ -60,9 +60,9 @@ owner, run, T0 = receipts.owner, receipts.run, receipts.T0
 
 
 @pytest.fixture
-async def worker(lane_db, admin_conn):
+async def worker(world_db, admin_conn):
     set_test_passwords(admin_conn)
-    engine = create_async_engine(async_url(as_user(lane_db, "svc_worker")))
+    engine = create_async_engine(async_url(as_user(world_db, "svc_worker")))
     try:
         yield engine
     finally:

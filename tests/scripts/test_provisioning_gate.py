@@ -64,7 +64,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     fetch_one,
-    replay_advertised_stream,
+    build_world,
     seed_workspace_chain,
 )
 
@@ -88,7 +88,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        stream = build_world(db, owner_actor, admin_conn)
         conn = psycopg2.connect(stream)
         try:
             a = seed_workspace_chain(conn, "prov-a")

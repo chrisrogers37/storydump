@@ -80,7 +80,7 @@ async def _sweep(engine):
     return minted
 
 
-async def _run_interactive_once(lane_db, engine, transport, *, config=None):
+async def _run_interactive_once(world_db, engine, transport, *, config=None):
     app = compose(
         engine=engine, config=config or WorkerConfig(), env={}, transport=transport
     )
@@ -119,10 +119,10 @@ def _age_past_ambiguity_backoff(sync_conn, binding):
 
 class TestDeliveryEndToEnd:
     async def test_sweep_mints_once_hold_drains_rows_land_sent_job_finalizes(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain, binding = _seed_binding_with_pending(sync_conn, "w2send", rows=2)
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             assert await _sweep(engine) == 1, "one pending binding, one sender job"
             assert await _sweep(engine) == 0, "a live job blocks a duplicate mint"
@@ -130,7 +130,7 @@ class TestDeliveryEndToEnd:
             transport = _FakeTransport()
             cfg = WorkerConfig(poller_interval_seconds=0.05, sender_hold_seconds=10.0)
             wl, claimed = await _run_interactive_once(
-                lane_db, engine, transport, config=cfg
+                world_db, engine, transport, config=cfg
             )
 
             assert claimed is True and wl.processed == 1
@@ -161,7 +161,7 @@ class TestDeliveryEndToEnd:
             await engine.dispose()
 
     async def test_an_aged_ambiguous_row_mints_a_sender_a_fresh_one_waits(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """A live sender's lost answer is resolved by the binding's sender
         after a backoff (#1297) — and a quiet binding has no sender, so the
@@ -176,7 +176,7 @@ class TestDeliveryEndToEnd:
                 (binding,),
             )
         sync_conn.commit()
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             assert await _sweep(engine) == 0, "a fresh ambiguous row waits"
             _age_past_ambiguity_backoff(sync_conn, binding)
@@ -187,13 +187,13 @@ class TestDeliveryEndToEnd:
 
 class TestDeadCredentialMidRun:
     async def test_an_auth_dead_send_fails_its_row_once_and_the_worker_survives(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         """Aged past the ambiguity backoff, an ambiguous row would mint a
         sender (the test above); a failed one mints none. The binding stays
         active: a dead token is not a gone chat."""
         chain, binding = _seed_binding_with_pending(sync_conn, "w2dead", rows=1)
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         try:
             await _sweep(engine)
             transport = _FakeTransport(
@@ -201,7 +201,7 @@ class TestDeadCredentialMidRun:
             )
             cfg = WorkerConfig(poller_interval_seconds=0.05, sender_hold_seconds=2.0)
             wl, claimed = await _run_interactive_once(
-                lane_db, engine, transport, config=cfg
+                world_db, engine, transport, config=cfg
             )
 
             assert claimed is True and wl.processed == 1, (
@@ -235,7 +235,7 @@ class TestReMintThroughTheRealSweeper:
     movement is a failure, never a silence."""
 
     async def test_rows_enqueued_after_startup_are_delivered_by_the_live_worker(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         import asyncio
 
@@ -265,7 +265,7 @@ class TestReMintThroughTheRealSweeper:
             poller_interval_seconds=0.05,
             sender_hold_seconds=3.0,
         )
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         app = compose(engine=engine, config=cfg, env={}, transport=transport)
         stop = asyncio.Event()
         runner = asyncio.create_task(run(app, stop=stop))
@@ -334,10 +334,10 @@ class TestTheClaimedRowVouchesForItsWorkspace:
 
     @pytest.mark.asyncio
     async def test_every_row_the_transport_sees_carries_the_bindings_workspace(
-        self, lane_db, sync_conn
+        self, world_db, sync_conn
     ):
         chain, binding = _seed_binding_with_pending(sync_conn, "w2-ws", rows=2)
-        engine = create_async_engine(async_url(lane_db))
+        engine = create_async_engine(async_url(world_db))
         seen = []
 
         class Recording(_FakeTransport):
@@ -352,7 +352,7 @@ class TestTheClaimedRowVouchesForItsWorkspace:
 
         try:
             await _sweep(engine)
-            await _run_interactive_once(lane_db, engine, Recording())
+            await _run_interactive_once(world_db, engine, Recording())
         finally:
             await engine.dispose()
         assert seen and all(ws == str(chain["ws"]) for ws in seen), seen

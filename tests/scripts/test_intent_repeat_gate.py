@@ -44,7 +44,7 @@ from tests.scripts.conftest import (
     _scratch,
     as_user,
     in_tenant,
-    replay_advertised_stream,
+    build_world,
     txn,
 )
 from tests.scripts.test_planned_serve_gate import (
@@ -92,7 +92,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         yield {"owner": dsn, "ingress": as_user(dsn, "svc_ingress")}
     finally:
         gen.close()

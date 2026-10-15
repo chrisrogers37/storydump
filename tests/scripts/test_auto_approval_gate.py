@@ -63,7 +63,7 @@ from tests.scripts.conftest import (
     as_user,
     in_tenant,
     ingress_engine,
-    replay_advertised_stream,
+    build_world,
 )
 from tests.scripts.test_planned_serve_gate import (
     _checked,
@@ -92,7 +92,7 @@ def world(admin_conn, owner_actor):
     gen = _scratch(admin_conn, owner=owner_actor, roles=[])
     db = next(gen)
     try:
-        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        dsn = build_world(db, owner_actor, admin_conn)
         yield {"owner": dsn}
     finally:
         gen.close()
