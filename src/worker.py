@@ -421,7 +421,7 @@ def compose(
         "alert_stranded_sources": 6 * 3600.0,
         "retention_sweep": 3600.0,
         # Reconciler cadence + budget: sweep every 60 s, LIMIT 50. The kind is
-        # live regardless of the poll seam (its notify half needs none;),
+        # live regardless of the poll seam (its notify half needs none),
         # so it satisfies the `recurring <= live` assert below.
         #
         # With `reap_expired` it is the fastest unconditional beat, which the
@@ -747,9 +747,8 @@ async def supervise(stop: asyncio.Event, tasks) -> asyncio.Task | None:
     Returns the dead task: one that raised (regardless of stop), or one that
     exited cleanly before stop was requested. None on legitimate shutdown —
     a clean or cancelled exit after stop fired. The caller owns
-    what loud means; this only guarantees a death can never pass unnoticed —
-    the failure class of, where background tasks die while the worker
-    keeps printing healthy status lines.
+    what loud means; this guarantees that a background task that dies while
+    the worker keeps printing healthy status lines is still reported.
     """
     stop_waiter = asyncio.create_task(stop.wait(), name="stop-waiter")
     try:
@@ -873,8 +872,8 @@ async def _run(app: WorkerApp, *, stop: asyncio.Event | None) -> None:
 
     # BEFORE the first database connection, deliberately. Railway times the
     # SOCKET, not the program: a listener bound after the slow startup steps
-    # cannot answer during them, and Railway can mark a healthy deploy FAILED
-    # . Binding here means the endpoint answers for the whole of
+    # cannot answer during them, and Railway can mark a healthy deploy FAILED.
+    # Binding here means the endpoint answers for the whole of
     # startup however slow the connections and the election turn out to be,
     # which is also why this root needs no startup-grace constant.
     health_server = app.health_server = await worker_health.serve_health(app)
@@ -1138,10 +1137,9 @@ def main() -> None:
     engine = unit_of_work.create_engine(url)
     transport = None
     token = env.get(reg.TOKEN_VAR)
-    # The Drive read leg. Armed unconditionally: it needs no env of its
-    # own (the engine carries the credential lookup, and the token is the
-    # workspace's grant, workspace Drive grant), so an env gate here would be a switch with
-    # nothing to switch on.
+    # The Drive read leg is armed unconditionally. The engine resolves each
+    # workspace's stored Drive grant when a source is read, so this leg needs
+    # no credential environment variable of its own.
     #
     # Safe to arm with no `gdrive` credential stored. A source with no
     # credential raises DriveCredentialDead, which `media_sync` classifies
