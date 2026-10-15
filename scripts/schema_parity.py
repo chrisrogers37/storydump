@@ -83,6 +83,15 @@ def body_diagnostic(text):
     )
 
 
+def normalize_database_properties(properties):
+    """Use common PostgreSQL 15–17 locale keys without discarding their values."""
+    normalized = dict(properties)
+    if "daticulocale" in normalized:
+        normalized["datlocale"] = normalized.pop("daticulocale")
+    normalized.setdefault("daticurules", None)
+    return normalized
+
+
 def normalize_role(name, owner):
     return "<owner>" if name in (owner, "pg_database_owner") else name
 
@@ -352,6 +361,7 @@ def extract(conn, *, read_only=False):
             for row in rows(
                 "SELECT '<database>' AS key, r.rolname AS owner, d.datdba AS owner_oid, d.datacl::text[] AS acl, (to_jsonb(d) - ARRAY['oid','datname','datdba','datacl','datfrozenxid','datminmxid','dattablespace','dathasloginevt']) AS properties, t.spcname AS tablespace FROM pg_database d JOIN pg_roles r ON r.oid=d.datdba JOIN pg_tablespace t ON t.oid=d.dattablespace WHERE d.datname=current_database()"
             ):
+                row["properties"] = normalize_database_properties(row["properties"])
                 put("database", row, acl_kind="d")
             for row in rows(
                 f"SELECT r.rolname AS role, coalesce(n.nspname,'*') AS schema, d.defaclobjtype AS kind, d.defaclrole AS owner_oid, d.defaclacl::text[] AS acl FROM pg_default_acl d JOIN pg_roles r ON r.oid=d.defaclrole LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace WHERE n.oid IS NULL OR ({_user_schema()})"

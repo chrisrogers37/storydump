@@ -105,6 +105,72 @@ def test_owner_and_acl_normalization():
     assert all("grantor" not in row for row in compared)
 
 
+@pytest.fixture
+def database_properties_by_version():
+    common = {"datlocprovider": "i", "datconnlimit": -1, "encoding": 6}
+    return {
+        150000: {**common, "daticulocale": "en-US"},
+        160000: {**common, "daticulocale": "en-US", "daticurules": None},
+        170000: {**common, "datlocale": "en-US", "daticurules": None},
+    }
+
+
+@pytest.mark.parametrize("locale", [None, "en-US"])
+def test_database_locale_catalog_shapes_compare_equal(
+    database_properties_by_version, locale
+):
+    snapshots = []
+    for properties in database_properties_by_version.values():
+        locale_key = "daticulocale" if "daticulocale" in properties else "datlocale"
+        properties[locale_key] = locale
+        original = copy.deepcopy(properties)
+        snapshot = healthy_snapshot()
+        snapshot["catalog"]["database"]["<database>"] = {
+            "properties": parity.normalize_database_properties(properties)
+        }
+        assert properties == original
+        snapshots.append(snapshot)
+    assert parity.schema_diff(snapshots[0], snapshots[1]) == []
+    assert parity.schema_diff(snapshots[0], snapshots[2]) == []
+    assert snapshots[0]["catalog"]["database"]["<database>"]["properties"] == {
+        "datlocprovider": "i",
+        "datconnlimit": -1,
+        "encoding": 6,
+        "datlocale": locale,
+        "daticurules": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("property_name", "value"),
+    [
+        ("datlocale", "fr-FR"),
+        ("daticurules", "&a < b"),
+        ("datlocprovider", "b"),
+        ("datconnlimit", 3),
+        ("future_property", "preserved"),
+    ],
+)
+def test_database_properties_still_gate(
+    database_properties_by_version, property_name, value
+):
+    first, second = healthy_snapshot(), healthy_snapshot()
+    first["catalog"]["database"]["<database>"] = {
+        "properties": parity.normalize_database_properties(
+            database_properties_by_version[150000]
+        )
+    }
+    changed = {**database_properties_by_version[170000], property_name: value}
+    second["catalog"]["database"]["<database>"] = {
+        "properties": parity.normalize_database_properties(changed)
+    }
+    assert parity.schema_diff(first, second) == [
+        "database <database>.properties: "
+        f"first={first['catalog']['database']['<database>']['properties']!r} "
+        f"second={second['catalog']['database']['<database>']['properties']!r}"
+    ]
+
+
 def test_creator_membership_and_options_normalization():
     row = {
         "role": "svc_worker",
@@ -185,6 +251,21 @@ class FakeCursor:
             self.result = [{"server_version_num": str(self.version)}]
         elif statement.startswith("SELECT r.rolname FROM pg_database"):
             self.result = [{"rolname": "owner_a"}]
+        elif statement.startswith("SELECT '<database>' AS key"):
+            locale_key = "datlocale" if self.version >= 170000 else "daticulocale"
+            properties = {locale_key: "en-US", "datconnlimit": -1}
+            if self.version >= 160000:
+                properties["daticurules"] = None
+            self.result = [
+                {
+                    "key": "<database>",
+                    "owner": "owner_a",
+                    "owner_oid": 10,
+                    "acl": [],
+                    "properties": properties,
+                    "tablespace": "pg_default",
+                }
+            ]
         elif statement.startswith("SELECT to_regclass"):
             self.result = [{"relation": None}]
         else:
@@ -197,7 +278,7 @@ class FakeCursor:
         return self.result[0]
 
 
-@pytest.mark.parametrize("version", [150000, 170000])
+@pytest.mark.parametrize("version", [150000, 160000, 170000])
 def test_extract_cli_reads_one_readonly_transaction_and_rolls_back(
     version, tmp_path, monkeypatch
 ):
@@ -219,6 +300,16 @@ def test_extract_cli_reads_one_readonly_transaction_and_rolls_back(
     )
     snapshot = json.loads(output.read_text())
     assert set(snapshot["catalog"]) == set(parity.DIMENSIONS)
+    assert snapshot["catalog"]["database"]["<database>"] == {
+        "owner": "<owner>",
+        "acl": [],
+        "properties": {
+            "datlocale": "en-US",
+            "daticurules": None,
+            "datconnlimit": -1,
+        },
+        "tablespace": "pg_default",
+    }
     assert settings == [{"readonly": True, "isolation_level": "REPEATABLE READ"}]
     assert events == ["rollback", "close"]
     assert cursor.statements[0] == "SET LOCAL search_path = pg_catalog"
