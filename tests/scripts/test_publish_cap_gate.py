@@ -508,7 +508,7 @@ class TestReEntry:
     def _stepped_back(self, cap_db):
         intent = _new_intent(cap_db)  # approved, undebited
         assert _run(_flip(cap_db["engine"], cap_db, intent)) is FlipOutcome.PROCEED
-        # The hop the pipeline makes on a wait (edge `post_intent_transitions publish wait edges`): progress and the
+        # The hop the pipeline makes on a wait (edge `post_intent_transitions`): progress and the
         # debit stay on the row.
         _exec(
             cap_db,

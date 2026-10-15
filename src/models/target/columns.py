@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import UUID
 #: the first. Never use a naive `DateTime` here.
 TZ = TIMESTAMP(timezone=True)
 
-#: The server-side clock. `trg_touch_updated_at` (`trg_touch_updated_at / fn_safe_tz`) owns
+#: The server-side clock. `trg_touch_updated_at` (`trg_touch_updated_at` / `fn_safe_tz`) owns
 #: ``updated_at`` after insert.
 NOW = text("now()")
 

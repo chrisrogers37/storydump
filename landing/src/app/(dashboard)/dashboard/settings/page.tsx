@@ -45,7 +45,7 @@ import { parseConnectionResult } from "@/lib/connection-result";
  * Every control on these tabs has its route: the General writes are on the
  * command client, `disconnect_account` is a built `COMMAND_SPECS` row and
  * Integrations calls it, `sync_now` is wired, Drive connects per workspace
- * against a per-workspace route (`workspace Drive grant`), and there is no switch-account
+ * against a per-workspace route (workspace Drive grant), and there is no switch-account
  * control. A permanently-true flag is the mirror image of a
  * permanently-false one, and neither survives a reader asking what it
  * would take to flip it.
@@ -368,7 +368,7 @@ export default async function SettingsPage({
 
         {/*
           No `editable` here either: Connect, the folder picker, Sync Now,
-          Remove and Disconnect all call routes that exist (`workspace Drive grant`), and
+          Remove and Disconnect all call routes that exist (workspace Drive grant), and
           gating them would be the reads-without-writes harm inverted, hiding
           controls that work. `isAdmin` gates one control only: removing a
           Telegram group, which the API refuses below the admin floor.

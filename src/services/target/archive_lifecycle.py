@@ -195,7 +195,7 @@ class SubjectRevocation:
 
 
 #: Each workspace's current authorizations for the subject, classified the way
-#: `fn_meta_deletion_receive` classifies a deletion (`Meta deletion receipt functions`) against the order
+#: `fn_meta_deletion_receive` classifies a deletion (Meta deletion receipt functions) against the order
 #: evidence: in scope when the authorization certainly predates the request,
 #: excluded when it certainly follows it, held otherwise. With no evidence, an
 #: account's only authorization for the subject is in scope; where it has more

@@ -1,5 +1,5 @@
 """The Drive connect gate — the first non-`ig_login` credential, measured as
-`svc_ingress` under RLS (the grant is the WORKSPACE's: `workspace Drive grant`).
+`svc_ingress` under RLS (the grant is the WORKSPACE's: workspace Drive grant).
 
 Two workspaces, for the reason every tenancy assertion in this tier needs two:
 "the row landed in workspace A" is only a claim if there was a workspace B it
@@ -82,7 +82,7 @@ def _error_page(reason: str) -> str:
 def _store(world, tenant, *, grant, by=None) -> str:
     """`store_credential` as the callback runs it: one committed unit of work
     under *tenant*, as its user (the granter, unless *by* names another).
-    Returns the credential id. The grant is the workspace's (`workspace Drive grant`): no source
+    Returns the credential id. The grant is the workspace's (workspace Drive grant): no source
     is named."""
     by = by or tenant["user"]
     return _run(
@@ -164,11 +164,11 @@ class TestTheCredentialRow:
         cid = _store(world, a, grant=drive_grant())
         (row,) = _credential_rows(world, a["ws"])
         assert str(row["id"]) == cid
-        # THE invariant `workspace Drive grant` states: provider, and NO owner column — the
+        # THE invariant workspace Drive grant states: provider, and NO owner column — the
         # workspace is the owner.
         assert row["provider"] == "gdrive"
         assert row["media_source_id"] is None and row["ig_account_id"] is None
-        # The `fn_clock_tick provider guards` fence stays closed, so this must be NULL.
+        # The `fn_clock_tick` provider guards fence stays closed, so this must be NULL.
         assert row["next_refresh_at"] is None
         assert row["state"] == "active"
         assert row["expires_at"] is not None
@@ -292,7 +292,7 @@ class TestTheCredentialRow:
         _store(world, a, grant=drive_grant(access_token="ya29.second"))
 
     def test_the_schema_refuses_a_per_source_gdrive_row(self, world):
-        """`workspace Drive grant`'s CHECK, measured: the folder-first shape cannot be stored by
+        """workspace Drive grant's CHECK, measured: the folder-first shape cannot be stored by
         accident — a gdrive row naming a source is refused at the constraint."""
         a = world["a"]
         conn = psycopg2.connect(world["stream"])

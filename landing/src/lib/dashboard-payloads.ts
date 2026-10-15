@@ -173,7 +173,7 @@ export type SourceRow = {
 export type SourcesResponse = { sources: SourceRow[] };
 
 /**
- * `GET /workspaces/{ws}/drive` — the WORKSPACE's Google Drive grant (`workspace Drive grant`:
+ * `GET /workspaces/{ws}/drive` — the WORKSPACE's Google Drive grant (workspace Drive grant:
  * one per workspace, every folder under it), projected as the
  * destinations' credentials are. `none` = never connected; `expired` and
  * `revoked` = reconnect needed. Never a token.
@@ -567,7 +567,7 @@ export function deriveSettings(
     /*
      * This is the CREDENTIAL's answer rather than the source row's: a
      * folder pasted by link can exist before any grant does. The credential
-     * is the WORKSPACE's (`workspace Drive grant`) — one grant, every folder under it — so
+     * is the WORKSPACE's (workspace Drive grant) — one grant, every folder under it — so
      * the answer comes from `GET /workspaces/{ws}/drive`, and a source row
      * says nothing about it either way.
      *

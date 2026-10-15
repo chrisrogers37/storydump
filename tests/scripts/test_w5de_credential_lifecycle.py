@@ -93,7 +93,7 @@ def _jobs_of_kind(conn, kind: str) -> list[dict]:
 
 
 class TestTheClockMintsTheReauthLeg:
-    """`fn_clock_tick reauthentication leg`: fn_clock_tick gains the reauth-prompt cadence leg."""
+    """`fn_clock_tick` mints due reauthentication prompts."""
 
     def test_a_reauth_required_account_is_prompted_and_an_active_one_is_not(
         self, world_db, sync_conn
@@ -160,36 +160,24 @@ class TestTheClockMintsTheReauthLeg:
 
 
 class TestTheRefreshLegIsProviderGuarded:
-    """`fn_clock_tick provider guards`.
+    """`fn_clock_tick` refreshes due Instagram credentials and skips Drive grants.
 
-    `fn_clock_tick reauthentication leg`'s refresh leg selected due credentials on `state`/`next_refresh_at` with
-    NO provider filter, and `ig_refresh` then builds IG-shaped params against
-    graph.instagram.com unconditionally. That was safe BY CONSTRUCTION ONLY:
-    `store_credential` takes no provider argument and binds `PROVIDER =
-    "ig_login"`, and it is the one INSERT site in the tree.
-
-    But `ck_credentials_provider` already admits 'gdrive', so the row is
-    insertable the moment a gdrive writer lands — and an armed gdrive row would
-    have its token posted to Instagram's host, draw a definitive 400, and be
-    wrongly `mark_dead`-ed. Both flips, permanent until reconnect.
-
-    THE GUARD IS ONLY WORTH ANYTHING IF IT CAN GO RED, so this drives both
-    providers through one tick: the ig_login row must still mint (or the guard
-    is refusing everything and would pass by breaking the feature), and the
-    gdrive row must not. Deleting `AND provider = 'ig_login'` from `fn_clock_tick provider guards` turns the
-    second assertion red.
+    Both providers are legal credential rows. `ig_refresh` sends Instagram
+    parameters to its provider host, so only `ig_login` credentials may reach
+    it. The same tick must mint for Instagram and leave Drive untouched; the
+    positive control prevents a provider filter that rejects every row from
+    passing this gate.
     """
 
     @staticmethod
     def _arm(conn, chain, provider: str, account_id, token_label: str) -> str:
         """Insert an ARMED credential directly — bypassing store_credential.
 
-        Deliberate: `store_credential` cannot produce a gdrive row (that is the
-        construction the guard replaces), so a test routed through it could not
-        reach the state under test at all.
+        `store_credential` accepts only Instagram credentials. Direct insertion
+        supplies both provider shapes so the tick's provider filter is tested.
 
         The owner column differs by provider and the schema enforces it —
-        `ck_credentials_one_owner` (`workspace Drive grant`) requires an `ig_login` credential to
+        `ck_credentials_one_owner` (workspace Drive grant) requires an `ig_login` credential to
         name its account and a `gdrive` credential to name NOTHING (the
         workspace is its owner). Writing a Drive credential account-owned
         raises CheckViolation rather than reaching the leg under test.
@@ -413,7 +401,7 @@ class TestRefreshExecutorOnTheRealMachinery:
     async def test_definitive_rejection_flips_both_and_the_cadence_prompts(
         self, world_db, sync_conn
     ):
-        """The whole refresh→`fn_clock_tick reauthentication leg`→prompt arc, end to end on the real schema."""
+        """The whole refresh→`fn_clock_tick`→prompt arc, end to end on the real schema."""
         import uuid as uuidlib
 
         from src.services.target.credential_lifecycle import RefreshRejected
@@ -440,7 +428,7 @@ class TestRefreshExecutorOnTheRealMachinery:
             "a definitive rejection is handled work, not a retry"
         )
 
-        # The `fn_clock_tick reauthentication leg` leg is the single prompt producer: next tick mints.
+        # `fn_clock_tick` is the single prompt producer: next tick mints.
         _tick(sync_conn)
         prompts_minted = _jobs_of_kind(sync_conn, "reauth_prompt")
         assert len(prompts_minted) == 1

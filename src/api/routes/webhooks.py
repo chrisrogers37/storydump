@@ -2,7 +2,7 @@
 
 This route mounts `webhook_ingress`'s `verify_secret_token`, `fingerprint`
 and `admit`. It stops at the resolution seam: tenant resolution belongs
-to `tenant_resolution` and its resolver door (`fn_resolve_binding`, `fn_channel_join / fn_channel_leave`),
+to `tenant_resolution` and its resolver door (`fn_resolve_binding`, `fn_channel_join` / `fn_channel_leave`),
 and none of it is here.
 
 ## Why admission needs no tenant

@@ -722,7 +722,7 @@ class TestTheLockAndItemRule:
         serve = _door(world, "fn_prompts_due")
         assert intent_ledger.LIVE_ACCOUNT in serve
         assert "m.state = 'available'" in serve
-        # a repeating story's successor is made only on a live account (`intent repeat constraints`)
+        # a repeating story's successor is made only on a live account (repeat rules)
         assert intent_ledger.LIVE_ACCOUNT in _door(world, "trg_intent_repeat")
 
 

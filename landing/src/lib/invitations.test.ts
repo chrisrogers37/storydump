@@ -17,7 +17,7 @@ import {
 /**
  * The pure decisions behind inviting a person: which link is
  * shown, which pending invitations are listed, and the date each one expires.
- * And the invited person's own (`invitee invitation functions`): what they are told is waiting, and what
+ * And the invited person's own (invitee invitation functions): what they are told is waiting, and what
  * "Email me the link again" answered.
  */
 

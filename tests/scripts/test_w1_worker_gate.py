@@ -236,7 +236,7 @@ class TestParkingOnTheRealMachinery:
     ):
         """A deferral moves the job's deadline with its `run_at`, so the
         parking contract's "never finalized dead" survives the reaper's
-        deadline leg (`fn_reaper_sweep deadline leg`). Seeded a minute past its deadline, the parked job's
+        deadline leg (`fn_reaper_sweep` deadline leg). Seeded a minute past its deadline, the parked job's
         deadline moves exactly as far as its `run_at`, and a sweep leaves it
         `ready`."""
         chain = seed_workspace_chain(sync_conn, "w1parkdl")

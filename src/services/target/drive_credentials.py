@@ -7,7 +7,7 @@ and hands the adapter a token or a typed refusal.
 
 ## It resolves by WORKSPACE, never by file id, and not by source
 
-A `gdrive` credential is the WORKSPACE's (`workspace Drive grant`): one Google grant, every
+A `gdrive` credential is the WORKSPACE's (workspace Drive grant): one Google grant, every
 folder under it, and the row names no owner column. So a source's token is its
 workspace's grant, and the source id plays no part in the lookup (it is kept in
 the provider's signature because the adapter names the source it is syncing).
@@ -34,7 +34,7 @@ source in `error` rather than a poisoned lane.
 ## The refresh door lives HERE, on the read path
 
 `credential_lifecycle` ships `ig_refresh` and no Google analogue, and the
-refresh clock is fenced to `ig_login` (`fn_clock_tick provider guards`) by design: gdrive rows carry
+refresh clock is fenced to `ig_login` (`fn_clock_tick` provider guards) by design: gdrive rows carry
 `next_refresh_at = NULL` and are minted on the READ path, not by the clock.
 That is this module's `_refresh`: an access token at or past its expiry (less
 `REFRESH_SKEW`) is exchanged for a fresh one with the stored refresh token,
@@ -78,7 +78,7 @@ REFRESH_SKEW = timedelta(minutes=5)
 async def token_for_source(
     engine, source_id, *, workspace_id: str, fresh: bool = False
 ) -> str:
-    """The source's Drive access token — its WORKSPACE's grant (`workspace Drive grant`) — or
+    """The source's Drive access token — its WORKSPACE's grant (workspace Drive grant) — or
     :class:`DriveCredentialDead`. `source_id` is not consulted: the adapter
     passes it for its own messages, and `None` is the folder browser.
     `fresh` forces a refresh — the adapter's one retry after Google refused a

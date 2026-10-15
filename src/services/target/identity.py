@@ -79,7 +79,7 @@ async def upsert_google_identity(
     A subject seen before signs in whatever *signup_open* says. A NEW one
     creates its user only when `fn_signup_admitted` admits its email — an
     owner admission or a live invitation addressed to it (`fn_signup_admitted`) from an active
-    workspace whose owner or admin still sent it (`invitation legitimacy checks`) — and is
+    workspace whose owner or admin still sent it (invitation legitimacy checks) — and is
     refused with `SignupNotAdmitted` otherwise, a None email included.
     *signup_open* (`TARGET_SIGNUP_OPEN`) skips that ask.
     """

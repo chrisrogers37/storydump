@@ -716,13 +716,13 @@ class TestRemoveMemberGoesThroughTheDoor:
         ) = ex.calls
         assert "fn_member_remove(" in sql and "DELETE" not in sql.upper()
         assert params == {"ws": "ws", "u": "u2", "by": "u1"}
-        # `workspace member removal`: the service identities the removed person minted go with them,
+        # workspace member removal: the service identities the removed person minted go with them,
         # in the same transaction — this workspace's, and only theirs.
         assert "UPDATE service_tokens SET revoked_at = now()" in revoke_sql
         assert "created_by_user_id = :u" in revoke_sql
         assert "workspace_id = :ws" in revoke_sql
         assert revoke_params == {"ws": "ws", "u": "u2"}
-        # `invitation legitimacy checks`: so do the pending invitations they sent or were sent.
+        # invitation legitimacy checks: so do the pending invitations they sent or were sent.
         assert "UPDATE workspace_invitations SET state = 'revoked'" in invites_sql
         assert "invited_by_user_id = :u" in invites_sql
         assert "SELECT lower(primary_email) FROM users" in invites_sql

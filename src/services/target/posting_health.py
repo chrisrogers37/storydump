@@ -104,7 +104,7 @@ poller must not consult it for the verdict.
 ## Bounds, stated because they will not be obvious later
 
 **Cross-tenant reach is a door, not a privilege.** Each read here is a
-SECURITY DEFINER function owned by `svc_maintenance` (`fleet health functions`) with
+SECURITY DEFINER function owned by `svc_maintenance` (fleet health functions) with
 EXECUTE for the runtime logins — the same footing `scheduling_lag` and the
 backpressure snapshot stand on. Without it, under `svc_ingress` every
 policy-covered table reads empty to these tenant-less queries, `posted_ever`
@@ -153,7 +153,7 @@ async def posting_freshness(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    # The door's body (`fleet health functions`): min-of-ages, not max-of-times,
+                    # The door's body (fleet health functions): min-of-ages, not max-of-times,
                     # because FILTER binds to the AGGREGATE — the freshest
                     # landing is the SMALLEST age.
                     "SELECT o_posted_ever AS posted_ever,"
@@ -249,7 +249,7 @@ async def destinations(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    # max-of-ages, not min-of-times, inside the door (`fleet health functions`):
+                    # max-of-ages, not min-of-times, inside the door (fleet health functions):
                     # the OLDEST destination is the LARGEST age, and it is the
                     # rung that dates the estate's expectation to post.
                     "SELECT o_accounts_active AS accounts_active,"

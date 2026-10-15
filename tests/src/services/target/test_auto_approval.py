@@ -194,7 +194,7 @@ class TestTheFactsRead:
             "p.workspace_id = :ws",
         ):
             assert binding in sql, binding
-        # The probe repeats `ix_intents_api_posted`'s predicate (`approval position constraints`), so the
+        # The probe repeats `ix_intents_api_posted`'s predicate (approval rules), so the
         # planner can use the partial index.
         assert "p.state = 'posted' AND p.published_via = 'api'" in sql
         assert "_CARD_SELECT" not in sql and "fn_prompts_due" not in sql

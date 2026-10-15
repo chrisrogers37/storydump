@@ -64,7 +64,7 @@ def settle_transit(db, w, *, destroyed):
     )
 
 
-# --- `archive lifecycle cleanup`: the redaction door -------------------------------------------------
+# --- archive lifecycle cleanup: the redaction door -------------------------------------------------
 
 
 def test_redaction_refuses_by_name_until_nothing_can_use_the_records(db):
@@ -170,7 +170,7 @@ def test_redaction_refuses_by_name_until_nothing_can_use_the_records(db):
     )
 
 
-# --- `archive lifecycle cleanup`: the finalize transit guard and the offboarding cascade -------------
+# --- archive lifecycle cleanup: the finalize transit guard and the offboarding cascade -------------
 
 
 ARCHIVE_ROWS = (
@@ -252,7 +252,7 @@ def test_finalize_refuses_an_owed_transit_upload_then_cascades_every_archive_row
     assert count(db, "meta_deletion_receipt_scopes", "workspace_id = %s", ws) == 1
 
 
-# --- `archive lifecycle job kinds`: the deletion cleanup jobs ------------------------------------------
+# --- archive lifecycle job kinds: the deletion cleanup jobs ------------------------------------------
 
 
 def cleanup(db, limit=25):
@@ -304,7 +304,7 @@ def test_cleanup_mints_one_job_per_due_receipt_workspace_and_never_a_second(db):
         "SELECT serialization_key FROM jobs WHERE kind = 'meta_deletion_cleanup' AND state = 'ready'",
     ) == [(f"receipt:{r['id']}:{second['ws']}",)]
     settle_jobs(db, "meta_deletion_cleanup")
-    # Completion is structural (`Meta deletion receipt functions`): the cleanup has deleted what each scope froze.
+    # Completion is structural (Meta deletion receipt functions): the cleanup has deleted what each scope froze.
     for w in (first, second):
         receipts.set_lifecycle(db, w, "deleted")
     receipts.progress(db, r["id"], second, "completed")
@@ -551,7 +551,7 @@ def test_a_held_scope_is_due_until_its_generations_are_fenced(db):
     assert cleanup(db) == 0, "held for review: nothing left to fence"
 
 
-# --- `archive lifecycle job kinds`: the reconciliation jobs --------------------------------------------
+# --- archive lifecycle job kinds: the reconciliation jobs --------------------------------------------
 
 
 def converted(db, ws):

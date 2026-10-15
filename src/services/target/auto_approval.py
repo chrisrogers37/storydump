@@ -16,7 +16,7 @@ do. The order, where the first match wins:
    before → ``returning``.** Never a post made by hand, never a dry run.
 5. **Otherwise → none.**
 
-The ledger admits the approval: `tg_intent_person_or_rule` (`approval position constraints`) takes
+The ledger admits the approval: `tg_intent_person_or_rule` (approval rules) takes
 `awaiting_approval → approved` from the system only when the same UPDATE
 stamps the rule, and `intent_ledger.transition` is that UPDATE's one writer.
 This module writes no card: the story's card renders settled when it is sent
@@ -63,7 +63,7 @@ class Decision(NamedTuple):
 #: verbatim to `fn_prompts_due`'s body. Every table is bound on the workspace.
 #: `has_login` is `approve`'s own precondition, the one spelling
 #: (`ig_credentials.usable_login_sql`), and `posted_via_api` is a probe of
-#: `ix_intents_api_posted` (`approval position constraints`), whose predicate it repeats.
+#: `ix_intents_api_posted` (approval rules), whose predicate it repeats.
 _FACTS = (
     "SELECT i.provider_account_ref, i.cancel_requested,"
     "       w.api_publishing_enabled, w.dry_run_mode,"

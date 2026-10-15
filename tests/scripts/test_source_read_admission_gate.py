@@ -71,7 +71,7 @@ async def test_empty_on_archive_admits_without_item_or_pool(archive_engine, orig
             "UPDATE instagram_archive_generations SET lifecycle='deletion_pending' WHERE id=:gid",
             "generation_unavailable",
         ),
-        # `archive lifecycle cleanup`: a generation held for review is unavailable, not destroyed.
+        # archive lifecycle cleanup: a generation held for review is unavailable, not destroyed.
         (
             "UPDATE instagram_archive_generations SET lifecycle='review_hold' WHERE id=:gid",
             "generation_unavailable",

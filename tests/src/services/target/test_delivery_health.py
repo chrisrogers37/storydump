@@ -14,7 +14,7 @@ from src.services.target import delivery_health
 
 
 class _Doors:
-    """Answers `outbox failure records`'s two doors from scripted rows and refuses anything else."""
+    """Answers outbox failure records' two doors from scripted rows and refuses anything else."""
 
     def __init__(self, failures=(), sent=0):
         self.failures = [

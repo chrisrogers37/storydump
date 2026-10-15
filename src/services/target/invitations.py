@@ -73,7 +73,7 @@ CHANNELS = ("email", "telegram")
 INVITE_TTL_SECONDS = 7 * 24 * 3600
 
 #: The caller's verified address, read in the statement that asks a door: the
-#: accept door, and the invitee's two (`invitee invitation functions`). `users` is user-plane, so the
+#: accept door, and the invitee's two (invitee invitation functions). `users` is user-plane, so the
 #: API's login reads it and the doors' owner never needs to.
 _THEIR_ADDRESS = "(SELECT primary_email FROM users WHERE id = :u)"
 
@@ -129,7 +129,7 @@ async def revoke_on_removal(executor, *, workspace_id: str, user_id: str) -> int
 
     Sent: the removed member's invitations no longer speak for the workspace.
     Addressed: the accept door already refuses an invitation older than the
-    removal (`invitation legitimacy checks`), so neither arm should stay listed as pending; an email one
+    removal (invitation legitimacy checks), so neither arm should stay listed as pending; an email one
     would also hold `uq_invite_live` and block the fresh invitation that is
     meant to bring the person back. The Telegram id is compared as text
     because that is how `user_identities` stores it. Returns how many moved."""
@@ -242,7 +242,7 @@ async def create(
     # stops working and the new one carries this send's role and inviter. The
     # addressee is the email or the Telegram id, as `revoke_on_removal` reads
     # it. The old one may also be one the accept door now refuses (its sender
-    # demoted or removed, or its addressee removed since, `invitation legitimacy checks`), which for an
+    # demoted or removed, or its addressee removed since, invitation legitimacy checks), which for an
     # email would otherwise hold `uq_invite_live` until the reaper expires it.
     #
     # Sends to one addressee are serialized for the rest of the transaction:
@@ -506,7 +506,7 @@ def _invitation_email(
 
 
 # ---------------------------------------------------------------------------
-# The invitee's own (`invitee invitation functions`): what they could accept, and a fresh link
+# The invitee's own (invitee invitation functions): what they could accept, and a fresh link
 # ---------------------------------------------------------------------------
 
 

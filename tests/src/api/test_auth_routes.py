@@ -1207,7 +1207,7 @@ class TestInstagramCallback:
 
 class TestDriveCallback:
     """`GET /auth/google-drive/callback` — the return half of the WORKSPACE's
-    Drive connect (`workspace Drive grant`). The state row is trusted for what it pins,
+    Drive connect (workspace Drive grant). The state row is trusted for what it pins,
     which is the workspace itself; the returning browser must carry the
     state user's session and that user must still be admin (the Instagram
     leg's two checks); the provider call sits between the two transactions;

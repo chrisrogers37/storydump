@@ -97,7 +97,7 @@ LIVE_SUBJECT = (
 
 #: An account a story may still post to, as SQL on the account's alias ``a``:
 #: one spelling for the schedule verbs' account read, the serve and miss doors,
-#: the successor trigger (`intent repeat constraints`), which the schedule gate pins against their
+#: the successor trigger (repeat rules), which the schedule gate pins against their
 #: bodies, and the calendar's projection of a series (`upcoming`).
 LIVE_ACCOUNT = (
     "a.state IN (" + ", ".join(f"'{s}'" for s in vocabulary.LIVE_ACCOUNT_STATES) + ")"
@@ -105,7 +105,7 @@ LIVE_ACCOUNT = (
 
 
 def repeat_sql(prefix: str = "") -> str:
-    """A story's repeat rule as one value, NULL for none (`intent repeat constraints`): the one
+    """A story's repeat rule as one value, NULL for none (repeat rules): the one
     shape every read and every answer carries, ``{unit, every, days, at}``
     with ``at`` as ``HH:MM``. *prefix* is the table's alias (``"i."``), or
     nothing for a bare row (a RETURNING)."""
@@ -149,7 +149,7 @@ async def transition(
 
     *approval_rule* is the automatic approval's stamp: the serve step
     passes it with `approved`, and the same UPDATE writes it, because
-    `tg_intent_person_or_rule` (`approval position constraints`) admits a rule only on the approval it
+    `tg_intent_person_or_rule` (approval rules) admits a rule only on the approval it
     names. This is the column's one writer.
 
     The caller must be inside a unit of work that has set `app.actor_kind` —

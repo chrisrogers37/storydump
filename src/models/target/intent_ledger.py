@@ -37,7 +37,8 @@ from src.models.target.columns import TZ, fk, pk, timestamps
 class CategoryPostCaseMix(TargetBase):
     """The per-workspace category ratio, row-shaped with Type 2 SCD semantics:
     a change closes the current row with `effective_to` and opens a new
-    one, so `uq_case_mix_current` is partial on `effective_to IS NULL`."""
+    one. `uq_case_mix_current_by_source` permits one current row per source,
+    using `effective_to IS NULL AND source_id IS NOT NULL`."""
 
     __tablename__ = "category_post_case_mix"
 
@@ -45,7 +46,7 @@ class CategoryPostCaseMix(TargetBase):
     workspace_id = fk("workspaces.id", "CASCADE", nullable=False)
     category = Column(
         Text, nullable=False
-    )  # the label the card shows (`category_post_case_mix.source_id`)
+    )  # the connected folder's display label, captured when the mix is saved
     ratio = Column(Numeric(), nullable=False)
     effective_from = Column(TZ, nullable=False, server_default=text("now()"))
     effective_to = Column(TZ, nullable=True)
@@ -91,7 +92,7 @@ class PostIntent(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'scheduled'"))
     cancel_requested = Column(Boolean, nullable=False, server_default=text("false"))
     schedule_slot_at = Column(TZ, nullable=False)
-    # Every insert writes 'manual' (`approval position constraints`); a row holding another mode carries
+    # Every insert writes 'manual' (approval rules); a row holding another mode carries
     # the workspace's mode as it was copied at mint.
     approval_mode = Column(Text, nullable=False)
     approved_by_user_id = fk("users.id", "SET NULL", nullable=True)
@@ -106,8 +107,8 @@ class PostIntent(TargetBase):
     cap_refunded_at = Column(TZ, nullable=True)
     # The colon is backslash-escaped: SQLAlchemy `text()` reads `:1` as a BIND
     # PARAMETER and would emit `DEFAULT '{"v"NULL}'`, so the table would not
-    # create. The parity gate never compares defaults, so this fails loudly at
-    # `create_all` rather than as drift.
+    # create. Escaping preserves the JSON default when the schema is built;
+    # the catalog comparator checks the stored default after construction.
     attempts_by_step = Column(
         JSONB, nullable=False, server_default=text(r"""'{"v"\:1}'""")
     )
@@ -119,12 +120,12 @@ class PostIntent(TargetBase):
     # cadence ones.
     origin = Column(Text, nullable=False, server_default=text("'cadence'"))
     scheduled_by_user_id = fk("users.id", "SET NULL", nullable=True)
-    # `approval position constraints`: the rule that approved the story — NULL for a person, or while it
+    # approval rules: the rule that approved the story — NULL for a person, or while it
     # waits. `tg_intent_person_or_rule` stamps it only with the approval and
     # keeps `origin` fixed at birth. The trigger functions and bindings live
     # in `ddl/04_functions.sql` and `ddl/06_triggers.sql`.
     approval_rule = Column(Text, nullable=True)
-    # `intent repeat constraints`: a planned story's repeat rule: the unit ('day' or 'week'), the
+    # repeat rules: a planned story's repeat rule: the unit ('day' or 'week'), the
     # interval, the ISO weekdays (weekly only) and the local time of day. All
     # four or none, and only on a planned story. `tg_intent_repeat` makes the
     # next occurrence when one ends. Its definition lives in
@@ -201,7 +202,7 @@ class PostIntent(TargetBase):
             "approval_rule IN ('auto','item','returning')",
             name="ck_intent_approval_rule",
         ),
-        # A waiting story is always one a person decides (`approval position constraints`).
+        # A waiting story is always one a person decides (approval rules).
         CheckConstraint(
             "approval_rule IS NULL OR state NOT IN "
             "('scheduled','prompt_pending','awaiting_approval')",
@@ -224,7 +225,7 @@ class PostIntent(TargetBase):
             " END",
             name="ck_intent_repeat",
         ),
-        # The slot key is cadence's alone (`post_intents.origin` expand, `fn_planned_serve / fn_planned_misses` contract): a planned
+        # The slot key applies only to cadence rows: a planned
         # row takes no slot, so it never absorbs a slot's mint and a cadence
         # mint never meets it. `plan_slot`'s conflict target carries the
         # predicate, which is how Postgres infers this partial index.
@@ -266,17 +267,15 @@ class PostIntent(TargetBase):
         # a workspace's stories by slot, in every state, for the
         # calendar's month, its day view and the Overview's recent activity.
         Index("ix_intents_workspace_slot", "workspace_id", "schedule_slot_at"),
-        # `approval position constraints`: "posted through the API before", the Returning items probe.
+        # approval rules: "posted through the API before", the Returning items probe.
         Index(
             "ix_intents_api_posted",
             "workspace_id",
             "media_item_id",
             postgresql_where=text("state = 'posted' AND published_via = 'api'"),
         ),
-        # Created by `machinery.py`, not `intent_ledger.py` — with the outbox rather than with
-        # the ledger. It lives here because
-        # `create_all` renders a table's indexes from its own `__table_args__`,
-        # so this is the only place the model side can produce it.
+        # The parked-intent index belongs to this table's model.
+        # `create_all` renders indexes from the table's `__table_args__`.
         Index(
             "ix_intents_parked",
             "entered_state_at",
@@ -348,7 +347,7 @@ class DailyPostCount(TargetBase):
 
 class PostIntentTransition(TargetBase):
     """The legal-edge reference table. `trg_intent_guard` reads it on every
-    UPDATE, so the seeds from `intent_ledger.py`, `post_intent_transitions publish wait edges` and the early archive review edges
+    UPDATE, so the seeds from `intent_ledger.py`, `post_intent_transitions` and the early archive review edges
     in the archive review transitions enforce behavior rather than
     fixture data — an unseeded copy of this schema rejects every transition.
 

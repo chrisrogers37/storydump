@@ -359,7 +359,7 @@ GDRIVE_PROVIDER = vocabulary.PROVIDER_GDRIVE
 
 
 async def drive_status(executor, *, workspace_id: str) -> dict:
-    """The WORKSPACE's Google Drive grant (`workspace Drive grant`: one per workspace,
+    """The WORKSPACE's Google Drive grant (workspace Drive grant: one per workspace,
     every folder under it) — `none` (never connected) · `active` · `expired` ·
     `revoked` — plus when it was last granted. Never a token.
 
@@ -570,15 +570,15 @@ async def list_bindings(executor, *, workspace_id: str) -> list[dict]:
 
 
 async def list_invitations(executor, *, workspace_id: str) -> list[dict]:
-    """Pending invitations the doors would still honour (`invitation legitimacy checks`): the workspace
+    """Pending invitations the doors would still honour (invitation legitimacy checks): the workspace
     is active and the sender is still an owner or admin there with an active
     account. The others are dead links that age out with their expiry, so they
-    are not listed as pending. The predicate mirrors `invitation legitimacy checks`'s two doors by hand.
+    are not listed as pending. The predicate mirrors invitation legitimacy checks' two doors by hand.
 
     The doors' third check, a removal newer than the invitation, is not
     repeated: the runtime cannot read the removal record, and it needs
     none. A removal revokes the invitations addressed to the person in its own
-    transaction (`invitations.revoke_on_removal`), and `invitation legitimacy checks` revoked the ones
+    transaction (`invitations.revoke_on_removal`), and invitation legitimacy checks revoked the ones
     older removals left pending, so the state filter already leaves them out.
     The token is never read back — only its hash is stored, and the row
     exposes nothing a caller could present."""
@@ -784,7 +784,7 @@ _INTENT_COLUMNS = (
     " COALESCE(a.tz, w.tz) AS tz,"
     f" CASE WHEN i.last_error->>'class' = '{vocabulary.PLANNED_MISSED}'"
     "      THEN i.last_error->>'message' END AS miss_reason,"
-    # a planned story's repeat rule as one value, NULL for none (`intent repeat constraints`)
+    # a planned story's repeat rule as one value, NULL for none (repeat rules)
     f" {intent_ledger.repeat_sql('i.')} AS repeat,"
     " m.file_name, m.media_kind, m.caption, m.category, m.link_url,"
     f" {_picture_sql('m.')},"
@@ -1272,7 +1272,7 @@ async def remove_member(
     must be the claimed tenant and *by_user_id* an owner or admin of it, or it
     raises. The door records the removal, which the Telegram join
     path honours until the person is invited back. In the same transaction,
-    the workspace service identities they minted are revoked (`workspace member removal`), as are the
+    the workspace service identities they minted are revoked (workspace member removal), as are the
     pending invitations in the workspace that they sent or that are addressed
     to them, so none of them lets anyone in and none blocks the fresh
     invitation that brings them back, and every live link state they hold for
@@ -1289,7 +1289,7 @@ async def remove_member(
     outcome = row[0] if row is not None else "not_found"
     if outcome == "removed":
         # The door recorded the removal, which the Telegram join path honours
-        # (`workspace member removal`); the service identities this person minted go with them, and so
+        # (workspace member removal); the service identities this person minted go with them, and so
         # do the pending invitations they sent or were sent and every bind or
         # connect link they hold for this workspace.
         await service_tokens.revoke_minted_by(

@@ -51,8 +51,8 @@ class Job(TargetBase):
     locked_until = Column(TZ, nullable=True)
     lease_token = Column(UUID(as_uuid=True), nullable=True)
     # Backslash-escaped colon: `text()` reads `:1` as a bind parameter and would
-    # emit `DEFAULT '{"v"NULL}'`, so the table would not create. The parity gate
-    # never compares defaults, so this fails at `create_all`, not as drift.
+    # emit `DEFAULT '{"v"NULL}'`, so the table would not create. Escaping
+    # preserves valid DDL; catalog parity compares the stored default.
     payload = Column(JSONB, nullable=False, server_default=text(r"""'{"v"\:1}'"""))
     created_at, updated_at = timestamps()
 
@@ -133,7 +133,7 @@ class ChannelOutbox(TargetBase):
     attempts = Column(Integer, nullable=False, server_default=text("0"))
     external_message_ref = Column(Text, nullable=True)
     created_at, updated_at = timestamps()
-    # The row's LAST failed attempt, not how it ended (`outbox failure records`): the class
+    # The row's LAST failed attempt, not how it ended (outbox failure records): the class
     # (`vocabulary.OUTBOX_FAILURE_CLASSES`), the provider's own code for it
     # (Telegram's `error_code`; NULL when no answer came back) and when. A later
     # success does not clear them; `state` says how the row ended.

@@ -5,7 +5,7 @@ What only PostgreSQL can say, and so is pinned here rather than in
 `tests/src/services/target/test_command_executors.py`:
 
 - **The login may write it.** `svc_ingress` holds UPDATE on `media_items`
-  (`09_grants.sql`), so `approval position constraints`'s column needs no grant of its own.
+  (`09_grants.sql`), so approval rules' column needs no grant of its own.
 - **A member may set it**: the port's gate admits the `member` floor.
 - **Only this workspace's item.** Under the tenant's policy another
   workspace's item is `not_found`, and it keeps its flag.

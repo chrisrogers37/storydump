@@ -25,7 +25,7 @@ interface Props {
  * NULL means "no workspace value — the deployment's defaults apply"
  * (`DEFAULT_REPOST_TTL_DAYS`, `DEFAULT_SKIP_TTL_DAYS`), which is not the same
  * as zero and not the same as any particular number. The per-chat TTL columns
- * on `chat_settings` (`chat lock TTL settings`) are not read by this tier.
+ * on `chat_settings` (chat lock TTL settings) are not read by this tier.
  *
  * The fields SHOW that fallback, marked as a default, and it arrives on the
  * payload rather than being written here. Both halves matter: a copy

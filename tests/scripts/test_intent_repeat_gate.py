@@ -1,4 +1,4 @@
-"""Gate: a planned story repeats (`intent repeat constraints`;).
+"""Gate: a planned story repeats (repeat rules;).
 
 `post_intents` carries a four-column repeat rule. `fn_repeat_times` gives the rule's grid, reading
 local times through `fn_wall_instant`, and `tg_intent_repeat` makes the next occurrence in the
@@ -755,7 +755,7 @@ class TestASuccessorStartsClean:
         """Every column tg_intent_repeat's INSERT does not name holds its default on the
         successor's approval_rule among them, and nothing is carried over from
         the ended occurrence. `approval_mode` is named, and written as 'manual', as
-        every insert writes it (`approval position constraints`)."""
+        every insert writes it (approval rules)."""
         w = _ws(world, "clean")
         s = _seed(world, w, state="publishing", slot_in_s=-600, cap=True)
         _exec(

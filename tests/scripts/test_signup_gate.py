@@ -7,12 +7,12 @@ unexpired invitation is addressed to it. It runs here as the production role
 upsert that asks it, so the bound parameter's type is the real one too. The
 admissions are seeded as the schema owner, the way the owner admits someone.
 
-`invitation legitimacy checks` holds the invitation branch to the invitation's standing, read
+invitation legitimacy checks holds the invitation branch to the invitation's standing, read
 live: it counts only from an `active` workspace whose owner or admin still sent
 it, so a removed or demoted inviter, a suspended workspace and an invitation
 with no recorded inviter admit nobody new.
 
-`invitee invitation functions` lets someone who signed in without the link see the invitations
+invitee invitation functions lets someone who signed in without the link see the invitations
 the accept door would honour for their address, and have the link sent again:
 a fresh token for the same invitation, emailed to its address alone.
 
@@ -90,7 +90,7 @@ INVITATIONS = {
 LIVE = {"live@example.com", "Mixed@Example.com"}
 
 #: (address, who sent it) for each pending, unexpired invitation whose
-#: standing `invitation legitimacy checks` judges. The owner sent every invitation above.
+#: standing invitation legitimacy checks judges. The owner sent every invitation above.
 SENT_BY = {
     "from-admin@example.com": "admin",
     "from-removed@example.com": "removed",
@@ -250,7 +250,7 @@ class TestTheDoor:
 
     @pytest.mark.parametrize("email", [e for e in SENT_BY if e not in STANDING])
     def test_an_invitation_that_lost_its_standing_lets_nobody_in(self, world, email):
-        """`invitation legitimacy checks`: the inviter was removed, demoted or disabled, the workspace is
+        """invitation legitimacy checks: the inviter was removed, demoted or disabled, the workspace is
         suspended, or nobody is recorded as the inviter — the invitation is
         pending and unexpired, and still admits no new account."""
         assert _admitted(world, email) is False
@@ -303,7 +303,7 @@ def _accept(world, email, user, *, token=None):
 
 
 class TestTheAcceptDoor:
-    """`invitation legitimacy checks` holds `fn_invitation_accept` to the same standing as the sign-up
+    """invitation legitimacy checks holds `fn_invitation_accept` to the same standing as the sign-up
     door, so an EXISTING account cannot come in through an invitation the
     sign-up door refuses, and a removal outranks an invitation sent before it.
     The refusal is the door's own `no_data_found`, the answer a used or
@@ -661,7 +661,7 @@ class TestTheSignInRoute:
         assert _users_with(world, "friend@example.com") == 1
 
 
-# --- `signup admission functions`: the claim link at sign-in ---------------------------------
+# --- signup admission functions: the claim link at sign-in ---------------------------------
 
 
 def _unspent(world, email, token):
@@ -1045,7 +1045,7 @@ class TestWhatAnAccountsCreationLeavesAlone:
     ):
         """`trg_signup_admission_consume` runs when an account is created, never when one changes. An
         existing account whose verified email moves to an admitted address
-        holds it, so `signup admission functions`'s doors refuse that admission's link and a new
+        holds it, so signup admission functions' doors refuse that admission's link and a new
         account at it, but the admission was used to create no one and is
         not stamped."""
         user = _google_account(world, "sub-keep-mover", "keep-mover@example.com")
@@ -1292,7 +1292,7 @@ class TestTheOverlapLeft:
         assert row["claim_token_hash"] is None
 
 
-# --- `invitee invitation functions`: an invited person's own invitations -------------------------------
+# --- invitee invitation functions: an invited person's own invitations -------------------------------
 
 #: The web origin a link sent again is built on.
 ORIGIN = "https://app.example.test"
@@ -1336,7 +1336,7 @@ def _ids(rows):
 
 
 class TestTheInviteeSeesTheirInvitations:
-    """`invitee invitation functions`: someone who signed in without the link is shown the invitations the
+    """invitee invitation functions: someone who signed in without the link is shown the invitations the
     accept door would still honour for their verified address, through
     `fn_invitations_for` as `svc_ingress`, and nothing else."""
 
@@ -1494,7 +1494,7 @@ class _AtSend(RecordingSender):
 
 
 class TestTheLinkSentAgain:
-    """`invitee invitation functions`: "Email me the link again" emails a new link to the invitation's
+    """invitee invitation functions: "Email me the link again" emails a new link to the invitation's
     address, through `invitations.reissue` as `svc_ingress`, and replaces the
     token only once the email went. The old link then stops working, nothing
     else about the invitation changes, and the new link exists only in the

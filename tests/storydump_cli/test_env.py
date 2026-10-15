@@ -1270,7 +1270,7 @@ def gate(directory: Path, *versions: int) -> None:
 def test_doctor_reports_a_gated_migration_as_owed_not_as_a_deployment_behind(
     tmp_path,
 ):
-    """`legacy schema removal` and `schema initialization` carry the runner's `manual` directive: every deploy owes
+    """legacy schema removal and schema initialization carry the runner's `manual` directive: every deploy owes
     them and they are applied only by hand (`apply --manual`), so until that
     window runs they are in the checkout and not in the ledger BY DESIGN.
     "Deploy main" would be the wrong fix, and exit 4 a standing false alarm."""

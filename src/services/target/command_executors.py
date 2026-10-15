@@ -843,7 +843,7 @@ async def cancel(session, command: Command) -> CommandResult:
     )
     # The card loses its decision buttons now: a cancelling card offers no
     # lever but ⚙️ Configure (`prompts.card_keyboard`'s *cancelling*), and the
-    # worker's terminalization is a later checkpoint (the reaper, `fn_reaper_sweep cancel leg`).
+    # worker's terminalization is a later checkpoint (the reaper, `fn_reaper_sweep` cancel leg).
     await _record_outcome(session, intent, command, "cancelled", series=series)
     return _result(intent, intent["state"], cancel_requested=True, **stopped)
 
@@ -856,7 +856,7 @@ async def cancel(session, command: Command) -> CommandResult:
 _LOCAL_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?")
 
 #: The wall time :local_at in the zone :tz as an instant, NULL when the
-#: clocks skip it: `fn_wall_instant` (`intent repeat constraints`), the reading the repeat grid
+#: clocks skip it: `fn_wall_instant` (repeat rules), the reading the repeat grid
 #: (`fn_repeat_times`) also takes, so a one-off time and a repeat's time never
 #: disagree. Two readings are candidates: Postgres's own (a skipped time takes
 #: the offset before the jump, an ambiguous one the offset after it — its
@@ -995,7 +995,7 @@ async def _audit_same_state(
     )
 
 
-#: The CHECKs that judge a repeat rule (`intent repeat constraints`), matched by name: the terminal
+#: The CHECKs that judge a repeat rule (repeat rules), matched by name: the terminal
 #: guard raises the same SQLSTATE (23514) and names no constraint.
 _REPEAT_CHECKS = ("ck_intent_repeat", "ck_intent_repeat_unit")
 
@@ -1158,7 +1158,7 @@ async def schedule_item(session, command: Command) -> CommandResult:
     that would miss it at its time), and `override_locks` gets past only its
     warnings.
 
-    A `repeat` rule rides on the story (`intent repeat constraints`). Nothing is computed
+    A `repeat` rule rides on the story (repeat rules). Nothing is computed
     here: the first occurrence is the chosen time, and each one's ending
     makes the next (`tg_intent_repeat`)."""
     account_id = _id_arg(command, "ig_account_id")
@@ -1571,7 +1571,7 @@ async def set_source_approval(session, command: Command) -> CommandResult:
     (`auto_approval.decide`), from the next serve on; it decides no card
     already waiting.
 
-    The value is checked here, by name, and `ck_source_approval_mode` (`approval position constraints`)
+    The value is checked here, by name, and `ck_source_approval_mode` (approval rules)
     bounds it again. One UPDATE of the workspace's own CONNECTED source, with
     the tenant's policy as the second fence: a removed folder's position went
     with its removal (`provisioning.pause_media_source`), and a stale page
@@ -1685,7 +1685,7 @@ _LINK_PURPOSE = {kind: purpose for purpose, kind in CONNECT_PURPOSE_KIND.items()
 
 async def _begin_drive_link(session, command: Command) -> CommandResult:
     """Shared body of `connect_account` / `reconnect_account` — the chat-side
-    start of the WORKSPACE's Drive grant (`workspace Drive grant`: one Google grant per
+    start of the WORKSPACE's Drive grant (workspace Drive grant: one Google grant per
     workspace, folders picked under it).
 
     THIN BY DESIGN. The OAuth leg is the API route's; this door only
@@ -1851,7 +1851,7 @@ async def disable_account(session, command: Command) -> CommandResult:
 
 
 async def disconnect_account(session, command: Command) -> CommandResult:
-    """For the WORKSPACE's Drive grant (`workspace Drive grant`): revoke the one
+    """For the WORKSPACE's Drive grant (workspace Drive grant): revoke the one
     credential, KEEP the row, and pause every folder under it.
 
     `paused`, deliberately not `error`. A disconnect is a decision, not a

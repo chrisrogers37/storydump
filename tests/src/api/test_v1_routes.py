@@ -1235,7 +1235,7 @@ class TestTelegramUnlink:
 
 
 class TestTheInviteesOwnInvitations:
-    """`/me/invitations` (`invitee invitation functions`): the signed-in person's invitations,
+    """`/me/invitations` (invitee invitation functions): the signed-in person's invitations,
     and "Email me the link again". Tenant-less, like `/me`; the service's answer
     is the response, and an invitation that is not theirs is one 404."""
 

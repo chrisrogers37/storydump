@@ -236,7 +236,7 @@ storydump jobs --since 3h                     # the queue, by kind, lane and sta
 - [ ] Each person signs in on the web with Google and links their Telegram
   (Settings › Integrations → Link Telegram). Sign-up is gated (`fn_signup_admitted`): a new
   account needs a pending invitation addressed to its email, sent from an
-  active workspace by someone still its owner or an admin (`invitation legitimacy checks`), or an
+  active workspace by someone still its owner or an admin (invitation legitimacy checks), or an
   admission: `storydump admit <email>`, for any address, on the waitlist or
   not (yours to run, as a person in the API's `OPS_USER_IDS`), tap Admit
   on the waitlist ping, or use the site's `/ops/waitlist` (the dashboard

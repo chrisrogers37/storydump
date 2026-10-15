@@ -152,7 +152,7 @@ process, at the path its variable names.
 ```
 
 - `lease_disposition` is `exhausted` or `fenced`.
-- Each evidence text is 1-2,`queue delivery state` characters.
+- Each evidence text is 1–2,048 characters.
 - `rollback_releases` names at least one release a rollback may return to. Each one
   carries the same protocol fields.
 
@@ -177,7 +177,7 @@ process, at the path its variable names.
 }
 ```
 
-- Each evidence string attests one prerequisite in 1-2,`queue delivery state` characters. The code checks
+- Each evidence string attests one prerequisite in 1–2,048 characters. The code checks
   only that it is present, and never stores, returns or logs it, because it may carry
   private references. Keep it out of the repository.
 - `conversion_run_digest` is the SHA-256 of the mix-conversion record file's bytes, as

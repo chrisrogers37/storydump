@@ -1,6 +1,6 @@
 /**
  * Invitations, as the Members card shows them, and as the person
- * invited sees their own (`invitee invitation functions`).
+ * invited sees their own (invitee invitation functions).
  *
  * An invitation's join link exists in full only in the answer to the command
  * that made it, and in its email: the port stores a hash of the token. So the
@@ -151,7 +151,7 @@ export function expiryLabel(iso: string, tz: string): string {
   return fellBack ? `${label} UTC` : label;
 }
 
-/** An invitation addressed to the signed-in person, as `/me/invitations` lists it (`invitee invitation functions`). */
+/** An invitation addressed to the signed-in person, as `/me/invitations` lists it (invitee invitation functions). */
 export type InvitationForYou = {
   id: string;
   workspaceName: string;
@@ -229,7 +229,7 @@ export type LinkSentAgain =
   | { ok: true; delivery: Delivery }
   | { ok: false; error: string; status: number };
 
-/** "Email me the link again" (`invitee invitation functions`), through this tier's route. */
+/** "Email me the link again" (invitee invitation functions), through this tier's route. */
 export async function sendLinkAgain(invitationId: string): Promise<LinkSentAgain> {
   const result = await callBff(
     `/api/me/invitations/${encodeURIComponent(invitationId)}/resend`,

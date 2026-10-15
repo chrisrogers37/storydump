@@ -604,7 +604,7 @@ class TestDisableDestination:
         assert retire[1] == {"provider": "ig_login", "target": "acct"}
 
     async def test_a_planned_story_not_yet_served_is_told_about_once(self, monkeypatch):
-        """`fn_planned_serve / fn_planned_misses`: a planned story the removal flags before its time is served
+        """`fn_planned_serve` / `fn_planned_misses`: a planned story the removal flags before its time is served
         will never reach the miss door (it lists no flagged row), so the
         removal tells the chats now, in its own transaction, with the reason
         `account_removed`. A served planned story and a cadence story flagged

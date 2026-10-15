@@ -16,7 +16,7 @@ import { TelegramCard } from "./telegram-card";
 /**
  * Integrations — Google Drive and Telegram, both live.
  *
- * Every action here is wired: Drive connect is the per-workspace grant (`workspace Drive grant`,
+ * Every action here is wired: Drive connect is the per-workspace grant (workspace Drive grant,
  *), disconnect is the `disconnect_account` command, and sync is
  * `sync_now`. Nothing on this tab is held off.
  *

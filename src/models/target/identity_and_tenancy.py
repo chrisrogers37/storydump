@@ -99,7 +99,7 @@ class Workspace(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'active'"))
 
     # IANA zone name, workspace default. The CHECK is a write-time backstop
-    # calling `trg_touch_updated_at / fn_safe_tz`'s fn_safe_tz — the service boundary validates first, and the
+    # calling `trg_touch_updated_at` / `fn_safe_tz`'s fn_safe_tz — the service boundary validates first, and the
     # read-side decay case (a zone withdrawn from tzdata after a valid write)
     # is what fn_safe_tz's fallback exists for.
     tz = Column(Text, nullable=False, server_default=text("'UTC'"))
@@ -207,7 +207,7 @@ class WorkspaceMember(TargetBase):
 
 
 class WorkspaceMemberRemoval(TargetBase):
-    """The record that an admin removed a person (`workspace member removal`). The Telegram join path
+    """The record that an admin removed a person (workspace member removal). The Telegram join path
     (`fn_group_member_seen`) honours it: a removed non-member is refused until
     invited back. Written only by `fn_member_remove`; an invitation accepted
     later makes it inert, and a second removal stamps it again."""
@@ -231,12 +231,12 @@ class SignupAdmission(TargetBase):
     """An email the owner let in (`fn_signup_admitted`): a new Google account with this verified
     address may create its user. Global, not tenant-plane; read and written
     only through `svc_membership`'s definer functions (`fn_signup_admitted`,
-    `signup admission functions`'s admission doors, and `trg_signup_admission_consume`'s trigger on `users`), so the runtime roles
+    signup admission functions' admission doors, and `trg_signup_admission_consume`'s trigger on `users`), so the runtime roles
     hold no grant on it.
 
-    `signup admission functions`: the admission's email carries a one-time claim link. Only its
+    signup admission functions: the admission's email carries a one-time claim link. Only its
     token's SHA-256 is stored, with `emailed_at`, once the provider accepted
-    the email. `claimed_at` records that the spot was used, by its link (`signup admission functions`)
+    the email. `claimed_at` records that the spot was used, by its link (signup admission functions)
     or by an account created at its address (`trg_signup_admission_consume`), and the link is
     cleared with it; the spot then admits nobody (one spot, one account).
     A consumed admission admits no additional account."""
@@ -269,7 +269,7 @@ class SignupAdmission(TargetBase):
 class WaitlistEntry(TargetBase):
     """An address that joined the marketing waitlist (`waitlist_entries`). Global, not
     tenant-plane; the API (`svc_ingress`) may INSERT and nothing else, and the
-    list is read only through `fn_waitlist` (`signup admission functions`). `utm` is the campaign the
+    list is read only through `fn_waitlist` (signup admission functions). `utm` is the campaign the
     visitor came from."""
 
     __tablename__ = "waitlist_entries"
@@ -383,9 +383,8 @@ class ChannelBinding(TargetBase):
     #
     # THE COLON IS ESCAPED, and it is not cosmetic: `text()` reads `:1` as a
     # BIND PARAMETER, so the unescaped form emits `DEFAULT '{"v"NULL}'` and the
-    # table will not create. The parity gate cannot catch this — it compares
-    # types, constraints, uniques and FKs, never defaults — so the failure
-    # surfaces as `create_all` raising, not as drift.
+    # table will not create. Escaping preserves valid DDL during the build;
+    # catalog parity compares the stored default after construction.
     settings = Column(JSONB, nullable=False, server_default=text(r"""'{"v"\:1}'"""))
     created_at, updated_at = timestamps()
 

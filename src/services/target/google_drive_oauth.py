@@ -48,10 +48,10 @@ encrypted, versioned JSON envelope (:func:`encode_payload` /
 :func:`decode_payload` — the writer's shape and the reader's, one definition);
 `expires_at` is the ACCESS token's expiry. `next_refresh_at` is NULL: the
 refresh clock is fenced to `ig_login` and minting happens on the read path,
-and :mod:`drive_credentials` owns that account (what the `fn_clock_tick provider guards` fence guards,
+and :mod:`drive_credentials` owns that account (what the `fn_clock_tick` provider guards fence guards,
 and what it does not).
 
-The row is WORKSPACE-owned (`workspace Drive grant`): `provider =
+The row is WORKSPACE-owned (workspace Drive grant): `provider =
 'gdrive'`, `media_source_id` NULL, `ig_account_id` NULL — `ck_credentials_one_owner`
 is provider-conditional and refuses any other shape for `gdrive`, and
 `uq_credential_per_workspace` admits one ownerless row per workspace and provider.
@@ -98,7 +98,7 @@ PAYLOAD_VERSION = 1
 GOOGLE_ACCESS_TOKEN_SECONDS = 3600
 
 #: A `gdrive` credential names no owner column — the WORKSPACE is its owner
-#: (`workspace Drive grant`), and this predicate is that ownership rule, in one place for
+#: (workspace Drive grant), and this predicate is that ownership rule, in one place for
 #: six readers; one of them omitting `media_source_id IS NULL` the day a
 #: source-owned row returns is exactly how a workspace reads another owner's
 #: grant. A fragment, spliced — there is no caller input in it. The writer
@@ -359,7 +359,7 @@ def decode_payload(plaintext: str) -> DrivePayload:
 
 
 async def connect_purpose(conn, *, workspace_id) -> str:
-    """Which state the connect route mints for this WORKSPACE (`workspace Drive grant`:
+    """Which state the connect route mints for this WORKSPACE (workspace Drive grant:
     one Google grant per workspace): ``"connect"`` when it holds no `gdrive`
     credential, ``"reconnect"`` once it does, in any state — so `issue_state`'s
     last-issued-wins retires a stale state per workspace."""
@@ -383,7 +383,7 @@ async def store_credential(
     already holds, in place, on a reconnect (`uq_credential_per_workspace`
     admits one ownerless row per workspace and provider; same id, no gap, no
     second row). Returns the id. A `gdrive` credential names no owner column:
-    the workspace is its owner (`workspace Drive grant`).
+    the workspace is its owner (workspace Drive grant).
 
     *granted_by* is the person whose Google account the grant is (`oauth_credentials.granted_by_user_id`)
     — the only one who may browse it (`workspaces.may_browse_drive`). A

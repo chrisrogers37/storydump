@@ -739,7 +739,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
                 )
 
     def test_the_shipped_key_is_cadence_only(self, clock_db):
-        """`fn_planned_serve / fn_planned_misses`'s contract, read from the catalog: one slot key,
+        """`fn_planned_serve` / `fn_planned_misses`'s contract, read from the catalog: one slot key,
         `uq_intent_slot`, with the cadence predicate."""
         defs = _owner_exec(
             clock_db,
@@ -771,7 +771,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
         return (clock_db["ws"], account, _new_media(clock_db), ref, slot, origin)
 
     def test_on_the_cadence_key_alone_the_bare_spelling_raises(self, clock_db):
-        """Why `fn_planned_serve / fn_planned_misses` ships only once every worker runs `post_intents.origin`'s spelling: against
+        """Why `fn_planned_serve` / `fn_planned_misses` ships only once every worker runs `post_intents.origin`'s spelling: against
         the partial key alone the predicate-less one finds no arbiter, so every
         cadence mint of a worker still running it raises."""
         account = _new_account(clock_db)
@@ -783,7 +783,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
 
     @pytest.mark.asyncio
     async def test_the_executor_holds_on_the_cadence_key_alone(self, clock_db):
-        """`post_intents.origin`'s spelling as `plan_slot` runs it, on `fn_planned_serve / fn_planned_misses`'s cadence-only key: a
+        """`post_intents.origin`'s spelling as `plan_slot` runs it, on `fn_planned_serve` / `fn_planned_misses`'s cadence-only key: a
         duplicate execution still mints one intent, and a planned row at the
         slot's instant does not absorb the cadence mint. The predicate-less
         spelling would raise on the first execution here: no arbiter is left
@@ -826,7 +826,7 @@ class TestADuplicatePlanSlotMintsNoSecondIntent:
 
 
 class TestEveryLegMintsWithADeadline:
-    """`fn_clock_tick deadlines`: the clock's five legs mint `deadline_at`, from `run_at`.
+    """fn_clock_tick deadlines: the clock's five legs mint `deadline_at`, from `run_at`.
 
     `jobs.enqueue` writes a deadline and `budget_exhausted` ends a job
     on either bound; `fn_clock_tick` hand-writes its INSERTs, so its legs mint
@@ -1083,7 +1083,7 @@ class TestTheTickAndTheSweepAreBounded:
             "SELECT id FROM post_intents"
             " WHERE state IN ('scheduled','prompt_pending')"
             "   AND schedule_slot_at < now()"
-            "   AND origin = 'cadence'",  # `fn_planned_serve / fn_planned_misses`: the leg takes cadence rows only
+            "   AND origin = 'cadence'",  # `fn_planned_serve` / `fn_planned_misses`: the leg takes cadence rows only
         )
         assert "Seq Scan" not in plan, plan
         definition = self._index_def(clock_db, "ix_intents_reap_slot")

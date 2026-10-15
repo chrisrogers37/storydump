@@ -77,7 +77,7 @@ async def resolve_chat(executor, channel: str, external_ref: str) -> ResolvedTen
     (distinct reason, because "this chat WAS bound" routes differently from
     "never seen"). An RLS-filtered empty read and a genuinely absent row are
     both refusals. The read goes through the `fn_resolve_binding` door
-    (`fn_channel_join / fn_channel_leave`), so `svc_ingress` resolves a bound chat pre-context; an
+    (`fn_channel_join` / `fn_channel_leave`), so `svc_ingress` resolves a bound chat pre-context; an
     unknown chat refuses by name.
     """
     if channel not in CHAT_CHANNELS:

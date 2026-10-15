@@ -22,7 +22,7 @@ export type Linked = { lead: string; link: string; tail: string };
  * neither admitted by the owner nor invited to a workspace (`fn_signup_admitted`),
  * and `error=claim_refused` when such an account came through a claim link
  * from an admission's email that cannot be used: used already, replaced by a
- * newer email, or its spot taken (`signup admission functions`). Nothing was created either way,
+ * newer email, or its spot taken (signup admission functions). Nothing was created either way,
  * and an existing account sees neither.
  */
 export const LOGIN_ERRORS = {

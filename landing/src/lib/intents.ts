@@ -80,7 +80,7 @@ export type Intent = {
    */
   approval_mode: "manual" | "auto";
   /**
-   * The rule that approved the story (`approval position constraints`): `auto` (YOLO), `item` (the
+   * The rule that approved the story (approval rules): `auto` (YOLO), `item` (the
    * item's Auto-approve) or `returning`. NULL when a person approved it, or
    * while nothing has. Stamped by the approving update and never changed, so
    * a story keeps it through publishing and review.

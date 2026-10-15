@@ -218,7 +218,7 @@ async def scheduling_health_check(request: Request):
         # and has no tenant; naming one that does not exist is a lie the guard
         # correctly refused, and the remedy is the one its own message gives.
         #
-        # The estate-wide reads answer through doors (`fleet health functions`): each
+        # The estate-wide reads answer through doors (fleet health functions): each
         # is a SECURITY DEFINER function owned by `svc_maintenance`, so the
         # answer is the same under the owner login and under `svc_ingress`.
         # Without the door, under `svc_ingress` every policy-covered
@@ -298,7 +298,7 @@ async def posting_health_check(request: Request):
         # A DIRECT CONNECTION, not a unit of work, for the reason the route
         # above records: `UnitOfWork.__init__` refuses a blank tenant at
         # construction, and this aggregate is estate-wide and has no tenant.
-        # Its cross-tenant reach is `fleet health functions`'s doors, the same footing as the route
+        # Its cross-tenant reach is fleet health functions' doors, the same footing as the route
         # above, and its statements are capped the same way.
         async with health_reads.connect(engine) as conn:
             posting = await posting_health.posting_freshness(conn)
@@ -326,7 +326,7 @@ async def delivery_health_check(request: Request):
 
     The last hour's outbox rows whose last failure fell in it, by class and the
     provider's code, how many of them ended `failed` or sit `ambiguous`, and how
-    many rows were sent in the same hour (`delivery_health`, through `outbox failure records`'s
+    many rows were sent in the same hour (`delivery_health`, through outbox failure records'
     doors). NOTHING IS RAISED HERE, for `/health/scheduling`'s two reasons: any
     alert on it belongs outside the app. Unauthenticated,
     so AGGREGATES ONLY: counts and codes, never a workspace, a chat or a message.
@@ -339,7 +339,7 @@ async def delivery_health_check(request: Request):
 
     async def read():
         # A direct connection, as on `/health/posting`: the read is estate-wide
-        # and has no tenant, its cross-tenant reach is `outbox failure records`'s doors, and its
+        # and has no tenant, its cross-tenant reach is outbox failure records' doors, and its
         # statements are capped the same way (`health_reads`).
         async with health_reads.connect(engine) as conn:
             return await delivery_health.outbox_failures(conn)

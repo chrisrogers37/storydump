@@ -964,7 +964,7 @@ class TestTheLogin:
             conn.close()
 
 
-# --- `signup admission functions`: admitting from the waitlist ------------------------------
+# --- signup admission functions: admitting from the waitlist ------------------------------
 
 #: The base of the claim link an admission's email carries.
 BASE = "https://app.example.test/claim/"
@@ -1387,8 +1387,8 @@ class TestTheClaim:
 
 
 class TestTheSignUpDoor:
-    """`fn_signup_admitted` (`fn_signup_admitted`, `invitation legitimacy checks`, `signup admission functions`): a claimed admission does not admit
-    its address, and the rest of the door is as `fn_signup_admitted` and `invitation legitimacy checks` make it."""
+    """`fn_signup_admitted` (`fn_signup_admitted`, invitation legitimacy checks, signup admission functions): a claimed admission does not admit
+    its address, and the rest of the door is as `fn_signup_admitted` and invitation legitimacy checks make it."""
 
     def test_an_unclaimed_admission_admits_and_a_claimed_one_no_longer_does(
         self, world

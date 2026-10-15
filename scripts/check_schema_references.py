@@ -28,7 +28,7 @@ DOCUMENT_SUFFIXES = frozenset({".md", ".rst"})
 # Implicit references use the retired inventory and reference-shaped grammar.
 RETIRED = r"(?:0\d{2}|10[0-8]|110|113|115|116|129|13[3-9]|14\d)"
 PATTERNS = (
-    re.compile(r"(?<![\w.])(?P<number>0\d{2})(?![\w.])"),
+    re.compile(r"(?<![\w.])(?<!\d,)(?P<number>0\d{2})(?![\w.])"),
     re.compile(r"\bmigrations?\s+[`\"']*(?P<number>\d{3})\b", re.I),
     re.compile(r"\b(?P<number>\d{3})_[\w-]+\.sql\b"),
     re.compile(rf"(?<!\w)[`]*(?P<number>{RETIRED})[`]*['’]s\b"),

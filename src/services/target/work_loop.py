@@ -295,7 +295,7 @@ _UNBUILT_REASON = (
 
 #: Kinds the tier has never carried an executor for. The registry parks them
 #: unconditionally; the schema-derived completeness test keeps this honest.
-#: (The three archive lifecycle kinds of `archive lifecycle job kinds` all have executors; the
+#: (The three archive lifecycle kinds all have executors; the
 #: existing-account reconciliation parks only while the archive is not armed.)
 UNBUILT_KINDS = ("reencrypt_credentials",)
 
@@ -1444,7 +1444,7 @@ async def ensure_sender_jobs(
     one always has exactly one live sender per binding.
     """
     attempts, deadline_seconds = jobs.LANE_BUDGETS["interactive"]
-    # The statement is `fn_sender_sweep`'s body (`worker sweep functions`): one INSERT … SELECT whose
+    # The statement is `fn_sender_sweep`'s body (worker sweep functions): one INSERT … SELECT whose
     # NOT EXISTS live-job check is its idempotence, a SECURITY DEFINER door
     # because the sweep runs with no tenant and every table it reads is
     # policy-covered. The key prefix, the lane budget and the bound stay

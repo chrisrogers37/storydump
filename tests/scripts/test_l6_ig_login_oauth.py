@@ -815,7 +815,7 @@ class TestARemovedDestinationStaysRemoved:
 
 
 class TestTheBindPurposeOnTheRealSchema:
-    """`oauth_states purpose binding` widens `ck_oauth_state_purpose` to `bind`.
+    """oauth_states purpose binding widens `ck_oauth_state_purpose` to `bind`.
     The whole lane on the replayed schema: mint, consume, bind — and the CHECK
     that a bind state pins BOTH a user and a workspace."""
 

@@ -256,7 +256,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   resume_workspace: submissionCommand(() => ({ ok: true, body: {} })),
 
   /**
-   * Disconnect the WORKSPACE's Google Drive (`workspace Drive grant`): the one grant is
+   * Disconnect the WORKSPACE's Google Drive (workspace Drive grant): the one grant is
    * revoked and every folder paused. No arguments — the grant is the
    * workspace's, so there is nothing to name.
    */
@@ -469,7 +469,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
    * Shape only, as everywhere here: a non-blank string, or `null`. The port
    * refuses a value outside the three positions by name, before it writes
    * (`set_source_approval`: `invalid_args`), and `ck_source_approval_mode`
-   * (`approval position constraints`) bounds it again, so this keeps no copy of the three. `null` is
+   * (approval rules) bounds it again, so this keeps no copy of the three. `null` is
    * forwarded explicitly, as `set_item_link`'s clear is: a missing key is a
    * mistake, never Workspace default.
    *

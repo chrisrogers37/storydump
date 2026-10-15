@@ -282,7 +282,7 @@ class TestTheApprovalFields:
             conn.commit()
             with conn.cursor() as cur:
                 # The serve step's approval: the system, the rule stamped in
-                # the same UPDATE (`approval position constraints`'s trigger admits nothing else).
+                # the same UPDATE (approval rules' trigger admits nothing else).
                 cur.execute("SET LOCAL app.actor_kind = 'system'")
                 cur.execute(
                     "UPDATE post_intents SET state = 'approved', approval_rule = 'item'"

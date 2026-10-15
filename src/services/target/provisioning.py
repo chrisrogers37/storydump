@@ -44,9 +44,9 @@ defaults above are what keep a new workspace off Meta.
 
 `fn_clock_tick` selects `WHERE state = 'active' AND next_slot_at IS NOT NULL
 AND next_slot_at <= now()` and then ADVANCES the cursor with
-`fn_next_slot(a.next_slot_at, …)`. Every one of the three places that writes
-`next_slot_at` in the whole schema (`04_functions.sql`, `fn_clock_tick reauthentication leg`, `fn_clock_tick provider guards`) is that same advance —
-**nothing anywhere seeds the first value.** A destination created with
+`fn_next_slot(a.next_slot_at, …)`. Both scheduling signatures in
+`ddl/04_functions.sql` advance an existing cursor; neither seeds a NULL one.
+A destination created with
 `next_slot_at = NULL` is therefore invisible to the clock forever, and
 `plan_slot` stays built-and-dead.
 
@@ -776,10 +776,10 @@ async def disable_destination(
     are flagged `cancel_requested`, the overlay `cancel` uses (the
     user never writes a terminal state; the pipeline honours the flag at
     admission, the Queue offers a flagged card no action, and the reaper's
-    cancel leg (`fn_reaper_sweep cancel leg`) ends the waiting states); and any grant issued for
+    cancel leg (`fn_reaper_sweep` cancel leg) ends the waiting states); and any grant issued for
     the row before the removal is retired, so it cannot land afterwards. A
     planned story it flags before its time is served is told about in this
-    transaction (`fn_planned_serve / fn_planned_misses`, `account_removed`): flagged, it will never reach the
+    transaction (`fn_planned_serve` / `fn_planned_misses`, `account_removed`): flagged, it will never reach the
     miss door, which lists no flagged row, so this is its one notice.
 
     The row stays. `oauth_credentials` and the intent history hang off it, and
@@ -824,7 +824,7 @@ async def disable_destination(
     # actor is the worker, and the user never writes a terminal state (the
     # rule `cancel` follows). The pipeline honours the flag at admission; the
     # Queue shows a flagged card as cancelling and offers it no action; the
-    # reaper's cancel leg (`fn_reaper_sweep cancel leg`) ends the WAITING states at its next sweep;
+    # reaper's cancel leg (`fn_reaper_sweep` cancel leg) ends the WAITING states at its next sweep;
     # the caller retires the cards now (`_supersede_everywhere`).
     flagged = await executor.execute(
         text(

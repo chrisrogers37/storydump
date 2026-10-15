@@ -16,7 +16,7 @@ canonical stable ref (the Drive file id, never a path), name, kind, and content
 hash.
 
 ``source_id`` is additive to the port and names the folder being synced
-rather than the credential (`workspace Drive grant`): a Drive credential is the WORKSPACE's, so
+rather than the credential (workspace Drive grant): a Drive credential is the WORKSPACE's, so
 the token is `workspace_id`'s grant and the source id is what the adapter's
 messages and the sync's own writes are about. A lookup by Drive file id
 inside the adapter would still be a cross-tenant hazard. Keyword-only
@@ -124,7 +124,7 @@ async def rearm_after_connect(
     ## Why all three columns, and why `next_sync_at` is the one that matters
 
     The clock's leg 4 selects `state = 'active' AND next_sync_at IS NOT NULL
-    AND next_sync_at <= now()` (`fn_clock_tick provider guards`) — a CONJUNCTION, and both halves
+    AND next_sync_at <= now()` (`fn_clock_tick` provider guards) — a CONJUNCTION, and both halves
     were unsatisfied for a stranded source. `state` alone is not enough:
     `media_sources.next_sync_at` has no default and the only other writer of a
     non-NULL value is this module's own post-sync re-arm, so a source that has
@@ -146,7 +146,7 @@ async def rearm_after_connect(
     `workspace_id` as well as id: the explicit predicate supplements RLS
     on the deployed `svc_worker` connection.
 
-    The grant is the WORKSPACE's (`workspace Drive grant`), so a reconnect names no source:
+    The grant is the WORKSPACE's (workspace Drive grant), so a reconnect names no source:
     with `source_id` None every `gdrive` source of the workspace is
     re-armed — one grant, every folder eligible again. A single source is
     re-armed alone when a folder is picked or re-added under a grant.
@@ -300,7 +300,7 @@ async def alert_stranded_sources(
 
     ## The seam — a read door, then one conditional UPDATE per workspace
 
-    The selection across every workspace is `fn_stranded_sources` (`worker sweep functions`), because
+    The selection across every workspace is `fn_stranded_sources` (worker sweep functions), because
     this sweep runs with no tenant and `media_sources` is policy-covered. The
     stamp is then ONE ``UPDATE … RETURNING`` per workspace, under that
     workspace's tenant, whose predicate IS the selection — ``state = 'error'``
@@ -322,7 +322,7 @@ async def alert_stranded_sources(
     is picked up rather than skipped forever; that column is nullable and rows
     written by paths that never stamped it are the realistic case.
     """
-    # The selection is a door (`worker sweep functions`): the sweep runs with no tenant and
+    # The selection is a door (worker sweep functions): the sweep runs with no tenant and
     # `media_sources` is policy-covered. The stamp is written per workspace
     # under that workspace's tenant, re-checking the window so a row stamped
     # since the read is not alerted twice, and only the rows the UPDATE

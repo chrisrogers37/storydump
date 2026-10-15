@@ -52,7 +52,7 @@ export function middleware(request: NextRequest) {
  * bounce. Here rather than in the page, because a page cannot delete a cookie.
  * Left behind, it would send every visit to /welcome back to the link for its
  * 15 minutes, whether the link was refused, replaced or simply not accepted,
- * and the invitations waiting for the person (`invitee invitation functions`) could not show.
+ * and the invitations waiting for the person (invitee invitation functions) could not show.
  */
 function inviteBounce(request: NextRequest): NextResponse | null {
   if (request.nextUrl.pathname !== "/welcome") return null;

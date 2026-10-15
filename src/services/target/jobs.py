@@ -53,9 +53,9 @@ needed here:
   shape) reports `rows=1`.
 * **Expiry recovery is the reaper's, not ours.** `fn_reaper_sweep`'s first leg
   re-readies expired leases (liveness-priority, budget-limited). This module
-  does not duplicate it; the clock revives its own singletons' leases (`fn_clock_tick singleton lease recovery`),
+  does not duplicate it; the clock revives its own singletons' leases (`fn_clock_tick`),
   the reaper's among them. `fn_reaper_sweep`'s last leg ends a
-  `ready` job past its `deadline_at` when a sweep re-mints its kind (`fn_reaper_sweep deadline leg`):
+  `ready` job past its `deadline_at` when a sweep re-mints its kind (`fn_reaper_sweep` deadline leg):
   `budget_exhausted` below is only ever asked after a run has
   failed, so without that leg a job nothing claims would never reach its
   deadline. A deferral carries the deadline with it (`reschedule_job`).
@@ -419,7 +419,7 @@ async def reschedule_job(
     A deferral also carries the job's deadline: `deadline_at` moves by as much
     as `run_at` does (both SET expressions read the row as it was), so a park,
     a pacing wait or a budget deferral keeps the job's slack: both the
-    reaper's deadline leg (`fn_reaper_sweep deadline leg`) and `budget_exhausted` measure from the
+    reaper's deadline leg (`fn_reaper_sweep` deadline leg) and `budget_exhausted` measure from the
     moved deadline. A retryable failure keeps its deadline, as it keeps its
     attempt.
     """

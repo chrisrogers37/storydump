@@ -418,7 +418,7 @@ class TestChunkChaining:
 
 
 def _credential(conn, ws, state="active"):
-    """The WORKSPACE's gdrive credential row (`workspace Drive grant`: one per workspace, no
+    """The WORKSPACE's gdrive credential row (workspace Drive grant: one per workspace, no
     owner column), so `connect_purpose` reports `reconnect`."""
     with conn.cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
@@ -945,7 +945,7 @@ class TestTheConnectTrioIsThinAndTenantBound:
     async def test_a_disconnect_touches_only_this_workspaces_grant_and_folders(
         self, world_db, sync_conn
     ):
-        """`workspace Drive grant`: the grant is the workspace's, so the disconnect names no
+        """workspace Drive grant: the grant is the workspace's, so the disconnect names no
         source — and the executor's own WHERE is the tenant bind (RLS is inert
         on the deployed runtime connection): B's disconnect leaves A whole."""
         a = seed_workspace_chain(sync_conn, "p4-x-a")

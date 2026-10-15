@@ -33,7 +33,7 @@ class _Result:
 
 class _Executor:
     """Answers the four statements by the door (or table) each selects from —
-    the doors of `fleet health functions` for the three tenant-wide reads, `rate_counters` direct."""
+    the doors of fleet health functions for the three tenant-wide reads, `rate_counters` direct."""
 
     def __init__(self, *, lanes, pending, paced, oldest):
         self.answers = {

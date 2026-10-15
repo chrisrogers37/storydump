@@ -114,7 +114,7 @@ async def test_saved_policy_versions_one_and_two_share_suitability_authority(
             "UPDATE instagram_archive_generations SET lifecycle='deletion_pending' WHERE id=:gid",
             "generation_unavailable",
         ),
-        # `archive lifecycle cleanup`: a generation held for review is unavailable, not destroyed.
+        # archive lifecycle cleanup: a generation held for review is unavailable, not destroyed.
         (
             "UPDATE instagram_archive_generations SET lifecycle='review_hold' WHERE id=:gid",
             "generation_unavailable",

@@ -2799,7 +2799,7 @@ class TestTheSenderMintReadsItsOwners:
         class _Result:
             def scalar(self):
 
-                return 0  # the door returns the minted count as a scalar (`worker sweep functions`)
+                return 0  # the door returns the minted count as a scalar (worker sweep functions)
 
         class _Session:
             def __init__(self):
@@ -2824,7 +2824,7 @@ class TestTheSenderMintReadsItsOwners:
     async def test_the_caller_may_bound_the_sweep(self):
         class _Result:
             def scalar(self):
-                return 0  # the door returns the minted count as a scalar (`worker sweep functions`)
+                return 0  # the door returns the minted count as a scalar (worker sweep functions)
 
         class _Session:
             def __init__(self):

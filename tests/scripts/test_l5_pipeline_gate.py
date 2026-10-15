@@ -210,7 +210,7 @@ def _new_intent(
         params.append(transit_ref)
     if approval_rule:
         # Born approved by a rule: the stamp is written only at birth
-        # or by the approval it names (`approval position constraints`'s `tg_intent_person_or_rule`).
+        # or by the approval it names (`tg_intent_person_or_rule`).
         cols += ", approval_rule"
         vals += ", %s"
         params.append(approval_rule)
@@ -3048,7 +3048,7 @@ class TestTheFloatsSafetyNets:
         assert row["last_error"]["evidence"]["customer_notified"] is True
 
     def test_a_dead_job_parks_a_waiting_story_for_review(self, pipe_db):
-        """From a stepped-back `approved` row: the second edge of `post_intent_transitions publish wait edges`."""
+        """From a stepped-back `approved` row: the second edge of `post_intent_transitions`."""
 
         intent, ref = _new_intent(pipe_db)
         binding = _seed_card(pipe_db, intent)
@@ -3382,7 +3382,7 @@ class TestTheFloatsSafetyNets:
         assert len(_notices(pipe_db, good, binding)) == 1
 
 
-# ---: the reaper's cancel leg (`fn_reaper_sweep cancel leg`) ---------------------------------------
+# ---: the reaper's cancel leg (`fn_reaper_sweep` cancel leg) ---------------------------------------
 
 #: The four states a cancel the user asked for waits in (`intent_ledger.py`'s seeded edges).
 WAITING_STATES = ("scheduled", "prompt_pending", "awaiting_approval", "approved")
@@ -3425,7 +3425,7 @@ def _sweep(pipe_db, lim):
 
 
 class TestTheReapersCancelLeg:
-    """`fn_reaper_sweep cancel leg`: a cancel the user asked for ends `cancelled` at the
+    """`fn_reaper_sweep` cancel leg: a cancel the user asked for ends `cancelled` at the
     reaper's next sweep in every waiting state, ahead of the expiry legs —
     never for a row carrying a debit, which only the paths that refund it may
     cancel."""
@@ -3487,7 +3487,7 @@ class TestTheReapersCancelLeg:
         assert _states(pipe_db, rows) == ["cancelled", "cancelled", "expired"]
 
     def test_a_debited_story_is_left_for_the_path_that_refunds_it(self, pipe_db):
-        """A floating story steps back to `approved` with its cap debit (`post_intent_transitions publish wait edges`).
+        """A floating story steps back to `approved` with its cap debit (`post_intent_transitions`).
         The sweep leaves it — cancelled there, the debit would be stranded —
         and its own job refunds it and cancels it, as
         `test_a_cancel_while_floating_refunds_and_destroys` pins."""
@@ -3609,12 +3609,12 @@ class TestTheReapersCancelLeg:
 
 
 class TestEveryLegRunsInTheFinalBody:
-    """The stream's last definition of `fn_reaper_sweep` carries every leg: `fn_planned_serve / fn_planned_misses`
-    redefines it on `fn_reaper_sweep cancel leg`'s body, so one file holds `post_intent_transitions publish wait edges`'s six, `fn_reaper_sweep deadline leg`'s
-    deadline leg, `fn_reaper_sweep cancel leg`'s cancel leg and `fn_planned_serve / fn_planned_misses`'s cadence-only slot
-    expiry. One sweep, as the worker runs it, over a world holding one row for
-    each leg to take, and one test per leg reading its row: a body that dropped
-    a leg fails by the leg's name."""
+    """`fn_reaper_sweep` runs all cleanup legs under one shared budget.
+
+    One seeded world supplies expired leases, flagged intents, expired cadence
+    slots and approvals, expired locks, invitations and onboarding sessions,
+    and ready jobs past their deadlines. Each assertion checks the affected
+    row, so omitting a cleanup leg fails by that leg's behavior."""
 
     @pytest.fixture(scope="class")
     def swept(self, pipe_db):
@@ -3892,10 +3892,11 @@ def _sessions_left(pipe_db, user):
 
 
 class TestTheSweepsLegOrder:
-    """The order the legs run in decides who gets a short budget. The lease leg
-    goes first (liveness comes first, `04_functions.sql`) and `fn_reaper_sweep deadline leg`'s deadline leg last, so a
-    backlog of expired jobs cannot take the budget of the legs above; a test
-    per adjacency that a large budget cannot tell apart."""
+    """The shared budget makes cleanup order observable.
+
+    Lease recovery runs first and ready-job deadline cleanup runs last in
+    `fn_reaper_sweep`. A backlog of overdue jobs cannot spend the budget
+    reserved for earlier legs. Each test isolates one adjacency."""
 
     def test_the_lease_leg_is_served_before_the_cancel_leg(self, pipe_db):
         _sweep(pipe_db, 100000)  # the module's other work drained

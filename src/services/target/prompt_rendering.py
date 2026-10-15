@@ -62,7 +62,7 @@ OUTCOME_WORDS = {
 SERVED_LATE_AFTER = timedelta(minutes=1)
 
 #: Why a planned story was not served, as its notice says it: the miss door's
-#: reasons in its precedence (`fn_planned_serve / fn_planned_misses`, `fn_planned_misses`), and `account_removed`
+#: reasons in its precedence (`fn_planned_serve` / `fn_planned_misses`, `fn_planned_misses`), and `account_removed`
 #: from a destination's removal as well (`provisioning.disable_destination`).
 MISS_REASONS = {
     "item_removed": "the item was removed from the library",

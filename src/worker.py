@@ -208,7 +208,7 @@ def _poll_from(engine, meta, *, session_factory=None):
     for a human. A typed error is logged by type and returned as None rather
     than raised so one account's dead token cannot abort the whole sweep.
     Reads under the workspace the reconciler's sweep row names, claimed in the
-    poll's own session (`worker sweep functions`): a tenant-less read would see nothing once the
+    poll's own session (worker sweep functions): a tenant-less read would see nothing once the
     worker runs as `svc_worker`."""
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -220,7 +220,7 @@ def _poll_from(engine, meta, *, session_factory=None):
     async def poll(*, intent_id, workspace_id) -> Optional[str]:
         async with maker() as session:
             # The reconciler's sweep row names the workspace; the read runs
-            # under it (`worker sweep functions`) — a fresh session with no tenant sees nothing
+            # under it (worker sweep functions) — a fresh session with no tenant sees nothing
             # under the policies once the worker runs as svc_worker.
             await unit_of_work.apply_gucs(
                 session, tenant_id=str(workspace_id), actor_kind="system"
@@ -659,7 +659,7 @@ class PromptSweeper:
     """The prompt sweep on its own cadence: due intents gain their cards
     and advance to `awaiting_approval` in the same pass — the web queue is a
     surface every workspace has, so delivery is not what gates the
-    edge. Then the miss leg (`fn_planned_serve / fn_planned_misses`): planned stories that will not be served
+    edge. Then the miss leg (`fn_planned_serve` / `fn_planned_misses`): planned stories that will not be served
     end `expired` and their bound chats are told. The two legs run in two
     transactions, so a fault in one never holds the other back. Counters ride
     the status line — the same absence-is-failure control the sender sweeper
@@ -1140,7 +1140,7 @@ def main() -> None:
     token = env.get(reg.TOKEN_VAR)
     # The Drive read leg. Armed unconditionally: it needs no env of its
     # own (the engine carries the credential lookup, and the token is the
-    # workspace's grant, `workspace Drive grant`), so an env gate here would be a switch with
+    # workspace's grant, workspace Drive grant), so an env gate here would be a switch with
     # nothing to switch on.
     #
     # Safe to arm with no `gdrive` credential stored. A source with no

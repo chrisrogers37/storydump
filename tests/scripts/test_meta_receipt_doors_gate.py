@@ -334,7 +334,7 @@ def test_one_current_mapping_per_credential(db):
     map_identity(db, w, subject(), authorization=str(uuid.uuid4()), current=False)
 
 
-# --- `Meta deletion receipt functions`: receive, replay, classification ------------------------------------
+# --- Meta deletion receipt functions: receive, replay, classification ------------------------------------
 
 
 def test_a_request_freezes_its_scope_and_a_replay_reuses_the_receipt(db):
@@ -624,7 +624,7 @@ def test_a_null_fingerprint_inside_the_array_is_refused(db):
         )
 
 
-# --- `Meta deletion receipt functions`: the worker's scope read and progress report ------------------------
+# --- Meta deletion receipt functions: the worker's scope read and progress report ------------------------
 
 
 def two_workspace_receipt(db):

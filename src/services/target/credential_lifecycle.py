@@ -2,7 +2,7 @@
 
 Two executors and one provider door. `refresh_credential` consumes the clock's
 weekly mints: load the token, ask the provider for a fresh one, swap in place.
-`reauth_prompt` consumes the `fn_clock_tick reauthentication leg` cadence leg's mints: tell the human, through
+`reauth_prompt` consumes `fn_clock_tick`'s reauthentication mints: tell the human, through
 the workspace's own bindings, that posting for an account is paused until they
 reconnect. Between them, a credential cannot die silently.
 
@@ -21,7 +21,7 @@ here is loud, not latent.
 - **Definitive auth-class rejection** (:class:`RefreshRejected` — the provider
   ANSWERED and the answer is "this credential is bad"): `mark_dead` performs
   both flips in one transaction — credential → ``expired``, account →
-  ``reauth_required``. No inline prompt mint: the `fn_clock_tick reauthentication leg` clock leg is the single
+  ``reauth_required``. No inline prompt mint: the `fn_clock_tick` is the single
   producer of `reauth_prompt` jobs and picks the account up on its next tick
   (marker NULL = immediately eligible), so prompting has exactly one door.
   The flips run under the account's source prefix and are bound to what the
@@ -323,7 +323,7 @@ async def refresh_credential(deps, session, job) -> str:
         new_token, expires_at = await deps.refresh(token)
     except RefreshRejected as exc:
         # The liveness checkpoint — the liveness edge: both flips, one transaction, under
-        # the account's source prefix. The `fn_clock_tick reauthentication leg` clock leg mints the reauth
+        # the account's source prefix. The `fn_clock_tick` mints the reauth
         # prompt on its next tick.
         async with factory() as s:
             outcome = await archive_lifecycle.credential_rejected(
@@ -362,7 +362,7 @@ async def refresh_credential(deps, session, job) -> str:
 
 
 async def reauth_prompt(deps, session, job) -> str:
-    """Executor for the `fn_clock_tick reauthentication leg` cadence leg's mints.
+    """Executor for `fn_clock_tick`'s reauthentication mints.
 
     Enqueues one `notification` outbox row per push binding. No provider call
     happens here — the sender delivers; this executor only writes rows, so a

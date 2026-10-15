@@ -1133,7 +1133,7 @@ SLOT = datetime(2026, 10, 1, 18, 0, tzinfo=timezone.utc)  # 14:00 in New York
 
 
 class TestThePlannedCard:
-    """A planned story's card says who scheduled it and for when (`fn_planned_serve / fn_planned_misses`), and
+    """A planned story's card says who scheduled it and for when (`fn_planned_serve` / `fn_planned_misses`), and
     says "served late" when it is rendered a minute or more past that time —
     at the serve, or again at send time, whichever renders it."""
 

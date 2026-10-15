@@ -637,7 +637,7 @@ def _sources(world, ids=None):
 
 def _credential(world, *, state="active", expires_at=None, ids=None):
     """Set the WORKSPACE's gdrive credential straight in — one row per
-    workspace (`workspace Drive grant`, `uq_credential_per_workspace`), so this upserts: each test
+    workspace (workspace Drive grant, `uq_credential_per_workspace`), so this upserts: each test
     below puts the workspace's grant in the state it needs."""
     ids = ids or world["a"]
 
@@ -676,7 +676,7 @@ def _drive(world, ids=None) -> dict:
 
 
 class TestTheWorkspaceDriveStatus:
-    """The WORKSPACE answers "is Google connected" (`workspace Drive grant`):
+    """The WORKSPACE answers "is Google connected" (workspace Drive grant):
     one grant, every folder under it. `media_sources.state` still cannot
     answer it — a folder picked and then paused is `paused`, a healthy one
     `active` — and the source list does not pretend to: it carries the

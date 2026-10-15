@@ -388,7 +388,7 @@ class TestTheByteCapBoundsMemoryRatherThanReportingAfterwards:
 
     @pytest.mark.asyncio
     async def test_the_read_STOPS_EARLY_rather_than_draining_the_body(self):
-        # `waitlist_entries` chunks of 1 KiB available; cap at 4 KiB.
+        # 100 chunks of 1 KiB available; cap at 4 KiB.
         stream = CountingStream(b"x" * 1024, 100)
         async with httpx.AsyncClient(transport=StreamingTransport(stream)) as client:
             with pytest.raises(ResponseTooLarge):

@@ -58,7 +58,7 @@ def world(admin_conn, owner_actor):
         yield {
             "stream": stream,
             "ingress": as_user(db, "svc_ingress"),
-            # the sender sweep is the worker's (`worker sweep functions`: a door granted to
+            # the sender sweep is the worker's (worker sweep functions: a door granted to
             # svc_worker alone), run here the way the worker runs it
             "worker": as_user(db, "svc_worker"),
             "a": a,
@@ -379,7 +379,7 @@ class TestItAuditsAndUnInertsTheChain:
             return None
 
         # The enqueue commits with the ingress unit of work; the sweep is the
-        # worker's (`worker sweep functions`) — its own login, its own session, after the commit.
+        # worker's (worker sweep functions) — its own login, its own session, after the commit.
         run(world, enqueue_and_sweep)
         assert sweep_as_worker(world["worker"]) >= 1
         (jobs,) = fetch_one(

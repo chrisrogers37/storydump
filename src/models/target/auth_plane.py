@@ -65,7 +65,7 @@ class OAuthState(TargetBase):
     #: ciphertext under the credential ring, never the verifier itself. NULL on
     #: a state minted without one.
     encrypted_code_verifier = Column(Text, nullable=True)
-    #: The Instagram connect's history choice (`OAuth archive choice`): the entry the
+    #: The Instagram connect's history choice (OAuth archive choice): the entry the
     #: start previewed, and the choice with the mix revision it was shown.
     #: NULL on every state that records none.
     archive_entry = Column(Text, nullable=True)
@@ -133,7 +133,7 @@ class ServiceToken(TargetBase):
     #: workspace. A person-bound token acts as the person across their
     #: memberships; a workspace service identity reads its one workspace.
     user_id = fk("users.id", "CASCADE", nullable=True)
-    #: Who minted a workspace service identity (`workspace member removal`), so removing them can
+    #: Who minted a workspace service identity (workspace member removal), so removing them can
     #: revoke it. NULL for a person-bound token and for every older token.
     created_by_user_id = fk("users.id", "SET NULL", nullable=True)
 
@@ -155,7 +155,7 @@ class ServiceToken(TargetBase):
 
 
 class OAuthConnectionResult(TargetBase):
-    """What one Instagram connect's callback applied (`OAuth archive choice`): read back
+    """What one Instagram connect's callback applied (OAuth archive choice): read back
     by the person who started it, in the session that returned, until it
     expires fifteen minutes later. A row is written once and never updated."""
 

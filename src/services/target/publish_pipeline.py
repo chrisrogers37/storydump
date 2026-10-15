@@ -52,7 +52,7 @@ precedes that work. The intent is `publishing` throughout the ladder.
 **A story never waits inside the slot (the float).**
 Every wait between attempts — a refused fetch's round spent, a container Meta
 cannot find, a rate limit, a pending poll, error 9 — steps the intent back
-`publishing → approved` (edge `post_intent_transitions publish wait edges`) with `publish_step`, the transit asset and
+`publishing → approved` (edge `post_intent_transitions`) with `publish_step`, the transit asset and
 the cap debit intact, so key 4 is held only for the seconds of a call and any
 number of stories wait side by side; re-entry is `flip_to_publishing`, made
 re-entrant (no second debit). Error 9's permit resolves `failed` (Meta saying
@@ -790,7 +790,7 @@ async def _cancel_in(session, ctx: _Ctx) -> None:
         )
     ).fetchone()
     if cancelled is None:
-        # The reaper's cancel leg (`fn_reaper_sweep cancel leg`) ends a flagged story that owes no
+        # The reaper's cancel leg (`fn_reaper_sweep` cancel leg) ends a flagged story that owes no
         # refund; a sweep landing after this job's load leaves the row already
         # `cancelled`, and the job's work is done. A debited row never gets
         # here: its refund above meets the terminal freeze first.
@@ -1065,7 +1065,7 @@ async def _bump(session, ctx: _Ctx, **changes) -> dict:
 
 
 async def _step_back(session, ctx: _Ctx) -> None:
-    """`publishing → approved` (edge `post_intent_transitions publish wait edges`): the story waits outside the
+    """`publishing → approved` (edge `post_intent_transitions`): the story waits outside the
     account's slot with its progress and its debit intact. A zero-row update
     is a race the caller must hear about, as every checkpoint's is."""
     moved = (
@@ -2007,7 +2007,7 @@ _INTENT_FOR_PARK = (
 
 
 async def flip_to_review(session, *, intent_id: str, from_state: str) -> bool:
-    """`from_state → review_required` (edges `intent_ledger.py` and `post_intent_transitions publish wait edges`), in the caller's
+    """`from_state → review_required` (edges `intent_ledger.py` and `post_intent_transitions`), in the caller's
     transaction. False when the row had already moved on."""
     moved = (
         await session.execute(
@@ -2139,7 +2139,7 @@ async def park_stale_approved(session, *, older_than_seconds: int, limit: int) -
     The reap job is a system singleton (`app.tenant_id = ''`), under which a
     plain SELECT here matches nothing on the deployed `svc_worker` connection
     (`p_tenant`;). So the stale rows are listed through
-    `fn_reaper_stale_approved` (`post_intent_transitions publish wait edges`, SECURITY DEFINER) and each row's tenant
+    `fn_reaper_stale_approved` (`post_intent_transitions`, SECURITY DEFINER) and each row's tenant
     is asserted before it is touched, under a savepoint per row (one story's
     fault must not roll back the door's sweep), and the session's own scope
     is restored after — the settled-cards sweep reads across tenants in this

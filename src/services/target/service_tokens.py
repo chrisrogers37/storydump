@@ -115,7 +115,7 @@ async def mint(
     """Mint one token. Returns ``(secret, row)`` — the secret exactly once.
 
     *created_by_user_id* names the person who minted a workspace service
-    identity (`workspace member removal`), so removing that person can revoke it
+    identity (workspace member removal), so removing that person can revoke it
     (`revoke_minted_by`). A person-bound token's ``user_id`` already says it.
 
     Validation happens here, before SQL: the table's CHECKs would refuse the
@@ -325,7 +325,7 @@ async def revoke(
 
 async def revoke_minted_by(executor, *, workspace_id: str, user_id: str) -> int:
     """Revoke every live service identity *user_id* minted for *workspace_id*
-    — the removal's other half (`workspace member removal`): a workspace token is revoked with the
+    — the removal's other half (workspace member removal): a workspace token is revoked with the
     membership of the person who minted it. Returns how many were revoked."""
     result = await executor.execute(
         text(

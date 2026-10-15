@@ -43,7 +43,7 @@ sends it with the code (RFC 7636 §4.5). The verifier never reaches the browser.
 
 ## The history choice rides it too
 
-`OAuth archive choice`: an Instagram connect start records the history choice it
+OAuth archive choice: an Instagram connect start records the history choice it
 previewed in its state — the entry, whether past posts are used, the mix
 revision shown and the preview version — and the one-shot consume returns
 them to the callback, so nothing the browser sends back can stand in for

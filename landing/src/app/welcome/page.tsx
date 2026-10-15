@@ -62,7 +62,7 @@ export default async function WelcomePage() {
   }
 
   // Invited, but signed in from the front door rather than the link: say an
-  // invitation is waiting before offering a workspace of their own (`invitee invitation functions`).
+  // invitation is waiting before offering a workspace of their own (invitee invitation functions).
   const invitations = await listMyInvitations();
 
   const name = session.displayName?.trim();

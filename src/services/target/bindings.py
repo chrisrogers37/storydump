@@ -80,7 +80,7 @@ CHANNELS: tuple[str, ...] = ("telegram_group", "telegram_dm")
 
 def push_binding_where(alias: str = "") -> str:
     """A LIVE binding — active and Telegram — optionally qualified for a table
-    alias. It is the set the sender sweep mints for (`fn_sender_sweep`, `worker sweep functions`,
+    alias. It is the set the sender sweep mints for (`fn_sender_sweep`, worker sweep functions,
     whose body is pinned to this) and the set an outcome supersedes cards in:
     a superset of where a card may go. Nothing queues or claims a card on it;
     that is :func:`deliverable_binding_where`."""

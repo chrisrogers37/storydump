@@ -677,7 +677,7 @@ class TestATapNeverWaitsOnASend:
 def _sweep_settled(world) -> int:
     """`prompts.sweep_settled_cards` the way the reaper runs it: as the
     worker's login, in its own session with the EMPTY tenant and the `system`
-    actor. The selection is a door the worker reads through (`worker sweep functions`); each row
+    actor. The selection is a door the worker reads through (worker sweep functions); each row
     is healed under its own workspace, and the caller's scope handed back."""
     from src.services.target import prompts, unit_of_work
 

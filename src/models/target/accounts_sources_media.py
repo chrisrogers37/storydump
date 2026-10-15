@@ -51,10 +51,10 @@ class IgAccount(TargetBase):
     next_slot_at = Column(TZ, nullable=True)
     last_posted_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
-    # When the reauth-prompt clock leg last minted for this account (`fn_clock_tick reauthentication leg`);
+    # When the reauth-prompt clock leg last minted for this account (`fn_clock_tick` reauthentication leg);
     # NULL = never prompted. Stamped at mint, symmetric with next_slot_at.
     last_reauth_prompt_at = Column(TZ, nullable=True)
-    # When a slot last found no media for this account and said so (`ig_accounts.no_media_notified_at`).
+    # When a slot last found no media for this account and said so (`ig_accounts.last_no_media_notice_at`).
     # NULL = never told. Per-ACCOUNT, not per-workspace: two accounts in one
     # workspace starve independently, so a workspace-keyed marker would let
     # the first one's notice silence the second one's first notice.
@@ -68,8 +68,8 @@ class IgAccount(TargetBase):
         CheckConstraint("posts_per_day BETWEEN 1 AND 50", name="ck_iga_ppd"),
         CheckConstraint("posting_hours_start BETWEEN 0 AND 23", name="ck_iga_hs"),
         CheckConstraint("posting_hours_end BETWEEN 0 AND 23", name="ck_iga_he"),
-        # Calls `trg_touch_updated_at / fn_safe_tz`'s fn_safe_tz. A CHECK naming a missing function is a hard
-        # error, so create_all against a database without `trg_touch_updated_at / fn_safe_tz` cannot run.
+        # Calls `trg_touch_updated_at` / `fn_safe_tz`'s fn_safe_tz. A CHECK naming a missing function is a hard
+        # error, so create_all against a database without `trg_touch_updated_at` / `fn_safe_tz` cannot run.
         CheckConstraint("tz IS NULL OR fn_safe_tz(tz) = tz", name="ck_iga_tz_valid"),
         # Exists to be a composite-FK target, not for its own sake.
         UniqueConstraint("workspace_id", "id", name="uq_ig_accounts_ws_id"),
@@ -137,7 +137,7 @@ class MediaSource(TargetBase):
     last_sync_success_at = Column(TZ, nullable=True)
     alerted_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
-    # `approval position constraints`: the folder's own approval position; NULL is the workspace's.
+    # approval rules: the folder's own approval position; NULL is the workspace's.
     approval_mode = Column(Text, nullable=True)
     origin_ig_account_id = Column(UUID(as_uuid=True), nullable=True)
     source_use_epoch = Column(BigInteger, nullable=False, server_default=text("0"))
@@ -206,7 +206,7 @@ class MediaSource(TargetBase):
 class OAuthCredential(TargetBase):
     """One encrypted credential payload. An `ig_login` credential is owned by
     exactly one ig_account; a `gdrive` credential is owned by the WORKSPACE
-    (`workspace Drive grant` — one Google grant per workspace, folders picked under it) and
+    (workspace Drive grant — one Google grant per workspace, folders picked under it) and
     names no owner column. `ck_credentials_one_owner` is provider-conditional,
     and the two partial unique indexes scope liveness per owner kind."""
 
@@ -238,7 +238,7 @@ class OAuthCredential(TargetBase):
         CheckConstraint(
             "state IN ('active','expired','revoked')", name="ck_credentials_state"
         ),
-        # `workspace Drive grant`: provider-conditional. An `ig_login` credential names its
+        # workspace Drive grant: provider-conditional. An `ig_login` credential names its
         # account; a `gdrive` credential names nothing — the workspace is its owner.
         CheckConstraint(
             "CASE provider"
@@ -316,8 +316,8 @@ class MediaItem(TargetBase):
     )  # `media_items.folder_path`: the folder's path under the connected folder
     last_listed_at = Column(
         TZ, nullable=True
-    )  # `media_items listing state`: when a walk of its folder last listed the file
-    # `approval position constraints`: the item's Auto-approve flag; false until a member sets it.
+    )  # media_items listing state: when a walk of its folder last listed the file
+    # approval rules: the item's Auto-approve flag; false until a member sets it.
     auto_approve = Column(Boolean, nullable=False, server_default=text("false"))
     source_data_generation_id = Column(UUID(as_uuid=True), nullable=True)
     source_projection_redacted = Column(

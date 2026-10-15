@@ -228,7 +228,7 @@ class TestListChanges:
 
     @pytest.mark.asyncio
     async def test_both_ids_reach_the_token_provider(self):
-        """The workspace id is the credential's key (`workspace Drive grant`) and the source id
+        """The workspace id is the credential's key (workspace Drive grant) and the source id
         names the folder; an adapter that dropped either would resolve the
         wrong tenant's grant or mislabel the folder it was syncing."""
         record: list = []

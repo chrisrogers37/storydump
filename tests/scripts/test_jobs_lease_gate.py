@@ -463,7 +463,7 @@ RECURRING = {"v": 1, "reap_expired": 60.0}
 NOTHING_MINTED, REAPER_MINTED = (0, 0, 0, 0, 0), (0, 0, 0, 1, 0)
 #: A lease that runs out while the test waits, as a killed worker's does.
 DYING_LEASE, LAPSE_S = "300 milliseconds", 0.5
-#: The four columns `fn_clock_tick singleton lease recovery` grants `svc_clock` on `jobs`.
+#: The four `jobs` columns `svc_clock` may update for lease recovery.
 LEASE_COLUMNS = "state, locked_by, lease_token, locked_until"
 
 
@@ -530,7 +530,7 @@ def _sender_key() -> str:
 
 
 class TestTheReapersOwnDeadLease:
-    """`fn_clock_tick singleton lease recovery`: the tick returns its own kind's expired lease to `ready`
+    """`fn_clock_tick`: the tick returns its own kind's expired lease to `ready`
     before its mint guard reads it — the one lease the reaper cannot re-ready
     is its own."""
 
@@ -589,7 +589,7 @@ class TestTheReapersOwnDeadLease:
 
 
 class TestTheReviveRidesItsOwnGrant:
-    """`fn_clock_tick singleton lease recovery`'s column grant is load-bearing on EVERY tick, not only when a lease
+    """`fn_clock_tick`'s column grant is load-bearing on EVERY tick, not only when a lease
     is dead: the revive's UPDATE is checked when it is planned, so without the
     grant the tick itself is refused. Removed, restored."""
 
@@ -606,10 +606,10 @@ class TestTheReviveRidesItsOwnGrant:
 
 
 class TestTheReaperEndsAReadyJobPastItsDeadline:
-    """`fn_reaper_sweep deadline leg`: the reaper ends a `ready` job past its deadline `failed`,
+    """`fn_reaper_sweep` deadline leg: the reaper ends a `ready` job past its deadline `failed`,
     and says so in its payload, when a sweep re-mints its kind."""
 
-    #: The kinds a sweep re-mints, which `fn_reaper_sweep deadline leg`'s leg may end: the clock's
+    #: The kinds a sweep re-mints, which `fn_reaper_sweep` may end at their deadlines: the clock's
     #: recurring singletons and its slot, refresh and reauth legs, the sender
     #: sweep's `deliver_outbox`, and the sync kinds, whose source it re-arms.
     RE_MINTED = frozenset(
@@ -625,18 +625,18 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
             "sync_media_source",
             "first_ingest_chunk",
             # The converter also ends at its deadline, but its terminal row
-            # prevents automatic remint in the same operator run (`source mix constraints`).
+            # prevents automatic remint in the same operator run (source mix constraints).
             "convert_source_mix",
         }
     )
     #: Nothing re-mints these, so ending one would only lose its work. The
-    #: exception is `retention_sweep`, which the clock mints hourly and `fn_reaper_sweep deadline leg`'s
+    #: exception is `retention_sweep`, which the clock mints hourly and the reaper's deadline
     #: leg does not list: a late one is still claimed (`fn_claim_job` reads no
     #: deadline, and only it holds its key), so it runs late rather than
     #: strands. Listing it is a migration.
     #: `activation_nudge_sweep` (`users.activation_nudge_at`) is minted daily by the clock once it is
     #: switched on, and is kept for the same reason: a late sweep runs late.
-    #: `archive lifecycle job kinds`'s three archive lifecycle kinds are kept too: the sweep runs late
+    #: The three archive lifecycle kinds are kept too: the sweep runs late
     #: like the nudge, and its two minting doors skip a key that still holds a
     #: ready job, so ending one past its deadline would only delay the next.
     KEPT = frozenset(
@@ -854,7 +854,7 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
                 fetch=True,
             )[0]
             # One statement stamps both, so the span is exact; a kind missing
-            # from `fn_reaper_sweep deadline leg`'s re-arm list leaves the source NULL.
+            # from `fn_reaper_sweep`'s re-arm list leaves the source NULL.
             assert span == timedelta(seconds=work_loop.REARM_AFTER_SECONDS), (
                 f"{kind}: a sync kind must be named in 086's re-arm too"
             )
@@ -865,7 +865,7 @@ class TestTheReaperEndsAReadyJobPastItsDeadline:
         )
 
     def test_the_re_arm_rides_its_own_grant(self, jobs_db):
-        """`fn_reaper_sweep deadline leg`'s column grant is load-bearing: without it the sweep is refused
+        """`fn_reaper_sweep`'s column grant is load-bearing: without it the sweep is refused
         (the re-arm's UPDATE is checked when it is planned). Removed, restored."""
         owner = jobs_db["owner_stream"]
         _sweep(jobs_db)  # positive control: the grant is in

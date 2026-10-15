@@ -54,6 +54,7 @@ def test_source_languages_find_only_prose(filename, source, numbers):
 def test_supported_markers_and_legitimate_numbers_are_allowed():
     source = """000_initial.sql, migration 001, `002`, 128-bit keys, 100 rows,
 20 msgs/min, 120/min/workspace, VARCHAR(100), 127.0.0.1 and 100.64.0.0/10.
+100 chunks of 1 KiB, 1–2,048 characters and 2,000 posts are quantities.
 """
     assert check_source(Path("guide.md"), source) == []
 

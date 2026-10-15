@@ -184,7 +184,7 @@ class TestChatResolutionAsAPrivilegedReader:
 
 class TestChatResolutionAsIngressGoesThroughTheDoor:
     """svc_ingress resolves a bound chat pre-context through
-    `fn_resolve_binding` (`fn_channel_join / fn_channel_leave`), exposing exactly one row; an unknown chat
+    `fn_resolve_binding` (`fn_channel_join` / `fn_channel_leave`), exposing exactly one row; an unknown chat
     refuses by name."""
 
     async def test_existing_active_binding_resolves_as_ingress(self, world):

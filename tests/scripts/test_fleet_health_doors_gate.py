@@ -3,7 +3,7 @@
 `/health/scheduling` and `/health/posting` count across every workspace —
 stalled cursors, active destinations, landings, the debited cap ledger — and
 the operating details read the ready lanes and the pending outbox; and external monitors take their verdicts
-from those counts. They read through `fleet health functions`'s definer doors: a direct read of the
+from those counts. They read through fleet health functions' definer doors: a direct read of the
 tenant tables with no tenant set works only for the owner login, because it
 bypasses row-level security. The runtime login cannot: under `svc_ingress`
 with no tenant set those reads come back empty, so a live estate would read as
@@ -308,7 +308,7 @@ def test_the_live_door_filters_landings_from_every_posting_signal(world):
 
 
 def test_the_api_login_never_holds_a_foreign_workspace_id_but_the_worker_may(world):
-    """`fleet health functions`'s one read that NAMES a tenant — the longest-waiting workspace, for
+    """fleet health functions' one read that NAMES a tenant — the longest-waiting workspace, for
     the worker's log — is the worker's door alone; the API's login reads the
     wait through a door that names nothing, and asks for no name."""
     api = _run(_worker_signal(world["ingress"]))

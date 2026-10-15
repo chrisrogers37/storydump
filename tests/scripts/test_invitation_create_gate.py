@@ -270,7 +270,7 @@ class TestTheRefusalsAreNamedRatherThanConstraintNames:
         """A second send to one address revokes the first: its link stops
         working, the new one is the only live invitation, and it is the new
         send's role that is granted. Without the revoke `uq_invite_live` would
-        refuse the send, and an invitation the accept door refuses (`invitation legitimacy checks`)
+        refuse the send, and an invitation the accept door refuses (invitation legitimacy checks)
         would keep refusing it until the reaper expired it."""
         r = _Round(world)
         try:

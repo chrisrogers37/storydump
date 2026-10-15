@@ -91,14 +91,14 @@ NOTICE_EVENT = "low_content_notice"
 REARM_EVENT = "low_content_rearmed"
 
 #: Whether a workspace is posting: active and not paused. The miss door ends a
-#: planned story of any other workspace as `paused` (`media_items listing state`). The calendar reads
+#: planned story of any other workspace as `paused`. The calendar reads
 #: it twice: in the cadence's predicted slots (`_POSTING_SQL`) and in a
 #: series' projection (`upcoming._REPEATING_SQL`).
 _WORKSPACE_POSTING_SQL = "w.state = 'active' AND NOT w.is_paused"
 
 #: Whether the clock posts for an account: fn_clock_tick's own `plan_slot`
-#: predicate (`fn_clock_tick singleton lease recovery`, leg 2) less its due-now conjunct, read here because nothing
-#: serves it per account. `test_content_runway.py` pins it to the migration.
+#: predicate less its due-now conjunct, read here because nothing serves it
+#: per account. `test_content_runway.py` pins it to the function definition.
 _POSTING_SQL = (
     f"(a.state = 'active' AND a.next_slot_at IS NOT NULL AND {_WORKSPACE_POSTING_SQL})"
 )

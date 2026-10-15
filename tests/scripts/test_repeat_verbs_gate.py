@@ -6,7 +6,7 @@ What each class pins, and why it is here rather than in a unit test:
 
 - **`schedule_item` stores the rule and computes nothing.** The first
   occurrence is the chosen time, on one of the rule's days; the ledger's
-  trigger (`intent repeat constraints`) makes every later one. A rule's time is kept to the minute.
+  trigger (repeat rules) makes every later one. A rule's time is kept to the minute.
 - **The CHECKs judge a rule, named.** A malformed rule is `invalid_args` with
   the `repeat` fact, and nothing is written; only the database can raise the
   constraint the refusal is matched on.

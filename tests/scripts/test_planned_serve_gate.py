@@ -1,4 +1,4 @@
-"""Gate: a planned story is served on time or missed out loud (`fn_planned_serve / fn_planned_misses`;
+"""Gate: a planned story is served on time or missed out loud (`fn_planned_serve` / `fn_planned_misses`;
 ).
 
 A planned story (`origin = 'planned'`) is served by the prompt sweep, not
@@ -164,7 +164,7 @@ def _seed_story(
     account and every other kind on the workspace. *entered_ago_s* backdates
     `entered_state_at`, *cap* stamps `cap_consumed_on` (a `publishing` row needs
     it), and *rule* ``(unit, every, days)`` gives a planned story a repeat rule
-    (`intent repeat constraints`) whose time of day is its own slot's, in the workspace's zone."""
+    (repeat rules) whose time of day is its own slot's, in the workspace's zone."""
     tag = uuid.uuid4().hex[:10]
     acct_tag = on["acct_tag"] if on else tag
     if on:

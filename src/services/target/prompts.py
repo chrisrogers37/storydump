@@ -31,7 +31,7 @@ the web until a person acts or `approval_ttl` expires it. That edge stays
 seeded in `intent_ledger.py`; nothing drives it.
 
 A PLANNED story (`origin = 'planned'`: a person chose its time) ends
-unserved only out loud (`fn_planned_serve / fn_planned_misses`). The due door serves it while it can be served
+unserved only out loud (`fn_planned_serve` / `fn_planned_misses`). The due door serves it while it can be served
 and within the worker's late window, its card naming who scheduled it; the
 miss door (`fn_planned_misses`) lists the rest, and `sweep_planned_misses`
 expires each with its reason and tells the bound chats in the same
@@ -297,7 +297,7 @@ async def _scheduler_name(
 async def _with_scheduler(session, row: Mapping) -> dict:
     """*row* as a dict and, when it is planned, who scheduled it
     (``scheduled_by``, as a shared chat may see them), its repeat rule
-    (``repeat``, `intent repeat constraints`) and its account's own zone (``repeat_tz``, NULL
+    (``repeat``, repeat rules) and its account's own zone (``repeat_tz``, NULL
     when it keeps the workspace's), in one read. Neither the due door nor
     `_CARD_SELECT` carries them, and both card paths, the sweep and the
     send-time render, come through here. The name is the scheduler's only
@@ -427,7 +427,7 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
     (`sends_settled`) is left in `pending` for `SETTLED_CARD_GRACE`,
     for the sender to claim, and is not counted healed until it goes.
 
-    The selection is a door (`worker sweep functions`, `fn_settled_cards`): the reaper runs with no
+    The selection is a door (worker sweep functions, `fn_settled_cards`): the reaper runs with no
     tenant and every table it joins is policy-covered — the direct read found
     nothing under `svc_worker`, so no ended story's card would ever lose its
     buttons. The door keeps the active-bindings join (a revoked
@@ -513,7 +513,7 @@ async def sweep_due_prompts(
     - ``prompted``: due `scheduled` intents (slot arrived, workspace active
       and unpaused, no cancel flag) gain their transition + cards via
       :func:`prompt_intent`. A planned one is due only while it can be served
-      and within *late_seconds* of its time (`fn_planned_serve / fn_planned_misses`); its card names who
+      and within *late_seconds* of its time (`fn_planned_serve` / `fn_planned_misses`); its card names who
       scheduled it.
       This is also the correctness backstop for the fast path in the
       `plan_slot` adapter — an intent whose prompt crashed mid-way is
@@ -534,7 +534,7 @@ async def sweep_due_prompts(
 
     counts = {"prompted": 0, "advanced": 0, "approved": 0}
 
-    # The two cross-tenant READS are doors (`worker sweep functions`): the sweep runs with no tenant
+    # The two cross-tenant READS are doors (worker sweep functions): the sweep runs with no tenant
     # and every table here is policy-covered. The WRITES — the cards, the
     # transitions — run per workspace under that workspace's tenant and the
     # system actor, exactly as a member's own action does, so the ledger's
@@ -702,7 +702,7 @@ async def say_not_served(
 
 #: The row a "not served" notice is written from, and the one spelling of it
 #: in Python. The removal's notice reads it directly; `fn_planned_misses`
-#: (`fn_planned_serve / fn_planned_misses`) spells the same columns and joins, a door being unable to call the
+#: (`fn_planned_serve` / `fn_planned_misses`) spells the same columns and joins, a door being unable to call the
 #: Python, and the pin in `test_prompts.py` holds the two together, as it
 #: holds `_CARD_SELECT` to `fn_prompts_due`.
 _NOTICE_SELECT = (
@@ -765,7 +765,7 @@ async def _next_waits(session, workspace_id: str, ended) -> bool:
 
 
 async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dict:
-    """The miss leg (`fn_planned_serve / fn_planned_misses`), on the prompt sweep's cadence and in the CALLER's
+    """The miss leg (`fn_planned_serve` / `fn_planned_misses`), on the prompt sweep's cadence and in the CALLER's
     transaction: every planned story the miss door lists ends `expired`, with
     `last_error = {v: 1, class: planned_missed, message: <reason>}`, and its
     notice is queued in the SAME savepoint, so none ends unserved without

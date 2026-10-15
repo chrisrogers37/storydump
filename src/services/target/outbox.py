@@ -132,7 +132,7 @@ MEDIA_ADMISSION_PASS_LIMIT = 25
 class ChannelSendError(StorydumpError):
     """What a channel's transport raises instead of a receipt.
 
-    ``failure_class`` is what the outbox records the attempt as (`outbox failure records`):
+    ``failure_class`` is what the outbox records the attempt as (outbox failure records):
     each definitive answer below names its own, and anything else is a lost
     answer, ``ambiguous``. ``code`` is the provider's own code when it answered
     with one: an int or nothing, never invented."""
@@ -431,7 +431,7 @@ async def _leave_sending(session, outbox_id: str, to_state: str, **extra) -> Non
     two independent statements.
 
     ``failure=(class, code)`` records why the attempt failed in the SAME
-    statement (`outbox failure records`): the record is written exactly when, and only if, the
+    statement (outbox failure records): the record is written exactly when, and only if, the
     state change is, so a fenced writer records nothing.
     """
     sets = ["state = :s"]
@@ -1354,7 +1354,7 @@ async def settle(
             "external_message_ref": None,
             "preparation_failed": error.preparation_failed,
         }
-    # What a failed attempt is recorded as (`outbox failure records`): the transport's own class and
+    # What a failed attempt is recorded as (outbox failure records): the transport's own class and
     # code, or a lost answer with no code for anything else.
     failure = (
         (error.failure_class, error.code)

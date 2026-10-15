@@ -371,7 +371,7 @@ async def apply_gucs(
     are sent — `set_config(x, NULL, true)` stores the empty string. An unset
     actor can read `''` regardless: a pooled connection that set
     `app.actor_kind` in an earlier transaction reads it back as `''`, not
-    NULL. The audit triggers treat `''` as unset for that reason (`audit actor checks`).
+    NULL. The audit triggers treat `''` as unset for that reason (audit actor checks).
 
     Known coverage note: the permit path's raw-connection transaction does not
     enter `transaction_discipline()`, so the discipline tripwire does not
@@ -405,7 +405,7 @@ class WorkspaceClaims:
     """Per-workspace tenant claims INSIDE a caller's transaction, and the
     caller's own scope handed back at the end.
 
-    A sweep that reads the estate through a door (`fleet health functions`, `worker sweep functions`) and then writes
+    A sweep that reads the estate through a door (fleet health functions, worker sweep functions) and then writes
     each row under its workspace's tenant claims several tenants in one
     transaction. Each claim is `SET LOCAL` (:func:`apply_gucs`), so it dies
     with the transaction — but not before the rest of the transaction runs.

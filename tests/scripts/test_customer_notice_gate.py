@@ -600,7 +600,7 @@ def _folder(notice_db, *, state="active", removed=False):
 
 def _cadence(notice_db, posts_per_day):
     """The account's own posts per day (None inherits the workspace's) and a
-    slot cursor, so the clock posts for it (`fn_clock_tick`, `fn_clock_tick singleton lease recovery`)."""
+    slot cursor, so the clock posts for it (`fn_clock_tick`)."""
     _sql(
         notice_db,
         "UPDATE ig_accounts SET posts_per_day = %s, next_slot_at = now() WHERE id = %s",

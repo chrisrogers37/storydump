@@ -1,4 +1,4 @@
-"""Admitting people from the waitlist (`signup admission functions`): the one core pathway.
+"""Admitting people from the waitlist (signup admission functions): the one core pathway.
 
 Every owner surface (the waitlist ping's Admit tap, the
 `/ops` page, the CLI) calls this module, and the doors decide. The

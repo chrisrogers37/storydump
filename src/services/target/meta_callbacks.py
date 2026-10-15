@@ -383,7 +383,7 @@ async def resolve_ig_accounts(conn, subject: str) -> list[AccountRef]:
     under the runtime login regardless of what is stored, and the route
     reports a miss as "not established" rather than "none". It reads
     through `fn_meta_accounts_for_ref`, a SECURITY DEFINER door
-    owned by `svc_maintenance` (`fleet health functions`): an equality on one bound value,
+    owned by `svc_maintenance` (fleet health functions): an equality on one bound value,
     every workspace's accounts, EXECUTE for `svc_ingress`. The first reason
     stands, so an empty answer is still not proof of absence.
     """
@@ -418,7 +418,7 @@ async def revoke_for_accounts(conn, accounts: list[AccountRef]) -> int:
     Under the owner login the tenant claim is inert and the pair predicate
     still bounds the write to the workspace; under `svc_ingress` it is what
     makes the UPDATE reach its rows at all — without it the policy filters
-    everything and this truthfully updates nothing (`fleet health functions`). The actor is
+    everything and this truthfully updates nothing (fleet health functions). The actor is
     `system`, as the worker's own writes claim: `trg_governance_audit`
     refuses an anonymous mutation of this table under EVERY login, so a
     matched deauthorize without an actor would raise, and Meta would retry
@@ -486,7 +486,7 @@ async def receive_deletion(
     subject: str,
     issued_at: Any,
 ) -> DeletionReceipt:
-    """Record a verified deletion request through the tenant-free door (`Meta deletion receipt functions`) and
+    """Record a verified deletion request through the tenant-free door (Meta deletion receipt functions) and
     mint the capability that reads its status back.
 
     One transaction, as the API's own login with no tenant: the door classifies

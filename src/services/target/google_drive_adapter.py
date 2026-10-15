@@ -32,7 +32,7 @@ two-argument shape stays legible.
 instead of reading `oauth_credentials` itself; the live provider is
 :func:`src.services.target.drive_credentials.provider_from_engine`, and the
 refresh it mints behind that seam is `drive_credentials._refresh` — on the READ
-path, because the refresh clock is fenced to `ig_login` (`fn_clock_tick provider guards`) and gdrive rows
+path, because the refresh clock is fenced to `ig_login` (`fn_clock_tick` provider guards) and gdrive rows
 carry `next_refresh_at = NULL`. The seam keeps this module free of
 decryption and of the credential state machine.
 
@@ -297,7 +297,7 @@ class _TokenBox:
 
 
 class TokenProvider(Protocol):
-    """Resolves a usable Drive access token — the WORKSPACE's grant (`workspace Drive grant`).
+    """Resolves a usable Drive access token — the WORKSPACE's grant (workspace Drive grant).
 
     `source_id` names the folder being synced, for the provider's own
     messages; it is `None` from the folder browser, which syncs nothing.
@@ -988,7 +988,7 @@ class GoogleDriveAdapter:
         folders shared to the account when `SHARED_ROOT` — as ``{"id",
         "name"}`` rows in name order: the picker's read. The
         same grant and the same floored transport as `list_changes`; the token
-        is the WORKSPACE's (`workspace Drive grant`), so the provider is asked with no source.
+        is the WORKSPACE's (workspace Drive grant), so the provider is asked with no source.
         Pages are followed to `FOLDER_LIST_CAP`, and the page says when it
         was cut rather than looking complete.
         """

@@ -1186,7 +1186,7 @@ async def test_selected_discovery_owner_has_only_required_archive_read_grants(
                 ),
                 {"table": table},
             )
-        # `archive lifecycle cleanup`: the redaction door, which svc_maintenance owns, deletes the intent
+        # archive lifecycle cleanup: the redaction door, which svc_maintenance owns, deletes the intent
         # provenance of fenced generations; the assets stay read-only.
         delete = "SELECT has_table_privilege('svc_maintenance',:table,'DELETE')"
         assert await conn.scalar(text(delete), {"table": "instagram_intent_provenance"})

@@ -27,7 +27,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture()
 def three_file_tree(tmp_path):
-    """Migrations 001-`user interaction records`; the scratch DB decides which 'ran' via tables."""
+    """Three synthetic migrations; the scratch DB decides which 'ran' via tables."""
     write_migration(tmp_path, 1, "CREATE TABLE adopted_one (id INT);")
     write_migration(tmp_path, 2, "CREATE TABLE adopted_two (id INT);")
     write_migration(tmp_path, 3, "CREATE TABLE adopted_three (id INT);")
@@ -124,7 +124,7 @@ class TestAdoptHardFailures:
         )
 
     def test_gap_below_a_true_probe_fails(self, scratch_db, three_file_tree):
-        """False-then-true above the floor is an incoherent chain: `user interaction records`
+        """False-then-true above the floor is an incoherent chain: the later DDL file
         present while 002 is absent needs a human, not a guess."""
         execute(scratch_db, "CREATE TABLE adopted_one (id INT)")
         execute(scratch_db, "CREATE TABLE adopted_three (id INT)")
@@ -218,7 +218,7 @@ class TestAdoptUnderALineageBound:
         bound also silences it for an entry naming a file that genuinely does
         not exist — the check stops asking its own question on every bounded
         run. Pointing it at the corpus instead keeps the question intact and
-        makes the answer true: `active-account settings` is absent from the tree, bound or no bound.
+        makes the answer true: active-account settings is absent from the tree, bound or no bound.
         """
         write_migration(tmp_path, 1, "CREATE TABLE adopted_one (id INT);")
         write_migration(tmp_path, 2, "CREATE TABLE adopted_two (id INT);")
@@ -260,8 +260,8 @@ class TestAdoptUnderALineageBound:
 
 class TestAdoptTrustsProbesNotSchemaVersion:
     def test_legacy_schema_version_rows_are_ignored(self, scratch_db, three_file_tree):
-        """The legacy self-stamp table contradicts the probes (its known
-        `verbose notifications`/`send failure tracking`-gap hazard class); the probes must win."""
+        """The legacy self-stamp table contradicts the probes; adoption follows
+        schema evidence and ignores the stale marker."""
         execute(
             scratch_db,
             "CREATE TABLE schema_version (version INT, description TEXT,"

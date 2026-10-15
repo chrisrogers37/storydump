@@ -140,7 +140,7 @@ describe("deriveSettings keeps the unsourced fields unsourced", () => {
   it("derives the Drive connection from the WORKSPACE's grant, not from the source row", () => {
     /*
      * The answer is the credential's, not a source row's, and the
-     * credential is the workspace's (`workspace Drive grant`), so the answer comes from
+     * credential is the workspace's (workspace Drive grant), so the answer comes from
      * `GET /workspaces/{ws}/drive` and a source row says nothing about it.
      */
     const connected = deriveSettings(CONFIG, [DRIVE], STATS, GRANT);

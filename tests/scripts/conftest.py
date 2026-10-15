@@ -201,7 +201,7 @@ def as_user(dsn: str, user: str) -> str:
 def sweep_as_worker(dsn: str) -> int:
     """`work_loop.ensure_sender_jobs` the way the worker runs it: as the login
     *dsn* names (the worker's), in its own session with the EMPTY tenant and
-    the `system` actor — the sweep's cross-tenant read is the door's (`worker sweep functions`).
+    the `system` actor — the sweep's cross-tenant read is the door's (worker sweep functions).
     Run it AFTER the transaction that enqueued the cards has committed: a
     second session cannot see an uncommitted row."""
     import asyncio
@@ -682,7 +682,7 @@ def seed_intent_chain(
     ``app.actor_kind``). ``state`` overrides the intent's column default
     (``'scheduled'``) for a suite that needs, say, ``'awaiting_approval'``;
     ``origin`` likewise (``'cadence'``) for a planned story, which must be
-    BORN planned: the ledger refuses changing it afterwards (`post_intents.origin`, `approval position constraints`).
+    BORN planned: the ledger refuses changing it afterwards (`post_intents.origin`, approval rules).
     Split out of :func:`seed_workspace_chain` so an API-created workspace can
     be seeded with the same spelling rather than a copy."""
     cur.execute(

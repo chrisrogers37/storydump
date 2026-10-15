@@ -42,7 +42,7 @@ async def scheduling_lag(executor) -> dict[str, Any]:
         (
             await executor.execute(
                 text(
-                    # The door's body (`fleet health functions`): FILTER binds to the AGGREGATE,
+                    # The door's body (fleet health functions): FILTER binds to the AGGREGATE,
                     # so the seconds are computed inside the max.
                     "SELECT o_stalled AS stalled,"
                     "   o_accounts_active AS accounts_active,"

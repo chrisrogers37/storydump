@@ -13,7 +13,7 @@ The connect callback writes the row where the archive is live, in the same unit
 of work as the credential and under the source prefix it already holds. The
 bounded reconciliation of older credentials writes `reconciled_read` rows
 through the same writer. Reading is the callbacks' own: `fn_meta_subject_mappings`
-and `fn_meta_deletion_receive`, tenant-free doors (`meta_identity_mappings`, `Meta deletion receipt functions`).
+and `fn_meta_deletion_receive`, tenant-free doors (`meta_identity_mappings`, Meta deletion receipt functions).
 """
 
 from __future__ import annotations

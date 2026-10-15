@@ -653,7 +653,7 @@ class TestPromptSweeperConsumesTheSweep:
             return {
                 "missed": 3,
                 "unheard": 1,
-            }  # the miss leg's vocabulary (`fn_planned_serve / fn_planned_misses`)
+            }  # the miss leg's vocabulary (`fn_planned_serve` / `fn_planned_misses`)
 
         monkeypatch.setattr(worker.prompts_mod, "sweep_due_prompts", fake_sweep)
         monkeypatch.setattr(worker.prompts_mod, "sweep_planned_misses", fake_misses)

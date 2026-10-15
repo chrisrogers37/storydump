@@ -10,7 +10,7 @@ verifier, one credential, and no secret anywhere that could mint a session
 for an arbitrary user — the reason this lives here and not on the front end.
 
 `POST /auth/google/claim` is the same start for a waitlist admission's claim
-link (`signup admission functions`): the site's claim page form-posts the link's token,
+link (signup admission functions): the site's claim page form-posts the link's token,
 and the token waits in the `sd_claim` cookie for the callback, so it is never
 in a URL the API receives. At the callback, a new account the sign-up gate
 refuses spends the claim, in one savepoint with the user it creates; any other
@@ -47,7 +47,7 @@ carries no PKCE verifier the ring can read) · ``exchange_failed`` ·
 ``identity_collision`` (sign-in: the verified email belongs to another
 account — never merged) · ``not_admitted`` (sign-in: a new account whose
 email nobody admitted or invited, `fn_signup_admitted`) · ``claim_refused`` (sign-in: such an
-account's claim link was used, replaced or unknown, or its spot is taken, `signup admission functions`;
+account's claim link was used, replaced or unknown, or its spot is taken, signup admission functions;
 or the claim page posted no token of a claim's shape) — those two land on
 `/login?error=…`, beside the waitlist, rather than on this page ·
 ``grant_incomplete`` (Drive: Google answered
@@ -131,7 +131,7 @@ router = APIRouter(tags=["auth"])
 NONCE_COOKIE = "sd_oauth_nonce"
 NONCE_COOKIE_PATH = "/auth/google"
 
-#: A claim link's token on its way to the sign-in callback (`signup admission functions`),
+#: A claim link's token on its way to the sign-in callback (signup admission functions),
 #: set by `POST /auth/google/claim` with the nonce's path and lifetime.
 #: A cookie and never a query string, so the token rests in no access log the
 #: API writes.
@@ -296,7 +296,7 @@ async def google_signin(request: Request) -> Response:
 
 @router.post("/google/claim")
 async def google_claim(request: Request) -> Response:
-    """Sign in through a claim link (`signup admission functions`). The site's claim
+    """Sign in through a claim link (signup admission functions). The site's claim
     page form-posts the link's token as ``claim``. A token of no claim's shape
     lands on `/login?error=claim_refused`; any other starts the sign-in as
     `GET /auth/google` does, answered as a 303 (the form's POST becomes a GET
@@ -410,7 +410,7 @@ async def _signed_in_user(
 ) -> Optional[str]:
     """The user *who* signs in as (`identity.upsert_google_identity`), or None
     when the claim link *claim* is refused: used, replaced, unknown, or its
-    spot taken (`signup admission functions`).
+    spot taken (signup admission functions).
 
     The upsert's refusals propagate, but for one: when the sign-up gate
     refuses a new account that carries a claim and a verified email, the claim
@@ -505,7 +505,7 @@ async def google_drive_callback(
     if row["reconnect_target"] is None or str(row["reconnect_target"]) != str(
         row["workspace_id"]
     ):
-        # The grant is the WORKSPACE's (`workspace Drive grant`): the issue leg pins the
+        # The grant is the WORKSPACE's (workspace Drive grant): the issue leg pins the
         # workspace as its own target. A state that names anything else — a
         # source id, or nothing — is
         # not one this leg can act on.

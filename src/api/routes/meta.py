@@ -160,7 +160,7 @@ async def deauthorize(request: Request):
     nothing to retry: a subject we hold no credential for is a completed no-op.
     **A miss on the account-reference lookup is logged as "not established"
     rather than "none"**: the lookup reads every workspace through its door
-    (`fleet health functions`), but the subject Meta sends names a person while
+    (fleet health functions), but the subject Meta sends names a person while
     `provider_account_ref` names an account — sometimes a provisional
     `manual:<handle>` no Meta id equals — see `resolve_ig_accounts`.
     """
@@ -221,7 +221,7 @@ async def data_deletion(request: Request):
         caller must not reach a stronger deletion than the owner's own
         confirmed one.
 
-     **With the archive's key ring configured the receipt is durable** (`Meta deletion receipt functions`,
+     **With the archive's key ring configured the receipt is durable** (Meta deletion receipt functions,
     ): a tenant-free door records the request under a keyed
      fingerprint of its signed payload — never the payload, the subject or a
      secret — freezes which authorizations are in scope, and the response

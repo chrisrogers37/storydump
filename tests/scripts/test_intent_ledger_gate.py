@@ -248,7 +248,7 @@ class TestTheTransitionMatrixIsEnforcedByTheTriggerNotTheService:
             if src in TERMINAL:
                 continue  # terminal immutability is a separate, stronger rule
             intent = _new_intent(ledger, src)
-            # The approval edge is a person's (`approval position constraints`), or the system's
+            # The approval edge is a person's (approval rules), or the system's
             # stamping a rule: driven here as the person the other paths are.
             person = (src, dst) == ("awaiting_approval", "approved")
             ok, msg, _ = _attempt(
@@ -758,7 +758,7 @@ def _stamped(ledger, rule: str = "auto") -> str:
 
 
 class TestOnlyAPersonOrAStampedRuleApproves:
-    """`approval position constraints`: `awaiting_approval -> approved` on ANY story is a person's,
+    """approval rules: `awaiting_approval -> approved` on ANY story is a person's,
     `app.actor_kind = 'user'` with an `app.actor_user_id` and the rule left NULL,
     or the system's stamping the rule that approved it in the same UPDATE. The
     rule reads no `origin`, so each behaviour runs on cadence stories and once
@@ -815,7 +815,7 @@ class TestOnlyAPersonOrAStampedRuleApproves:
         assert not ok and "is the system's" in msg, msg
 
     def test_the_pipelines_step_back_is_untouched(self, ledger):
-        """`publishing -> approved` is the float's step back (`post_intent_transitions publish wait edges`), issued by
+        """`publishing -> approved` is the float's step back (`post_intent_transitions`), issued by
         the worker as `system`: the rule is about approval, not about every
         edge that lands in `approved`."""
         intent = _new_intent(ledger, "publishing")
@@ -855,7 +855,7 @@ class TestTheRuleIsStampedOnlyByTheApproval:
 
 class TestOriginIsFixedAtBirth:
     """`origin` must not move: a rule one UPDATE could step around would not
-    hold (`post_intents.origin`'s guarantee, which `tg_intent_person_or_rule` (`approval position constraints`) carries)."""
+    hold (`post_intents.origin`'s guarantee, which `tg_intent_person_or_rule` (approval rules) carries)."""
 
     @pytest.mark.parametrize(
         "born, becomes", [("planned", "cadence"), ("cadence", "planned")]
@@ -1126,7 +1126,7 @@ class TestTheServicePathAgreesWithTheTrigger:
         is legal, so the guard passes and the missing actor is the only
         objection left. On a fresh connection the unset setting reads NULL; on
         a pooled connection that has carried an actor it reads '', which the
-        trigger reads as unset too (`audit actor checks`).
+        trigger reads as unset too (audit actor checks).
         """
         from sqlalchemy import text
         from sqlalchemy.ext.asyncio import create_async_engine

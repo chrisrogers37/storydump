@@ -152,7 +152,7 @@ def describe_repeat(rule: Mapping[str, Any]) -> str:
     09:00", "every 3 days at 09:00", "every week on Mon and Thu at 16:07",
     "every 2 weeks on Tue at 16:07". *rule* is the rule's one shape,
     ``{unit, every, days, at}`` with ``at`` as ``HH:MM``
-    (`intent_ledger.repeat_sql`). It is one the CHECKs admitted (`intent repeat constraints`), so an
+    (`intent_ledger.repeat_sql`). It is one the CHECKs admitted (repeat rules), so an
     unknown unit is a bug, raised."""
     unit, every, at = rule["unit"], rule["every"], rule["at"]
     if unit == "day":
@@ -270,7 +270,7 @@ ADMIT_OUTCOMES: tuple[str, ...] = (
 )
 
 #: The hex characters of an address's SHA-256 that stand for it where the
-#: address itself must not travel: `fn_waitlist`'s `p_ref` (`signup admission functions`), and
+#: address itself must not travel: `fn_waitlist`'s `p_ref` (signup admission functions), and
 #: the waitlist ping's Admit button. One spelling for `signup_admissions.ref`,
 #: which cuts it, and `callback_tokens`, which checks it.
 WAITLIST_REF_HEX = 32
@@ -635,7 +635,7 @@ AT_RULE_SENTENCES: Mapping[str, str] = {
 }
 
 #: Why the port refused a repeat rule (its `repeat` fact), in the CLI's
-#: words: the CHECKs judged its shape (`intent repeat constraints`), and the port the story's day,
+#: words: the CHECKs judged its shape (repeat rules), and the port the story's day,
 #: which a weekly series' days must include.
 REPEAT_SENTENCES: Mapping[str, str] = {
     "invalid": "that repeat is not one a story can keep",
