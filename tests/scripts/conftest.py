@@ -20,7 +20,6 @@ cluster, which is the scope the guarded resource actually has.
 """
 
 import contextlib
-import functools
 import json
 import shutil
 import subprocess
@@ -36,8 +35,6 @@ from psycopg2.extras import RealDictCursor, UUID_adapter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
-
-from scripts.migration_runner import MIGRATIONS_DIR, legacy_lineage_max
 
 from src.config.db_url import userinfo
 from src.config.settings import settings
@@ -168,27 +165,6 @@ SCRATCH_LOCK_KEY = 785_2026
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SQL = REPO_ROOT / "scripts" / "setup_database.sql"
 
-#: The one legacy table no migration creates: `posting_history_dedup_archive`,
-#: made by hand in production during #941. A world that will apply the snapshot
-#: file (078) has to hold it, in `public` before the 051 move so it rides into
-#: `legacy` the way production's did — which is why the lane seeds it beside
-#: `SETUP_SQL`, and why the snapshot gate (`test_legacy_snapshots.py`) reads its
-#: DDL from here.
-BY_HAND_SQL = REPO_ROOT / "tests" / "scripts" / "fixtures" / "legacy_by_hand.sql"
-
-#: Advertised-stream boundaries for the target-lineage increments (#806), used
-#: by the derivation's unit tests. Held here because the stream is generated
-#: from the advertised DDL blocks — one inserted statement moves every boundary,
-#: and a bare literal at each use site lets consumers drift apart while each
-#: stays green.
-#:
-#: DELIBERATELY LITERAL, NOT DERIVED. `F2_6_END` is "the index of the first
-#: ENABLE ROW LEVEL SECURITY", and a test asserts exactly that property at that
-#: bound; deriving it from the stream would make that assertion true by
-#: construction. Re-derive them by hand when the stream changes — that is a
-#: review event, which is the point.
-F2_2_END = 22  # 053 = stream[2:22]: 7 tables, 4 tenant-keyed, no RLS
-F2_6_END = 126  # end of 057 — the last index before any RLS is enabled
 BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
 
 #: The step-0 companion artifact (#787): the window's legacy-DDL definer
@@ -200,30 +176,6 @@ BOOTSTRAP_SQL = REPO_ROOT / "scripts" / "window" / "step0_bootstrap.sql"
 #: needs the suite mutex), this is per-database and needs none, which is what
 #: lets the owner-world sites apply it through `psql_apply`.
 DOOR_SQL = REPO_ROOT / "scripts" / "window" / "step0_legacy_ddl_door.sql"
-
-#: THE LEGACY LINEAGE'S STAND-UP IS TWO FILES (#787), and this constant is
-#: the one place that says so. 050 routes its owner-DDL through the step-0
-#: definer door, so any world that will REPLAY 050 — not merely one that applies
-#: `SETUP_SQL` — has to carry the door first. Window worlds get it from
-#: `run_bootstrap`; owner worlds get it from here. Named rather than inlined
-#: because the failure mode of forgetting it is a bare `schema "window_ddl" does
-#: not exist` at migration 050, which reads as a corpus defect rather than as a
-#: missing fixture file.
-LEGACY_STANDUP = [SETUP_SQL, DOOR_SQL]
-
-#: The last version of the LEGACY lineage — everything numbered below the
-#: schema move. **Derived from the move file's own marker, never written down
-#: here**: a bound stated as a literal is a second enumeration of the corpus,
-#: and it would be right on the day it was typed and silently wrong the first
-#: time anyone renumbered anything. Read it, do not replace it with an int.
-#:
-#: What it is FOR: from 051 on the corpus holds two lineages in one directory,
-#: and the suites below guard the legacy one — the schema the running
-#: application is built on. Replaying past the boundary renames `public` out
-#: from under them, so every legacy-lineage replay passes this bound. The lane
-#: that replays *across* the boundary is `test_lineage_lane.py`, deliberately
-#: a separate suite rather than a flag on these.
-LEGACY_LINEAGE_MAX = legacy_lineage_max(MIGRATIONS_DIR)
 
 #: The seven service roles, split as the step-0 bootstrap provisions them.
 #: Held here rather than re-listed per test so the inventory has one home on
@@ -476,23 +428,6 @@ def admin_conn():
                 _sweep_leftovers(cur)
             except Exception as exc:  # noqa: BLE001 - hygiene must not fail the run
                 print(f"conftest: leftover sweep skipped on error: {exc}")
-        yield conn
-    finally:
-        conn.close()
-
-
-@pytest.fixture()
-def outsider_conn():
-    """A connection valid in every way EXCEPT that it does not hold the mutex.
-
-    Same cluster, database, user and process as ``admin_conn`` — both go
-    through `maintenance_conn`, whose docstring already names this consumer:
-    "anything that has to reach the cluster from OUTSIDE it". The single
-    difference is the advisory lock, which is what makes a refusal asserted
-    against this connection a controlled result rather than an unexplained one.
-    """
-    conn = maintenance_conn()
-    try:
         yield conn
     finally:
         conn.close()
@@ -829,81 +764,6 @@ def window_actor(db_dsn: str, owner_actor: str, admin_conn) -> str:
     return as_user(db_dsn, "svc_migration")
 
 
-# --- production-shaped templates (built once per session, copied per test) --
-
-
-@pytest.fixture(scope="session")
-def at45_template(admin_conn, owner_actor):
-    """The at-45 world (setup + 001–045 hand-applied, no ledger), seeded
-    CONNECTED AS THE OWNER ACTOR: production history was built by hand as
-    the database owner, so the template's legacy tables carry real legacy
-    ownership. Table ownership rides into every TEMPLATE copy."""
-    name = _scratch_name(TPL_DB_PREFIX, "at45_")
-    _create_db(admin_conn, name, owner=owner_actor)
-    psql_apply(as_user(_dsn(name), owner_actor), LEGACY_STANDUP + migration_files(45))
-    yield name
-    _drop_db(admin_conn, name)
-
-
-@pytest.fixture(scope="session")
-def at49_template(admin_conn, owner_actor, at45_template):
-    """The at-49 world — built FROM the at-45 template plus 046–049, so the
-    session pays for the shared prefix once."""
-    name = _scratch_name(TPL_DB_PREFIX, "at49_")
-    _create_db(admin_conn, name, template=at45_template, owner=owner_actor)
-    files = [f for f in migration_files(49) if f not in set(migration_files(45))]
-    psql_apply(as_user(_dsn(name), owner_actor), files)
-    yield name
-    _drop_db(admin_conn, name)
-
-
-@pytest.fixture(scope="session")
-def replayed_template(admin_conn, owner_actor):
-    """The legacy lineage REPLAYED THROUGH THE RUNNER as the owner — for
-    tests that assert on the resulting schema rather than on the replay
-    report (the report-asserting test builds its own and stays the actual
-    tightening battery)."""
-    from scripts.migration_runner import apply_pending
-
-    name = _scratch_name(TPL_DB_PREFIX, "replayed_")
-    _create_db(admin_conn, name, owner=owner_actor)
-    as_owner = as_user(_dsn(name), owner_actor)
-    psql_apply(as_owner, LEGACY_STANDUP)
-    apply_pending(as_owner, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
-    yield name
-    _drop_db(admin_conn, name)
-
-
-@pytest.fixture()
-def at45_db(admin_conn, at45_template, owner_actor):
-    """A private copy of the at-45 shape."""
-    yield from _scratch(admin_conn, template=at45_template, owner=owner_actor)
-
-
-@pytest.fixture()
-def at45_window_db(admin_conn, at45_template, owner_actor):
-    """The at-45 shape plus the service-role bracket (window-actor tests)."""
-    yield from _scratch(admin_conn, template=at45_template, owner=owner_actor, roles=[])
-
-
-@pytest.fixture()
-def at49_db(admin_conn, at49_template, owner_actor):
-    """A private copy of the at-49 shape, safe to mutate."""
-    yield from _scratch(admin_conn, template=at49_template, owner=owner_actor)
-
-
-@pytest.fixture()
-def at49_window_db(admin_conn, at49_template, owner_actor):
-    """The at-49 shape plus the service-role bracket (window-actor tests)."""
-    yield from _scratch(admin_conn, template=at49_template, owner=owner_actor, roles=[])
-
-
-@pytest.fixture()
-def replayed_db(admin_conn, replayed_template, owner_actor):
-    """A private copy of the runner-replayed legacy schema."""
-    yield from _scratch(admin_conn, template=replayed_template, owner=owner_actor)
-
-
 # --- the step-0 window bootstrap (#746) -------------------------------------
 #
 # Service roles are CLUSTER-scoped, so they outlive the per-test scratch
@@ -1010,7 +870,7 @@ def drop_service_roles(admin_conn, extra=()) -> None:
     `DependentObjectsStillExist` while that database is still there. Dropping
     the database first discards the dependencies with it.
     Callers must not hand-roll this order; use the role-bracketed fixtures
-    (`roleless_db`, `owner_window_db`, `at49_window_db`, ...), whose shared
+    (`roleless_db`, `owner_window_db`, ...), whose shared
     `_scratch` lifecycle sequences it correctly.
 
     Having ``admin_conn`` in the signature made this door DECLARE the mutex, not
@@ -1047,19 +907,6 @@ def run_bootstrap(admin_conn, dsn: str) -> None:
             cur.execute(DOOR_SQL.read_text())
     finally:
         conn.close()
-
-
-def bootstrap_via_psql(admin_conn, dsn: str) -> None:
-    """The same artifact through `psql -v ON_ERROR_STOP=1` — how a runbook step
-    actually invokes it.
-
-    A named door rather than a bare `psql_apply(dsn, [BOOTSTRAP_SQL])` call
-    because BOTH routes onto the seven cluster-scoped roles have to verify the
-    mutex or the one left bare is the whole hole (#808). This is the only route
-    that may apply that artifact through psql — `psql_apply` turns it away.
-    """
-    assert_holds_cluster_lock(admin_conn, "bootstrap_via_psql")
-    _psql_run(dsn, [BOOTSTRAP_SQL])
 
 
 @pytest.fixture()
@@ -1138,62 +985,20 @@ def sync_conn(lane_db):
     conn.close()
 
 
-@functools.lru_cache(maxsize=1)
-def advertised_stream():
-    """The expanded advertised stream, NORMALIZED, built once per process.
-
-    ONE SPELLING for the whole suite. Measured on this host: ~36 ms per build
-    of the 257-statement stream, and the two suites between them ask for it
-    roughly ten times a run.
-
-    Cached because callers only ever slice it, and slicing copies — nothing in
-    the suite writes to the source docs or the manifest (every fixture that
-    rewrites either targets `tmp_path`), so there is no invalidation to miss.
-
-    NORMALIZED IS A COMPARISON KEY AND NOT EXECUTABLE SQL, which matters when
-    writing a migration from it: normalization collapses each
-    statement onto one line and keeps a function body whole, so a `--` line
-    inside a body (`fn_clock_tick` carries many) comments out the rest of that
-    body when the normalized statement runs.
-    """
-    from scripts.advertised_ddl import (
-        DEFAULT_DOCS,
-        DEFAULT_MANIFEST,
-        build_stream,
-        load_manifest,
-        normalize_statements,
-    )
-
-    return normalize_statements(
-        build_stream(DEFAULT_DOCS, load_manifest(DEFAULT_MANIFEST))
-    )
-
-
-@functools.lru_cache(maxsize=None)
-def migration_files(limit: int):
-    """The real corpus up to ``limit``, selected by the runner's own
-    discovery so the gate cannot drift from production's file set."""
-    from scripts.migration_runner import discover_migrations
-
-    files = [m.path for m in discover_migrations(MIGRATIONS_DIR, limit)]
-    assert files, "no migration files found"
-    return files
-
-
 def psql_apply(dsn: str, files) -> None:
     """Hand-apply SQL files the way production history was actually built.
 
-    REFUSES ``BOOTSTRAP_SQL`` (#808). That artifact provisions the seven
+    REFUSES ``BOOTSTRAP_SQL``. That artifact provisions the seven
     cluster-scoped ``svc_*`` roles, and this door cannot check the suite mutex
     for the reason the door exists — it holds a DSN, not a connection, and a
-    DSN cannot be asked what locks anyone holds. Rather than guard it (12 of
-    its 13 callers apply `SETUP_SQL` or migration files INTO one scratch
-    database, which is per-database and needs no cluster mutex), the one
-    cluster-scoped file is turned away toward `bootstrap_via_psql`.
+    DSN cannot be asked what locks anyone holds. Its callers apply files INTO
+    one scratch database, which is per-database and needs no cluster mutex, so
+    the one cluster-scoped file is turned away toward `run_bootstrap`, which
+    checks the mutex on the connection it is handed.
 
     Keying the refusal on the ARTIFACT rather than on a door is what stops the
-    hole reopening: the inventory of ways to reach a file is unbounded and this
-    is the second one already, so the check belongs where the file is named.
+    hole reopening: the inventory of ways to reach a file is unbounded, so the
+    check belongs where the file is named.
 
     The subprocess gets a MINIMAL environment, not the inherited shell:
     external code under an ambient environment is how credential names
@@ -1203,17 +1008,17 @@ def psql_apply(dsn: str, files) -> None:
     if any(Path(f) == BOOTSTRAP_SQL for f in files):
         raise RuntimeError(
             "psql_apply: BOOTSTRAP_SQL provisions the CLUSTER-scoped svc_*"
-            " roles, so it must go through `bootstrap_via_psql`, which verifies"
-            " SUITE_CLUSTER_LOCK_KEY (#808). This door only has a DSN, so it"
-            " cannot check the mutex itself."
+            " roles, so it must go through `run_bootstrap`, which verifies"
+            " SUITE_CLUSTER_LOCK_KEY. This door only has a DSN, so it cannot"
+            " check the mutex itself."
         )
     _psql_run(dsn, files)
 
 
 def _psql_run(dsn: str, files) -> None:
-    """The subprocess invocation itself — the one spelling, shared by the public
-    `psql_apply` door and the guarded `bootstrap_via_psql` one, so the refusal
-    above cannot be sidestepped by rebuilding the command somewhere else."""
+    """The subprocess invocation itself — the one spelling, behind the
+    `psql_apply` door, so its refusal cannot be sidestepped by rebuilding the
+    command somewhere else."""
     cmd = ["psql", dsn, "-q", "-v", "ON_ERROR_STOP=1"]
     for f in files:
         cmd += ["-f", str(f)]

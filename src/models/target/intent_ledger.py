@@ -67,14 +67,14 @@ class CategoryPostCaseMix(TargetBase):
     id = pk()
     workspace_id = fk("workspaces.id", "CASCADE", nullable=False)
     category = Column(Text, nullable=False)  # the label the card shows (071)
-    source_id = Column(
-        UUID(as_uuid=True), nullable=True
-    )  # 071: the connected folder — the key
     ratio = Column(Numeric(), nullable=False)
     effective_from = Column(TZ, nullable=False, server_default=text("now()"))
     effective_to = Column(TZ, nullable=True)
     created_by_user_id = fk("users.id", "SET NULL", nullable=True)
     created_at, updated_at = timestamps()
+    source_id = Column(
+        UUID(as_uuid=True), nullable=True
+    )  # 071: the connected folder — the key
 
     __table_args__ = (
         CheckConstraint("ratio >= 0", name="ck_case_mix_ratio"),
@@ -115,11 +115,6 @@ class PostIntent(TargetBase):
     # Every insert writes 'manual' (110); a row holding another mode carries
     # the workspace's mode as it was copied at mint.
     approval_mode = Column(Text, nullable=False)
-    # 110: the rule that approved the story — NULL for a person, or while it
-    # waits. `tg_intent_person_or_rule` stamps it only with the approval and
-    # keeps `origin` fixed at birth; the parity gate does not compare
-    # triggers, so the migration is where both rules are read.
-    approval_rule = Column(Text, nullable=True)
     approved_by_user_id = fk("users.id", "SET NULL", nullable=True)
     published_via = Column(Text, nullable=False, server_default=text("'api'"))
     provider_account_ref = Column(Text, nullable=False)
@@ -145,6 +140,11 @@ class PostIntent(TargetBase):
     # cadence ones.
     origin = Column(Text, nullable=False, server_default=text("'cadence'"))
     scheduled_by_user_id = fk("users.id", "SET NULL", nullable=True)
+    # 110: the rule that approved the story — NULL for a person, or while it
+    # waits. `tg_intent_person_or_rule` stamps it only with the approval and
+    # keeps `origin` fixed at birth; the parity gate does not compare
+    # triggers, so the migration is where both rules are read.
+    approval_rule = Column(Text, nullable=True)
     # 116: a planned story's repeat rule (#485): the unit ('day' or 'week'), the
     # interval, the ISO weekdays (weekly only) and the local time of day. All
     # four or none, and only on a planned story. `tg_intent_repeat` makes the

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.services.target import prompt_rendering, prompts, vocabulary
+from tests.src.services.target.schema_code import function_body
 
 
 def _card_input(**over):
@@ -906,21 +907,16 @@ class TestWaitingLine:
 class TestTheDueDoorReadsTheCardSelect:
     def test_fn_prompts_due_carries_the_card_select_verbatim(self):
         """`_CARD_SELECT` is the one spelling of what a card is rendered from.
-        Since 082 the prompt sweep's first card comes from `fn_prompts_due`,
-        whose body spells the same columns and joins — a door cannot call the
-        Python — so the fragment is pinned to the door's body verbatim, and the
-        sweep's alias list to every column: a column added for `render_card`
-        cannot reach the resend and not the sweep (#1349 re-verify). An
-        applied file is immutable: a column change means a fix-forward door,
-        and this pin moves to the new file with it — 089 re-created the door
-        with the origin and the scheduler, so it reads 089."""
+        The prompt sweep's first card comes from `fn_prompts_due`, whose body
+        spells the same columns and joins — a door cannot call the Python — so
+        the fragment is pinned to the door's body in the schema code verbatim,
+        and the sweep's alias list to every column: a column added for
+        `render_card` cannot reach the resend and not the sweep."""
         import inspect
 
-        from scripts.migration_runner import MIGRATIONS_DIR
         from src.services.target import prompts
 
-        ddl = (MIGRATIONS_DIR / "089_planned_serve_and_misses.sql").read_text()
-        body = ddl.split("CREATE FUNCTION fn_prompts_due(", 1)[1].split("$$;", 1)[0]
+        body = function_body("fn_prompts_due")
         assert " ".join(prompts._CARD_SELECT.split()) in " ".join(body.split())
         select_list = prompts._CARD_SELECT.split("SELECT", 1)[1].split("FROM", 1)[0]
         names = [c.strip().split(".")[-1] for c in select_list.split(",")]
@@ -1295,20 +1291,6 @@ def _notice(**over):
     return prompts.missed_notice(**kw)
 
 
-def _door_body(name: str) -> str:
-    """Door `name`'s body as it stands: the last migration that defines it. A
-    door is re-created by a later file, never edited in place (089 created
-    `fn_planned_misses`; 105 re-created it with `item_missing`)."""
-    import re
-
-    from scripts.migration_runner import MIGRATIONS_DIR
-
-    head = re.compile(rf"CREATE (?:OR REPLACE )?FUNCTION {name}\(")
-    texts = [p.read_text() for p in sorted(MIGRATIONS_DIR.glob("*.sql"))]
-    ddl = [text for text in texts if head.search(text)][-1]
-    return head.split(ddl, 1)[1].split("$$;", 1)[0]
-
-
 class TestTheMissNotice:
     @pytest.mark.parametrize("reason", sorted(prompts.MISS_REASONS))
     def test_each_reason_says_what_happened_and_that_nothing_was_posted(self, reason):
@@ -1330,7 +1312,7 @@ class TestTheMissNotice:
         does: `account_removed` comes from the door and from a removal."""
         import re
 
-        body = _door_body("fn_planned_misses")
+        body = function_body("fn_planned_misses")
         returned = set(re.findall(r"(?:THEN|ELSE) '([a-z_]+)'", body))
         assert returned == set(prompts.MISS_REASONS), returned
 
@@ -1350,7 +1332,7 @@ class TestTheMissNotice:
         import inspect
         import re
 
-        body = " ".join(_door_body("fn_planned_misses").split())
+        body = " ".join(function_body("fn_planned_misses").split())
         columns, joins = prompts._NOTICE_SELECT.split("FROM", 1)
         assert " ".join(columns.split()) in body
         assert " ".join(f"FROM{joins}".split()) in body

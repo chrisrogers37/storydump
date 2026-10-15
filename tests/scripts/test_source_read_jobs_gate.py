@@ -215,7 +215,7 @@ async def test_archive_reconnect_off_does_not_clear_checkpoint_or_removed(
 async def test_legacy_clock_keeps_adoption_evidence_and_same_orchestration(
     archive_engine, origin
 ):
-    from scripts.advertised_ddl import normalize_statements
+    from scripts.sql_lexer import normalize_statements
 
     async with obs.uow(archive_engine, origin) as conn:
         legacy = (

@@ -28,20 +28,16 @@ runbook cites it):
   state is undecidable in place (048's class): adopt may leave them pending
   below an adopted head without calling the chain incoherent, and apply
   re-runs them there.
-- ``-- runner:schema-move`` — the one file that renames ``public`` to
-  ``legacy`` and re-creates an empty ``public``. It is the
-  corpus's **lineage boundary**: below it is the legacy lineage, above it the
-  target schema. Exactly one file may carry it. Callers needing the boundary
-  call ``legacy_lineage_max`` and let the marker locate it — the boundary is
-  never written down as a version, because a written-down number is a second
-  enumeration that drifts from the file it describes.
+``000_initial.sql`` is empty and is never executed. A database built from the
+schema code (``src.models.target.ddl``) enters the ledger at it through
+``adopt``, whose probe for it is in the adoption manifest; every later file
+applies on top of it.
 
 The three doors that WRITE from the corpus — ``discover_migrations``,
-``apply_pending`` and ``adopt`` — take an optional ``max_version``: a bound
-callers use to replay one *lineage* rather than the whole tree. ``status``
-deliberately does not: an operator asking what is pending wants the whole
-answer, target lineage included. Production never passes a bound either — a
-deploy is one invocation in file order.
+``apply_pending`` and ``adopt`` — take an optional ``max_version``, a bound for
+a caller that replays the tree only up to a version. ``status`` deliberately
+does not: an operator asking what is pending wants the whole answer.
+Production never passes a bound.
 
 A file's execution mode is a declared discovery-time fact — ``wrapped`` (the
 runner owns one transaction, ledger row inside it), ``self-managed`` (the file
@@ -79,6 +75,10 @@ RUNNER_LOCK_KEY = 712_050_2026
 #: The corpus, relative to this file — the home for the path the suites import.
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
+#: The initial marker's version: ``000_initial.sql``, empty, recorded by
+#: ``adopt`` on a database built from the schema code and never executed.
+INITIAL_VERSION = 0
+
 #: The longest a wrapped file waits for any one lock (#1515). A file that
 #: must wait for ACCESS EXCLUSIVE holds its place in the table's lock queue,
 #: and every later statement on the table, readers included, queues behind
@@ -99,16 +99,10 @@ LOCK_RETRY_DELAYS_S = (1.0, 2.0, 4.0, 8.0)
 NO_TRANSACTION_MARKER = "-- runner:no-transaction"
 POSTCONDITION_MARKER = "-- runner:postcondition"
 REAPPLY_SAFE_MARKER = "-- runner:reapply-safe"
-SCHEMA_MOVE_MARKER = "-- runner:schema-move"
-#: The file acts on `legacy`/`archive` and is NOT advertised DDL: the prefix
-#: ratchet (`scripts/advertised_ddl.py::target_lineage_files`) leaves it out of
-#: the lineage it diffs against the stream; the runner applies it like any
-#: other.
-UNADVERTISED_MARKER = "-- runner:unadvertised"
-#: A file the deploy must never run by itself: `apply` skips it where it
-#: stands and reports it as OWED,
-#: exit 0; `apply --manual <version>` applies it by name, below the head
-#: if need be, exactly like any file — ledger row, postconditions, lock.
+#: A file the deploy must never run by itself: `apply` skips it where it stands
+#: and reports it as OWED, exit 0; `apply --manual <version>` applies it by
+#: name, below the head if need be, exactly like any file — ledger row,
+#: postconditions, lock.
 MANUAL_MARKER = "-- runner:manual"
 
 #: Every `-- runner:<word>` the runner knows. A line that looks like a marker
@@ -119,8 +113,6 @@ KNOWN_MARKERS = (
     NO_TRANSACTION_MARKER,
     POSTCONDITION_MARKER,
     REAPPLY_SAFE_MARKER,
-    SCHEMA_MOVE_MARKER,
-    UNADVERTISED_MARKER,
     MANUAL_MARKER,
 )
 #: The marker grammar, matched ONCE per line and case-insensitively on the
@@ -136,7 +128,7 @@ _KNOWN_WORDS = {m.split(":", 1)[1] for m in KNOWN_MARKERS}
 #: same line. Each of these once
 #: read as PROSE, which for a `manual` file is the whole hazard: the next
 #: predeploy applies it. Refused at discovery instead. A mention mid-sentence
-#: (`-- the runner:schema-move marker is what …`) is not a near miss: the
+#: (`-- the runner:manual marker is what …`) is not a near miss: the
 #: opener is followed by a word, not by `runner`.
 _NEAR_MISS_RE = re.compile(
     r"(?:^|\s)(?:-{2,}|/\*|#)\s*runner\b\s*[:=\-]?\s*("
@@ -175,8 +167,6 @@ class Migration:
     reapply_safe: bool
     postconditions: tuple
     execution_mode: str  # wrapped | self-managed | no-transaction
-    schema_move: bool
-    unadvertised: bool
     manual: bool
 
     @property
@@ -206,8 +196,6 @@ def _parse_markers(text: str):
     flags = {
         "no-transaction": False,
         "reapply-safe": False,
-        "schema-move": False,
-        "unadvertised": False,
         "manual": False,
     }
     postconditions = []
@@ -245,8 +233,6 @@ def _parse_markers(text: str):
     return (
         flags["no-transaction"],
         flags["reapply-safe"],
-        flags["schema-move"],
-        flags["unadvertised"],
         flags["manual"],
         tuple(postconditions),
     )
@@ -274,9 +260,11 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
     Reads, checksums, splits, and mode-classifies each file exactly once —
     every later stage works from the returned records.
 
-    ``max_version`` bounds the result to files at or below that version. It is
-    how a caller replays one *lineage* out of a tree that holds two (see
-    ``legacy_lineage_max``); production never passes it.
+    ``max_version`` bounds the result to files at or below that version;
+    production never passes it.
+
+    ``000_initial.sql`` must be empty: it marks the schema built from code, so
+    a byte in it is refused here, before any caller can apply it.
     """
     migrations_dir = Path(migrations_dir)
     by_version = {}
@@ -291,6 +279,11 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
                 f" {by_version[version].path.name} and {path.name}"
             )
         raw = path.read_bytes()
+        if version == INITIAL_VERSION and raw:
+            raise MigrationRunnerError(
+                f"{version:03d} ({path.name}) must be empty: it marks the schema"
+                " built from code and holds no SQL"
+            )
         try:
             # `utf-8-sig`: a byte-order mark at the start of the file is dropped,
             # so a marker on line 1 is still at the start of its line; the
@@ -314,8 +307,6 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
             (
                 no_transaction,
                 reapply_safe,
-                schema_move,
-                unadvertised,
                 manual,
                 postconditions,
             ) = _parse_markers(sql)
@@ -332,8 +323,6 @@ def discover_migrations(migrations_dir, max_version: int | None = None) -> list:
             reapply_safe=reapply_safe,
             postconditions=postconditions,
             execution_mode=_execution_mode(no_transaction, statements),
-            schema_move=schema_move,
-            unadvertised=unadvertised,
             manual=manual,
         )
     return _within([by_version[v] for v in sorted(by_version)], max_version)
@@ -346,55 +335,6 @@ def _within(migrations, max_version: int | None):
     if max_version is None:
         return list(migrations)
     return [m for m in migrations if m.version <= max_version]
-
-
-def schema_move_migration(migrations_dir):
-    """The corpus's one lineage-boundary file, located by its own marker.
-
-    The single home of the "find the boundary" rule, so the three questions
-    callers actually ask — which file is it, what is below it, what does it
-    assert — cannot answer from three different scans.
-
-    Loud in both directions. **No move file is a hard failure, not an
-    unbounded pass**: callers are asking "where does the legacy lineage end",
-    and answering "nowhere, take all of it" when the boundary cannot be found
-    hands back the whole target schema under the legacy one's name — absence of
-    evidence read as evidence of absence, on a door that licenses a replay.
-    Two move files is a hard failure because the corpus then has no single
-    boundary to derive.
-
-    Cardinality is checked here rather than in ``discover_migrations`` so that
-    a corpus is refused to the caller that needs a boundary, not to every
-    caller that merely reads files. Moving it into discovery would be a
-    stronger invariant; it is also a behavioural change to ``apply_pending``
-    and ``adopt``, so it belongs to whoever decides that deliberately.
-    """
-    moves = [m for m in discover_migrations(migrations_dir) if m.schema_move]
-    if not moves:
-        raise MigrationRunnerError(
-            f"no migration in {migrations_dir} carries {SCHEMA_MOVE_MARKER!r} —"
-            " the legacy/target lineage boundary is derived from that marker"
-            " and cannot be guessed"
-        )
-    if len(moves) > 1:
-        names = ", ".join(m.path.name for m in moves)
-        raise MigrationRunnerError(
-            f"{len(moves)} migrations carry {SCHEMA_MOVE_MARKER!r} ({names}) —"
-            " the corpus has exactly one lineage boundary"
-        )
-    return moves[0]
-
-
-def legacy_lineage_max(migrations_dir) -> int:
-    """The last version of the LEGACY lineage — one below the schema move.
-
-    Derived from the marker, never declared: the move file says which file it
-    is, so renumbering it moves the boundary with it and there is no second
-    inventory to keep in step. That is the same property `TargetBase` rests on
-    (#746) — a check whose input is derived cannot drift from
-    the artifact it describes, and a check whose input is written down will.
-    """
-    return schema_move_migration(migrations_dir).version - 1
 
 
 def split_statements(sql: str) -> list:
@@ -600,9 +540,11 @@ def apply_pending(
 ) -> ApplyReport:
     """Apply every pending migration in version order.
 
-    ``max_version`` replays one lineage out of the tree (``legacy_lineage_max``
-    derives the legacy one). Production leaves it unset — a deploy is a
-    single unbounded invocation in file order.
+    ``max_version`` stops the run at that version; production leaves it unset.
+
+    ``000_initial.sql`` is never applied: an unrecorded ``000`` is refused,
+    because the database it stands for is built from the schema code and
+    recorded with ``adopt``.
 
     A pending ``runner:manual`` file is OWED, not applied: it is left where it
     stands, reported on ``owed``, and exempt from the below-head rule — an
@@ -620,6 +562,12 @@ def apply_pending(
 
         applied_head = max(ledger, default=0)
         pending = [m for m in migrations if m.version not in ledger]
+        for migration in pending:
+            if migration.version == INITIAL_VERSION:
+                raise MigrationRunnerError(
+                    f"{migration.label} is not recorded: build the schema from"
+                    " code and record it with `adopt`; it is never applied"
+                )
         report.owed = [m for m in pending if m.manual]
         pending = [m for m in pending if not m.manual]
         for migration in pending:
@@ -716,13 +664,14 @@ def _load_manifest(manifest_path, window, corpus):
       the probe derives from them, so the predicate has one home.
 
     **The two checks below ask different questions and take different lists,
-    and conflating them is what made a bounded adopt lie** (#746). One
-    list serving both looks harmless until a bound exists:
+    and conflating them makes a bounded adopt lie.** One list serving both
+    looks harmless until a bound exists:
 
     - *unpaired* is a **window** question — "does everything I am about to
       decide on have a probe?" Adopt decides nothing about files outside the
-      window, so demanding evidence for them would fail a legacy-lineage adopt
-      because a *target* file lacks a probe: true, and about the wrong files.
+      window, so demanding evidence for them would fail a bounded adopt
+      because a file above the bound lacks a probe: true, and about the wrong
+      files.
     - *orphans* is a **corpus** question — "does every manifest key name a
       real file?" Asked against the window instead, every entry above the
       bound is reported as having *no migration file* when the file is right

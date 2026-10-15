@@ -5,8 +5,6 @@ rule of the contract's table gets a case it decides, and a control showing the
 next rule takes over once the fact is gone, so the order itself is pinned.
 """
 
-from pathlib import Path
-
 import pytest
 
 from src.services.target import destination_readiness as dr
@@ -17,8 +15,7 @@ from src.services.target.vocabulary import (
     READINESS_REMEDIES,
     READINESS_TONES,
 )
-
-ROOT = Path(__file__).resolve().parents[4]
+from tests.src.services.target.schema_code import function_body
 
 
 def drive(**kw):
@@ -428,7 +425,9 @@ class TestGuidance:
 
 def test_the_policy_reasons_are_spelled_as_the_suitability_relation_returns_them():
     # The remedy keys on these strings, so a respelling in the database would
-    # silently stop naming `review_policy`. Read them back from the current authority's body.
-    body = (ROOT / "scripts/migrations/147_archive_asset_suitability.sql").read_text()
+    # silently stop naming `review_policy`. Read them back from the body that
+    # evaluates them: the 9-parameter `fn_source_asset_suitability`, whose rows
+    # the 8-parameter overload returns.
+    body = function_body("fn_source_asset_suitability", arity=9)
     for reason in POLICY_EXCLUSIONS:
         assert f"THEN '{reason}'" in body, reason

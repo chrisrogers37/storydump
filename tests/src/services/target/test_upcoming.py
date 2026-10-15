@@ -1,7 +1,7 @@
 """`upcoming.upcoming` against a scripted executor: its three statements and
 what they bind, its bounds, and the pins that hold the projections to the
 clock's own expressions and the successor trigger's own grid in the
-migrations.
+schema code.
 
 What the rows are (the range's edges, a predicted row's keys, the slots the
 clock will mint, per account and across a clock change) is a database's to
@@ -22,12 +22,11 @@ from src.services.target import (
     vocabulary,
     workspaces,
 )
+from tests.src.services.target.schema_code import function_body, function_definitions
 from tests.src.services.target.test_content_runway import (
-    CLOCK_TICK_MIGRATION,
     _Executor,
     _plan_slot_columns,
 )
-from tests.src.services.target.test_prompts import _door_body
 
 WS = "33333333-3333-3333-3333-333333333333"
 #: An archive item is stored under this Instagram id, which no read may give; a
@@ -319,7 +318,7 @@ class TestAPlannedArchiveStory:
 
 
 class TestTheClocksOwnExpressions:
-    """The projection is the clock's, read from the migration rather than
+    """The projection is the clock's, read from the schema code rather than
     trusted to a comment: the accounts it walks are the ones the tick mints
     for, under the settings the tick advances their cursors by, one step of
     the walk being the tick's own advance. The gate cannot see this: its
@@ -327,27 +326,32 @@ class TestTheClocksOwnExpressions:
 
     def test_the_accounts_are_the_ones_the_clock_posts_for(self):
         """`_POSTING_SQL` is the `plan_slot` leg's WHERE less its due-now
-        conjunct, which `test_content_runway.py` pins to the migration."""
+        conjunct, which `test_content_runway.py` pins to the schema code."""
         assert f" AND {content_runway._POSTING_SQL})" in upcoming._PREDICTED_SQL
 
     def test_the_settings_are_the_legs_own(self):
         """Each of the four, as the leg's own select list writes it and under
         the leg's own name."""
-        columns = _plan_slot_columns(CLOCK_TICK_MIGRATION)
+        columns = _plan_slot_columns()
         predicted = _flat(upcoming._PREDICTED_SQL)
         for name in ("eff_tz", "eff_ppd", "eff_start", "eff_end"):
             assert f"{columns[name]} AS {name}" in predicted, name
 
     def test_a_step_is_the_legs_cursor_advance(self):
         """The same function over the same settings in the same order, from
-        the slot before instead of the cursor."""
-        from scripts.migration_runner import MIGRATIONS_DIR
-
-        ddl = (MIGRATIONS_DIR / CLOCK_TICK_MIGRATION).read_text()
-        advances = re.findall(r"SET next_slot_at = (fn_next_slot\([^)]*\))", ddl)
-        assert len(advances) == 2, "both approved clock arities advance their cursor"
-        assert len(set(advances)) == 1, "both arities use the identical expression"
-        ours = advances[0].replace("d.next_slot_at", "{after}").replace("d.", "a.")
+        the slot before instead of the cursor. Both overloads of the tick
+        advance their cursor, each once and by the same expression."""
+        advances = [
+            re.findall(r"SET next_slot_at = (fn_next_slot\([^)]*\))", body)
+            for body in function_definitions("fn_clock_tick").values()
+        ]
+        assert [len(found) for found in advances] == [1, 1], (
+            "both clock arities advance their cursor"
+        )
+        assert len({found[0] for found in advances}) == 1, (
+            "both arities use the identical expression"
+        )
+        ours = advances[0][0].replace("d.next_slot_at", "{after}").replace("d.", "a.")
         assert ours == upcoming._NEXT_SLOT
         assert upcoming._NEXT_SLOT.format(after="s.slot") in upcoming._PREDICTED_SQL
         assert upcoming._NEXT_SLOT.format(after="b.walk_from") in (
@@ -357,10 +361,9 @@ class TestTheClocksOwnExpressions:
 
 class TestTheTriggersOwnGrid:
     """A series is projected as its successors are made, read from the
-    trigger as it stands (`_door_body`: the newest migration that defines it)
-    rather than trusted to a comment."""
+    trigger's body in the schema code rather than trusted to a comment."""
 
-    TRIGGER = _flat(_door_body("trg_intent_repeat"))
+    TRIGGER = _flat(function_body("trg_intent_repeat"))
 
     def test_the_grid_is_asked_as_the_trigger_asks_it(self):
         """The story's own rule and anchor, its zone (the account's, else the

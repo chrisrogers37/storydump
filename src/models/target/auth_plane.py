@@ -34,9 +34,11 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     ForeignKeyConstraint,
+    Index,
     Integer,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -76,13 +78,13 @@ class OAuthState(TargetBase):
     # would be a red parity test.
     reconnect_target = Column(UUID(as_uuid=True), nullable=True)
     cookie_nonce_hash = Column(Text, nullable=True)
+    expires_at = Column(TZ, nullable=False)
+    consumed_at = Column(TZ, nullable=True)
+    created_at, updated_at = timestamps()
     #: The PKCE code verifier minted with the state (RFC 7636):
     #: ciphertext under the credential ring, never the verifier itself. NULL on
     #: a state minted without one.
     encrypted_code_verifier = Column(Text, nullable=True)
-    expires_at = Column(TZ, nullable=False)
-    consumed_at = Column(TZ, nullable=True)
-    created_at, updated_at = timestamps()
     #: The Instagram connect's history choice (141): the entry the
     #: start previewed, and the choice with the mix revision it was shown.
     #: NULL on every state that records none.
@@ -142,18 +144,18 @@ class ServiceToken(TargetBase):
     name = Column(Text, nullable=False)
     token_hash = Column(Text, nullable=False)
     role = Column(Text, nullable=False)
-    #: Exactly one subject (077 `ck_service_token_subject`): a person, or a
-    #: workspace. A person-bound token acts as the person across their
-    #: memberships; a workspace service identity reads its one workspace.
-    user_id = fk("users.id", "CASCADE", nullable=True)
     workspace_id = fk("workspaces.id", "CASCADE", nullable=True)
-    #: Who minted a workspace service identity (090), so removing them can
-    #: revoke it. NULL for a person-bound token and for every older token.
-    created_by_user_id = fk("users.id", "SET NULL", nullable=True)
     expires_at = Column(TZ, nullable=True)
     revoked_at = Column(TZ, nullable=True)
     last_used_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
+    #: Exactly one subject (077 `ck_service_token_subject`): a person, or a
+    #: workspace. A person-bound token acts as the person across their
+    #: memberships; a workspace service identity reads its one workspace.
+    user_id = fk("users.id", "CASCADE", nullable=True)
+    #: Who minted a workspace service identity (090), so removing them can
+    #: revoke it. NULL for a person-bound token and for every older token.
+    created_by_user_id = fk("users.id", "SET NULL", nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -164,6 +166,11 @@ class ServiceToken(TargetBase):
             name="ck_service_token_subject",
         ),
         UniqueConstraint("token_hash", name="uq_service_token"),
+        Index(
+            "ix_service_tokens_user",
+            "user_id",
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
     )
 
 

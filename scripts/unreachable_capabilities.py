@@ -330,12 +330,32 @@ def probe_commands() -> ProbeResult:
 # --- probe 2: SQL functions with no caller ----------------------------------
 
 
-def sql_functions() -> dict[str, str]:
-    """Every `fn_*` the migration stream defines → the file that defines it."""
-    migrations = REPO / "scripts" / "migrations"
-    files = sorted(migrations.glob("*.sql"))
+def schema_sql_files() -> list[Path]:
+    """The schema code's SQL files, in the order the builder runs them.
+
+    **Imported, not listed here.** `src.models.target.ddl` names its own files,
+    and a copy of that list would be a second answer that can disagree with the
+    first.
+    """
+    sys.path.insert(0, str(REPO))
+    try:
+        from src.models.target import ddl  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 — cannot look, must be loud
+        raise CannotLook(f"could not import the schema builder: {exc}") from exc
+    files = [ddl.HERE / name for name in (*ddl.BEFORE_TABLES, *ddl.AFTER_TABLES)]
     if not files:
-        raise CannotLook(f"no migrations under {migrations}")
+        raise CannotLook("the schema builder names no SQL files — the layout moved")
+    missing = [f.name for f in files if not f.is_file()]
+    if missing:
+        raise CannotLook(
+            f"the schema builder names files that are not there: {missing}"
+        )
+    return files
+
+
+def sql_functions() -> dict[str, str]:
+    """Every `fn_*` the schema code defines → the file that defines it."""
+    files = schema_sql_files()
     found: dict[str, str] = {}
     pattern = re.compile(
         r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(fn_[a-z0-9_]+)", re.I
@@ -390,9 +410,9 @@ def probe_sql_functions() -> ProbeResult:
     """
     defined = sql_functions()
     py = _names_in(sorted((REPO / "src").rglob("*.py")), "python")
-    sql = _names_in(sorted((REPO / "scripts" / "migrations").glob("*.sql")), "sql")
+    sql = _names_in(schema_sql_files(), "sql")
     res = ProbeResult(
-        probe="sql", scope=f"{len(defined)} fn_* defined in the migration stream"
+        probe="sql", scope=f"{len(defined)} fn_* defined in the schema code"
     )
     allow = ALLOWLIST["sql"]
     for name, where in sorted(defined.items()):

@@ -1,77 +1,51 @@
-"""Live schema drift — does a running database carry what the repo declares?
+"""Live schema drift: does a running database carry the schema the repo builds?
 
-#1195. Migration 066 merged and production's highest applied
-migration was 65 for a day, and nothing anywhere noticed. This is the check
-that would have noticed.
+The expected side is a scratch database the schema builder stands up from the
+code, through `src.models.target.ddl.build`, the call `make init-db` makes. The
+other side is the database `SCHEMA_DRIFT_DSN` names. Both are read with
+`schema_parity.schema_signature` and compared with `schema_diff`.
 
-## Why the existing gates could not catch it
+## Why it reads the live schema and never the ledger
 
-Both lineages already gate models against migrations, and both were green
-through the whole window:
-
-- `test_migration_gate.py::TestSchemaParity` — the legacy lineage.
-- `test_lineage_lane.py` — the target lineage, whose parity assertion this
-  test deliberately mirrors so the two cannot drift apart in method.
-
-They compare the repo against itself. 066's migration and its model agreed
-perfectly; what disagreed was **production**, which no test had ever been
-pointed at. Repo-internal parity is necessary and is not the same property.
-
-## Why it reads LIVE SCHEMA and never the ledger
-
-`runner.schema_migrations` read entirely healthy while this was wrong: rows
-1-65, no holes, zero checksum mismatches. It was also blind, in a way that
-cannot be fixed by reading it more carefully — #840's objects
-(`uq_posting_history_queue_item_id`, `posting_history_dedup_archive`) are in
-production with no ledger row at all, applied outside the runner. **A ledger
-describes what the runner did; it cannot describe what a human did around it.**
-So the comparison here is against `information_schema`, and a ledger-reading
-variant of this check would be theatre.
+`runner.schema_migrations` describes what the runner applied. It cannot
+describe a change made around the runner, by hand or by any other tool, so a
+database whose ledger is complete can still differ from the code. This compares
+what the catalog holds, on both sides.
 
 ## Why this is not a pull-request gate
 
-Production lags `main` by design between merge and deploy, so prod-versus-repo
-is legitimately red for every migration PR from merge until deploy. Red would
+A deployed database lags `main` between a merge and its deploy, so a check
+against it is legitimately red for every schema change in that window. Red would
 be its normal state, and a gate whose normal state is red gets weakened by
-whoever hits it first. It therefore SKIPS unless a target DSN is supplied. A blocking version of
-this would run at deploy time, beside the migration runner that `railway.toml`'s
-`preDeployCommand` runs — an operator decision, not taken.
+whoever hits it first. It therefore SKIPS unless a DSN is supplied, and FAILS
+when `REQUIRE_SCHEMA_DRIFT_CHECK=1` is set without one.
 
-## Bounds — what this cannot see
+## Bounds: what this cannot see
 
-- **`public` only.** `schema_parity` scopes every query to `nspname='public'`,
-  so the target schema is covered and `legacy` is not. The #840 objects quoted
-  above live in `legacy` and this check would NOT report them; they are cited
-  as why ledger-reading fails, not as something this catches.
-- **Structure, not data.** Columns (type + nullability), CHECK constraints,
-  uniqueness and foreign keys — the dimensions `schema_parity` compares, whose
-  own docstring enumerates the deliberate omissions (column defaults, index
-  shape, and the rest).
-- **Materialized views, sequences and functions are invisible here** — MEASURED
-  against a database holding one of each, where the signature came back as the
-  table and the view alone. That is not a small corner: the expected side is
-  built by applying a migration whose entire job is to supply FUNCTIONS, and
-  production carries 20 of them in `public` plus a sequence. A change to any of
-  them reports clean.
-- **Views are compared by their COLUMNS only.** They are NOT out of scope, and
-  the distinction is the point: `information_schema.columns` includes views, so
-  one gained or dropped IS caught, while one whose *definition* changed behind
-  an unchanged column list is not. Stating them as uncovered would be as wrong
-  as leaving them unstated, in the same direction — a reader believing the
-  scope is other than it is.
-- **It never writes**, to production or anywhere. Both sides are read with
-  `information_schema` queries; the expected side is built in a scratch
-  database.
+- **`public` only.** `schema_parity` scopes every query to `public`, so every
+  other schema, `archive` and the runner's ledger among them, is outside the
+  comparison.
+- **Structure, not data.** Tables, columns (type and nullability), CHECK
+  constraints, uniqueness and foreign keys: the dimensions `schema_parity`
+  compares, whose own docstring lists what it leaves out (column defaults,
+  non-unique indexes and the rest).
+- **The signature reads no function, trigger, row-level security setting,
+  policy, grant, sequence or materialized view.** The builder creates every
+  kind but the last on the expected side, and a change to any of them reports
+  clean.
+- **Views are compared by their columns only.** `information_schema.columns`
+  includes views, so one gained or dropped is caught, while one whose
+  definition changed behind an unchanged column list is not.
+- **It never writes to the audited database.** Both sides are read with
+  catalog queries; the expected side is built in a scratch database.
 """
 
 import os
 
 import pytest
 
-from scripts.advertised_ddl import target_lineage_files
 from scripts.schema_parity import schema_diff, schema_signature
-from scripts.migration_runner import MIGRATIONS_DIR
-from tests.scripts.conftest import psql_apply
+from tests.scripts.conftest import _scratch
 
 #: Read-only connection string for the database to audit. Absent on pull
 #: requests by design.
@@ -89,7 +63,7 @@ def drift_dsn() -> str:
     """The DSN to audit, or skip — unless the caller demanded a real answer.
 
     A FIXTURE rather than a call in the test body, and requested FIRST, so the
-    skip lands before `second_scratch_db` builds anything. On a pull request
+    skip lands before the expected database is built. On a pull request
     this check is meant to cost nothing, and a scratch database created only to
     be thrown away is not nothing.
     """
@@ -106,42 +80,46 @@ def drift_dsn() -> str:
     )
 
 
+@pytest.fixture
+def built_db(drift_dsn, admin_conn):
+    """A scratch database the schema builder stands up, as `make init-db` does:
+    `build` on an empty database, connected as the role that owns it.
+
+    It depends on `drift_dsn`, so the skip lands before anything is built. The
+    builder creates the service roles it finds missing, and roles belong to the
+    whole cluster, so the database comes with the suite's role bracket: the
+    roles are absent before it and dropped after it, the database first.
+    """
+    from sqlalchemy import create_engine
+
+    from src.models.target.ddl import build
+
+    gen = _scratch(admin_conn, roles=[])
+    dsn = next(gen)
+    try:
+        engine = create_engine(dsn)
+        try:
+            with engine.connect() as conn:
+                build(conn)
+        finally:
+            engine.dispose()
+        yield dsn
+    finally:
+        gen.close()
+
+
 class TestLiveSchemaDrift:
-    def test_live_public_schema_matches_the_target_models(
-        self, drift_dsn, second_scratch_db
-    ):
-        """The repo's declared target schema equals the audited database's.
-
-        The expected side is built exactly as `test_lineage_lane.py` builds it
-        — the lineage head's shared functions, then `create_all` — rather than
-        by replaying the whole corpus, because the lane test already pins that
-        replay and the models to each other. Reusing its recipe keeps this a
-        third comparison against the same two proven sides, not a fourth
-        opinion about what the schema should be.
-        """
-        # Function prerequisite only — it supplies shared functions and creates
-        # no relations. This test does not depend on that being asserted
-        # elsewhere: anything it did create would land on the expected side and
-        # be reported below as a table present here and absent there, which is
-        # the honest reading of an unexpected relation anyway.
-        psql_apply(second_scratch_db, [target_lineage_files(MIGRATIONS_DIR)[0]])
-
-        from sqlalchemy import create_engine
-
-        from src.models.target import TargetBase
-
-        engine = create_engine(second_scratch_db)
-        TargetBase.metadata.create_all(engine)
-        engine.dispose()
-
-        expected = schema_signature(second_scratch_db)
+    def test_live_public_schema_matches_the_built_schema(self, drift_dsn, built_db):
+        """The schema the builder stands up equals the audited database's, on
+        every dimension `schema_parity` compares."""
+        expected = schema_signature(built_db)
         live = schema_signature(drift_dsn)
 
         # NON-VACUITY, both halves. An empty signature on either side makes the
         # diff below pass by comparing nothing — the failure mode a drift
         # monitor must never have, since it reports clean at exactly the moment
         # it has stopped looking.
-        assert expected, "the expected schema is empty — `create_all` built nothing"
+        assert expected, "the expected schema is empty — the builder built nothing"
         assert live, (
             "the audited database's public schema is empty — this is a wrong"
             " DSN or a wrong schema, not a clean result"

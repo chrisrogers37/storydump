@@ -4,7 +4,7 @@ The database half — that the count is the planner's own pool, and that a real
 mint crosses the line once — is `tests/scripts/test_customer_notice_gate.py`'s
 `TestTheRunway*` classes. This file pins the decisions in between, and pins the
 runway's `posting` and its cadence to the clock's own expressions in the
-migration.
+schema code.
 """
 
 from __future__ import annotations
@@ -24,10 +24,15 @@ from src.services.target.content_runway import (
     latch_action,
     notice_text,
 )
+from tests.src.services.target.schema_code import function_body, function_definitions
 
-#: The newest migration that defines `fn_clock_tick`. An applied file is
-#: immutable, so a change to the tick is a new file, and this pin moves to it.
-CLOCK_TICK_MIGRATION = "135_source_read_admission.sql"
+#: The overload of `fn_clock_tick` the pins read: the one that takes
+#: `p_archive_enabled`. `_tick_body` holds the other to the same body.
+CLOCK_TICK_ARITY = 4
+
+#: The one line the 3-parameter tick has of its own: it declares the archive
+#: flag off, where the other overload takes the flag as its last argument.
+ARCHIVE_OFF = "p_archive_enabled boolean := false; "
 
 #: The `plan_slot` leg's one conjunct the runway leaves out: an account is
 #: posting whether or not its next slot is due this tick.
@@ -38,33 +43,39 @@ DUE_NOW = "a.next_slot_at <= now()"
 #: eligibility condition for the account within that workspace.
 CLOCK_SCOPE = "a.workspace_id=ANY(locked_workspaces)"
 
-#: A definition of the tick, in either spelling a migration can use.
-DEFINES_TICK = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+fn_clock_tick\s*\(")
+
+def _tick_body() -> str:
+    """The body of the tick the pins read, the overload `CLOCK_TICK_ARITY`
+    names. The schema code defines one more, without `p_archive_enabled`,
+    which declares the flag off and is otherwise the same text. This holds the
+    two to that, so a pin on the tick holds for both overloads."""
+    bodies = function_definitions("fn_clock_tick")
+    assert sorted(bodies) == [3, CLOCK_TICK_ARITY], sorted(bodies)
+    assert bodies[3].count(ARCHIVE_OFF) == 1, "the 3-parameter tick's own line"
+    assert bodies[3].replace(ARCHIVE_OFF, "", 1) == bodies[CLOCK_TICK_ARITY], (
+        "the two fn_clock_tick overloads run different bodies"
+    )
+    return function_body("fn_clock_tick", arity=CLOCK_TICK_ARITY)
 
 
-def _plan_slot_leg(migration: str) -> str:
-    """`fn_clock_tick`'s body in *migration* up to where its `plan_slot` leg
-    inserts its `'plan_slot'` jobs, so it ends with the CTE that picks the
-    leg's accounts."""
-    from scripts.migration_runner import MIGRATIONS_DIR
-
-    ddl = (MIGRATIONS_DIR / migration).read_text()
-    head = DEFINES_TICK.search(ddl)
-    assert head, f"no fn_clock_tick in {migration}"
-    return ddl[head.end() :].split("$$;", 1)[0].split("'plan_slot'", 1)[0]
+def _plan_slot_leg() -> str:
+    """`fn_clock_tick`'s body up to where its `plan_slot` leg inserts its
+    `'plan_slot'` jobs, so it ends with the CTE that picks the leg's
+    accounts."""
+    return _tick_body().split("'plan_slot'", 1)[0]
 
 
-def _plan_slot_conjuncts(migration: str) -> list[str]:
+def _plan_slot_conjuncts() -> list[str]:
     """The conjuncts of the WHERE that picks `fn_clock_tick`'s `plan_slot`
     accounts, in order: the leg's last WHERE."""
-    where = _plan_slot_leg(migration).rsplit("WHERE", 1)[1].split("ORDER BY", 1)[0]
+    where = _plan_slot_leg().rsplit("WHERE", 1)[1].split("ORDER BY", 1)[0]
     return " ".join(where.split()).split(" AND ")
 
 
-def _plan_slot_columns(migration: str) -> dict[str, str]:
+def _plan_slot_columns() -> dict[str, str]:
     """The same CTE's select list, alias to expression: the SELECT before that
     WHERE, split at the commas outside parentheses."""
-    head = _plan_slot_leg(migration).rsplit("WHERE", 1)[0]
+    head = _plan_slot_leg().rsplit("WHERE", 1)[0]
     select = " ".join(head.rsplit("SELECT", 1)[1].split()).split(" FROM ", 1)[0]
     columns = {}
     for item in re.split(r",\s*(?![^()]*\))", select):
@@ -413,12 +424,12 @@ class TestTheRunwaysLocks:
 
 class TestThePostingPredicate:
     """The runway's `posting` and its cadence are the clock's own, read from
-    the migration rather than trusted to a comment: an account the tick would
+    the schema code rather than trusted to a comment: an account the tick would
     not mint a slot for shows no runway, one it would is never hidden, and its
     days are counted at the posts per day its slots are spent at."""
 
     def test_it_is_the_plan_slot_legs_where_less_tick_scope_and_due_now(self):
-        leg = _plan_slot_conjuncts(CLOCK_TICK_MIGRATION)
+        leg = _plan_slot_conjuncts()
         assert DUE_NOW in leg, "positive control: the leg's WHERE was found"
         assert CLOCK_SCOPE in leg, "the clock retains its frozen workspace scope"
         posting = " ".join(content_runway._POSTING_SQL.split())
@@ -430,22 +441,19 @@ class TestThePostingPredicate:
     def test_the_cadence_is_the_legs_eff_ppd(self):
         """The expression the leg's CTE selects as `eff_ppd`: the posts per day
         `fn_next_slot` advances the account's slot cursor by."""
-        columns = _plan_slot_columns(CLOCK_TICK_MIGRATION)
+        columns = _plan_slot_columns()
         assert {"eff_tz", "eff_ppd", "eff_start", "eff_end"} <= set(columns), (
             "positive control: the leg's select list was found"
         )
         cadence = " ".join(content_runway._POSTS_PER_DAY_SQL.split())
         assert columns["eff_ppd"] == cadence
 
-    def test_the_pin_reads_the_newest_definition_of_the_tick(self):
-        from scripts.migration_runner import MIGRATIONS_DIR, discover_migrations
-
-        defining = [
-            migration.path.name
-            for migration in discover_migrations(MIGRATIONS_DIR)
-            if DEFINES_TICK.search(migration.sql)
-        ]
-        assert defining[-1] == CLOCK_TICK_MIGRATION, defining
+    def test_both_overloads_of_the_tick_run_the_leg_the_pins_read(self):
+        """The schema code defines the tick with and without the
+        `p_archive_enabled` parameter. Every pin here reads the leg through
+        `_tick_body`, which holds the two to one body, so the leg the pins read
+        is the leg either overload runs."""
+        assert "'plan_slot'" in _tick_body(), "positive control: the leg is there"
 
 
 class _Session:

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import timedelta
 
 import psycopg2
 import psycopg2.errors
@@ -22,7 +21,6 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from scripts.migration_runner import MIGRATIONS_DIR, split_statements
 from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import bindings, oauth_states, outbox, prompts, workspaces
 from src.services.target._dbapi import driver_error_is
@@ -1109,170 +1107,6 @@ class TestTheJoinPathThroughTheDoors:
 
         assert [live(st) for st in theirs_here] == [False, False, False]
         assert [live(st) for st in untouched] == [True, True]
-
-
-class TestTheRemovalBackfill:
-    """102's backfill and the invitation revoke after it, the file's own
-    statements, run over a crafted audit trail in a transaction that is rolled
-    back: for whoever is not a member again, the latest removal is recorded
-    when another person made it, a record the door already wrote is kept, and
-    nothing else is recorded; an invitation such a record outranks ends
-    revoked."""
-
-    def _statements(self, *openings):
-        """The file's own statements that open with one of *openings*, in the
-        order the file runs them."""
-        sql = (MIGRATIONS_DIR / "102_member_removal_holds.sql").read_text()
-        return [st for st in split_statements(sql) if st.lstrip().startswith(openings)]
-
-    def test_the_latest_removal_is_recorded_when_another_person_made_it(self, world):
-        ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
-        gone_ws, gone_user = str(uuid.uuid4()), str(uuid.uuid4())
-        with txn(world["stream"]) as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.actor_kind = 'migration'")
-            people = {}
-            for name in (
-                "twice",
-                "back",
-                "migrated",
-                "superseded",
-                "left",
-                "unnamed",
-                "elsewhere",
-                "orphaned",
-                "kept",
-            ):
-                cur.execute("INSERT INTO users DEFAULT VALUES RETURNING id::text")
-                people[name] = cur.fetchone()[0]
-
-            def removal(person, *, ago, actor_kind="user", actor=owner, at=ws):
-                cur.execute(
-                    "INSERT INTO audit_events (workspace_id, entity_kind,"
-                    " entity_id, from_state, actor_kind, actor_user_id,"
-                    " channel, detail, created_at)"
-                    " VALUES (%s, 'member', %s, 'member', %s, %s, 'web',"
-                    " jsonb_build_object('v', 1, 'op', 'DELETE'),"
-                    " now() - %s * interval '1 day')",
-                    (at, person, actor_kind, actor, ago),
-                )
-
-            removal(people["twice"], ago=3)
-            removal(people["twice"], ago=1)
-            removal(people["back"], ago=2)
-            cur.execute(
-                "INSERT INTO workspace_members (workspace_id, user_id, role)"
-                " VALUES (%s, %s, 'member')",
-                (ws, people["back"]),
-            )
-            removal(people["migrated"], ago=2, actor_kind="migration", actor=None)
-            # An admin's removal followed by a later one made by no person (a
-            # migration) or by the member themselves: the latest removal is
-            # not another person's, so neither person is recorded.
-            removal(people["superseded"], ago=3)
-            removal(people["superseded"], ago=1, actor_kind="migration", actor=None)
-            removal(people["left"], ago=3)
-            removal(people["left"], ago=1, actor=people["left"])
-            # A person's removal whose audit row names no remover is not the
-            # member's own, so it is recorded, with no remover named.
-            removal(people["unnamed"], ago=2, actor=None)
-            removal(people["elsewhere"], ago=2, at=gone_ws)
-            removal(people["orphaned"], ago=2, actor=gone_user)
-            removal(gone_user, ago=2)
-            # A removal the door has recorded already: the backfill keeps that
-            # record as it is, rather than the audit trail's older remover.
-            removal(people["kept"], ago=2)
-            cur.execute(
-                "INSERT INTO workspace_member_removals (workspace_id, user_id)"
-                " VALUES (%s, %s)",
-                (ws, people["kept"]),
-            )
-
-            (backfill,) = self._statements("INSERT INTO workspace_member_removals")
-            cur.execute(backfill)
-            cur.execute(
-                "SELECT user_id::text, removed_by_user_id::text, now() - removed_at"
-                "  FROM workspace_member_removals"
-                " WHERE workspace_id = %s AND user_id = ANY(%s::uuid[])",
-                (ws, list(people.values()) + [gone_user]),
-            )
-            recorded = {row[0]: row[1:] for row in cur.fetchall()}
-        assert recorded == {
-            people["twice"]: (owner, timedelta(days=1)),
-            people["unnamed"]: (None, timedelta(days=2)),
-            people["orphaned"]: (None, timedelta(days=2)),
-            people["kept"]: (None, timedelta(0)),
-        }
-
-    def test_an_invitation_to_a_person_it_records_ends_revoked(self, world):
-        """The file's invitation revoke, run after its backfill as the file
-        runs them: an invitation sent to a person before the removal the
-        backfill records ends revoked. One sent to them after that removal, and
-        one to a person the backfill leaves unrecorded (a member again), stay
-        pending."""
-        ws, owner = str(world["a"]["ws"]), str(world["a"]["user"])
-        run_id = uuid.uuid4().hex[:8]
-        emails = {name: f"{name}-{run_id}@example.com" for name in ("removed", "back")}
-        with txn(world["stream"]) as conn, conn.cursor() as cur:
-            cur.execute("SET LOCAL app.actor_kind = 'migration'")
-            people = {}
-            for name, email in emails.items():
-                cur.execute(
-                    "INSERT INTO users (primary_email) VALUES (%s) RETURNING id::text",
-                    (email,),
-                )
-                people[name] = cur.fetchone()[0]
-                # The owner removed them two days ago.
-                cur.execute(
-                    "INSERT INTO audit_events (workspace_id, entity_kind,"
-                    " entity_id, from_state, actor_kind, actor_user_id,"
-                    " channel, detail, created_at)"
-                    " VALUES (%s, 'member', %s, 'member', 'user', %s, 'web',"
-                    " jsonb_build_object('v', 1, 'op', 'DELETE'),"
-                    " now() - interval '2 days')",
-                    (ws, people[name], owner),
-                )
-            cur.execute(
-                "INSERT INTO workspace_members (workspace_id, user_id, role)"
-                " VALUES (%s, %s, 'member')",
-                (ws, people["back"]),
-            )
-            # Pending invitations from the owner, sent that many days ago. The
-            # second is the first's address in capitals: the live-invitation
-            # key compares the address as written, the revoke by lower().
-            sent = {
-                "before": (emails["removed"], 3),
-                "after": (emails["removed"].upper(), 1),
-                "back": (emails["back"], 3),
-            }
-            tokens = {key: f"{key}-{run_id}" for key in sent}
-            for key, (email, ago) in sent.items():
-                cur.execute(
-                    "INSERT INTO workspace_invitations (workspace_id, token_hash,"
-                    " delivery_channel, email, expires_at, invited_by_user_id,"
-                    " created_at)"
-                    " VALUES (%s, %s, 'email', %s, now() + interval '7 days', %s,"
-                    " now() - %s * interval '1 day')",
-                    (ws, tokens[key], email, owner, ago),
-                )
-
-            # The file's order is the point: the revoke reads the records the
-            # backfill writes.
-            backfill, revoke = self._statements(
-                "INSERT INTO workspace_member_removals", "UPDATE workspace_invitations"
-            )
-            cur.execute(backfill)
-            cur.execute(revoke)
-            cur.execute(
-                "SELECT token_hash, state FROM workspace_invitations"
-                " WHERE token_hash = ANY(%s)",
-                (list(tokens.values()),),
-            )
-            states = dict(cur.fetchall())
-        assert states == {
-            tokens["before"]: "revoked",
-            tokens["after"]: "pending",
-            tokens["back"]: "pending",
-        }
 
 
 def _basic_group() -> str:

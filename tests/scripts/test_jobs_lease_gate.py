@@ -33,7 +33,6 @@ winner's commit — the #883 block-then-reevaluate window, driven on purpose.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import re
 import threading
@@ -45,18 +44,14 @@ import psycopg2
 import pytest
 from psycopg2 import errors as pg_errors
 
-from scripts.migration_runner import MIGRATIONS_DIR
 from src.services.target import jobs, work_loop
 from src.services.target.work_loop import WorkerConfig
-from src.worker import compose
 from tests.scripts.conftest import (
     _scratch,
     as_user,
     async_url,
     execute,
     fetch_all,
-    fetch_one,
-    ingress_engine,
     replay_advertised_stream,
     seed_workspace_chain,
 )
@@ -530,29 +525,6 @@ def _rows(jobs_db, kind) -> list:
     )
 
 
-@contextlib.contextmanager
-def _ticking_on_083(jobs_db):
-    """083's tick — the one production runs before 084 — installed from its
-    own file for the duration, and the replayed tick restored afterwards, so
-    every other test here meets the current definition."""
-    owner = jobs_db["owner_stream"]
-    ddl, comment = fetch_one(
-        owner,
-        "SELECT pg_get_functiondef(oid), obj_description(oid, 'pg_proc')"
-        " FROM pg_proc WHERE oid = 'fn_clock_tick(int, interval, jsonb)'::regprocedure",
-    )
-    execute(owner, (MIGRATIONS_DIR / "083_clock_tick_deadlines.sql").read_text())
-    try:
-        yield
-    finally:
-        execute(owner, ddl)
-        execute(
-            owner,
-            "COMMENT ON FUNCTION fn_clock_tick(int, interval, jsonb) IS %s",
-            (comment,),
-        )
-
-
 def _sender_key() -> str:
     return f"{jobs.SENDER_KEY_PREFIX}{uuid.uuid4()}"
 
@@ -561,75 +533,6 @@ class TestTheReapersOwnDeadLease:
     """084 (#1329): the tick returns its own kind's expired lease to `ready`
     before its mint guard reads it — the one lease the reaper cannot re-ready
     is its own."""
-
-    async def test_083s_tick_leaves_the_job_system_wedged_and_084s_recovers_it(
-        self, jobs_db
-    ):
-        # A worker claims the reaper the clock minted, and a delivery on one
-        # binding with a second queued behind it on the same key. Then it dies.
-        assert _tick(jobs_db) == REAPER_MINTED, (
-            "positive control: the tick minted the reaper and nothing else"
-        )
-        reaper = _claimed(jobs_db, lane="bulk", worker="w-dead", lease=DYING_LEASE)
-        assert reaper["kind"] == "reap_expired"
-        key = _sender_key()
-        first = _seed_job(jobs_db, key=key, kind="deliver_outbox", run_at_offset_s=-2)
-        queued = _seed_job(jobs_db, key=key, kind="deliver_outbox", run_at_offset_s=-1)
-        held = _claimed(jobs_db, lane="interactive", worker="w-dead", lease=DYING_LEASE)
-        assert held["id"] == first
-        await asyncio.sleep(LAPSE_S)
-        dead = {"state": "leased", "locked_by": "w-dead", "lapsed": True}
-        waiting = {"state": "ready", "locked_by": None, "lapsed": None}
-
-        with _ticking_on_083(jobs_db):
-            assert _tick(jobs_db) == NOTHING_MINTED
-            assert _rows(jobs_db, "reap_expired") == [{"id": reaper["id"], **dead}], (
-                "083 reads the dead lease as live: no successor, no revive — and"
-                " its leg 1 writes nothing, so no later tick differs"
-            )
-            assert _claimed(jobs_db, lane="bulk", worker="w-new") is None, (
-                "the dead reaper is never handed out again: the door takes ready rows"
-            )
-            assert _claimed(jobs_db, lane="interactive", worker="w-new") is None, (
-                "the queued delivery waits behind a dead lease on its key"
-            )
-
-        # 084's tick: the reaper's own lease is `ready` again and nothing is
-        # minted beside it; the delivery's dead lease is left to the reaper.
-        assert _tick(jobs_db) == NOTHING_MINTED
-        assert _rows(jobs_db, "reap_expired") == [{"id": reaper["id"], **waiting}]
-        assert _rows(jobs_db, "deliver_outbox") == [
-            {"id": first, **dead},
-            {"id": queued, **waiting},
-        ], "the tick revives only its own kinds; a tenant's lease is the reaper's"
-
-        # A new worker's bulk lane, exactly as the worker composes it, runs
-        # the revived reaper, which frees the delivery's dead lease.
-        async with ingress_engine(jobs_db["worker"]) as engine:
-            app = compose(engine=engine, config=WorkerConfig(), env={})
-            lane = next(loop for loop in app.loops if loop.lane == "bulk")
-            assert await lane.run_once() is True, "the bulk lane claimed nothing"
-        assert (lane.processed, lane.failures, lane.fenced) == (1, 0, 0)
-        assert _rows(jobs_db, "reap_expired") == [
-            {
-                "id": reaper["id"],
-                "state": "succeeded",
-                "locked_by": lane._worker_name,
-                "lapsed": False,
-            }
-        ], "the revived row itself ran, and it is still the only reaper row"
-        again = _claimed(jobs_db, lane="interactive", worker="w-new")
-        assert again["id"] == first and again["attempts"] == 2, (
-            "the delivery the dead worker held goes first: its key's order holds"
-        )
-        assert _claimed(jobs_db, lane="interactive", worker="w-new-2") is None, (
-            "the key still serializes: the queued delivery waits for the first"
-        )
-        lapsed = fetch_one(
-            jobs_db["owner_stream"],
-            "SELECT count(*) FROM jobs WHERE state = 'leased' AND locked_until < now()",
-        )[0]
-        assert lapsed == 0, "no expired lease is left anywhere"
 
     def test_a_live_lease_is_never_revived(self, jobs_db):
         assert _tick(jobs_db) == REAPER_MINTED

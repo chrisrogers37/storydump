@@ -20,6 +20,7 @@ from src.services.target.posting_health import (
     posting_freshness,
     publish_attempts,
 )
+from tests.src.services.target.schema_code import function_body
 
 
 class FakeExecutor:
@@ -157,20 +158,15 @@ class TestTheBackfillExclusion:
     pass while the AGE goes unfiltered, which is the half that manufactures the
     false recovery.
 
-    Since 081 the query is the body of `fn_health_posting_freshness`, a door the
-    module reads through, so the property is read from the migration file here
-    (the doors gate reads it from the LIVE function in the replayed world);
-    the module's own statement is pinned to the door.
+    The query is the body of `fn_health_posting_freshness`, a door the module
+    reads through, so the property is read from the door's body in the schema
+    code here (the doors gate reads it from the live function); the module's
+    own statement is pinned to the door.
     """
 
     @staticmethod
     def _door_body() -> str:
-        from scripts.migration_runner import MIGRATIONS_DIR
-
-        ddl = (MIGRATIONS_DIR / "081_fleet_health_doors.sql").read_text()
-        body = ddl.split("CREATE FUNCTION fn_health_posting_freshness()", 1)[1]
-        body = body.split("AS $$", 1)[1].split("$$;", 1)[0]
-        return " ".join(body.split())
+        return " ".join(function_body("fn_health_posting_freshness").split())
 
     async def test_the_module_reads_through_the_door(self):
         fake = FakeExecutor(

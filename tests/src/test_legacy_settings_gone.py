@@ -465,12 +465,12 @@ ENV_READ_OUTSIDE_SETTINGS = {
     # `src/services/target/archive_activation.py`)
     "INSTAGRAM_ARCHIVE_ACTIVATION_RECORD",
     "ARCHIVE_HMAC_KEYS",
-    # the deployed roots' database and the runner's
+    # the deployed roots' database, and the runner's and the schema builder's
     "TARGET_DATABASE_URL",
     "DATABASE_URL",
-    # a local database's fields, for `make init-db`'s runner URL
-    # (`scripts/app_db_url.py`, which init-db's recipe hands them through psql's
-    # own quoting) — the names `Settings` declares
+    # a local database's fields, for `make init-db`'s URL (`scripts/app_db_url.py`,
+    # which init-db's recipe hands them with psql's own quoting) — the names
+    # `Settings` declares
     "DB_HOST",
     "DB_PORT",
     "DB_NAME",
@@ -566,31 +566,41 @@ def _recipe(target: str) -> str:
     return "\n".join(body)
 
 
-def test_every_file_the_makefile_feeds_psql_exists():
-    """Every SQL file the Makefile feeds `psql` exists in this tree."""
+def test_every_module_the_makefile_runs_exists():
+    """A target that names a module or a file that is not in the tree fails
+    where its help text says it runs."""
     text = (ROOT / "Makefile").read_text()
+    modules = {
+        m
+        for m in re.findall(r"python3? -m ([A-Za-z0-9_.]+)", text)
+        if (ROOT / m.split(".")[0]).is_dir()  # the tree's own; a tool is not
+    }
+    assert modules, "the Makefile runs no module — the pattern has rotted"
+    missing = [
+        m
+        for m in sorted(modules)
+        if not (ROOT / (m.replace(".", "/") + ".py")).is_file()
+        and not (ROOT / m.replace(".", "/") / "__main__.py").is_file()
+    ]
+    assert missing == [], f"the Makefile runs modules that do not exist: {missing}"
     named = re.findall(r"-f\s+([A-Za-z0-9_./-]+\.sql)", text)
-    assert named, "the Makefile feeds psql no file — the pattern has rotted"
-    missing = [f for f in named if not (ROOT / f).is_file()]
-    assert missing == [], f"the Makefile names files that do not exist: {missing}"
+    gone = [f for f in named if not (ROOT / f).is_file()]
+    assert gone == [], f"the Makefile names files that do not exist: {gone}"
 
 
-def test_init_db_is_the_lanes_own_sequence():
-    """Step 0 (the service roles, then the DDL door 050 calls), the by-hand
-    base with the one table production made by hand (078 snapshots it, so a
-    database built from the tree must hold it), then the runner — the order
-    `run_bootstrap` and `run_lane` stand a world up in. Proven end to end on a
-    throwaway PostgreSQL 15 (the ledger)."""
+def test_init_db_builds_from_code_then_records_and_applies():
+    """Build the schema from code (or leave a database built that way), record
+    the initial marker, then apply the newer migrations, each step only after
+    the one before it succeeded."""
     recipe = _recipe("init-db")
     order = [
-        recipe.index("scripts/window/step0_bootstrap.sql"),
-        recipe.index("scripts/window/step0_legacy_ddl_door.sql"),
-        recipe.index("scripts/setup_database.sql"),
-        recipe.index("tests/scripts/fixtures/legacy_by_hand.sql"),
-        recipe.index("scripts.migration_runner apply"),
+        recipe.index("python -m src.models.target.ddl init"),
+        recipe.index("python -m scripts.migration_runner adopt"),
+        recipe.index("python -m scripts.migration_runner apply"),
     ]
-    assert order == sorted(order), "init-db applies its files out of order"
-    assert "ON_ERROR_STOP=1" in recipe
+    assert order == sorted(order), "init-db runs its steps out of order"
+    between = recipe[order[0] : order[2]]
+    assert between.count("&&") >= 2, "a step runs even when the one before it failed"
 
 
 def test_the_makefile_validates_the_settings_that_exist_and_can_fail():

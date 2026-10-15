@@ -7,6 +7,7 @@ never the shared storyline_test database.
 """
 
 import hashlib
+import json
 import threading
 import time
 
@@ -15,8 +16,10 @@ import pytest
 
 import scripts.migration_runner as runner_module
 from scripts.migration_runner import (
+    INITIAL_VERSION,
     RUNNER_LOCK_KEY,
     MigrationRunnerError,
+    adopt,
     apply_manual,
     apply_pending,
     discover_migrations,
@@ -152,7 +155,7 @@ class TestMarkers:
             "-- Runner:gated",  # a capital R
             "--runner:gated",  # no space after the dashes
             "-- runner:MANUAL",  # a capital word: the words are exact
-            "-- runner:unadvertised because it snapshots",  # a flag with an argument
+            "-- runner:reapply-safe because it re-runs",  # a flag with an argument
         ],
     )
     def test_every_spelling_that_reads_as_a_marker_reaches_the_known_set(
@@ -187,7 +190,7 @@ class TestMarkers:
         write_migration(
             tmp_path,
             1,
-            "-- The runner:schema-move marker is what makes the boundary derivable.\n"
+            "-- The runner:manual marker is what keeps a file out of the deploy.\n"
             "-- see runner:postcondition lines below\n"
             "CREATE TABLE t_a (id INT);",
         )
@@ -207,22 +210,6 @@ class TestMarkers:
         [m] = discover_migrations(tmp_path)
         assert m.postconditions == ("SELECT tru",)
 
-    def test_unadvertised_is_read_off_the_file(self, tmp_path):
-        write_migration(
-            tmp_path, 1, "-- runner:unadvertised\nCREATE TABLE t_a (id INT);"
-        )
-        write_migration(tmp_path, 2, "CREATE TABLE t_b (id INT);")
-        a, b = discover_migrations(tmp_path)
-        assert a.unadvertised is True
-        assert b.unadvertised is False
-
-    def test_an_unadvertised_file_is_applied_like_any_other(self, scratch_db, tmp_path):
-        write_migration(
-            tmp_path, 1, "-- runner:unadvertised\nCREATE TABLE t_a (id INT);"
-        )
-        apply_pending(scratch_db, tmp_path)
-        assert [row[0] for row in fetch_ledger(scratch_db)] == [1]
-
     @pytest.mark.parametrize(
         "line",
         [
@@ -232,7 +219,7 @@ class TestMarkers:
             "# runner:manual",  # a shell-style frame
             "-- runner manual",  # no colon
             "DROP TABLE t_gone; -- runner:manual",  # after code on the same line
-            "-- RUNNER unadvertised",  # another word, upper case, no colon
+            "-- RUNNER reapply-safe",  # another word, upper case, no colon
             "-- runner-manual",  # a dash for the colon
             "-- runner=manual",  # an equals sign for the colon
         ],
@@ -253,12 +240,12 @@ class TestMarkers:
         write_migration(
             tmp_path,
             1,
-            "-- The runner:schema-move marker is what makes the boundary derivable.\n"
-            "-- python -m scripts.migration_runner apply --manual 79 is the door.\n"
+            "-- The runner:manual marker is what keeps a file out of the deploy.\n"
+            "-- python -m scripts.migration_runner apply --manual 5 is the door.\n"
             "CREATE TABLE t_a (id INT);",
         )
         [m] = discover_migrations(tmp_path)
-        assert m.manual is False and m.schema_move is False
+        assert m.manual is False
 
     def test_a_byte_order_mark_does_not_hide_a_marker_on_line_one(self, tmp_path):
         path = tmp_path / "001_bom.sql"
@@ -818,3 +805,62 @@ class TestManual:
 
         assert main(argv + ["apply", "--manual", "3"]) == 1
         assert "runner:manual" in capsys.readouterr().err
+
+
+class TestTheInitialMarker:
+    """`000_initial.sql` is empty and never executed; `adopt` records it on a
+    database built from the schema code, and later files apply on top."""
+
+    def test_an_empty_initial_marker_is_discovered_with_no_statements(self, tmp_path):
+        (tmp_path / "000_initial.sql").write_bytes(b"")
+        [m] = discover_migrations(tmp_path)
+        assert m.version == INITIAL_VERSION
+        assert m.statements == ()
+
+    def test_a_byte_in_the_initial_marker_is_refused_at_discovery(self, tmp_path):
+        (tmp_path / "000_initial.sql").write_text("SELECT 1;")
+        with pytest.raises(
+            MigrationRunnerError, match=r"000 \(000_initial\.sql\) must be empty"
+        ):
+            discover_migrations(tmp_path)
+
+    def test_an_unrecorded_initial_marker_is_refused_never_applied(
+        self, scratch_db, tmp_path
+    ):
+        (tmp_path / "000_initial.sql").write_bytes(b"")
+        write_migration(tmp_path, 1, "CREATE TABLE t_a (id INT);")
+        with pytest.raises(
+            MigrationRunnerError, match="not recorded: build the schema"
+        ):
+            apply_pending(scratch_db, tmp_path)
+        assert fetch_ledger(scratch_db) == []
+        assert not table_exists(scratch_db, "t_a")
+
+    def test_adopt_records_the_marker_then_apply_runs_what_is_above_it(
+        self, scratch_db, tmp_path
+    ):
+        (tmp_path / "000_initial.sql").write_bytes(b"")
+        write_migration(
+            tmp_path,
+            1,
+            "-- runner:postcondition SELECT to_regclass('public.t_a') IS NOT NULL\n"
+            "CREATE TABLE t_a (id INT);",
+        )
+        manifest = tmp_path / "adoption_manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "required_through": 0,
+                    "entries": [{"version": 0, "probe": "SELECT true"}],
+                }
+            )
+        )
+        report = adopt(scratch_db, tmp_path, manifest)
+        assert [m.version for m in report.adopted] == [0]
+        assert [m.version for m in report.pending] == [1]
+        applied = apply_pending(scratch_db, tmp_path)
+        assert [m.version for m in applied.applied] == [1]
+        assert [row[0] for row in fetch_ledger(scratch_db)] == [0, 1]
+        again = adopt(scratch_db, tmp_path, manifest)
+        assert [m.version for m in again.already] == [0, 1]
+        assert again.adopted == [] and again.pending == []

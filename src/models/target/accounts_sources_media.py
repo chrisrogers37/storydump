@@ -72,6 +72,7 @@ class IgAccount(TargetBase):
     tz = Column(Text, nullable=True)
     next_slot_at = Column(TZ, nullable=True)
     last_posted_at = Column(TZ, nullable=True)
+    created_at, updated_at = timestamps()
     # When the reauth-prompt clock leg last minted for this account (062);
     # NULL = never prompted. Stamped at mint, symmetric with next_slot_at.
     last_reauth_prompt_at = Column(TZ, nullable=True)
@@ -80,7 +81,6 @@ class IgAccount(TargetBase):
     # workspace starve independently, so a workspace-keyed marker would let
     # the first one's notice silence the second one's first notice.
     last_no_media_notice_at = Column(TZ, nullable=True)
-    created_at, updated_at = timestamps()
 
     __table_args__ = (
         CheckConstraint(
@@ -158,10 +158,9 @@ class MediaSource(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'active'"))
     last_sync_success_at = Column(TZ, nullable=True)
     alerted_at = Column(TZ, nullable=True)
+    created_at, updated_at = timestamps()
     # 110: the folder's own approval position; NULL is the workspace's.
     approval_mode = Column(Text, nullable=True)
-    created_at, updated_at = timestamps()
-
     origin_ig_account_id = Column(UUID(as_uuid=True), nullable=True)
     source_use_epoch = Column(BigInteger, nullable=False, server_default=text("0"))
     source_epoch_transaction_id = Column(BigInteger, nullable=True)
@@ -246,10 +245,10 @@ class OAuthCredential(TargetBase):
     expires_at = Column(TZ, nullable=True)
     next_refresh_at = Column(TZ, nullable=True)
     state = Column(Text, nullable=False, server_default=text("'active'"))
+    created_at, updated_at = timestamps()
     #: Whose Google account a `gdrive` grant is (091): only they browse it.
     #: NULL for `ig_login` and for every Drive grant made before 091.
     granted_by_user_id = fk("users.id", "SET NULL", nullable=True)
-    created_at, updated_at = timestamps()
 
     __table_args__ = (
         UniqueConstraint(
@@ -320,12 +319,6 @@ class MediaItem(TargetBase):
     file_name = Column(Text, nullable=False)
     file_size = Column(BigInteger, nullable=True)
     category = Column(Text, nullable=True)
-    folder_path = Column(
-        Text, nullable=True
-    )  # 070: the folder's path under the connected folder
-    last_listed_at = Column(
-        TZ, nullable=True
-    )  # 105: when a walk of its folder last listed the file
     title = Column(Text, nullable=True)
     caption = Column(Text, nullable=True)
     generated_caption = Column(Text, nullable=True)
@@ -339,10 +332,15 @@ class MediaItem(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'available'"))
     times_posted = Column(Integer, nullable=False, server_default=text("0"))
     last_posted_at = Column(TZ, nullable=True)
+    created_at, updated_at = timestamps()
+    folder_path = Column(
+        Text, nullable=True
+    )  # 070: the folder's path under the connected folder
+    last_listed_at = Column(
+        TZ, nullable=True
+    )  # 105: when a walk of its folder last listed the file
     # 110: the item's Auto-approve flag; false until a member sets it.
     auto_approve = Column(Boolean, nullable=False, server_default=text("false"))
-    created_at, updated_at = timestamps()
-
     source_data_generation_id = Column(UUID(as_uuid=True), nullable=True)
     source_projection_redacted = Column(
         Boolean, nullable=False, server_default=text("false")

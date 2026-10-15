@@ -224,6 +224,7 @@ class WorkspaceMember(TargetBase):
             unique=True,
             postgresql_where=text("role = 'owner'"),
         ),
+        Index("ix_members_user", "user_id"),
     )
 
 
@@ -374,6 +375,11 @@ class WorkspaceInvitation(TargetBase):
             "workspace_id",
             "email",
             unique=True,
+            postgresql_where=text("state = 'pending'"),
+        ),
+        Index(
+            "ix_invite_pending_email",
+            text("lower(email)"),
             postgresql_where=text("state = 'pending'"),
         ),
     )

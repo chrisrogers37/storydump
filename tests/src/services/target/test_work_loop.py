@@ -40,6 +40,7 @@ from src.services.target.work_loop import (
     build_registry,
 )
 from tests.src.services.target.conftest import RecordingSender
+from tests.src.services.target.schema_code import function_body
 
 
 def schema_kinds() -> set:
@@ -2845,16 +2846,12 @@ class TestTheSenderMintReadsItsOwners:
 
         from src.services.target import bindings, outbox, prompts
 
-        # Since 082 the sender sweep's statement is `fn_sender_sweep`'s body — a
-        # door cannot call the Python fragment, so the predicate is spelled in
-        # the door and pinned here to the one owner: the door's body must carry
-        # `push_binding_where('b')` verbatim, and the Python does not spell it.
-        # An applied file is immutable: a predicate change means a fix-forward
-        # door (063's precedent), and this pin moves to the new file with it.
-        from scripts.migration_runner import MIGRATIONS_DIR
-
-        ddl = (MIGRATIONS_DIR / "082_worker_doors.sql").read_text()
-        body = ddl.split("CREATE FUNCTION fn_sender_sweep(", 1)[1].split("$$;", 1)[0]
+        # The sender sweep's statement is `fn_sender_sweep`'s body — a door
+        # cannot call the Python fragment, so the predicate is spelled in the
+        # door and pinned here to the one owner: the door's body in the schema
+        # code must carry `push_binding_where('b')` verbatim, and the Python does
+        # not spell it.
+        body = function_body("fn_sender_sweep")
         assert body.count(bindings.push_binding_where("b")) == 1
         assert "push_binding_where(" not in inspect.getsource(
             work_loop.ensure_sender_jobs

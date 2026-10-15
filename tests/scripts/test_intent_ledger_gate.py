@@ -44,7 +44,6 @@ import uuid
 import psycopg2
 import pytest
 
-from scripts.migration_runner import MIGRATIONS_DIR
 from src.services.target import vocabulary
 from tests.scripts.conftest import (
     as_user,
@@ -878,9 +877,8 @@ class TestOriginIsFixedAtBirth:
 
 
 class TestTheDefaultsAskAPerson:
-    """Nothing approves automatically until someone sets a position or a flag,
-    and 110's one-time reset makes every workspace ask, whatever it had saved
-    (a value nothing ever honored is not consent)."""
+    """Nothing approves automatically until someone sets a position or a
+    flag: every approval column defaults to asking."""
 
     def test_each_column_defaults_to_asking(self, ledger):
         expected = {
@@ -898,24 +896,6 @@ class TestTheDefaultsAskAPerson:
                 " ('post_intents', 'approval_rule'))"
             )
             assert {(t, c): d for t, c, d in cur.fetchall()} == expected
-
-    def test_the_reset_makes_every_workspace_ask(self, ledger):
-        """110's one-time reset, read from the file so the test runs the
-        shipped statements rather than a copy (098's pattern)."""
-        reset = re.search(
-            r"SET LOCAL app\.actor_kind = 'migration';.*?SET LOCAL app\.actor_kind = '';",
-            (MIGRATIONS_DIR / "110_approval_positions.sql").read_text(),
-            re.S,
-        ).group()
-        ws = ledger["chain"]["ws"]
-        with ledger["conn"].cursor() as cur:
-            cur.execute("SET app.actor_kind = 'system'")
-            cur.execute(
-                "UPDATE workspaces SET approval_mode = 'auto' WHERE id = %s", (ws,)
-            )
-            cur.execute(reset)
-            cur.execute("SELECT approval_mode FROM workspaces WHERE id = %s", (ws,))
-            assert cur.fetchone() == ("manual",)
 
 
 class TestTheGuardsAreLoadBearing:

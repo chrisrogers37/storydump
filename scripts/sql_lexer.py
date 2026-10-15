@@ -1,13 +1,11 @@
-"""Where a literal, a quoted identifier or a comment starts and ends in SQL (#1406).
+"""Where a literal, a quoted identifier or a comment starts and ends in SQL.
 
-Every scan that reads a migration as text needs that answer before it can read
-anything else. `migration_runner.split_statements` cuts at a `;` only outside
-all three. `advertised_ddl.normalize_statements` drops comments without
-reaching into a literal. The tenancy gate reads structure — a comma, a paren, a
-column name — only in code. Each of them once kept a partial answer of its own,
-and each gap let a string literal change a gate's verdict. This module is the
-one answer. Callers keep only their POLICY: what to do with a form they will
-not read through.
+Every scan that reads SQL as text needs that answer before it can read anything
+else, and a gap in it lets a string literal change what the scan sees.
+`migration_runner.split_statements` cuts at a `;` only outside all three, and
+`normalize_statements` below drops comments without reaching into a literal.
+This module is the one answer. Callers keep only their POLICY: what to do with
+a form they will not read through.
 
 The model is PostgreSQL's own scanner, for boundaries alone; it never decodes a
 literal's value. Literals are read the way PostgreSQL reads them with
@@ -195,3 +193,54 @@ def _block_comment(sql: str, i: int):
         else:
             i += 1
     return len(sql), False
+
+
+class QuotesWouldMove(ValueError):
+    """`normalize_statements` refuses a statement whose quotes it would move."""
+
+
+def normalize_statements(sql: str) -> list:
+    """Split ``sql`` into statements, drop every comment and collapse each run
+    of whitespace to one space. Two SQL texts that differ only in layout and
+    comments normalize to the same statement list: the result is a key to
+    compare, not SQL to execute.
+
+    Comments go and literals stay, each whole. Every comment goes, not only the
+    lines that hold nothing else: the result is one line, so a comment left in
+    it would have no end, and a scan that reads quotes could not tell where the
+    statement resumes. A comment leaves a space where it was, as PostgreSQL
+    reads it. Every literal stays whole, and only its runs of whitespace
+    collapse, as everywhere: a dollar-quoted body keeps its `--` lines, since
+    PostgreSQL stores a function body verbatim.
+
+    Raises `QuotesWouldMove` for a statement whose quotes normalizing would
+    move, so a scan of the normalized text can trust them. An escape string
+    continued across a line break keeps its escape rules only while the break
+    is there, and no single-line form of it lexes the same.
+
+    The statements are cut by the runner's `split_statements`, imported here
+    when called, since the runner imports this module.
+    """
+    from scripts.migration_runner import split_statements
+
+    out = []
+    for raw in split_statements(sql):
+        text = "".join(" " if s.kind in COMMENTS else s.text for s in segments(raw))
+        collapsed = re.sub(r"\s+", " ", text).strip()
+        if _shape(collapsed) != _shape(text):
+            raise QuotesWouldMove(
+                "normalizing this statement would move its quotes, so no scan of"
+                " the normalized text could trust where a literal ends — an"
+                " escape string continued across a line break does this; write"
+                f" it on one line: {raw.strip()[:120]}"
+            )
+        out.append(collapsed)
+    return out
+
+
+def _shape(sql: str) -> tuple:
+    """Every segment of ``sql`` but blank code, in order, and whether each is
+    closed: what normalization must leave as it found it."""
+    return tuple(
+        (s.kind, s.closed) for s in segments(sql) if s.kind != CODE or s.text.strip()
+    )

@@ -61,10 +61,9 @@ backup/
 *.tar.gz
 
 # But allow SQL scripts in scripts/ directory
-!scripts/*.sql
 !scripts/**/*.sql
-# By-hand SQL fixtures for the DB gates (a legacy table no migration creates)
-!tests/scripts/fixtures/*.sql
+# The schema as code, beside the models
+!src/models/target/ddl/*.sql
 
 # Media files (don't commit user media)
 media/stories/*
