@@ -89,6 +89,12 @@ in one transaction and refuses an existing schema it does not recognize.
 Locally, `make init-db` runs these same steps using the `DB_*` connection
 components; `make create-db init-db` creates the database first.
 
+Automatic apply reports pending `001` and `002` as owed. These cutover
+steps require explicit owner application, separate constraint validation,
+and confirmation of the snapshot export or backup. Follow the
+[cutover runbook](../operations/schema-cutover.md), including its rehearsal
+and zero-difference parity requirement.
+
 `scripts/migrations/000_initial.sql` is an empty marker, never executable SQL.
 `adopt` records it after checking the schema-code probe. Later files apply on
 top of that base. `make reset-db` drops and rebuilds a local database.
@@ -117,7 +123,13 @@ per `WEB_CONCURRENCY`) against the plan's connection limit.
 
 ## 2. Railway Deployment
 
-### Two services, one repository
+### Required dashboard start commands
+
+Deploy two services from the same repository. For each service, open
+**Settings > Deploy > Start Command** in the Railway dashboard and set its
+command from this table. These per-service overrides are required before a
+deploy. The `Procfile` lists available processes; this setting selects which
+process the service runs. See [Railway's start-command configuration](https://docs.railway.com/deployments/start-command).
 
 | Service | Start command | What it is |
 |---|---|---|
@@ -134,7 +146,7 @@ commands.
 | Key | Value | Effect |
 |---|---|---|
 | `buildCommand` | `pip install -r requirements.txt && pip install -e .` | no `[cli]` extra: `keyring` does not ship to a service (`setup.py`) |
-| `preDeployCommand` | `python -m scripts.migration_runner apply` | every deploy of either service applies pending migrations first; the runner's advisory lock serializes the two, and a failing migration aborts the deploy with the old version still serving |
+| `preDeployCommand` | `python -m scripts.migration_runner apply` | applies ordinary pending migrations and reports manual cutover steps as owed; the runner's advisory lock serializes the two services, and a failing migration aborts the deploy with the old version still serving |
 | `healthcheckPath` | `/health` | both services answer it (below) |
 | `restartPolicyType` | `ON_FAILURE`, 10 retries | |
 | `drainingSeconds` | `60` | the old deployment gets 60 s after SIGTERM |
@@ -143,7 +155,7 @@ commands.
 
 1. **Connect the GitHub repo** in the Railway dashboard
 2. **Create the two services** from the same repo, named `worker` and
-   `storydump`, each with its start command from the table above
+   `storydump`, and set each required dashboard Start Command from the table above
 3. **Generate a domain** for the `storydump` service — OAuth callbacks and
    Telegram's webhook need it. Production's is `https://api.storydump.app`
 4. **Configure the variables** (Section 3). `DATABASE_URL` must be on both

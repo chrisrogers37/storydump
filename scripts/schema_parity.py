@@ -5,6 +5,8 @@ signature; their created_at timestamps are reported as runtime metadata.
 Archive and runner relations, extension members and system objects
 are excluded. Comments, outside-role grants and membership options are reported
 for review; raw function bodies remain part of the comparison.
+Memberships held by service roles or the database owner are compared regardless
+of the granted role or grantor.
 """
 
 from __future__ import annotations
@@ -345,10 +347,7 @@ def extract(conn, *, read_only=False):
                     reported["membership_options"].append(options_report)
                 if row is None:
                     continue
-                if all(
-                    r == "<owner>" or r.startswith("svc_")
-                    for r in (row["role"], row["member"], row["grantor"])
-                ):
+                if row["member"] == "<owner>" or row["member"].startswith("svc_"):
                     row["key"] = (
                         row["role"] + "->" + row["member"] + "@" + row["grantor"]
                     )
@@ -549,7 +548,17 @@ def print_comparison(first, second):
             print(
                 f"diagnostic function {key}: comment-free bodies are {status}; raw body difference gates"
             )
-    print(f"{len(diffs)} difference(s)")
+    outside_sides = [
+        label
+        for label, snapshot in (("first", first), ("second", second))
+        if snapshot.get("reported", {}).get("outside_roles")
+    ]
+    scope_note = (
+        f"; out-of-scope roles reported ({', '.join(outside_sides)})"
+        if outside_sides
+        else ""
+    )
+    print(f"{len(diffs)} difference(s){scope_note}")
     return 1 if diffs else 0
 
 

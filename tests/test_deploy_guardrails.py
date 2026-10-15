@@ -94,3 +94,20 @@ def test_the_check_can_fail():
     assert automatic_runner_invocations(f"web: uvicorn app\n{release}\n") == [release]
     assert automatic_runner_invocations(f"[deploy]\n  # {predeploy}\n") == []
     assert automatic_runner_invocations('[deploy]\nhealthcheckPath = "/health"\n') == []
+
+
+def test_per_service_dashboard_start_commands_are_required():
+    """A multi-process Procfile does not select the worker service's process."""
+    guide = (REPO_ROOT / "documentation/guides/cloud-deployment.md").read_text()
+    heading = "### Required dashboard start commands"
+    assert heading in guide, "each service needs an explicit dashboard Start Command"
+    section = guide.split(heading, 1)[1].split("\n### ", 1)[0]
+    assert "Settings > Deploy > Start Command" in section
+    processes = dict(
+        line.split(": ", 1)
+        for line in (REPO_ROOT / "Procfile").read_text().splitlines()
+        if line.strip()
+    )
+    assert f"| `worker` | `{processes['worker']}` |" in section
+    assert f"| `storydump` | `{processes['web']}` |" in section
+    assert "required" in section.lower()

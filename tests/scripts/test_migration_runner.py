@@ -659,6 +659,25 @@ class TestManual:
         )
         write_migration(tmp_path, 3, "CREATE TABLE t_three (id INT);")
 
+    @pytest.mark.parametrize("manual", [[], ["--manual", "001"]])
+    def test_backup_confirmation_refuses_anything_except_manual_002(
+        self, tmp_path, capsys, manual
+    ):
+        with pytest.raises(SystemExit) as caught:
+            main(
+                [
+                    "--database-url",
+                    "postgresql://unused.invalid/unused",
+                    "--migrations-dir",
+                    str(tmp_path),
+                    "apply",
+                    *manual,
+                    "--confirm-archive-backup",
+                ]
+            )
+        assert caught.value.code == 2
+        assert "requires --manual 002" in capsys.readouterr().err
+
     def test_apply_owes_the_manual_file_and_applies_the_ordinary_ones_above_it(
         self, scratch_db, tmp_path
     ):
