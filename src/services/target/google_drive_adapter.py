@@ -1,4 +1,4 @@
-"""The real Google Drive read leg — the `list_changes` port (#982).
+"""The real Google Drive read leg — the `list_changes` port.
 
 `drive_adapter.py` holds the port's SEAM, and this is the real door.
 
@@ -32,8 +32,8 @@ two-argument shape stays legible.
 instead of reading `oauth_credentials` itself; the live provider is
 :func:`src.services.target.drive_credentials.provider_from_engine`, and the
 refresh it mints behind that seam is `drive_credentials._refresh` — on the READ
-path, because the refresh clock is fenced to `ig_login` (`063`) and gdrive rows
-carry `next_refresh_at = NULL` (#1247). The seam keeps this module free of
+path, because the refresh clock is fenced to `ig_login` (`fn_clock_tick` provider guards) and gdrive rows
+carry `next_refresh_at = NULL`. The seam keeps this module free of
 decryption and of the credential state machine.
 
 A provider that raises :class:`DriveCredentialDead` routes to the source state
@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 
 #: Drive v3 listing endpoint. Host is already on the egress allowlist.
 FILES_URL = "https://www.googleapis.com/drive/v3/files"
-#: The folder browser's mime (#1165).
+#: The folder browser's mime.
 FOLDER_MIME = "application/vnd.google-apps.folder"
 #: What a Drive id looks like. The browser splices `parent` into a `q`
 #: string, so a value outside this shape is refused before any request —
@@ -105,7 +105,7 @@ FOLDER_WALK_CAP = 2000
 
 #: The picker's second root: folders shared TO the connected account, which
 #: have no `root` parent and would otherwise be unreachable, since the picker
-#: takes no pasted link (#1246). A sentinel, not a Drive id.
+#: takes no pasted link. A sentinel, not a Drive id.
 SHARED_ROOT = "shared-with-me"
 
 
@@ -297,14 +297,14 @@ class _TokenBox:
 
 
 class TokenProvider(Protocol):
-    """Resolves a usable Drive access token — the WORKSPACE's grant (069).
+    """Resolves a usable Drive access token — the WORKSPACE's grant (workspace Drive grant).
 
     `source_id` names the folder being synced, for the provider's own
     messages; it is `None` from the folder browser, which syncs nothing.
     `workspace_id` is the key: the credential is the workspace's, the read is
     bound to it by the WHERE and, where RLS is live, by the tenant GUC too.
     `fresh=True` asks for a re-minted token — the adapter's one retry after
-    Google refused a token the door thought live (#1247).
+    Google refused a token the door thought live.
     """
 
     async def __call__(
@@ -366,7 +366,7 @@ def _refuse_unsupported_config(config: Mapping[str, Any]) -> None:
     validate_source_config(config)
     if not is_folder_id(config.get("folder_ref")):
         # The id is spliced into a Drive `q` string; a value outside the id
-        # shape is refused here rather than trusted there (#1256).
+        # shape is refused here rather than trusted there.
         raise DriveTerminalError("folder_ref is not a Drive folder id")
     if "root_name" in config and config["root_name"]:
         raise DriveTerminalError(
@@ -389,7 +389,7 @@ class GoogleDriveAdapter:
         page_size: int = DEFAULT_PAGE_SIZE,
     ) -> None:
         # `client` optional and per-call by default, following
-        # `credential_lifecycle.ig_refresh` (:84-99) rather than inventing a
+        # `credential_lifecycle.ig_refresh` rather than inventing a
         # lifecycle: a long-lived client would need closing on shutdown, and
         # the sync cadence is minutes, so a per-call pool costs nothing. The
         # thumbnail route calls far more often, so every client opened here
@@ -430,8 +430,8 @@ class GoogleDriveAdapter:
              "partial": <part of the tree skipped otherwise>,
              "whole": <done, and nothing skipped>,
              "current": {"id", "name", "top", "top_name", "path", "listed"},
-             "queue":   [ … the same shape … ],   # folders still to list
-             "page_token": <within current>}       # only while more pages
+             "queue": [ … the same shape … ], # folders still to list
+             "page_token": <within current>} # only while more pages
 
         `walk` is minted by the SYNC for each walk and carried through unchanged
         (a cursor handed in without one — the first call of a walk from a caller
@@ -508,7 +508,7 @@ class GoogleDriveAdapter:
         if not current.get("listed") and seen >= FOLDER_WALK_CAP:
             # Past the cap no listing is even asked for: every child would be
             # discarded, and a 2,000-folder tree would otherwise spend 2,000
-            # requests per walk on nothing (#1256).
+            # requests per walk on nothing.
             note_truncation()
             current["listed"] = True
         if not current.get("listed"):
@@ -538,7 +538,7 @@ class GoogleDriveAdapter:
                 if child["id"] in known:
                     # Reachable by two paths (a multi-parent folder) or a cycle
                     # (a provider handing back an ancestor): walked once, and
-                    # never spun to the cap (#1256).
+                    # never spun to the cap.
                     logger.warning(
                         "drive source %s: folder %r (%s) reached twice under %s — skipped",
                         source_id,
@@ -569,7 +569,7 @@ class GoogleDriveAdapter:
                 raise  # the connected folder itself is gone: the source's fault to report
             # A folder deleted or unshared mid-walk is not the source's fault
             # and must not wedge it: said once, skipped, the walk goes on
-            # (#1251 — the stored cursor would otherwise point at
+            # ( — the stored cursor would otherwise point at
             # the dead folder forever).
             logger.warning(
                 "drive source %s: folder %r (%s) is gone mid-walk — skipped",
@@ -596,7 +596,7 @@ class GoogleDriveAdapter:
         items = self._page_items(payload, current)
         if payload.get("incompleteSearch"):
             # Drive says the page may leave files out: what it did not list
-            # is not known to be gone, so the walk is not whole (#1545).
+            # is not known to be gone, so the walk is not whole.
             logger.warning(
                 "drive source %s: listing of folder %r is incomplete",
                 source_id,
@@ -793,7 +793,7 @@ class GoogleDriveAdapter:
         media_params = {"alt": "media", "supportsAllDrives": "true"}
         # The worker builds this adapter without a policy (the floor's
         # default applies per call); the media policy derives from whichever
-        # is in force, never from None (#1259).
+        # is in force, never from None.
         base = self._policy or EgressPolicy()
         policy = _replace(
             base,
@@ -986,9 +986,9 @@ class GoogleDriveAdapter:
     ) -> FolderPage:
         """The folders under `parent` — the Drive root when None, the
         folders shared to the account when `SHARED_ROOT` — as ``{"id",
-        "name"}`` rows in name order: the picker's read (#1165). The
+        "name"}`` rows in name order: the picker's read. The
         same grant and the same floored transport as `list_changes`; the token
-        is the WORKSPACE's (069), so the provider is asked with no source.
+        is the WORKSPACE's (workspace Drive grant), so the provider is asked with no source.
         Pages are followed to `FOLDER_LIST_CAP`, and the page says when it
         was cut rather than looking complete.
         """
@@ -1063,7 +1063,7 @@ class GoogleDriveAdapter:
             # The provider's own content type, carried rather than consumed.
             # `kind` is the two-value `ck_media_kind` domain and is DERIVED from
             # this; deriving and then discarding the input leaves `mime_type`
-            # — a column `054` defines and the media read already serves — NULL
+            # — a column `accounts_sources_media.py` defines and the media read already serves — NULL
             # for every provider-sourced item, recoverable only by re-listing
             # the folder. It is also the one classifier input that does not
             # depend on the file NAME, which for provider media is whatever
@@ -1105,7 +1105,7 @@ class GoogleDriveAdapter:
         door handed out can die inside the request it was minted for, and
         Google can invalidate one early. On Google's 401/403 the provider is
         asked once more with `fresh=True` and the GET retried; a second
-        refusal is the grant's, and propagates (#1247). `box` lets a
+        refusal is the grant's, and propagates. `box` lets a
         multi-request call (the walk) share one token and see the re-mint."""
         response = await self._fetch_as_workspace(
             url, source_id=source_id, workspace_id=workspace_id, box=box

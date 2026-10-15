@@ -1,8 +1,8 @@
-"""#1172 — the create half, driven against the acceptor.
+"""— the create half, driven against the acceptor.
 
 The risk in the create half is not that it fails — it is that it succeeds
 against a shape the acceptor (`fn_invitation_accept` and `/join/[token]`,
-#1090) disagrees with, and nobody finds out until a real person clicks a real
+) disagrees with, and nobody finds out until a real person clicks a real
 link.
 
 **Every test here is therefore a ROUND TRIP.** `invitations.create` writes the
@@ -234,7 +234,7 @@ class TestTheCreateHalfMatchesTheAcceptor:
     ):
         """The cross-lane claim, asserted rather than promised.
 
-        `053` closes `delivery_channel` at `email | telegram` and gives each
+        `identity_and_tenancy.py` closes `delivery_channel` at `email | telegram` and gives each
         its own acceptance value, so a Telegram card and an email are one
         row shape. If this fails, the Telegram half needs its own creator
         and the two will drift on the parts that are authorization rather
@@ -270,7 +270,7 @@ class TestTheRefusalsAreNamedRatherThanConstraintNames:
         """A second send to one address revokes the first: its link stops
         working, the new one is the only live invitation, and it is the new
         send's role that is granted. Without the revoke `uq_invite_live` would
-        refuse the send, and an invitation the accept door refuses (098)
+        refuse the send, and an invitation the accept door refuses (invitation legitimacy checks)
         would keep refusing it until the reaper expired it."""
         r = _Round(world)
         try:
@@ -404,7 +404,7 @@ class TestTheRefusalsAreNamedRatherThanConstraintNames:
 
 
 class TestTheLinkIsShownOnce:
-    """#1563/#1564: an admin mints an invitation from the web and is shown its
+    """/: an admin mints an invitation from the web and is shown its
     link once. The token reaches the database only as its SHA-256, so the
     command's response is the only place it appears.
 

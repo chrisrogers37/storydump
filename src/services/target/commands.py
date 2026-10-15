@@ -1,11 +1,11 @@
-"""The interaction-layer port (#1028).
+"""The interaction-layer port.
 
 Every inbound channel normalizes what it received into a :class:`Command` and
 hands it to :func:`ingest`. The web/API adapter (`api/routes/v1.py`) is the
 one that does so end to end; the Telegram webhook
 (`/webhooks/telegram` — the `/start` door and the group join path) builds
 a :class:`Command` in `telegram_dispatch`, while chat-inbound COMMANDS ("approve"
-typed in a group) are not dispatched (#854). Nothing inland sees a chat
+typed in a group) are not dispatched. Nothing inland sees a chat
 id, a session cookie, a callback
 payload or an HTTP body: a command carries RESOLVED domain ids and nothing
 else, which is the discipline made structural rather than reviewed for.
@@ -80,7 +80,7 @@ FLOORS: tuple[str, ...] = ("user", "member", "admin", "owner", "operator")
 # has no field that can express a non-user principal, and the refusal is TWO
 # independent constructions (the branch in `authorize` below AND `operator`'s
 # absence from `tenant_resolution.ROLE_ORDER`), so removing either alone changes
-# nothing (#1124).
+# nothing.
 #
 # `resolve_review` is not on the operator floor — see `ROLE_FLOOR`.
 # `clear_quarantine` is, so no principal in this tier can run it.
@@ -92,15 +92,15 @@ ROLE_FLOOR: dict[str, str] = {
     "reject": "member",
     "mark_posted": "member",
     "cancel": "member",
-    # A planned story (#1413): the floor of `approve` and `cancel`, the
+    # A planned story: the floor of `approve` and `cancel`, the
     # two levers a member already holds on the same row. Scheduling asks a
     # person at the story's time and posts nothing by itself.
     "schedule_item": "member",
     "reschedule_item": "member",
-    # The item's link (#1413): the same floor. It changes what a
+    # The item's link: the same floor. It changes what a
     # story's card asks a person to add by hand, and posts nothing.
     "set_item_link": "member",
-    # The item's Auto-approve flag (#1477): any member, because the flag
+    # The item's Auto-approve flag: any member, because the flag
     # is a standing Approve, the lever a member already holds on each story.
     # It applies from the item's next serve and decides no card already
     # waiting.
@@ -108,7 +108,7 @@ ROLE_FLOOR: dict[str, str] = {
     "autopost_now": "member",
     "sync_now": "member",
     "settings_change": "admin",
-    # A folder's approval position (#1477): admin, like every
+    # A folder's approval position: admin, like every
     # position — the workspace's own rides `settings_change`. YOLO on a
     # folder posts its stories without a tap.
     "set_source_approval": "admin",
@@ -119,7 +119,7 @@ ROLE_FLOOR: dict[str, str] = {
     # ever apply one floor to workspace and account both. Starting them equal is
     # behaviourally identical to that and keeps the option open. Loosening this
     # later is cheap; tightening it is a security change, so it does not start
-    # loose (#1175).
+    # loose.
     "account_settings_change": "admin",
     "pause_workspace": "admin",
     "resume_workspace": "admin",
@@ -144,7 +144,7 @@ ROLE_FLOOR: dict[str, str] = {
     # `cancel` already, and the resolutions are those levers on a parked row
     # (`retry` re-approves, `posted` confirms, `cancel` gives up keeping the
     # debit). `failed` — a refund — is not offered: like `clear_quarantine`,
-    # it is the operator's (#1124).
+    # it is the operator's.
     "resolve_review": "member",
     "clear_quarantine": "operator",
 }
@@ -193,7 +193,7 @@ class Command:
     channel: str
     args: Mapping[str, Any] = field(default_factory=dict)
     #: The actor's display name as the ADAPTER resolved it (the tap reads it
-    #: with the tapper's identity — #1286), never from `args`: the web route
+    #: with the tapper's identity), never from `args`: the web route
     #: passes the request body into `args` verbatim, and a name there would
     #: be a member's own choice of what the group reads after "by".
     actor_label: Optional[str] = None
@@ -280,15 +280,15 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "reject": ex.reject,
             "mark_posted": ex.mark_posted,
             "cancel": ex.cancel,
-            # #1413: a planned story, created and moved in place;
+            # a planned story, created and moved in place;
             # `cancel` ends one, as it ends any story.
             "schedule_item": ex.schedule_item,
             "reschedule_item": ex.reschedule_item,
-            # #1413: the link an item's stories ask for by hand.
+            # the link an item's stories ask for by hand.
             "set_item_link": ex.set_item_link,
-            # #1477: the item's Auto-approve flag.
+            # the item's Auto-approve flag.
             "set_item_auto_approve": ex.set_item_auto_approve,
-            # #1477: a folder's approval position.
+            # a folder's approval position.
             "set_source_approval": ex.set_source_approval,
             "sync_now": ex.sync_now,
             # The trio is provider-general and
@@ -300,7 +300,7 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             # half — the web's Remove.
             "disable_account": ex.disable_account,
             # An admin removes membership explicitly — the revoke for
-            # every join edge, the Telegram one included (#1242).
+            # every join edge, the Telegram one included.
             "remove_member": ex.remove_member,
             "settings_change": ex.settings_change,
             "account_settings_change": ex.account_settings_change,
@@ -311,8 +311,8 @@ def _build_registry() -> dict[str, Optional[Executor]]:
             "revoke_invitation": ex.revoke_invitation,
             "rename_workspace": ex.rename_workspace,
             # The offboarding entry edge. The DOOR that finishes the job
-            # (`fn_offboard_finalize`) is `059`'s, and the job kind is `056`'s
-            # (#1090).
+            # (`fn_offboard_finalize`) is in `04_functions.sql`; the job kind
+            # is declared in `machinery.py`.
             "offboard_workspace": ex.offboard_workspace,
             "restore_workspace": ex.restore_workspace,
             "resolve_review": ex.resolve_review,
@@ -367,7 +367,7 @@ async def authorize(
 ) -> None:
     """The gate *kind*'s floor (`ROLE_FLOOR`) demands, or a refusal: the one
     spelling, for `execute` and for the Telegram card menu's navigation taps,
-    which act on a card without running a command (#1477) and must not be a
+    which act on a card without running a command and must not be a
     lever a non-member can pull."""
     floor = ROLE_FLOOR[kind]
     if floor == "operator":

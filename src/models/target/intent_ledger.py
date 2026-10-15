@@ -1,36 +1,13 @@
-"""The intent ledger models (migration 055).
+"""The intent ledger table definitions.
 
-The mirror of `055_intent_ledger_tables.sql`, on the terms
-`identity_and_tenancy` set: not an independent design, but the second side of
-the parity gate. `scripts/schema_parity.py` requires the two equal on
-tables, columns (type + nullability), CHECK constraints (by name AND normalized
-definition), uniqueness semantics and foreign keys.
+`ddl.build()` creates these tables through `TargetBase.metadata`. The state
+machine's functions, triggers and reference edges live in
+`src/models/target/ddl/04_functions.sql`, `06_triggers.sql` and
+`05_reference_rows.sql`.
 
-**Deliberately absent: the triggers and the seeds.** 055 carries four trigger
-functions, eleven triggers and 27 seeded rows (29 with 076's two float edges);
-none of that is mirrored here. The comparator is relation-scoped, so restating a
-`plpgsql` body or a seed would be an unchecked second copy — the drift class
-these modules exist to prevent. The state machine is enforced by
-`trg_intent_guard` reading `post_intent_transitions`, not by anything in Python.
-
-**`audit_events` deliberately has NO foreign key on `workspace_id`.** It is the
-one table here whose tenant column is a bare `UUID NOT NULL`, because an audit
-row must outlive the workspace it describes — a CASCADE would delete exactly
-the evidence of the deletion. Adding an `fk()` here would be a red parity test,
-and it would also be wrong.
-
-**`post_intents`' two composite FKs carry NO `ON DELETE`**, unlike every
-composite FK in 054. That asymmetry is deliberate and load-bearing: an
-intent references an account and a media item under default `NO ACTION`, so a
-delete that would strand a live intent is REFUSED rather than silently
-cascading the ledger away. `daily_post_counts` does cascade, because a count is
-derived rather than evidentiary.
-
-**Three of the five tables have no `updated_at`.** `audit_events` and
-`post_intent_transitions` are insert-only classes and carry no touch
-trigger; `daily_post_counts` and the other two do. `timestamps()` is therefore
-not uniform across this module, which is the schema's shape rather than an
-oversight.
+`audit_events.workspace_id` has no foreign key so evidence survives workspace
+deletion. `post_intents` uses composite tenant foreign keys with `NO ACTION`
+so deleting an account or media item cannot silently delete its ledger.
 """
 
 from sqlalchemy import (
@@ -60,13 +37,16 @@ from src.models.target.columns import TZ, fk, pk, timestamps
 class CategoryPostCaseMix(TargetBase):
     """The per-workspace category ratio, row-shaped with Type 2 SCD semantics:
     a change closes the current row with `effective_to` and opens a new
-    one, so `uq_case_mix_current` is partial on `effective_to IS NULL`."""
+    one. `uq_case_mix_current_by_source` permits one current row per source,
+    using `effective_to IS NULL AND source_id IS NOT NULL`."""
 
     __tablename__ = "category_post_case_mix"
 
     id = pk()
     workspace_id = fk("workspaces.id", "CASCADE", nullable=False)
-    category = Column(Text, nullable=False)  # the label the card shows (071)
+    category = Column(
+        Text, nullable=False
+    )  # the connected folder's display label, captured when the mix is saved
     ratio = Column(Numeric(), nullable=False)
     effective_from = Column(TZ, nullable=False, server_default=text("now()"))
     effective_to = Column(TZ, nullable=True)
@@ -74,7 +54,7 @@ class CategoryPostCaseMix(TargetBase):
     created_at, updated_at = timestamps()
     source_id = Column(
         UUID(as_uuid=True), nullable=True
-    )  # 071: the connected folder — the key
+    )  # `category_post_case_mix.source_id`: the connected folder — the key
 
     __table_args__ = (
         CheckConstraint("ratio >= 0", name="ck_case_mix_ratio"),
@@ -112,7 +92,7 @@ class PostIntent(TargetBase):
     state = Column(Text, nullable=False, server_default=text("'scheduled'"))
     cancel_requested = Column(Boolean, nullable=False, server_default=text("false"))
     schedule_slot_at = Column(TZ, nullable=False)
-    # Every insert writes 'manual' (110); a row holding another mode carries
+    # Every insert writes 'manual' (approval rules); a row holding another mode carries
     # the workspace's mode as it was copied at mint.
     approval_mode = Column(Text, nullable=False)
     approved_by_user_id = fk("users.id", "SET NULL", nullable=True)
@@ -127,8 +107,8 @@ class PostIntent(TargetBase):
     cap_refunded_at = Column(TZ, nullable=True)
     # The colon is backslash-escaped: SQLAlchemy `text()` reads `:1` as a BIND
     # PARAMETER and would emit `DEFAULT '{"v"NULL}'`, so the table would not
-    # create. The parity gate never compares defaults, so this fails loudly at
-    # `create_all` rather than as drift.
+    # create. Escaping preserves the JSON default when the schema is built;
+    # the catalog comparator checks the stored default after construction.
     attempts_by_step = Column(
         JSONB, nullable=False, server_default=text(r"""'{"v"\:1}'""")
     )
@@ -136,20 +116,20 @@ class PostIntent(TargetBase):
     legacy_queue_item_id = Column(UUID(as_uuid=True), nullable=True)
     entered_state_at = Column(TZ, nullable=False, server_default=text("now()"))
     created_at, updated_at = timestamps()
-    # 088: a planned story (one a person scheduled for a chosen time) beside the
+    # `post_intents.origin`: a planned story (one a person scheduled for a chosen time) beside the
     # cadence ones.
     origin = Column(Text, nullable=False, server_default=text("'cadence'"))
     scheduled_by_user_id = fk("users.id", "SET NULL", nullable=True)
-    # 110: the rule that approved the story — NULL for a person, or while it
+    # approval rules: the rule that approved the story — NULL for a person, or while it
     # waits. `tg_intent_person_or_rule` stamps it only with the approval and
-    # keeps `origin` fixed at birth; the parity gate does not compare
-    # triggers, so the migration is where both rules are read.
+    # keeps `origin` fixed at birth. The trigger functions and bindings live
+    # in `ddl/04_functions.sql` and `ddl/06_triggers.sql`.
     approval_rule = Column(Text, nullable=True)
-    # 116: a planned story's repeat rule (#485): the unit ('day' or 'week'), the
+    # repeat rules: a planned story's repeat rule: the unit ('day' or 'week'), the
     # interval, the ISO weekdays (weekly only) and the local time of day. All
     # four or none, and only on a planned story. `tg_intent_repeat` makes the
-    # next occurrence when one ends; the parity gate does not compare triggers,
-    # so the migration is where that rule is read.
+    # next occurrence when one ends. Its definition lives in
+    # `ddl/04_functions.sql` and its binding in `ddl/06_triggers.sql`.
     repeat_unit = Column(Text, nullable=True)
     repeat_every = Column(SmallInteger, nullable=True)
     repeat_days = Column(ARRAY(SmallInteger), nullable=True)
@@ -222,7 +202,7 @@ class PostIntent(TargetBase):
             "approval_rule IN ('auto','item','returning')",
             name="ck_intent_approval_rule",
         ),
-        # A waiting story is always one a person decides (110).
+        # A waiting story is always one a person decides (approval rules).
         CheckConstraint(
             "approval_rule IS NULL OR state NOT IN "
             "('scheduled','prompt_pending','awaiting_approval')",
@@ -245,7 +225,7 @@ class PostIntent(TargetBase):
             " END",
             name="ck_intent_repeat",
         ),
-        # The slot key is cadence's alone (088 expand, 089 contract): a planned
+        # The slot key applies only to cadence rows: a planned
         # row takes no slot, so it never absorbs a slot's mint and a cadence
         # mint never meets it. `plan_slot`'s conflict target carries the
         # predicate, which is how Postgres infers this partial index.
@@ -284,20 +264,18 @@ class PostIntent(TargetBase):
             "entered_state_at",
             postgresql_where=text("state IN ('awaiting_approval','approved')"),
         ),
-        # #1640: a workspace's stories by slot, in every state, for the
+        # a workspace's stories by slot, in every state, for the
         # calendar's month, its day view and the Overview's recent activity.
         Index("ix_intents_workspace_slot", "workspace_id", "schedule_slot_at"),
-        # 110: "posted through the API before", the Returning items probe.
+        # approval rules: "posted through the API before", the Returning items probe.
         Index(
             "ix_intents_api_posted",
             "workspace_id",
             "media_item_id",
             postgresql_where=text("state = 'posted' AND published_via = 'api'"),
         ),
-        # Created by migration 056, not 055 — with the outbox rather than with
-        # the ledger. It lives here because
-        # `create_all` renders a table's indexes from its own `__table_args__`,
-        # so this is the only place the model side can produce it.
+        # The parked-intent index belongs to this table's model.
+        # `create_all` renders indexes from the table's `__table_args__`.
         Index(
             "ix_intents_parked",
             "entered_state_at",
@@ -369,8 +347,8 @@ class DailyPostCount(TargetBase):
 
 class PostIntentTransition(TargetBase):
     """The legal-edge reference table. `trg_intent_guard` reads it on every
-    UPDATE, so the seeds from 055, 076 and the early archive review edges
-    in 140 are load-bearing rather than
+    UPDATE, so the seeds from `intent_ledger.py`, `post_intent_transitions` and the early archive review edges
+    in the archive review transitions enforce behavior rather than
     fixture data — an unseeded copy of this schema rejects every transition.
 
     Insert-only: edges are added or deleted, never updated, so there

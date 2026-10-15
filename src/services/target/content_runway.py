@@ -1,4 +1,4 @@
-"""Days of content left per account, and the one notice when it runs low (#1478).
+"""Days of content left per account, and the one notice when it runs low.
 
 A workspace hears when its library is already EMPTY (`scheduler._notice_no_media`,
 on the slot that found nothing) and when a Drive folder or an Instagram
@@ -76,7 +76,7 @@ logger = logging.getLogger(__name__)
 #: Fewer days of eligible content than this, and the workspace is told. A week:
 #: the one early notice has to leave time to shoot or collect new media, add it
 #: to Drive and let the next sync pick it up, and a week is one content-planning
-#: cycle (#152).
+#: cycle.
 LOW_RUNWAY_DAYS = 7
 
 #: How far above the warning level an account must climb before a later drop
@@ -91,14 +91,14 @@ NOTICE_EVENT = "low_content_notice"
 REARM_EVENT = "low_content_rearmed"
 
 #: Whether a workspace is posting: active and not paused. The miss door ends a
-#: planned story of any other workspace as `paused` (105). The calendar reads
+#: planned story of any other workspace as `paused`. The calendar reads
 #: it twice: in the cadence's predicted slots (`_POSTING_SQL`) and in a
 #: series' projection (`upcoming._REPEATING_SQL`).
 _WORKSPACE_POSTING_SQL = "w.state = 'active' AND NOT w.is_paused"
 
 #: Whether the clock posts for an account: fn_clock_tick's own `plan_slot`
-#: predicate (084, leg 2) less its due-now conjunct, read here because nothing
-#: serves it per account. `test_content_runway.py` pins it to the migration.
+#: predicate less its due-now conjunct, read here because nothing serves it
+#: per account. `test_content_runway.py` pins it to the function definition.
 _POSTING_SQL = (
     f"(a.state = 'active' AND a.next_slot_at IS NOT NULL AND {_WORKSPACE_POSTING_SQL})"
 )
@@ -214,7 +214,7 @@ async def after_mint(
     # waits here until the first ends, and the read below, a statement of its
     # own, then sees what the first wrote. The lock dies with the transaction.
     # 64-bit (`hashtextextended`), as every namespace keyed on a tenant's rows
-    # is (#1370, `test_advisory_lock_widths.py`): a collision can only
+    # is (`test_advisory_lock_widths.py`): a collision can only
     # over-serialize, and the wide hash makes one rarer.
     from src.services.target import source_state
 
@@ -325,7 +325,7 @@ async def _latch(session, workspace_id: str, ig_account_id: str, detail: dict):
 
 async def runway(executor, *, workspace_id: str, below_days: int) -> dict:
     """The Overview's read: per account, the eligible files, the posts per day
-    they are spent at, and the whole days left (#1478).
+    they are spent at, and the whole days left.
 
     Every destination the Accounts tab lists, in the same order
     (`workspaces.LISTED_ACCOUNT_SQL`). ``low`` is the notice's own test

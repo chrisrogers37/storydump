@@ -1,4 +1,4 @@
-"""Cap-ledger gate — the flip, refund, and the two resolve edges (#862).
+"""Cap-ledger gate — the flip, refund, and the two resolve edges.
 
 ZERO OVER-CAP is the assertion the product depends on: over-cap means posting
 more than Meta allows, which limits the account. Everything here proves it,
@@ -508,7 +508,7 @@ class TestReEntry:
     def _stepped_back(self, cap_db):
         intent = _new_intent(cap_db)  # approved, undebited
         assert _run(_flip(cap_db["engine"], cap_db, intent)) is FlipOutcome.PROCEED
-        # The hop the pipeline makes on a wait (edge 076): progress and the
+        # The hop the pipeline makes on a wait (edge `post_intent_transitions`): progress and the
         # debit stay on the row.
         _exec(
             cap_db,
@@ -575,7 +575,7 @@ class TestReEntry:
 
 
 class TestAPlannedStorySitsOutsideTheCap:
-    """A planned story (#1413) neither spends the account's daily cap nor
+    """A planned story neither spends the account's daily cap nor
     waits on it, so a spent day never pushes it and it never pushes a cadence
     story to tomorrow. Key 4 and the cancel honour hold it exactly as they hold
     a cadence story."""

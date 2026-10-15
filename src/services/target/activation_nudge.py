@@ -1,7 +1,7 @@
-"""The activation nudge (#1481): one email, once, to a person who stopped
+"""The activation nudge: one email, once, to a person who stopped
 part-way through setting up.
 
-`fn_activation_stalled` (106) lists who is owed one: people whose first
+`fn_activation_stalled` (`users.activation_nudge_at`) lists who is owed one: people whose first
 missing stage is connecting Instagram, adding a folder or approving a first
 story, idle for the stall window, and never nudged. ONE conditional UPDATE
 then sets `users.activation_nudge_at` for them and returns their addresses,
@@ -26,7 +26,7 @@ is not followed by a second nudge: the latch is set as the job is enqueued,
 and `send_email`'s own ladder is the only retry. One reminder, best effort,
 never two. So a provider mistake on an armed day uses up that day's nudges,
 which is why the daily cap starts small (`WorkerConfig.activation_nudge_limit`,
-#1653).
+).
 """
 
 from __future__ import annotations

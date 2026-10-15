@@ -1,8 +1,16 @@
 # GitHub Actions CI/CD
 
+A new database starts with `make init-db`: build from the models and
+`src/models/target/ddl/`, adopt the empty `000_initial.sql` base marker,
+then apply later migrations. The marker is never executed. The owner
+role performs schema changes; the API uses `svc_ingress` and the worker
+uses `svc_worker`. `make reset-db` drops and rebuilds a local database.
+
 ## Overview
 
-Storydump uses GitHub Actions for continuous integration and Railway for continuous deployment. Since the project is hosted on a public repository, all CI runs on GitHub's cloud runners (`ubuntu-latest`).
+The CI workflow defines jobs on GitHub-hosted runners (`ubuntu-latest`).
+GitHub Actions is disabled for this private repository, so validation runs
+locally and its results are recorded in the pull request.
 
 ---
 
@@ -106,11 +114,9 @@ storydump burst --since <the deploy's time> --watch
 
 ---
 
-## Security for Public Repos
+## CI and Deployment Credentials
 
-Since this is a public repository:
-
-- All CI runs on **GitHub cloud runners** (`ubuntu-latest`) -- safe for public repos
+- The CI workflow uses **GitHub-hosted runners** (`ubuntu-latest`)
 - No self-hosted runners are used (avoids exposing infrastructure to malicious PRs)
 - All production secrets are stored in **Railway environment variables** (never in code)
 - Deployment is performed by Railway's GitHub integration, not by a CI job: no workflow holds a deploy credential

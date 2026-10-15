@@ -1,26 +1,13 @@
-"""Tenancy gate (#746) — the check that can see RLS.
+"""Tenant-keyed tables carry consistent row-level security and policies.
 
-`schema_parity` compares the runner-replayed schema against what
-``Base.metadata.create_all`` builds from the models. That comparison cannot
-carry RLS, because the models side cannot produce it: ``create_all`` emits
-foreign keys and **zero** policies, zero RLS-enabled tables, zero triggers,
-zero functions. Adding policies to the parity signature would not gate them —
-it would make parity permanently red.
+`schema_parity` compares the full user catalog with a database built from
+schema code, including RLS, policies, functions, triggers, defaults and grants.
+This gate separately enforces an invariant: every workspace-keyed table is
+RLS-enabled and has at least one policy, with a consistent FORCE posture.
+The invariant catches an omission even when both compared schemas share it.
 
-So tenancy is an **invariant over the replayed schema alone**, not a comparison
-against the models: every workspace-keyed table is RLS-enabled and carries at
-least one policy. Foreign keys, which both sides do emit, belong in the parity
-signature instead and are added there rather than here.
-
-Why this exists at all: a table's `ENABLE ROW LEVEL SECURITY` and its policies
-belong in the same replay — tables are *born* tenant-scoped. Without this gate,
-a migration creating a workspace-keyed table and omitting its policy would
-pass every other check, and tenant isolation would be an assertion rather
-than an enforced property.
-
-Standalone stdlib + psycopg2, matching `migration_runner` and `schema_parity`:
-the gate must be runnable in the same predeploy context, importing nothing from
-``src``.
+Standalone stdlib plus psycopg2, matching the runner and catalog comparator;
+this gate imports no application code.
 """
 
 from __future__ import annotations
@@ -36,7 +23,7 @@ TENANT_KEY = "workspace_id"
 TENANT_ROOT = "workspaces"
 
 #: The posture on owner-bypass: ENABLE without FORCE, deliberately —
-#: svc_migration owns the tables and owner-bypass is what lets the runner
+#: the schema owner owns the tables and owner-bypass lets schema changes
 #: transform without blanket migration policies.
 #:
 #: So FORCE is NOT required — requiring it would fail every table built to spec.

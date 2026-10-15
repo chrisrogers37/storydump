@@ -130,7 +130,7 @@ describe("the intent-state partition agrees with the API", () => {
     // Named rather than folded into the exhaustiveness check above: that check
     // would also go green if review_required were moved to TERMINAL_STATES,
     // which is the same undercount wearing a different label. It is non-
-    // terminal in `055`'s transition table (it exits to approved/posted/
+    // terminal in `intent_ledger.py`'s transition table (it exits to approved/posted/
     // failed/cancelled), so it belongs on the queue side specifically.
     expect(split(QUEUE_STATES)).toContain(REVIEW_REQUIRED_STATE);
     expect(split(TERMINAL_STATES)).not.toContain(REVIEW_REQUIRED_STATE);

@@ -27,7 +27,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture()
 def three_file_tree(tmp_path):
-    """Migrations 001-003; the scratch DB decides which 'ran' via tables."""
+    """Three synthetic migrations; the scratch DB decides which 'ran' via tables."""
     write_migration(tmp_path, 1, "CREATE TABLE adopted_one (id INT);")
     write_migration(tmp_path, 2, "CREATE TABLE adopted_two (id INT);")
     write_migration(tmp_path, 3, "CREATE TABLE adopted_three (id INT);")
@@ -124,7 +124,7 @@ class TestAdoptHardFailures:
         )
 
     def test_gap_below_a_true_probe_fails(self, scratch_db, three_file_tree):
-        """False-then-true above the floor is an incoherent chain: 003
+        """False-then-true above the floor is an incoherent chain: the later DDL file
         present while 002 is absent needs a human, not a guess."""
         execute(scratch_db, "CREATE TABLE adopted_one (id INT)")
         execute(scratch_db, "CREATE TABLE adopted_three (id INT)")
@@ -189,9 +189,9 @@ class TestAdoptHardFailures:
 
 class TestAdoptUnderALineageBound:
     """`max_version` selects a replay WINDOW out of a corpus that holds two
-    lineages (#746). The manifest is not windowed — it describes the whole
+    lineages. The manifest is not windowed — it describes the whole
     corpus — and the two manifest checks therefore ask questions at different
-    scopes. Answering both from the bounded list is what made adopt lie (#755).
+    scopes. Answering both from the bounded list is what made adopt lie.
     """
 
     def test_a_file_above_the_bound_is_not_reported_as_missing(
@@ -218,7 +218,7 @@ class TestAdoptUnderALineageBound:
         bound also silences it for an entry naming a file that genuinely does
         not exist — the check stops asking its own question on every bounded
         run. Pointing it at the corpus instead keeps the question intact and
-        makes the answer true: 009 is absent from the tree, bound or no bound.
+        makes the answer true: active-account settings is absent from the tree, bound or no bound.
         """
         write_migration(tmp_path, 1, "CREATE TABLE adopted_one (id INT);")
         write_migration(tmp_path, 2, "CREATE TABLE adopted_two (id INT);")
@@ -260,8 +260,8 @@ class TestAdoptUnderALineageBound:
 
 class TestAdoptTrustsProbesNotSchemaVersion:
     def test_legacy_schema_version_rows_are_ignored(self, scratch_db, three_file_tree):
-        """The legacy self-stamp table contradicts the probes (its known
-        010/034-gap hazard class); the probes must win."""
+        """The legacy self-stamp table contradicts the probes; adoption follows
+        schema evidence and ignores the stale marker."""
         execute(
             scratch_db,
             "CREATE TABLE schema_version (version INT, description TEXT,"

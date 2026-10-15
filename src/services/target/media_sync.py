@@ -1,4 +1,4 @@
-"""The media-sync executors (#942, seam: #982).
+"""The media-sync executors.
 
 Two executors over one shared body. `sync_media_source` consumes the clock's
 baseline mints (leg 4 nulls `next_sync_at` at mint and ONLY this executor
@@ -16,10 +16,10 @@ canonical stable ref (the Drive file id, never a path), name, kind, and content
 hash.
 
 ``source_id`` is additive to the port and names the folder being synced
-rather than the credential (069): a Drive credential is the WORKSPACE's, so
+rather than the credential (workspace Drive grant): a Drive credential is the WORKSPACE's, so
 the token is `workspace_id`'s grant and the source id is what the adapter's
 messages and the sync's own writes are about. A lookup by Drive file id
-inside the adapter would still be a cross-tenant hazard (#982). Keyword-only
+inside the adapter would still be a cross-tenant hazard. Keyword-only
 so the two-argument shape stays legible.
 
 ## Failure routing (the source state machine)
@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 BASELINE_SECONDS = 6 * 3600
 JITTER_SECONDS = 45 * 60
 
-#: First-ingest chunks of 200 files. This is the #982 door's
+#: First-ingest chunks of 200 files. This is the door's
 #: PAGING CONTRACT, documented here for the consumer's reader — deliberately
 #: NOT enforced by truncation: a door that overruns it must still have every
 #: item processed, because silently dropping a tail the door already returned
@@ -85,7 +85,7 @@ _ALLOWED_KINDS = frozenset({"image", "video"})
 def _listed_state(kind: str, size_bytes: Optional[int]) -> str:
     """The state a listed file lands in: `unsupported` when its size is past
     the publish's cap for its kind — the fetch refuses it by its metadata, so
-    no slot could ever post it (#1545) — and `available` otherwise. A listing
+    no slot could ever post it — and `available` otherwise. A listing
     that states no size is not judged. A kind with no cap is a KeyError: every
     kind the sync lands has one."""
     if size_bytes is not None and size_bytes > vocabulary.PUBLISH_MAX_BYTES[kind]:
@@ -124,7 +124,7 @@ async def rearm_after_connect(
     ## Why all three columns, and why `next_sync_at` is the one that matters
 
     The clock's leg 4 selects `state = 'active' AND next_sync_at IS NOT NULL
-    AND next_sync_at <= now()` (`063:143`) — a CONJUNCTION, and both halves
+    AND next_sync_at <= now()` (`fn_clock_tick` provider guards) — a CONJUNCTION, and both halves
     were unsatisfied for a stranded source. `state` alone is not enough:
     `media_sources.next_sync_at` has no default and the only other writer of a
     non-NULL value is this module's own post-sync re-arm, so a source that has
@@ -132,7 +132,7 @@ async def rearm_after_connect(
     without the cursor produces an `active` source that is permanently not due
     — the same silence in a different column.
 
-    `alerted_at = NULL` retires the #1061 disconnect alert in the same breath.
+    `alerted_at = NULL` retires the disconnect alert in the same breath.
     That is what stops this module's `alert_stranded_sources` beat re-alerting
     a source that has just recovered: the beat scans `state = 'error'`, so a
     row this statement has touched no longer matches, and because both run as
@@ -143,10 +143,10 @@ async def rearm_after_connect(
     undo of whatever came before — `error` from a fault, `paused` from a
     deliberate disconnect — and a filter would silently no-op on
     exactly the paused case a user is trying to reverse. Scoped by
-    `workspace_id` as well as id: RLS is inert under the deployed owner role
-    (#751), so the WHERE clause is what actually binds the row to its tenant.
+    `workspace_id` as well as id: the explicit predicate supplements RLS
+    on the deployed `svc_worker` connection.
 
-    The grant is the WORKSPACE's (069), so a reconnect names no source:
+    The grant is the WORKSPACE's (workspace Drive grant), so a reconnect names no source:
     with `source_id` None every `gdrive` source of the workspace is
     re-armed — one grant, every folder eligible again. A single source is
     re-armed alone when a folder is picked or re-added under a grant.
@@ -183,7 +183,7 @@ async def rearm_after_connect(
     if source_id is None:
         # A folder the admin REMOVED stays removed: `pause_media_source` marks
         # it (`config.removed`), and a reconnect revives only what a dead
-        # grant or a disconnect had paused (#1246 — without it, a reconnect
+        # grant or a disconnect had paused ( — without it, a reconnect
         # would resurrect every removed folder).
         result = await session.execute(
             text(
@@ -263,7 +263,7 @@ async def alert_stranded_sources(
 ) -> int:
     """Re-alert every source stranded in ``error``. Returns rows alerted.
 
-    ## Why it exists (#1061): stuckness causes silence
+    ## Why it exists: stuckness causes silence
 
     The persistent branch above sets ``state = 'error'`` and enqueues one
     notification. Recovery to ``active`` happens only on the last page of a
@@ -300,7 +300,7 @@ async def alert_stranded_sources(
 
     ## The seam — a read door, then one conditional UPDATE per workspace
 
-    The selection across every workspace is `fn_stranded_sources` (082), because
+    The selection across every workspace is `fn_stranded_sources` (worker sweep functions), because
     this sweep runs with no tenant and `media_sources` is policy-covered. The
     stamp is then ONE ``UPDATE … RETURNING`` per workspace, under that
     workspace's tenant, whose predicate IS the selection — ``state = 'error'``
@@ -322,7 +322,7 @@ async def alert_stranded_sources(
     is picked up rather than skipped forever; that column is nullable and rows
     written by paths that never stamped it are the realistic case.
     """
-    # The selection is a door (082): the sweep runs with no tenant and
+    # The selection is a door (worker sweep functions): the sweep runs with no tenant and
     # `media_sources` is policy-covered. The stamp is written per workspace
     # under that workspace's tenant, re-checking the window so a row stamped
     # since the read is not alerted twice, and only the rows the UPDATE
@@ -457,7 +457,7 @@ class _ArchiveDispatch:
 
 @dataclass(frozen=True)
 class _SyncStart:
-    """What Phase 1 hands the phases after it: the source's config, the cursor
+    """What The source read hands the phases after it: the source's config, the cursor
     this carrier walks FROM, the cursor it READ (the CAS's `old` value, which
     is not the same thing once a walk is minted) and the walk token every log
     line on this path names."""
@@ -473,15 +473,15 @@ class _SyncStart:
 async def _read_source(
     factory, job, *, adapters, payload, source_id, workspace_id, reason
 ) -> str | _SyncStart | _ArchiveDispatch:
-    """Phase 1 — read the source, own transaction, committed before the door.
+    """The source read — read the source, own transaction, committed before the door.
 
     Each phase is its own function, and every phase boundary is a transaction
-    boundary (Phase 2, the provider call, runs in none). That makes the rule
+    boundary (The provider call, the provider call, runs in none). That makes the rule
     that a transaction never spans a provider call structural rather than a
     thing each reader has to check.
 
     Returns the outcome that ENDS the job — ``"missing"``, ``"paused"`` or
-    ``"stale"``, each already logged — or the walk for Phase 2 to open.
+    ``"stale"``, each already logged — or the walk for The provider call to open.
     """
     async with factory() as s:
         row = (
@@ -505,7 +505,7 @@ async def _read_source(
     if row["state"] == "paused":
         # Removed, or its grant disconnected, while this job (a chunk of a
         # long walk, most likely) was queued: the person chose that. No
-        # provider call, no rows, and the chain ends here (#1256).
+        # provider call, no rows, and the chain ends here.
         logger.info(
             "sync %s: source %s is paused — nothing to do", job["id"], source_id
         )
@@ -525,7 +525,7 @@ async def _read_source(
     if reason == "chunk" and in_flight:
         # A chunk is a carrier for ONE walk — the one it names. On another
         # walk it is stale: a re-pick or a reset started a new one, or a
-        # parallel carrier is further along. It does nothing (#1256).
+        # parallel carrier is further along. It does nothing.
         if stored.get("walk") != payload.get("walk"):
             logger.info(
                 "sync %s: chunk for walk %s is stale (row holds %s) — dropped",
@@ -540,7 +540,7 @@ async def _read_source(
         # or a lease was lost after the last page committed), or a re-pick
         # nulled the cursor and re-armed the clock. Above all a stray chunk
         # never MINTS a walk — that would re-walk the whole tree once per
-        # chunk (#1256).
+        # chunk.
         logger.info(
             "sync %s: chunk for walk %s finds the row complete — dropped",
             job["id"],
@@ -556,7 +556,7 @@ async def _read_source(
         # Nothing worth resuming: nothing stored, or an old cursor with no
         # shared walk token. For a chunk that is the sole carrier of that old
         # chain, so it starts the walk over rather than leaving the source
-        # with `next_sync_at` NULL and no carrier (#1256).
+        # with `next_sync_at` NULL and no carrier.
         if adapter.checkpoint_incomplete(stored):
             logger.warning(
                 "sync %s: source %s stored a cursor without a walk token — starting over",
@@ -622,7 +622,7 @@ async def _list_page(adapter, config, checkpoint, *, source_id, workspace_id):
 async def _call_provider(
     adapter, factory, job, *, config, checkpoint, source_id, workspace_id
 ) -> Optional[tuple[list, Any]]:
-    """Phase 2 — the provider door, outside any transaction.
+    """The provider call — the provider door, outside any transaction.
 
     Returns the page and the cursor that resumes it, or None once a
     classified-persistent fault has been recorded — the source flipped to
@@ -648,10 +648,10 @@ async def _call_provider(
                     # A folder paused meanwhile (removed, or its grant
                     # disconnected) is NOT flipped to error, and NOT alerted
                     # about: the person chose that, and `paused` is what keeps
-                    # the stranded-source beat honest (#1246).
+                    # the stranded-source beat honest.
                     # The cursor is dropped with the fault: whatever re-arms this
                     # source (a reconnect, a re-pick) starts a fresh walk rather
-                    # than resuming at the folder that failed (#1251).
+                    # than resuming at the folder that failed.
                     "UPDATE media_sources SET state = 'error', alerted_at = now(),"
                     "  sync_checkpoint = CAST(:checkpoint AS jsonb)"
                     " WHERE id = :s AND workspace_id = :ws AND state <> 'paused'"
@@ -720,21 +720,21 @@ async def _land_page(
     workspace_id,
     reason,
 ) -> str:
-    """Phase 3 — checkpoint CAS + upsert + chain-or-rearm, one transaction."""
+    """The checkpoint — checkpoint CAS + upsert + chain-or-rearm, one transaction."""
     kept = skipped_kind = relisted = tombstoned = 0
     async with factory() as s:
         # The cursor advances by compare-and-swap against what THIS carrier
         # read. A re-pick that nulled it, a persistent failure that reset it,
         # or a parallel carrier that got here first all leave a different
         # value, and this carrier then writes NOTHING — not the cursor, not
-        # the rows, not a chunk (#1256). `{}` stands for SQL NULL on
+        # the rows, not a chunk. `{}` stands for SQL NULL on
         # both sides; no writer ever stores an empty object.
         moved = (
             await s.execute(
                 text(
                     "UPDATE media_sources SET sync_checkpoint = CAST(:cp AS jsonb)"
                     " WHERE id = :s AND workspace_id = :ws"
-                    # Removed (or disconnected) since Phase 1: the person chose
+                    # Removed (or disconnected) since The source read: the person chose
                     # that, and this carrier's page must not land — least of
                     # all onto rows the removal just retired.
                     "   AND state <> 'paused'"
@@ -880,9 +880,9 @@ async def _land_page(
         if adapter.checkpoint_incomplete(new_checkpoint):
             # More pages: chain the next chunk and do NOT re-arm — the chain
             # is the carrier. The serialized key orders it after this job.
-            # Through `jobs.enqueue`, not a hand-written INSERT (#1361): the
+            # Through `jobs.enqueue`, not a hand-written INSERT: the
             # module writes both bounds from `LANE_BUDGETS`, `max_attempts` and
-            # a `deadline_at` (#1288) that can end a stuck chunk before its
+            # a `deadline_at` that can end a stuck chunk before its
             # attempts run out. This asks it rather than copying either.
             await jobs.enqueue(
                 s,
@@ -913,7 +913,7 @@ async def _land_page(
                     "  last_sync_success_at = now(),"
                     "  next_sync_at = now() + make_interval(secs => :secs)"
                     # Removed or disconnected while this job ran: the success
-                    # stamp must not un-pause it (#1246).
+                    # stamp must not un-pause it.
                     " WHERE id = :s AND workspace_id = :ws AND state <> 'paused'"
                 ),
                 {"secs": BASELINE_SECONDS + jitter, "s": source_id, "ws": workspace_id},
@@ -976,7 +976,7 @@ async def _tombstone_unlisted(
 ) -> int:
     """The last page of a walk that saw the whole tree: the source's rows
     neither it nor the last whole walk before it listed are no longer in the
-    folder, so the draw must not take them (#1545). They go `missing` — the
+    folder, so the draw must not take them. They go `missing` — the
     file's own absence, which only a listing undoes; a re-pick revives
     `removed` rows, never these.
 

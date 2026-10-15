@@ -1,5 +1,5 @@
 """``-- runner:reapply-safe`` — an idempotent data migration whose applied
-state is undecidable in place (048's class): adopt may leave it pending below
+state is undecidable in place: adopt may leave it pending below
 an adopted head without calling the chain incoherent, and apply may re-run it
 below the head. Files without the marker keep the strict refusals.
 """
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture()
 def tree_with_reapply_safe_gap(tmp_path):
-    """001 DDL, 002 reapply-safe data, 003 DDL — the 048 shape."""
+    """A DDL file, an idempotent data update and a later DDL file."""
     write_migration(tmp_path, 1, "CREATE TABLE rs_one (id INT);")
     write_migration(
         tmp_path,
@@ -62,7 +62,7 @@ class TestAdoptExemption:
     def test_reapply_safe_false_below_head_is_pending_not_incoherent(
         self, scratch_db, tree_with_reapply_safe_gap
     ):
-        """The at-49 world with 048 undecidable: 001 and 003 probe true, the
+        """An undecidable idempotent data update: 001 and the later DDL file probe true, the
         marked 002 probes false — pending, not a hard failure."""
         execute(scratch_db, "CREATE TABLE rs_one (id INT)")
         execute(scratch_db, "CREATE TABLE rs_three (id INT)")

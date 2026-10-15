@@ -1,5 +1,5 @@
-"""The ingress dispatcher — the `/start` door (#1183), the group join path (#1242)
-and a group's move to a supergroup (#743).
+"""The ingress dispatcher — the `/start` door, the group join path
+and a group's move to a supergroup.
 
 Three things are served, and the bound is still worth stating:
 
@@ -8,20 +8,20 @@ Three things are served, and the bound is still worth stating:
   links) and `bind-` (a group joins a workspace); `build_router` registers
   those two lanes and no other. The `inv-` lane (an invitation) is designed
   in `start_router.py` and not registered — an invitation is accepted on the
-  web (#1172). The payload carries its own resolution, so these need no
+  web. The payload carries its own resolution, so these need no
   resolver.
 - **A message in a group** — the Telegram join path: the people the bot
   can see (the sender; the people a `new_chat_members` service message names)
   become members of the workspace the group is bound to, through the
   `fn_group_member_seen` door, which reads the group's binding as a definer,
-  as the resolver door does (#854).
+  as the resolver door does.
 - **A group's migration notice** — Telegram retired the group's chat id for a
   supergroup's; the binding follows it (`chat_migration`), before anything
   from the new id has to resolve through it.
 
 **Not served: chat-inbound COMMANDS.** An "approve" typed in a group is not
 dispatched here; the resolver door exists (`fn_resolve_binding`), so that
-is a dispatch question, not a resolution one (#854).
+is a dispatch question, not a resolution one.
 
 ## Why an unservable update is a NAMED outcome and never a silent drop
 
@@ -64,7 +64,7 @@ from src.services.target import (
 from src.services.target.commands import Command, CommandRefused, CommandResult
 from src.services.target.start_router import StartResult, StartRouter
 
-#: How long a tap waits on another tap's row lock (#1271).
+#: How long a tap waits on another tap's row lock.
 TAP_LOCK_TIMEOUT = "2s"
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 # The tap
 # ---------------------------------------------------------------------------
 
-#: `rate_counters` scope for tap admission (`056` `ck_rate_scope`); the
+#: `rate_counters` scope for tap admission (`machinery.py` `ck_rate_scope`); the
 #: window is a minute.
 ADMISSION_SCOPE = "ws_admission"
 ADMISSION_WINDOW_SECONDS = 60
@@ -172,7 +172,7 @@ ANSWERS: dict[str, tuple[str, bool]] = {
     # menu's read and the flag's write (`set_item_auto_approve` refuses it as
     # `locked`).
     "locked": ("This item can't post again.", False),
-    # The archive's selected media is not authorized or ready now (#1644).
+    # The archive's selected media is not authorized or ready now.
     "media_unsuitable": (f"This post's media isn't ready to use — {_WEB}.", True),
     "cancelling": ("This card is being cancelled.", False),
     "illegal_transition": ("That card can't take this action any more.", False),
@@ -214,7 +214,7 @@ def _executed_text(action: Optional[str], result: CommandResult) -> str:
 def _answered_text(result: CommandResult) -> str:
     """A tap on a card already decided answers with the card's own line, the
     `outcome_text` `command_executors._settle` writes, so the toast and the
-    card never disagree — the rule that approved it included (#1477)."""
+    card never disagree — the rule that approved it included."""
     data = result.data or {}
     if data.get("outcome_text"):
         return f"Already: {data['outcome_text']}"
@@ -286,7 +286,7 @@ def _command_for(
         args=args,
         # The tapper's name rides with the command — on its own
         # field, never in `args` — so the outcome line needs no
-        # second identity read (#1286).
+        # second identity read.
         actor_label=actor_label,
         # The card this tap came from: a settled story's
         # answer adopts a message the ledger never learned — a resend's
@@ -296,7 +296,7 @@ def _command_for(
     )
 
 
-#: The command a card menu's toggle runs (#1477); its floor is the menu's gate,
+#: The command a card menu's toggle runs; its floor is the menu's gate,
 #: which navigation passes too.
 MENU_COMMAND = "set_item_auto_approve"
 
@@ -353,17 +353,17 @@ class TapResult:
     reply: Optional[str] = None
     #: Text that replaces the tapped message, its buttons removed — the
     #: identity link's confirmation prompt, or a waitlist ping its Admit
-    #: settled (#1723) — edited by the route after the commit, best effort. A
+    #: settled — edited by the route after the commit, best effort. A
     #: card's outcome edit is the outbox's, never this.
     edit_text: Optional[str] = None
-    #: The keyboard the tapped card's Configure menu leaves (#1477): the
+    #: The keyboard the tapped card's Configure menu leaves: the
     #: menu, Back to the card's keyboard, or none. One edit by the route after
     #: the commit, best effort; never through the outbox or the ledger.
     edit_markup: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
-# The waitlist ping's ✅ Admit (#1723): user-plane, for the operators
+# The waitlist ping's ✅ Admit: user-plane, for the operators
 # ---------------------------------------------------------------------------
 
 #: An Admit tap by anyone but a linked user in `OPS_USER_IDS`.
@@ -452,7 +452,7 @@ def build_router() -> StartRouter:
     """The one `/start` door, with every lane registered into it.
 
     Registration is how a lane joins the door; a second door would break
-    the lanes' disjointness. The `inv-` lane (#1172) is not registered: nothing
+    the lanes' disjointness. The `inv-` lane is not registered: nothing
     below serves it, and the docstring at the top says so.
     """
     router = StartRouter()
@@ -485,7 +485,7 @@ class TelegramDispatcher:
         start_payload = StartRouter.payload_of(payload)
         people = membership_sync.group_members_of(payload)
         if people and (start_payload is None or start_payload == ""):
-            # The Telegram join path (#1242). A BARE `/start` in a group
+            # The Telegram join path. A BARE `/start` in a group
             # is speech, not a greeting request: the greeting is the DM's, and
             # in a group it would be a lever anyone could pull to make the bot
             # talk. Named outcomes, no reply, and never a raise.
@@ -590,7 +590,7 @@ class TelegramDispatcher:
             # timeout: a tap waits on another tap's row lock for at most 2 s;
             # past it the database refuses, the route answers 5xx and Telegram
             # redelivers — read-then-decide makes the retry safe, and no
-            # convoy can hold the ingress pool hostage (#1271).
+            # convoy can hold the ingress pool hostage.
             await unit_of_work.apply_gucs(
                 conn,
                 tenant_id=tenant.workspace_id,
@@ -699,7 +699,7 @@ class TelegramDispatcher:
     async def _admit_tap(
         self, conn, payload: dict, admit_tap: callback_tokens.AdmitTap, started: float
     ) -> TapResult:
-        """✅ Admit on a waitlist ping (#1723), user-plane like `_link_tap`: no
+        """✅ Admit on a waitlist ping, user-plane like `_link_tap`: no
         chat resolution, no tenant, no command port and no admission debit
         (no workspace exists to charge). The gates are `_admit`'s, and every
         outcome is an answer from `ADMIT_ANSWERS`. Once the entry is admitted,
@@ -748,7 +748,7 @@ class TelegramDispatcher:
     async def _menu(
         self, conn, tap, tenant, user_id: str, actor_label, window, limit: int
     ) -> tuple[str, tuple[str, bool], dict]:
-        """A Configure tap (#1477): open the menu, go Back, or turn the item's
+        """A Configure tap: open the menu, go Back, or turn the item's
         Auto-approve flag. Behind the gate the flag's command applies, and the
         tap's admission is spent, so one workspace's burst of menu taps is
         capped (`TARGET_TAP_ADMISSION_PER_MINUTE`), like its other taps that
@@ -806,7 +806,7 @@ class TelegramDispatcher:
         A savepoint: a refusal the database raised mid-executor (the guard's
         last line; `publish_cap`'s manual-post flip) must not leave the
         admission's transaction aborted — the route's COMMIT would silently
-        become a ROLLBACK and the delivery would be lost with a 200 (#1271).
+        become a ROLLBACK and the delivery would be lost with a 200.
         """
         begin_nested = getattr(conn, "begin_nested", None)
         if callable(begin_nested):
@@ -821,11 +821,11 @@ class TelegramDispatcher:
     @staticmethod
     async def _debit(conn, workspace_id: str, window, limit: int, result) -> None:
         """Spend one unit of the workspace's tap admission for a flip that RAN
-        (`executed`, or `enqueued` — a `post` that minted its job), and for an
-        `answered` tap that ADOPTED a card, which writes a row and a paced edit
-        (#1308). An `answered` no-op and a refusal spend nothing. Raises
-        :class:`_AdmissionExhausted` when the window is full — inside the
-        caller's savepoint, so the flip rolls back with it."""
+                (`executed`, or `enqueued` — a `post` that minted its job), and for an
+                `answered` tap that ADOPTED a card, which writes a row and a paced edit.
+        An `answered` no-op and a refusal spend nothing. Raises
+                :class:`_AdmissionExhausted` when the window is full — inside the
+                caller's savepoint, so the flip rolls back with it."""
         outcome = getattr(result, "outcome", None)
         wrote = outcome in ("executed", "enqueued") or (
             outcome == "answered"

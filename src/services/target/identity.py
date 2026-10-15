@@ -4,14 +4,14 @@ The one writer of a human's identity row. Keyed on the provider's IMMUTABLE
 SUBJECT — `(provider, external_id)`, the Google OIDC `sub` — never on the email
 address: emails are mutable and recyclable, so identity keyed on email is an
 account-takeover primitive. The verified email claim is metadata, refreshed at
-every sign-in: `users.primary_email` follows it whenever it changes (#1579), so
+every sign-in: `users.primary_email` follows it whenever it changes, so
 invitations and mail reach the address the person uses now. A claim colliding
 with a DIFFERENT user's `primary_email` never merges accounts (merging two
 populated users is an operator action with an audit trail, and nothing here
 performs it): a new subject is refused, and a returning one signs in keeping
 the address it had, with the clash logged.
 
-Both tables are user-plane (`058` class 3: role-scoped `USING (true)`), so
+Both tables are user-plane (`07_row_security.sql` class 3: role-scoped `USING (true)`), so
 this runs before any `app.tenant_id` exists — identity precedes tenancy.
 """
 
@@ -41,7 +41,7 @@ class IdentityCollision(StorydumpError):
 
 class SignupNotAdmitted(StorydumpError):
     """A new Google account whose verified email nobody admitted or invited
-    (092): no user is created. Sign-in maps it to `not_admitted`."""
+    (`fn_signup_admitted`): no user is created. Sign-in maps it to `not_admitted`."""
 
 
 class IdentityAlreadyLinked(StorydumpError):
@@ -78,8 +78,8 @@ async def upsert_google_identity(
 
     A subject seen before signs in whatever *signup_open* says. A NEW one
     creates its user only when `fn_signup_admitted` admits its email — an
-    owner admission or a live invitation addressed to it (092) from an active
-    workspace whose owner or admin still sent it (098) — and is
+    owner admission or a live invitation addressed to it (`fn_signup_admitted`) from an active
+    workspace whose owner or admin still sent it (invitation legitimacy checks) — and is
     refused with `SignupNotAdmitted` otherwise, a None email included.
     *signup_open* (`TARGET_SIGNUP_OPEN`) skips that ask.
     """
@@ -88,7 +88,7 @@ async def upsert_google_identity(
     claim = email or None
 
     # `hashtext` (32-bit), NOT `hashtextextended` (64-bit), and the asymmetry
-    # with `provisioning.py` is deliberate rather than an oversight (#1370).
+    # with `provisioning.py` is deliberate rather than an oversight.
     #
     # A hash collision here can only ever OVER-serialize — two unrelated
     # subjects would share one lock and briefly queue. It can never fail to
@@ -124,7 +124,7 @@ async def upsert_google_identity(
         user_id, held = str(row[0]), row[1]
         await executor.execute(
             text(
-                # COALESCE, not a bare assignment (#1364): `google_oidc` maps an
+                # COALESCE, not a bare assignment: `google_oidc` maps an
                 # absent, non-string or blank `name` claim to None before it
                 # reaches here, so NULL means "this token said nothing about the
                 # name" — which is not the same as "the name is now empty", and
@@ -170,7 +170,7 @@ async def upsert_google_identity(
 
 
 async def _refuse_unless_admitted(executor, *, email: Optional[str]) -> None:
-    """The sign-up gate (092): the door answers for the owner's admissions and
+    """The sign-up gate (`fn_signup_admitted`): the door answers for the owner's admissions and
     every workspace's invitations, which this login cannot read itself. Asked
     before the collision check, so a refused address learns nothing about
     which accounts exist."""
@@ -201,13 +201,13 @@ async def _refuse_if_email_held(executor, *, email: str) -> None:
 
 
 async def _refresh_primary_email(executor, *, user_id: str, email: str) -> None:
-    """Point a returning user's `primary_email` at their verified claim
-    (#1579). The caller asks only when the claim differs from what is stored,
-    so a clash on `uq_users_primary_email` means another user holds it: then
-    this user keeps the address they had and the clash is logged by user id,
-    never by address (the module docstring's rule). The constraint decides,
-    inside a savepoint, so a concurrent claim of the same address is a clash
-    too rather than a failed sign-in: the per-subject lock does not cover it."""
+    """Point a returning user's `primary_email` at their verified claim.
+    The caller asks only when the claim differs from what is stored,
+        so a clash on `uq_users_primary_email` means another user holds it: then
+        this user keeps the address they had and the clash is logged by user id,
+        never by address (the module docstring's rule). The constraint decides,
+        inside a savepoint, so a concurrent claim of the same address is a clash
+        too rather than a failed sign-in: the per-subject lock does not cover it."""
     try:
         async with executor.begin_nested():
             await executor.execute(
@@ -251,7 +251,7 @@ async def tapper_for_identity(
     executor, *, provider: str, external_id: str
 ) -> Optional[tuple[str, Optional[str]]]:
     """`user_for_identity` plus the identity's own display name, in ONE read —
-    for a tap, whose outcome line names the tapper (#1286: not a second query
+    for a tap, whose outcome line names the tapper (without a second query
     inside the flip). The Telegram identity's name is the one a group already
     sees, which is exactly `display_name_for`'s first choice; an empty name
     here means "ask the long way" (`_actor_name`)."""
@@ -321,7 +321,7 @@ def display_name_sql(user_id_sql: str) -> str:
 
 
 async def display_name_for(executor, *, user_id: str) -> str:
-    """:func:`display_name_sql` for one person."""
+    """Func:`display_name_sql` for one person."""
     found = await readers.row(
         executor,
         f"SELECT {display_name_sql('CAST(:u AS uuid)')} AS name",
@@ -331,10 +331,10 @@ async def display_name_for(executor, *, user_id: str) -> str:
 
 
 def member_name_sql(user_id_sql: str, workspace_id_sql: str) -> str:
-    """:func:`display_name_sql` while the person is still a member of the
+    """Func:`display_name_sql` while the person is still a member of the
     workspace, else NULL, as one SQL expression. Both operands are SQL, never
     user input. A story planned by someone who has since left reads as planned,
-    with no name (#485). Under the tenant policy, `workspace_members` shows a
+    with no name. Under the tenant policy, `workspace_members` shows a
     row only inside its own workspace, which is where every caller reads."""
     return (
         "CASE WHEN EXISTS (SELECT 1 FROM workspace_members wm"
@@ -347,7 +347,7 @@ def member_name_sql(user_id_sql: str, workspace_id_sql: str) -> str:
 async def member_name_for(
     executor, *, user_id: str, workspace_id: str
 ) -> Optional[str]:
-    """:func:`member_name_sql` for one person in one workspace."""
+    """Func:`member_name_sql` for one person in one workspace."""
     found = await readers.row(
         executor,
         f"SELECT {member_name_sql('CAST(:u AS uuid)', 'CAST(:ws AS uuid)')} AS name",
@@ -421,7 +421,7 @@ async def link_identity(
 
     # The same 32-bit width, and it must stay the same as the site above:
     # both lock the `identity:` namespace, so they only exclude each other
-    # while they agree on the function (#1370).
+    # while they agree on the function.
     await executor.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
         {"k": f"identity:{provider}:{external_id}"},
@@ -452,7 +452,7 @@ async def link_identity(
     ).first()
     if mine is not None:
         # `uq_user_provider`. Replacing it would silently unlink the old
-        # account; the person unlinks it first (`unlink_telegram`, 099).
+        # account; the person unlinks it first (`unlink_telegram`, `fn_identity_unlink`).
         raise IdentityAlreadyLinked("user_already_has_this_provider")
 
     await executor.execute(
@@ -469,9 +469,9 @@ async def link_identity(
 async def unlink_telegram(executor, *, user_id: str) -> str:
     """Remove *user_id*'s own Telegram identity — the reverse of
     :func:`link_identity`. Returns the door's outcome: `unlinked`,
-    `not_linked` or `last_identity` (099).
+    `not_linked` or `last_identity` (`fn_identity_unlink`).
 
-    The delete is the `fn_identity_unlink` door's (099): no runtime role
+    The delete is the `fn_identity_unlink` door's (`fn_identity_unlink`): no runtime role
     deletes from `user_identities`, and the door keeps the user's other
     identity, answering `last_identity` rather than leave an account with no
     way to sign in. The caller proves the person — this is the session's user.

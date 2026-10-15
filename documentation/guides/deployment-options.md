@@ -1,6 +1,12 @@
 # Deployment Options
 
-**Repository Status**: PUBLIC
+A new database starts with `make init-db`: build from the models and
+`src/models/target/ddl/`, adopt the empty `000_initial.sql` base marker,
+then apply later migrations. The marker is never executed. The owner
+role performs schema changes; the API uses `svc_ingress` and the worker
+uses `svc_worker`. `make reset-db` drops and rebuilds a local database.
+
+**Repository Status**: PRIVATE
 
 ---
 
@@ -21,7 +27,7 @@ Railway automatically deploys when changes are pushed to `main`:
 
 `railway.toml` (build, pre-deploy, health check, restart and draining policy)
 and the `Procfile` (the two process commands) are the whole deployment
-configuration; `cloud-deployment.md` §2 walks through them.
+configuration; the runtime-login section in `cloud-deployment.md` walks through them.
 
 ### Pros
 - **Automated** -- deploy on every push to main
@@ -39,7 +45,9 @@ configuration; `cloud-deployment.md` §2 walks through them.
 
 ### Continuous Integration (Automated)
 
-GitHub Actions runs automatically on every push/PR (`.github/workflows/ci.yml`):
+GitHub Actions is disabled for this repository, so run validation locally and
+record its results in the pull request. When enabled, `.github/workflows/ci.yml`
+runs these checks on the configured push and pull-request branches:
 - **Linting** (ruff) -- code style checks over the whole repository
 - **Telegram ratchet** (`scripts/telegram_ratchet.py`) -- the allowlist of
   modules that may reference Telegram
@@ -118,7 +126,8 @@ share it.
 
 ## Summary
 
-- **CI runs automatically** on GitHub cloud runners (`ubuntu-latest`) -- safe for public repos
+- **CI uses GitHub-hosted runners** (`ubuntu-latest`) when enabled; validation
+  runs locally while Actions is disabled
 - **CD runs automatically** via Railway GitHub integration on push to `main`
 - **No manual deployment required** -- merge to main and Railway handles the rest
 - **No self-hosted runners** -- all CI/CD uses managed cloud infrastructure

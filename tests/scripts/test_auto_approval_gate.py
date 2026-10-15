@@ -1,5 +1,5 @@
 """Gate: the serve step approves a story automatically, or leaves it
-to a person (#1477).
+to a person.
 
 Driven against the replayed advertised stream, every sweep as `svc_worker`
 with no tenant, exactly as the worker's prompt sweeper runs it
@@ -18,7 +18,7 @@ the story a test minted).
   the story `awaiting_approval` with no rule and no job, and a fault leaves
   the rest of the sweep to go on.
 - **The ledger is the authority.** The serve path's actor is the one
-  `tg_intent_person_or_rule` (110) requires; `test_intent_ledger_gate.py`
+  `tg_intent_person_or_rule` (approval rules) requires; `test_intent_ledger_gate.py`
   covers the rule in depth.
 - **The card's life.** A rule-approved story's card goes out once, settled,
   however far the story got before the sender claimed it; the settled sweep
@@ -818,7 +818,7 @@ class TestTheCardOfAStoryARuleApproved:
 
 
 class TestTheSenderRendersEveryKeyboard:
-    """#1477, against the ledger: the sender claims a card's edit and sends
+    """Against the ledger: the sender claims a card's edit and sends
     it with the keyboard of its story as it is then, whatever its caller stored
     — a parked story's edit carries the three resolutions and Configure, a
     posted story's Configure alone."""

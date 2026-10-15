@@ -1,4 +1,4 @@
-"""090: a removal sticks, and a removed admin's tokens go with them.
+"""workspace member removal: a removal sticks, and a removed admin's tokens go with them.
 
 `fn_member_remove` records the removal and `fn_group_member_seen` honours it:
 a removed person seen in the bound group is refused (`removed`) until invited
@@ -9,7 +9,7 @@ minted (and only those) with the membership.
 Both doors run here as the production role (`svc_ingress`) on the replayed
 advertised stream, and the removal runs through `workspaces.remove_member`, the
 service the command port calls, so the token half is proven in the same
-transaction the API uses. 098 adds the invitations the removed member sent or
+transaction the API uses. invitation legitimacy checks adds the invitations the removed member sent or
 was sent: the service revokes the pending ones in that same transaction.
 """
 
@@ -194,7 +194,7 @@ def _admitted(world, email: str) -> bool:
 
 
 def test_the_removed_members_pending_invitations_are_revoked_with_them(world):
-    """098: what the removed admin sent and nobody has used yet is
+    """invitation legitimacy checks: what the removed admin sent and nobody has used yet is
     revoked in the removal's transaction, so it neither admits a new account
     (`fn_signup_admitted`) nor can be accepted; the owner's invitation and the
     removed admin's already-accepted one are left as they were."""
@@ -243,7 +243,7 @@ def test_the_removed_members_pending_invitations_are_revoked_with_them(world):
 
 def test_the_invitations_addressed_to_the_removed_person_are_revoked_too(world):
     """An invitation to the removed person, by email or by Telegram id, is
-    revoked with the removal: the accept door would refuse it anyway (098), and
+    revoked with the removal: the accept door would refuse it anyway (invitation legitimacy checks), and
     a pending one would hold `uq_invite_live` against the fresh invitation that
     is meant to bring them back. That fresh invitation, to the same address,
     is sent and accepted."""

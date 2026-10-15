@@ -1,7 +1,7 @@
-"""Registry + claim-loop logic for the worker composition root (#942, #903).
+"""Registry + claim-loop logic for the worker composition root.
 
 The registry is the kind→executor table, and the denominator is DERIVED from
-the schema's own ck_jobs_kind rather than restated (#951): a kind a migration
+the schema's own ck_jobs_kind rather than restated: a kind a migration
 adds fails here until the registry says whether it runs or parks.
 
 Parking is the load-bearing negative: a claimed job whose kind has no runnable
@@ -48,7 +48,7 @@ def schema_kinds() -> set:
     return set(re.findall(r"'([a-z_]+)'", str(ck.sqltext)))
 
 
-#: The config half of "everything supplied": the activation nudge (#1481) is
+#: The config half of "everything supplied": the activation nudge is
 #: gated on its switch and a web origin as well as on the email seam.
 FULL_CONFIG = dict(activation_nudge_enabled=True, web_app_origin="https://app.example")
 
@@ -72,7 +72,7 @@ def full_deps(**over):
         adapters={"gdrive": object()},
         email=object(),
         archive_keys=object(),
-        # #1644: the archive armed, with the client its adapter reads
+        # the archive armed, with the client its adapter reads
         # through, which is what makes the reconciliation executor live.
         archive_capability=ArchiveCapability(enabled=True),
         archive_client=object(),
@@ -97,8 +97,7 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
     `own_transactions` exists so "a task waiting on a provider holds no
     pooled connection while it waits" (its own docstring). Without the mark
     the loop would hold a transaction open across a Drive call, a token
-    refresh or a revoke, and hand the executor a session it never touches
-    (#1368).
+    refresh or a revoke, and hand the executor a session it never touches.
 
     It is also the precondition for arming `_IN_TRANSACTION` in
     `make_session_for`. The flag is set for an executor's whole body, so an
@@ -108,9 +107,8 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
     here, `refresh=refresh_stub` in `test_w5de_credential_lifecycle.py`), so
     nothing in the test tree reaches `egress.request` from a worker session.
 
-    THE LIST IS EXPLICIT AND MEANT TO NEED EDITING, the way the lineage
-    lane's file list is: a new executor that calls a provider has to
-    say so here once.
+    The executor list is explicit: each new provider-facing executor must
+    declare that it owns its transactions.
     """
 
     #: Every registry kind whose executor can reach `egress.request`.
@@ -124,7 +122,7 @@ class TestEveryProviderFacingExecutorOwnsItsTransactions:
         "sync_media_source",  # deps.adapters provider list_changes
         "first_ingest_chunk",  # the same _run_sync, one page at a time
         "reconcile_ambiguous",  # deps.poll, the provider's verdict on an
-        # ambiguous publish; each row commits alone (#1492)
+        # ambiguous publish; each row commits alone
     }
 
     #: Marked for another reason: each of its batches commits on its own.
@@ -203,23 +201,23 @@ class TestRegistryCoversTheSchema:
             "first_ingest_chunk",
             "alert_stranded_sources",
             "revoke_workspace_credentials",
-            # #1092: live once a provider is configured, and `full_deps`
+            # live once a provider is configured, and `full_deps`
             # supplies that seam like every other.
             "send_email",
-            # #1090: live unconditionally. Its one provider seam is leg 3,
+            # live unconditionally. Its one provider seam is leg 3,
             # which the transit TTL sweep already backstops, so a
             # missing transit store must not park the whole workflow.
             "offboard_workspace",
             # The `rate_counters` retention class only.
             "retention_sweep",
-            # #1481: built, and live only with its switch and an origin as
+            # built, and live only with its switch and an origin as
             # well as the email seam, which `FULL_CONFIG` supplies.
             "activation_nudge_sweep",
-            # #1644: the sweep needs nothing; the cleanup needs the
+            # the sweep needs nothing; the cleanup needs the
             # key ring alone, which `full_deps` supplies.
             "archive_lifecycle_sweep",
             "meta_deletion_cleanup",
-            # #1644: live once the archive is armed with its client,
+            # live once the archive is armed with its client,
             # which `full_deps` supplies.
             "reconcile_archive_accounts",
         }
@@ -239,16 +237,16 @@ class TestRegistryCoversTheSchema:
             "first_ingest_chunk",
             "alert_stranded_sources",
             "revoke_workspace_credentials",
-            # #1092: live once a provider is configured, and `full_deps`
+            # live once a provider is configured, and `full_deps`
             # supplies that seam like every other.
             "send_email",
-            "offboard_workspace",  # #1090
+            "offboard_workspace",  #
             "retention_sweep",
-            "activation_nudge_sweep",  # #1481, with `FULL_CONFIG`
+            "activation_nudge_sweep",  # , with `FULL_CONFIG`
             "convert_source_mix",  # typed operator record in full_deps
-            "archive_lifecycle_sweep",  # #1644
-            "meta_deletion_cleanup",  # #1644, with the key ring
-            "reconcile_archive_accounts",  # #1644, with the archive armed
+            "archive_lifecycle_sweep",  #
+            "meta_deletion_cleanup",  # , with the key ring
+            "reconcile_archive_accounts",  # , with the archive armed
         }
         assert unbuilt, "denominator went empty — the schema kinds parse broke"
         assert unbuilt == set(UNBUILT_KINDS)
@@ -258,9 +256,9 @@ class TestRegistryCoversTheSchema:
 
 class TestDeletionCleanupNeedsOnlyTheKeyRing:
     """A deletion closes things, so the cleanup runs without a transit store: it
-    asks the provider nothing, and counts any upload it holds as unresolved
-    (#1644). Only the key ring, which its tombstones are hashed with,
-    can keep it parked."""
+        asks the provider nothing, and counts any upload it holds as unresolved.
+    Only the key ring, which its tombstones are hashed with,
+        can keep it parked."""
 
     def test_with_the_ring_and_no_transit_store_it_is_live_and_owns_its_transactions(
         self,
@@ -281,7 +279,7 @@ SWEEP_EVIDENCE = ArchiveActivationEvidence(
 
 
 class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
-    """The existing-account reconciliation (#1644) backfills grants made
+    """The existing-account reconciliation backfills grants made
     before the archive was live, so it needs the capability AND the archive
     adapter's client; the sweep mints its jobs only on the same terms, plus the
     activation evidence the door keys them to."""
@@ -397,7 +395,7 @@ class TestReconciliationIsLiveOnlyWhereTheArchiveIsArmed:
         self, caplog, minted, line
     ):
         """It runs every minute, armed or not, and an archive that is off mints
-        nothing: a line a minute reading `0 ... 0` is noise a log reader has to
+        nothing: a line a minute reading `0... 0` is noise a log reader has to
         learn to skip. A leg that minted is reported whichever leg it was."""
         with caplog.at_level("INFO", logger=work_loop.logger.name):
             await self._sweep(minted=minted, archive_evidence=SWEEP_EVIDENCE)
@@ -418,10 +416,10 @@ class TestSeamAbsenceParksTheDependentKind:
         assert "transport" in registry["deliver_outbox"].reason
 
     def test_no_email_provider_parks_send_email(self):
-        """#1092. The reason must NAME the config: "no email provider
+        """The reason must NAME the config: "no email provider
         configured" without the variable names sends the reader to the wrong
         place. Resend is the provider, so the reason does not say the ack is
-        open (#1723): the variables are the whole of what is missing."""
+        open: the variables are the whole of what is missing."""
         registry = build_registry(full_deps(email=None))
         assert isinstance(registry["send_email"], Parked)
         reason = registry["send_email"].reason
@@ -447,7 +445,7 @@ class TestSeamAbsenceParksTheDependentKind:
 
     def test_no_meta_or_no_transit_parks_publish_pipeline_by_name(self):
         """The ladder calls fetch, transit and meta; each absence parks the
-        kind naming itself (#1220)."""
+        kind naming itself."""
         registry = build_registry(full_deps(meta=None))
         assert isinstance(registry["publish_pipeline"], Parked)
         assert registry["publish_pipeline"].reason.startswith("meta is not wired")
@@ -456,7 +454,7 @@ class TestSeamAbsenceParksTheDependentKind:
         assert registry["publish_pipeline"].reason.startswith("transit is not wired")
 
     def test_no_poll_does_NOT_park_the_reconciler(self):
-        """A missing poll does not park the reconciler (#1090). The property
+        """A missing poll does not park the reconciler. The property
         this class pins — a missing seam parks its DEPENDENT kind — has four
         instances above, and the reconciler is not one of them: its sweep
         returns `ladder_due` rows (which need the poll) AND `notify_window`
@@ -468,7 +466,7 @@ class TestSeamAbsenceParksTheDependentKind:
 
 
 class TestTheActivationNudgeIsBuiltOff:
-    """#1481. The sweep emails real people, so it is live only when its switch,
+    """The sweep emails real people, so it is live only when its switch,
     an email provider and a web origin are ALL there, and a parked one names
     every gate that is closed and none that is open."""
 
@@ -510,7 +508,7 @@ class TestTheActivationNudgeIsBuiltOff:
         assert not isinstance(self._nudge(config=config), Parked)
 
     async def test_the_live_sweep_runs_with_the_configs_bounds(self, monkeypatch):
-        """#1653: the entry hands the sweep the config's cap, window and idle
+        """The entry hands the sweep the config's cap, window and idle
         time, and the origin for its links, rather than defaults of its own."""
         seen = {}
 
@@ -538,9 +536,9 @@ class TestTheActivationNudgeIsBuiltOff:
 
 
 class TestReconcilerSweepBranchesOnItsReason:
-    """The `notify_window` half of the reconciler sweep (#1090).
+    """The `notify_window` half of the reconciler sweep.
 
-    `fn_reconciler_sweep` tags its rows (059), and the executor branches on
+    `fn_reconciler_sweep` tags its rows (`04_functions.sql`), and the executor branches on
     the tag: a notify row is notified, not polled as if the ladder were due.
     """
 
@@ -606,7 +604,7 @@ class TestReconcilerSweepBranchesOnItsReason:
     ):
         """`post_intents` is policy-covered and the sweep's session carries no
         tenant: a count read before the claim is 0 for every row, so every step
-        is the first and the ladder never exhausts (#1349). The claim
+        is the first and the ladder never exhausts. The claim
         precedes the read, and what the row says is what the ladder gets."""
         rows = [{"intent_id": "i-6", "workspace_id": "ws-1", "reason": "ladder_due"}]
         seen = []
@@ -691,7 +689,7 @@ class TestReconcilerSweepBranchesOnItsReason:
 
 
 class TestReconcilerRowsFailAlone:
-    """#1492: one row of the reconciler sweep fails alone (the executor's
+    """One row of the reconciler sweep fails alone (the executor's
     docstring has the why)."""
 
     def _rows(self, n):
@@ -744,7 +742,7 @@ class TestReconcilerRowsFailAlone:
         monkeypatch.setattr(work_loop.reconciler, "reconcile_intent", reconcile)
 
     async def test_no_transaction_carries_more_than_one_row(self, monkeypatch):
-        """The drain's bound (#1441), pinned with more due rows than it
+        """The drain's bound, pinned with more due rows than it
         allows: one transaction per row, so none can collect the writing
         savepoints a batch of `MAX_WRITING_SAVEPOINTS + 1` rows would."""
         from src.services.target.offboarding import MAX_WRITING_SAVEPOINTS
@@ -767,7 +765,7 @@ class TestReconcilerRowsFailAlone:
         assert ended == ["committed"] * (1 + len(rows))
 
     async def test_the_provider_is_asked_with_no_transaction_open(self, monkeypatch):
-        """#1508: the egress floor refuses a provider call made inside a
+        """The egress floor refuses a provider call made inside a
         transaction (`unit_of_work.in_transaction()` is what it reads), so a
         ladder row asks before its transaction opens."""
         self._own_transactions(monkeypatch)
@@ -849,9 +847,9 @@ class TestReconcilerRowsFailAlone:
         self, monkeypatch
     ):
         """A beat with a failed ladder row AND a notice nobody can hear fails
-        with the row's error: `UNDELIVERABLE` never stands in for the alarm
-        (#1438). Nor is the notice recorded, so the first beat that returns
-        signals it."""
+                with the row's error: `UNDELIVERABLE` never stands in for the alarm.
+        Nor is the notice recorded, so the first beat that returns
+                signals it."""
         recorded = self._mixed(monkeypatch, ladder_fails=True)
         registry = build_registry(full_deps(poll=_in_progress))
         with pytest.raises(ValueError, match="intent i-0 matched no row"):
@@ -889,7 +887,7 @@ class TestReconcilerRowsFailAlone:
 
 
 class TestAJobThatReachedNobodyIsNotASuccess:
-    """#1090. A producer that reaches nobody on an empty binding list says so
+    """A producer that reaches nobody on an empty binding list says so
     in its verdict, and the verdict decides the terminal state: the ledger
     records no clean run for a message nobody received, and the cadence does
     not repeat into the void forever."""
@@ -1066,11 +1064,11 @@ class TestPlanSlotAdapterMapsThePayload:
         assert seen["workspace_id"] == "ws-1"
         assert seen["ig_account_id"] == "acct-1"
         assert seen["provider_account_ref"] == "ig-acct-9"
-        # The workspace's mode is not copied onto the story (#1477, 110):
+        # The workspace's mode is not copied onto the story (`ck_intent_approval`):
         # a story is born deciding nothing, and its serve decides.
         assert "approval_mode" not in seen
         # The payload crosses jsonb as a string POSTGRES rendered, so the
-        # resolve query casts it server-side (#969) — the executor receives
+        # resolve query casts it server-side — the executor receives
         # the row's datetime and no Python parser ever sees the string.
         assert seen["slot_at"] is resolved_slot
         bound = session.statements[0][1]
@@ -1342,7 +1340,7 @@ ACTIVE_ROW = {
 
 class TestDeliverOutboxRetiresAGoneChat:
     """The deliverer's definitive "chat gone" ends the hold and retires the
-    binding — or follows a group that became a supergroup (#1240)."""
+    binding — or follows a group that became a supergroup."""
 
     def _job(self):
         return {
@@ -1680,7 +1678,7 @@ class TestWeightedCategorySelection:
     async def test_a_runway_notice_nobody_receives_does_not_ride_the_mint(
         self, monkeypatch
     ):
-        """The runway notice never decides the slot (#1478): owed and heard by
+        """The runway notice never decides the slot: owed and heard by
         nobody, its verdict is not carried back, so the job the mint belongs
         to succeeds. It is settled after the mint, in a savepoint."""
         from src.services.target import content_runway, outbox
@@ -2088,7 +2086,7 @@ class TestTheBudgetCeiling:
 
 
 #: An admission's `send_email` payload as `signup_admissions.admit` queues it
-#: (#1723): the address and the claim link's base, never a token or a link.
+#:the address and the claim link's base, never a token or a link.
 ADMITTED = "admitted-person@example.com"
 CLAIM_BASE = "https://app.example.test/claim/"
 ADMISSION_PAYLOAD = {
@@ -2109,7 +2107,7 @@ class _SyntheticFault(Exception):
 
 class _AdmissionStorage:
     """The admission executor's own transactions and the link's store, in
-    memory, with the loop's sessions counted beside them (#1740).
+    memory, with the loop's sessions counted beside them.
 
     A `system_session` stages what is written in it and commits that to
     `committed` only when it ends cleanly; a fault drops the stage. The store
@@ -2205,12 +2203,12 @@ class _ProviderTakesIt(RecordingSender):
 
 
 class TestAnAdmissionEmailWhoseLinkFailsToStore:
-    """#1740: the provider took an admission's email, and then storing its
+    """The provider took an admission's email, and then storing its
     link failed: the store raised, or its transaction's commit was refused.
     Run through the REAL `send_email` adapter (`build_registry`) and
     `_run_job`, on `TestTheBudgetCeiling`'s recorded loop.
 
-    Send first, store second (#1723). Before the last attempt the job is
+    Send first, store second. Before the last attempt the job is
     rescheduled with its attempt kept, and the retry, a new claim with a new
     lease, emails a fresh link whose hash alone is stored: two emails, the
     accepted cost of sending first. On the last attempt the job ends
@@ -2788,7 +2786,7 @@ class TestADeadPublishJobParksItsStory:
 
 
 class TestTheSenderMintReadsItsOwners:
-    """#1325: the sweep's INSERT reads the interactive lane's budget, the
+    """The sweep's INSERT reads the interactive lane's budget, the
     `tg:` key prefix and the push-binding predicate from the module that
     declares each, so retuning the lane or adding a second push channel cannot
     miss this statement."""
@@ -2799,7 +2797,7 @@ class TestTheSenderMintReadsItsOwners:
         class _Result:
             def scalar(self):
 
-                return 0  # the door returns the minted count as a scalar (082)
+                return 0  # the door returns the minted count as a scalar (worker sweep functions)
 
         class _Session:
             def __init__(self):
@@ -2824,7 +2822,7 @@ class TestTheSenderMintReadsItsOwners:
     async def test_the_caller_may_bound_the_sweep(self):
         class _Result:
             def scalar(self):
-                return 0  # the door returns the minted count as a scalar (082)
+                return 0  # the door returns the minted count as a scalar (worker sweep functions)
 
         class _Session:
             def __init__(self):

@@ -3,7 +3,7 @@ port, on the replayed target schema.
 
 The unit gate (`tests/src/services/target/test_commands.py`) patches
 `commands.REGISTRY`, so a green run there proves the DISPATCH and says nothing
-about the BODY (#1035); `test_web_router_x2_gate.py` runs real bodies for
+about the BODY; `test_web_router_x2_gate.py` runs real bodies for
 `create_workspace`, `settings_change` and `approve`. This file drives `skip`,
 `reject`, `mark_posted`, `cancel`, `sync_now`, `pause_workspace`,
 `resume_workspace`, `rename_workspace` and `account_settings_change`, each
@@ -228,7 +228,7 @@ class TestSkip:
         ) == ("skipped",)
 
     def test_review_required_is_answered_not_flipped_by_a_member(self, world):
-        """`review_required → approved` is the operator's edge (055): a
+        """`review_required → approved` is the operator's edge (`intent_ledger.py`): a
         member's approve answers with the state and takes nothing."""
         i = _intent(world, world["a"], "review-1", state="review_required")
         out = run(world, "approve", intent_id=i["id"])
@@ -359,7 +359,7 @@ class TestMarkPosted:
         assert self._count(world) == before
 
     def test_a_planned_story_posted_by_hand_leaves_the_day_as_it_was(self, world):
-        """#1413: a planned story sits outside the cap whichever way it posts.
+        """A planned story sits outside the cap whichever way it posts.
         Counted here, a Posted myself would push the day's last cadence story
         to tomorrow, which must not happen. Its day is still stamped, which a
         manual post needs (`ck_posted_complete`)."""
@@ -536,7 +536,7 @@ class TestAnotherTenantsIntent:
         ) == ("awaiting_approval",)
 
 
-# --- account_settings_change: the per-account schedule overrides (#1175) ------
+# --- account_settings_change: the per-account schedule overrides ------
 
 
 def _acct(world, ids=None) -> dict:
@@ -564,7 +564,7 @@ def _acct(world, ids=None) -> dict:
 
 
 class TestAccountSettingsChange:
-    """Every account has its own cadence, window and tz (`054`); the account is
+    """Every account has its own cadence, window and tz (`accounts_sources_media.py`); the account is
     the unit of scheduling; `fn_clock_tick` resolves the ladder per row. These
     drive the write end to end and read back what the CLOCK reads, not merely
     what was stored."""
@@ -617,7 +617,7 @@ class TestAccountSettingsChange:
         **What enforces this is RLS, not the writer's WHERE clause, and this
         test cannot tell them apart.** Mutation-tested: delete
         `AND workspace_id = :ws` from `change_account_settings` and this stays
-        green, because `p_tenant` on `ig_accounts` (`058`:266) already covers
+        green, because `p_tenant` on `ig_accounts` (`07_row_security.sql`:266) already covers
         `svc_ingress`. Read it as the CONTRACT being pinned — cross-tenant is
         `not_found` and writes nothing — never as evidence for the clause."""
         b_before = _acct(world, world["b"])
@@ -701,7 +701,7 @@ class TestAccountSettingsChange:
         assert _acct(world)["posts_per_day"] != 0
 
     def test_the_change_is_audited(self, world):
-        """`055`'s trigger early-exits only for `next_slot_at`/`last_posted_at`,
+        """`intent_ledger.py`'s trigger early-exits only for `next_slot_at`/`last_posted_at`,
         so these four columns audit already — the trail this command needs
         exists in the schema and is asserted rather than assumed."""
         (before,) = _one(

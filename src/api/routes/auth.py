@@ -1,4 +1,4 @@
-"""Sign-in, hosted on the API (#1015), and
+"""Sign-in, hosted on the API, and
 the Drive connect leg's callback — the same shape with a different purpose.
 
 `GET /auth/google` mints an anonymous `oauth_states` row and sends the browser
@@ -10,13 +10,13 @@ verifier, one credential, and no secret anywhere that could mint a session
 for an arbitrary user — the reason this lives here and not on the front end.
 
 `POST /auth/google/claim` is the same start for a waitlist admission's claim
-link (129, #1723): the site's claim page form-posts the link's token,
+link (signup admission functions): the site's claim page form-posts the link's token,
 and the token waits in the `sd_claim` cookie for the callback, so it is never
 in a URL the API receives. At the callback, a new account the sign-up gate
 refuses spends the claim, in one savepoint with the user it creates; any other
 sign-in does not ask it, and every answer deletes the cookie. An account
 created at the admission's own address still uses the admission up, its link
-with it, in the database (133).
+with it, in the database (`trg_signup_admission_consume`).
 
 Two transactions bracket the provider call, never one around it:
 the state is consumed and COMMITTED before Google is contacted, so a failed
@@ -46,8 +46,8 @@ for another leg, the nonce cookie did not match, or — Drive — the state
 carries no PKCE verifier the ring can read) · ``exchange_failed`` ·
 ``identity_collision`` (sign-in: the verified email belongs to another
 account — never merged) · ``not_admitted`` (sign-in: a new account whose
-email nobody admitted or invited, 092) · ``claim_refused`` (sign-in: such an
-account's claim link was used, replaced or unknown, or its spot is taken, 129;
+email nobody admitted or invited, `fn_signup_admitted`) · ``claim_refused`` (sign-in: such an
+account's claim link was used, replaced or unknown, or its spot is taken, signup admission functions;
 or the claim page posted no token of a claim's shape) — those two land on
 `/login?error=…`, beside the waitlist, rather than on this page ·
 ``grant_incomplete`` (Drive: Google answered
@@ -60,12 +60,12 @@ nothing the callback wrote landed). A Drive failure also carries
 sign-in-shaped by default and needs to know which leg it renders for.
 
 `GET /auth/instagram-login/callback` is the other half of
-`POST /api/v1/workspaces/{ws}/accounts/{id}/connect` (#1220): the same
+`POST /api/v1/workspaces/{ws}/accounts/{id}/connect`: the same
 shape as the Drive leg on the path the Meta app has registered, so the app
 needs no console change. The admin check runs again at the callback,
 inside the write transaction. Where the archive is live it also applies the
 history choice the state recorded and lands on Settings with the applied
-result's id (`connect_choice`, #1644), and records the verified Meta
+result's id (`connect_choice`), and records the verified Meta
 identity the exchange proved (`identity_mappings`): an exchange that
 proved none refuses the whole landing as ``history_setup_failed``.
 """
@@ -131,7 +131,7 @@ router = APIRouter(tags=["auth"])
 NONCE_COOKIE = "sd_oauth_nonce"
 NONCE_COOKIE_PATH = "/auth/google"
 
-#: A claim link's token on its way to the sign-in callback (129, #1723),
+#: A claim link's token on its way to the sign-in callback (signup admission functions),
 #: set by `POST /auth/google/claim` with the nonce's path and lifetime.
 #: A cookie and never a query string, so the token rests in no access log the
 #: API writes.
@@ -146,7 +146,7 @@ SIGNIN_LIMITED = "too many sign-in attempts"
 
 #: The Drive leg's name on the error page (`flow=`); sign-in carries none.
 DRIVE_FLOW = "drive"
-#: The Instagram connect leg's (#1220).
+#: The Instagram connect leg's.
 INSTAGRAM_FLOW = "instagram"
 
 
@@ -296,7 +296,7 @@ async def google_signin(request: Request) -> Response:
 
 @router.post("/google/claim")
 async def google_claim(request: Request) -> Response:
-    """Sign in through a claim link (129, #1723). The site's claim
+    """Sign in through a claim link (signup admission functions). The site's claim
     page form-posts the link's token as ``claim``. A token of no claim's shape
     lands on `/login?error=claim_refused`; any other starts the sign-in as
     `GET /auth/google` does, answered as a 303 (the form's POST becomes a GET
@@ -390,7 +390,7 @@ async def _signin_callback(
             user_id = await _signed_in_user(conn, who, claim=claim)
         except identity.SignupNotAdmitted:
             logger.info("google sign-in: a new account was not admitted")
-            # Sign-up is gated (092): /login says so and points at the waitlist.
+            # Sign-up is gated (`fn_signup_admitted`): /login says so and points at the waitlist.
             return _refuse("/login", "error", "not_admitted")
         except identity.IdentityCollision:
             return _fail("identity_collision")
@@ -410,7 +410,7 @@ async def _signed_in_user(
 ) -> Optional[str]:
     """The user *who* signs in as (`identity.upsert_google_identity`), or None
     when the claim link *claim* is refused: used, replaced, unknown, or its
-    spot taken (129).
+    spot taken (signup admission functions).
 
     The upsert's refusals propagate, but for one: when the sign-up gate
     refuses a new account that carries a claim and a verified email, the claim
@@ -505,7 +505,7 @@ async def google_drive_callback(
     if row["reconnect_target"] is None or str(row["reconnect_target"]) != str(
         row["workspace_id"]
     ):
-        # The grant is the WORKSPACE's (069): the issue leg pins the
+        # The grant is the WORKSPACE's (workspace Drive grant): the issue leg pins the
         # workspace as its own target. A state that names anything else — a
         # source id, or nothing — is
         # not one this leg can act on.
@@ -565,7 +565,7 @@ async def google_drive_callback(
                 str(row["user_id"]),
                 minimum_role=commands.connect_floor(row["purpose"]),
             )
-            # The state's user is the granter (091): the presenter
+            # The state's user is the granter (`oauth_credentials.granted_by_user_id`): the presenter
             # check above proved the returning browser is theirs, so the
             # Google account just consented is theirs, and only they browse it.
             await google_drive_oauth.store_credential(
@@ -596,7 +596,7 @@ async def instagram_login_callback(
     code: Optional[str] = None,
     error: Optional[str] = None,
 ) -> Response:
-    """The Instagram connect leg's return (#1220): consume the state,
+    """The Instagram connect leg's return: consume the state,
     check the returning browser is the one that started the flow, exchange
     the code for a long-lived token and its owner, land that identity on a
     destination — the one the state pinned, or (untargeted: the workspace-
@@ -659,7 +659,7 @@ async def instagram_login_callback(
                 str(row["user_id"]),
                 minimum_role=commands.connect_floor(row["purpose"]),
             )
-            # #1644: where the archive is live the recorded history
+            # where the archive is live the recorded history
             # choice lands with the destination, under the source prefix taken
             # first. Without a capability no statement is issued here and the
             # landing below makes no archive write.
@@ -697,7 +697,7 @@ async def instagram_login_callback(
             if archive:
                 # The exchange that just succeeded is ONE authorization: the
                 # archive generation and the verified identity mapping
-                # (#1644) are bound to this id and this callback time.
+                # are bound to this id and this callback time.
                 # No mapping is recorded where the archive is not live.
                 authorization = ArchiveAuthorization(
                     str(uuid.uuid4()),

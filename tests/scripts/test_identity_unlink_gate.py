@@ -1,4 +1,4 @@
-"""099: a person unlinks their own Telegram identity.
+"""`fn_identity_unlink`: a person unlinks their own Telegram identity.
 
 `fn_identity_unlink` is the one delete on `user_identities`: it removes the
 user's Telegram identity only while they keep another one, refuses any other

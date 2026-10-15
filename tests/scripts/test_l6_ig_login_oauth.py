@@ -1,4 +1,4 @@
-"""Gate — target-side Instagram Login OAuth against a real database (#863).
+"""Gate — target-side Instagram Login OAuth against a real database.
 
 Covers the gate clauses that are provable without Meta: state replay, expiry and
 cross-workspace rejection; the credential under the MultiFernet ring; and the
@@ -6,8 +6,8 @@ part of the dead-token symptom gate that belongs to the OAuth flow.
 
 **What is NOT claimed here, stated rather than left to inference.** The gate's
 first clause — *"a fresh Professional account connects with zero Facebook
-surface"* — is unprovable for an arbitrary account without Meta App Review
-(#410), an external gate with a human owner, not something tests close.
+surface"* — requires Meta App Review for an arbitrary account. That external
+gate has a human owner and cannot be closed by tests.
 And the dead-token symptom gate's other two halves (the dispatcher minting no
 further intents, the publish pipeline recording the fault) belong to those
 components' gates. Nothing below pretends otherwise.
@@ -160,7 +160,7 @@ def _second_workspace(oauth_db):
 
 
 class TestTheTokenReadCannotCrossATenant:
-    """#1369: two workspaces holding ONE real Instagram account.
+    """Two workspaces holding ONE real Instagram account.
 
     `uq_ig_account_live` is unique on `(workspace_id, provider_account_ref)`,
     so this is a state the schema allows — and `usage_precheck`'s cache note
@@ -245,7 +245,7 @@ class TestTheIsolationLevelIsWhatProductionRuns:
 
 class TestTheFbLegacyStagingIsGone:
     def test_the_provider_CHECK_ships_without_fb_login_legacy(self, oauth_db):
-        """#863: there is no `ck_no_new_fb_legacy` staging, because no
+        """There is no `ck_no_new_fb_legacy` staging, because no
         FB-vintage row can exist in the target. Asserted against the replayed
         constraint itself, because the refresh path below drops a branch on the
         strength of it."""
@@ -496,7 +496,7 @@ class TestTheCredentialUnderTheRing:
 
     def test_storing_twice_for_one_account_is_ONE_row_replaced_in_place(self, oauth_db):
         """The connect callback writes with `store_credential` for connect AND
-        reconnect (#1221): the second store must land on `uq_credential_per_account`
+        reconnect: the second store must land on `uq_credential_per_account`
         as an UPDATE — same id, new payload, `active`, one row — which is the
         partial-index inference only a real database can prove."""
         first = _call(
@@ -563,7 +563,7 @@ class TestTheCredentialUnderTheRing:
 class TestTheDeadTokenSymptomGate_TheOAuthHalf:
     """Only the credential/account flip is the OAuth flow's. The dispatcher
     declining to mint intents and the publish pipeline recording the fault
-    are not (#863), and this class does not reach into either."""
+    are not, and this class does not reach into either."""
 
     def _undecryptable(self, oauth_db):
         acct = _new_account(oauth_db)
@@ -757,7 +757,7 @@ class TestTheGuardsAreLoadBearing:
 
 
 class TestARemovedDestinationStaysRemoved:
-    """`disable_account` (#1233) revokes the credential and disables the row;
+    """`disable_account` revokes the credential and disables the row;
     a refresh job minted before the removal must not undo either."""
 
     def test_a_swap_leaves_a_revoked_credential_revoked(self, oauth_db):
@@ -815,7 +815,7 @@ class TestARemovedDestinationStaysRemoved:
 
 
 class TestTheBindPurposeOnTheRealSchema:
-    """067 widens `ck_oauth_state_purpose` to `bind`.
+    """oauth_states purpose binding widens `ck_oauth_state_purpose` to `bind`.
     The whole lane on the replayed schema: mint, consume, bind — and the CHECK
     that a bind state pins BOTH a user and a workspace."""
 

@@ -17,7 +17,7 @@ No Telegram binding exists at any point. The provider call is the only stub
 state's); everything else — oauth_states, session_tokens, command_dedup,
 rate_counters, the audit triggers, the intent guard — is the real thing.
 
-The membership class measures the tenth door (`064`, #1037) under this role: the
+The membership class measures the tenth door (`fn_memberships_for_caller`) under this role: the
 membership list — a cross-tenant question `p_tenant` cannot serve — answers
 through `fn_memberships_for_caller()`, is the caller's alone, and reads
 empty when no caller is claimed.
@@ -72,7 +72,7 @@ def _seed_intent(
 ) -> str:
     """Fixture data INTO an API-created workspace, as the migration actor —
     the suite's one spelling of the chain, with the state the gate reads, and
-    a planned story's rule (#485) as its four columns when *repeat* is given:
+    a planned story's rule as its four columns when *repeat* is given:
     `(unit, every, days, at)`. Its account's Instagram login is in
     *login_state*."""
     conn = psycopg2.connect(dsn)
@@ -89,7 +89,7 @@ def _seed_intent(
                 (f"@{tag}_acct", str(chain["iga"])),
             )
             # `approve` refuses a post without a usable Instagram token
-            # (`not_connected`, #1276); the API workspace this gate flips to
+            # (`not_connected`); the API workspace this gate flips to
             # api_publishing is connected, as the real one is.
             cur.execute(
                 "INSERT INTO oauth_credentials (workspace_id, ig_account_id,"
@@ -147,7 +147,7 @@ def test_web_only_approval_as_svc_ingress(world, google_configured, monkeypatch)
             assert got.json()["name"] == "Gate"
             assert got.json()["tz"] == "America/New_York"
             assert got.json()["api_publishing_enabled"] is False
-            # A new workspace carries the column's own default (#1033).
+            # A new workspace carries the column's own default.
             assert got.json()["approval_mode"] == "manual"
             members = await client.get(
                 f"/api/v1/workspaces/{ws}/members", headers=owner
@@ -163,7 +163,7 @@ def test_web_only_approval_as_svc_ingress(world, google_configured, monkeypatch)
             )
             assert pending.status_code == 200, pending.text
             assert [i["id"] for i in pending.json()["intents"]] == [intent_id]
-            # the queue's account column rides the intent row (#1033)
+            # the queue's account column rides the intent row
             assert pending.json()["intents"][0]["account_handle"] == "@gate_acct"
 
             approve_url = f"/api/v1/workspaces/{ws}/commands/approve"
@@ -175,7 +175,7 @@ def test_web_only_approval_as_svc_ingress(world, google_configured, monkeypatch)
             assert manual.status_code == 409, manual.text
             assert manual.json()["reason"] == "manual_mode"
 
-            # Manual mode's own tap, through the real route (#1033): a second
+            # Manual mode's own tap, through the real route: a second
             # intent is marked posted by hand and terminalizes with no job.
             by_hand = _seed_intent(world["stream"], ws, "byhand")
             marked = await client.post(
@@ -357,7 +357,7 @@ class TestMembershipListingUnderTheProductionRole:
 def test_a_planned_story_is_approved_through_the_web_route_by_its_person(
     world, google_configured, monkeypatch
 ):
-    """088 lets only a person approve a planned story. The web route is a
+    """`post_intents.origin` lets only a person approve a planned story. The web route is a
     person: the session principal opens the tenant as `user` with the
     signed-in id (`principal.open_tenant`), so the trigger admits it, and the
     audit row names who approved."""
@@ -398,7 +398,7 @@ def test_a_planned_story_is_approved_through_the_web_route_by_its_person(
 def test_the_queue_read_carries_a_planned_storys_rule(
     world, google_configured, monkeypatch
 ):
-    """The web's Queue reads a repeating story's rule (#485) through the route,
+    """The web's Queue reads a repeating story's rule through the route,
     as the production role reads it: `repeat`, in the rule's one shape
     (`intent_ledger.repeat_sql`), and null on a story with no rule."""
 
@@ -434,12 +434,12 @@ def test_the_queue_read_carries_a_planned_storys_rule(
 def test_approve_is_refused_not_connected_when_the_login_is_not_active(
     world, google_configured, monkeypatch, login_state
 ):
-    """`approve`'s precondition (#1276) is a working Instagram login, the one
-    spelling the serve step's rules read too (`ig_credentials.usable_login_sql`,
-    #1477). A login in any state but `active` is none, so the web's approve is
-    refused `not_connected` and writes nothing, its dedup row included. A story
-    beside it whose login is active is approved, so the login's state is what
-    refused it."""
+    """`approve`'s precondition is a working Instagram login, the one
+     spelling the serve step's rules read too (`ig_credentials.usable_login_sql`,
+    ). A login in any state but `active` is none, so the web's approve is
+     refused `not_connected` and writes nothing, its dedup row included. A story
+     beside it whose login is active is approved, so the login's state is what
+     refused it."""
 
     async def main():
         async with api_client(world["ingress"]) as (client, _):

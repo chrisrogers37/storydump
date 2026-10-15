@@ -13,14 +13,14 @@ kept, the payload shape, and the INSERT.
 
 ## The scope, consent, exchange and PKCE shapes
 
-The target tier imports nothing legacy (#982). The shapes this leg uses:
+The target tier imports nothing legacy. The shapes this leg uses:
 
 - **The scope**: `drive.readonly` is the narrowest scope that lists AND
   downloads a pre-existing folder. `drive.file` sees only files the app created
   or opened, and user media predates the app; `drive.metadata.readonly` lists
   but cannot download. The narrower path is the Google Picker under
   `drive.file`, which changes onboarding from "paste a folder id" to a Picker
-  widget (#327). There is no `userinfo.email` scope: nothing in the target
+  widget. There is no `userinfo.email` scope: nothing in the target
   schema stores the granting account's email.
 - **The offline-consent shape**: `access_type=offline` is
   what makes Google issue a refresh token, and `prompt=consent` is what makes
@@ -42,16 +42,16 @@ The target tier imports nothing legacy (#982). The shapes this leg uses:
 
 `oauth_credentials.encrypted_payload` is ONE column, and the payload needs two
 tokens in it: the durable refresh token, from which short-lived access tokens
-are minted on demand (#1247), and the access token issued at connect time,
+are minted on demand, and the access token issued at connect time,
 which the read door hands back while it is still good. Both ride in one
 encrypted, versioned JSON envelope (:func:`encode_payload` /
 :func:`decode_payload` — the writer's shape and the reader's, one definition);
 `expires_at` is the ACCESS token's expiry. `next_refresh_at` is NULL: the
 refresh clock is fenced to `ig_login` and minting happens on the read path,
-and :mod:`drive_credentials` owns that account (what the `063` fence guards,
+and :mod:`drive_credentials` owns that account (what the `fn_clock_tick` provider guards fence guards,
 and what it does not).
 
-The row is WORKSPACE-owned (069): `provider =
+The row is WORKSPACE-owned (workspace Drive grant): `provider =
 'gdrive'`, `media_source_id` NULL, `ig_account_id` NULL — `ck_credentials_one_owner`
 is provider-conditional and refuses any other shape for `gdrive`, and
 `uq_credential_per_workspace` admits one ownerless row per workspace and provider.
@@ -85,7 +85,7 @@ from src.services.target.oauth_states import CODE_CHALLENGE_METHOD, ring
 PROVIDER = vocabulary.PROVIDER_GDRIVE
 
 #: The one scope this leg asks for — see the module docstring for the two
-#: narrower ones and the Picker (#327).
+#: narrower ones and the Picker.
 SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
 #: The envelope's version. A payload without it, or with another, is
@@ -98,7 +98,7 @@ PAYLOAD_VERSION = 1
 GOOGLE_ACCESS_TOKEN_SECONDS = 3600
 
 #: A `gdrive` credential names no owner column — the WORKSPACE is its owner
-#: (069, #1165), and this predicate is that ownership rule, in one place for
+#: and this predicate is that ownership rule, in one place for
 #: six readers; one of them omitting `media_source_id IS NULL` the day a
 #: source-owned row returns is exactly how a workspace reads another owner's
 #: grant. A fragment, spliced — there is no caller input in it. The writer
@@ -120,7 +120,7 @@ REDIRECT_REASON = {
     "malformed_response": "exchange_failed",
     "no_refresh_token": "grant_incomplete",
     "scope_not_granted": "grant_incomplete",
-    # The read-path refresh (#1247) never reaches the callback, but its two
+    # The read-path refresh never reaches the callback, but its two
     # refusals live in the one vocabulary so `DriveOAuthRefused` stays total:
     # `grant_revoked` is Google's `invalid_grant` — definitive, the row goes
     # `expired` — and `refresh_failed` is everything transient.
@@ -274,7 +274,7 @@ async def exchange_code(
 async def refresh_access_token(
     client, *, refresh_token: str, client_id: str, client_secret: str
 ) -> DriveGrant:
-    """Mint a fresh access token from the stored refresh token (#1247),
+    """Mint a fresh access token from the stored refresh token,
     through the egress floor (`google_oidc.refresh_grant`).
 
     Google issues no new refresh token on a refresh as a rule, so the stored
@@ -359,7 +359,7 @@ def decode_payload(plaintext: str) -> DrivePayload:
 
 
 async def connect_purpose(conn, *, workspace_id) -> str:
-    """Which state the connect route mints for this WORKSPACE (069:
+    """Which state the connect route mints for this WORKSPACE (workspace Drive grant:
     one Google grant per workspace): ``"connect"`` when it holds no `gdrive`
     credential, ``"reconnect"`` once it does, in any state — so `issue_state`'s
     last-issued-wins retires a stale state per workspace."""
@@ -383,9 +383,9 @@ async def store_credential(
     already holds, in place, on a reconnect (`uq_credential_per_workspace`
     admits one ownerless row per workspace and provider; same id, no gap, no
     second row). Returns the id. A `gdrive` credential names no owner column:
-    the workspace is its owner (069, #1165).
+    the workspace is its owner (workspace Drive grant).
 
-    *granted_by* is the person whose Google account the grant is (091)
+    *granted_by* is the person whose Google account the grant is (`oauth_credentials.granted_by_user_id`)
     — the only one who may browse it (`workspaces.may_browse_drive`). A
     reconnect replaces it with the person who reconnected.
 

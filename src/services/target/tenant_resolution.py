@@ -1,4 +1,4 @@
-"""Neutral tenant resolution: the ONE resolver (#842).
+"""Neutral tenant resolution: the ONE resolver.
 
 Inbound identity (chat id | web session) resolves HERE, once, to the triple
 (user_id, workspace_id, channel_binding_id) — and everything
@@ -26,7 +26,7 @@ Privilege reality, as the tests pin it:
   fail-closes (an empty read is a refusal by name, never a fallback) — the
   tests pin that.
 
-## Shape: async, executor-first, the tier's own (#1028)
+## Shape: async, executor-first, the tier's own
 
 The router that calls this module is async, like every other module in
 `src/services/target/`, and so is this module. It exists once: a second
@@ -47,7 +47,7 @@ from src.exceptions.tenancy import TenantResolutionError
 from src.services.target import bindings
 
 #: Channel vocabulary — `bindings.CHANNELS` is `ck_bindings_channel` verbatim
-#: and this module routes on the same set (#1325).
+#: and this module routes on the same set.
 CHAT_CHANNELS = bindings.CHANNELS
 
 #: workspace_members role ladder, least to greatest.
@@ -77,12 +77,12 @@ async def resolve_chat(executor, channel: str, external_ref: str) -> ResolvedTen
     (distinct reason, because "this chat WAS bound" routes differently from
     "never seen"). An RLS-filtered empty read and a genuinely absent row are
     both refusals. The read goes through the `fn_resolve_binding` door
-    (068), so `svc_ingress` resolves a bound chat pre-context (#854); an
+    (`fn_channel_join` / `fn_channel_leave`), so `svc_ingress` resolves a bound chat pre-context; an
     unknown chat refuses by name.
     """
     if channel not in CHAT_CHANNELS:
         raise TenantResolutionError("unknown_channel", channel)
-    # Through the door (#854): svc_ingress has no pre-context read
+    # Through the door: svc_ingress has no pre-context read
     # of channel_bindings, and the door exposes exactly the one row asked for.
     row = (
         await executor.execute(

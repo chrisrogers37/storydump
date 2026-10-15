@@ -1,5 +1,5 @@
 """The OAuth history choice, from the preview to the applied result, AS THE
-PRODUCTION ROLE (#1644, migration 141).
+PRODUCTION ROLE (OAuth archive choice).
 
 The OAuth choice and its applied result form a matrix of
 entry points against account states. Every row is driven here through the REAL

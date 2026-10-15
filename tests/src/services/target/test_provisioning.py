@@ -61,7 +61,7 @@ class TestAccountRefFrom:
         assert account_ref_from("1" * ACCOUNT_REF_MAX) == "1" * ACCOUNT_REF_MAX
 
     def test_a_non_numeric_reference_is_accepted(self):
-        """`provider_account_ref` carries NO format CHECK (054) and the column
+        """`provider_account_ref` carries NO format CHECK (`accounts_sources_media.py`) and the column
         comment calls it opaque. Rejecting a shape Meta has not shipped yet
         would be this module inventing a constraint the schema declined to
         make."""
@@ -129,7 +129,7 @@ class TestFolderRefFrom:
     @pytest.mark.parametrize("bad", ["X' or 'a'='a", "abc def", "id;drop", "x" * 129])
     def test_an_id_outside_the_adapters_shape_is_refused_at_the_pick(self, bad):
         """The walk splices the id into a Drive `q` string and refuses one
-        outside `FOLDER_ID_RE` (#1256); a pick the adapter would refuse must
+        outside `FOLDER_ID_RE`; a pick the adapter would refuse must
         fail here, not as a source that errors on every sync."""
         with pytest.raises(ProvisioningRefused) as exc:
             folder_ref_from(bad)
@@ -182,7 +182,7 @@ class TestTheRefusalCarriesItsReason:
 
 
 class TestHandleFrom:
-    """The typed-handle path (#1089). Same rule as `account_ref_from`: this is
+    """The typed-handle path. Same rule as `account_ref_from`: this is
     the ONLY place a spelling is normalised, and `uq_ig_account_live` is an
     exact comparison downstream."""
 
@@ -262,7 +262,7 @@ class _AttachExecutor:
 
 
 class TestAttachConnectedIdentityRefusesTheWrongAccount:
-    """A destination is for ONE Instagram account (#1221).
+    """A destination is for ONE Instagram account.
     The UPDATE's WHERE carries the rule; these pin the WHERE's shape and the
     named refusals when nothing moved. The rule against a real database is
     the gate's business."""
@@ -604,7 +604,7 @@ class TestDisableDestination:
         assert retire[1] == {"provider": "ig_login", "target": "acct"}
 
     async def test_a_planned_story_not_yet_served_is_told_about_once(self, monkeypatch):
-        """089: a planned story the removal flags before its time is served
+        """`fn_planned_serve` / `fn_planned_misses`: a planned story the removal flags before its time is served
         will never reach the miss door (it lists no flagged row), so the
         removal tells the chats now, in its own transaction, with the reason
         `account_removed`. A served planned story and a cadence story flagged

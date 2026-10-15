@@ -1,4 +1,4 @@
-"""The marketing waitlist (100): one statement, an INSERT.
+"""The marketing waitlist (`waitlist_entries`): one statement, an INSERT.
 
 The API owns the write. `waitlist_entries` gives `svc_ingress` INSERT and
 nothing else, so :func:`join` cannot read whether an address was already

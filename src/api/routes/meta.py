@@ -1,4 +1,4 @@
-"""Meta's two policy callbacks, as routes. Required for Meta App Review (#410).
+"""Meta's two policy callbacks, as routes. Required for Meta App Review.
 
 Both doors verify a `signed_request` before doing anything else — reading no
 more of the body than that one field needs (`_signed_request`) — and both
@@ -10,8 +10,8 @@ treats them as different events and so do we:
   **Deletes nothing synchronously**; see the module docstring in
   `services/target/meta_callbacks.py` and the runbook for why. With the
   archive's key ring configured the receipt is durable: a row behind a random
-  capability, its cleanup done afterwards by the worker (#1644).
-* `GET  /webhooks/meta/data-deletion/status` — what Meta's returned URL points
+  capability, its cleanup done afterwards by the worker.
+* `GET /webhooks/meta/data-deletion/status` — what Meta's returned URL points
   at, so a person can check a request they made: `in_progress` or `completed`.
 
 Registering the URLs with Meta is a submission step, not a deploy step; this
@@ -108,7 +108,7 @@ def _verified_subject(
     except meta_callbacks.SignedRequestInvalid as exc:
         logger.warning("meta callback rejected: %s", exc)
         raise HTTPException(status_code=400, detail="invalid signed_request")
-    # The instrument for #739: which setting signed this — by name and
+    # The instrument for: which setting signed this — by name and
     # position, never by value. Which Meta app the URLs are registered under
     # is a dashboard fact; this line and one press of Meta's test button
     # answer it. The Instagram secret is tried first, then the Facebook one,
@@ -138,7 +138,7 @@ async def deauthorize(request: Request):
     is not a deletion request, and the one bug worth engineering against here
     is treating it as one.
 
-    The subject is matched through verified identity mappings (142, #1644):
+    The subject is matched through verified identity mappings (`meta_identity_mappings`):
     the (app, subject) a same-token OAuth exchange proved, never
     `provider_account_ref`, which names an account rather than the person
     Meta's id names. Each account's current authorization is revoked only when
@@ -160,7 +160,7 @@ async def deauthorize(request: Request):
     nothing to retry: a subject we hold no credential for is a completed no-op.
     **A miss on the account-reference lookup is logged as "not established"
     rather than "none"**: the lookup reads every workspace through its door
-    (081), but the subject Meta sends names a person while
+    (fleet health functions), but the subject Meta sends names a person while
     `provider_account_ref` names an account — sometimes a provisional
     `manual:<handle>` no Meta id equals — see `resolve_ig_accounts`.
     """
@@ -211,7 +211,7 @@ async def data_deletion(request: Request):
 
     1. **The subject cannot be reliably identified here.** Meta sends an
        app-scoped person id; which accounts it names is what the verified
-       identity mappings record (142), and the request's scope is frozen
+       identity mappings record (`meta_identity_mappings`), and the request's scope is frozen
        against them inside the receipt door.
     2. **The blast radius is not the requester's to spend.** An Instagram
        account lives inside a workspace that may hold other members' content.
@@ -221,8 +221,8 @@ async def data_deletion(request: Request):
        caller must not reach a stronger deletion than the owner's own
        confirmed one.
 
-    **With the archive's key ring configured the receipt is durable** (143,
-    #1644): a tenant-free door records the request under a keyed
+    **With the archive's key ring configured the receipt is durable**:
+    a tenant-free door records the request under a keyed
     fingerprint of its signed payload — never the payload, the subject or a
     secret — freezes which authorizations are in scope, and the response
     carries a fresh random capability, of which the database keeps only the

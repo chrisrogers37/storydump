@@ -1,19 +1,19 @@
 /**
  * The posting schedule, said in words the card can show.
  *
- * `slotLabels` mirrors `fn_next_slot` (`059`): a window of `end - start`
+ * `slotLabels` mirrors `fn_next_slot` (`04_functions.sql`): a window of `end - start`
  * hours (24 when they are equal) split into `postsPerDay` equal parts, the
  * first slot at the window start. The card shows these so "3 posts between
  * 2 PM and 2 AM" reads as "2 PM, 6 PM, 10 PM" — and so a workspace running
  * on UTC sees, in its own hours, why a slot passed when nothing arrived.
  */
 /**
- * The posting window in hours, as `fn_next_slot` (`059`) reads it: `end - start`,
+ * The posting window in hours, as `fn_next_slot` (`04_functions.sql`) reads it: `end - start`,
  * wrapping through midnight, and 24 when the two are equal.
  *
  * Not exported: `slotLabels` and `postingIntervalMinutes` are the two things
  * that answer with it, and the Calendar asks the second of those. It exists
- * as its own function so those two cannot disagree (#1367): a bare
+ * as its own function so those two cannot disagree: a bare
  * `end - start` guarded on `> 0` drops both shapes this handles — a wrap gives
  * a negative, an equal pair gives zero — and the card would read "interval
  * not set" for them. 14 → 2 is the schema DEFAULT for a workspace, so that is

@@ -1,4 +1,4 @@
-"""A repeating story through the command port (#485), EXECUTED as
+"""A repeating story through the command port, EXECUTED as
 `svc_ingress` on the replayed target schema, with the worker's sweeps and the
 reaper as the roles that run them.
 
@@ -6,7 +6,7 @@ What each class pins, and why it is here rather than in a unit test:
 
 - **`schedule_item` stores the rule and computes nothing.** The first
   occurrence is the chosen time, on one of the rule's days; the ledger's
-  trigger (116) makes every later one. A rule's time is kept to the minute.
+  trigger (repeat rules) makes every later one. A rule's time is kept to the minute.
 - **The CHECKs judge a rule, named.** A malformed rule is `invalid_args` with
   the `repeat` fact, and nothing is written; only the database can raise the
   constraint the refusal is matched on.
@@ -450,7 +450,7 @@ class TestCancelAndTheSeries:
     def test_a_stop_while_the_cancel_lands_says_so_on_the_sent_card(self, world):
         """A plain cancel of a sent card, then a stop before the reaper lands
         it: the line the first cancel wrote is restated with the series
-        stopped (#485)."""
+        stopped."""
         w = _ws(world, "card-flag-then-stop")
         story = _story(world, w, rule=DAILY, slot_in_s=-5)
         _serve(world)
@@ -552,7 +552,7 @@ class TestAMissAndTheSeries:
         """A daily story served three days ago and skipped only now: its next
         occurrence is born two days late, while its card was still out. The
         miss sweep ends it with its reason and says nothing, and the one after
-        it follows now (a late miss resumes from now, 116)."""
+        it follows now (the repeat trigger resumes a late miss from now)."""
         w = _ws(world, "born-late")
         story = _story(
             world, w, state="awaiting_approval", rule=DAILY, slot_in_s=-(3 * 86400)
@@ -615,7 +615,7 @@ class TestTheCardAndTheReadSayTheRule:
     )
     def test_a_served_card_says_when_its_series_ended(self, world, verb, args, tail):
         """The card's header keeps its "repeats every …" words, so the line
-        written under it says when the act ended the series (#485). A plain
+        written under it says when the act ended the series. A plain
         cancel ends this story alone, and its series goes on."""
         w = _ws(world, f"ended-{verb}")
         story = _story(world, w, rule=DAILY, slot_in_s=-5)

@@ -1,4 +1,4 @@
-"""The composition root's object graph (#942): what `python -m src.worker`
+"""The composition root's object graph: what `python -m src.worker`
 assembles, tested without connecting anything.
 
 The compose() seam exists exactly so this is checkable: the deployment's
@@ -26,7 +26,7 @@ def test_composition_parks_only_for_a_named_reason():
     """A kind is dead in a bare composition ONLY because something is missing
     and SAYS SO — never silently.
 
-    A hardcoded set of live kinds pins the CURRENT state as correct (#1083): it
+    A hardcoded set of live kinds pins the CURRENT state as correct: it
     fails the moment anyone adds a job kind, passes again the moment they paste
     the name in, and never tests the property it is meant to pin. Such a
     literal exists twice in `test_work_loop.py`, which is how one change can
@@ -38,8 +38,8 @@ def test_composition_parks_only_for_a_named_reason():
     - any OTHER reason marks a seam this deployment did not wire.
 
     The invariant is that those two sets account for EVERY difference between a
-    bare composition and a fully-configured one. A new seam-free kind (#1083's
-    `revoke_workspace_credentials` is one) changes both sides equally and this
+    bare composition and a fully-configured one. A new seam-free kind such as
+    `revoke_workspace_credentials` changes both sides equally and this
     test does not move. A kind that starts parking for no stated reason does.
 
     What it deliberately does not pin: WHICH kinds are live. That would be a
@@ -91,7 +91,7 @@ def test_cloudinary_config_brings_the_transit_reaper_live():
 
 
 def test_the_activation_nudge_is_off_and_off_the_clock_by_default(caplog):
-    """#1481, built off: nothing mints the sweep until it is switched on."""
+    """Built off: nothing mints the sweep until it is switched on."""
     with caplog.at_level(logging.INFO, logger=worker_logger.name):
         app = compose(engine=object(), config=WorkerConfig(), env={})
     assert isinstance(app.registry["activation_nudge_sweep"], Parked)
@@ -101,7 +101,7 @@ def test_the_activation_nudge_is_off_and_off_the_clock_by_default(caplog):
 
 def test_an_armed_activation_nudge_is_on_the_clock_daily_and_says_so(caplog):
     """The arming line is the deploy log's only mark that real people may be
-    emailed, and it carries the cap the sweep runs with (#1653)."""
+    emailed, and it carries the cap the sweep runs with."""
     env = {"RESEND_API_KEY": "re_test", "EMAIL_FROM": "hello@example.com"}
     config = WorkerConfig(
         activation_nudge_enabled=True,
@@ -116,7 +116,7 @@ def test_an_armed_activation_nudge_is_on_the_clock_daily_and_says_so(caplog):
 
 
 def test_a_live_runs_bounds_are_a_small_first_run():
-    """#1653: what one armed day may do. Three emails, because the latch is set
+    """What one armed day may do. Three emails, because the latch is set
     as each is queued, so a provider mistake uses them up; only people who
     signed up in the last 30 days; each idle for 72 hours."""
     config = WorkerConfig()
@@ -126,7 +126,7 @@ def test_a_live_runs_bounds_are_a_small_first_run():
 
 
 def test_the_config_main_runs_with_carries_the_nudges_switch_and_cap():
-    """#1653: the switch reaches the config `main` builds, not only the flag
+    """The switch reaches the config `main` builds, not only the flag
     helper, and so does the cap."""
     origin = "https://app.example"
     default = worker_config_from_env({}, web_app_origin=origin)
@@ -211,7 +211,7 @@ def test_heartbeat_and_lease_numbers_agree():
 
 
 def test_the_late_window_is_one_hour():
-    """#1413: a planned story is still served up to 60 minutes after its time,
+    """A planned story is still served up to 60 minutes after its time,
     and missed out loud past it. A change to the number is a product decision
     this test makes visible."""
     cfg = WorkerConfig()
@@ -455,7 +455,7 @@ class TestTransportComposition:
 
 
 class TestTaskSupervision:
-    """#958: the worker supervises every task it owns: a death is logged
+    """The worker supervises every task it owns: a death is logged
     loudly, stops the worker, and surfaces as a raise — silence is
     structurally impossible."""
 
@@ -590,8 +590,8 @@ class TestSweeperObservables:
 
 class TestPromptSweeperConsumesTheSweep:
     """The sweep's count vocabulary is the sweeper's contract. It has no
-    `failed_no_surface` leg (#1033: the web queue is a surface every workspace
-    has, so "no reachable surface" cannot occur); a sweeper reaching
+    `failed_no_surface` leg: the web queue is a surface every workspace
+    has, so "no reachable surface" cannot occur. A sweeper reaching
     for that key would raise INSIDE its own `except Exception` — the sweep
     itself committed, the counters before the bad read still moved, and the
     only symptom is a "prompt sweep failed" line on every cadence. So the
@@ -622,7 +622,7 @@ class TestPromptSweeperConsumesTheSweep:
 
         class _Config:
             prompt_sweep_seconds = 0.01
-            # The door reads its batch from the config too (#1325);
+            # The door reads its batch from the config too;
             # a stub missing it spins the loop's `except Exception` forever.
             prompt_sweep_limit = 50
             planned_late_seconds = 3600
@@ -646,11 +646,14 @@ class TestPromptSweeperConsumesTheSweep:
         async def fake_sweep(session, *, limit, late_seconds):
             asked.append(("serve", limit, late_seconds))
             stop.set()  # one iteration: both legs run, then the loop sees the stop
-            return {"prompted": 2, "advanced": 1}  # the whole vocabulary (#1033)
+            return {"prompted": 2, "advanced": 1}  # the whole vocabulary
 
         async def fake_misses(session, *, limit, late_seconds):
             asked.append(("miss", limit, late_seconds))
-            return {"missed": 3, "unheard": 1}  # the miss leg's vocabulary (089)
+            return {
+                "missed": 3,
+                "unheard": 1,
+            }  # the miss leg's vocabulary (`fn_planned_serve` / `fn_planned_misses`)
 
         monkeypatch.setattr(worker.prompts_mod, "sweep_due_prompts", fake_sweep)
         monkeypatch.setattr(worker.prompts_mod, "sweep_planned_misses", fake_misses)
@@ -728,7 +731,7 @@ class TestPromptSweeperConsumesTheSweep:
 
 
 class TestThePublishLegIsWired:
-    """#1220: with a Drive adapter and the Cloudinary trio the
+    """With a Drive adapter and the Cloudinary trio the
     publish_pipeline kind is LIVE; without Drive it parks naming media_fetch;
     the Graph adapter is always built and the fetch reads the intent row."""
 
@@ -882,7 +885,7 @@ class TestTheConversionRecordIsReadOnce:
 
 
 class TestTheReconcilerPollIsWired:
-    """#1220: production does not run `poll=None` — the ambiguous
+    """Production does not run `poll=None` — the ambiguous
     ladder asks Meta for the container's status through the Graph adapter."""
 
     def test_compose_supplies_the_poll_seam(self):
@@ -1205,7 +1208,7 @@ def test_the_approval_ttl_default_is_the_documented_number():
 
 
 def test_the_reaper_cadence_and_budget_are_the_documented_numbers():
-    """Both halves of the fixture's reaper row are pinned TO IT (#1329): every
+    """Both halves of the fixture's reaper row are pinned TO IT: every
     expired lease waits for this beat — its serialization key stays held until
     the reaper re-readies it."""
     seconds, budget = _documented_numbers(

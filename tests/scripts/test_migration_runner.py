@@ -394,7 +394,7 @@ class TestSelfManagedTransactions:
     def test_file_with_own_begin_commit_and_post_commit_concurrently(
         self, scratch_db, tmp_path
     ):
-        """The legacy-corpus shape (023): the file manages its own
+        """The legacy-corpus shape (account-scoped settings): the file manages its own
         transaction and follows it with CREATE INDEX CONCURRENTLY. The
         runner must execute it with psql semantics — statement by statement —
         not wrap it in a second transaction."""
@@ -523,7 +523,7 @@ def _apply_in_thread(dsn, migrations_dir):
 
 
 class TestTheLockWaitIsBounded:
-    """#1515: a wrapped file's lock waits are bounded (`LOCK_TIMEOUT`), and a
+    """A wrapped file's lock waits are bounded (`LOCK_TIMEOUT`), and a
     lock-wait failure, and no other, is tried again (`LOCK_RETRY_DELAYS_S`).
 
     A holder reads the table in an open transaction (ACCESS SHARE until it
@@ -662,7 +662,7 @@ class TestManual:
     def test_apply_owes_the_manual_file_and_applies_the_ordinary_ones_above_it(
         self, scratch_db, tmp_path
     ):
-        """THE LOAD-BEARING HALF: with the manual 002 pending, 003 — numbered
+        """THE LOAD-BEARING HALF: with the manual 002 pending, the later DDL file — numbered
         above it — applies and nothing raises. Without the exemption every
         predeploy after the next ordinary file would raise on every push."""
         self._corpus(tmp_path)
@@ -673,8 +673,8 @@ class TestManual:
         assert [m.version for m in report.owed] == [2]
         assert [row[0] for row in fetch_ledger(scratch_db)] == [1, 3]
         assert table_exists(scratch_db, "t_one"), "the manual file must not have run"
-        # THE NEXT DEPLOY, in production's exact shape: an ordinary 004 lands
-        # while 002 is still owed BELOW the head. 004 applies, 002 is owed
+        # THE NEXT DEPLOY, in production's exact shape: a new ordinary file lands
+        # while 002 is still owed BELOW the head. The new ordinary file applies, 002 is owed
         # again, nothing raises.
         write_migration(tmp_path, 4, "CREATE TABLE t_four (id INT);")
         again = apply_pending(scratch_db, tmp_path)
@@ -685,7 +685,7 @@ class TestManual:
     def test_apply_manual_applies_it_below_the_head_with_a_ledger_row(
         self, scratch_db, tmp_path
     ):
-        """THE OTHER HALF: after 003 is the head, `--manual 002` applies 002
+        """THE OTHER HALF: after the later DDL file is the head, `--manual 002` applies 002
         below it — the below-head rule is for files inserted under history by
         mistake, and a gated file is under it by design."""
         self._corpus(tmp_path)

@@ -16,14 +16,14 @@ import type { RepeatRule } from "./repeat";
  * from `awaiting_approval`: Approve (`approve`, and only where the workspace
  * can publish by API — otherwise the port refuses `manual_mode`), Posted
  * myself (`mark_posted`, the manual-mode path), Skip and Reject. A planned
- * story still in `scheduled` gets two more (#1413): Reschedule
+ * story still in `scheduled` gets two more: Reschedule
  * (`reschedule_item`, which moves the same row) and Cancel (`cancel`, which
  * sets an overlay flag the worker honours, so the row reads Cancelling until
  * the reaper closes it). A cadence story in `scheduled` stays read-only:
- * both levers (#1413) are for planned stories only. `autopost_now` is
+ * both levers are for planned stories only. `autopost_now` is
  * unbuilt (501), a command with its own semantics, not a missing entry here.
  *
- * A story that repeats (#485) trades Reschedule for Edit series, which moves
+ * A story that repeats trades Reschedule for Edit series, which moves
  * the series with it; any live one can Stop repeating, a story being cancelled
  * included; and its Cancel asks whether to skip this one or stop the series.
  */
@@ -71,16 +71,16 @@ export type Intent = {
   schedule_slot_at: string;
   /**
    * HISTORY, not the story's position, and still two values. It is the
-   * workspace's mode copied at mint before 110, bounded by 055's
-   * `ck_intent_approval` ('auto', 'manual'), which 110 left as it was; every
-   * story minted since is written 'manual'. Positions are three
+   * approval mode captured at mint, bounded by
+   * `ck_intent_approval` ('auto', 'manual'); every
+   * new story is written 'manual'. Positions are three
    * (`APPROVAL_POSITIONS`), but none of them reaches this column, so widening
    * this type would let it claim a value the database refuses. What approved
    * a story is `approval_rule`.
    */
   approval_mode: "manual" | "auto";
   /**
-   * The rule that approved the story (110): `auto` (YOLO), `item` (the
+   * The rule that approved the story (approval rules): `auto` (YOLO), `item` (the
    * item's Auto-approve) or `returning`. NULL when a person approved it, or
    * while nothing has. Stamped by the approving update and never changed, so
    * a story keeps it through publishing and review.
@@ -93,7 +93,7 @@ export type Intent = {
   entered_state_at: string;
   created_at: string;
   /**
-   * `planned`: a story a person scheduled for a chosen time (#1413).
+   * `planned`: a story a person scheduled for a chosen time.
    * `cadence`: the slot plan's own. Fixed when the row is born.
    */
   origin: "cadence" | "planned";
@@ -105,7 +105,7 @@ export type Intent = {
   tz: string;
   /** Why the story missed its slot, when it did. */
   miss_reason: string | null;
-  /** How a planned story repeats (#485), in the rule's one shape; null for none. */
+  /** How a planned story repeats, in the rule's one shape; null for none. */
   repeat: RepeatRule | null;
   /**
    * An archive item reads `ARCHIVE_ITEM_NAME`: it is stored under that name, and
@@ -153,7 +153,7 @@ export const QUEUE_HREF = "/dashboard/queue";
 export const PLANNED_QUEUE_HREF = `${QUEUE_HREF}?origin=planned`;
 
 /**
- * The id a Queue row carries (#485): its item on its account, the key the one
+ * The id a Queue row carries: its item on its account, the key the one
  * live story of that pair holds (`uq_intent_live_subject`). A series' link
  * still lands once the occurrence it was drawn from has ended and the next has
  * taken its place.
@@ -162,7 +162,7 @@ export function storyAnchor(mediaItemId: string, accountId: string): string {
   return `story-${mediaItemId}-${accountId}`;
 }
 
-/** An item's live story in the Queue's Planned view: where a series' occurrence opens (#485). */
+/** An item's live story in the Queue's Planned view: where a series' occurrence opens. */
 export function plannedStoryHref(mediaItemId: string, accountId: string): string {
   return `${PLANNED_QUEUE_HREF}#${storyAnchor(mediaItemId, accountId)}`;
 }
@@ -175,8 +175,7 @@ export function queueOriginFilter(param: unknown): "planned" | null {
 /**
  * The intent-keyed commands the web adapter offers — the ones the queue
  * renders a button and a refusal sentence for, keyed on the intent so a
- * double-click replays. `cancel` is one of them, for planned stories (#1413;
- * #1033). `reschedule_item` is not here: moving a story twice is two acts, so
+ * double-click replays. `cancel` is one of them, for planned stories (*). `reschedule_item` is not here: moving a story twice is two acts, so
  * it is keyed per submission (`@/lib/commands`). The port re-validates the
  * name, the role floor and the transition; this list decides what the web tier
  * fronts, nothing more.
@@ -195,8 +194,8 @@ export type QueueCommand = (typeof QUEUE_COMMANDS)[number];
 /**
  * What a press in the Queue can send: the approval card's four, the review
  * card's three (a `review_required` intent is the workspace's to
- * resolve), a planned story's two (#1413), and a repeating story's three
- * (#485). An action is what a press sends — a row's button, or an answer to a
+ * resolve), a planned story's two, and a repeating story's three
+ *. An action is what a press sends — a row's button, or an answer to a
  * button's question, as Stop the series answers Cancel's; a command is what
  * the port runs — the three review actions are ONE command with the
  * resolution in the body, and Reschedule sends `reschedule_item`.
@@ -313,14 +312,14 @@ export type ActionsInput = Pick<Intent, "state"> &
  * rung the port can only refuse it); Post again needs the API to publish;
  * Give up is offered even while a cancel is pending, because it IS the
  * cancel. A planned story still in `scheduled` can be rescheduled or
- * cancelled (#1413) — the port allows the move nowhere else. A story whose
+ * cancelled — the port allows the move nowhere else. A story whose
  * item carries a link to add by hand gets no Approve: an app cannot attach a
  * link to a story it publishes, so such a story is posted by hand. The
  * approval card's Post now follows the same rule. Post again on a review card
  * publishes the same way and is offered whatever the link. Every other state
  * renders read-only with its badge.
  *
- * A repeating story (#485) offers Edit series in Reschedule's place, and,
+ * A repeating story offers Edit series in Reschedule's place, and,
  * while it lives, Stop repeating: a cancel landing included, since clearing a
  * rule posts nothing and the port allows it.
  */

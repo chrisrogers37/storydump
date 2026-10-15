@@ -1,11 +1,10 @@
-"""The jobs service: claim, heartbeat, and lease-token CAS finalization
-(#859).
+"""The jobs service: claim, heartbeat, and lease-token CAS finalization.
 
 A deliberately thin layer over the job machinery the schema defines: the
-DATABASE is the authority. Migration `056` shipped the `jobs` table with the
+DATABASE is the authority. `machinery.py` defines the `jobs` table with the
 kind registry, the pairing equivalence, and `uq_jobs_serialized_lease` — THE
 serialization guard ("two leased jobs with one key are impossible by
-constraint, not by claim-query discipline"). Migration `059` shipped the two
+constraint, not by claim-query discipline"). `04_functions.sql` defines the two
 `SECURITY DEFINER` doors this module calls: `fn_claim_job` (the claim
 query, `FOR UPDATE SKIP LOCKED`, `LIMIT 1`, token minted and `attempts`
 incremented at claim time) and `fn_extend_leases` (the heartbeat UPDATE,
@@ -41,7 +40,7 @@ needed here:
   pass the claim query's ``NOT EXISTS`` before either commits update two
   different `ready` rows sharing a key; the second hits
   `uq_jobs_serialized_lease` and gets `unique_violation` — it is REFUSED, not
-  told it won (the #883 failure shape, prevented here by an index rather than
+  told it won (the failure shape, prevented here by an index rather than
   a trigger). :func:`claim_job` rolls back and retries, and the retry is
   naturally clean: the winner's committed lease now trips the ``NOT
   EXISTS``, so the key is excluded without any bookkeeping (the retry
@@ -50,30 +49,30 @@ needed here:
 * **A stale owner cannot finalize.** Re-claiming after lease expiry mints a
   fresh `lease_token`, so the previous owner's CAS matches zero rows — the
   WHERE fails on the token, which is why this rowcount CAN discriminate. A
-  predicate miss reports `rows=0` here; a self-transition no-op (the #883
+  predicate miss reports `rows=0` here; a self-transition no-op (the
   shape) reports `rows=1`.
 * **Expiry recovery is the reaper's, not ours.** `fn_reaper_sweep`'s first leg
   re-readies expired leases (liveness-priority, budget-limited). This module
-  does not duplicate it; the clock revives its own singletons' leases (084),
+  does not duplicate it; the clock revives its own singletons' leases (`fn_clock_tick`),
   the reaper's among them. `fn_reaper_sweep`'s last leg ends a
-  `ready` job past its `deadline_at` when a sweep re-mints its kind (086):
+  `ready` job past its `deadline_at` when a sweep re-mints its kind (`fn_reaper_sweep` deadline leg):
   `budget_exhausted` below is only ever asked after a run has
   failed, so without that leg a job nothing claims would never reach its
   deadline. A deferral carries the deadline with it (`reschedule_job`).
 * **`jobs` has NO transition guard, and this contract is written against
-  that fact** (#883; the gate pins the absence as a tripwire). What makes
+  that fact** (the gate pins the absence as a tripwire). What makes
   that safe is the MECHANISM on each concurrency-bearing edge, not any
-  classification of the table (#887): `ready → leased` is guarded by a
+  classification of the table: `ready → leased` is guarded by a
   partial UNIQUE INDEX — writer-independent, so no trigger needs to be the
   authority on that edge — and `leased → terminal` by the token+state CAS,
   where only a WRONG caller (a stale owner) can be misled, about its own
   staleness: a far weaker failure than a correct caller misled about its
-  own success (the #883 shape). This argument is PER-EDGE and does not
+  own success (the shape). This argument is PER-EDGE and does not
   extend to a table lacking both mechanisms — `channel_outbox` has
   neither, and must build or justify its own. (The bookkeeping rule —
   never the authority on whether an external effect happened — is
   containment of one proposition, not the carrier of this conclusion.)
-  No guard is added as defense in depth (#887).
+  No guard is added as defense in depth.
 
 Every operational number (lease duration, heartbeat interval, per-workspace
 lane cap) arrives as a parameter — callers read config and pass values (the
@@ -133,7 +132,7 @@ LANE_BUDGETS: dict[str, tuple[int, int]] = {
     "bulk": (5, 6 * 3600),
 }
 #: The serialization key of a binding's sender job: one live sender per
-#: binding, and `work_loop` parses the binding id back off it (#1325).
+#: binding, and `work_loop` parses the binding id back off it.
 SENDER_KEY_PREFIX = "tg:"
 #: `enqueue(deadline_seconds=NO_DEADLINE)`: the job carries no deadline (`deadline_at`
 #: NULL) — for a kind whose ceiling is its own, like the publish pipeline, whose
@@ -246,7 +245,7 @@ async def finalize_job(session, job_id, lease_token, terminal_state: str) -> Non
     terminal rows deliberately KEEP their token as the record of who
     finalized them, so without ``AND state = 'leased'`` a double-finalize (a
     lost commit ack, a client retry) would match the terminal row and report
-    ``rows=1`` — the #883 phantom-win shape reappearing one table over. With
+    ``rows=1`` — the phantom-win shape reappearing one table over. With
     it, zero rows means stale token OR already-terminal, and both mean the
     same thing to the caller: abort, you do not own this job.
     """
@@ -380,7 +379,7 @@ async def mint_publish_job(
     dry_run: bool,
 ) -> None:
     """The `publish_pipeline` job for a story entering the ladder: the one mint
-    for a person's `approve`, the serve step's automatic approval (#1477),
+    for a person's `approve`, the serve step's automatic approval,
     `resolve_review` and a give-up that leaves a transit copy
     (`command_executors._give_up`).
     """
@@ -420,7 +419,7 @@ async def reschedule_job(
     A deferral also carries the job's deadline: `deadline_at` moves by as much
     as `run_at` does (both SET expressions read the row as it was), so a park,
     a pacing wait or a budget deferral keeps the job's slack: both the
-    reaper's deadline leg (086, #1429) and `budget_exhausted` measure from the
+    reaper's deadline leg (`fn_reaper_sweep` deadline leg) and `budget_exhausted` measure from the
     moved deadline. A retryable failure keeps its deadline, as it keeps its
     attempt.
     """
@@ -452,8 +451,8 @@ async def wait_or_stop(event, timeout_seconds: float) -> bool:
     The 3.10-safe form of the wait-with-deadline idiom. Neither of the obvious
     spellings works here: `asyncio.timeout` is 3.11+ (the repo floor is 3.10,
     where it raises `AttributeError` and the `lease-heartbeat` task dies), and
-    `wait_for(event.wait(), ...)` leaks an unawaited coroutine under cancel
-    races (#958). Owning the waiter task and always reaping it is leak-free on
+    `wait_for(event.wait(),...)` leaks an unawaited coroutine under cancel
+    races. Owning the waiter task and always reaping it is leak-free on
     every supported version.
     """
     waiter = asyncio.ensure_future(event.wait())

@@ -907,7 +907,7 @@ async def test_posted_rule_archive_card_sends_text_outcome_without_selected_fetc
     assert result["state"] == "sent" and poller.sent == 1 and poller.deferred == 0
     assert len(sent) == 1 and sent[0][0].endswith("/sendMessage")
     assert card["outcome_text"] in sent[0][1]["text"]
-    # The settled card goes out with Configure alone (#1477).
+    # The settled card goes out with Configure alone.
     assert sent[0][1]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "⚙️ Configure", "callback_data": f"v1:cfg:{intent}"}]
@@ -1186,7 +1186,7 @@ async def test_selected_discovery_owner_has_only_required_archive_read_grants(
                 ),
                 {"table": table},
             )
-        # 144: the redaction door, which svc_maintenance owns, deletes the intent
+        # archive lifecycle cleanup: the redaction door, which svc_maintenance owns, deletes the intent
         # provenance of fenced generations; the assets stay read-only.
         delete = "SELECT has_table_privilege('svc_maintenance',:table,'DELETE')"
         assert await conn.scalar(text(delete), {"table": "instagram_intent_provenance"})

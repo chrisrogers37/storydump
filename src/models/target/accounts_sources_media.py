@@ -1,31 +1,9 @@
-"""The accounts, sources and media models (migration 054).
+"""The accounts, sources and media table definitions.
 
-The mirror of `054_accounts_sources_media_tables.sql`, on the same terms
-`identity_and_tenancy` states: these are not an independent design, they are
-the second side of the parity gate. `scripts/schema_parity.py`
-requires the two sides equal on tables, columns (type + nullability), CHECK
-constraints (by name AND normalized definition), uniqueness semantics and
-foreign keys.
-
-**Triggers and RLS are deliberately absent**, as in `identity_and_tenancy`:
-the comparator is relation-scoped and reads neither, so restating the six
-`tg_touch_*` triggers here would be an unchecked second copy. The database
-owns `updated_at`.
-
-**Composite foreign keys are the shape to notice.** Every FK here from one
-tenant table to another is a composite `(workspace_id, <id>)` reference rather
-than a plain single-column one — for example `oauth_credentials` to both
-`ig_accounts` and `media_sources`, `media_items` to `media_sources`, and
-`post_locks` to both `media_items` and `ig_accounts`. That is the
-tenant-integrity device: a composite FK makes a cross-workspace row
-unrepresentable at the schema level rather than only forbidden by policy, which
-is why each parent carries a `UNIQUE (workspace_id, id)` that exists solely to
-be their target. Rendering one as a single-column FK would still create a
-working schema and would be a red parity test, which is the point.
-
-**`provider_quarantine` has no surrogate key** — its primary key is the
-composite `(workspace_id, scope_ref)`, so it is the one table here that does
-not call `pk()`. Its `workspace_id` is both the tenant key and half the PK.
+`ddl.build()` creates these tables through `TargetBase.metadata`. Composite
+`(workspace_id, id)` foreign keys prevent references across workspaces.
+`provider_quarantine` uses `(workspace_id, scope_ref)` as its primary key.
+Database triggers and row policies live in `src/models/target/ddl/`.
 """
 
 from sqlalchemy import (
@@ -73,10 +51,10 @@ class IgAccount(TargetBase):
     next_slot_at = Column(TZ, nullable=True)
     last_posted_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
-    # When the reauth-prompt clock leg last minted for this account (062);
+    # When the reauth-prompt clock leg last minted for this account (`fn_clock_tick` reauthentication leg);
     # NULL = never prompted. Stamped at mint, symmetric with next_slot_at.
     last_reauth_prompt_at = Column(TZ, nullable=True)
-    # When a slot last found no media for this account and said so (066).
+    # When a slot last found no media for this account and said so (`ig_accounts.last_no_media_notice_at`).
     # NULL = never told. Per-ACCOUNT, not per-workspace: two accounts in one
     # workspace starve independently, so a workspace-keyed marker would let
     # the first one's notice silence the second one's first notice.
@@ -90,8 +68,8 @@ class IgAccount(TargetBase):
         CheckConstraint("posts_per_day BETWEEN 1 AND 50", name="ck_iga_ppd"),
         CheckConstraint("posting_hours_start BETWEEN 0 AND 23", name="ck_iga_hs"),
         CheckConstraint("posting_hours_end BETWEEN 0 AND 23", name="ck_iga_he"),
-        # Calls 052's fn_safe_tz. A CHECK naming a missing function is a hard
-        # error, so create_all against a database without 052 cannot run.
+        # Calls `trg_touch_updated_at` / `fn_safe_tz`'s fn_safe_tz. A CHECK naming a missing function is a hard
+        # error, so create_all against a database without `trg_touch_updated_at` / `fn_safe_tz` cannot run.
         CheckConstraint("tz IS NULL OR fn_safe_tz(tz) = tz", name="ck_iga_tz_valid"),
         # Exists to be a composite-FK target, not for its own sake.
         UniqueConstraint("workspace_id", "id", name="uq_ig_accounts_ws_id"),
@@ -159,7 +137,7 @@ class MediaSource(TargetBase):
     last_sync_success_at = Column(TZ, nullable=True)
     alerted_at = Column(TZ, nullable=True)
     created_at, updated_at = timestamps()
-    # 110: the folder's own approval position; NULL is the workspace's.
+    # approval rules: the folder's own approval position; NULL is the workspace's.
     approval_mode = Column(Text, nullable=True)
     origin_ig_account_id = Column(UUID(as_uuid=True), nullable=True)
     source_use_epoch = Column(BigInteger, nullable=False, server_default=text("0"))
@@ -228,7 +206,7 @@ class MediaSource(TargetBase):
 class OAuthCredential(TargetBase):
     """One encrypted credential payload. An `ig_login` credential is owned by
     exactly one ig_account; a `gdrive` credential is owned by the WORKSPACE
-    (069, #1165 — one Google grant per workspace, folders picked under it) and
+    (workspace Drive grant — one Google grant per workspace, folders picked under it) and
     names no owner column. `ck_credentials_one_owner` is provider-conditional,
     and the two partial unique indexes scope liveness per owner kind."""
 
@@ -246,8 +224,8 @@ class OAuthCredential(TargetBase):
     next_refresh_at = Column(TZ, nullable=True)
     state = Column(Text, nullable=False, server_default=text("'active'"))
     created_at, updated_at = timestamps()
-    #: Whose Google account a `gdrive` grant is (091): only they browse it.
-    #: NULL for `ig_login` and for every Drive grant made before 091.
+    #: Whose Google account a `gdrive` grant is (`oauth_credentials.granted_by_user_id`): only they browse it.
+    #: NULL for `ig_login` and for a Drive grant with no recorded granter.
     granted_by_user_id = fk("users.id", "SET NULL", nullable=True)
 
     __table_args__ = (
@@ -260,7 +238,7 @@ class OAuthCredential(TargetBase):
         CheckConstraint(
             "state IN ('active','expired','revoked')", name="ck_credentials_state"
         ),
-        # 069 (#1165): provider-conditional. An `ig_login` credential names its
+        # workspace Drive grant: provider-conditional. An `ig_login` credential names its
         # account; a `gdrive` credential names nothing — the workspace is its owner.
         CheckConstraint(
             "CASE provider"
@@ -335,11 +313,11 @@ class MediaItem(TargetBase):
     created_at, updated_at = timestamps()
     folder_path = Column(
         Text, nullable=True
-    )  # 070: the folder's path under the connected folder
+    )  # `media_items.folder_path`: the folder's path under the connected folder
     last_listed_at = Column(
         TZ, nullable=True
-    )  # 105: when a walk of its folder last listed the file
-    # 110: the item's Auto-approve flag; false until a member sets it.
+    )  # media_items listing state: when a walk of its folder last listed the file
+    # approval rules: the item's Auto-approve flag; false until a member sets it.
     auto_approve = Column(Boolean, nullable=False, server_default=text("false"))
     source_data_generation_id = Column(UUID(as_uuid=True), nullable=True)
     source_projection_redacted = Column(
@@ -405,9 +383,8 @@ class PostLock(TargetBase):
     ig_account_id = Column(UUID(as_uuid=True), nullable=True)
     kind = Column(Text, nullable=False)
     expires_at = Column(TZ, nullable=True)
-    # No FK: post_intents lands in migration 055, and a reference to a table
-    # that does not exist yet would not be a stream prefix. The migration
-    # declares none here.
+    # No FK: the lock records which intent created it without constraining
+    # the lifetime of that intent.
     created_by_intent_id = Column(UUID(as_uuid=True), nullable=True)
     created_by_user_id = fk("users.id", "SET NULL", nullable=True)
     created_at, updated_at = timestamps()

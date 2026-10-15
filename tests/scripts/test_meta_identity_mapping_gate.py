@@ -1,5 +1,5 @@
 """Verified Meta identity mappings through the real Instagram callback, as the
-production role (#1644, migration 142).
+production role (`meta_identity_mappings`).
 
 The OAuth gate's world: the real app on the replayed target schema, connected
 as `svc_ingress`, Instagram the only stub (`exchange_code` hands back the grant

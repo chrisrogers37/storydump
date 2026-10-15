@@ -1,13 +1,13 @@
-"""Gate — channel outbox + Telegram sender (#861).
+"""Gate — channel outbox + Telegram sender.
 
 *"Stopped-sender and lost-ack injections strand nothing; duplicate sends
 bounded exactly as the policy states (≤1 extra notification; prompts converge
 on supersede)."*
 
 THE HAZARD THE OUTBOX AND SENDER CLOSE. `channel_outbox` carries no unique index
-and no lease token (#886), so the argument that makes `jobs` safe does NOT
-transfer (#887): `jobs` has both and this table has neither. An outbox exists to
-make a send happen exactly once, so #883's failure — two writers both told they
+and no lease token, so the argument that makes `jobs` safe does NOT
+transfer: `jobs` has both and this table has neither. An outbox exists to
+make a send happen exactly once, so a failure — two writers both told they
 won — reads here as the machine believing it sent something it did not, or sending
 twice while believing it sent once.
 
@@ -20,7 +20,7 @@ real database as the real `svc_worker` login:
    rows rather than being handed a phantom win — `TestTheClaimIsSingleWinner`,
    `TestAStaleSenderCannotOverwriteALiveOne`.
 
-Concurrency rules (#883/#890), all load-bearing:
+Concurrency rules, all exercised by the tests:
 
 * Every race runs on REAL concurrent connections at **READ COMMITTED**,
   asserted in its own test — a race test can pass at REPEATABLE READ while
@@ -28,7 +28,7 @@ Concurrency rules (#883/#890), all load-bearing:
   level proves nothing about production.
 * No refusal is inferred from a bare rowcount alone. Where rowcount IS the
   discriminator, the docstring says why it can be: a predicate miss on a
-  column the winner changed, not #883's self-transition no-op.
+  column the winner changed, rather than a self-transition no-op.
 * Every refusal carries a positive control — the row being refused exists and
   is visible to the refusing connection.
 * Every guard is proven load-bearing by removing it and watching the refusal
@@ -65,7 +65,7 @@ CHAT_LIMIT, CHAT_WINDOW_S = 20, 60
 GLOBAL_LIMIT, GLOBAL_WINDOW_S = 30, 1
 
 #: The claim CAS, as a template so the unguarded variant is the SAME statement
-#: minus its clause rather than string surgery on it (the #890 idiom).
+#: minus its clause rather than string surgery on it (the idiom).
 _CLAIM_TEMPLATE = (
     "UPDATE channel_outbox SET state = 'sending', attempts = attempts + 1"
     " WHERE id = (SELECT id FROM channel_outbox"
@@ -76,7 +76,7 @@ _CLAIM_TEMPLATE = (
 CLAIM_SQL = _CLAIM_TEMPLATE.format(guard=" AND state = 'pending'")
 UNGUARDED_CLAIM_SQL = _CLAIM_TEMPLATE.format(guard="")
 
-#: `uq_jobs_serialized_lease`, verbatim from `056` — re-added after its drop.
+#: `uq_jobs_serialized_lease`, verbatim from `machinery.py` — re-added after its drop.
 UQ_LEASE_SQL = (
     "CREATE UNIQUE INDEX uq_jobs_serialized_lease ON jobs (serialization_key)"
     " WHERE state = 'leased'"
@@ -399,7 +399,7 @@ async def _run_worker(outbox_db, transport, done, *, after_sweeps=0):
 
 class TestTheLevelIsReadCommitted:
     """Pinned as a fact. Every claim below holds at the level production runs,
-    and most of these proofs keep passing at stricter levels (#890) — so without
+    and most of these proofs keep passing at stricter levels — so without
     this they could silently stop describing production."""
 
     def test_worker_connections_run_read_committed(self, outbox_db):
@@ -415,7 +415,7 @@ class TestTheLevelIsReadCommitted:
 
 
 class TestOneSenderPerBinding:
-    """Mechanism 1, for a table with no unique index or lease token (#886/#887).
+    """Mechanism 1, for a table with no unique index or lease token.
 
     `channel_outbox` needs no guard of its own for concurrent senders because
     the SENDER is serialized: `deliver_outbox` keys on `tg:<binding_id>` and
@@ -586,7 +586,7 @@ class TestTheClaimIsSingleWinner:
 
         Driven directly rather than through the race, because SKIP LOCKED
         hides the predicate — the interesting case is a claimer whose
-        candidate row moved underneath it, which is #883's exact window.
+        candidate row changes between selection and the state update.
         """
         outbox_id = _enqueue(outbox_db)
         _owner_exec(
@@ -1145,7 +1145,7 @@ class TestTheLostAckPolicyIsBoundedPerKind:
     async def test_a_live_senders_lost_answer_is_resolved_after_the_backoff(
         self, outbox_db
     ):
-        """`settle` marks a lost answer `ambiguous` (#1297). The binding's next
+        """`settle` marks a lost answer `ambiguous`. The binding's next
         claim resolves the rows that have waited the backoff — the aged card is
         resent (pending, then claimed), the fresh one is left for a later tick,
         and a settled row is never touched."""
@@ -1213,7 +1213,7 @@ class TestTheLostAckPolicyIsBoundedPerKind:
 
         binding = _new_binding(outbox_db)
         # The newer-edit check joins on the intent (it rides `ix_outbox_intent`,
-        # 072): the rows carry the chain's intent, as every card edit does.
+        # `ix_outbox_intent`): the rows carry the chain's intent, as every card edit does.
         ((intent,),) = _owner_exec(
             outbox_db,
             "SELECT id FROM post_intents WHERE workspace_id = %s LIMIT 1",
@@ -1524,7 +1524,7 @@ class TestAStaleSenderCannotOverwriteALiveOne:
 
     `deliver` never commits: the outbox write and `finalize_job` commit
     together, so a stale owner's fenced finalization takes its outbox write
-    with it. That is a SERVICE discipline, which is exactly the #883 shape — so
+    with it. That is a SERVICE discipline, which is exactly the shape — so
     it is exercised, not documented.
     """
 
@@ -1700,7 +1700,7 @@ class TestThePollerReplacesTheRedisWakeUp:
     The loop production runs is `work_loop.deliver_outbox`'s hold: it builds a
     poller and drives `tick` on the cadence until `sender_hold_seconds`, and
     the sweep re-mints the job. The drain below is driven the way the executor
-    drives it (#1325).
+    drives it.
     """
 
     def _factory(self, outbox_db):
@@ -1813,7 +1813,7 @@ class TestThePollerReplacesTheRedisWakeUp:
         assert poller.deferred == 1 and poller.sent == 1
         # The paced tick's claim was rolled back with its session: the row is
         # still `pending`, un-attempted, for the next window — never stranded
-        # `sending` for `recover_stranded` to write off (#1271).
+        # `sending` for `recover_stranded` to write off.
         assert _state(outbox_db, second_id) == ("pending", 0, None)
         assert poller.consecutive_failures == 0, (
             "a paced tick moved the failure counter — a chat at its budget"
@@ -1877,7 +1877,7 @@ class TestTheSenderCommitsBeforeItSpeaks:
             assert _state(outbox_db, outbox_id)[0] == "sending"
             # The `tg_global` row is FREE: a debit from another transaction
             # returns at once (a row lock held across the send would block it
-            # for the whole upload — #1260).
+            # for the whole upload —).
             async with factory() as other:
                 await other.execute(
                     __import__("sqlalchemy").text("SET LOCAL statement_timeout = '2s'")
@@ -1991,7 +1991,7 @@ class TestTheSenderCommitsBeforeItSpeaks:
     @pytest.mark.asyncio
     async def test_an_idle_poller_spends_no_pacing_budget(self, outbox_db):
         """Empty ticks debit nothing: a silent chat keeps its whole window for
-        the card that arrives (#1271)."""
+        the card that arrives."""
         from src.services.target.outbox import OutboxPoller
 
         binding = _new_binding(outbox_db)
@@ -2029,7 +2029,7 @@ class TestTheSenderCommitsBeforeItSpeaks:
 class TestAFloodLimitWritesADurableHold:
     """A 429 returns the row to `pending` and spends the
     pacing rows for Telegram's `retry_after` in ONE statement, so every
-    replica's sender defers until it passes — no in-task sleep (#1035),
+    replica's sender defers until it passes — no in-task sleep,
     no ambiguous row, no attempt lost to the provider's own limit."""
 
     def _engine(self, outbox_db):
@@ -2404,9 +2404,10 @@ class TestACardIsRenderedAgainAtClaimTime:
 
 
 class TestTheSenderFollowsAGroupThatMoved:
-    """#743's backstop on the real worker: a group that became a supergroup
-    and whose migration notice never reached the ingress is found by its next
-    delivery — Telegram refuses the send to the old id and names the new one.
+    """The sender discovers a group that becomes a supergroup.
+
+    If its migration notice never reaches the ingress, the next delivery
+    discovers the new id: Telegram refuses the old id and names the new one.
     The binding follows, and the chat keeps receiving: the worker's own sender
     sweep mints the binding's next sender, which delivers to the successor.
     (The row that discovered the move is the settle taxonomy's — a gone

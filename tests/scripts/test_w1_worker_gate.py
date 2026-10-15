@@ -1,4 +1,4 @@
-"""Gate — the worker composition against the real machinery (#942, #903).
+"""Gate — the worker composition against the real machinery.
 
 The unit tier proves the loop's logic against fakes; this proves the assembled
 thing against the replayed schema and the real doors: fn_claim_job grants the
@@ -147,7 +147,7 @@ class TestPlanSlotEndToEnd:
     async def test_a_mint_whose_runway_notice_reaches_nobody_still_succeeds(
         self, world_db, sync_conn
     ):
-        """The runway notice never decides the slot (#1478), end to end at the
+        """The runway notice never decides the slot, end to end at the
         worker's default level. Minting the world's one free file leaves the
         account no content, so the notice is owed, and the workspace has no
         push binding to hear it. The mint is the job's work, so the job
@@ -234,9 +234,9 @@ class TestParkingOnTheRealMachinery:
     async def test_a_parked_job_carries_its_deadline_past_the_reaper(
         self, world_db, sync_conn
     ):
-        """#1429: a deferral moves the job's deadline with its `run_at`, so the
+        """A deferral moves the job's deadline with its `run_at`, so the
         parking contract's "never finalized dead" survives the reaper's
-        deadline leg (086). Seeded a minute past its deadline, the parked job's
+        deadline leg (`fn_reaper_sweep` deadline leg). Seeded a minute past its deadline, the parked job's
         deadline moves exactly as far as its `run_at`, and a sweep leaves it
         `ready`."""
         chain = seed_workspace_chain(sync_conn, "w1parkdl")
@@ -396,14 +396,14 @@ class TestTheWorkerIdlesVisibly:
         assert app.clock is not None and app.clock.elected is True
         assert app.clock.ticks >= 3, "the clock must tick on its cadence"
         # `ticks` counts ATTEMPTS — it increments before the try, so a clock
-        # failing every single tick satisfies the line above (#1074). The
+        # failing every single tick satisfies the line above. The
         # counter that moves when the clock is broken is this one, and the
         # heartbeat two lines down was already asserted this way while the
         # clock was not.
         assert app.clock.consecutive_failures == 0, (
             "the clock ticked but every tick failed — `ticks` cannot see this"
         )
-        # Positive controls (#958): counters whose ABSENCE of movement
+        # Positive controls: counters whose ABSENCE of movement
         # is a failure — a dead task cannot hide behind a quiet pass.
         assert app.sweeper is not None and app.sweeper.sweeps >= 2, (
             "the sender sweeper must be alive and sweeping for the whole run"
@@ -420,7 +420,7 @@ class TestTheWorkerIdlesVisibly:
             "the executor-less kind must park, not vanish"
         )
         assert app.heartbeat.consecutive_failures == 0
-        # The event-loop watchdog rides the run and ends with it (#1664): the
+        # The event-loop watchdog rides the run and ends with it: the
         # same positive control. A thread still armed here would outlive the
         # worker it guards.
         assert app.watchdog is not None and app.watchdog.beats >= 3, (
@@ -430,7 +430,7 @@ class TestTheWorkerIdlesVisibly:
 
         with sync_conn.cursor() as cur:
             # The slot was due when it was minted, so the fast path prompted
-            # it in the minting pass — and the web queue (#1033) is a
+            # it in the minting pass — and the web queue is a
             # surface every workspace has, so a workspace with no push binding
             # (this one) still advances to `awaiting_approval` there and then.
             cur.execute(
@@ -447,7 +447,7 @@ class TestTheWorkerIdlesVisibly:
 
 
 class TestJsonbTimestampWidths:
-    """#969 — deterministic by construction: Postgres strips trailing zeros
+    """— deterministic by construction: Postgres strips trailing zeros
     rendering timestamptz into jsonb, and CPython's fromisoformat is version-
     sensitive about fraction widths (3.10, the declared floor, rejects most
     of them), so a parse in Python strands ticks on backoff. The resolve query
@@ -500,7 +500,7 @@ class TestJsonbTimestampWidths:
             # Assert each CONSTRUCTED slot minted exactly once — the seed
             # chain carries its own intent, so a bare count would be off-by-one.
             # No state predicate: every slot here is in the past, so the
-            # fast path prompts and advances each intent (#1033) in the
+            # fast path prompts and advances each intent in the
             # minting pass; the question this test asks is whether it MINTED.
             for width in self.WIDTHS:
                 cur.execute(
@@ -1081,7 +1081,7 @@ class TestNoLeaseExpiresDuringAWait:
         assert claimed is True
         assert wl.fenced == 0 and wl.processed == 1
         assert app.heartbeat.beats >= 4, app.heartbeat.beats
-        # THE proof (#1291): `fn_extend_leases` extends only a lease with
+        # THE proof: `fn_extend_leases` extends only a lease with
         # `locked_until > now()`, so a lease that expired mid-run makes a
         # SHORT beat — none means every beat found the lease alive, i.e. it
         # was extended before the 3 s ran out.

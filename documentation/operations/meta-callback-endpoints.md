@@ -48,7 +48,7 @@ Three reasons it must not delete inline, in increasing order of weight:
    **account** rather than a person (sometimes a provisional `manual:<handle>` that no
    Meta id will ever equal). The only proof of which account an app-scoped id belongs
    to is the OAuth exchange itself, which reads `/me` with the new token and says both.
-   `meta_identity_mappings` (142) records that proof, bound to the credential and the
+   `meta_identity_mappings` (`meta_identity_mappings`) records that proof, bound to the credential and the
    authorization it was verified for, where the archive is live and, for older
    credentials, once reconciliation backfills it. Anywhere else the subject cannot be
    tied to anything.
@@ -75,7 +75,7 @@ stays the owner's confirmed act through the existing door.
    secret and the subject, logged and not stored, and the status page says only that
    the request was received. Nothing else happens.
 3. **With the key ring**, the subject must be 1–64 digits (else `400`), and
-   `fn_meta_deletion_receive` (143), a tenant-free SECURITY DEFINER door, takes over:
+   `fn_meta_deletion_receive` (Meta deletion receipt functions), a tenant-free SECURITY DEFINER door, takes over:
    - **Fingerprint.** The receipt stores a keyed digest of the signed payload segment,
      one per ring version, never the payload, the subject or a secret. An exact
      retry matches it under any version and is the same receipt behind a new
@@ -118,7 +118,7 @@ stays the owner's confirmed act through the existing door.
      the worker asks the provider nothing: a scope that holds no unresolved upload
      completes, and one that does waits, then goes to review after the hour.
    - **C. Redact**, all or nothing, through `fn_archive_redact_generation_records`
-     (144): provenance and artifact records, then the bound stories' queued card
+     (archive lifecycle cleanup): provenance and artifact records, then the bound stories' queued card
      payloads (once those stories are terminal and nothing is owed delivery), then
      the observations and shared item fields.
    - **D. Recount and report.** Every category of the completion predicate is counted
@@ -160,7 +160,7 @@ A scope's own states are `pending`, `cleaning`, `held`, `completed` and
 
 The subject is matched through verified identity mappings: the (app identity, subject)
 a same-token OAuth exchange proved, never `provider_account_ref`
-(`fn_meta_subject_mappings`, 142). Each mapped workspace runs in its own transaction
+(`fn_meta_subject_mappings`, `meta_identity_mappings`). Each mapped workspace runs in its own transaction
 under its tenant and the `system` actor, and each account's current authorization is
 classified the way a deletion classifies it. Only an in-scope current authorization is
 revoked:
@@ -209,7 +209,7 @@ Instagram accounts the person authorized. A remote erasure is never counted as d
 **The routes issue no SQL at all, and `meta_callbacks` issues no SQL `DELETE`.** AST
 tests (`tests/src/api/test_meta_callbacks.py`) pin both, and that the module's one
 credential statement is an `UPDATE`. The rows that are deleted are deleted in the
-worker, by the redaction door (144) and the catalog's redaction.
+worker, by the redaction door (archive lifecycle cleanup) and the catalog's redaction.
 
 ## What a completed deletion leaves
 
@@ -238,13 +238,13 @@ cannot discover ownership through an ordinary unscoped table query. Narrow SECUR
 DEFINER doors, owned by `svc_maintenance` and given only the EXECUTE grants they need,
 answer instead:
 
-- **081's `fn_meta_accounts_for_ref`**, for `svc_ingress`: the account-reference lookup
+- **`fn_meta_accounts_for_ref`**, for `svc_ingress`: the account-reference lookup
   `meta_callbacks.resolve_ig_accounts` calls. It is the deauthorize fallback.
-- **142's `fn_meta_subject_mappings`**, for `svc_ingress`: the verified mappings of an
+- **`meta_identity_mappings`'s `fn_meta_subject_mappings`**, for `svc_ingress`: the verified mappings of an
   (app identity, subject), across workspaces.
-- **143's `fn_meta_deletion_receive` and `fn_meta_deletion_status`**, for
+- **`fn_meta_deletion_receive` and `fn_meta_deletion_status`**, for
   `svc_ingress`: record a request and read a capability's status.
-- **143's `fn_meta_receipt_scope` and `fn_meta_receipt_progress`**, for `svc_worker`: a
+- **`fn_meta_receipt_scope` and `fn_meta_receipt_progress`**, for `svc_worker`: a
   claimed tenant's scopes of one receipt, and the report of one scope's progress.
 
 The four receipt tables grant the runtime roles nothing: only these doors reach them.

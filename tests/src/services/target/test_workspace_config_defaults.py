@@ -1,13 +1,13 @@
 """The config payload carries the fallbacks the dashboard would otherwise retype.
 
 `repost_ttl_days`, `skip_ttl_days` and `approval_ttl_minutes` are the columns
-`053` declares NULL on purpose, so "the deployment's fallback applies" stays
+`identity_and_tenancy.py` declares NULL on purpose, so "the deployment's fallback applies" stays
 distinguishable from "the owner chose this number" (`config/defaults.py`).
 The settings cards need the fallback to SHOW it, and they read it here rather
 than keep a second copy in TSX that drifts the moment the worker's own copy
-does (#1366, #1365).
+does.
 
-This is the same argument, and the same answer, as `restorable_until` (#1127):
+This is the same argument, and the same answer, as `restorable_until`:
 the server computes it "so the dashboard never derives it from a copied
 number". `landing/src/lib/settings-defaults.test.ts` is the other half — it
 asserts the cards read these and hold no literal of their own.

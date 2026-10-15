@@ -1,4 +1,4 @@
-"""Admitting people from the waitlist (129, #1723): the one core pathway.
+"""Admitting people from the waitlist (signup admission functions): the one core pathway.
 
 Every owner surface (the waitlist ping's Admit tap, the
 `/ops` page, the CLI) calls this module, and the doors decide. The
@@ -27,7 +27,7 @@ last link working.
 
 The first account through an admission, by its link or as its address, uses it
 up. That rule is the database's: the doors, and the trigger that stamps an
-admission used when an account is created at its address (133). So
+admission used when an account is created at its address (`trg_signup_admission_consume`). So
 is the table's CHECK on what an address is: this module keeps no Python copy
 of either beyond the length bound, and routes on the doors' answers.
 

@@ -129,14 +129,14 @@ _IPV4_IN_IPV6 = (
 
 
 class Settings(BaseSettings):
-    """Application configuration. NO FIELD IS REQUIRED (#1222): a process needs
+    """Application configuration. NO FIELD IS REQUIRED: a process needs
     only what it reads, and a field survives only while something reads it
     (`tests/src/test_legacy_settings_gone.py` measures both)."""
 
     def __init__(self, **kwargs):
         """Load settings, converting any validation failure into SettingsError.
 
-        WHY THIS EXISTS (#775). Fields here are bare-named -- ENCRYPTION_KEY,
+        WHY THIS EXISTS. Fields here are bare-named -- ENCRYPTION_KEY,
         TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN and friends -- so pydantic reads
         whatever the ambient environment holds under those names, from a
         process this project does not control. On a validation failure its
@@ -164,7 +164,7 @@ class Settings(BaseSettings):
         is no active exception to chain, so __context__ is genuinely None and
         the value is unreachable rather than merely unprinted.
 
-        BOTH EXITS ARE COVERED (#780), because construction can fail in two
+        BOTH EXITS ARE COVERED, because construction can fail in two
         phases that raise unrelated classes. pydantic-settings' SOURCE layer
         resolves raw values from env/dotenv/secrets BEFORE pydantic's
         VALIDATION layer runs, and raises its own ``SettingsError`` -- a
@@ -251,7 +251,7 @@ class Settings(BaseSettings):
     INSTAGRAM_APP_SECRET: Optional[str] = None  # Instagram Login OAuth
     OAUTH_REDIRECT_BASE_URL: Optional[str] = None  # e.g., "https://api.storydump.app"
 
-    # The web front end (#1028). The target API hosts sign-in and the session
+    # The web front end. The target API hosts sign-in and the session
     # cookie; the front end is a separate origin that calls it. WEB_APP_URL is
     # the ONE browser origin CORS admits (never "*") and where a finished
     # sign-in lands. Absent = no browser origin is admitted and sign-in lands
@@ -272,7 +272,7 @@ class Settings(BaseSettings):
     # Bounded: 0 would end every session at once, and a huge value overflows
     # the interval it builds.
     SESSION_MAX_AGE_SECONDS: int = Field(30 * 24 * 3600, gt=0, le=365 * 24 * 3600)
-    # Sign-up while in beta (092): a NEW Google
+    # Sign-up while in beta (`fn_signup_admitted`): a NEW Google
     # account creates its user only when `fn_signup_admitted` admits its
     # verified email. True switches that ask off — a local stack's setting,
     # never production's. An existing user signs in either way.
@@ -300,7 +300,7 @@ class Settings(BaseSettings):
     # NEVER set this to "*". The wildcard makes uvicorn take the LEFTMOST
     # X-Forwarded-For entry, which is wholly caller-supplied, so every
     # IP-keyed control in the app (rate limiting, auth-failure alerting)
-    # becomes attacker-partitionable. See issue #726.
+    # becomes attacker-partitionable.
     TRUSTED_PROXY_HOSTS: str = (
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.1,::1,fd00::/8"
     )
@@ -398,7 +398,7 @@ class Settings(BaseSettings):
         """Whether *user_id* is one of the deployment's operators: named in
         `OPS_USER_IDS`, compared lower-cased against :attr:`ops_user_ids`. The
         one spelling of the question, which `principal.require_ops`, the
-        waitlist ping's Admit tap and `GET /me`'s ``ops`` all ask (#1723)."""
+        waitlist ping's Admit tap and `GET /me`'s ``ops`` all ask."""
         return (user_id or "").lower() in self.ops_user_ids
 
     # Google Drive OAuth: the client the workspace grant is minted and

@@ -1,7 +1,8 @@
-"""Migration 134: archive ownership, current observations and immutable captures.
+"""Archive ownership, current observations and immutable captures.
 
-Schema definitions only. Services use hand-written SQL under the tenant UoW.
-Triggers and RLS are owned by the migration, not mirrored by ORM behavior.
+`ddl.build()` creates these tables through `TargetBase.metadata`. Services use
+SQL under the tenant unit of work. Functions, triggers and row policies live
+in `src/models/target/ddl/`.
 """
 
 from sqlalchemy import (

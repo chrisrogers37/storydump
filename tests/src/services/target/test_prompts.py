@@ -1,4 +1,4 @@
-"""Prompt production: the card, designed first-principles (#790): a tap
+"""Prompt production: the card, designed first-principles: a tap
 PUBLISHES (post-now is the user contract; internals may queue), and the
 button set serves the next state, with the live loop preserved:
 autopost/skip/posted/reject are the four callbacks production actually uses,
@@ -43,7 +43,7 @@ class TestStringSlotWidths:
     Postgres strips trailing fractional zeros in timestamptz text/jsonb
     rendering, so a microsecond value arrives at any width 0-6; at the
     repository's 3.10 floor a bare ``fromisoformat`` rejects widths 1, 2,
-    4 and 5 (#969). Width 5 is #969's real shape (``.05024``).
+    4 and 5. The five-digit fraction ``.05024`` exercises that case.
 
     Bound, stated rather than implied: the call-site leg below has teeth
     ONLY at the 3.10 floor — on 3.11+ every width parses natively, so a
@@ -183,7 +183,7 @@ class TestPromptIntent:
     async def test_no_active_binding_still_transitions_and_enqueues_nothing(
         self, monkeypatch
     ):
-        """The web queue is a surface (#1033): a workspace with no push binding
+        """The web queue is a surface: a workspace with no push binding
         still has somewhere to act, so the intent leaves `scheduled` and simply
         gets no card."""
         called = []
@@ -282,7 +282,7 @@ class TestTheOutcomeLine:
 
     def test_an_act_that_ends_a_series_says_so_after_the_time(self):
         """The card's header still says how the story repeats, so the line
-        under it says the series is over (#485)."""
+        under it says the series is over."""
         from datetime import datetime, timezone
 
         at = datetime(2026, 9, 9, 18, 14, tzinfo=timezone.utc)
@@ -350,7 +350,7 @@ INTENT = "0b6e5f1a-2f4d-4c1e-9a3b-7d8e9f0a1b2c"
 
 
 class TestTheCardKeyboard:
-    """`card_keyboard` (#1477): the one spelling of an approval card's
+    """`card_keyboard`: the one spelling of an approval card's
     keyboard for its story as it is now. Configure is on every card but a
     rejected story's or a removed item's, which carry none."""
 
@@ -464,7 +464,7 @@ class TestTheCardKeyboard:
 
 
 class TestTheMenuKeyboard:
-    """Configure's menu (#1477): the flag's toggle, the web's approval settings
+    """Configure's menu: the flag's toggle, the web's approval settings
     only on an https link Telegram will take, and Back."""
 
     @pytest.mark.parametrize(
@@ -499,7 +499,7 @@ class TestARendersAgainForAResend:
     """`rerender_prompt`: a card that is sent again — a lost
     answer's resend, or a first send that waited — is rendered from the
     intent AS IT IS NOW: the workspace's current buttons, and nothing at all
-    when the slot has already moved on. A waiting card (#1477) also says
+    when the slot has already moved on. A waiting card also says
     when a block stopped a rule from approving it, and a story a rule
     approved is sent settled."""
 
@@ -766,7 +766,7 @@ class TestARendersAgainForAResend:
 
 
 class TestTheLineNamesTheMechanism:
-    """#1477: a line a rule caused names the rule where a person's name
+    """A line a rule caused names the rule where a person's name
     would stand ("✅ Posted by YOLO"), a dry run included. A failed, review,
     expired or cancelled line never names it, and a person's lines are
     unchanged."""
@@ -846,7 +846,7 @@ class TestTheLineNamesTheMechanism:
 class TestWaitingLine:
     """The approved card's line while its story waits for a slot that is
     hours away: the state's word and when it posts, in the workspace's zone.
-    Each test pins the whole line, so a wrong day or time fails (#1306)."""
+    Each test pins the whole line, so a wrong day or time fails."""
 
     NOW = datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc)  # 16:00 in New York
     TZ = "America/New_York"
@@ -1039,7 +1039,7 @@ class TestTheAdvancePhaseSurvivesARefusal:
         aborts the transaction: without a savepoint the next statement —
         the next row's transition, or the hand-back of the caller's scope —
         raises `InFailedSqlTransaction`, and one raced row fails the whole
-        sweep (#1349)."""
+        sweep."""
         from src.services.target import intent_ledger, prompts
 
         pending = [
@@ -1078,7 +1078,7 @@ class TestTheAdvancePhaseSurvivesARefusal:
     async def test_the_serve_step_approves_and_a_failure_there_rolls_back_alone(
         self, monkeypatch, caplog
     ):
-        """#1477: the serve step rides a savepoint of its own after the
+        """The serve step rides a savepoint of its own after the
         advance. A story it approves is counted; any failure deciding or
         approving one rolls back only that savepoint, is logged naming the
         story, and leaves it waiting for a person while the sweep goes on."""
@@ -1113,7 +1113,7 @@ class TestTheAdvancePhaseSurvivesARefusal:
         )
 
     async def test_an_intent_it_cannot_see_is_NOT_swallowed(self, monkeypatch):
-        """#1423: `IntentNotVisible` is a caller's bug, not a refusal, so it
+        """`IntentNotVisible` is a caller's bug, not a refusal, so it
         escapes the savepoint that refusals ride. As a subclass of
         `IntentTransitionRefused` it would be swallowed right here, which is
         why it is a distinct type."""
@@ -1133,7 +1133,7 @@ SLOT = datetime(2026, 10, 1, 18, 0, tzinfo=timezone.utc)  # 14:00 in New York
 
 
 class TestThePlannedCard:
-    """A planned story's card says who scheduled it and for when (089), and
+    """A planned story's card says who scheduled it and for when (`fn_planned_serve` / `fn_planned_misses`), and
     says "served late" when it is rendered a minute or more past that time —
     at the serve, or again at send time, whichever renders it."""
 
@@ -1235,7 +1235,7 @@ class TestThePlannedCard:
 class TestTheCardReadsTheRule:
     """Neither the due door nor `_CARD_SELECT` carries who scheduled a story or
     its repeat rule, so `_with_scheduler`, which both card paths come through,
-    reads both in one statement (#485)."""
+    reads both in one statement."""
 
     async def test_a_planned_row_gains_both_in_one_read_under_its_tenant(self):
         statements = []
@@ -1465,7 +1465,7 @@ class TestTheMissLeg:
 
 
 class TestTheMissLegAndARepeat:
-    """A repeating story's miss (#485): a notice says what became of its
+    """A repeating story's miss: a notice says what became of its
     series, read from the ledger after the miss; a repeat's occurrence born
     after its time ends with no notice at all."""
 
@@ -1858,7 +1858,7 @@ def _stored(provider, **over):
 class TestAnArchiveItemOnTheTelegramSurfaces:
     """The stored name is what the card and the missed-story notice say, so an
     archive item is named for where it came from there, as on the web, and a
-    card carries no Instagram id (#1644)."""
+    card carries no Instagram id."""
 
     def test_the_card_names_the_item_and_carries_no_graph_id(self):
         card = prompts._card_for(_stored("instagram_archive"), intent_id=INTENT)
@@ -1955,7 +1955,7 @@ def test_drive_posted_settled_card_keeps_media_and_configure_alone():
     card = prompts._settled_card(row, intent_id=INTENT, line="synthetic posted outcome")
     assert "media" in card and "caption" in card
     assert card["outcome_text"] == "synthetic posted outcome"
-    # A settled card keeps Configure alone (#1477).
+    # A settled card keeps Configure alone.
     assert card["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "⚙️ Configure", "callback_data": f"v1:cfg:{INTENT}"}]

@@ -125,7 +125,7 @@ class TestMint:
 
     @pytest.mark.asyncio
     async def test_a_service_identity_records_who_minted_it(self):
-        """090: the minter is kept so removing them can revoke what they made."""
+        """workspace member removal: the minter is kept so removing them can revoke what they made."""
         ex = _Executor([{"id": TOKEN, "name": "ops", "role": "readonly"}])
         await service_tokens.mint(
             ex, name="ops", role="readonly", workspace_id=WS, created_by_user_id=USER

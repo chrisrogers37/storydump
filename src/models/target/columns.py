@@ -14,14 +14,14 @@ from sqlalchemy.dialects.postgresql import UUID
 #: compares `information_schema` data types, and a naive `DateTime` renders
 #: ``timestamp without time zone`` — so getting this wrong is a silent
 #: divergence on every timestamp column in the schema rather than a loud one on
-#: the first. Never use a naive `DateTime` here (#1216).
+#: the first. Never use a naive `DateTime` here.
 TZ = TIMESTAMP(timezone=True)
 
-#: The server-side clock. `trg_touch_updated_at` (migration 052) owns
+#: The server-side clock. `trg_touch_updated_at` owns
 #: ``updated_at`` after insert.
 NOW = text("now()")
 
-#: The PK default the target migrations print on every id column. PG15 ships
+#: The PK default the declarative tables use on id columns. PostgreSQL 15 provides
 #: ``gen_random_uuid()`` in core, so no extension is required and they declare
 #: none.
 GEN_UUID = text("gen_random_uuid()")

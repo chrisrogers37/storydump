@@ -1,4 +1,4 @@
-"""Prompt production — the approval card, first-principles (#790).
+"""Prompt production — the approval card, first-principles.
 
 Two rules shape this module. **A tap publishes**: the
 card's affirmative action is *Post now* — the user contract is post-now, and
@@ -12,14 +12,14 @@ reader) · **Posted myself** (the manual-mode path, awaiting→posted) ·
 **Skip** · **Reject**, plus the zero-backend Instagram deeplink button.
 Callback tokens are versioned (`v1:<action>:<intent-uuid>`) and fit
 Telegram's 64-byte `callback_data` bound; the inbound half that parses them
-is the tap (#854).
+is the tap.
 
 `prompt_intent` implements the `scheduled → prompt_pending` edge:
 the transition commits in the SAME transaction as its outbox rows ("outbox
 rows created for active push bindings, same tx"), one card per binding a push
 may reach — and the transition happens whether or not a binding exists. The
 advance edge, `prompt_pending → awaiting_approval`, reads "delivered on ≥ 1
-binding, **or** workspace has web access": with the web queue (#1033)
+binding, **or** workspace has web access": with the web queue
 every workspace has web access by construction, so the second disjunct is
 always true and the sweep advances every `prompt_pending` intent in the
 same pass, on no delivery evidence at all. Two consequences, both
@@ -28,10 +28,10 @@ still reaches `awaiting_approval` and simply gets
 no card. And `prompt_pending → failed` ("no reachable surface") has no
 producer: an intent whose every card failed is still actionable on
 the web until a person acts or `approval_ttl` expires it. That edge stays
-seeded in `055`; nothing drives it.
+seeded in `intent_ledger.py`; nothing drives it.
 
-A PLANNED story (`origin = 'planned'`: a person chose its time, #1413) ends
-unserved only out loud (089). The due door serves it while it can be served
+A PLANNED story (`origin = 'planned'`: a person chose its time) ends
+unserved only out loud (`fn_planned_serve` / `fn_planned_misses`). The due door serves it while it can be served
 and within the worker's late window, its card naming who scheduled it; the
 miss door (`fn_planned_misses`) lists the rest, and `sweep_planned_misses`
 expires each with its reason and tells the bound chats in the same
@@ -256,7 +256,7 @@ _CARD_FACTS = (
 async def card_facts(session, *, workspace_id: str, intent_id: str) -> Optional[dict]:
     """A card's story as it is now (`_CARD_FACTS`), or None when this session
     cannot see it: the one read behind a card's keyboard — the sender's at
-    every send and edit of an approval card (#1477), and Configure's at
+    every send and edit of an approval card, and Configure's at
     every tap."""
     return await readers.row(
         session, _CARD_FACTS, ws=str(workspace_id), id=str(intent_id)
@@ -267,7 +267,7 @@ async def card_keyboard_for(
     session, *, workspace_id: str, intent_id: str
 ) -> Optional[dict]:
     """A card's keyboard for its story as it is now: the sender's, at every
-    send and every edit of an approval card (#1477). None when the story
+    send and every edit of an approval card. None when the story
     is gone, or carries no keyboard."""
     facts = await card_facts(session, workspace_id=workspace_id, intent_id=intent_id)
     return None if facts is None else keyboard_of(intent_id, facts)
@@ -279,7 +279,7 @@ async def _scheduler_name(
     """Who scheduled a planned story, as a shared chat may see them:
     `identity.member_name_for`, the one spelling of that rule (never an
     email). None when the user is gone, or no longer a member of the
-    workspace (#485). A sweep passes *names* to look each scheduler up once
+    workspace. A sweep passes *names* to look each scheduler up once
     per workspace."""
     if user_id is None:
         return None
@@ -297,11 +297,11 @@ async def _scheduler_name(
 async def _with_scheduler(session, row: Mapping) -> dict:
     """*row* as a dict and, when it is planned, who scheduled it
     (``scheduled_by``, as a shared chat may see them), its repeat rule
-    (``repeat``, 116, #485) and its account's own zone (``repeat_tz``, NULL
+    (``repeat``, repeat rules) and its account's own zone (``repeat_tz``, NULL
     when it keeps the workspace's), in one read. Neither the due door nor
     `_CARD_SELECT` carries them, and both card paths, the sweep and the
     send-time render, come through here. The name is the scheduler's only
-    while they are still a member of the workspace (#485)."""
+    while they are still a member of the workspace."""
     row = dict(row)
     if row.get("origin") == "planned":
         from src.services.target import identity  # noqa: PLC0415 — cycle
@@ -350,7 +350,7 @@ async def rerender_prompt(session, *, intent_id: str) -> Optional[dict]:
     """The card for *intent_id* rendered from the intent AS IT IS NOW — at
     send time: the workspace's current buttons, the slot in its
     clock. None when the slot has moved on (answered, expired, ended) — such
-    a card is never sent. Two exceptions (#1477): a waiting card says
+    a card is never sent. Two exceptions: a waiting card says
     when a block stopped a rule from approving it, and a story a rule
     approved is sent settled (`sends_settled`)."""
     row = (
@@ -424,13 +424,13 @@ async def sweep_settled_cards(session, *, limit: int = 50) -> int:
     and gain the terminal line. One mechanism for every writer, run in the
     reaper's pass; a tap's own supersede is immediate and this is the
     backstop. Returns the intents healed. A card that is sent settled
-    (`sends_settled`, #1477) is left in `pending` for `SETTLED_CARD_GRACE`,
+    (`sends_settled`) is left in `pending` for `SETTLED_CARD_GRACE`,
     for the sender to claim, and is not counted healed until it goes.
 
-    The selection is a door (082, `fn_settled_cards`): the reaper runs with no
+    The selection is a door (worker sweep functions, `fn_settled_cards`): the reaper runs with no
     tenant and every table it joins is policy-covered — the direct read found
     nothing under `svc_worker`, so no ended story's card would ever lose its
-    buttons (#1349). The door keeps the active-bindings join (a revoked
+    buttons. The door keeps the active-bindings join (a revoked
     group's cards cannot be edited and would starve the LIMIT every beat) and
     takes the terminal states as its argument, so their one spelling stays
     `intent_ledger.TERMINAL_STATES`. The settlement read and the supersede
@@ -513,7 +513,7 @@ async def sweep_due_prompts(
     - ``prompted``: due `scheduled` intents (slot arrived, workspace active
       and unpaused, no cancel flag) gain their transition + cards via
       :func:`prompt_intent`. A planned one is due only while it can be served
-      and within *late_seconds* of its time (089); its card names who
+      and within *late_seconds* of its time (`fn_planned_serve` / `fn_planned_misses`); its card names who
       scheduled it.
       This is also the correctness backstop for the fast path in the
       `plan_slot` adapter — an intent whose prompt crashed mid-way is
@@ -525,7 +525,7 @@ async def sweep_due_prompts(
       actionable the moment it is prompted. The guard makes a lost race
       benign.
     - ``approved``: each story the leg advances is then served its decision
-      (#1477): a rule approves it as the system
+      a rule approves it as the system
       (`auto_approval.approve_if_due`), in a savepoint of its own. Any
       failure there rolls back that savepoint alone and is logged; the story
       waits for a person, and the sweep goes on.
@@ -534,7 +534,7 @@ async def sweep_due_prompts(
 
     counts = {"prompted": 0, "advanced": 0, "approved": 0}
 
-    # The two cross-tenant READS are doors (082): the sweep runs with no tenant
+    # The two cross-tenant READS are doors (worker sweep functions): the sweep runs with no tenant
     # and every table here is policy-covered. The WRITES — the cards, the
     # transitions — run per workspace under that workspace's tenant and the
     # system actor, exactly as a member's own action does, so the ledger's
@@ -634,7 +634,7 @@ async def sweep_due_prompts(
             counts["advanced"] += 1
         except intent_ledger.IntentTransitionRefused:
             continue  # the ledger refused; most often the fast path moved it first
-        # The serve step (#1477), in its own savepoint: whatever goes wrong
+        # The serve step, in its own savepoint: whatever goes wrong
         # deciding or approving rolls back only that, and the story waits for
         # a person — the safe failure. The settled sweep isolates its rows the
         # same way.
@@ -702,7 +702,7 @@ async def say_not_served(
 
 #: The row a "not served" notice is written from, and the one spelling of it
 #: in Python. The removal's notice reads it directly; `fn_planned_misses`
-#: (089) spells the same columns and joins, a door being unable to call the
+#: (`fn_planned_serve` / `fn_planned_misses`) spells the same columns and joins, a door being unable to call the
 #: Python, and the pin in `test_prompts.py` holds the two together, as it
 #: holds `_CARD_SELECT` to `fn_prompts_due`.
 _NOTICE_SELECT = (
@@ -749,7 +749,7 @@ async def say_removed_before_served(
 async def _next_waits(session, workspace_id: str, ended) -> bool:
     """Whether a live story now waits for the ended story's item on its
     account. Read in the transaction that ended it, that is the story its
-    ending made (`tg_intent_repeat`, 116), so a notice says what became of a
+    ending made (`tg_intent_repeat`), so a notice says what became of a
     series rather than what its reason predicts."""
     found = await readers.row(
         session,
@@ -765,7 +765,7 @@ async def _next_waits(session, workspace_id: str, ended) -> bool:
 
 
 async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dict:
-    """The miss leg (089), on the prompt sweep's cadence and in the CALLER's
+    """The miss leg (`fn_planned_serve` / `fn_planned_misses`), on the prompt sweep's cadence and in the CALLER's
     transaction: every planned story the miss door lists ends `expired`, with
     `last_error = {v: 1, class: planned_missed, message: <reason>}`, and its
     notice is queued in the SAME savepoint, so none ends unserved without
@@ -783,7 +783,7 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
 
     A repeating story's notice says what became of its series (`_next_waits`),
     and a repeat's occurrence born after its time, whose series goes on, ends
-    with no notice at all (#485)."""
+    with no notice at all."""
     from src.services.target import unit_of_work
 
     rows = (
@@ -853,7 +853,7 @@ async def sweep_planned_misses(session, *, late_seconds: int, limit: int) -> dic
                 # A repeat's occurrence born after its time was made when the
                 # one before it ended late, while that one's card was out:
                 # nobody waited for this one, and when its series goes on there
-                # is nothing to say (#485). A series it stops is said.
+                # is nothing to say. A series it stops is said.
                 # `schedule_item` refuses a past time, so no other story is
                 # born late.
                 if not (ended.born_late and repeats):

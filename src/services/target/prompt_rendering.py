@@ -27,7 +27,7 @@ _ACTIONS_MANUAL = ("posted", "skip", "reject")
 #: retry button's label is the answer to the review's own question ("is it
 #: on your story?"), so a tap on it carries the member's verdict.
 REVIEW_ACTIONS = ("itposted", "notposted", "giveup")
-#: ⚙️ Configure and its menu (#1477): on every card for the card's whole life,
+#: ⚙️ Configure and its menu: on every card for the card's whole life,
 #: one button opening a menu one level down — the item's Auto-approve
 #: flag, the web's approval settings, Back. Navigation runs no card command.
 MENU_ACTIONS = ("cfg", "back", "aa1", "aa0")
@@ -62,7 +62,7 @@ OUTCOME_WORDS = {
 SERVED_LATE_AFTER = timedelta(minutes=1)
 
 #: Why a planned story was not served, as its notice says it: the miss door's
-#: reasons in its precedence (089, `fn_planned_misses`), and `account_removed`
+#: reasons in `fn_planned_misses`'s precedence, and `account_removed`
 #: from a destination's removal as well (`provisioning.disable_destination`).
 MISS_REASONS = {
     "item_removed": "the item was removed from the library",
@@ -75,11 +75,11 @@ MISS_REASONS = {
 }
 
 #: What a repeating story's miss notice adds: whether its next occurrence now
-#: waits (#485), read from the ledger after the miss (`_next_waits`).
+#: waits, read from the ledger after the miss (`_next_waits`).
 SERIES_WORDS = {True: "It repeats as planned.", False: "Its repeat has stopped."}
 
 #: What a settled card's outcome line adds when the act ended the story's
-#: series (#485): a cancel or give-up that stops it, or a Reject, which ends a
+#: series: a cancel or give-up that stops it, or a Reject, which ends a
 #: series by its nature. The card's header keeps the rule it was sent with.
 SERIES_STOPPED = "the series stopped"
 SERIES_ENDED = "the series ended"
@@ -107,7 +107,7 @@ def stamp(at: datetime, tz: str) -> str:
     the outcome line share this one spelling. A zone Postgres accepted
     (`fn_safe_tz`: `PST`, `UTC+5`) that the IANA database does not know
     degrades to UTC, as the door does — one workspace's zone must never fail
-    a tap or a sweep (#1271)."""
+    a tap or a sweep."""
     try:
         zone = ZoneInfo(tz)
     except (ZoneInfoNotFoundError, ValueError):
@@ -131,14 +131,14 @@ def outcome_word(state: str, published_via: Optional[str] = None) -> str:
     return OUTCOME_WORDS.get(state, state)
 
 
-#: A story a rule approved keeps its card (#1477): it is sent settled — the
+#: A story a rule approved keeps its card: it is sent settled — the
 #: card, the outcome line naming the mechanism, no buttons — while the story is
 #: in one of these. Any other state outside `LIVE_FOR_A_CARD` retires the card
 #: unsent.
 SETTLED_CARD_STATES = ("approved", "publishing", "publishing_ambiguous", "posted")
 
 #: The lines that name the rule that approved a story where no person's name
-#: stands ("✅ Posted by YOLO", #1477): the settled states' lines, and
+#: stands ("✅ Posted by YOLO"): the settled states' lines, and
 #: `dry_run`, the pipeline's word for a posted dry run. A failed, review,
 #: expired or cancelled line never names it — a rule caused none of those.
 RULE_LINE_STATES = (*SETTLED_CARD_STATES, "dry_run")
@@ -195,7 +195,7 @@ def waiting_line(
     posts, in the workspace's zone — "today 14:00", "tomorrow 09:00", or
     the weekday. *day_spent* is the local cap's case: the day's count is at
     its cap, so a slot later today cannot post and the line promises
-    tomorrow without a time the clock has not chosen yet (#1306). *rule*
+    tomorrow without a time the clock has not chosen yet. *rule*
     names the rule that approved the story, as `outcome_line` does."""
     from zoneinfo import ZoneInfo
 
@@ -245,7 +245,7 @@ def card_keyboard(
     cancelling: bool = False,
 ) -> Optional[dict]:
     """The keyboard of an approval card for its story as it is now — the one
-    spelling (#1477): the sender renders every card's keyboard with it
+    spelling: the sender renders every card's keyboard with it
     when it sends or edits the card (`card_keyboard_for`), and Configure's
     Back and its heal read it the same way (`keyboard_of`), so no caller picks
     one. ⚙️ Configure is on every card but a rejected story's or a removed
@@ -281,7 +281,7 @@ def card_keyboard(
 
 
 def menu_keyboard(intent_id: str, *, on: bool, settings_url: Optional[str]) -> dict:
-    """Configure's menu, one level down (#1477): the item's Auto-approve flag,
+    """Configure's menu, one level down: the item's Auto-approve flag,
     which a tap turns the other way; the web's approval settings, only for an
     https link, which is all Telegram takes in a URL button (any other fails
     the whole edit); and Back to the card's own keyboard."""
@@ -332,7 +332,7 @@ def _planned_line(
     intent: dict, *, slot: datetime, tz: str, now: Optional[datetime]
 ) -> Optional[str]:
     """The line a PLANNED card adds under its slot: who scheduled it and for
-    when, its repeat rule when it has one (#485), plus "served late" when the
+    when, its repeat rule when it has one, plus "served late" when the
     card is rendered `SERVED_LATE_AFTER` past that time. None for a cadence
     card. *intent* carries ``scheduled_by``, the display name, ``repeat``,
     the rule, and ``repeat_tz``, the account's own zone, which the rule's time
@@ -353,7 +353,7 @@ def _planned_line(
 
 
 #: The line a waiting card adds when a rule would have approved its story but
-#: step 1 of the decision stopped it (#1477). It is derived at render from
+#: step 1 of the decision stopped it. It is derived at render from
 #: the decision's own facts, seconds after the serve made the same decision.
 _BLOCK_NOTES = {
     "link": "🔒 {label} is on, but this item has a link to add — post it by hand.",
