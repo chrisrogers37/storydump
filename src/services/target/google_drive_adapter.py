@@ -1,0 +1,1282 @@
+"""The real Google Drive read leg — the `list_changes` port (#982).
+
+`drive_adapter.py` holds the port's SEAM, and this is the real door.
+
+## `list_changes` is the tier's one listing verb
+
+The port is normative and specifies
+``list_changes(config, checkpoint) → (items, checkpoint')``; the consumer whose
+two kinds are parked — :mod:`src.services.target.media_sync` — calls
+the selected ``MediaAdapter.list_changes`` and NOTHING else.
+This is the only listing door.
+
+`drive_adapter.py` is reused rather than forked: :func:`validate_source_config`
+is explicitly "part of the seam contract, every implementation calls it first",
+and its typed errors are the ladder's routing vocabulary.
+
+## The port carries `source_id`, and it has to
+
+`media_sources` has **no credential column**; `oauth_credentials` points AT the
+source (`media_source_id`, exclusive per `ck_credentials_one_owner`). So the
+credential is reachable only from the source's identity — which the port's
+two-argument form does not carry, and `config` (`{v, folder_ref,
+root_name?}`) does not either. Adding the id to `config` would fork the
+ownership the schema already settled.
+
+`source_id` is therefore keyword-only and additive, so the
+two-argument shape stays legible.
+
+## The token arrives injected
+
+:class:`GoogleDriveAdapter` takes an async ``token_provider(source_id) -> str``
+instead of reading `oauth_credentials` itself; the live provider is
+:func:`src.services.target.drive_credentials.provider_from_engine`, and the
+refresh it mints behind that seam is `drive_credentials._refresh` — on the READ
+path, because the refresh clock is fenced to `ig_login` (`063`) and gdrive rows
+carry `next_refresh_at = NULL` (#1247). The seam keeps this module free of
+decryption and of the credential state machine.
+
+A provider that raises :class:`DriveCredentialDead` routes to the source state
+machine; anything else it raises rides the ladder unchanged.
+
+## The bound is announced, never absorbed
+
+Truncation and paging look the same to a caller. Exhaustion is structural — the
+returned checkpoint carries ``page_token`` when more exist and omits it when the
+listing is genuinely complete. `page_size` bounds ONE request; a bounded page is
+always accompanied by a token, so the remainder is resumable rather than
+dropped. There is no total cap.
+
+## A file with no `md5Checksum` is SKIPPED AND SAID
+
+`media_items.content_hash` is required and Drive supplies `md5Checksum` for
+uploaded binary content — which every `image/*` and `video/*` file is. A file
+that passes the mime filter and still carries no checksum is anomalous, and the
+port has no channel for a partial item, so it is skipped. It is skipped
+**loudly**, one warning naming the file id: a silent drop here is the same
+data-loss-wearing-a-bound's-clothing this seam was designed against.
+"""
+
+from __future__ import annotations
+
+import functools
+import re
+import ssl
+import uuid
+from dataclasses import replace as _replace
+from dataclasses import dataclass
+import logging
+from typing import Any, Mapping, Optional, Protocol
+from urllib.parse import urlencode
+
+import httpx
+
+from src.services.target import egress, media_adapters, vocabulary
+from src.services.target.egress import EgressPolicy
+from src.services.target.drive_adapter import (
+    DriveMediaGone,
+    DriveMediaTooLarge,
+    DriveLostResponse,
+    DriveRetryableError,
+    DriveTerminalError,
+    validate_source_config,
+    checkpoint_incomplete,
+    walk_saw_whole_tree,
+)
+from src.services.target.media_sync import DriveCredentialDead, DriveSourceGone
+
+logger = logging.getLogger(__name__)
+
+#: Drive v3 listing endpoint. Host is already on the egress allowlist.
+FILES_URL = "https://www.googleapis.com/drive/v3/files"
+#: The folder browser's mime (#1165).
+FOLDER_MIME = "application/vnd.google-apps.folder"
+#: What a Drive id looks like. The browser splices `parent` into a `q`
+#: string, so a value outside this shape is refused before any request —
+#: not because Drive would be fooled, but because a query built from an
+#: unchecked string is the class of bug that only fails later and elsewhere.
+FOLDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+#: The most folders the browser will page through for one parent.
+FOLDER_LIST_CAP = 500
+#: The most folders one WALK will queue (the tree is walked
+#: to any depth, lazily); past it the rest is skipped and the cut is said.
+FOLDER_WALK_CAP = 2000
+
+
+#: The picker's second root: folders shared TO the connected account, which
+#: have no `root` parent and would otherwise be unreachable, since the picker
+#: takes no pasted link (#1246). A sentinel, not a Drive id.
+SHARED_ROOT = "shared-with-me"
+
+
+def is_folder_id(value: object) -> bool:
+    return isinstance(value, str) and FOLDER_ID_RE.fullmatch(value) is not None
+
+
+def _cursor_folder(entry: Mapping[str, Any]) -> dict:
+    """A queue/current entry read back from a stored cursor, with every field
+    the walk reads present: a missing one gets its default (the entry's own id
+    as `top`; an empty path) rather than a KeyError the retry ladder would
+    repeat forever."""
+    fid = str(entry["id"])
+    return {
+        "id": fid,
+        "name": entry.get("name"),
+        "top": entry.get("top") or fid,
+        "top_name": entry.get("top_name"),
+        "path": entry.get("path") or "",
+        "listed": bool(entry.get("listed")),
+    }
+
+
+def _queued_child(
+    parent: Mapping[str, Any], child: Mapping[str, Any], *, root: str
+) -> dict:
+    """A discovered subfolder as a queue entry.
+
+    A child of the ROOT becomes its own top-level folder — that is the label
+    the sync stores as `category`, and the path starts at its own name. Deeper
+    down it inherits the top-level folder it sits under and extends its
+    parent's path.
+    """
+    if parent["id"] == root:
+        top, top_name, path = child["id"], child["name"], child["name"]
+    else:
+        top, top_name = parent["top"], parent["top_name"]
+        path = f"{parent['path']}/{child['name']}"
+    return {
+        "id": child["id"],
+        "name": child["name"],
+        "top": top,
+        "top_name": top_name,
+        "path": path,
+        "listed": False,
+    }
+
+
+def _resume_walk(
+    cp: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    root: str,
+    source_id: str,
+) -> tuple[str, dict, list, Optional[str], int, bool, list, bool]:
+    """The walk a stored cursor resumes, or the fresh one that replaces it.
+
+    One decision of :meth:`GoogleDriveAdapter.list_changes`: whether a stored
+    cursor can be believed. Returns the eight values the walk reads —
+    ``(walk, current, queue, page_token, seen, truncated, visited, partial)``
+    — under the names the walk uses.
+
+    A cursor is resumable only when it is v2, carries a `walk` token and names
+    a `current` folder whose id is a Drive id; anything else starts over, and
+    a cursor that held a `current` or a `page_token` says so once before it
+    does. `walk` is reused when the cursor carried one (a caller that minted
+    it keeps it) and minted here otherwise.
+    """
+    walk = cp.get("walk")
+    if not (cp.get("v") == 2 and isinstance(walk, str) and walk):
+        walk = None
+    resumed = cp.get("current") if walk is not None else None
+    if resumed and is_folder_id(resumed.get("id")):
+        # Healed, not trusted: a field a stored cursor lacks gets its
+        # default rather than a KeyError that would retry forever.
+        current: dict = _cursor_folder(resumed)
+        queue = [
+            _cursor_folder(f)
+            for f in (cp.get("queue") or [])
+            if is_folder_id((f or {}).get("id"))
+        ]
+        page_token = cp.get("page_token")
+        seen = int(cp.get("seen") or 0)
+        truncated = bool(cp.get("truncated"))
+        visited = [v for v in (cp.get("visited") or []) if isinstance(v, str)]
+        partial = bool(cp.get("partial"))
+    else:
+        if cp.get("current") or cp.get("page_token"):
+            logger.warning(
+                "drive source %s: the stored cursor cannot be resumed (pre-v2, or"
+                " malformed) — starting over",
+                source_id,
+            )
+        walk = walk or uuid.uuid4().hex
+        current = {
+            "id": root,
+            "name": None,
+            "top": root,
+            "top_name": _folder_label(config),
+            "path": "",
+            "listed": False,
+        }
+        queue, page_token, seen, truncated, visited = [], None, 0, False, []
+        partial = False
+    return walk, current, queue, page_token, seen, truncated, visited, partial
+
+
+@dataclass(frozen=True)
+class FolderPage:
+    """A folder listing (the browser's, the walk's): the folders, and whether
+    the listing was cut short."""
+
+    folders: list[dict]
+    truncated: bool = False
+
+
+#: Telegram's bot-upload limits, which bound the approval card's media fetch
+#: (the card is the photo).
+MEDIA_CARD_MAX_BYTES = media_adapters.MEDIA_CARD_MAX_BYTES
+#: A fetch holds about two copies of the file in memory (the capped read and
+#: the multipart body): ~100 MB per in-flight video card, one sender per
+#: binding. How many run at once in one worker is its lane's task count
+#: (`WorkerConfig.lane_concurrency`), not the per-workspace cap, which under
+#: the pinned pool (`POOL_SIZE_SEAM`) cannot bind on a single worker — noted
+#: here so nobody raises that count without raising the worker.
+#: The media fetch runs under the upload timeout class with its own budget:
+#: a 50 MB video on a modest link needs more than the 30 s default.
+MEDIA_FETCH_BUDGET_S = 120.0
+#: The byte cap's floor on the download leg: enough for a refusal's JSON body.
+MEDIA_CAP_FLOOR_BYTES = 16 * 1024
+
+#: The most parents a pick's ancestry walk follows (Drive trees are shallow;
+#: a chain this long is a loop or a lie, and stops here).
+ANCESTOR_CAP = 32
+
+
+@dataclass(frozen=True)
+class Thumbnail:
+    """A file's thumbnail: its bytes and their raster type (`THUMBNAIL_TYPES`)."""
+
+    content: bytes
+    content_type: str
+
+
+#: Requested per file. `md5Checksum` is the content hash without a download.
+#: `thumbnailLink` is a short-lived, credentialed link to the file's thumbnail,
+#: absent until Drive has made one (`fetch_thumbnail` fetches through it).
+FILE_FIELDS = "id,name,mimeType,size,modifiedTime,md5Checksum,thumbnailLink"
+
+#: Where Drive serves thumbnails. Only the thumbnail fetch may reach these, so
+#: they are its own policy's hosts, not `egress.DEFAULT_ALLOWED_HOSTS`: every
+#: other Drive call stays on `www.googleapis.com`.
+THUMBNAIL_HOSTS = frozenset(
+    {
+        "lh3.googleusercontent.com",
+        "lh4.googleusercontent.com",
+        "lh5.googleusercontent.com",
+        "lh6.googleusercontent.com",
+    }
+)
+#: A thumbnail is a small preview; anything larger is not one, and is refused.
+THUMBNAIL_MAX_BYTES = 1024 * 1024
+#: A page asks for many thumbnails at once and draws a placeholder for any
+#: that fail, so a slow one gives up quickly rather than holding a worker.
+THUMBNAIL_BUDGET_S = 8.0
+THUMBNAIL_MAX_ATTEMPTS = 2
+THUMBNAIL_TYPES = frozenset(vocabulary.THUMBNAIL_TYPES)
+#: The thumbnail host's answers to a link that no longer works: the signed link
+#: has expired, or Drive replaced it. The current link is read once and tried.
+THUMBNAIL_LINK_DEAD = frozenset({401, 403, 404, 410})
+
+#: One request's bound — never the traversal's. See the header.
+DEFAULT_PAGE_SIZE = 200
+
+#: mime prefix -> `media_items.media_kind`. Mirrors media_sync `_ALLOWED_KINDS`;
+#: a kind absent here is never listed, so the executor never has to skip it.
+_KIND_BY_PREFIX = (("image/", "image"), ("video/", "video"))
+
+
+class _TokenBox:
+    """The token one listing call is using. A re-mint inside `_get_as_workspace`
+    replaces it here, so the NEXT request of the same call (the media page after
+    the subfolder listing) does not resend the token Google just refused."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+class TokenProvider(Protocol):
+    """Resolves a usable Drive access token — the WORKSPACE's grant (069).
+
+    `source_id` names the folder being synced, for the provider's own
+    messages; it is `None` from the folder browser, which syncs nothing.
+    `workspace_id` is the key: the credential is the workspace's, the read is
+    bound to it by the WHERE and, where RLS is live, by the tenant GUC too.
+    `fresh=True` asks for a re-minted token — the adapter's one retry after
+    Google refused a token the door thought live (#1247).
+    """
+
+    async def __call__(
+        self, source_id: Optional[str], *, workspace_id: str, fresh: bool = False
+    ) -> str: ...
+
+
+def _kind_for(mime_type: str) -> Optional[str]:
+    for prefix, kind in _KIND_BY_PREFIX:
+        if mime_type.startswith(prefix):
+            return kind
+    return None
+
+
+def _listing_query(folder_ref: str) -> str:
+    """`q` for ONE folder's images and videos, trashed excluded. The walk
+    (`list_changes`) calls it once per folder: the picked root, then each
+    immediate subfolder, whose name is the items' category.
+
+    `root_name` is deliberately NOT expressed here. It names a SUBFOLDER to
+    scope the listing to, and a query that silently ignored it would list the
+    parent — the exact wrong-place-looks-correct failure
+    `validate_source_config` exists to refuse. A source carrying `root_name`
+    is refused rather than mislisted.
+    """
+    kinds = " or ".join(f"mimeType contains '{p}'" for p, _ in _KIND_BY_PREFIX)
+    return f"'{folder_ref}' in parents and trashed = false and ({kinds})"
+
+
+def _subfolder_query(folder_ref: str) -> str:
+    return (
+        f"'{folder_ref}' in parents and mimeType = '{FOLDER_MIME}' and trashed = false"
+    )
+
+
+def _folder_label(config: Mapping[str, Any]) -> Optional[str]:
+    """The connected folder's own name — the label of the files directly in it.
+
+    A file's `category` is the name of the top-level folder it sits under (a
+    display label no weight keys on). For a file directly in the connected
+    folder that top-level folder IS the connected folder, so its picked name
+    labels them; a folder picked without a name labels nothing. This is what
+    keeps a subfolder connected in place of its parent carrying the labels
+    its files had — the adoption would otherwise blank every label.
+    """
+    name = config.get("folder_name")
+    return name.strip() if isinstance(name, str) and name.strip() else None
+
+
+def _refuse_unsupported_config(config: Mapping[str, Any]) -> None:
+    """Every refusal a config earns BEFORE a provider call, in one place.
+
+    Shared by `list_changes` and `probe` deliberately. A probe that accepted a
+    config the sync then refuses is worse than no probe: it green-lights a
+    source into `active` that cannot list, and the failure surfaces later as a
+    sync error nobody connects back to the connect form. The two must refuse
+    the same set, which is a property that only holds if there is one set.
+    """
+    validate_source_config(config)
+    if not is_folder_id(config.get("folder_ref")):
+        # The id is spliced into a Drive `q` string; a value outside the id
+        # shape is refused here rather than trusted there (#1256).
+        raise DriveTerminalError("folder_ref is not a Drive folder id")
+    if "root_name" in config and config["root_name"]:
+        raise DriveTerminalError(
+            "config carries root_name, which scopes listing to a subfolder"
+            " this door cannot yet resolve. Refusing rather than listing"
+            " the parent, which looks correct whether it comes back full"
+            " or empty."
+        )
+
+
+class GoogleDriveAdapter:
+    """`list_changes` against Drive v3, under the egress floor."""
+
+    def __init__(
+        self,
+        *,
+        token_provider: TokenProvider,
+        client: Optional[httpx.AsyncClient] = None,
+        policy: Optional[egress.EgressPolicy] = None,
+        page_size: int = DEFAULT_PAGE_SIZE,
+    ) -> None:
+        # `client` optional and per-call by default, following
+        # `credential_lifecycle.ig_refresh` (:84-99) rather than inventing a
+        # lifecycle: a long-lived client would need closing on shutdown, and
+        # the sync cadence is minutes, so a per-call pool costs nothing. The
+        # thumbnail route calls far more often, so every client opened here
+        # shares one TLS context (`_tls_context`). Tests inject a transport here.
+        self._client = client
+        self._token_provider = token_provider
+        self._policy = policy
+        self._page_size = page_size
+
+    checkpoint_incomplete = staticmethod(checkpoint_incomplete)
+    checkpoint_whole = staticmethod(walk_saw_whole_tree)
+
+    @staticmethod
+    def initial_checkpoint() -> dict:
+        return {"v": 2}
+
+    async def list_changes(
+        self,
+        config: Mapping[str, Any],
+        checkpoint: Optional[Mapping[str, Any]],
+        *,
+        source_id: str,
+        workspace_id: str,
+    ) -> tuple[list[dict], dict]:
+        """One page of a source's media, plus the checkpoint that resumes it.
+
+        THE WALK (sources are the groups): every
+        folder under the connected folder is walked, to any depth, LAZILY. A
+        folder is asked for its subfolders once, when it is popped, and they
+        join the queue carrying the top-level folder they sit under; then the
+        folder's media is paged. A file's `category` is that TOP-LEVEL folder's
+        name (None for the root's own files — a label the sync stores, never a
+        key) and `folder_path` is its folder's path under the root. The cursor
+        rides the checkpoint so a walk of any size is resumable:
+
+            {"v": 2, "walk": <token>,
+             "seen": <folders queued so far>, "truncated": <cap hit>,
+             "partial": <part of the tree skipped otherwise>,
+             "whole": <done, and nothing skipped>,
+             "current": {"id", "name", "top", "top_name", "path", "listed"},
+             "queue":   [ … the same shape … ],   # folders still to list
+             "page_token": <within current>}       # only while more pages
+
+        `walk` is minted by the SYNC for each walk and carried through unchanged
+        (a cursor handed in without one — the first call of a walk from a caller
+        that did not mint — gets a fresh token here). A pre-v2 cursor with a
+        `current` is ignored and the walk starts over. The complete checkpoint
+        is `{"v": 2, "walk": …}` with at most `seen`, `truncated`, `partial` and
+        `whole` beside it: no `current`, `queue` or `page_token`
+        (`checkpoint_incomplete` is the one definition the sync's chain
+        reads), and the bare `page_token` shape is never emitted.
+
+        `FOLDER_WALK_CAP` bounds the folders queued per walk; past it the rest
+        is skipped and the cut is SAID (one warning) and carried to completion
+        as `truncated`, never absorbed. Every other skip — a folder past
+        `FOLDER_LIST_CAP`, a subfolder listing that repeats its page token, a
+        folder that vanished before or during its listing, a listing Drive
+        marks `incompleteSearch` — is said where it
+        happens and carried to completion as `partial`. A walk carrying either
+        did not see the whole tree. Only a walk that skipped nothing ends
+        `whole`, and only after one does the sync tombstone what it did not
+        list (`drive_adapter.walk_saw_whole_tree`).
+        """
+        _refuse_unsupported_config(config)
+        cp = dict(checkpoint or {})
+        root = str(config["folder_ref"])
+        box = _TokenBox(
+            await self._token_provider(source_id, workspace_id=workspace_id)
+        )
+
+        walk, current, queue, page_token, seen, truncated, visited, partial = (
+            _resume_walk(cp, config, root=root, source_id=source_id)
+        )
+
+        def cursor(**extra: Any) -> dict:
+            # `seen`, `truncated` and `partial` ride to completion (the log
+            # reads them); `visited` only while the walk is in flight. A
+            # completed walk that skipped nothing says so, `whole`: the one
+            # key the sync's tombstone acts on (`walk_saw_whole_tree`).
+            out: dict = {"v": 2, "walk": walk}
+            if seen:
+                out["seen"] = seen
+            if truncated:
+                out["truncated"] = True
+            if partial:
+                out["partial"] = True
+            if extra:
+                out["visited"] = visited
+                out.update(extra)
+            elif not (truncated or partial):
+                out["whole"] = True
+            return out
+
+        def advanced() -> dict:
+            # The cursor past `current`: the next queued folder, or done.
+            return cursor(current=queue[0], queue=queue[1:]) if queue else cursor()
+
+        def note_truncation() -> None:
+            # ONE cut, said ONCE per walk. The cap is reached two ways — a
+            # folder popped when the queue is already full, and the queue
+            # filling mid-batch — and they are the same fact to everyone
+            # downstream: the same sentence, and a `truncated` that rides the
+            # cursor to completion.
+            nonlocal truncated
+            if truncated:
+                return
+            logger.warning(
+                "drive source %s: more than %d folders under %s in one walk —"
+                " the rest are skipped this walk (truncated)",
+                source_id,
+                FOLDER_WALK_CAP,
+                root,
+            )
+            truncated = True
+
+        if not current.get("listed") and seen >= FOLDER_WALK_CAP:
+            # Past the cap no listing is even asked for: every child would be
+            # discarded, and a 2,000-folder tree would otherwise spend 2,000
+            # requests per walk on nothing (#1256).
+            note_truncation()
+            current["listed"] = True
+        if not current.get("listed"):
+            # Lazy discovery: this folder's subfolders, once, as it is popped.
+            try:
+                listing = await self._subfolders(
+                    str(current["id"]),
+                    source_id=source_id,
+                    workspace_id=workspace_id,
+                    box=box,
+                )
+            except DriveSourceGone:
+                if current["id"] == root:
+                    raise  # the connected folder itself is gone: the source's fault
+                logger.warning(
+                    "drive source %s: folder %r (%s) vanished before it was listed — skipped",
+                    source_id,
+                    current.get("path"),
+                    current["id"],
+                )
+                partial = True
+                return [], advanced()
+            if listing.truncated:
+                partial = True
+            known = set(visited) | {str(current["id"])} | {str(f["id"]) for f in queue}
+            for child in listing.folders:
+                if child["id"] in known:
+                    # Reachable by two paths (a multi-parent folder) or a cycle
+                    # (a provider handing back an ancestor): walked once, and
+                    # never spun to the cap (#1256).
+                    logger.warning(
+                        "drive source %s: folder %r (%s) reached twice under %s — skipped",
+                        source_id,
+                        child["name"],
+                        child["id"],
+                        current.get("path") or root,
+                    )
+                    continue
+                if seen >= FOLDER_WALK_CAP:
+                    note_truncation()
+                    break
+                queue.append(_queued_child(current, child, root=root))
+                seen += 1
+                known.add(child["id"])
+            visited.append(str(current["id"]))
+            current["listed"] = True
+
+        try:
+            payload = await self._list_page(
+                str(current["id"]),
+                page_token=page_token,
+                source_id=source_id,
+                workspace_id=workspace_id,
+                box=box,
+            )
+        except DriveSourceGone:
+            if current["id"] == root:
+                raise  # the connected folder itself is gone: the source's fault to report
+            # A folder deleted or unshared mid-walk is not the source's fault
+            # and must not wedge it: said once, skipped, the walk goes on
+            # (#1251 — the stored cursor would otherwise point at
+            # the dead folder forever).
+            logger.warning(
+                "drive source %s: folder %r (%s) is gone mid-walk — skipped",
+                source_id,
+                current.get("path"),
+                current["id"],
+            )
+            partial = True
+            return [], advanced()
+        except DriveTerminalError:
+            if not page_token:
+                raise
+            # An expired or invalid page token (a long stall between chunks):
+            # restart THIS folder from its first page rather than fail the
+            # source; the upsert is idempotent, so re-listing costs nothing.
+            # `listed` rides along, so its subfolders are not queued twice.
+            logger.warning(
+                "drive source %s: page token for folder %r refused — restarting the folder",
+                source_id,
+                current.get("path"),
+            )
+            return [], cursor(current=current, queue=queue)
+
+        items = self._page_items(payload, current)
+        if payload.get("incompleteSearch"):
+            # Drive says the page may leave files out: what it did not list
+            # is not known to be gone, so the walk is not whole (#1545).
+            logger.warning(
+                "drive source %s: listing of folder %r is incomplete",
+                source_id,
+                current.get("path"),
+            )
+            partial = True
+
+        next_token = payload.get("nextPageToken")
+        if next_token:
+            return items, cursor(current=current, queue=queue, page_token=next_token)
+        return items, advanced()
+
+    async def _list_page(
+        self,
+        folder_id: str,
+        *,
+        page_token: Optional[str],
+        source_id: str,
+        workspace_id: str,
+        box: "_TokenBox",
+    ) -> dict:
+        """ONE listing request for one folder: the media page, bounded by
+        `page_size` and resumed by `page_token`.
+
+        The refusals ride out unchanged — :class:`DriveSourceGone` and
+        :class:`DriveTerminalError` are cursor decisions, and they are made
+        where the cursor is.
+        """
+        params = {
+            "q": _listing_query(folder_id),
+            "fields": f"nextPageToken,incompleteSearch,files({FILE_FIELDS})",
+            "pageSize": str(self._page_size),
+            "spaces": "drive",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        return await self._get_as_workspace(
+            f"{FILES_URL}?{urlencode(params)}",
+            source_id=source_id,
+            workspace_id=workspace_id,
+            box=box,
+        )
+
+    def _page_items(
+        self, payload: Mapping[str, Any], folder: Mapping[str, Any]
+    ) -> list[dict]:
+        """One listing page as port items, labelled by the folder they came
+        from. A file the mime filter or the checksum rule rejects is
+        dropped by :meth:`_item_for`, which says so."""
+        category = folder.get("top_name")
+        items: list[dict] = []
+        for entry in payload.get("files") or []:
+            item = self._item_for(entry)
+            if item is not None:
+                if category is not None:
+                    # Absent = the root's own files; the sync reads `.get`.
+                    item["category"] = category
+                item["folder_path"] = folder.get("path") or ""
+                items.append(item)
+        return items
+
+    async def _subfolders(
+        self,
+        parent: str,
+        *,
+        source_id: str,
+        workspace_id: str,
+        box: Optional[_TokenBox] = None,
+    ) -> FolderPage:
+        """A folder's immediate subfolders in name order. Paged to
+        `FOLDER_LIST_CAP` and the cut is SAID (one warning), never absorbed: a
+        folder past the cap would otherwise quietly never sync. A provider
+        handing the same page token back forever (a stub, or a Drive bug) ends
+        the listing, said once, and so does a listing Drive marks
+        `incompleteSearch`. Any cut is the page's `truncated`, and makes the
+        walk `partial`."""
+        params = {
+            "q": _subfolder_query(parent),
+            "fields": "nextPageToken,incompleteSearch,files(id,name,mimeType)",
+            "pageSize": "200",
+            "orderBy": "name_natural",
+            "spaces": "drive",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        folders: list[dict] = []
+        page: Optional[str] = None
+        seen_tokens: set[str] = set()
+        incomplete = False
+        while True:
+            if page:
+                if page in seen_tokens:
+                    logger.warning(
+                        "drive source %s: subfolder listing repeated page token; stopping",
+                        source_id,
+                    )
+                    return FolderPage(folders, truncated=True)
+                seen_tokens.add(page)
+                params["pageToken"] = page
+            payload = await self._get_as_workspace(
+                f"{FILES_URL}?{urlencode(params)}",
+                source_id=source_id,
+                workspace_id=workspace_id,
+                box=box,
+            )
+            for entry in payload.get("files") or []:
+                fid, name = entry.get("id"), entry.get("name")
+                # The query asks for folders; the mime is checked again because
+                # a provider answering something else must not become a
+                # folder that is really a file.
+                if isinstance(fid, str) and not is_folder_id(fid):
+                    # Spliced into a `q` string next: a shape outside the id
+                    # alphabet is skipped and said, never trusted.
+                    logger.warning(
+                        "drive source %s: folder id %r under %s is not a Drive id — skipped",
+                        source_id,
+                        fid,
+                        parent,
+                    )
+                    continue
+                if (
+                    isinstance(fid, str)
+                    and isinstance(name, str)
+                    and name.strip()
+                    and entry.get("mimeType") == FOLDER_MIME
+                ):
+                    # Stripped: the label the sync stores is trimmed, as the
+                    # mix service trims what it compares against.
+                    folders.append({"id": fid, "name": name.strip()})
+            if payload.get("incompleteSearch") and not incomplete:
+                # Drive says the listing may leave folders out: said once, a cut.
+                logger.warning(
+                    "drive source %s: subfolder listing under %s is incomplete",
+                    source_id,
+                    parent,
+                )
+                incomplete = True
+            page = payload.get("nextPageToken")
+            if len(folders) > FOLDER_LIST_CAP or (
+                len(folders) == FOLDER_LIST_CAP and page
+            ):
+                logger.warning(
+                    "drive source %s: more than %d subfolders under %s — only the first"
+                    " %d are walked; the rest never sync",
+                    source_id,
+                    FOLDER_LIST_CAP,
+                    parent,
+                    FOLDER_LIST_CAP,
+                )
+                return FolderPage(folders[:FOLDER_LIST_CAP], truncated=True)
+            if not page:
+                return FolderPage(folders, truncated=incomplete)
+
+    async def fetch_bytes(
+        self,
+        config: Mapping[str, Any],
+        file_ref: str,
+        *,
+        source_id: str,
+        workspace_id: str,
+        max_bytes: int,
+    ) -> tuple[bytes, str, Optional[str]]:
+        """A file's bytes, name and mime under the workspace grant — the
+        approval card's media. Metadata first, so a file
+        over `max_bytes` is refused (`DriveMediaTooLarge`) before a download;
+        a file that is gone is `DriveMediaGone`, never the source's fault. The
+        download runs under the upload timeout class with the byte cap set to
+        `max_bytes`, so a metadata size that lied cannot pull more."""
+        validate_source_config(config)
+        if not is_folder_id(file_ref):  # file ids share the folder-id alphabet
+            raise DriveTerminalError("file_ref is not a Drive id")
+        box = _TokenBox(
+            await self._token_provider(source_id, workspace_id=workspace_id)
+        )
+        meta_params = {"fields": "size,mimeType,name", "supportsAllDrives": "true"}
+        try:
+            meta = await self._get_as_workspace(
+                f"{FILES_URL}/{file_ref}?{urlencode(meta_params)}",
+                source_id=source_id,
+                workspace_id=workspace_id,
+                box=box,
+            )
+        except DriveSourceGone as exc:
+            raise DriveMediaGone(
+                f"drive file {file_ref} is gone for source {source_id}: {exc}"
+            ) from exc
+        size = int(meta.get("size") or 0)
+        if size > max_bytes:
+            raise DriveMediaTooLarge(
+                f"drive file {file_ref} is {size} bytes; the cap is {max_bytes}"
+            )
+        media_params = {"alt": "media", "supportsAllDrives": "true"}
+        # The worker builds this adapter without a policy (the floor's
+        # default applies per call); the media policy derives from whichever
+        # is in force, never from None (#1259).
+        base = self._policy or EgressPolicy()
+        policy = _replace(
+            base,
+            timeout_class="upload",
+            # The cap bounds a body that outgrows its metadata; its floor
+            # leaves room for the JSON body of a refusal (a 401/403 must
+            # still be READ to be routed, not cut off as "too large").
+            max_response_bytes=max(max_bytes, MEDIA_CAP_FLOOR_BYTES),
+            total_budget_s=max(base.total_budget_s, MEDIA_FETCH_BUDGET_S),
+        )
+        try:
+            response = await self._fetch_as_workspace(
+                f"{FILES_URL}/{file_ref}?{urlencode(media_params)}",
+                source_id=source_id,
+                workspace_id=workspace_id,
+                box=box,
+                policy=policy,
+            )
+        except DriveSourceGone as exc:
+            raise DriveMediaGone(
+                f"drive file {file_ref} vanished mid-fetch for source {source_id}: {exc}"
+            ) from exc
+        except DriveCredentialDead as exc:
+            # The metadata leg just succeeded under this grant (with the one
+            # re-mint inside the fetch), so a refusal on the bytes is the
+            # FILE's — `cannotDownloadFile`, an abuse flag — not the grant's.
+            raise DriveMediaGone(
+                f"drive refuses the bytes of file {file_ref} for source {source_id}: {exc}"
+            ) from exc
+        except egress.ResponseTooLarge as exc:
+            raise DriveMediaTooLarge(str(exc)) from exc
+        return response.content, str(meta.get("name") or file_ref), meta.get("mimeType")
+
+    async def fetch_thumbnail(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str,
+        file_ref: str,
+        link: str,
+    ) -> Optional[Thumbnail]:
+        """A file's thumbnail under the workspace grant, or None when there is
+        none to serve.
+
+        The stored `link` is tried first. A dead link (`THUMBNAIL_LINK_DEAD`)
+        is the short-lived link having expired, so Drive is asked once for the
+        file's current `thumbnailLink` and that is tried once. Anything else
+        that is not a raster image within `THUMBNAIL_MAX_BYTES` is None with a
+        log line, never retried: a refused host or redirect, a non-raster type
+        (an SVG among them), an oversized body, a host that gave no answer.
+        The token goes to `THUMBNAIL_HOSTS` and Drive's API host, nowhere
+        else, and the link itself is never logged: it is a credential."""
+        if not is_folder_id(file_ref):  # file ids share the folder-id alphabet
+            raise DriveTerminalError("file_ref is not a Drive id")
+        box = _TokenBox(
+            await self._token_provider(source_id, workspace_id=workspace_id)
+        )
+        dead, thumbnail = await self._thumbnail_get(link, box.value)
+        if not dead:
+            return thumbnail
+        params = {"fields": "thumbnailLink", "supportsAllDrives": "true"}
+        try:
+            meta = _json_body(
+                await self._fetch_as_workspace(
+                    f"{FILES_URL}/{file_ref}?{urlencode(params)}",
+                    source_id=source_id,
+                    workspace_id=workspace_id,
+                    box=box,
+                    policy=self._thumbnail_policy(),
+                )
+            )
+        except DriveSourceGone:
+            logger.info("drive file %s is gone — no thumbnail", file_ref)
+            return None
+        current = meta.get("thumbnailLink")
+        if not current or current == link:
+            logger.info(
+                "drive file %s: its thumbnail link is dead and Drive has no other",
+                file_ref,
+            )
+            return None
+        _, thumbnail = await self._thumbnail_get(current, box.value)
+        return thumbnail
+
+    async def _thumbnail_get(
+        self, link: str, token: str
+    ) -> tuple[bool, Optional[Thumbnail]]:
+        """One GET of a thumbnail link under the thumbnail policy: whether the
+        host said the link is dead, and the thumbnail when the answer is one."""
+        policy = self._thumbnail_policy(
+            max_response_bytes=THUMBNAIL_MAX_BYTES, allowed_hosts=THUMBNAIL_HOSTS
+        )
+        host = httpx.URL(link).host
+        try:
+            response = await self._floored_get(link, token, policy=policy)
+        except egress.ResponseTooLarge:
+            logger.warning(
+                "drive thumbnail from %s is over %d bytes — not served",
+                host,
+                THUMBNAIL_MAX_BYTES,
+            )
+            return False, None
+        except (
+            egress.EgressRefused,
+            egress.EgressBudgetExhausted,
+            httpx.TransportError,
+        ) as exc:
+            # The message is not logged: a refusal of a link with no host
+            # quotes the link, and the link is a credential.
+            logger.warning(
+                "drive thumbnail from %s not fetched: %s", host, type(exc).__name__
+            )
+            return False, None
+        status = response.status_code
+        if status in THUMBNAIL_LINK_DEAD:
+            return True, None
+        if status != 200:
+            logger.warning("drive thumbnail host %s answered %d", host, status)
+            return False, None
+        content_type = (
+            response.headers.get("content-type", "").split(";")[0].strip().lower()
+        )
+        if content_type not in THUMBNAIL_TYPES:
+            logger.warning(
+                "drive thumbnail from %s is %r, not a raster image — not served",
+                host,
+                content_type,
+            )
+            return False, None
+        return False, Thumbnail(response.content, content_type)
+
+    def _thumbnail_policy(self, **changes: Any) -> EgressPolicy:
+        """The floor for both legs of a thumbnail fetch: quick to give up,
+        since the page draws a placeholder for any picture that fails."""
+        return _replace(
+            self._policy or EgressPolicy(),
+            timeout_class="fast",
+            total_budget_s=THUMBNAIL_BUDGET_S,
+            max_attempts=THUMBNAIL_MAX_ATTEMPTS,
+            **changes,
+        )
+
+    async def folder_ancestors(
+        self, *, workspace_id: str, folder_ref: str
+    ) -> list[str]:
+        """A folder's parents up to the Drive root, nearest first — the pick
+        check's read (connected folders are disjoint).
+        `files/{id}?fields=parents` under the workspace grant, one call per
+        level, bounded at `ANCESTOR_CAP`; a folder with no parent (My Drive's
+        root, a shared-drive root, a folder shared into the account) ends the
+        chain, and so does a parent outside the id shape rather than a query
+        built from it."""
+        if not is_folder_id(folder_ref):
+            raise DriveTerminalError("folder_ref is not a Drive folder id")
+        chain: list[str] = []
+        current = folder_ref
+        params = {"fields": "parents", "supportsAllDrives": "true"}
+        # One token for the whole chain, re-minted at most once (the walk's
+        # own pattern), rather than one credential read per level.
+        box = _TokenBox(await self._token_provider(None, workspace_id=workspace_id))
+        for _ in range(ANCESTOR_CAP):
+            try:
+                meta = await self._get_as_workspace(
+                    f"{FILES_URL}/{current}?{urlencode(params)}",
+                    source_id=None,
+                    workspace_id=workspace_id,
+                    box=box,
+                )
+            except DriveSourceGone:
+                if current == folder_ref:
+                    raise  # the folder itself is gone
+                # A parent the grant cannot see (a folder shared into the
+                # account names its owner's parent) ends the chain here. A
+                # dead grant is NOT this: `DriveCredentialDead` propagates, so
+                # a grant dying mid-walk never passes as a shorter chain.
+                break
+            # Drive v3 gives a file ONE parent (multi-parenting ended in 2020);
+            # a legacy multi-parent folder reports the first, which is the
+            # path Drive itself shows.
+            parents = meta.get("parents") or []
+            parent = parents[0] if parents else None
+            if not is_folder_id(parent) or parent in chain or parent == folder_ref:
+                break
+            chain.append(parent)
+            current = parent
+        return chain
+
+    async def list_folders(
+        self, *, parent: Optional[str], workspace_id: str
+    ) -> FolderPage:
+        """The folders under `parent` — the Drive root when None, the
+        folders shared to the account when `SHARED_ROOT` — as ``{"id",
+        "name"}`` rows in name order: the picker's read (#1165). The
+        same grant and the same floored transport as `list_changes`; the token
+        is the WORKSPACE's (069), so the provider is asked with no source.
+        Pages are followed to `FOLDER_LIST_CAP`, and the page says when it
+        was cut rather than looking complete.
+        """
+        if parent is not None and parent != SHARED_ROOT and not is_folder_id(parent):
+            raise DriveTerminalError("parent is not a Drive folder id")
+        scope = (
+            "sharedWithMe = true"
+            if parent == SHARED_ROOT
+            else f"'{parent or 'root'}' in parents"
+        )
+        params = {
+            "q": f"{scope} and mimeType = '{FOLDER_MIME}' and trashed = false",
+            "fields": "nextPageToken,files(id,name)",
+            "pageSize": "200",
+            "orderBy": "name_natural",
+            "spaces": "drive",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        folders: list[dict] = []
+        page_token: Optional[str] = None
+        while True:
+            if page_token:
+                params["pageToken"] = page_token
+            payload = await self._get_as_workspace(
+                f"{FILES_URL}?{urlencode(params)}",
+                source_id=None,
+                workspace_id=workspace_id,
+            )
+            for entry in payload.get("files") or []:
+                fid, name = entry.get("id"), entry.get("name")
+                if isinstance(fid, str) and isinstance(name, str):
+                    folders.append({"id": fid, "name": name})
+            page_token = payload.get("nextPageToken")
+            if len(folders) > FOLDER_LIST_CAP:
+                return FolderPage(folders[:FOLDER_LIST_CAP], truncated=True)
+            if not page_token:
+                return FolderPage(folders, truncated=False)
+            if len(folders) == FOLDER_LIST_CAP:
+                return FolderPage(folders, truncated=True)
+
+    def _item_for(self, entry: Mapping[str, Any]) -> Optional[dict]:
+        file_id = entry.get("id")
+        if not file_id:
+            logger.warning("drive listing returned a file with no id — skipped")
+            return None
+        mime = entry.get("mimeType") or ""
+        kind = _kind_for(mime)
+        if kind is None:
+            # The query already filters to image/video, so this is the provider
+            # disagreeing with its own filter rather than an expected skip.
+            logger.warning(
+                "drive file %s has mime %r which the listing query excludes — skipped",
+                file_id,
+                entry.get("mimeType"),
+            )
+            return None
+        content_hash = entry.get("md5Checksum")
+        if not content_hash:
+            logger.warning(
+                "drive file %s (%s) carries no md5Checksum — skipped, because"
+                " media_items.content_hash is required and this port has no"
+                " channel for a partial item",
+                file_id,
+                entry.get("name"),
+            )
+            return None
+        return {
+            "ref": file_id,
+            "name": entry.get("name"),
+            "kind": kind,
+            # The provider's own content type, carried rather than consumed.
+            # `kind` is the two-value `ck_media_kind` domain and is DERIVED from
+            # this; deriving and then discarding the input leaves `mime_type`
+            # — a column `054` defines and the media read already serves — NULL
+            # for every provider-sourced item, recoverable only by re-listing
+            # the folder. It is also the one classifier input that does not
+            # depend on the file NAME, which for provider media is whatever
+            # someone typed in Drive and need not carry an extension at all.
+            "mime_type": mime,
+            "content_hash": content_hash,
+            "size_bytes": int(entry["size"]) if entry.get("size") else None,
+            "modified_at": entry.get("modifiedTime"),
+            "thumbnail_link": entry.get("thumbnailLink"),
+        }
+
+    async def _floored_get(
+        self,
+        url: str,
+        token: str,
+        *,
+        policy: Optional[EgressPolicy] = None,
+    ) -> httpx.Response:
+        """One GET under the floor with the bearer token: on the injected
+        client, or on one opened for this call with the shared TLS context."""
+        kwargs = {
+            "policy": policy or self._policy,
+            "headers": {"Authorization": f"Bearer {token}"},
+        }
+        if self._client is not None:
+            return await egress.request(self._client, "GET", url, **kwargs)
+        async with httpx.AsyncClient(verify=_tls_context()) as own:
+            return await egress.request(own, "GET", url, **kwargs)
+
+    async def _get_as_workspace(
+        self,
+        url: str,
+        *,
+        source_id: Optional[str],
+        workspace_id: str,
+        box: Optional[_TokenBox] = None,
+    ) -> dict:
+        """One GET under the workspace's token, with ONE re-mint: a token the
+        door handed out can die inside the request it was minted for, and
+        Google can invalidate one early. On Google's 401/403 the provider is
+        asked once more with `fresh=True` and the GET retried; a second
+        refusal is the grant's, and propagates (#1247). `box` lets a
+        multi-request call (the walk) share one token and see the re-mint."""
+        response = await self._fetch_as_workspace(
+            url, source_id=source_id, workspace_id=workspace_id, box=box
+        )
+        return _json_body(response)
+
+    async def _fetch_as_workspace(
+        self,
+        url: str,
+        *,
+        source_id: Optional[str],
+        workspace_id: str,
+        box: Optional[_TokenBox] = None,
+        policy: Optional[EgressPolicy] = None,
+    ) -> httpx.Response:
+        """`_get_as_workspace` before the JSON step: the 200 response itself,
+        for a body that is bytes (the card's media) — same token, same one
+        re-mint, same status routing."""
+        label = (
+            source_id
+            if source_id is not None
+            else f"workspace {workspace_id} (folder browser)"
+        )
+        if box is None:
+            box = _TokenBox(
+                await self._token_provider(source_id, workspace_id=workspace_id)
+            )
+        try:
+            return await self._get_response(
+                url, box.value, source_id=label, policy=policy
+            )
+        except DriveCredentialDead:
+            box.value = await self._token_provider(
+                source_id, workspace_id=workspace_id, fresh=True
+            )
+            return await self._get_response(
+                url, box.value, source_id=label, policy=policy
+            )
+
+    async def _get_response(
+        self,
+        url: str,
+        token: str,
+        *,
+        source_id: str,
+        policy: Optional[EgressPolicy] = None,
+    ) -> httpx.Response:
+        """One floored GET, with the status mapped to the routing vocabulary;
+        a 200 comes back whole for the caller to read."""
+        try:
+            response = await self._floored_get(url, token, policy=policy)
+        except egress.EgressBudgetExhausted as exc:
+            # The floor retries transport failures internally and then raises
+            # THIS rather than the original error, so a bare
+            # `except httpx.TransportError` here can never fire. Budget
+            # exhausted means every attempt failed to get an answer, which is
+            # exactly what DriveLostResponse states.
+            raise DriveLostResponse(f"drive gave no answer: {exc}") from exc
+        except httpx.TransportError as exc:
+            # No answer exists. Deliberately not a DriveError — "we do not
+            # know" must not be catchable as "it failed".
+            raise DriveLostResponse(f"drive transport died: {exc}") from exc
+
+        status = response.status_code
+        if status == 200:
+            return response
+
+        detail = _reason(response)
+        if status in (401, 403):
+            # 403 is overloaded. Google's `errors[].reason` decides first: a
+            # limit passes and is retried, and a refusal of ONE item the app
+            # may not reach is that item gone to the app (a source's folder, a
+            # subfolder mid-walk, a file being fetched), not the grant dead —
+            # a reconnect would not help it, and no token is re-minted for it.
+            # The message is the fallback for a body without a reason.
+            code = _reason_code(response)
+            if status == 403 and (
+                code in _LIMIT_REASONS or (not code and _is_quota(detail))
+            ):
+                raise DriveRetryableError(f"drive quota/rate limited: {detail}")
+            if status == 403 and code in _ITEM_REFUSAL_REASONS:
+                raise DriveSourceGone(
+                    f"drive refuses this item to the app for source {source_id}"
+                    f" ({code}): {detail}"
+                )
+            raise DriveCredentialDead(
+                f"drive refused the credential for source {source_id}"
+                f" ({status}): {detail}"
+            )
+        if status == 404:
+            raise DriveSourceGone(
+                f"drive says the configured folder is gone for source"
+                f" {source_id}: {detail}"
+            )
+        if status == 429 or status >= 500:
+            raise DriveRetryableError(f"drive answered {status}: {detail}")
+        raise DriveTerminalError(f"drive answered {status}: {detail}")
+
+
+@functools.lru_cache(maxsize=1)
+def _tls_context() -> ssl.SSLContext:
+    """One TLS context, httpx's default, for every client this module opens.
+    Building one loads the CA bundle and blocks the event loop while it does,
+    which a page of thumbnails would otherwise pay once per picture."""
+    return httpx.create_ssl_context()
+
+
+def _json_body(response: httpx.Response) -> dict:
+    """A 200's body as JSON, or the retryable refusal a non-JSON body earns."""
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise DriveRetryableError(
+            "drive answered 200 with a body that is not JSON"
+        ) from exc
+
+
+def _reason(response: httpx.Response) -> str:
+    """Drive's error reason, or the raw body. Never raises."""
+    try:
+        body = response.json()
+    except ValueError:
+        return (response.text or "")[:200]
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("status") or error)[:200]
+    return str(body)[:200]
+
+
+#: Google's 403 `errors[].reason` values that are limits, not refusals: they
+#: pass, so the call is retried (the "Resolve errors" guide). A daily limit
+#: read as a dead grant would flip a source to `error` and alert.
+_LIMIT_REASONS = frozenset(
+    {"dailyLimitExceeded", "userRateLimitExceeded", "rateLimitExceeded"}
+)
+
+#: Google's 403 `errors[].reason` values about ONE file or folder the app may
+#: not reach (it is not on the item's ACL, or the user lost access to it). The
+#: item is gone to the app; the credential is fine.
+_ITEM_REFUSAL_REASONS = frozenset(
+    {"appNotAuthorizedToFile", "insufficientFilePermissions"}
+)
+
+
+def _reason_code(response: httpx.Response) -> str:
+    """Google's first `errors[].reason`, or "" when the body names none. Never
+    raises."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    errors = error.get("errors") if isinstance(error, dict) else None
+    if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+        return str(errors[0].get("reason") or "")
+    return ""
+
+
+def _is_quota(detail: str) -> bool:
+    lowered = detail.lower()
+    return any(
+        token in lowered
+        for token in ("ratelimit", "rate limit", "quota", "userratelimitexceeded")
+    )
+
+
+__all__ = [
+    "DEFAULT_PAGE_SIZE",
+    "FILE_FIELDS",
+    "FILES_URL",
+    "GoogleDriveAdapter",
+    "Thumbnail",
+    "TokenProvider",
+]

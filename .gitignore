@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+
+# Environment variables
+.env
+.env.test
+.env.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Backups
+backup/
+*.sql
+*.sql.gz
+*.tar.gz
+
+# But allow SQL scripts in scripts/ directory
+!scripts/*.sql
+!scripts/**/*.sql
+# By-hand SQL fixtures for the DB gates (a legacy table no migration creates)
+!tests/scripts/fixtures/*.sql
+
+# Media files (don't commit user media)
+media/stories/*
+!media/stories/.gitkeep
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS
+Thumbs.db
+
+# Landing site (Next.js)
+landing/node_modules/
+# a vitest run from the repository root leaves its cache here too
+node_modules/
+landing/.next/
+landing/.env.local
+!landing/src/lib/
+
+# Vercel project link (written by the Vercel CLI)
+.vercel/
+
+# Editable-install venvs under either name
+.venv/

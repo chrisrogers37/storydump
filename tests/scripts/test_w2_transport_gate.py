@@ -1,0 +1,358 @@
+"""Gate — outbox delivery through the assembled worker (#942).
+
+The unit tier proves the transport and the wiring shapes; this proves the
+cycle on the real machinery: the sweep mints exactly one live sender job per
+pending binding, the interactive lane claims it, the hold drains the queue
+through the injected transport to the binding's own chat ref, rows land
+`sent` with real refs, the job finalizes, and a re-sweep on a drained outbox
+mints nothing. On the dead-credential path an auth failure fails its row
+after the one attempt, nothing resends it (#1493), and the worker survives.
+"""
+
+import uuid
+
+import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from src.channels.telegram_transport import TelegramAuthDead
+from src.services.target import unit_of_work
+from src.services.target.outbox import AMBIGUOUS_RESOLVE_AFTER_SECONDS
+from src.services.target.work_loop import WorkerConfig, ensure_sender_jobs
+from src.worker import compose
+from tests.scripts.conftest import async_url, seed_workspace_chain
+
+pytestmark = [pytest.mark.integration]
+
+
+def _seed_binding_with_pending(sync_conn, name: str, *, rows: int = 2):
+    chain = seed_workspace_chain(sync_conn, name)
+    binding = str(uuid.uuid4())
+    with sync_conn.cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "INSERT INTO channel_bindings (id, workspace_id, channel, external_ref)"
+            " VALUES (%s, %s, 'telegram_group', %s)",
+            (binding, chain["ws"], f"-100{name[-3:]}42"),
+        )
+        for i in range(rows):
+            cur.execute(
+                "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload)"
+                " VALUES (%s, %s, 'approval_prompt',"
+                " jsonb_build_object('v', 1, 'text', %s))",
+                (chain["ws"], binding, f"card {i} for {name}"),
+            )
+    sync_conn.commit()
+    return chain, binding
+
+
+class _FakeTransport:
+    """for_chat-shaped; records (chat_ref, text) and returns rising refs."""
+
+    def __init__(self, fail_with=None):
+        self.sent = []
+        self.fail_with = fail_with
+        self.auth_failures = 0
+
+    def for_chat(self, external_ref):
+        async def send(row):
+            if self.fail_with is not None:
+                if isinstance(self.fail_with, TelegramAuthDead):
+                    self.auth_failures += 1
+                raise self.fail_with
+            self.sent.append((external_ref, row["payload"]["text"]))
+            return f"msg-{len(self.sent)}"
+
+        return send
+
+    async def probe(self):
+        return "gate_bot"
+
+    async def aclose(self):
+        pass
+
+
+async def _sweep(engine):
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as session:
+        async with session.begin():
+            await unit_of_work.apply_gucs(session, tenant_id="", actor_kind="system")
+            minted = await ensure_sender_jobs(session)
+    return minted
+
+
+async def _run_interactive_once(lane_db, engine, transport, *, config=None):
+    app = compose(
+        engine=engine, config=config or WorkerConfig(), env={}, transport=transport
+    )
+    wl = next(wl_ for wl_ in app.loops if wl_.lane == "interactive")
+    conn = await engine.connect()
+    try:
+        wl.bind_claim_conn(conn)
+        claimed = await wl.run_once()
+    finally:
+        await conn.close()
+    return wl, claimed
+
+
+def _age_past_ambiguity_backoff(sync_conn, binding):
+    """Backdate a binding's outbox rows past `AMBIGUOUS_RESOLVE_AFTER_SECONDS`,
+    with the trigger that would stamp `updated_at` back to now held off for
+    the one statement."""
+    with sync_conn.cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "ALTER TABLE channel_outbox DISABLE TRIGGER tg_touch_channel_outbox"
+        )
+        try:
+            cur.execute(
+                "UPDATE channel_outbox"
+                " SET updated_at = now() - make_interval(secs => %s)"
+                " WHERE binding_id = %s",
+                (AMBIGUOUS_RESOLVE_AFTER_SECONDS + 1, binding),
+            )
+        finally:
+            cur.execute(
+                "ALTER TABLE channel_outbox ENABLE TRIGGER tg_touch_channel_outbox"
+            )
+    sync_conn.commit()
+
+
+class TestDeliveryEndToEnd:
+    async def test_sweep_mints_once_hold_drains_rows_land_sent_job_finalizes(
+        self, lane_db, sync_conn
+    ):
+        chain, binding = _seed_binding_with_pending(sync_conn, "w2send", rows=2)
+        engine = create_async_engine(async_url(lane_db))
+        try:
+            assert await _sweep(engine) == 1, "one pending binding, one sender job"
+            assert await _sweep(engine) == 0, "a live job blocks a duplicate mint"
+
+            transport = _FakeTransport()
+            cfg = WorkerConfig(poller_interval_seconds=0.05, sender_hold_seconds=10.0)
+            wl, claimed = await _run_interactive_once(
+                lane_db, engine, transport, config=cfg
+            )
+
+            assert claimed is True and wl.processed == 1
+            assert len(transport.sent) == 2
+            with sync_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT external_ref FROM channel_bindings WHERE id = %s",
+                    (binding,),
+                )
+                bound_ref = cur.fetchone()[0]
+            assert {ref for ref, _ in transport.sent} == {bound_ref}, (
+                "cards must go to the binding's own external ref"
+            )
+            with sync_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT state, external_message_ref FROM channel_outbox"
+                    " WHERE binding_id = %s ORDER BY created_at",
+                    (binding,),
+                )
+                rows = cur.fetchall()
+            assert [r[0] for r in rows] == ["sent", "sent"]
+            assert all(r[1] for r in rows)
+            with sync_conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
+                assert cur.fetchone()[0] == 0
+            assert await _sweep(engine) == 0, "a drained outbox mints nothing"
+        finally:
+            await engine.dispose()
+
+    async def test_an_aged_ambiguous_row_mints_a_sender_a_fresh_one_waits(
+        self, lane_db, sync_conn
+    ):
+        """A live sender's lost answer is resolved by the binding's sender
+        after a backoff (#1297) — and a quiet binding has no sender, so the
+        sweep must mint one for an aged `ambiguous` row, not only for pending
+        ones; a fresh ambiguous row is not yet the sweep's business."""
+        chain, binding = _seed_binding_with_pending(sync_conn, "w2aged", rows=1)
+        with sync_conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(
+                "UPDATE channel_outbox SET state = 'ambiguous', attempts = 1"
+                " WHERE binding_id = %s",
+                (binding,),
+            )
+        sync_conn.commit()
+        engine = create_async_engine(async_url(lane_db))
+        try:
+            assert await _sweep(engine) == 0, "a fresh ambiguous row waits"
+            _age_past_ambiguity_backoff(sync_conn, binding)
+            assert await _sweep(engine) == 1, "an aged ambiguous row needs a sender"
+        finally:
+            await engine.dispose()
+
+
+class TestDeadCredentialMidRun:
+    async def test_an_auth_dead_send_fails_its_row_once_and_the_worker_survives(
+        self, lane_db, sync_conn
+    ):
+        """Aged past the ambiguity backoff, an ambiguous row would mint a
+        sender (the test above); a failed one mints none. The binding stays
+        active: a dead token is not a gone chat."""
+        chain, binding = _seed_binding_with_pending(sync_conn, "w2dead", rows=1)
+        engine = create_async_engine(async_url(lane_db))
+        try:
+            await _sweep(engine)
+            transport = _FakeTransport(
+                fail_with=TelegramAuthDead("sendMessage: 401 Unauthorized", code=401)
+            )
+            cfg = WorkerConfig(poller_interval_seconds=0.05, sender_hold_seconds=2.0)
+            wl, claimed = await _run_interactive_once(
+                lane_db, engine, transport, config=cfg
+            )
+
+            assert claimed is True and wl.processed == 1, (
+                "the hold ends and the job finalizes; the ROW carries the state"
+            )
+            assert transport.auth_failures == 1
+            with sync_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT state, attempts, last_failure_class, last_error_code"
+                    " FROM channel_outbox WHERE binding_id = %s",
+                    (binding,),
+                )
+                assert cur.fetchone() == ("failed", 1, "credential_dead", 401)
+                cur.execute(
+                    "SELECT state FROM channel_bindings WHERE id = %s", (binding,)
+                )
+                assert cur.fetchone()[0] == "active"
+                cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
+                assert cur.fetchone()[0] == 0
+            _age_past_ambiguity_backoff(sync_conn, binding)
+            assert await _sweep(engine) == 0, "a failed row mints no sender"
+        finally:
+            await engine.dispose()
+
+
+class TestReMintThroughTheRealSweeper:
+    """Re-mint through the real sweeper: rows enqueued AFTER the worker is up get
+    their sender job from the PERIODIC sweeper — not from a test helper calling
+    the mint function directly — and the sweeper is still alive at the end.
+    Positive controls throughout: sweeps and mints are counters whose absence of
+    movement is a failure, never a silence."""
+
+    async def test_rows_enqueued_after_startup_are_delivered_by_the_live_worker(
+        self, lane_db, sync_conn
+    ):
+        import asyncio
+
+        from src.worker import run
+
+        chain, binding = _seed_binding_with_pending(sync_conn, "w2remint", rows=0)
+        # The row this test watches is the one it writes after startup, which
+        # belongs to no intent, so nothing can supersede it: a `superseded`
+        # read here was always the chain's own card. That intent is due as
+        # soon as it is seeded, so the live worker prompts it onto this
+        # binding, and the reaper can expire it even after the prompt (#1454).
+        # Its slot moves a day out, so the late row is the binding's only card.
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE post_intents SET schedule_slot_at = now() + interval '1 day'"
+                " WHERE id = %s",
+                (chain["intent"],),
+            )
+        sync_conn.commit()
+        transport = _FakeTransport()
+        cfg = WorkerConfig(
+            lease_seconds=10.0,
+            claim_idle_seconds=0.1,
+            clock_interval_seconds=5.0,
+            heartbeat_interval_seconds=0.5,
+            sender_sweep_seconds=0.3,
+            poller_interval_seconds=0.05,
+            sender_hold_seconds=3.0,
+        )
+        engine = create_async_engine(async_url(lane_db))
+        app = compose(engine=engine, config=cfg, env={}, transport=transport)
+        stop = asyncio.Event()
+        runner = asyncio.create_task(run(app, stop=stop))
+        try:
+            # The late row lands after the sweeper's first pass, so only a
+            # later pass can mint its job. `sweeps` counts passes as they
+            # start: a second one means the first has finished.
+            first_pass_deadline = asyncio.get_running_loop().time() + 12.0
+            while (
+                app.sweeper is None or app.sweeper.sweeps < 2
+            ) and asyncio.get_running_loop().time() < first_pass_deadline:
+                await asyncio.sleep(0.2)
+            assert app.sweeper is not None and app.sweeper.sweeps >= 2, (
+                "the sender sweeper never finished its first pass"
+            )
+            with sync_conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute(
+                    "INSERT INTO channel_outbox (workspace_id, binding_id, kind,"
+                    " payload) VALUES (%s, %s, 'approval_prompt',"
+                    " jsonb_build_object('v', 1, 'text', 'late card')) RETURNING id",
+                    (chain["ws"], binding),
+                )
+                late = cur.fetchone()[0]
+            sync_conn.commit()
+
+            deadline = asyncio.get_running_loop().time() + 12.0
+            while not transport.sent and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.2)
+        finally:
+            # Wait for the third sweep on its own bounded clock before
+            # stopping: the >=3 assert discriminates died-after-one-pass
+            # (#958: sweeps pinned at 1 forever) from a loaded host where
+            # each sweep's real DB query outlasts the 0.3s interval — a
+            # fixed post-hoc count conflates the two.
+            sweep_deadline = asyncio.get_running_loop().time() + 10.0
+            while (
+                app.sweeper is not None
+                and app.sweeper.sweeps < 3
+                and asyncio.get_running_loop().time() < sweep_deadline
+            ):
+                await asyncio.sleep(0.2)
+            stop.set()
+            await asyncio.wait_for(runner, timeout=20.0)
+
+        assert transport.sent, "the late row was never delivered — re-mint is broken"
+        assert app.sweeper is not None and app.sweeper.sweeps >= 3, (
+            "the sweeper must still be sweeping, not dead after one pass"
+        )
+        assert app.sweeper.mints >= 1, "the sender job must come from the SWEEPER"
+        with sync_conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, state FROM channel_outbox WHERE binding_id = %s",
+                (binding,),
+            )
+            assert cur.fetchall() == [(late, "sent")]
+            cur.execute("SELECT count(*) FROM jobs WHERE state = 'leased'")
+            assert cur.fetchone()[0] == 0
+
+
+class TestTheClaimedRowVouchesForItsWorkspace:
+    """#1259: the transport holds a card's media block against the
+    ROW's workspace before it asks the grant. That only works if the row the
+    outbox hands the transport carries one — through `claim_next`, not a
+    hand-built dict."""
+
+    @pytest.mark.asyncio
+    async def test_every_row_the_transport_sees_carries_the_bindings_workspace(
+        self, lane_db, sync_conn
+    ):
+        chain, binding = _seed_binding_with_pending(sync_conn, "w2-ws", rows=2)
+        engine = create_async_engine(async_url(lane_db))
+        seen = []
+
+        class Recording(_FakeTransport):
+            def for_chat(self, external_ref):
+                inner = super().for_chat(external_ref)
+
+                async def send(row):
+                    seen.append(row.get("workspace_id"))
+                    return await inner(row)
+
+                return send
+
+        try:
+            await _sweep(engine)
+            await _run_interactive_once(lane_db, engine, Recording())
+        finally:
+            await engine.dispose()
+        assert seen and all(ws == str(chain["ws"]) for ws in seen), seen

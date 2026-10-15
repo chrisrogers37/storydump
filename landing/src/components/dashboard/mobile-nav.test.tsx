@@ -1,0 +1,129 @@
+/**
+ * The mobile navigation drawer (#1363), which the dashboard and the
+ * sample workspace both draw (`NavDrawer`).
+ *
+ * It pins three properties: the drawer renders `<Sidebar mobile />`, not the
+ * `hidden … lg:block` variant, which would open onto nothing; the trigger's
+ * breakpoint (`lg:hidden`) and the aside's (`lg:block`) name the same width,
+ * so the trigger and the static sidebar are never on screen together; and
+ * following a link closes the drawer (#1649), because the layout holding it
+ * survives the navigation.
+ *
+ * Asserted without a DOM, per this suite's `environment: "node"` — the
+ * components are read as returned element trees, which is enough because each
+ * is a prop, a handler or a class string. The drawer's open state is one
+ * `useState` in `NavDrawer`; everything else is `NavDrawerView`, read here.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+import type { ReactElement } from "react";
+import { isValidElement } from "react";
+
+vi.mock("next/navigation", () => ({ usePathname: () => "/dashboard" }));
+
+import { SheetContent } from "@/components/ui/sheet";
+import { DashboardHeader } from "./header";
+import { NavDrawer, NavDrawerView } from "./nav-drawer";
+import { Sidebar } from "./sidebar";
+
+/** Every element in a returned tree, depth-first. Client components are not
+ *  rendered here, so their elements appear as themselves — which is the point:
+ *  we want the props the drawer HANDS the sidebar, not what it renders. */
+function* walk(node: unknown): Generator<ReactElement> {
+  if (Array.isArray(node)) {
+    for (const child of node) yield* walk(child);
+    return;
+  }
+  if (!isValidElement(node)) return;
+  yield node;
+  yield* walk((node.props as { children?: unknown }).children);
+}
+
+const header = () =>
+  DashboardHeader({
+    user: { email: "owner@example.com", displayName: "Owner" },
+  } as Parameters<typeof DashboardHeader>[0]) as ReactElement;
+
+const drawer = (onOpenChange: (open: boolean) => void = () => {}) =>
+  NavDrawerView({ open: true, onOpenChange }) as ReactElement;
+
+/** The responsive prefix attached to one utility — `lg` of `lg:hidden`.
+ *
+ *  Read per-utility rather than "the only prefix in the string": the trigger
+ *  is an ordinary button and the aside an ordinary column, so either may grow
+ *  an unrelated `md:px-4` one day. That must not turn this into a red build
+ *  about padding. */
+function breakpointOf(className: string, utility: string): string {
+  const found = className.match(
+    new RegExp(`\\b(sm|md|lg|xl|2xl):${utility}\\b`)
+  );
+  expect(found, `expected a responsive \`${utility}\` in: ${className}`).not.toBeNull();
+  return found![1];
+}
+
+describe("the mobile navigation drawer", () => {
+  it("is drawn by the dashboard's header, with the dashboard's own entries", () => {
+    const inHeader = [...walk(header())].find((el) => el.type === NavDrawer);
+    expect(inHeader, "the header draws a <NavDrawer>").toBeDefined();
+    expect((inHeader!.props as Parameters<typeof NavDrawer>[0]).items).toBeUndefined();
+  });
+
+  it("hands the sidebar its `mobile` variant", () => {
+    // Without this the drawer renders the `hidden` variant: the sheet opens,
+    // and the navigation inside it is display:none. There is no navigation at
+    // all below the breakpoint.
+    const inDrawer = [...walk(drawer())].find((el) => el.type === Sidebar);
+    expect(inDrawer, "the drawer renders a <Sidebar>").toBeDefined();
+    expect((inDrawer!.props as { mobile?: boolean }).mobile).toBe(true);
+  });
+
+  it("renders nothing hidden in that variant", () => {
+    // The assertion the prop exists FOR. Pinning the prop alone would pass on
+    // a variant that was itself hidden.
+    const aside = Sidebar({ mobile: true }) as ReactElement<{ className: string }>;
+    expect(aside.props.className).not.toMatch(/\bhidden\b/);
+    expect(aside.props.className).not.toMatch(/:(block|flex|grid)\b/);
+  });
+
+  it("hides the trigger at exactly the width the static sidebar appears", () => {
+    // The second property. These two are complements — the drawer is the
+    // navigation below the breakpoint and the aside is the navigation above it
+    // — so a disagreement leaves a band showing both, or neither. Compared as
+    // breakpoints rather than as literals: the value is a judgement call, the
+    // AGREEMENT is the invariant.
+    const trigger = [...walk(drawer())].find((el) =>
+      /\b(sm|md|lg|xl|2xl):hidden\b/.test(
+        String((el.props as { className?: string }).className ?? "")
+      )
+    );
+    expect(trigger, "the drawer has a breakpoint-hidden trigger").toBeDefined();
+
+    const desktop = Sidebar({}) as ReactElement<{ className: string }>;
+    expect(desktop.props.className).toMatch(/\bhidden\b/);
+
+    expect(
+      breakpointOf(
+        String((trigger!.props as { className: string }).className),
+        "hidden"
+      )
+    ).toBe(breakpointOf(desktop.props.className, "block"));
+  });
+
+  it("closes on a tap that follows a link in it, and on no other tap", () => {
+    // The third property. Closed on the tap itself, so it also closes for
+    // the entry of the page already open, where the path never changes.
+    const onOpenChange = vi.fn();
+    const content = [...walk(drawer(onOpenChange))].find((el) => el.type === SheetContent);
+    expect(content, "the drawer has its sheet").toBeDefined();
+    const tap = (onLink: boolean) =>
+      (content!.props as { onClick: (event: unknown) => void }).onClick({
+        target: { closest: (selector: string) => (onLink && selector === "a[href]" ? {} : null) },
+      });
+
+    tap(false);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    tap(true);
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+});

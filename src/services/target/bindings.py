@@ -1,0 +1,424 @@
+"""The `channel_bindings` writer (#1172).
+
+## What this is
+
+**The one writer of `channel_bindings`.** :func:`bind`, :func:`revoke`,
+:func:`revoke_by_id`, :func:`revoke_for_workspace` and
+:func:`follow_or_retire` are the whole write surface, and
+`channel_bind.handle_bind` — the `bind-` lane of the `/start` door — is what
+calls :func:`bind` when a group's ``/start bind-<state>``
+consumes its one-shot state. Routing every write through one module is what
+makes `uq_binding_external` (a chat binds once) and `0..n` bindings per
+workspace hold by construction rather than by review.
+
+`0..n` bindings per workspace are deliberate (#721), and the table's shape
+encodes it: no constraint limits a workspace to a single binding.
+Everything downstream depends on a row here: `work_loop`'s sweep mints
+`deliver_outbox` jobs `FROM channel_bindings`, the `deliver_outbox` handler
+resolves a binding to its `external_ref`, and `outbox.enqueue` writes the rows
+they carry — so a workspace with no binding produces cards that land nowhere,
+which is the gap `email_sender` exists for.
+
+## The one rule that is a product rule, and it is stated rather than inferred
+
+**A chat cannot be double-bound.** `uq_binding_external UNIQUE (channel,
+external_ref)` is global, not per-workspace: it is inherent to the product, so
+the cap is INTENDED. `0..n` is bindings-per-WORKSPACE, which is a different
+axis from workspaces-per-CHAT.
+
+A Telegram account managing one-to-many workspaces is about the
+IDENTITY, not the chat: one person with two chats is the supported shape, one
+chat driving two workspaces is not.
+
+## Why the upsert is guarded
+
+Three forms, run against the schema as `svc_ingress` with a chat already
+bound to another workspace:
+
+| form | result |
+|---|---|
+| plain `INSERT` | `UniqueViolation` on `uq_binding_external` |
+| `ON CONFLICT DO UPDATE SET state='active'` | `InsufficientPrivilege` — RLS `USING` refuses |
+| the same **guarded** by `workspace_id = EXCLUDED.workspace_id` | clean, `rowcount = 0` |
+
+RLS does refuse the theft, so no form of this silently re-points a chat. What
+the guard buys is a **refusal instead of an error**: the naive upsert fails as
+a policy violation, which a caller can only render as a 500. The guarded form
+lets the conflicting row stay invisible and reports "not yours" as an ordinary
+outcome.
+
+**On the existence oracle, stated precisely.**
+:data:`TAKEN` has exactly one cause — the conflict fired
+and the guard rejected it — so it leaks *precisely* what the `UniqueViolation`
+leaks: this chat is bound somewhere. The guarded form changes the SHAPE of that
+answer (a value a caller can render, not an exception it can only turn into a
+500); it does not change the INFORMATION. It neither widens nor narrows the
+leak.
+
+That leak is accepted on the ground that the person probing must already be
+adding the bot to that chat, which bounds who can ask, not what the answer
+reveals. Returning a single value for the single case is this module's choice
+and should be reviewed as such.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Optional
+
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+
+from src.services.target._dbapi import constraint_violated
+
+from src.exceptions.base import RefusalError
+
+#: `ck_bindings_channel`, verbatim. A closed set the CALLER supplies, so it is
+#: refused by name here rather than left to surface as a check violation.
+CHANNELS: tuple[str, ...] = ("telegram_group", "telegram_dm")
+
+
+def push_binding_where(alias: str = "") -> str:
+    """A LIVE binding — active and Telegram — optionally qualified for a table
+    alias. It is the set the sender sweep mints for (`fn_sender_sweep`, 082,
+    whose body is pinned to this) and the set an outcome supersedes cards in:
+    a superset of where a card may go. Nothing queues or claims a card on it;
+    that is :func:`deliverable_binding_where`."""
+    p = f"{alias}." if alias else ""
+    return f"{p}state = 'active' AND {p}channel LIKE 'telegram%'"
+
+
+def deliverable_binding_where(alias: str = "channel_bindings") -> str:
+    """ "Where can we say this": a live binding, and for a private chat
+    (`telegram_dm`) only while the person whose chat it is — the linked
+    Telegram identity with that chat's id — belongs to the binding's
+    workspace.
+
+    ONE owner: every statement that queues or claims a card routes on it, at
+    use time, so it holds however the binding or the membership came to be,
+    and several spellings is how they drift apart the day a second push
+    channel lands (`invitation_cards.announce` names that exact risk). The
+    sender sweep's door mints on the live set and reads no membership; a
+    sender it mints for a binding this refuses retires that binding's queue
+    (`work_loop.deliver_outbox`). A fragment, not a bound parameter: it is
+    SQL, and no user input reaches it. *alias* qualifies every column, as the
+    subquery needs: a bare ``workspace_id`` there would bind to
+    ``workspace_members``."""
+    return (
+        f"{push_binding_where(alias)}"
+        f" AND ({alias}.channel <> 'telegram_dm' OR EXISTS ("
+        "SELECT 1 FROM user_identities dm_ui"
+        " JOIN workspace_members dm_wm ON dm_wm.user_id = dm_ui.user_id"
+        " WHERE dm_ui.provider = 'telegram'"
+        f" AND dm_ui.external_id = {alias}.external_ref"
+        f" AND dm_wm.workspace_id = {alias}.workspace_id))"
+    )
+
+
+#: The form for a statement whose one `channel_bindings` is unaliased.
+DELIVERABLE_BINDING_WHERE = deliverable_binding_where()
+
+#: A Telegram chat id as text — negative for groups and supergroups. Both
+#: members of :data:`CHANNELS` are Telegram, which is what makes this shape
+#: knowable; adding a non-Telegram channel to `ck_bindings_channel` must
+#: revisit this, and the constraint moving is the signal to do so.
+_EXTERNAL_REF = re.compile(r"^-?[0-9]{1,32}$")
+
+#: A new row was written.
+BOUND = "bound"
+#: The workspace's own binding for this chat was re-activated. The table's DDL
+#: comment specifies this path: `uq_binding_external` holds across states, so
+#: re-adding the bot flips `revoked` back to `active` and preserves history.
+REBOUND = "rebound"
+#: The chat belongs to a DIFFERENT workspace. Refused — see the module note.
+TAKEN = "taken"
+
+
+class BindingRefused(RefusalError):
+    """A caller-supplied value the boundary refuses, before the database sees
+    it (`provisioning.ProvisioningRefused`'s shape).
+
+    The reasons: ``chat_type_unsupported``, ``external_ref_required``,
+    ``external_ref_malformed`` and ``chat_type_not_accepted``."""
+
+    _prefix = "binding refused"
+
+
+#: Telegram's chat types → this module's channel vocabulary. **It lives here,
+#: and that placement is the point.** The `/start` router and any future
+#: adapter both need it, and a mapping embedded in two lanes is one that can
+#: disagree about what a supergroup is — the fork this module exists to prevent
+#: for the write itself.
+#:
+#: A broadcast `channel` is deliberately absent rather than mapped: it is a
+#: real Telegram chat type with no value in `ck_bindings_channel`, and guessing
+#: one would invent a product decision. It refuses by name.
+_CHAT_TYPES: dict[str, str] = {
+    "private": "telegram_dm",
+    "group": "telegram_group",
+    "supergroup": "telegram_group",
+}
+
+#: The chat types that map to `telegram_group` — derived from the mapping
+#: above so a new group-shaped type is added once (#1325).
+GROUP_CHAT_TYPES: tuple[str, ...] = tuple(
+    t for t, channel in _CHAT_TYPES.items() if channel == "telegram_group"
+)
+
+
+def channel_for_chat_type(chat_type: object) -> str:
+    """One Telegram `chat.type` → one `ck_bindings_channel` value.
+
+    The rule is total and named: a type the mapping lacks is refused by name,
+    so a caller cannot quietly omit a type.
+    """
+    mapped = _CHAT_TYPES.get(chat_type) if isinstance(chat_type, str) else None
+    if mapped is None:
+        raise BindingRefused(
+            "chat_type_unsupported", f"{chat_type!r} has no channel_bindings value"
+        )
+    return mapped
+
+
+def _clean(chat_type: object, external_ref: object) -> tuple[str, str]:
+    """Telegram's own vocabulary in, this schema's out.
+
+    **The writers take the RAW `chat.type`, and that is the contract rather
+    than a convenience.** The `/start` router passes what Telegram sent
+    precisely because the mapping is this module's domain rule; a writer that
+    demanded an already-mapped value would leave the rule owned here and
+    implemented nowhere (#1178).
+    """
+    channel = channel_for_chat_type(chat_type)
+    if not isinstance(external_ref, str) or not external_ref.strip():
+        raise BindingRefused("external_ref_required")
+    ref = external_ref.strip()
+    if not _EXTERNAL_REF.match(ref):
+        raise BindingRefused("external_ref_malformed", "a Telegram chat id")
+    return channel, ref
+
+
+async def bind(
+    session,
+    *,
+    workspace_id: str,
+    chat_type: str,
+    external_ref: str,
+    accepts: tuple[str, ...] = GROUP_CHAT_TYPES,
+) -> str:
+    """Bind one chat to one workspace. Returns :data:`BOUND`, :data:`REBOUND`
+    or :data:`TAKEN`.
+
+    **A chat is bound only when its type is one the caller names** in
+    *accepts*: a group's by default, so a private chat is bound only for a
+    caller that asks for one by name. :data:`_CHAT_TYPES` knows every bindable
+    type, so the mapping alone would write a row for whatever a caller passed
+    on. This is the writer's own rule, so it does not rest on each caller
+    remembering to refuse. The group door names nothing
+    (`channel_bind.handle_bind`), and it answers the person itself first.
+
+    Runs in the caller's transaction — a binding created by the delivery that
+    announced it must roll back with it, the same rule `outbox.enqueue` states.
+
+    **`TAKEN` is not an exception**, because it is not a fault: adding the bot
+    to a chat another workspace already uses is a thing a person can do by
+    accident, and the caller has to render it. The two error-shaped outcomes it
+    replaces are in the module note.
+
+    New versus re-activated is read from `xmax = 0` on the RETURNING row —
+    `provisioning.create_destination`'s idiom, one round trip rather than a
+    read-then-write that another transaction could interleave.
+    """
+    channel, ref = _clean(chat_type, external_ref)
+    if chat_type not in accepts:
+        raise BindingRefused(
+            "chat_type_not_accepted", f"{chat_type!r} is not a type this caller binds"
+        )
+    params = {"ws": str(workspace_id), "ch": channel, "ref": ref}
+    # A removed group coming back: its old queue is retired before it is
+    # active again, so nothing left over from before the removal is sent.
+    revoked = (
+        await session.execute(
+            text(
+                "SELECT id FROM channel_bindings"
+                " WHERE workspace_id = :ws AND channel = :ch AND external_ref = :ref"
+                "   AND state = 'revoked' FOR UPDATE"
+            ),
+            params,
+        )
+    ).first()
+    if revoked is not None:
+        await retire_unsettled(session, binding_id=str(revoked[0]))
+    row = (
+        await session.execute(
+            text(
+                "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+                " VALUES (:ws, :ch, :ref)"
+                " ON CONFLICT (channel, external_ref) DO UPDATE"
+                "    SET state = 'active'"
+                "  WHERE channel_bindings.workspace_id = EXCLUDED.workspace_id"
+                " RETURNING (xmax = 0) AS created"
+            ),
+            params,
+        )
+    ).first()
+    if row is None:
+        return TAKEN
+    return BOUND if row[0] else REBOUND
+
+
+async def revoke(
+    session, *, workspace_id: str, chat_type: str, external_ref: str
+) -> bool:
+    """Mark this workspace's binding revoked — the bot was kicked or blocked.
+
+    `revoked` is written by the adapter on the my_chat_member
+    event, and the row is KEPT rather than deleted so :func:`bind` can flip
+    it back and the history survives. Returns whether a row moved; False means
+    the workspace has no such binding, which is the correct answer for a kick
+    from a chat it never held.
+    """
+    channel, ref = _clean(chat_type, external_ref)
+    result = await session.execute(
+        text(
+            "UPDATE channel_bindings SET state = 'revoked'"
+            " WHERE workspace_id = :ws AND channel = :ch AND external_ref = :ref"
+            "   AND state <> 'revoked'"
+        ),
+        {"ws": str(workspace_id), "ch": channel, "ref": ref},
+    )
+    return result.rowcount > 0
+
+
+async def revoke_by_id(session, *, binding_id: str) -> bool:
+    """Mark one binding revoked by its id — what :func:`follow_or_retire` does
+    to a chat that will not take messages and cannot be followed (the bot
+    kicked or blocked, the chat deleted, a successor another binding holds).
+    Same row-kept semantics as :func:`revoke`; the sweep stops minting for it
+    on its next pass (`work_loop`: `b.state = 'active'`)."""
+    result = await session.execute(
+        text(
+            "UPDATE channel_bindings SET state = 'revoked'"
+            " WHERE id = :b AND state <> 'revoked'"
+        ),
+        {"b": str(binding_id)},
+    )
+    return result.rowcount > 0
+
+
+async def revoke_for_workspace(session, *, workspace_id: str, binding_id: str) -> bool:
+    """An admin removes a group from the workspace: the binding is
+    revoked and every card still queued for it is superseded, in the caller's
+    transaction. Returns whether the binding moved; False means the workspace
+    holds no live binding by that id, which the route answers 404.
+
+    Same row-kept semantics as :func:`revoke` — a fresh bind link re-activates
+    the row (:data:`REBOUND`). The queue is retired here rather than left to
+    the sender because a `deliver_outbox` job minted before the revoke would
+    otherwise still find its rows: the claim refuses a revoked binding
+    (`outbox.claim_next`), and superseding the rows is what keeps a later
+    re-bind from posting a backlog of stale cards into the group. `pending`
+    and `ambiguous` only — a `sending` row is the live sender's, and its CAS
+    out of `sending` settles it; `ck_outbox_state` (056) admits `superseded`
+    and no trigger guards outbox transitions.
+    """
+    params = {"ws": str(workspace_id), "b": str(binding_id)}
+    result = await session.execute(
+        text(
+            "UPDATE channel_bindings SET state = 'revoked'"
+            " WHERE workspace_id = :ws AND id = :b AND state <> 'revoked'"
+        ),
+        params,
+    )
+    if result.rowcount == 0:
+        return False
+    await session.execute(
+        text(
+            "UPDATE channel_outbox SET state = 'superseded'"
+            " WHERE workspace_id = :ws AND binding_id = :b"
+            "   AND state IN ('pending', 'ambiguous')"
+        ),
+        params,
+    )
+    return True
+
+
+async def retire_unsettled(session, *, binding_id: str) -> int:
+    """Supersede every unsettled card (`pending`, `sending`, `ambiguous`) of a
+    binding a push may no longer reach: not active, or refused by
+    :func:`deliverable_binding_where`. Returns how many moved.
+
+    :func:`revoke_for_workspace` supersedes `pending` and `ambiguous` at the
+    removal but leaves `sending` to a live sender, and that row can still end
+    up `pending` (a 429), `ambiguous` (a lost answer) or stranded in `sending`
+    (the sender died). The claim refuses a revoked binding, so nothing settles
+    it; a re-bind would send it as a stale card. Run by :func:`bind` before a
+    revoked binding is re-activated, and by `work_loop.deliver_outbox` when
+    the deliverable predicate refuses its binding. Safe for a `sending` row:
+    `outbox._leave_sending` is fenced against a row superseded in flight.
+    """
+    result = await session.execute(
+        text(
+            "UPDATE channel_outbox SET state = 'superseded'"
+            " WHERE binding_id = :b"
+            "   AND state IN ('pending', 'sending', 'ambiguous')"
+        ),
+        {"b": str(binding_id)},
+    )
+    return result.rowcount
+
+
+async def _repoint(session, *, binding_id: str, external_ref: str) -> bool:
+    """A group became a supergroup: Telegram retires the old chat id and names
+    the new one, and the binding follows the chat. False when the new id is
+    already another binding's — `uq_binding_external` still holds one chat to
+    one workspace. Private: a False left unacted on is a binding still active
+    on a dead id, so the only caller is :func:`follow_or_retire`, which
+    revokes the row."""
+    _, ref = _clean("supergroup", external_ref)
+    try:
+        # SAVEPOINT, not a bare statement (#1362): answering False here is only
+        # useful if the caller can still act on it, and :func:`follow_or_retire`
+        # does exactly that — it revokes the binding on THIS session. A unique
+        # violation aborts the whole transaction in Postgres, so without the
+        # savepoint that revoke raises InFailedSQLTransactionError and the
+        # binding is left neither re-pointed nor revoked. The savepoint scopes
+        # the rollback to this statement and leaves the caller's transaction
+        # usable.
+        async with session.begin_nested():
+            result = await session.execute(
+                text(
+                    "UPDATE channel_bindings SET external_ref = :ref, channel = 'telegram_group'"
+                    " WHERE id = :b AND state <> 'revoked'"
+                ),
+                {"b": str(binding_id), "ref": ref},
+            )
+    except DBAPIError as exc:
+        if constraint_violated(exc, "uq_binding_external"):
+            return False
+        raise
+    return result.rowcount > 0
+
+
+async def follow_or_retire(
+    session, *, binding_id: str, successor: Optional[str]
+) -> bool:
+    """The chat stopped taking messages at this binding's id: follow it to
+    *successor* — a group that became a supergroup, whose new id Telegram
+    names — or retire the binding when there is none, or when the successor is
+    already another binding's (:func:`_repoint` refuses: one chat, one
+    workspace). The old id never takes a message again, so a binding that
+    cannot follow is revoked rather than left active on it. Returns whether
+    the binding followed.
+
+    The one rule for both places that learn a chat moved: the deliverer, from
+    a send refused with the successor named, and the live migration notice
+    (`chat_migration`). Two spellings are how they would come to disagree
+    about what a moved chat means. Runs in the caller's transaction;
+    :func:`_repoint`'s savepoint is what leaves it usable for the revoke."""
+    if successor and await _repoint(
+        session, binding_id=binding_id, external_ref=successor
+    ):
+        return True
+    await revoke_by_id(session, binding_id=binding_id)
+    return False

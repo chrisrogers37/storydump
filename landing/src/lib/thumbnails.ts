@@ -1,0 +1,92 @@
+import type { MediaProvenance } from "./archive-media";
+
+/**
+ * The image types a thumbnail may be: raster only, the API's
+ * `vocabulary.THUMBNAIL_TYPES` (held to it by `wire-contract.test.ts`). The
+ * thumbnail route relays no other, so an SVG never reaches the page.
+ */
+export const THUMBNAIL_TYPES: readonly string[] = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/avif",
+];
+
+/**
+ * A media item's thumbnail URL: this tier's route
+ * (`app/api/workspaces/[id]/media/[mediaId]/thumbnail`), never a provider's
+ * link. The version is the payload's `thumbnail_version`, which the route
+ * forwards. A Drive item's names one picture for good, so the browser may keep
+ * its answer; an archive item's names the generation and epoch the API will
+ * answer for, and the API says in its answer that nothing may be kept.
+ */
+export function thumbnailSrc(
+  workspaceId: string,
+  mediaId: string,
+  version: string,
+): string {
+  const ws = encodeURIComponent(workspaceId);
+  const media = encodeURIComponent(mediaId);
+  return `/api/workspaces/${ws}/media/${media}/thumbnail?v=${encodeURIComponent(version)}`;
+}
+
+/**
+ * What a picture needs from a payload row. The intents read and the calendar's
+ * month read carry all of it; a row without the thumbnail's fields (the sample
+ * workspace's calendar) draws its glyph.
+ */
+export type ThumbnailMedia = {
+  /** The picture's alt text. */
+  file_name: string;
+  media_kind?: string;
+  media_item_id?: string;
+  has_thumbnail?: boolean;
+  /** Null while an archive item awaits observation again; `has_thumbnail` is false then. */
+  thumbnail_version?: string | null;
+  /**
+   * An archive item's provenance, which is also what tells its picture from a
+   * Drive picture: it is asked for under the limits of `ArchiveThumbnail`. Null
+   * for Drive, and absent from a read that does not carry it.
+   */
+  provenance?: MediaProvenance | null;
+};
+
+/**
+ * The fields a picture reads, copied off a larger row: what a client component
+ * is handed for a story's picture, rather than the whole row.
+ */
+export function thumbnailMedia({
+  file_name,
+  media_kind,
+  media_item_id,
+  has_thumbnail,
+  thumbnail_version,
+  provenance,
+}: ThumbnailMedia): ThumbnailMedia {
+  return {
+    file_name,
+    media_kind,
+    media_item_id,
+    has_thumbnail,
+    thumbnail_version,
+    // Only where the row has it, so a Drive story hands the browser the five fields a chip reads.
+    ...(provenance ? { provenance } : {}),
+  };
+}
+
+/**
+ * The row's thumbnail URL, or null when it has no picture or there is no
+ * workspace to ask, which is how the sample workspace draws.
+ */
+export function thumbnailFor(
+  media: ThumbnailMedia,
+  workspaceId: string | null | undefined,
+): string | null {
+  return workspaceId &&
+    media.has_thumbnail &&
+    media.media_item_id &&
+    typeof media.thumbnail_version === "string"
+    ? thumbnailSrc(workspaceId, media.media_item_id, media.thumbnail_version)
+    : null;
+}

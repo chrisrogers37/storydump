@@ -1,0 +1,1196 @@
+"""The gate that can see RLS (#746).
+
+The parity comparator compares the runner-replayed schema against
+``Base.metadata.create_all``. Measured: create_all emits 24 foreign keys but
+**zero** policies, zero RLS-enabled tables, zero triggers and zero functions.
+So RLS cannot be checked by comparison — the models side can never produce it,
+and adding it to the parity signature would make that gate permanently red.
+
+RLS is therefore checked as an **invariant over the replayed schema alone**:
+every workspace-keyed table is RLS-enabled and carries at least one policy.
+FKs, which both sides do emit, belong in the parity signature instead.
+
+`test_migration_gate.py:180` already states the principle this file exists to
+satisfy — *"A comparator that cannot fail proves nothing."* Every check below
+is paired with a proof that it CAN fail.
+"""
+
+import pytest
+
+from tests.scripts.conftest import F2_2_END, F2_6_END, advertised_stream
+from scripts.advertised_ddl import normalize_statements
+from scripts.migration_runner import MIGRATIONS_DIR
+from scripts.tenancy_gate import (
+    _tenancy_entry,
+    expected_tenancy,
+    tenancy_signature,
+    tenancy_violations,
+    tenant_keyed_tables,
+    TENANT_KEY,
+)
+
+
+#: The advertised stream, built once per process (~33 ms a build, six calls in
+#: the class below) and owned by `conftest`, so every suite that needs it finds
+#: one cached spelling rather than a copy of its own.
+_real_stream = advertised_stream
+
+
+def _sig(**tables):
+    """Synthetic signature: {table: (tenant_keyed, rls_enabled, policies[, forced])}."""
+    out = {}
+    for name, spec in tables.items():
+        t, r, p = spec[0], spec[1], spec[2]
+        forced = spec[3] if len(spec) > 3 else False
+        out[name] = {
+            "tenant_keyed": t,
+            "rls_enabled": r,
+            "policies": p,
+            "rls_forced": forced,
+        }
+    return out
+
+
+class TestTheGateCanFail:
+    """The comparator-that-cannot-fail check, applied to this comparator."""
+
+    def test_flags_a_tenant_keyed_table_with_rls_off(self):
+        v = tenancy_violations(_sig(media_items=(True, False, 0)))
+        assert any("media_items" in x and "RLS" in x for x in v), v
+
+    def test_flags_rls_enabled_but_no_policy(self):
+        """The subtler half: ENABLE without a policy denies everything to the
+        logins and reads as 'secured' to anyone eyeballing relrowsecurity."""
+        v = tenancy_violations(_sig(media_items=(True, True, 0)))
+        assert any("media_items" in x and "policy" in x.lower() for x in v), v
+
+    def test_passes_a_correctly_born_table(self):
+        assert tenancy_violations(_sig(media_items=(True, True, 2))) == []
+
+    def test_ignores_a_table_with_no_tenant_key(self):
+        """user-plane and auth-plane tables legitimately carry no workspace key
+        — the gate must not demand tenancy of them."""
+        assert tenancy_violations(_sig(users=(False, False, 0))) == []
+
+
+class TestAgainstTheLegacyReplay:
+    """THE LEGACY LINEAGE ONLY — named, because there are two replays (#806).
+
+    Every replay below is bounded to `LEGACY_LINEAGE_MAX`, which stops BELOW
+    the 051 move. Target files are numbered ABOVE it, so nothing this class
+    examines can ever contain one. The target-lineage half is
+    `test_lineage_lane.py::test_the_tenancy_gate_runs_against_this_replay_and_can_see_into_it`.
+    """
+
+    @pytest.mark.integration
+    def test_replayed_corpus_has_no_tenancy_violations(self, scratch_db):
+        from tests.scripts.conftest import LEGACY_STANDUP
+        from tests.scripts.test_migration_gate import (
+            LEGACY_LINEAGE_MAX,
+            MIGRATIONS_DIR,
+            apply_pending,
+            psql_apply,
+        )
+
+        # LEGACY_STANDUP, not SETUP_SQL: this replay reaches 050, which routes
+        # its owner-DDL through the step-0 door (#787). Imported from conftest
+        # rather than re-exported through test_migration_gate — the symbol has
+        # one home, and leaning on another test module to forward it is what
+        # broke here when that module's import list changed.
+        psql_apply(scratch_db, LEGACY_STANDUP)
+        apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
+        sig = tenancy_signature(scratch_db)
+        assert tenancy_violations(sig) == []
+
+    @pytest.mark.integration
+    def test_states_its_own_coverage_rather_than_passing_silently(self, scratch_db):
+        """NON-VACUITY DISCLOSURE (#806).
+
+        The target schema's tables are numbered above the move and this replay
+        stops below it, so no target table can move this count — measured in an
+        exported tree, where a tenant-keyed RLS-less `053` left this whole class
+        passing.
+
+        A disclosure that names a trip condition it cannot reach is worse than
+        none: it is read as coverage. What is actually disclosed is that the
+        LEGACY corpus carries no workspace-keyed table, and the condition that
+        moves this number is a LEGACY one gaining a tenant key — which would
+        mean the pre-move schema had grown a tenancy obligation nothing else
+        checks.
+
+        The target-lineage tripwire lives where the target replay is; see the
+        class docstring for the pointer.
+        """
+        from tests.scripts.conftest import LEGACY_STANDUP
+        from tests.scripts.test_migration_gate import (
+            LEGACY_LINEAGE_MAX,
+            MIGRATIONS_DIR,
+            apply_pending,
+            psql_apply,
+        )
+
+        # LEGACY_STANDUP, not SETUP_SQL: this replay reaches 050, which routes
+        # its owner-DDL through the step-0 door (#787). Imported from conftest
+        # rather than re-exported through test_migration_gate — the symbol has
+        # one home, and leaning on another test module to forward it is what
+        # broke here when that module's import list changed.
+        psql_apply(scratch_db, LEGACY_STANDUP)
+        apply_pending(scratch_db, MIGRATIONS_DIR, LEGACY_LINEAGE_MAX)
+        sig = tenancy_signature(scratch_db)
+        keyed = [t for t, e in sig.items() if e["tenant_keyed"]]
+        assert keyed == [], (
+            f"{len(keyed)} tenant-keyed tables now exist ({keyed}). The corpus "
+            f"gate is now load-bearing — update this disclosure deliberately."
+        )
+        assert TENANT_KEY == "workspace_id"
+
+
+class TestParitySeesForeignKeys:
+    """This gate's other half. FKs differ from RLS: both sides DO emit them
+    (measured — create_all produced 24), so they belong in the parity
+    comparison rather than in the invariant gate above."""
+
+    def test_a_missing_fk_is_a_diff(self):
+        from scripts.schema_parity import schema_diff
+
+        base = {"columns": {}, "checks": {}, "uniques": set()}
+        replayed = {
+            "media_items": {
+                **base,
+                "fks": {"FOREIGN KEY (workspace_id) REFERENCES workspaces(id)"},
+            }
+        }
+        models = {"media_items": {**base, "fks": set()}}
+        diffs = schema_diff(replayed, models)
+        assert any(d.startswith("fk media_items") for d in diffs), diffs
+
+    def test_identical_fks_are_not_a_diff(self):
+        from scripts.schema_parity import schema_diff
+
+        fk = {"FOREIGN KEY (workspace_id) REFERENCES workspaces(id)"}
+        base = {"columns": {}, "checks": {}, "uniques": set()}
+        assert schema_diff({"t": {**base, "fks": fk}}, {"t": {**base, "fks": fk}}) == []
+
+
+@pytest.mark.integration
+class TestTheGateFiresOnRealPostgres:
+    """The synthetic checks above prove the PREDICATE can fail. This proves the
+    whole path can — signature read from a live catalog, not a hand-built dict.
+
+    A predicate that fails on a dict but never on a database is still a
+    comparator that cannot fail; the dict cannot tell you that
+    `tenancy_signature` queries the wrong catalog or spells the column wrong.
+    """
+
+    def _exec(self, dsn, sql):
+        import psycopg2
+
+        conn = psycopg2.connect(dsn)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql)
+        conn.close()
+
+    def test_born_correctly_passes_then_dropping_the_policy_turns_it_red(
+        self, scratch_db
+    ):
+        self._exec(
+            scratch_db,
+            """
+            CREATE TABLE gate_probe (
+              id UUID PRIMARY KEY,
+              workspace_id UUID NOT NULL
+            );
+            ALTER TABLE gate_probe ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY p_probe ON gate_probe FOR ALL
+              USING (workspace_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+            """,
+        )
+        sig = tenancy_signature(scratch_db)
+        assert sig["gate_probe"] == {
+            "tenant_keyed": True,
+            "rls_enabled": True,
+            "rls_forced": False,  # the posture: ENABLE without FORCE
+            "policies": 1,
+        }
+        assert tenancy_violations(sig) == [], "a correctly born table was flagged"
+
+        # THE MUTATION: drop the policy, keep everything else.
+        self._exec(scratch_db, "DROP POLICY p_probe ON gate_probe;")
+        v = tenancy_violations(tenancy_signature(scratch_db))
+        assert any("gate_probe" in x and "no policy" in x for x in v), v
+
+        # And the other half: RLS off entirely.
+        self._exec(scratch_db, "ALTER TABLE gate_probe DISABLE ROW LEVEL SECURITY;")
+        v = tenancy_violations(tenancy_signature(scratch_db))
+        assert any("gate_probe" in x and "RLS is not enabled" in x for x in v), v
+
+        self._exec(scratch_db, "DROP TABLE gate_probe;")
+
+    def test_a_table_without_a_tenant_key_is_not_demanded_of(self, scratch_db):
+        """Class 3/4 tables (user-plane, machinery) carry no workspace key by
+        design. The gate must stay silent on them or it blocks the auth plane."""
+        self._exec(scratch_db, "CREATE TABLE gate_probe_global (id UUID PRIMARY KEY);")
+        sig = tenancy_signature(scratch_db)
+        assert sig["gate_probe_global"]["tenant_keyed"] is False
+        assert tenancy_violations(sig) == []
+        self._exec(scratch_db, "DROP TABLE gate_probe_global;")
+
+
+class TestOwnerBypassPosture:
+    """#750: policies do NOT apply to a table's OWNER unless
+    FORCE is set — so ENABLE + policies + no FORCE is owner-readable wholesale.
+
+    Measured on real Postgres:
+      ENABLE only, deny-all policy  -> owner reads the row   (bypass is real)
+      + FORCE                       -> owner reads nothing   (FORCE works)
+      + one `NO FORCE` statement    -> owner reads it again  (owner can undo it)
+
+    ENABLE-without-FORCE is deliberate, because owner-bypass is what lets the
+    migration transform run without blanket migration policies. So the
+    gate does NOT require FORCE — that would fail every table built to spec.
+    It gates AGREEMENT, because a mixed estate is the state nobody can see.
+    """
+
+    def test_a_table_deviating_from_the_posture_is_flagged(self):
+        v = tenancy_violations(_sig(media_items=(True, True, 2, True)))
+        assert any("media_items" in x and "posture" in x for x in v), v
+
+    def test_the_posture_message_is_distinguishable_from_the_other_two(self):
+        """Three invariants, three messages — an operator reading red has to
+        know WHICH one broke, and 'RLS' appears in all three descriptions."""
+        no_rls = tenancy_violations(_sig(a=(True, False, 0)))[0]
+        no_pol = tenancy_violations(_sig(b=(True, True, 0)))[0]
+        posture = tenancy_violations(_sig(c=(True, True, 2, True)))[0]
+        assert len({no_rls, no_pol, posture}) == 3
+        assert "not enabled" in no_rls
+        assert "no policy" in no_pol
+        assert "posture deviates" in posture
+
+    def test_conforming_tables_are_silent(self):
+        assert tenancy_violations(_sig(a=(True, True, 1, False))) == []
+
+
+@pytest.mark.integration
+class TestPostureFiresOnRealPostgres:
+    def _exec(self, dsn, sql):
+        import psycopg2
+
+        conn = psycopg2.connect(dsn)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql)
+        conn.close()
+
+    def test_setting_force_on_one_table_turns_the_gate_red(self, scratch_db):
+        self._exec(
+            scratch_db,
+            "CREATE TABLE posture_probe (id UUID PRIMARY KEY, workspace_id UUID NOT NULL)",
+        )
+        self._exec(scratch_db, "ALTER TABLE posture_probe ENABLE ROW LEVEL SECURITY")
+        self._exec(
+            scratch_db,
+            "CREATE POLICY p ON posture_probe FOR ALL USING (workspace_id IS NOT NULL)",
+        )
+        assert tenancy_violations(tenancy_signature(scratch_db)) == []
+
+        # THE MUTATION: one table deviates from the posture.
+        self._exec(scratch_db, "ALTER TABLE posture_probe FORCE ROW LEVEL SECURITY")
+        sig = tenancy_signature(scratch_db)
+        assert sig["posture_probe"]["rls_forced"] is True
+        v = tenancy_violations(sig)
+        assert any("posture_probe" in x and "posture deviates" in x for x in v), v
+
+        self._exec(scratch_db, "DROP TABLE posture_probe")
+
+
+class TestAddColumnBoundaryIsBoundedAtBothEnds:
+    """#978: `re.match` anchors only the START, so without a bound a compound
+    ALTER — `ADD COLUMN foo, DROP COLUMN workspace_id` — matches as a prefix
+    and rides the continue past the refusal. The bound is a TOP-LEVEL comma:
+    a single ADD COLUMN never carries one outside parentheses, while a
+    paren'd type (`numeric(10,2)`) legitimately carries one inside. A comma
+    at depth zero means a second action — whatever it is, including the
+    fact-MOVING ones a verb denylist would have to keep chasing — and falls
+    through to the loud refusal.
+    """
+
+    BASE = "CREATE TABLE t ( id uuid, workspace_id uuid )"
+
+    ADMITTED = {
+        "intended_062": "ALTER TABLE t ADD COLUMN last_reauth_prompt_at TIMESTAMPTZ NULL",
+        "tenant_key_add": "ALTER TABLE t ADD COLUMN workspace_id uuid",
+        "paren_type": "ALTER TABLE t ADD COLUMN amount numeric(10,2)",
+    }
+    REFUSED = {
+        "bare_drop": "ALTER TABLE t DROP COLUMN workspace_id",
+        "compound_drop": "ALTER TABLE t ADD COLUMN foo text, DROP COLUMN workspace_id",
+        "compound_rename": "ALTER TABLE t ADD COLUMN foo text, RENAME TO other",
+        "compound_add_key": "ALTER TABLE t ADD COLUMN foo text, ADD COLUMN workspace_id uuid",
+        "compound_force_rls": "ALTER TABLE t ADD COLUMN foo text, FORCE ROW LEVEL SECURITY",
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADMITTED))
+    def test_single_action_add_column_is_admitted(self, name):
+        expected_tenancy([self.BASE, self.ADMITTED[name]])
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_everything_else_falls_through_to_the_refusal(self, name):
+        with pytest.raises(AssertionError):
+            expected_tenancy([self.BASE, self.REFUSED[name]])
+
+    def test_adding_the_tenant_key_flips_the_fact(self):
+        sig = expected_tenancy(
+            ["CREATE TABLE t ( id uuid )", "ALTER TABLE t ADD COLUMN workspace_id uuid"]
+        )
+        assert sig["t"]["tenant_keyed"] is True
+
+
+class TestExpectedTenancyDerivation:
+    """`expected_tenancy` — the static half of the prefix-aware lane check.
+
+    The lane test compares a live catalog against this derivation, so a
+    derivation that quietly returned `{}` would make that comparison pass on
+    everything. These are the positive controls that stop it.
+    """
+
+    @staticmethod
+    def _stream():
+        return _real_stream()
+
+    def test_the_full_stream_derives_the_counts_a_live_replay_measured(self):
+        """CALIBRATION, and the reason this is not circular reasoning.
+
+        `test_advertised_ddl_replay` executes the whole stream into a real
+        database and observes 44 tables, 33 of them tenant-keyed. This parses
+        the same stream as TEXT and must land on the same two numbers. Agreement
+        between a catalog read and a text parse is what licenses using the parse
+        as an expectation elsewhere; without it the derivation would only ever
+        be self-consistent.
+        """
+        sig = expected_tenancy(self._stream())
+        # 142-143 (#1644) add five: the mappings and the receipt scopes and
+        # generations carry a workspace key; the receipts and capabilities do not.
+        assert len(sig) == 44
+        assert len(tenant_keyed_tables(sig)) == 33
+
+    def test_the_completed_stream_satisfies_the_invariant_it_will_be_judged_by(self):
+        """At the end of the stream — and only there — the tenancy invariant
+        holds. If this ever fails, the DESIGN is wrong, not a migration.
+        """
+        assert tenancy_violations(expected_tenancy(self._stream())) == []
+
+    def test_the_index_22_boundary_implies_tables_without_rls_or_policies(self):
+        """Up to stream index 22, seven tables land, four of them tenant-keyed,
+        and NOT ONE of them has RLS or a policy yet. This is a state a
+        `tenant_keyed_tables(sig) == []` assertion cannot express without going
+        red.
+        """
+        sig = expected_tenancy(self._stream()[:F2_2_END])
+        assert len(sig) == 7
+        assert len(tenant_keyed_tables(sig)) == 4
+        assert all(not e["rls_enabled"] for e in sig.values())
+        assert all(e["policies"] == 0 for e in sig.values())
+
+    def test_the_mid_stream_window_is_represented_rather_than_assumed_away(self):
+        """THE LOAD-BEARING ONE. The derivation must faithfully describe a state
+        the tenancy invariant REJECTS — otherwise it would be smuggling the
+        invariant into the expectation, and the lane comparison could never
+        catch a migration that skipped a policy.
+
+        Measured at the last index before any RLS is enabled: tenant-keyed
+        tables exist, none has a policy, and `tenancy_violations` over the
+        derived state is non-empty.
+        The lane test asserts EQUALITY with this, never that it is clean.
+        """
+        sig = expected_tenancy(self._stream()[:F2_6_END])
+        assert tenant_keyed_tables(sig), "no tenant-keyed tables to be wrong about"
+        violations = tenancy_violations(sig)
+        assert violations, (
+            "the derived mid-stream state satisfies the tenancy invariant, which"
+            " means the derivation is asserting the invariant instead of"
+            " describing the prefix"
+        )
+
+    def test_it_emits_the_same_keys_tenancy_signature_does(self):
+        """The two producers are compared with `==`, so a shape drift on either
+        side would make every lane run red for a reason unrelated to tenancy.
+
+        Pinned to `_tenancy_entry` rather than to a literal key set, and the
+        difference matters: a literal is a THIRD copy of the shape, so adding a
+        field to the catalog reader alone would leave this green while every
+        lane run went red. Both producers build through the constructor, so this
+        asserts the routing rather than re-spelling the answer.
+        """
+        entry = next(iter(expected_tenancy(self._stream()).values()))
+        assert set(entry) == set(_tenancy_entry(tenant_keyed=False))
+
+    def test_an_empty_prefix_derives_nothing(self):
+        assert expected_tenancy([]) == {}
+
+    def test_the_tenant_key_column_is_what_marks_a_table(self):
+        keyed = expected_tenancy([f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )"])
+        plain = expected_tenancy(["CREATE TABLE t ( id UUID, name TEXT )"])
+        assert keyed["t"]["tenant_keyed"] is True
+        assert plain["t"]["tenant_keyed"] is False
+
+    def test_the_tenant_root_is_keyed_without_carrying_the_column(self):
+        """`workspaces` IS the tenant — it keys on `id`. The catalog side has
+        the same special case, so the derivation must too or the two disagree on
+        the single most important table in the schema.
+        """
+        sig = expected_tenancy(["CREATE TABLE workspaces ( id UUID, name TEXT )"])
+        assert sig["workspaces"]["tenant_keyed"] is True
+
+    def test_rls_and_policies_accumulate_onto_the_table(self):
+        sig = expected_tenancy(
+            [
+                f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )",
+                "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+                "CREATE POLICY p_one ON t FOR ALL TO svc_ingress USING (true)",
+                "CREATE POLICY p_two ON t FOR SELECT TO svc_ingress USING (true)",
+            ]
+        )
+        assert sig["t"]["rls_enabled"] is True
+        assert sig["t"]["policies"] == 2
+        assert tenancy_violations(sig) == []
+
+    def test_a_plain_drop_policy_takes_one_policy_off_its_table(self):
+        """The plain form is read exactly, because a replay that got past it
+        dropped exactly one policy: the count falls by one. A drop naming a
+        table the prefix has not created records nothing, as a create does."""
+        sig = expected_tenancy(
+            [
+                f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )",
+                "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+                "CREATE POLICY p_one ON t FOR ALL TO svc_ingress USING (true)",
+                "CREATE POLICY p_two ON t FOR SELECT TO svc_ingress USING (true)",
+                "DROP POLICY p_two ON t",
+                "DROP POLICY p_any ON not_yet",
+            ]
+        )
+        assert sig == {
+            "t": _tenancy_entry(tenant_keyed=True, rls_enabled=True, policies=1)
+        }
+
+    def test_statements_about_a_table_the_prefix_has_not_created_are_ignored(self):
+        """A prefix can legitimately mention nothing about a later table. What it
+        must never do is invent one — a phantom entry would diverge from the
+        catalog and redden the lane for a table that does not exist yet.
+        """
+        assert (
+            expected_tenancy(["CREATE POLICY p ON not_yet FOR ALL USING (true)"]) == {}
+        )
+
+    @pytest.mark.parametrize(
+        "reducing",
+        [
+            "DROP POLICY IF EXISTS p_one ON t",
+            "DROP TABLE t",
+            f"ALTER TABLE t DROP COLUMN {TENANT_KEY}",
+            "ALTER TABLE t RENAME TO t_old",
+            "DROP SCHEMA public CASCADE",
+            "ALTER TABLE t DISABLE ROW LEVEL SECURITY",
+        ],
+    )
+    def test_a_state_reducing_statement_refuses_rather_than_deriving_a_wrong_state(
+        self, reducing
+    ):
+        """A statement that takes something away, in any form the derivation
+        does not read exactly, would leave it claiming a table or policy is
+        present that the replay has since dropped — the quiet direction — so it
+        refuses. The one it reads is the plain DROP POLICY, above; `IF EXISTS`
+        may drop nothing, so that spelling is here.
+
+        Parametrized deliberately: naming `DROP POLICY` and
+        `DISABLE ROW LEVEL SECURITY` by regex and letting every other reducing
+        form fall through to a silent ignore would be a claim about the corpus
+        wearing the shape of an enforced rule. None of these six is special; they
+        are all just "not on the allowlist".
+        """
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(
+                [f"CREATE TABLE t ( id UUID, {TENANT_KEY} UUID )", reducing]
+            )
+
+    def test_the_real_stream_is_fully_classified(self):
+        """POSITIVE CONTROL for the refusal above. A gate that refuses everything
+        is as useless as one that refuses nothing — this asserts the allowlist
+        actually covers the corpus it has to run against, so the refusal is
+        discriminating rather than merely strict.
+        """
+        assert len(expected_tenancy(self._stream())) == 44
+
+    def test_an_unclassified_statement_kind_refuses(self):
+        """The allowlist's other direction: a statement kind nobody has judged
+        is a review event, not a silent skip. `CREATE SEQUENCE` cannot move the
+        four facts — but that is a conclusion someone has to reach and
+        record, which is what adding it to `_TENANCY_IRRELEVANT` means.
+        """
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(["CREATE SEQUENCE s START 1"])
+
+
+class TestADataUpdateIsInert:
+    """098 is the first migration on the target lineage to UPDATE rows (its
+    one-time revoke of a removed inviter's invitations). Rows are none of the
+    four facts, so that table's UPDATE is allowlisted beside INSERT INTO; this
+    is the control that proves the entry is reachable, and that it admits no
+    other UPDATE."""
+
+    def test_update_of_the_invitations_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE workspace_invitations ( id uuid, workspace_id uuid )",
+                "UPDATE workspace_invitations i SET id = NULL"
+                " WHERE workspace_id IS NULL",
+            ]
+        )
+        assert sig["workspace_invitations"]["tenant_keyed"] is True
+        assert sig["workspace_invitations"]["policies"] == 0
+
+    def test_a_catalog_update_is_not_waved_through(self):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(
+                [
+                    "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                    "UPDATE pg_class SET relrowsecurity = false WHERE relname = 't'",
+                ]
+            )
+
+
+class TestDroppingAnIndexIsInert:
+    """069 (#1165) is the first migration to DROP an index. An index is none
+    of the four facts, so the kind is allowlisted beside CREATE INDEX — and
+    this is the control that proves the entry is reachable, not decorative."""
+
+    def test_drop_index_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                "CREATE UNIQUE INDEX uq_t ON t (workspace_id) WHERE id IS NOT NULL",
+                "DROP INDEX uq_t",
+            ]
+        )
+        assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
+
+
+class TestTheApprovalRuleStatementsAreInert:
+    """110 (#1477) is the first migration to drop a trigger, and the first to
+    name the governance audit's actor itself, for its one-time reset of a saved
+    approval position. A trigger, a setting and the rows of `workspaces` are
+    none of the four facts, so each kind is allowlisted. These are the controls
+    that prove each entry is reachable, and that the setting admits nothing
+    broader."""
+
+    def test_drop_trigger_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                "CREATE TRIGGER tg_t BEFORE UPDATE ON t FOR EACH ROW"
+                " EXECUTE FUNCTION f()",
+                "DROP TRIGGER tg_t ON t",
+            ]
+        )
+        assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
+
+    def test_the_reset_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE workspaces ( id uuid, approval_mode text )",
+                "SET LOCAL app.actor_kind = 'migration'",
+                "UPDATE workspaces SET approval_mode = 'manual'"
+                " WHERE approval_mode <> 'manual'",
+                "SET LOCAL app.actor_kind = ''",
+            ]
+        )
+        assert sig["workspaces"]["policies"] == 0
+        assert sig["workspaces"]["rls_enabled"] is False
+
+    def test_another_setting_is_not_waved_through(self):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(
+                [
+                    "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                    "SET LOCAL row_security = off",
+                ]
+            )
+
+
+class TestTheAdmissionConsumptionStatementsAreInert:
+    """133 (#1740) is the first migration to take a table lock, which it takes
+    on `users` before installing its trigger, and the first to UPDATE rows of
+    `signup_admissions`, its one-time stamp of the admissions an account holds.
+    A lock and that table's rows are none of the four facts, so each kind is
+    allowlisted. These are the controls that prove each entry is reachable,
+    on 133's own statements read from its file, and that the UPDATE's entry
+    admits no other table."""
+
+    def test_133s_lock_and_backfill_move_no_fact(self):
+        statements = [
+            s
+            for s in normalize_statements(
+                (MIGRATIONS_DIR / "133_signup_admission_consumption.sql").read_text()
+            )
+            if s.startswith(("LOCK ", "UPDATE "))
+        ]
+        assert [s.split(" ")[:3] for s in statements] == [
+            ["LOCK", "TABLE", "users"],
+            ["UPDATE", "signup_admissions", "a"],
+        ], statements
+        base = [
+            "CREATE TABLE users ( id uuid, primary_email text )",
+            "CREATE TABLE signup_admissions ( email text, claimed_at timestamptz )",
+        ]
+        assert expected_tenancy([*base, *statements]) == expected_tenancy(base)
+
+    def test_an_update_of_a_table_sharing_the_prefix_is_not_waved_through(self):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(
+                [
+                    "CREATE TABLE signup_admissions_x ( id uuid, workspace_id uuid )",
+                    "UPDATE signup_admissions_x SET workspace_id = NULL",
+                ]
+            )
+
+
+class TestDroppingAColumnOtherThanTheKeyIsInert:
+    """113 (#1477) is the first migration to drop a column: auto-approval's
+    contract half drops `workspaces.auto_reapprove_returning`. The derivation
+    refused every `DROP COLUMN`, because one spelling drops `workspace_id` and
+    unkeys its table. Any other column is none of the four facts, so one
+    `DROP COLUMN` naming one is handled, bounded at the far end like ADD COLUMN.
+
+    These pin the BOUNDS, and the refusal controls are the point. Dropping the
+    key still refuses in every spelling the server reads as the key, so does a
+    second clause after the first, and so does `CASCADE`, which drops every
+    policy that reads the column: measured on 15, a policy on the table and one
+    on another table that read it both went. The admitted cases prove the
+    branch is reachable, and 113's own statement is read from its file, so the
+    branch admits the statement the stream carries, not a copy of it.
+    """
+
+    BASE = "CREATE TABLE t ( id uuid, workspace_id uuid, note text )"
+
+    ADMITTED = {
+        "plain": "ALTER TABLE t DROP COLUMN note",
+        "schema_qualified": "ALTER TABLE public.t DROP COLUMN note",
+        "if_exists": "ALTER TABLE t DROP COLUMN IF EXISTS note",
+        "restrict": "ALTER TABLE t DROP COLUMN note RESTRICT",
+        "quoted": 'ALTER TABLE t DROP COLUMN "note"',
+        # A quoted name is exact, so this is another column, as the CREATE
+        # TABLE read already holds (`a_quoted_name_in_another_case`).
+        "quoted_in_another_case": 'ALTER TABLE t DROP COLUMN "Workspace_Id"',
+        "a_longer_identifier": "ALTER TABLE t DROP COLUMN workspace_id$old",
+        # The comma is text inside one quoted name, not a second clause.
+        "comma_in_a_quoted_name": (
+            'ALTER TABLE t DROP COLUMN "a, DROP COLUMN workspace_id"'
+        ),
+    }
+    REFUSED = {
+        # The key, in every spelling the server reads as it.
+        "the_key": "ALTER TABLE t DROP COLUMN workspace_id",
+        "the_key_upper_case": "ALTER TABLE t DROP COLUMN WORKSPACE_ID",
+        "the_key_quoted": 'ALTER TABLE t DROP COLUMN "workspace_id"',
+        "the_key_if_exists": "ALTER TABLE t DROP COLUMN IF EXISTS workspace_id",
+        "the_key_quoted_if_exists": (
+            'ALTER TABLE t DROP COLUMN IF EXISTS "workspace_id"'
+        ),
+        "the_key_restrict": "ALTER TABLE t DROP COLUMN workspace_id RESTRICT",
+        "the_key_cascade": "ALTER TABLE t DROP COLUMN workspace_id CASCADE",
+        "the_key_schema_qualified": "ALTER TABLE public.t DROP COLUMN workspace_id",
+        "the_key_unicode_escaped": 'ALTER TABLE t DROP COLUMN U&"\\0077orkspace_id"',
+        # A second clause, whatever it is.
+        "two_drops": "ALTER TABLE t DROP COLUMN note, DROP COLUMN id",
+        "the_key_second": "ALTER TABLE t DROP COLUMN note, DROP COLUMN workspace_id",
+        "the_key_after_restrict": (
+            "ALTER TABLE t DROP COLUMN note RESTRICT, DROP COLUMN workspace_id"
+        ),
+        "force_rls_second": "ALTER TABLE t DROP COLUMN note, FORCE ROW LEVEL SECURITY",
+        # CASCADE takes every policy that reads the column with it.
+        "cascade": "ALTER TABLE t DROP COLUMN note CASCADE",
+        "cascade_quoted": 'ALTER TABLE t DROP COLUMN "note" CASCADE',
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADMITTED))
+    def test_one_drop_of_another_column_moves_no_fact(self, name):
+        assert expected_tenancy([self.BASE, self.ADMITTED[name]]) == expected_tenancy(
+            [self.BASE]
+        )
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_the_key_a_second_clause_and_cascade_still_refuse(self, name):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy([self.BASE, self.REFUSED[name]])
+
+    def test_113s_own_statement_goes_through_the_branch(self):
+        """Reachability on the real statement: 113's file, normalized as the
+        stream is, holds one `DROP COLUMN`, and `workspaces` keeps all four
+        facts across it."""
+        (stmt,) = normalize_statements(
+            (MIGRATIONS_DIR / "113_drop_auto_reapprove_returning.sql").read_text()
+        )
+        assert stmt.startswith("ALTER TABLE workspaces DROP COLUMN "), stmt
+        base = [
+            "CREATE TABLE workspaces ( id uuid, auto_reapprove_returning boolean )",
+            "ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY",
+            "CREATE POLICY p_tenant_workspaces ON workspaces FOR ALL TO svc_ingress"
+            " USING (true)",
+        ]
+        assert expected_tenancy([*base, stmt]) == expected_tenancy(base)
+
+
+class TestRenamingAnIndexIsInert:
+    """089 (#1413) is the first migration to rename an index: the slot key's
+    contract gives the cadence-only key the dropped key's name. An index is
+    none of the four facts, so an ALTER INDEX on one is inert. PostgreSQL also
+    renames a TABLE through `ALTER INDEX … RENAME TO`, and a table's name is
+    the key its facts are recorded under, so that spelling is refused like
+    `ALTER TABLE … RENAME TO`."""
+
+    def test_alter_index_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                "CREATE UNIQUE INDEX uq_t_new ON t (workspace_id) WHERE id IS NOT NULL",
+                "ALTER INDEX uq_t_new RENAME TO uq_t",
+            ]
+        )
+        assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
+
+    @pytest.mark.parametrize("target", ["t", "T"])
+    def test_a_table_renamed_through_alter_index_is_refused(self, target):
+        """An unquoted name folds to lower case on the server, so `T` renames
+        the table `t` just as `t` does."""
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(
+                [
+                    "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                    f"ALTER INDEX {target} RENAME TO t_renamed",
+                ]
+            )
+
+    def test_moving_every_index_to_a_tablespace_moves_no_fact(self):
+        sig = expected_tenancy(
+            [
+                "CREATE TABLE t ( id uuid, workspace_id uuid )",
+                "ALTER INDEX ALL IN TABLESPACE pg_default SET TABLESPACE pg_default",
+            ]
+        )
+        assert sig["t"]["tenant_keyed"] is True and sig["t"]["policies"] == 0
+
+
+class TestConstraintEditsAreBoundedTheSameWay:
+    """#1061: `065` is the first migration to edit a CHECK constraint, and the
+    derivation had no branch for it — a loud refusal, correctly.
+
+    Handled rather than allowlisted, for the reason the note on
+    `_TENANCY_IRRELEVANT` gives: a blanket ``"ALTER TABLE "`` prefix would
+    admit `DROP COLUMN workspace_id` alongside these. The claim is exhaustive
+    rather than plausible — each of the four facts has exactly one writer in
+    `expected_tenancy` (`tenant_keyed` from ADD COLUMN workspace_id,
+    `rls_enabled` from ENABLE ROW LEVEL SECURITY, `policies` from CREATE
+    POLICY, `rls_forced` never), and a CHECK constraint adds or removes no
+    column, policy or RLS bit.
+
+    These pin the BOUNDS, not the happy path. Widening a refusal is only safe
+    if what it still refuses is asserted, so the reducing statements and both
+    compound-smuggling shapes are the point of the class; the admitted cases
+    are the control that proves the branch is reachable at all.
+    """
+
+    BASE = "CREATE TABLE t ( id uuid, workspace_id uuid )"
+
+    ADMITTED = {
+        "drop_constraint": "ALTER TABLE t DROP CONSTRAINT ck_t_kind",
+        "drop_schema_qualified": "ALTER TABLE public.t DROP CONSTRAINT ck_t_kind",
+        "add_foreign_key": (
+            "ALTER TABLE t ADD CONSTRAINT fk_ws FOREIGN KEY (workspace_id, id)"
+            " REFERENCES workspaces(workspace_id, id) ON DELETE RESTRICT"
+            " DEFERRABLE INITIALLY DEFERRED"
+        ),
+        "add_unique": "ALTER TABLE public.t ADD CONSTRAINT uq_t UNIQUE (workspace_id, id)",
+        "add_check": "ALTER TABLE t ADD CONSTRAINT ck_t_kind CHECK (id IS NOT NULL)",
+        "add_check_with_inner_commas": (
+            "ALTER TABLE t ADD CONSTRAINT ck_t_kind CHECK (kind IN ('a','b','c'))"
+        ),
+    }
+    REFUSED = {
+        # The reducing cases the refusal exists for — unchanged by this branch.
+        "bare_drop_column": "ALTER TABLE t DROP COLUMN workspace_id",
+        "rename": "ALTER TABLE t RENAME TO other",
+        # Compound smuggling: a constraint edit must not carry a second action.
+        "compound_drop_column": (
+            "ALTER TABLE t DROP CONSTRAINT ck_t_kind, DROP COLUMN workspace_id"
+        ),
+        "compound_force_rls": (
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (id IS NOT NULL),"
+            " FORCE ROW LEVEL SECURITY"
+        ),
+        "foreign_key_compound_drop": (
+            "ALTER TABLE t ADD CONSTRAINT fk_ws FOREIGN KEY (workspace_id)"
+            " REFERENCES workspaces(id), DROP COLUMN workspace_id"
+        ),
+        "unique_compound_disable": (
+            "ALTER TABLE t ADD CONSTRAINT uq_t UNIQUE (id), DISABLE ROW LEVEL SECURITY"
+        ),
+        "primary_key_not_admitted": "ALTER TABLE t ADD CONSTRAINT pk_t PRIMARY KEY (id)",
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADMITTED))
+    def test_a_single_constraint_edit_is_admitted(self, name):
+        expected_tenancy([self.BASE, self.ADMITTED[name]])
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_everything_else_still_falls_through_to_the_refusal(self, name):
+        with pytest.raises(AssertionError):
+            expected_tenancy([self.BASE, self.REFUSED[name]])
+
+    def test_a_constraint_edit_moves_none_of_the_four_facts(self):
+        """The positive statement behind the admission: the derived signature
+        is identical with and without the constraint edit."""
+        without = expected_tenancy([self.BASE])
+        with_edit = expected_tenancy(
+            [self.BASE, self.ADMITTED["add_check"], self.ADMITTED["drop_constraint"]]
+        )
+        assert with_edit == without
+
+
+class TestTheRlsEnableIsBoundedTheSameWay:
+    """#1412: the ENABLE ROW LEVEL SECURITY branch matched its prefix only, so
+    a second action after a top-level comma rode its `continue` — the tenant
+    key dropped behind an RLS enable. It is bounded by the same
+    `_top_level_comma` the ADD COLUMN and constraint branches use; the
+    admitted forms are the control that proves the branch still sets the bit.
+    """
+
+    BASE = "CREATE TABLE t ( id uuid, workspace_id uuid )"
+
+    ADMITTED = {
+        "enable": "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+        "enable_schema_qualified": "ALTER TABLE public.t ENABLE ROW LEVEL SECURITY",
+    }
+    REFUSED = {
+        # The issue's statement, verbatim.
+        "compound_drop_column": (
+            "ALTER TABLE t ENABLE ROW LEVEL SECURITY, DROP COLUMN workspace_id"
+        ),
+        # A second action that moves a fact the derivation never records.
+        "compound_force_rls": (
+            "ALTER TABLE t ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY"
+        ),
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADMITTED))
+    def test_a_single_enable_is_admitted_and_sets_the_bit(self, name):
+        assert expected_tenancy([self.BASE, self.ADMITTED[name]])["t"]["rls_enabled"]
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_a_second_action_after_the_enable_is_refused(self, name):
+        with pytest.raises(AssertionError):
+            expected_tenancy([self.BASE, self.REFUSED[name]])
+
+
+class TestTheCompoundGuardIsBoundedByQuoting:
+    """Parenthesis depth is itself a scope claim, and quoting bounds it: a
+    paren or comma inside a string literal or a quoted identifier is text, not
+    structure. Every REFUSED statement carries a real second action at the top
+    level, which a quote-blind depth count loses — a quoted `(` holds the depth
+    above zero past the comma, and a quoted `)` drives it negative so that no
+    later comma reads as top-level.
+
+    The guard fails toward the refusal on text it cannot bound, so those cases
+    are pinned too: the forms it does not read through, each written so that
+    reading it as plain code would hide the comma, and text whose quotes or
+    parens do not balance. UNREAD pins that refusal on its own, with no second
+    action behind it: an escape string, a dollar-quoted body or a comment is
+    refused because of what it IS, which is the only thing that keeps a lexer
+    defect in those forms from ever becoming an admission (#1406).
+
+    The RAW cases go through `normalize_statements`, because normalized text is
+    what the guard sees and each is a shape a normalizer can damage: a
+    trailing comment left with no line end to bound it, and a literal's
+    continuation lines dropped whole when they start with `--` — alone,
+    which leaves an unterminated quote, or in a pair, which leaves a balanced
+    literal and takes the second action out of the text (#1406). Normalization
+    drops every comment and keeps every literal, so the action reaches the
+    guard.
+
+    The ADMITTED cases are the control. A guard that refused every quote would
+    pass every REFUSED case, so literal text that looks like structure must
+    still read as a single action — and so must the two forms only a lexer
+    tells apart from a quote: a `$` inside an identifier, and a type name run
+    into its literal (`DATE'…'`).
+    """
+
+    BASE = "CREATE TABLE t ( id uuid, workspace_id uuid )"
+
+    REFUSED = {
+        "quoted_open_paren": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT '(', DROP COLUMN workspace_id"
+        ),
+        "quoted_close_paren": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT ')', DROP COLUMN workspace_id"
+        ),
+        "quoted_parens_balanced": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT '(', DROP COLUMN workspace_id,"
+            " ALTER COLUMN foo SET DEFAULT ')'"
+        ),
+        "quoted_paren_in_check": (
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (kind <> '('),"
+            " DROP COLUMN workspace_id"
+        ),
+        "paren_in_quoted_identifier": (
+            'ALTER TABLE t ADD COLUMN foo text COLLATE "(", DROP COLUMN workspace_id'
+        ),
+        # Lexical forms the guard does not model.
+        "escape_string": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT E'\\'', DROP COLUMN workspace_id,"
+            " ALTER COLUMN foo SET DEFAULT E'\\''"
+        ),
+        "dollar_quoted": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT $$($$, DROP COLUMN workspace_id,"
+            " ALTER COLUMN foo SET DEFAULT $$)$$"
+        ),
+        "block_comment": (
+            "ALTER TABLE t ADD COLUMN foo text /* ( */, DROP COLUMN workspace_id /* ) */"
+        ),
+        # Quotes or parens that do not balance.
+        "unterminated_literal": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc, DROP COLUMN workspace_id"
+        ),
+        "unclosed_paren": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT (, DROP COLUMN workspace_id"
+        ),
+        "lone_close_paren": (
+            "ALTER TABLE t ADD COLUMN foo text ), DROP COLUMN workspace_id ("
+        ),
+    }
+    REFUSED_RAW = {
+        "line_comment": (
+            "ALTER TABLE t ADD COLUMN foo text -- don't\n"
+            ", DROP COLUMN workspace_id -- won't\n"
+        ),
+        "literal_line_dropped": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc\n"
+            "--x'\n"
+            ", DROP COLUMN workspace_id\n"
+        ),
+        "literal_lines_dropped_in_a_pair": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'abc\n"
+            "--x', DROP COLUMN workspace_id, ALTER COLUMN foo SET DEFAULT 'y\n"
+            "z'\n"
+        ),
+    }
+    UNREAD = {
+        "escape_string": "ALTER TABLE t ADD COLUMN foo text DEFAULT E'x'",
+        "dollar_quoted": "ALTER TABLE t ADD COLUMN foo text DEFAULT $$x$$",
+        "block_comment": "ALTER TABLE t ADD COLUMN foo text /* x */",
+    }
+    ADMITTED = {
+        "comma_in_literal": "ALTER TABLE t ADD COLUMN foo text DEFAULT 'a,b'",
+        "doubled_quote": (
+            "ALTER TABLE t ADD COLUMN foo text DEFAULT 'it''s (fine), really'"
+        ),
+        "comma_in_quoted_identifier": 'ALTER TABLE t ADD COLUMN foo text COLLATE "x,y"',
+        "markers_in_literal": "ALTER TABLE t ADD COLUMN foo text DEFAULT '), -- /* $ ('",
+        "dollar_inside_an_identifier": "ALTER TABLE t ADD COLUMN foo$bar text",
+        "typed_literal": "ALTER TABLE t ADD COLUMN d date DEFAULT DATE'2026-01-01'",
+    }
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_a_second_action_behind_quoting_is_refused(self, name):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy([self.BASE, self.REFUSED[name]])
+
+    @pytest.mark.parametrize("name", sorted(REFUSED_RAW))
+    def test_a_second_action_survives_normalization_and_is_refused(self, name):
+        (stmt,) = normalize_statements(self.REFUSED_RAW[name])
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy([self.BASE, stmt])
+
+    @pytest.mark.parametrize("name", sorted(UNREAD))
+    def test_a_form_it_does_not_read_through_is_refused_alone(self, name):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy([self.BASE, self.UNREAD[name]])
+
+    @pytest.mark.parametrize("name", sorted(ADMITTED))
+    def test_literal_text_is_not_structure(self, name):
+        expected_tenancy([self.BASE, self.ADMITTED[name]])
+
+
+class TestTheTenantKeyIsAColumnName:
+    """`CREATE TABLE` derives `tenant_keyed` from its column list (#1406). A
+    regex over the raw text would make a table read as keyed when a DEFAULT
+    string merely mentions `workspace_id`, so the key is read as a NAME in
+    code — an identifier, folded to lower case
+    as PostgreSQL folds an unquoted one, or a quoted identifier spelled exactly.
+
+    Reading names only in code is a bound in its own right, and it fails in the
+    silent direction: a literal the read cannot bound could HIDE a real column,
+    and a keyed table read as unkeyed is never asked for RLS. So KEYED holds
+    columns after a literal that a mis-bounded quote would swallow, and the
+    forms the read does not go through are REFUSED rather than guessed at —
+    the escape string and dollar body the compound guard refuses, a comment
+    (normalized text carries none, so one means text that never came through
+    `normalize_statements`), an unterminated literal, and a `U&"…"` identifier,
+    whose escapes can spell the key.
+    """
+
+    KEYED = {
+        "plain_column": "CREATE TABLE t ( id uuid, workspace_id uuid )",
+        "upper_case_column": "CREATE TABLE t ( id uuid, WORKSPACE_ID uuid )",
+        "quoted_column": 'CREATE TABLE t ( id uuid, "workspace_id" uuid )',
+        "after_a_doubled_quote": (
+            "CREATE TABLE t ( note text DEFAULT 'it''s', workspace_id uuid )"
+        ),
+        "after_a_backslash_in_a_literal": (
+            "CREATE TABLE t ( note text DEFAULT 'C:\\', workspace_id uuid )"
+        ),
+    }
+    UNKEYED = {
+        "named_only_in_a_default": (
+            "CREATE TABLE audit_log ( id uuid,"
+            " note text DEFAULT 'workspace_id backfill marker' )"
+        ),
+        "a_longer_identifier": "CREATE TABLE t ( id uuid, workspace_id$old uuid )",
+        "a_quoted_name_in_another_case": 'CREATE TABLE t ( id uuid, "Workspace_Id" uuid )',
+    }
+    REFUSED = {
+        "escape_string": (
+            "CREATE TABLE t ( note text DEFAULT E'\\'', workspace_id uuid )"
+        ),
+        "dollar_quoted": "CREATE TABLE t ( note text DEFAULT $$x$$, workspace_id uuid )",
+        "comment": "CREATE TABLE t ( id uuid, -- don't\n workspace_id uuid )",
+        "block_comment": "CREATE TABLE t ( id uuid, /* x */ workspace_id uuid )",
+        "unterminated_literal": "CREATE TABLE t ( note text DEFAULT 'x, workspace_id uuid )",
+        "unicode_escaped_identifier": (
+            'CREATE TABLE t ( id uuid, U&"\\0077orkspace_id" uuid )'
+        ),
+    }
+
+    @staticmethod
+    def _keyed(stmt):
+        (entry,) = expected_tenancy([stmt]).values()
+        return entry["tenant_keyed"]
+
+    @pytest.mark.parametrize("name", sorted(KEYED))
+    def test_a_column_named_the_key_marks_the_table(self, name):
+        assert self._keyed(self.KEYED[name]) is True
+
+    @pytest.mark.parametrize("name", sorted(UNKEYED))
+    def test_anything_else_that_spells_the_key_does_not(self, name):
+        assert self._keyed(self.UNKEYED[name]) is False
+
+    @pytest.mark.parametrize("name", sorted(REFUSED))
+    def test_a_column_list_it_cannot_bound_is_refused(self, name):
+        with pytest.raises(AssertionError, match="cannot bound"):
+            expected_tenancy([self.REFUSED[name]])
+
+    ADDED = {
+        "upper_case_column": ("ALTER TABLE t ADD COLUMN WORKSPACE_ID uuid", True),
+        "if_not_exists": (
+            "ALTER TABLE t ADD COLUMN IF NOT EXISTS workspace_id uuid",
+            True,
+        ),
+        "a_longer_identifier": (
+            "ALTER TABLE t ADD COLUMN workspace_id$old uuid",
+            False,
+        ),
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADDED))
+    def test_an_added_column_is_read_by_the_same_rule(self, name):
+        """ADD COLUMN is the other place a table gains the key, so it reads the
+        column's name the way the CREATE TABLE read does — two rules for one
+        name would key a table on one branch that the other leaves unkeyed."""
+        stmt, keyed = self.ADDED[name]
+        sig = expected_tenancy(["CREATE TABLE t ( id uuid )", stmt])
+        assert sig["t"]["tenant_keyed"] is keyed
+
+    ADD_REFUSED = {
+        "a_quoted_name": 'ALTER TABLE t ADD COLUMN "workspace_id" uuid',
+        "a_quoted_name_after_if_not_exists": (
+            'ALTER TABLE t ADD COLUMN IF NOT EXISTS "workspace_id" uuid'
+        ),
+    }
+
+    @pytest.mark.parametrize("name", sorted(ADD_REFUSED))
+    def test_an_added_name_it_does_not_read_is_refused(self, name):
+        """A quoted name falls through to the refusal rather than being read,
+        and `IF NOT EXISTS` in front of one is never taken for the name: that
+        would read the column as `if`, and the key as absent."""
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(["CREATE TABLE t ( id uuid )", self.ADD_REFUSED[name]])
+
+    def test_a_trailing_comment_cannot_hide_a_column_after_it(self):
+        """The case that made normalization drop every comment: left in the
+        one-line text, a trailing `--` would run over the columns after it, and
+        a read that skips comments would lose them — measured on the real
+        stream, three tenant-keyed tables. It is a column here, and so it
+        reads."""
+        (stmt,) = normalize_statements(
+            "CREATE TABLE t (\n    id uuid, -- the row's id\n    workspace_id uuid\n);"
+        )
+        assert self._keyed(stmt) is True
+
+
+class TestRatioTypeExpansionIsExactlyBounded:
+    BASE = [
+        "CREATE TABLE category_post_case_mix (workspace_id uuid, ratio numeric)",
+        "ALTER TABLE category_post_case_mix ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY p ON category_post_case_mix",
+    ]
+
+    @pytest.mark.parametrize("schema", ["", "public."])
+    def test_ratio_numeric_expansion_moves_no_tenancy_fact(self, schema):
+        assert expected_tenancy(
+            self.BASE
+            + [
+                f"ALTER TABLE {schema}category_post_case_mix ALTER COLUMN ratio TYPE NUMERIC"
+            ]
+        ) == expected_tenancy(self.BASE)
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "ALTER TABLE category_post_case_mix ALTER COLUMN ratio TYPE NUMERIC, DROP COLUMN workspace_id",
+            "ALTER TABLE public.category_post_case_mix ALTER COLUMN ratio TYPE NUMERIC, DISABLE ROW LEVEL SECURITY",
+            "ALTER TABLE category_post_case_mix ALTER COLUMN ratio TYPE NUMERIC USING ratio::numeric",
+            "ALTER TABLE category_post_case_mix ALTER COLUMN workspace_id TYPE NUMERIC",
+            "ALTER TABLE other_table ALTER COLUMN ratio TYPE NUMERIC",
+            "ALTER TABLE category_post_case_mix ALTER COLUMN ratio TYPE BIGINT",
+            "ALTER TABLE category_post_case_mix ALTER COLUMN ratio TYPE NUMERIC(10,2)",
+        ],
+    )
+    def test_unreviewed_type_or_compound_changes_still_refuse(self, statement):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(self.BASE + [statement])
+
+
+class TestAssetBundleConstraintClassification:
+    """146's composite UNIQUE target is inert; a compound ALTER still refuses."""
+
+    BASE = "CREATE TABLE instagram_media_index ( id uuid, workspace_id uuid )"
+
+    def test_real_bundle_unique_form_is_classified_without_moving_tenancy(self):
+        migration = (MIGRATIONS_DIR / "146_instagram_media_assets.sql").read_text()
+        (unique,) = [
+            statement
+            for statement in normalize_statements(migration)
+            if statement.startswith(
+                "ALTER TABLE instagram_media_index ADD CONSTRAINT uq_archive_index_bundle"
+            )
+        ]
+        assert expected_tenancy([self.BASE, unique]) == expected_tenancy([self.BASE])
+
+    def test_bundle_unique_cannot_hide_a_tenant_key_drop(self):
+        with pytest.raises(AssertionError, match="does not classify"):
+            expected_tenancy(
+                [
+                    self.BASE,
+                    "ALTER TABLE instagram_media_index ADD CONSTRAINT"
+                    " uq_archive_index_bundle UNIQUE (workspace_id,id),"
+                    " DROP COLUMN workspace_id",
+                ]
+            )

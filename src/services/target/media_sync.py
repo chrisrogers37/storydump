@@ -1,0 +1,1010 @@
+"""The media-sync executors (#942, seam: #982).
+
+Two executors over one shared body. `sync_media_source` consumes the clock's
+baseline mints (leg 4 nulls `next_sync_at` at mint and ONLY this executor
+re-arms it — the alive job is the sole carrier until then).
+`first_ingest_chunk` is chained by the sync itself while the source adapter
+reports more pages (chunks of 200 files), so a large first ingest is bounded
+per job rather than one unbounded crawl.
+
+## Provider dispatch is the registry's; checkpoint progress is the adapter's
+
+The seam is the port signature — ``list_changes(config, checkpoint) →
+(items, checkpoint')`` — resolved by source provider from ``deps.adapters``,
+plus keyword-only ``source_id`` and ``workspace_id``. Items carry the adapter's
+canonical stable ref (the Drive file id, never a path), name, kind, and content
+hash.
+
+``source_id`` is additive to the port and names the folder being synced
+rather than the credential (069): a Drive credential is the WORKSPACE's, so
+the token is `workspace_id`'s grant and the source id is what the adapter's
+messages and the sync's own writes are about. A lookup by Drive file id
+inside the adapter would still be a cross-tenant hazard (#982). Keyword-only
+so the two-argument shape stays legible.
+
+## Failure routing (the source state machine)
+
+- **Classified persistent** (:class:`DriveSourceGone`,
+  :class:`DriveCredentialDead` — the folder is gone or the credential is
+  definitively dead): the source flips to ``error``, the alert fires once
+  under the ``alerted_at`` dedup through the workspace's own bindings, and
+  the JOB SUCCEEDS — handled work, not a retry loop. An ``error`` source
+  leaves the baseline due-scan by predicate.
+- **Everything else** raises and rides the lane's ladder; the source stays
+  ``active`` with ``next_sync_at`` NULL — the alive job carries the re-arm.
+- **Recovery is the successful sync itself** (the pre-slot or
+  on-demand sync IS the probe): a demand-minted sync that succeeds flips
+  ``error → active`` and clears ``alerted_at``.
+
+Dedup is the schema's, not this module's: ``uq_media_dedup (workspace_id,
+content_hash)`` — the insert skips conflicts rather than pre-checking, so
+two syncs offering the same bytes cannot race a duplicate in.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import random
+import uuid
+from dataclasses import dataclass
+from typing import Optional, Any
+
+from sqlalchemy import text
+
+from src.services.target import jobs, outbox, prompts, unit_of_work, vocabulary
+from src.services.target.media_adapters import (
+    MediaAdapter,
+    MediaAdapters,
+    MediaCredentialDead,
+    MEDIA_FAILURES,
+    redacted_error,
+    MediaSourceGone,
+    get_adapter,
+)
+from src.services.target.workspaces import CONNECTED_FLAG_SQL
+
+logger = logging.getLogger(__name__)
+
+#: Sync baseline every 6 h, jittered; the jitter keeps a fleet of
+#: sources from thundering the same tick.
+BASELINE_SECONDS = 6 * 3600
+JITTER_SECONDS = 45 * 60
+
+#: First-ingest chunks of 200 files. This is the #982 door's
+#: PAGING CONTRACT, documented here for the consumer's reader — deliberately
+#: NOT enforced by truncation: a door that overruns it must still have every
+#: item processed, because silently dropping a tail the door already returned
+#: is data loss wearing a bound's clothing. Enforcement, if ever needed,
+#: belongs in the door.
+CHUNK_ITEM_BOUND = 200
+
+_ALLOWED_KINDS = frozenset({"image", "video"})
+
+
+def _listed_state(kind: str, size_bytes: Optional[int]) -> str:
+    """The state a listed file lands in: `unsupported` when its size is past
+    the publish's cap for its kind — the fetch refuses it by its metadata, so
+    no slot could ever post it (#1545) — and `available` otherwise. A listing
+    that states no size is not judged. A kind with no cap is a KeyError: every
+    kind the sync lands has one."""
+    if size_bytes is not None and size_bytes > vocabulary.PUBLISH_MAX_BYTES[kind]:
+        return "unsupported"
+    return "available"
+
+
+class DriveSourceGone(MediaSourceGone):
+    """The provider says the configured folder/root no longer exists."""
+
+
+class DriveCredentialDead(MediaCredentialDead):
+    """The provider definitively rejected the source's credential."""
+
+
+async def sync_media_source(deps, session, job) -> str:
+    payload = job.get("payload") or {}
+    return await _run_sync(deps, job, reason=payload.get("reason"))
+
+
+async def first_ingest_chunk(deps, session, job) -> str:
+    return await _run_sync(deps, job, reason="chunk")
+
+
+async def rearm_after_connect(
+    session, *, workspace_id: str, source_id: Optional[str] = None, capability=None
+) -> int:
+    """Make a source eligible again, in the CALLER's transaction.
+
+    Called beside `google_drive_oauth.store_credential` so that "a credential
+    now exists" and "this source is eligible again" are ONE fact. Atomicity is
+    the whole case: two statements in two transactions can drift, and
+    the drift is invisible — a credentialed source that never syncs looks
+    exactly like one that has nothing wrong with it.
+
+    ## Why all three columns, and why `next_sync_at` is the one that matters
+
+    The clock's leg 4 selects `state = 'active' AND next_sync_at IS NOT NULL
+    AND next_sync_at <= now()` (`063:143`) — a CONJUNCTION, and both halves
+    were unsatisfied for a stranded source. `state` alone is not enough:
+    `media_sources.next_sync_at` has no default and the only other writer of a
+    non-NULL value is this module's own post-sync re-arm, so a source that has
+    never completed a sync is `NULL` there whatever its state. Setting state
+    without the cursor produces an `active` source that is permanently not due
+    — the same silence in a different column.
+
+    `alerted_at = NULL` retires the #1061 disconnect alert in the same breath.
+    That is what stops this module's `alert_stranded_sources` beat re-alerting
+    a source that has just recovered: the beat scans `state = 'error'`, so a
+    row this statement has touched no longer matches, and because both run as
+    a single statement inside their own transaction neither can observe the
+    other mid-decision.
+
+    Deliberately NOT filtered on the prior state. A reconnect is the explicit
+    undo of whatever came before — `error` from a fault, `paused` from a
+    deliberate disconnect — and a filter would silently no-op on
+    exactly the paused case a user is trying to reverse. Scoped by
+    `workspace_id` as well as id: RLS is inert under the deployed owner role
+    (#751), so the WHERE clause is what actually binds the row to its tenant.
+
+    The grant is the WORKSPACE's (069), so a reconnect names no source:
+    with `source_id` None every `gdrive` source of the workspace is
+    re-armed — one grant, every folder eligible again. A single source is
+    re-armed alone when a folder is picked or re-added under a grant.
+
+    Returns the number of rows moved; 0 means nothing matched, which the
+    caller may treat as it likes.
+    """
+    if source_id is not None:
+        from src.services.target import readers, source_read_admission
+
+        source = await readers.row(
+            session,
+            "SELECT provider FROM media_sources WHERE workspace_id=:ws AND id=:sid",
+            ws=str(workspace_id),
+            sid=str(source_id),
+        )
+        if source is not None and source["provider"] == "instagram_archive":
+            try:
+                await source_read_admission.capture_source_read(
+                    session,
+                    workspace_id=workspace_id,
+                    source_id=source_id,
+                    capability=capability,
+                )
+            except source_read_admission.SourceReadRefused:
+                return 0
+            result = await session.execute(
+                text(
+                    "UPDATE media_sources SET alerted_at=NULL,next_sync_at=clock_timestamp() WHERE workspace_id=:ws AND id=:sid"
+                ),
+                dict(ws=str(workspace_id), sid=str(source_id)),
+            )
+            return int(result.rowcount or 0)
+    if source_id is None:
+        # A folder the admin REMOVED stays removed: `pause_media_source` marks
+        # it (`config.removed`), and a reconnect revives only what a dead
+        # grant or a disconnect had paused (#1246 — without it, a reconnect
+        # would resurrect every removed folder).
+        result = await session.execute(
+            text(
+                "UPDATE media_sources"
+                "   SET state = 'active', alerted_at = NULL, next_sync_at = now()"
+                " WHERE workspace_id = :ws AND provider = :provider"
+                "   AND NOT COALESCE((config->>'removed')::boolean, false)"
+            ),
+            {"ws": str(workspace_id), "provider": vocabulary.PROVIDER_GDRIVE},
+        )
+    else:
+        # Picked (or picked again): the removal marker clears with the re-arm,
+        # in the same statement, so the two cannot drift.
+        result = await session.execute(
+            text(
+                "UPDATE media_sources"
+                "   SET state = 'active', alerted_at = NULL, next_sync_at = now(),"
+                "       config = config - 'removed',"
+                # A pick or a re-pick is a fresh start: no stale walk cursor.
+                "       sync_checkpoint = NULL"
+                " WHERE id = :s AND workspace_id = :ws"
+            ),
+            {"s": str(source_id), "ws": str(workspace_id)},
+        )
+        # Its media comes back with it: the rows
+        # Remove retired are available again before the walk even starts. A
+        # `missing` row is not Remove's to undo — its file left the folder —
+        # so it waits for a walk that lists the file again.
+        await session.execute(
+            text(
+                "UPDATE media_items SET state = 'available'"
+                " WHERE workspace_id = :ws AND source_id = :s AND state = 'removed'"
+            ),
+            {"s": str(source_id), "ws": str(workspace_id)},
+        )
+    return int(result.rowcount or 0)
+
+
+async def retire_media_of_removed_folders(session, *, workspace_id: str) -> int:
+    """Retire what is still ``available`` under a REMOVED folder of the workspace.
+
+    Reconciliation, not a lifecycle step. A REMOVED folder can own live rows
+    that Remove did not retire — and adoption (`_run_sync`'s upsert) takes
+    only a RETIRED row, so a connected subfolder listing the same bytes would
+    sync to nothing. A walk that is MINTED starts by calling this, whichever
+    way it was started (a pick, Sync Now, the schedule, a reconnect); a sync
+    that joins a walk already in flight does not, that walk reconciled when
+    it began. A no-op once the invariant holds. "Removed" is the product's
+    own definition (`workspaces.CONNECTED_FLAG_SQL` — the marker, not the
+    state), so a connected folder's rows, and a disconnected-but-not-removed
+    folder's, are never touched. A migration cannot carry it: the tenancy
+    lane refuses ``UPDATE`` there by design. Returns the rows retired.
+
+    The removed sources are read FOR UPDATE: a re-pick of one of them
+    (`rearm_after_connect`) updates that same row, so the two serialise on
+    it and this statement sees the folder as it is when it runs, not as it
+    was a snapshot ago — retiring a folder someone has just connected, whose
+    own walk could then never bring the rows back.
+    """
+    result = await session.execute(
+        text(
+            "WITH removed AS ("
+            "  SELECT s.id FROM media_sources s"
+            "   WHERE s.workspace_id = :ws AND " + CONNECTED_FLAG_SQL + "   FOR UPDATE)"
+            " UPDATE media_items m SET state = 'removed'"
+            "   FROM removed"
+            "  WHERE m.workspace_id = :ws AND m.source_id = removed.id"
+            "    AND m.state = 'available'"
+        ),
+        {"ws": str(workspace_id)},
+    )
+    return int(result.rowcount or 0)
+
+
+async def alert_stranded_sources(
+    session, *, stale_after_seconds: int, limit: int
+) -> int:
+    """Re-alert every source stranded in ``error``. Returns rows alerted.
+
+    ## Why it exists (#1061): stuckness causes silence
+
+    The persistent branch above sets ``state = 'error'`` and enqueues one
+    notification. Recovery to ``active`` happens only on the last page of a
+    SUCCESSFUL sync, and `fn_clock_tick` enqueues only ``state = 'active'``
+    sources. So an errored source is never scheduled again, that branch never
+    runs again, and **no second alert ever fires**. A workspace whose Drive
+    access was revoked would get one message and then silence indefinitely —
+    which reads exactly like a healthy workspace.
+
+    ## It ends the SILENCE, deliberately not the stuckness
+
+    A source dead for good reasons — folder deleted, access revoked — is
+    allowed to stay dead. It is not allowed to be QUIET about it. So nothing
+    here re-arms a source, enqueues a sync, or touches `next_sync_at`; no
+    provider call happens on this path at all.
+
+    **Re-arming belongs to the connect/reconnect flow**,
+    which does it in the same transaction as the credential write. Two things
+    racing to re-arm one row is the failure this scope split exists to avoid.
+
+    **The clock does not retry `error` sources on a backoff.** That would
+    change a due-scan every provider shares, and permanently re-poll sources
+    that are dead on purpose. Do not reach for it here.
+
+    ## `paused` is the acknowledgement, and it is why this is not noise
+
+    A recurring alert about a deliberately-dead source would be the same
+    recurring noise a backoff retry makes, so there has to be a way to say
+    "yes, I know". There already is: `ck_sources_state` admits
+    ``('active','paused','error')`` and this scans ``error`` only. Moving a
+    source a human has decided about to ``paused`` stops the alerts without
+    resurrecting it and without a schema change. Silence then means somebody
+    chose it.
+
+    ## The seam — a read door, then one conditional UPDATE per workspace
+
+    The selection across every workspace is `fn_stranded_sources` (082), because
+    this sweep runs with no tenant and `media_sources` is policy-covered. The
+    stamp is then ONE ``UPDATE … RETURNING`` per workspace, under that
+    workspace's tenant, whose predicate IS the selection — ``state = 'error'``
+    and the age window — and the notifications ride the same transaction. That
+    is what keeps the connect flow safe to run concurrently: it sets
+    ``state='active', alerted_at=NULL``, so a row it has cleared between the
+    door's read and this statement cannot match the predicate, and a row this
+    statement has locked forces the connect flow's UPDATE to re-evaluate after
+    commit. Only the rows the UPDATE returns are alerted; a row the door listed
+    that no longer qualifies is silently dropped, never stamped.
+
+    **One bounded staleness remains and is not worth more machinery.** If a
+    reconnect commits immediately after this transaction, one already-enqueued
+    alert still sends for a source that is now healthy. It is a single message,
+    it names a real state the source was in moments earlier, and suppressing it
+    would mean reaching into the outbox — more risk than the message costs.
+
+    `alerted_at IS NULL` is included so a stranded row with no stamp
+    is picked up rather than skipped forever; that column is nullable and rows
+    written by paths that never stamped it are the realistic case.
+    """
+    # The selection is a door (082): the sweep runs with no tenant and
+    # `media_sources` is policy-covered. The stamp is written per workspace
+    # under that workspace's tenant, re-checking the window so a row stamped
+    # since the read is not alerted twice, and only the rows the UPDATE
+    # returns are alerted — the stamp is the selection. One sweep runs
+    # at a time (the kind's serialization key).
+    candidates = (
+        (
+            await session.execute(
+                text(
+                    "SELECT o_id AS id, o_workspace_id AS workspace_id"
+                    "  FROM fn_stranded_sources(:age, :lim)"
+                ),
+                {"age": float(stale_after_seconds), "lim": int(limit)},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    by_workspace: dict[str, list[str]] = {}
+    for row in candidates:
+        by_workspace.setdefault(str(row["workspace_id"]), []).append(str(row["id"]))
+    claims = unit_of_work.WorkspaceClaims(session)
+    alerted = 0
+    for workspace_id, ids in by_workspace.items():
+        await claims.claim(workspace_id)
+        stamped = (
+            (
+                await session.execute(
+                    text(
+                        "UPDATE media_sources SET alerted_at = now()"
+                        " WHERE workspace_id = CAST(:ws AS uuid)"
+                        "   AND id = ANY(CAST(:ids AS uuid[]))"
+                        "   AND state = 'error'"
+                        "   AND (alerted_at IS NULL"
+                        "        OR alerted_at < now() - make_interval(secs => :age))"
+                        " RETURNING id"
+                    ),
+                    {"ws": workspace_id, "ids": ids, "age": float(stale_after_seconds)},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not stamped:
+            continue
+        bindings = await prompts.push_bindings(session, workspace_id)
+        for _ in stamped:
+            await outbox.fanout_notification(
+                session,
+                workspace_id=workspace_id,
+                bindings=bindings,
+                text=(
+                    "⚠️ This workspace's Drive source is still disconnected"
+                    " and has not synced since it failed. Reconnect it to"
+                    " resume syncing, or pause it if this is intended."
+                ),
+            )
+            alerted += 1
+    if alerted:
+        logger.warning(
+            "stranded-source sweep: re-alerted %d source(s) in error", alerted
+        )
+    await claims.release()
+    return alerted
+
+
+async def _run_sync(deps, job, *, reason) -> str:
+    payload = job.get("payload") or {}
+    source_id = str(payload["source_id"])
+    workspace_id = str(job["workspace_id"])
+    factory = unit_of_work.poller_session_factory(deps.engine, workspace_id)
+
+    start = await _read_source(
+        factory,
+        job,
+        adapters=deps.adapters,
+        payload=payload,
+        source_id=source_id,
+        workspace_id=workspace_id,
+        reason=reason,
+    )
+    if isinstance(start, str):
+        return start
+    if isinstance(start, _ArchiveDispatch):
+        from src.services.target import instagram_sync
+        from src.services.target.media_adapters import ProviderNotWired
+
+        ports = getattr(deps, "archive_sync", None)
+        if ports is None:
+            raise ProviderNotWired("instagram_archive")
+        return (await instagram_sync.run_sync(deps.engine, job, ports=ports)).outcome
+
+    page = await _call_provider(
+        start.adapter,
+        factory,
+        job,
+        config=start.config,
+        checkpoint=start.checkpoint,
+        source_id=source_id,
+        workspace_id=workspace_id,
+    )
+    if page is None:
+        return "source-error"
+    items, new_checkpoint = page
+    # The adapter's cursor carries the adapter's own keys. The walk's start,
+    # and the last whole walk's, are the sync's, so they go back onto every
+    # cursor of the walk, and the walk's last page judges against them.
+    carried = {k: start.checkpoint[k] for k in _WALK_KEYS if k in start.checkpoint}
+    if carried:
+        new_checkpoint = {**new_checkpoint, **carried}
+
+    return await _land_page(
+        factory,
+        job,
+        adapters=deps.adapters,
+        adapter=start.adapter,
+        provider=start.provider,
+        items=items,
+        new_checkpoint=new_checkpoint,
+        stored=start.stored,
+        walk=start.walk,
+        source_id=source_id,
+        workspace_id=workspace_id,
+        reason=reason,
+    )
+
+
+@dataclass(frozen=True)
+class _ArchiveDispatch:
+    """Route a discovered archive to its captured transaction owner."""
+
+
+@dataclass(frozen=True)
+class _SyncStart:
+    """What Phase 1 hands the phases after it: the source's config, the cursor
+    this carrier walks FROM, the cursor it READ (the CAS's `old` value, which
+    is not the same thing once a walk is minted) and the walk token every log
+    line on this path names."""
+
+    adapter: MediaAdapter
+    provider: str
+    config: Any
+    checkpoint: Any
+    stored: Any
+    walk: str
+
+
+async def _read_source(
+    factory, job, *, adapters, payload, source_id, workspace_id, reason
+) -> str | _SyncStart | _ArchiveDispatch:
+    """Phase 1 — read the source, own transaction, committed before the door.
+
+    Each phase is its own function, and every phase boundary is a transaction
+    boundary (Phase 2, the provider call, runs in none). That makes the rule
+    that a transaction never spans a provider call structural rather than a
+    thing each reader has to check.
+
+    Returns the outcome that ENDS the job — ``"missing"``, ``"paused"`` or
+    ``"stale"``, each already logged — or the walk for Phase 2 to open.
+    """
+    async with factory() as s:
+        row = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT provider, config, sync_checkpoint, state, now() AS db_now"
+                        " FROM media_sources WHERE id = :s AND workspace_id = :ws"
+                    ),
+                    {"s": source_id, "ws": workspace_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+    if row is None:
+        logger.warning("sync %s: source %s has no row", job["id"], source_id)
+        return "missing"
+    if row["provider"] == "instagram_archive":
+        return _ArchiveDispatch()
+    if row["state"] == "paused":
+        # Removed, or its grant disconnected, while this job (a chunk of a
+        # long walk, most likely) was queued: the person chose that. No
+        # provider call, no rows, and the chain ends here (#1256).
+        logger.info(
+            "sync %s: source %s is paused — nothing to do", job["id"], source_id
+        )
+        return "paused"
+    adapter = get_adapter(adapters, row["provider"])
+    minted = False
+    # The stored cursor and its chunk were committed atomically. Only the
+    # adapter interprets its progress keys; the sync reserves the walk token
+    # and timestamps for carrier fencing and the two-whole-walk absence rule.
+    # Drive's existing flat v2 cursors remain unchanged across deployment.
+    stored: Any = row["sync_checkpoint"] or None
+    in_flight = bool(
+        adapter.checkpoint_incomplete(stored)
+        and isinstance(stored.get("walk"), str)
+        and stored.get("walk")
+    )
+    if reason == "chunk" and in_flight:
+        # A chunk is a carrier for ONE walk — the one it names. On another
+        # walk it is stale: a re-pick or a reset started a new one, or a
+        # parallel carrier is further along. It does nothing (#1256).
+        if stored.get("walk") != payload.get("walk"):
+            logger.info(
+                "sync %s: chunk for walk %s is stale (row holds %s) — dropped",
+                job["id"],
+                payload.get("walk"),
+                stored.get("walk"),
+            )
+            return "stale"
+        checkpoint: Any = stored
+    elif reason == "chunk" and not adapter.checkpoint_incomplete(stored):
+        # The walk this chunk carried is complete (a parallel carrier finished,
+        # or a lease was lost after the last page committed), or a re-pick
+        # nulled the cursor and re-armed the clock. Above all a stray chunk
+        # never MINTS a walk — that would re-walk the whole tree once per
+        # chunk (#1256).
+        logger.info(
+            "sync %s: chunk for walk %s finds the row complete — dropped",
+            job["id"],
+            payload.get("walk"),
+        )
+        return "stale"
+    elif in_flight:
+        # A baseline or demand sync that finds a walk in flight joins it as a
+        # carrier (the chain may have died); the cursor CAS below keeps two
+        # carriers from ever overwriting each other.
+        checkpoint = stored
+    else:
+        # Nothing worth resuming: nothing stored, or an old cursor with no
+        # shared walk token. For a chunk that is the sole carrier of that old
+        # chain, so it starts the walk over rather than leaving the source
+        # with `next_sync_at` NULL and no carrier (#1256).
+        if adapter.checkpoint_incomplete(stored):
+            logger.warning(
+                "sync %s: source %s stored a cursor without a walk token — starting over",
+                job["id"],
+                source_id,
+            )
+        # The walk's start rides its cursor, read from the database's clock —
+        # the clock that writes `created_at` and `last_listed_at` — and so
+        # does the start of the last whole walk before it, because a whole
+        # walk tombstones only what that walk missed too (`_tombstone_unlisted`).
+        checkpoint = {
+            **adapter.initial_checkpoint(),
+            "walk": uuid.uuid4().hex,
+            "started_at": row["db_now"].isoformat(),
+        }
+        last_whole = _last_whole_start(stored, adapter)
+        if last_whole:
+            checkpoint["last_whole_started_at"] = last_whole
+        minted = True
+    walk = checkpoint["walk"]
+    if minted:
+        # A MINTED walk starts by reconciling: the live rows a REMOVED folder
+        # owns are retired, so this walk can adopt them. Own transaction,
+        # before the door; a no-op once the invariant holds.
+        async with factory() as s:
+            retired = await retire_media_of_removed_folders(
+                s, workspace_id=workspace_id
+            )
+            await s.commit()
+        if retired:
+            logger.warning(
+                "sync %s: retired %d row(s) still available under a removed"
+                " folder of workspace %s before walk %s",
+                job["id"],
+                retired,
+                workspace_id,
+                walk,
+            )
+    return _SyncStart(
+        adapter=adapter,
+        provider=row["provider"],
+        config=row["config"],
+        checkpoint=checkpoint,
+        stored=stored,
+        walk=walk,
+    )
+
+
+async def _list_page(adapter, config, checkpoint, *, source_id, workspace_id):
+    """The provider boundary: preserve routing without credentialed error text.
+
+    Raising a safe neutral exception from None also protects a later SQL
+    failure: its chained traceback can contain only this fixed message.
+    """
+    try:
+        return await adapter.list_changes(
+            config, checkpoint, source_id=source_id, workspace_id=workspace_id
+        )
+    except MEDIA_FAILURES as exc:
+        raise redacted_error(exc) from None
+
+
+async def _call_provider(
+    adapter, factory, job, *, config, checkpoint, source_id, workspace_id
+) -> Optional[tuple[list, Any]]:
+    """Phase 2 — the provider door, outside any transaction.
+
+    Returns the page and the cursor that resumes it, or None once a
+    classified-persistent fault has been recorded — the source flipped to
+    ``error`` under the `alerted_at` dedup, the cursor dropped with it — and
+    the job is to report ``"source-error"``.
+    """
+    # Local imports, as in `alert_stranded_sources` above: these modules reach
+    # back into this one, so a module-level import is a cycle.
+    from src.services.target import outbox, prompts
+
+    try:
+        items, new_checkpoint = await _list_page(
+            adapter,
+            dict(config or {}),
+            checkpoint,
+            source_id=source_id,
+            workspace_id=workspace_id,
+        )
+    except (MediaSourceGone, MediaCredentialDead) as exc:
+        async with factory() as s:
+            await s.execute(
+                text(
+                    # A folder paused meanwhile (removed, or its grant
+                    # disconnected) is NOT flipped to error, and NOT alerted
+                    # about: the person chose that, and `paused` is what keeps
+                    # the stranded-source beat honest (#1246).
+                    # The cursor is dropped with the fault: whatever re-arms this
+                    # source (a reconnect, a re-pick) starts a fresh walk rather
+                    # than resuming at the folder that failed (#1251).
+                    "UPDATE media_sources SET state = 'error', alerted_at = now(),"
+                    "  sync_checkpoint = CAST(:checkpoint AS jsonb)"
+                    " WHERE id = :s AND workspace_id = :ws AND state <> 'paused'"
+                    " RETURNING id"
+                ),
+                {
+                    "s": source_id,
+                    "ws": workspace_id,
+                    "checkpoint": json.dumps(adapter.initial_checkpoint()),
+                },
+            )
+            flipped = (
+                await s.execute(
+                    text(
+                        "SELECT state FROM media_sources"
+                        " WHERE id = :s AND workspace_id = :ws"
+                    ),
+                    {"s": source_id, "ws": workspace_id},
+                )
+            ).scalar()
+            bindings = (
+                await prompts.push_bindings(s, workspace_id)
+                if flipped == "error"
+                else []
+            )
+            # An empty list writes nothing and returns 0 — the same as the
+            # zero-iteration loop this replaces.
+            await outbox.fanout_notification(
+                s,
+                workspace_id=workspace_id,
+                bindings=bindings,
+                # Provider errors may carry credentialed URLs. The error type
+                # selects the recovery advice; its message never leaves here.
+                text=(
+                    "⚠️ This workspace's media connection needs to be renewed."
+                    " Reconnect the source to resume syncing."
+                    if isinstance(exc, MediaCredentialDead)
+                    else "⚠️ This workspace's media source is unavailable."
+                    " Restore access or reconnect the source to resume syncing."
+                ),
+            )
+            await s.commit()
+        logger.warning(
+            "sync %s: source %s classified persistent (%s) — state=error,"
+            " alert dedup stamped",
+            job["id"],
+            source_id,
+            type(exc).__name__,
+        )
+        return None
+    return items, new_checkpoint
+
+
+async def _land_page(
+    factory,
+    job,
+    *,
+    adapters,
+    adapter,
+    provider,
+    items,
+    new_checkpoint,
+    stored,
+    walk,
+    source_id,
+    workspace_id,
+    reason,
+) -> str:
+    """Phase 3 — checkpoint CAS + upsert + chain-or-rearm, one transaction."""
+    kept = skipped_kind = relisted = tombstoned = 0
+    async with factory() as s:
+        # The cursor advances by compare-and-swap against what THIS carrier
+        # read. A re-pick that nulled it, a persistent failure that reset it,
+        # or a parallel carrier that got here first all leave a different
+        # value, and this carrier then writes NOTHING — not the cursor, not
+        # the rows, not a chunk (#1256). `{}` stands for SQL NULL on
+        # both sides; no writer ever stores an empty object.
+        moved = (
+            await s.execute(
+                text(
+                    "UPDATE media_sources SET sync_checkpoint = CAST(:cp AS jsonb)"
+                    " WHERE id = :s AND workspace_id = :ws"
+                    # Removed (or disconnected) since Phase 1: the person chose
+                    # that, and this carrier's page must not land — least of
+                    # all onto rows the removal just retired.
+                    "   AND state <> 'paused'"
+                    "   AND COALESCE(sync_checkpoint, CAST('{}' AS jsonb))"
+                    "       = CAST(:old AS jsonb)"
+                    " RETURNING id"
+                ),
+                {
+                    "cp": json.dumps(new_checkpoint),
+                    "old": json.dumps(stored if stored is not None else {}),
+                    "s": source_id,
+                    "ws": workspace_id,
+                },
+            )
+        ).first()
+        if moved is None:
+            await s.rollback()
+            logger.warning(
+                "sync %s: source %s cursor moved under this carrier (walk %s) —"
+                " dropped without writes",
+                job["id"],
+                source_id,
+                walk,
+            )
+            return "stale"
+        whole_starts = (
+            await _whole_starts(s, workspace_id=workspace_id, adapters=adapters)
+            if items
+            else "{}"
+        )
+        for item in items:
+            if item.get("kind") not in _ALLOWED_KINDS:
+                skipped_kind += 1
+                continue
+            result = await s.execute(
+                text(
+                    "INSERT INTO media_items (workspace_id, source_id,"
+                    " content_hash, file_name, media_kind, mime_type,"
+                    " provider_file_ref, category, folder_path, file_size, state,"
+                    " thumbnail_url, last_listed_at)"
+                    " VALUES (:ws, :src, :hash, :name, :kind, :mime, :ref,"
+                    "  :category, :folder_path, :size, :state, :thumb, now())"
+                    # The row is the ITEM: the dedup
+                    # is per workspace by content hash (`uq_media_dedup`), and
+                    # posting history and locks hang off the row, so it is
+                    # never re-created. Every listing of the SAME file (this
+                    # folder, this reference) refreshes its row — label, path,
+                    # name, size — and stamps `last_listed_at`, which is how a
+                    # walk spanning chunks knows at its end what it listed. A
+                    # RETIRED or TOMBSTONED row is ADOPTED by whichever
+                    # connected folder lists the same bytes — new owner,
+                    # reference, label and path. Two connected folders sharing
+                    # bytes keep the first owner: a different file with
+                    # identical bytes must not flap a live row.
+                    " ON CONFLICT ON CONSTRAINT uq_media_dedup DO UPDATE"
+                    "   SET source_id = EXCLUDED.source_id,"
+                    "       provider_file_ref = EXCLUDED.provider_file_ref,"
+                    "       file_name = EXCLUDED.file_name,"
+                    "       mime_type = COALESCE(EXCLUDED.mime_type, media_items.mime_type),"
+                    "       category = EXCLUDED.category,"
+                    "       folder_path = EXCLUDED.folder_path,"
+                    "       file_size = COALESCE(EXCLUDED.file_size, media_items.file_size),"
+                    # The listing judges the state each time it names the
+                    # file: `unsupported` past the publish's cap, else
+                    # `available` — so a retired or tombstoned row comes back,
+                    # and a raised cap brings an `unsupported` one back too.
+                    "       state = EXCLUDED.state,"
+                    # The provider's thumbnail link is short-lived, so each
+                    # listing's is the current one and replaces the stored
+                    # link; a listing without one means the provider offers
+                    # none now, and the media reads say `has_thumbnail` false.
+                    "       thumbnail_url = EXCLUDED.thumbnail_url,"
+                    # The stamp only moves forward. now() is a transaction's
+                    # START, so a writer that opened before a walk and lands
+                    # after a page re-stamped the row would otherwise move it
+                    # backwards, past the walk's start, and the walk's last
+                    # page would tombstone a file it listed.
+                    "       last_listed_at = GREATEST(media_items.last_listed_at,"
+                    "                                 EXCLUDED.last_listed_at)"
+                    # A retired row is adopted by whichever CONNECTED folder
+                    # lists its bytes — including its own, should it find one
+                    # retired under itself (a re-pick's revive lost a race).
+                    # A live row stays with its folder while that folder still
+                    # lists the file, so a file two connected folders both
+                    # list keeps one owner. Another folder listing the same
+                    # Drive file takes it over once a whole walk of the owner
+                    # has missed it (`_whole_starts`), so a file moved between
+                    # connected folders keeps its row. One such miss is enough
+                    # here, because that listing shows the file still exists;
+                    # the tombstone has no such proof, and waits for two.
+                    # A removed folder's carrier never lands its page (the
+                    # cursor CAS above fails once the source is paused), so no
+                    # check that the listing folder is still connected is
+                    # needed here.
+                    # Archive identity is never adopted, including redacted
+                    # items whose inert sentinels deliberately retain the UUID.
+                    " WHERE EXISTS (SELECT 1 FROM media_sources owner_source"
+                    "               WHERE owner_source.id = media_items.source_id"
+                    "                 AND owner_source.workspace_id = :ws"
+                    "                 AND owner_source.provider = 'gdrive')"
+                    "   AND NOT media_items.source_projection_redacted"
+                    "   AND (media_items.state IN ('removed', 'missing')"
+                    "    OR (media_items.provider_file_ref = EXCLUDED.provider_file_ref"
+                    "        AND EXISTS (SELECT 1 FROM media_sources owner_source"
+                    "                    WHERE owner_source.id = media_items.source_id"
+                    "                      AND owner_source.workspace_id = :ws"
+                    "                      AND owner_source.provider = :provider)"
+                    "        AND (media_items.source_id = EXCLUDED.source_id"
+                    "             OR GREATEST(media_items.created_at,"
+                    "                         media_items.last_listed_at)"
+                    "                < CAST(CAST(:whole_starts AS jsonb)"
+                    "                       ->> CAST(media_items.source_id AS text)"
+                    "                       AS timestamptz))))"
+                    " RETURNING (xmax = 0) AS inserted"
+                ),
+                {
+                    "ws": workspace_id,
+                    "src": source_id,
+                    "hash": item["content_hash"],
+                    "name": item.get("name") or item["ref"],
+                    "kind": item["kind"],
+                    "size": item.get("size_bytes"),
+                    "state": _listed_state(item["kind"], item.get("size_bytes")),
+                    "category": item.get("category"),
+                    # The folder's path under the connected folder ("" at its
+                    # root); an adapter that has no notion of folders says
+                    # nothing and the column stays NULL.
+                    "folder_path": item.get("folder_path"),
+                    # `.get`, not `[...]`: the column is nullable and an adapter
+                    # that cannot know the content type must be able to say so.
+                    # Absent stays NULL — the same row this wrote before — so a
+                    # port without the key is unaffected rather than crashing.
+                    "mime": item.get("mime_type"),
+                    "ref": item["ref"],
+                    "thumb": item.get("thumbnail_link"),
+                    "whole_starts": whole_starts,
+                    "provider": provider,
+                },
+            )
+            outcomes = [inserted for (inserted,) in result.all()]
+            kept += sum(1 for inserted in outcomes if inserted)
+            relisted += sum(1 for inserted in outcomes if not inserted)
+        if adapter.checkpoint_incomplete(new_checkpoint):
+            # More pages: chain the next chunk and do NOT re-arm — the chain
+            # is the carrier. The serialized key orders it after this job.
+            # Through `jobs.enqueue`, not a hand-written INSERT (#1361): the
+            # module writes both bounds from `LANE_BUDGETS`, `max_attempts` and
+            # a `deadline_at` (#1288) that can end a stuck chunk before its
+            # attempts run out. This asks it rather than copying either.
+            await jobs.enqueue(
+                s,
+                kind="first_ingest_chunk",
+                workspace_id=workspace_id,
+                serialization_key=f"src:{source_id}",
+                lane="bulk",
+                # The chunk names the walk it belongs to; the row's cursor is
+                # the one resumed (see the cursor rule above).
+                payload={"v": 2, "source_id": source_id, "walk": walk},
+            )
+        else:
+            # The last page: what the walk no longer lists, then success
+            # stamps, probe recovery, baseline re-arm.
+            tombstoned = await _tombstone_unlisted(
+                s,
+                new_checkpoint,
+                adapter=adapter,
+                source_id=source_id,
+                workspace_id=workspace_id,
+            )
+            jitter = random.uniform(-JITTER_SECONDS, JITTER_SECONDS)
+            await s.execute(
+                text(
+                    "UPDATE media_sources SET"
+                    "  state = 'active',"
+                    "  alerted_at = NULL,"
+                    "  last_sync_success_at = now(),"
+                    "  next_sync_at = now() + make_interval(secs => :secs)"
+                    # Removed or disconnected while this job ran: the success
+                    # stamp must not un-pause it (#1246).
+                    " WHERE id = :s AND workspace_id = :ws AND state <> 'paused'"
+                ),
+                {"secs": BASELINE_SECONDS + jitter, "s": source_id, "ws": workspace_id},
+            )
+        await s.commit()
+    logger.info(
+        "sync %s: source %s reason=%s walk=%s kept=%d relisted=%d skipped_kind=%d"
+        " tombstoned=%d chained=%s",
+        job["id"],
+        source_id,
+        reason,
+        walk,
+        kept,
+        relisted,
+        skipped_kind,
+        tombstoned,
+        adapter.checkpoint_incomplete(new_checkpoint),
+    )
+    return "chained" if adapter.checkpoint_incomplete(new_checkpoint) else "synced"
+
+
+#: The keys a walk's cursor carries for the sync, beside the adapter's own.
+_WALK_KEYS = ("walk", "started_at", "last_whole_started_at")
+
+
+def _last_whole_start(stored, adapter: MediaAdapter) -> Optional[str]:
+    """The start of the last walk of *stored*'s folder that saw the whole
+    tree: the stored walk's own start when it was whole, else what it
+    carried, since a walk in flight or one that skipped part of the tree
+    judges nothing and moves nothing on. None when no whole walk is known:
+    nothing stored, or a cursor a re-pick or a reset nulled."""
+    if not stored:
+        return None
+    if not adapter.checkpoint_incomplete(stored) and adapter.checkpoint_whole(stored):
+        return stored.get("started_at")
+    return stored.get("last_whole_started_at")
+
+
+async def _whole_starts(s, *, workspace_id: str, adapters: MediaAdapters) -> str:
+    """Each folder's `_last_whole_start`, keyed by source id, as JSON; a
+    folder with none is absent."""
+    rows = (
+        await s.execute(
+            text(
+                "SELECT id, provider, sync_checkpoint FROM media_sources WHERE workspace_id = :ws"
+            ),
+            {"ws": workspace_id},
+        )
+    ).mappings()
+    starts = {
+        str(r["id"]): _last_whole_start(r["sync_checkpoint"], adapters[r["provider"]])
+        for r in rows
+        if r["provider"] in adapters
+    }
+    return json.dumps({k: v for k, v in starts.items() if v})
+
+
+async def _tombstone_unlisted(
+    s, checkpoint, *, adapter, source_id, workspace_id
+) -> int:
+    """The last page of a walk that saw the whole tree: the source's rows
+    neither it nor the last whole walk before it listed are no longer in the
+    folder, so the draw must not take them (#1545). They go `missing` — the
+    file's own absence, which only a listing undoes; a re-pick revives
+    `removed` rows, never these.
+
+    Two whole walks, not one: a file that still exists can miss one walk
+    (moved into a folder the walk had already listed, or trashed and
+    restored across its end), and a planned story on a `missing` file
+    expires. So only what predates the last whole walk is judged: a row
+    created or listed since that walk began waits, since rows land outside
+    any walk too (a relay's drop). Only a walk the adapter says was whole is
+    judged (`checkpoint_whole`): one that skipped part of the tree, or
+    whose adapter does not say, judges nothing, and nor does a walk that
+    knows no whole walk before it. Returns the rows tombstoned."""
+    started = (checkpoint or {}).get("last_whole_started_at")
+    if (
+        not started
+        or adapter.checkpoint_incomplete(checkpoint)
+        or not adapter.checkpoint_whole(checkpoint)
+    ):
+        return 0
+    result = await s.execute(
+        text(
+            "UPDATE media_items SET state = 'missing'"
+            " WHERE workspace_id = :ws AND source_id = :s"
+            "   AND state IN ('available', 'unsupported')"
+            # GREATEST skips a NULL: a row never stamped is judged by its birth.
+            "   AND GREATEST(created_at, last_listed_at)"
+            "       < CAST(CAST(:started AS text) AS timestamptz)"
+        ),
+        {"started": started, "ws": workspace_id, "s": source_id},
+    )
+    return int(result.rowcount or 0)

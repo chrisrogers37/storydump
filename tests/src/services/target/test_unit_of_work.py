@@ -1,0 +1,616 @@
+"""Unit-of-work gates (#857).
+
+Four of the five gate clauses live here; the floor proofs are in
+`test_egress_floor.py`. The pool-reuse clause is DB-backed and marked
+integration — it is the one that cannot be faked, because GUC leakage is a
+property of a real connection being handed to a second borrower.
+"""
+
+from __future__ import annotations
+
+
+import pytest
+from sqlalchemy import text
+
+from src.config.settings import settings
+from src.services.target.unit_of_work import (
+    CONNECTION_ROLE_SQL,
+    connection_role,
+    MAX_OVERFLOW_SEAM,
+    POOL_RECYCLE_SEAM,
+    POOL_SIZE_SEAM,
+    POOL_TIMEOUT_SEAM,
+    TenantContextRequired,
+    UnitOfWork,
+    async_database_url,
+    create_engine,
+    in_transaction,
+    transaction_discipline,
+    unit_of_work,
+)
+
+TENANT_A = "aaaaaaaa-0000-0000-0000-00000000000a"
+TENANT_B = "bbbbbbbb-0000-0000-0000-00000000000b"
+
+
+class TestTheEngineConfigAssertsTheSeam:
+    """Gate: *engine config asserts `max_overflow` equals its seam value.*"""
+
+    def test_the_seam_constant_is_zero(self):
+        assert MAX_OVERFLOW_SEAM == 0
+
+    def test_the_engine_pins_max_overflow_to_the_seam(self):
+        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert engine.pool._max_overflow == MAX_OVERFLOW_SEAM
+
+    @pytest.mark.parametrize("value", ["0", "20", "99"])
+    def test_the_seam_is_NOT_sized_by_the_environment(self, monkeypatch, value):
+        """The seam's size, pinned BEHAVIOURALLY rather than by proxy.
+
+        Nothing reads the `DB_MAX_OVERFLOW` / `DB_POOL_SIZE` settings — and an
+        operator may still have them set on a service. Driving both NAMES to
+        arbitrary values and asserting the engine still shows the literals
+        proves "not sized by configuration" for ANY value, including 0 (the
+        overflow seam's own value), and can never invert."""
+        monkeypatch.setenv("DB_MAX_OVERFLOW", value)
+        monkeypatch.setenv("DB_POOL_SIZE", value)
+        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert engine.pool._max_overflow == MAX_OVERFLOW_SEAM
+        assert engine.pool.size() == POOL_SIZE_SEAM
+
+    def test_the_saturation_policy_is_pinned_not_left_to_the_default(self):
+        """With `max_overflow=0` the pool cannot burst, so `pool_timeout` IS the
+        saturation policy — and SQLAlchemy's 30 s default is pile-up, not
+        "slip-a-slot". It is also >= the egress floor's own budget, so the
+        substrate could outlast the callers it serves."""
+        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert engine.pool._timeout == POOL_TIMEOUT_SEAM
+        assert POOL_TIMEOUT_SEAM < 10, "the seam must defer, not stall"
+
+    def test_the_connection_wait_is_shorter_than_the_shortest_provider_timeout(self):
+        """The coupling that makes 30 s wrong rather than merely large: a
+        caller must never spend its provider budget waiting for a connection."""
+        from src.services.target.egress import TIMEOUT_CLASSES
+
+        assert POOL_TIMEOUT_SEAM < min(TIMEOUT_CLASSES.values())
+
+    def test_pool_recycle_is_set_explicitly_alongside_pre_ping(self):
+        """The target engine sets recycling to 300 explicitly ALONGSIDE
+        pre-ping: -1 (never) would be a default nobody chose."""
+        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert engine.pool._recycle == POOL_RECYCLE_SEAM
+
+    def test_a_logged_statement_error_carries_no_bound_values(self):
+        """Bound values are addresses, campaigns and token hashes; a failed
+        statement's error (which uvicorn logs) names the SQL only."""
+        engine = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert engine.sync_engine.hide_parameters is True
+
+    def test_pool_size_is_pinned_too_so_the_invariant_cannot_be_overridden(self):
+        """Half a pinned inequality is not pinned. With `pool_size` read from
+        settings, a production `DB_POOL_SIZE` override breaks
+        `Σ(replica × (pool + overflow)) = 50` and no gate can see it — the test
+        would read the same overridden value it is meant to be checking."""
+        monkeypatch_free = create_engine("postgresql+asyncpg://u:p@localhost:5432/none")
+        assert monkeypatch_free.pool.size() == POOL_SIZE_SEAM
+
+    def test_the_invariant_arithmetic_holds(self):
+        """Σ(replica × (pool + overflow)) = 3×(10+0) + 2×(10+0) = 50."""
+        # From the SEAM literals, not from settings: reading the setting here
+        # means CI only ever sees its default, so a production override would
+        # break the invariant with the gate still green.
+        per_replica = POOL_SIZE_SEAM + MAX_OVERFLOW_SEAM
+        assert 3 * per_replica + 2 * per_replica == 50
+
+
+class TestAUoWWithoutTenantContextIsUnconstructible:
+    """Gate: *a UoW without tenant context is unconstructible.*
+
+    Unconstructible, not "raises on use" — the object must not come into
+    existence, so no code path can hold one and reach a query with it.
+    """
+
+    @pytest.mark.parametrize("bad", [None, "", 0, [], {}, "   ", "\n", "\t", " \n\t "])
+    def test_construction_refuses_every_absent_tenant(self, bad):
+        with pytest.raises(TenantContextRequired):
+            UnitOfWork(engine=None, tenant_id=bad)
+
+    def test_the_factory_refuses_too(self):
+        with pytest.raises(TenantContextRequired):
+            unit_of_work(None, "")
+
+    def test_there_is_no_system_scope_door(self):
+        """*No role selection exists to make — system operations go through
+        the doors.* A cross-tenant UoW variant would bypass the
+        audited doors, so its absence is asserted rather than assumed."""
+        import src.services.target.unit_of_work as mod
+
+        surface = dir(mod)
+        for forbidden in ("SYSTEM_SCOPE", "SystemScope", "system_unit_of_work"):
+            assert forbidden not in surface, (
+                f"{forbidden} appeared on the unit-of-work surface — system "
+                "operations go through the doors, not through a privileged UoW"
+            )
+
+    def test_a_real_tenant_constructs(self):
+        """Positive control: the refusals above are about absence."""
+        assert UnitOfWork(engine=None, tenant_id=TENANT_A).tenant_id == TENANT_A
+
+
+class TestTheDisciplineFlagDoesNotLeak:
+    """The ContextVar is reset from its token, never by assignment.
+
+    A leaked flag makes every later provider call in the task raise — a
+    wrong-way failure that looks like the discipline working, which is why it
+    is asserted rather than reasoned about. CI runs 3.10, and a ContextVar leak
+    can trip on 3.10 alone, so CI is the arbiter for this class, not a local
+    pass.
+    """
+
+    def test_the_flag_is_false_at_rest(self):
+        assert in_transaction() is False
+
+    @pytest.mark.asyncio
+    async def test_the_flag_is_false_again_after_a_failed_transaction(self):
+        engine = create_engine("postgresql+asyncpg://u:p@127.0.0.1:1/none")
+        uow = UnitOfWork(engine=engine, tenant_id=TENANT_A)
+        with pytest.raises(Exception):
+            async with uow.begin():
+                pass
+        assert in_transaction() is False, "the discipline flag leaked past a failure"
+        await engine.dispose()
+
+    def test_a_nested_exit_restores_the_outer_flag(self):
+        """`transaction_discipline` resets from its token: leaving an inner
+        block restores the outer block's flag, where a bare reset would clear
+        it while the outer transaction is still open."""
+        with transaction_discipline():
+            with transaction_discipline():
+                assert in_transaction() is True
+            assert in_transaction() is True, "a nested exit cleared the outer flag"
+        assert in_transaction() is False
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+class TestTenantScopingAndGucHygieneUnderPoolReuse:
+    """Gate: *harness proves tenant-scoping + GUC hygiene under pool reuse.*
+
+    The pool is deliberately tiny so connections are genuinely recycled — with
+    a large pool each UoW could get a fresh connection and the test would pass
+    without ever exercising reuse, which is the vacuity this gate is about.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_db(self, setup_test_database):
+        """The suite's own session-DB fixture: creates `TEST_DB_NAME` and skips
+        cleanly when no database is reachable. Depending on it is what makes
+        these tests run against the database CI actually provisions — CI has no
+        `DB_NAME` database, so building the URL from that name fails there while
+        passing locally."""
+        if setup_test_database is None:
+            pytest.skip("Database not available - skipping integration test")
+
+    @pytest.mark.asyncio
+    async def test_each_uow_sees_only_its_own_tenant_across_recycled_connections(self):
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            seen = []
+            for tenant in (TENANT_A, TENANT_B, TENANT_A, TENANT_B):
+                async with unit_of_work(engine, tenant).begin() as s:
+                    got = (
+                        await s.execute(text("SELECT current_setting('app.tenant_id')"))
+                    ).scalar()
+                    seen.append(got)
+            assert seen == [TENANT_A, TENANT_B, TENANT_A, TENANT_B]
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_the_guc_does_not_survive_into_the_next_borrower(self):
+        """The hygiene half: after a UoW commits, a plain connection off the
+        SAME single-slot pool must see no tenant at all."""
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            async with unit_of_work(engine, TENANT_A).begin() as s:
+                assert (
+                    await s.execute(text("SELECT current_setting('app.tenant_id')"))
+                ).scalar() == TENANT_A
+            async with engine.connect() as c:
+                leaked = (
+                    await c.execute(
+                        text("SELECT current_setting('app.tenant_id', true)")
+                    )
+                ).scalar()
+            assert not leaked, f"app.tenant_id leaked across pool reuse: {leaked!r}"
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_actor_gucs_are_set_and_are_also_transaction_scoped(self):
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            uow = unit_of_work(
+                engine, TENANT_A, actor_kind="system", actor_user_id=None, channel="web"
+            )
+            async with uow.begin() as s:
+                assert (
+                    await s.execute(text("SELECT current_setting('app.actor_kind')"))
+                ).scalar() == "system"
+                assert (
+                    await s.execute(text("SELECT current_setting('app.channel')"))
+                ).scalar() == "web"
+            async with engine.connect() as c:
+                for guc in ("app.actor_kind", "app.channel"):
+                    assert not (
+                        await c.execute(text(f"SELECT current_setting('{guc}', true)"))
+                    ).scalar(), f"{guc} leaked across pool reuse"
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_lock_timeout_is_applied_and_is_also_transaction_scoped(self):
+        """The option rides the GUC statement and dies with the transaction, so
+        a pooled connection cannot hand its bound to the next borrower, and a
+        unit of work that asks for none waits unbounded."""
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            bounded = unit_of_work(
+                engine, TENANT_A, actor_kind="system", lock_timeout="250ms"
+            )
+            async with bounded.begin() as s:
+                assert (await s.execute(text("SHOW lock_timeout"))).scalar() == "250ms"
+                # The tenant and the actor are set by the same statement.
+                assert (
+                    await s.execute(text("SELECT current_setting('app.tenant_id')"))
+                ).scalar() == TENANT_A
+            # The next borrower of the one pooled connection starts unbounded.
+            async with unit_of_work(engine, TENANT_A, actor_kind="system").begin() as s:
+                assert (await s.execute(text("SHOW lock_timeout"))).scalar() == "0"
+            async with engine.connect() as c:
+                assert (await c.execute(text("SHOW lock_timeout"))).scalar() == "0"
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_the_COMPOSED_path_refuses_a_provider_call_inside_a_real_uow(self):
+        """The JOIN of two halves that are each proven alone.
+        `test_a_provider_call_inside_an_open_transaction_fails` arms the flag
+        directly, and the flag test proves a UoW sets it; neither runs the
+        shape a caller actually writes. Each half can keep passing while the join
+        breaks, so this runs a real UoW transaction against live Postgres with a
+        real `egress.request` through it."""
+        import httpx
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.egress import EgressPolicy
+        from src.services.target.egress import request as egress_request
+        from src.services.target.unit_of_work import TransactionDisciplineError
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            transport = httpx.MockTransport(lambda r: httpx.Response(200, text="ok"))
+            async with httpx.AsyncClient(transport=transport) as client:
+                async with unit_of_work(engine, TENANT_A).begin():
+                    with pytest.raises(TransactionDisciplineError):
+                        await egress_request(
+                            client,
+                            "GET",
+                            "https://graph.instagram.com/v1/me",
+                            policy=EgressPolicy(),
+                            resolver=lambda h: ["93.184.216.34"],
+                        )
+                # ... and the same call OUTSIDE the transaction goes out, so the
+                # refusal above is the discipline rather than a broken call.
+                resp = await egress_request(
+                    client,
+                    "GET",
+                    "https://graph.instagram.com/v1/me",
+                    policy=EgressPolicy(),
+                    resolver=lambda h: ["93.184.216.34"],
+                )
+                assert resp.status_code == 200
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_task_spawned_INSIDE_the_transaction_is_also_refused(self):
+        """The per-task bound, as an assertion rather than a docstring claim:
+        a child task inherits the context, so it is caught too."""
+        import asyncio as aio
+
+        import httpx
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.egress import EgressPolicy
+        from src.services.target.egress import request as egress_request
+        from src.services.target.unit_of_work import TransactionDisciplineError
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            transport = httpx.MockTransport(lambda r: httpx.Response(200, text="ok"))
+            async with httpx.AsyncClient(transport=transport) as client:
+                async with unit_of_work(engine, TENANT_A).begin():
+
+                    async def child():
+                        return await egress_request(
+                            client,
+                            "GET",
+                            "https://graph.instagram.com/v1/me",
+                            policy=EgressPolicy(),
+                            resolver=lambda h: ["93.184.216.34"],
+                        )
+
+                    with pytest.raises(TransactionDisciplineError):
+                        await aio.create_task(child())
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_the_discipline_flag_is_set_inside_and_clear_outside(self):
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            assert in_transaction() is False
+            async with unit_of_work(engine, TENANT_A).begin():
+                assert in_transaction() is True
+            assert in_transaction() is False
+        finally:
+            await engine.dispose()
+
+
+class _Result:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
+
+
+class _Conn:
+    """A connection that answers the role query with a fixed row, or raises."""
+
+    def __init__(self, row=None, raises=None):
+        self._row, self._raises, self.statements = row, raises, []
+
+    async def execute(self, statement, *args, **kwargs):
+        self.statements.append(str(statement))
+        if self._raises is not None:
+            raise self._raises
+        return _Result(self._row)
+
+
+class TestTheWorkerSessionsAreCoveredToo:
+    """The two worker factories set the discipline flag as `begin()` does, and
+    so does `email_sender.system_session`, which the API's invitation email
+    debits in before it sends.
+
+    #1368: without the flag in those three sessions, `_IN_TRANSACTION` would
+    cover no worker path at all, and the structural claims in
+    `credential_lifecycle`'s and `email_sender`'s module docstrings (a provider
+    call inside an open transaction raises) would hold of `UnitOfWork.begin()`
+    alone and of no session the worker opens.
+
+    The test is shaped like the composed path above rather than as a flag
+    assertion because every worker gate injects a provider stub
+    (`refresh=_fake_seam`, `refresh=refresh_stub`), so no test reaches
+    `egress.request` from a worker session by accident. This one does it on
+    purpose, against live Postgres, through the real floor.
+
+    The four executors that reach the floor own their transactions (#1387),
+    so arming this refuses a violation rather than breaking four production
+    paths.
+    """
+
+    async def _refuses_inside(self, opener):
+        import httpx
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from src.services.target.egress import EgressPolicy
+        from src.services.target.egress import request as egress_request
+        from src.services.target.unit_of_work import TransactionDisciplineError
+
+        engine = create_async_engine(
+            async_database_url(settings.TEST_DB_NAME), pool_size=1, max_overflow=0
+        )
+        try:
+            transport = httpx.MockTransport(lambda r: httpx.Response(200, text="ok"))
+            async with httpx.AsyncClient(transport=transport) as client:
+                async with opener(engine):
+                    with pytest.raises(TransactionDisciplineError):
+                        await egress_request(
+                            client,
+                            "GET",
+                            "https://graph.instagram.com/v1/me",
+                            policy=EgressPolicy(),
+                            resolver=lambda h: ["93.184.216.34"],
+                        )
+                # Outside it the same call goes out, so the refusal above is
+                # the discipline and not a broken call.
+                resp = await egress_request(
+                    client,
+                    "GET",
+                    "https://graph.instagram.com/v1/me",
+                    policy=EgressPolicy(),
+                    resolver=lambda h: ["93.184.216.34"],
+                )
+                assert resp.status_code == 200
+                assert in_transaction() is False, "the flag is reset on the way out"
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_make_session_for_refuses_a_provider_call(self):
+        from src.services.target.unit_of_work import make_session_for
+
+        def opener(engine):
+            return make_session_for(engine)({"workspace_id": TENANT_A})
+
+        await self._refuses_inside(opener)
+
+    @pytest.mark.asyncio
+    async def test_the_poller_factory_refuses_a_provider_call(self):
+        from src.services.target.unit_of_work import poller_session_factory
+
+        def opener(engine):
+            return poller_session_factory(engine, TENANT_A)()
+
+        await self._refuses_inside(opener)
+
+    @pytest.mark.asyncio
+    async def test_the_tenantless_email_session_refuses_a_provider_call(self):
+        from src.services.target.email_sender import system_session
+
+        await self._refuses_inside(system_session)
+
+
+class TestConnectionRole:
+    """`connection_role` is the one place that asks a live connection who it is.
+
+    It exists because a login with `BYPASSRLS` makes every tenant policy inert
+    (#751), and the estate has to be able to SAY which login it runs as: the API
+    samples it at startup and the worker on its election connection. The login a
+    deployment runs as is verified by reading this back, so it has to be honest
+    and it has to be harmless.
+    """
+
+    async def test_it_reports_the_login_and_whether_it_bypasses_rls(self):
+        conn = _Conn(row=("svc_ingress", False))
+        assert await connection_role(conn) == {
+            "user": "svc_ingress",
+            "bypassrls": False,
+        }
+
+    async def test_it_asks_postgres_not_the_config(self):
+        """The answer has to come from the catalog: a role name copied from the
+        URL would report what was CONFIGURED, and the whole point is to detect
+        a deployment where the two disagree."""
+        conn = _Conn(row=("neondb_owner", True))
+        await connection_role(conn)
+        assert "current_user" in conn.statements[0]
+        assert "rolbypassrls" in conn.statements[0]
+        assert (
+            "current_user" in CONNECTION_ROLE_SQL
+            and "rolbypassrls" in CONNECTION_ROLE_SQL
+        )
+
+    async def test_a_failing_sample_is_none_never_an_exception(self):
+        """A diagnostic must not take its caller down: the API samples this at
+        startup and the worker on its election connection, and neither may die
+        because a catalog read failed."""
+        conn = _Conn(raises=RuntimeError("connection reset"))
+        assert await connection_role(conn) is None
+
+    async def test_an_empty_answer_is_none(self):
+        assert await connection_role(_Conn(row=None)) is None
+
+
+class TestTheIngressPoolSeam:
+    """The API's pool waits 1 s, the worker's 3 s, and a
+    caller may pick only one of the two seams."""
+
+    def test_the_two_seams_and_nothing_else(self):
+        from src.services.target import unit_of_work as uow
+
+        url = "postgresql+asyncpg://u:p@localhost:1/db"
+        api = uow.create_engine(url, pool_timeout=uow.INGRESS_POOL_TIMEOUT_SEAM)
+        worker = uow.create_engine(url)
+        try:
+            assert api.sync_engine.pool._timeout == 1.0
+            assert worker.sync_engine.pool._timeout == 3.0
+            assert uow.INGRESS_POOL_TIMEOUT_SEAM < uow.POOL_TIMEOUT_SEAM
+            with pytest.raises(ValueError, match="pool_timeout"):
+                uow.create_engine(url, pool_timeout=7.0)
+        finally:
+            api.sync_engine.dispose()
+            worker.sync_engine.dispose()
+
+    def test_the_pool_watch_reports_the_arithmetic_and_starts_at_zero(self):
+        from src.services.target import unit_of_work as uow
+
+        engine = uow.create_engine(
+            "postgresql+asyncpg://u:p@localhost:1/db",
+            pool_timeout=uow.INGRESS_POOL_TIMEOUT_SEAM,
+        )
+        try:
+            snap = uow.PoolWatch(engine).snapshot()
+            assert snap == {
+                "size": 10,
+                "overflow": 0,
+                "timeout_s": 1.0,
+                "checked_out": 0,
+                "checked_out_peak": 0,
+            }
+        finally:
+            engine.sync_engine.dispose()
+
+    def test_the_pool_watch_tolerates_a_composition_fake(self):
+        from src.services.target import unit_of_work as uow
+
+        snap = uow.PoolWatch(object()).snapshot()
+        assert snap["size"] == 10 and snap["checked_out_peak"] == 0
+
+
+class TestTheLockTimeoutRidesTheGucStatement:
+    """#1286: `apply_gucs(lock_timeout=)` folds `lock_timeout` into the ONE
+    `set_config` statement, transaction-local like the rest."""
+
+    @staticmethod
+    def _module():
+        from src.services.target import unit_of_work as uow_mod
+
+        return uow_mod
+
+    async def test_one_statement_carries_the_gucs_and_the_timeout(self):
+        seen = []
+
+        class _Ex:
+            async def execute(self, stmt, params=None):
+                seen.append((" ".join(str(stmt).split()), params))
+
+        await self._module().apply_gucs(
+            _Ex(),
+            tenant_id="ws-1",
+            actor_kind="user",
+            actor_user_id="u-1",
+            channel="telegram",
+            lock_timeout="2s",
+        )
+        assert len(seen) == 1
+        sql, params = seen[0]
+        assert "set_config('lock_timeout', :v4, true)" in sql
+        assert params["v4"] == "2s"
+        assert sql.count("set_config(") == 5
+
+    async def test_without_a_timeout_nothing_is_added(self):
+        seen = []
+
+        class _Ex:
+            async def execute(self, stmt, params=None):
+                seen.append(" ".join(str(stmt).split()))
+
+        await self._module().apply_gucs(_Ex(), tenant_id="ws-1", actor_kind="system")
+        assert "lock_timeout" not in seen[0]

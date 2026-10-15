@@ -1,0 +1,1343 @@
+"""The tap, on the real schema, as the production ingress role.
+
+A `callback_query` goes through `TelegramDispatcher._tap` on an ingress
+connection exactly as the route drives it: resolve the chat through the door,
+resolve the tapper, set the actor GUCs, run the command, commit. The triggers
+are real (`trg_intent_guard`, `trg_intent_audit`), the supersede rows are
+real, and every "which row" assertion has a second binding to be wrong about.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+import uuid
+
+import psycopg2
+import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+
+from src.services.target import commands  # noqa: F401 — the port first: the registry cycle
+from src.services.target.telegram_dispatch import TapResult, TelegramDispatcher
+from src.services.target.unit_of_work import asyncpg_url
+from tests.scripts.conftest import (
+    _scratch,
+    as_user,
+    fetch_one,
+    replay_advertised_stream,
+    seed_workspace_chain,
+)
+
+TAPPER_TG_ID = "7007"
+STRANGER_TG_ID = "9009"
+CHAT_A = "-1001"
+CHAT_B = "-1002"
+
+# The account's own day: where the ledger stamps `cap_consumed_on` and debits
+# `daily_post_counts` (the world's workspace keeps the schema's default, UTC).
+# Not the session's `current_date`, which is another date for part of every
+# day on a server outside UTC.
+ACCOUNT_DAY = "(now() AT TIME ZONE 'UTC')::date"
+
+
+@pytest.fixture(scope="module")
+def world(admin_conn, owner_actor):
+    """Replayed schema; one workspace (API publishing on) with its owner LINKED
+    to Telegram id 7007 as "Ada", and TWO bound groups."""
+    gen = _scratch(admin_conn, owner=owner_actor, roles=[])
+    db = next(gen)
+    try:
+        stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        conn = psycopg2.connect(stream)
+        try:
+            chain = seed_workspace_chain(conn, "w4-tap")
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'migration'")
+                cur.execute(
+                    "UPDATE workspaces SET api_publishing_enabled = true WHERE id = %s",
+                    (chain["ws"],),
+                )
+                # `approve` refuses a `post` tap without a usable Instagram
+                # token (#1276): the API workspace here is connected.
+                cur.execute(
+                    "INSERT INTO oauth_credentials (workspace_id, ig_account_id,"
+                    " provider, encrypted_payload, state)"
+                    " VALUES (%s, %s, 'ig_login', 'ciphertext', 'active')",
+                    (chain["ws"], chain["iga"]),
+                )
+                cur.execute(
+                    "INSERT INTO user_identities"
+                    " (user_id, provider, external_id, display_name, verified_at)"
+                    " VALUES (%s, 'telegram', %s, 'Ada', now())",
+                    (chain["user"], TAPPER_TG_ID),
+                )
+                bindings = {}
+                for name, chat in (("a", CHAT_A), ("b", CHAT_B)):
+                    cur.execute(
+                        "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+                        " VALUES (%s, 'telegram_group', %s) RETURNING id",
+                        (chain["ws"], chat),
+                    )
+                    bindings[name] = str(cur.fetchone()[0])
+        finally:
+            conn.close()
+        yield {
+            "stream": stream,
+            "ingress": as_user(db, "svc_ingress"),
+            "worker": as_user(db, "svc_worker"),
+            "ws": str(chain["ws"]),
+            "user": str(chain["user"]),
+            "iga": str(chain["iga"]),
+            "src": str(chain["src"]),
+            "bindings": bindings,
+        }
+    finally:
+        gen.close()
+
+
+# --- fixture data, as the migration actor -------------------------------------
+
+
+def _write(world, sql, params=(), fetch=False):
+    conn = psycopg2.connect(world["stream"])
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(sql, params)
+            return cur.fetchall() if fetch else None
+    finally:
+        conn.close()
+
+
+def _one(world, sql, params=()):
+    return fetch_one(world["stream"], sql, params)
+
+
+def _intent(world, tag: str, *, state="awaiting_approval", origin="cadence") -> dict:
+    """An intent on the chain's account, on its own media item, with a SENT
+    card in both groups (refs 1xxx in A, 2xxx in B). A planned story (088) is
+    born planned: its origin cannot change afterwards."""
+    ((media,),) = _write(
+        world,
+        "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name,"
+        " media_kind, provider_file_ref)"
+        " VALUES (%s, %s, %s, 'f.jpg', 'image', %s) RETURNING id",
+        (world["ws"], world["src"], f"hash-{tag}", f"ref-{tag}"),
+        fetch=True,
+    )
+    # A `posted` row must be complete (`ck_posted_complete`): as the manual
+    # path leaves it — published by hand, the day's cap consumed.
+    posted_cols = ", published_via, cap_consumed_on" if state == "posted" else ""
+    posted_vals = f", 'manual', {ACCOUNT_DAY}" if state == "posted" else ""
+    ((intent,),) = _write(
+        world,
+        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, state, origin"
+        f"{posted_cols})"
+        f" VALUES (%s, %s, %s, 'acct-w4-tap', 'manual', now(), %s, %s{posted_vals})"
+        " RETURNING id",
+        (world["ws"], world["iga"], media, state, origin),
+        fetch=True,
+    )
+    cards = {}
+    for n, (name, binding) in enumerate(sorted(world["bindings"].items()), start=1):
+        ref = f"{n}{uuid.uuid4().int % 10_000:04d}"
+        _write(
+            world,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            " VALUES (%s, %s, 'approval_prompt', %s, %s, 'sent', %s)",
+            (
+                world["ws"],
+                binding,
+                intent,
+                json.dumps(
+                    {"v": 2, "text": f"📸 f.jpg ({tag})\nSlot: soon", "sent_as": "text"}
+                ),
+                ref,
+            ),
+        )
+        cards[name] = ref
+    return {"id": str(intent), "media": str(media), "cards": cards}
+
+
+def _tap_payload(
+    action: str,
+    intent_id: str,
+    *,
+    chat=CHAT_A,
+    message_id=555,
+    tg_user=TAPPER_TG_ID,
+    update_id=None,
+):
+    return {
+        "update_id": update_id or int(uuid.uuid4().int % 1_000_000_000),
+        "callback_query": {
+            "id": f"q-{uuid.uuid4().hex[:8]}",
+            "from": {"id": int(tg_user), "first_name": "Ada"},
+            "message": {
+                "message_id": message_id,
+                "chat": {"id": int(chat), "type": "supergroup"},
+            },
+            "data": f"v1:{action}:{intent_id}",
+        },
+    }
+
+
+# --- the tap, as the production ingress role ---------------------------------
+
+
+async def _tap(world, payload) -> TapResult:
+    """Exactly the route's shape: one ingress connection, dispatch, commit."""
+    engine = create_async_engine(asyncpg_url(world["ingress"]), poolclass=NullPool)
+    try:
+        async with engine.connect() as conn:
+            result = await TelegramDispatcher()(conn, payload)
+            await conn.commit()
+        return result
+    finally:
+        await engine.dispose()
+
+
+def tap(world, action, intent_id, **kw) -> TapResult:
+    return asyncio.run(_tap(world, _tap_payload(action, intent_id, **kw)))
+
+
+def _state(world, intent_id):
+    return _one(world, "SELECT state FROM post_intents WHERE id = %s", (intent_id,))[0]
+
+
+def _audit(world, intent_id):
+    return _write(
+        world,
+        "SELECT to_state, actor_kind, actor_user_id::text, channel FROM audit_events"
+        " WHERE entity_kind = 'post_intent' AND entity_id = %s ORDER BY id",
+        (intent_id,),
+        fetch=True,
+    )
+
+
+def _supersedes(world, intent_id):
+    rows = _write(
+        world,
+        "SELECT binding_id::text, payload FROM channel_outbox"
+        " WHERE intent_id = %s AND kind = 'prompt_supersede' ORDER BY created_at",
+        (intent_id,),
+        fetch=True,
+    )
+    return [(b, p if isinstance(p, dict) else json.loads(p)) for b, p in rows]
+
+
+def _lost_answer(world, intent_id):
+    """The evidence a twin leaves: the card's row shows two send attempts —
+    the first lost its answer, the second is the ref the ledger knows."""
+    _write(
+        world,
+        "UPDATE channel_outbox SET attempts = 2"
+        " WHERE intent_id = %s AND kind = 'approval_prompt'",
+        (intent_id,),
+    )
+
+
+def _card_states(world, intent_id):
+    return dict(
+        _write(
+            world,
+            "SELECT external_message_ref, state FROM channel_outbox"
+            " WHERE intent_id = %s AND kind = 'approval_prompt'",
+            (intent_id,),
+            fetch=True,
+        )
+    )
+
+
+class TestATapFlipsOnceAndEditsEveryCard:
+    def test_a_planned_story_is_approved_by_the_tapper_like_any_other(self, world):
+        """088 lets only a person approve a planned story. A tap is a person:
+        the dispatcher stamps the tapper as `user` with their linked id, so
+        the trigger admits it, and the audit row says who."""
+        i = _intent(world, "post-planned", origin="planned")
+        assert _one(
+            world, "SELECT origin FROM post_intents WHERE id = %s", (i["id"],)
+        ) == ("planned",), "positive control: the story really is planned"
+        r = tap(world, "post", i["id"])
+        assert r.outcome == "executed" and r.handled is True
+        assert _state(world, i["id"]) == "approved"
+        (row,) = _audit(world, i["id"])
+        assert row == ("approved", "user", world["user"], "telegram")
+
+    def test_post_approves_as_the_tapper_enqueues_the_publish_and_supersedes_both_groups(
+        self, world
+    ):
+        i = _intent(world, "post-1")
+        r = tap(world, "post", i["id"])
+        assert r.outcome == "executed" and r.handled is True
+        assert "Approved" in r.answer_text
+        assert _state(world, i["id"]) == "approved"
+        (row,) = _audit(world, i["id"])
+        assert row == ("approved", "user", world["user"], "telegram")
+        assert _one(
+            world,
+            "SELECT count(*) FROM jobs WHERE kind = 'publish_pipeline'"
+            " AND serialization_key = 'ig:acct-w4-tap' AND payload->>'intent_id' = %s",
+            (i["id"],),
+        ) == (1,)
+        # Both groups' cards are superseded, each with the outcome line and
+        # its own header, keyed to the ref the card was sent under.
+        assert set(_card_states(world, i["id"]).values()) == {"superseded"}
+        supersedes = _supersedes(world, i["id"])
+        assert {b for b, _ in supersedes} == set(world["bindings"].values())
+        for _, payload in supersedes:
+            assert payload["supersedes_ref"] in i["cards"].values()
+            assert "✅ Approved by Ada" in payload["outcome_text"]
+            assert payload["header"].startswith("📸 f.jpg")
+            assert payload["sent_as"] == "text"
+
+    def test_skip_writes_the_lock_keyed_to_the_tapper(self, world):
+        i = _intent(world, "skip-1")
+        r = tap(world, "skip", i["id"])
+        assert r.outcome == "executed" and "Skipped" in r.answer_text
+        assert _state(world, i["id"]) == "skipped"
+        assert _one(
+            world,
+            "SELECT created_by_user_id::text FROM post_locks"
+            " WHERE workspace_id = %s AND media_item_id = %s AND kind = 'skip'",
+            (world["ws"], i["media"]),
+        ) == (world["user"],)
+
+
+class TestARepeatOrLateTapAnswers:
+    def test_a_second_tap_on_a_decided_card_answers_and_writes_nothing(self, world):
+        i = _intent(world, "twice-1")
+        first = tap(world, "reject", i["id"])
+        assert first.outcome == "executed"
+        audits_before = _audit(world, i["id"])
+        second = tap(world, "post", i["id"])
+        assert second.outcome == "answered"
+        assert "Already" in second.answer_text and "Rejected" in second.answer_text
+        assert "Ada" in second.answer_text
+        assert _state(world, i["id"]) == "rejected"
+        assert _audit(world, i["id"]) == audits_before
+
+    def test_a_tap_on_a_posted_card_answers_and_heals_the_card(self, world):
+        i = _intent(world, "posted-1", state="posted")
+        # From the card the ledger knows: an id it does not know is a twin,
+        # adopted and edited — the tests below.
+        r = tap(world, "skip", i["id"], message_id=int(i["cards"]["a"]))
+        assert r.outcome == "answered" and "Posted" in r.answer_text
+        assert _state(world, i["id"]) == "posted"
+        assert _audit(world, i["id"]) == []
+        # The stale card (a lost supersede) heals on first touch: both copies.
+        assert set(_card_states(world, i["id"]).values()) == {"superseded"}
+        assert len(_supersedes(world, i["id"])) == 2
+
+    def test_a_tap_from_a_twin_card_the_ledger_never_learned_heals_that_message(
+        self, world
+    ):
+        """A card whose first send lost its answer is resent by policy — two
+        messages in the chat, one ref in the ledger — and the twin keeps live
+        buttons through Approved and Posted, because no edit can name it. The
+        tap is the moment the ledger learns its id: the message is ADOPTED as
+        a card of the intent (superseded, with the twin's own content) and
+        edited at once with the story's line — and, adopted, every later line
+        by ref reaches it too."""
+        i = _intent(world, "twin-1", state="posted")
+        _lost_answer(world, i["id"])
+        known_a = i["cards"]["a"]
+        r = tap(world, "skip", i["id"], message_id=4242)
+        assert r.outcome == "answered" and "Posted" in r.answer_text
+        sups = _supersedes(world, i["id"])
+        for_twin = [p for _, p in sups if p.get("supersedes_ref") == "4242"]
+        assert len(for_twin) == 1, sups
+        assert for_twin[0]["outcome_text"].startswith("✅ Posted")
+        assert for_twin[0]["sent_as"] == "text", (
+            "the twin is edited as its card was sent"
+        )
+        assert for_twin[0]["header"].startswith("📸 f.jpg"), (
+            "the card's own header rides the edit"
+        )
+        assert "reply_markup" not in for_twin[0], "a posted story leaves no buttons"
+        cards = _card_states(world, i["id"])
+        assert cards["4242"] == "superseded", "adopted as a card the ledger knows"
+        assert cards[known_a] == "superseded"
+        # Known now: a second tap from the twin queues nothing new — for it
+        # or for anyone (the known cards are superseded already).
+        again = tap(world, "post", i["id"], message_id=4242)
+        assert again.outcome == "answered"
+        assert len(_supersedes(world, i["id"])) == 3, (
+            "two known cards and the twin, once"
+        )
+        # Nor does a tap from the ORIGINAL card, now that the twin sits beside
+        # it in the ledger: every known ref is checked, not the newest row.
+        original = tap(world, "post", i["id"], message_id=int(known_a))
+        assert original.outcome == "answered"
+        assert len(_supersedes(world, i["id"])) == 3
+        assert len(_card_states(world, i["id"])) == 3
+
+    def test_a_twin_adopted_while_the_story_waits_gets_every_later_line(self, world):
+        """The adoption is what makes the twin reachable: a twin tapped while
+        the story is still approved is edited with the Approved line now, and
+        the pipeline's later restate-by-ref (the Posted line) reaches it."""
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        from src.services.target import outbox
+        from src.services.target.unit_of_work import apply_gucs
+
+        i = _intent(world, "twin-2", state="approved")
+        _lost_answer(world, i["id"])
+        r = tap(world, "post", i["id"], message_id=4343)
+        assert r.outcome == "answered" and "Approved" in r.answer_text
+        first = [
+            p
+            for _, p in _supersedes(world, i["id"])
+            if p.get("supersedes_ref") == "4343"
+        ]
+        assert len(first) == 1 and first[0]["outcome_text"].startswith("✅ Approved")
+        assert "reply_markup" not in first[0], (
+            "only a parked story's twin keeps buttons"
+        )
+        assert _card_states(world, i["id"])["4343"] == "superseded"
+
+        async def posted_line():
+            engine = create_async_engine(
+                asyncpg_url(world["ingress"]), poolclass=NullPool
+            )
+            try:
+                async with engine.connect() as conn:
+                    async with conn.begin():
+                        await apply_gucs(
+                            conn, tenant_id=world["ws"], actor_kind="system"
+                        )
+                        return await outbox.restate_cards(
+                            conn,
+                            workspace_id=world["ws"],
+                            binding_id=world["bindings"]["a"],
+                            intent_id=i["id"],
+                            outcome_text="✅ Posted · later",
+                        )
+            finally:
+                await engine.dispose()
+
+        assert asyncio.run(posted_line()) == 2, "the known card and the adopted twin"
+        posted = [
+            p
+            for _, p in _supersedes(world, i["id"])
+            if p.get("supersedes_ref") == "4343"
+            and p.get("outcome_text") == "✅ Posted · later"
+        ]
+        assert len(posted) == 1
+
+    def test_a_twin_adopted_during_review_keeps_the_review_buttons(self, world):
+        """A twin of a parked story's card is edited to "👀 Needs review" WITH
+        the three resolutions, as the known card was — a twin with dead
+        approval buttons and no review buttons would be a story nobody can
+        resolve from that message."""
+        i = _intent(world, "twin-3", state="review_required")
+        _lost_answer(world, i["id"])
+        r = tap(world, "post", i["id"], message_id=4444)
+        assert r.outcome == "answered" and "Needs review" in r.answer_text
+        sup = [
+            p
+            for _, p in _supersedes(world, i["id"])
+            if p.get("supersedes_ref") == "4444"
+        ]
+        assert len(sup) == 1
+        # The adopted twin's edit stores no keyboard: the sender renders the
+        # review buttons when it claims it, from the story's state (#1477),
+        # so the twin gets them as the known card does.
+        assert "reply_markup" not in sup[0], sup[0]
+
+    def test_a_deciding_tap_from_a_twin_edits_the_twin_too(self, world):
+        """#1308: the tap that FLIPS the story is as likely to come from the
+        twin as from the known card (they sit side by side). The flip's
+        outcome edits every known card; the twin is adopted and edited in the
+        same transaction, not on a second tap."""
+        i = _intent(world, "twin-4")
+        _lost_answer(world, i["id"])
+        r = tap(world, "skip", i["id"], message_id=4545)
+        assert r.outcome == "executed"
+        assert _state(world, i["id"]) == "skipped"
+        sups = _supersedes(world, i["id"])
+        assert len(sups) == 3, sups
+        twin = [p for _, p in sups if p.get("supersedes_ref") == "4545"]
+        assert len(twin) == 1 and twin[0]["outcome_text"].startswith("⏭️ Skipped")
+        assert "reply_markup" not in twin[0]
+        assert _card_states(world, i["id"])["4545"] == "superseded"
+
+    def test_a_resolution_tap_from_a_twin_edits_the_twin_too(self, world):
+        """The review card's resolutions restate by ref; a twin of the review
+        card tapped for a resolution is adopted and gets the resolution's line."""
+        i = _intent(world, "twin-5", state="review_required")
+        _lost_answer(world, i["id"])
+        r = tap(world, "giveup", i["id"], message_id=4646)
+        assert r.outcome == "executed", r.answer_text
+        assert _state(world, i["id"]) == "cancelled"
+        twin = [
+            p
+            for _, p in _supersedes(world, i["id"])
+            if p.get("supersedes_ref") == "4646"
+        ]
+        assert len(twin) == 1 and twin[0]["outcome_text"].startswith("🚫 Cancelled")
+        assert _card_states(world, i["id"])["4646"] == "superseded"
+
+    def test_a_tap_naming_another_stories_message_adopts_nothing(self, world):
+        """#1308: Telegram does not bind a callback's intent token to its
+        message id — a modified client can send story X's token with story
+        Y's message. A message the ledger already owns (any row on the
+        binding: a card, an invitation, a notice) is never adopted by
+        another story, so Y's card keeps its buttons."""
+        x = _intent(world, "twin-x", state="posted")
+        _lost_answer(world, x["id"])
+        y = _intent(world, "twin-y")
+        r = tap(world, "skip", x["id"], message_id=int(y["cards"]["a"]))
+        assert r.outcome == "answered"
+        assert y["cards"]["a"] not in _card_states(world, x["id"]), "not adopted by X"
+        assert _card_states(world, y["id"])[y["cards"]["a"]] == "sent", "Y untouched"
+        assert not any(
+            p.get("supersedes_ref") == y["cards"]["a"]
+            for _, p in _supersedes(world, x["id"])
+        )
+        assert _state(world, y["id"]) == "awaiting_approval"
+
+    def test_a_twin_is_adopted_only_where_the_story_has_a_card(self, world):
+        """A twin exists only in a chat where the story's card was sent: a
+        tap from a binding with no card of the story adopts nothing."""
+        x = _intent(world, "twin-z", state="posted")
+        _lost_answer(world, x["id"])
+        _write(
+            world,
+            "DELETE FROM channel_outbox WHERE intent_id = %s AND binding_id = %s",
+            (x["id"], world["bindings"]["b"]),
+        )
+        r = tap(world, "skip", x["id"], chat=CHAT_B, message_id=4747)
+        assert r.outcome == "answered"
+        assert "4747" not in _card_states(world, x["id"])
+        assert not any(
+            p.get("supersedes_ref") == "4747" for _, p in _supersedes(world, x["id"])
+        )
+
+    def test_a_twins_id_may_equal_another_bindings_ref(self, world):
+        """Message ids are per chat: a twin in group A whose id happens to
+        equal B's known ref is still A's twin — the ownership check is per
+        binding."""
+        x = _intent(world, "twin-ab", state="posted")
+        _lost_answer(world, x["id"])
+        clash = int(x["cards"]["b"])
+        r = tap(world, "skip", x["id"], chat=CHAT_A, message_id=clash)
+        assert r.outcome == "answered"
+        adopted = _write(
+            world,
+            "SELECT state FROM channel_outbox WHERE intent_id = %s AND binding_id = %s"
+            " AND kind = 'approval_prompt' AND external_message_ref = %s",
+            (x["id"], world["bindings"]["a"], str(clash)),
+            fetch=True,
+        )
+        assert adopted == [("superseded",)], adopted
+
+    def test_a_card_sent_once_has_no_twin_to_adopt(self, world):
+        """#1308: a twin exists only per lost answer. A card whose row shows
+        ONE send cannot have a twin, so a tap from an unknown message id — a
+        forged callback, a forwarded copy — adopts nothing and edits
+        nothing."""
+        i = _intent(world, "once-1", state="posted")
+        _write(
+            world,
+            "UPDATE channel_outbox SET attempts = 1"
+            " WHERE intent_id = %s AND kind = 'approval_prompt'",
+            (i["id"],),
+        )
+        r = tap(world, "skip", i["id"], message_id=4848)
+        assert r.outcome == "answered"
+        assert "4848" not in _card_states(world, i["id"])
+        assert len(_supersedes(world, i["id"])) == 2, "the two known cards only"
+
+    def test_a_tap_from_a_known_card_adopts_nothing(self, world):
+        """The ordinary repeat tap — from the card the ledger already knows —
+        writes exactly what it wrote before: no adoption row, no extra edit."""
+        i = _intent(world, "known-1", state="posted")
+        # Evidence of a twin, so neither the no-card nor the evidence guard is
+        # what protects here: the known card is live, so the deciding edit's
+        # own flag says it was among the cards edited.
+        _lost_answer(world, i["id"])
+        known_a = int(i["cards"]["a"])
+        r = tap(world, "skip", i["id"], message_id=known_a)
+        assert r.outcome == "answered"
+        assert set(_card_states(world, i["id"])) == set(i["cards"].values())
+        assert len(_supersedes(world, i["id"])) == 2, (
+            "one edit per known card, nothing more"
+        )
+
+    def test_an_approval_tap_on_a_review_card_answers_the_review_has_its_own_buttons(
+        self, world
+    ):
+        """A stale approval card's `post` on a parked intent answers with
+        the state; the review card's own buttons (`retry`/`itposted`/`giveup`)
+        are the levers."""
+        i = _intent(world, "review-1", state="review_required")
+        r = tap(world, "post", i["id"])
+        assert r.outcome == "answered" and "Needs review" in r.answer_text
+        assert _state(world, i["id"]) == "review_required"
+        assert _audit(world, i["id"]) == []
+
+
+class TestTwoTapsRacingOnOneCard:
+    @pytest.mark.asyncio
+    async def test_exactly_one_flip_the_other_answers_and_the_race_was_genuine(
+        self, world
+    ):
+        """Two connections, two taps, one row lock. The loser blocks on
+        `FOR UPDATE` until the winner commits, then reads the committed state
+        and answers — never an error. Concurrency is PROVED by the timeline,
+        not assumed: both taps start before either finishes."""
+        i = _intent(world, "race-1")
+        timeline = {}
+
+        async def run(tag, action):
+            timeline[f"{tag}_start"] = time.monotonic()
+            r = await _tap(world, _tap_payload(action, i["id"], update_id=len(tag)))
+            timeline[f"{tag}_end"] = time.monotonic()
+            return r
+
+        a, b = await asyncio.gather(run("alpha", "skip"), run("beta", "reject"))
+        outcomes = sorted([a.outcome, b.outcome])
+        assert outcomes == ["answered", "executed"], (a, b)
+        assert max(timeline["alpha_start"], timeline["beta_start"]) < min(
+            timeline["alpha_end"], timeline["beta_end"]
+        ), "both taps must be in flight at once for this to prove anything"
+        flips = [
+            row for row in _audit(world, i["id"]) if row[0] in ("skipped", "rejected")
+        ]
+        assert len(flips) == 1
+        assert _state(world, i["id"]) in ("skipped", "rejected")
+
+
+class TestManyCardsAtOnce:
+    @pytest.mark.asyncio
+    async def test_twenty_taps_on_twenty_cards_all_land(self, world):
+        intents = [_intent(world, f"many-{n}") for n in range(20)]
+        results = await asyncio.gather(
+            *[
+                _tap(world, _tap_payload("skip", i["id"], update_id=10_000 + n))
+                for n, i in enumerate(intents)
+            ]
+        )
+        assert [r.outcome for r in results] == ["executed"] * 20
+        states = [_state(world, i["id"]) for i in intents]
+        assert states == ["skipped"] * 20
+
+
+class TestWhoMayTap:
+    def test_an_unlinked_tapper_flips_nothing_and_leaves_no_audit_row(self, world):
+        i = _intent(world, "stranger-1")
+        r = tap(world, "post", i["id"], tg_user=STRANGER_TG_ID)
+        assert r.outcome == "unlinked" and r.show_alert is True
+        assert "Settings" in r.answer_text
+        assert _state(world, i["id"]) == "awaiting_approval"
+        assert _audit(world, i["id"]) == []
+
+    def test_an_unbound_chat_is_answered_not_connected(self, world):
+        i = _intent(world, "nochat-1")
+        r = tap(world, "post", i["id"], chat="-1999")
+        assert r.outcome == "unknown_binding" and r.show_alert is True
+        assert _state(world, i["id"]) == "awaiting_approval"
+
+    def test_a_card_of_another_workspace_is_not_found(self, world):
+        r = tap(world, "post", str(uuid.uuid4()))
+        assert r.outcome == "not_found"
+
+
+class TestATapNeverWaitsOnASend:
+    def test_a_tap_supersedes_a_card_in_flight_and_commits_at_once(self, world):
+        """The sender commits its claim BEFORE the provider call, so
+        `sending` is a committed, unlocked state the flip meets: the supersede
+        takes it, the tap commits, nothing waits on an upload."""
+        i = _intent(world, "inflight-1")
+        ref_a = i["cards"]["a"]
+        _write(
+            world,
+            "UPDATE channel_outbox SET state = 'sending'"
+            " WHERE intent_id = %s AND external_message_ref = %s",
+            (i["id"], ref_a),
+        )
+        started = time.monotonic()
+        r = tap(world, "skip", i["id"])
+        elapsed = time.monotonic() - started
+        assert r.outcome == "executed"
+        assert _card_states(world, i["id"]) == {
+            ref: "superseded" for ref in i["cards"].values()
+        }
+        assert elapsed < 5.0, f"the tap waited {elapsed:.1f}s — on what?"
+
+
+def _sweep_settled(world) -> int:
+    """`prompts.sweep_settled_cards` the way the reaper runs it: as the
+    worker's login, in its own session with the EMPTY tenant and the `system`
+    actor. The selection is a door the worker reads through (082); each row
+    is healed under its own workspace, and the caller's scope handed back."""
+    from src.services.target import prompts, unit_of_work
+
+    async def go() -> int:
+        engine = create_async_engine(asyncpg_url(world["worker"]), poolclass=NullPool)
+        try:
+            async with engine.begin() as conn:
+                await unit_of_work.apply_gucs(conn, tenant_id="", actor_kind="system")
+                return await prompts.sweep_settled_cards(conn, limit=50)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(go())
+
+
+class TestCardsEndInEveryTerminalState:
+    def test_the_settled_card_sweep_retires_cards_of_intents_anyone_ended(self, world):
+        """Whoever ended the intent — the reaper's expiry here, the pipeline's
+        `posted`, a cancellation — its live cards lose their buttons and gain
+        the terminal line on the sweep's beat."""
+        i = _intent(world, "expired-1", state="awaiting_approval")
+        _write(
+            world,
+            "UPDATE post_intents SET state = 'expired' WHERE id = %s",
+            (i["id"],),
+        )
+        assert set(_card_states(world, i["id"]).values()) == {"sent"}
+        assert _sweep_settled(world) >= 1
+        assert set(_card_states(world, i["id"]).values()) == {"superseded"}
+        lines = [p["outcome_text"] for _, p in _supersedes(world, i["id"])]
+        assert len(lines) == 2 and all(
+            "⌛ Expired — slot passed" in line for line in lines
+        )
+
+    def test_a_revoked_bindings_cards_do_not_starve_the_sweep(self, world):
+        """A revoked group's cards cannot be edited and are not selected; the
+        second beat finds nothing left to heal (#1271)."""
+        i = _intent(world, "revoked-1", state="awaiting_approval")
+        ((revoked,),) = _write(
+            world,
+            "INSERT INTO channel_bindings (workspace_id, channel, external_ref, state)"
+            " VALUES (%s, 'telegram_group', '-1003', 'revoked') RETURNING id",
+            (world["ws"],),
+            fetch=True,
+        )
+        _write(
+            world,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            ' VALUES (%s, %s, \'approval_prompt\', %s, \'{"v": 2, "text": "old"}\','
+            " 'sent', '30001')",
+            (world["ws"], revoked, i["id"]),
+        )
+        _write(
+            world, "UPDATE post_intents SET state = 'expired' WHERE id = %s", (i["id"],)
+        )
+        first = _sweep_settled(world)
+        assert first >= 2  # the two active groups' cards of this intent
+        states = _card_states(world, i["id"])
+        assert states["30001"] == "sent", "the revoked group's card is left alone"
+        assert all(v == "superseded" for r, v in states.items() if r != "30001")
+        assert _sweep_settled(world) == 0, "nothing left to heal — no starvation"
+
+
+class TestTapAdmissionOnTheLedger:
+    """Admission for taps (120/min/workspace): the window is
+    read before the flip and debited only for a flip that ran — on the real
+    `rate_counters` row, with the real window truncation."""
+
+    def _window(self):
+        from datetime import datetime, timezone
+
+        from src.services.target import rate_counters
+
+        # The dispatcher truncates its own clock to the minute; a test that
+        # straddles the boundary would read one window and debit the next.
+        # Wait it out once rather than pin a clock seam: within ten seconds of
+        # the boundary, sleep past it, so a test's taps all land in the window
+        # its reads pin (`_pinned`).
+        import time as _time
+
+        left = 60 - _time.time() % 60
+        if left < 10:
+            _time.sleep(left + 0.5)
+        return rate_counters.window_start(datetime.now(timezone.utc), 60)
+
+    def _pinned(self):
+        """One window per test, read by every count: recomputed per read, a tap
+        that ended near the rollover sent the next read into the next window."""
+        if not hasattr(self, "_pinned_window"):
+            self._pinned_window = self._window()
+        return self._pinned_window
+
+    def _count(self, world, window=None):
+        row = _one(
+            world,
+            "SELECT count FROM rate_counters WHERE scope = 'ws_admission'"
+            " AND key = %s AND window_start = %s",
+            (world["ws"], window or self._pinned()),
+        )
+        return None if row is None else row[0]
+
+    def test_an_executed_tap_debits_the_workspace_and_a_repeat_does_not(self, world):
+        i = _intent(world, "adm-1")
+        before = self._count(world) or 0
+        assert tap(world, "skip", i["id"]).outcome == "executed"
+        assert self._count(world) == before + 1, "one flip, one unit"
+        assert tap(world, "skip", i["id"]).outcome == "answered"
+        assert self._count(world) == before + 1, "an answered repeat spends nothing"
+
+    def test_an_adopting_tap_spends_one_unit_and_a_plain_repeat_none(self, world):
+        """An answered tap that adopted a twin wrote a row and a paced edit:
+        it spends one unit of admission on the ledger; the next tap from the
+        same, now-known, message spends nothing (#1308)."""
+        i = _intent(world, "adm-adopt", state="posted")
+        _lost_answer(world, i["id"])
+        before = self._count(world) or 0
+        assert tap(world, "skip", i["id"], message_id=4949).outcome == "answered"
+        assert self._count(world) == before + 1, "the adoption spent one"
+        assert tap(world, "skip", i["id"], message_id=4949).outcome == "answered"
+        assert self._count(world) == before + 1, "a known card's repeat spends nothing"
+
+    def test_at_the_limit_the_tap_is_told_and_the_card_keeps_its_state(self, world):
+        from src.config.settings import settings
+
+        i = _intent(world, "adm-2")
+        limit = int(settings.TARGET_TAP_ADMISSION_PER_MINUTE)
+        # The window the counter is seeded in, read back by name: a tap refused
+        # in it can return after the minute turns, and recomputing the window
+        # then reads the next one, which holds no row.
+        window = self._window()
+        _write(
+            world,
+            "INSERT INTO rate_counters (scope, key, window_start, count)"
+            " VALUES ('ws_admission', %s, %s, %s)"
+            " ON CONFLICT (scope, key, window_start) DO UPDATE SET count = EXCLUDED.count",
+            (world["ws"], window, limit),
+        )
+        try:
+            r = tap(world, "skip", i["id"])
+            # The flip RAN and rolled back with the savepoint on real Postgres:
+            # the row keeps its state, the counter its count, and the delivery
+            # is consumed (the update_id is admitted) so a redelivery is a toast.
+            assert r.outcome == "too_many" and r.show_alert is True
+            assert _state(world, i["id"]) == "awaiting_approval", "nothing flipped"
+            assert self._count(world, window) == limit, "a refused tap spends nothing"
+            assert (
+                _one(
+                    world,
+                    "SELECT count(*) FROM channel_outbox WHERE intent_id = %s"
+                    " AND kind = 'prompt_supersede'",
+                    (i["id"],),
+                )[0]
+                == 0
+            ), "the flip's supersede rows rolled back too"
+        finally:
+            _write(
+                world,
+                "DELETE FROM rate_counters WHERE scope = 'ws_admission' AND key = %s",
+                (world["ws"],),
+            )
+
+
+class TestTheConfigureMenuOnTheLedger:
+    """#1477, as the production ingress role through the real
+    dispatcher: Configure, Back and the item's Auto-approve flag. Every menu
+    tap passes the flag's gate and spends one unit of admission on the real
+    `rate_counters` row; the toggle writes the flag and names the person;
+    its answer reads the serve step's facts under `svc_ingress`; a card that
+    cannot post again heals; an item removed behind the menu's back is
+    refused `locked`, its delivery committing with nothing written; and a
+    toggle refused at the limit keeps the flag, its write undone with the
+    tap's savepoint."""
+
+    ADMISSION = TestTapAdmissionOnTheLedger()
+
+    def _flag(self, world, media):
+        return _one(
+            world, "SELECT auto_approve FROM media_items WHERE id = %s", (media,)
+        )[0]
+
+    def _audits(self, world, media):
+        return _write(
+            world,
+            "SELECT actor_kind, actor_user_id::text, channel, detail FROM audit_events"
+            " WHERE entity_kind = 'media_item' AND entity_id = %s ORDER BY id",
+            (media,),
+            fetch=True,
+        )
+
+    def _spent(self, world):
+        # `ADMISSION` is shared by the class's tests, so the window is pinned on
+        # this test's own instance.
+        if not hasattr(self, "_pinned_window"):
+            self._pinned_window = self.ADMISSION._window()
+        return self.ADMISSION._count(world, self._pinned_window) or 0
+
+    def test_open_toggle_and_go_back(self, world):
+        from src.services.target import prompts
+
+        i = _intent(world, f"menu-{uuid.uuid4().hex[:6]}")
+        before = self._spent(world)
+
+        r = tap(world, "cfg", i["id"])
+        assert r.outcome == "menu" and r.answer_text == ""
+        assert r.edit_markup["inline_keyboard"][0][0]["callback_data"] == (
+            f"v1:aa1:{i['id']}"
+        )
+        assert self._spent(world) == before + 1, "navigation spends admission"
+
+        r = tap(world, "aa1", i["id"])
+        assert r.outcome == "executed"
+        assert r.answer_text == (
+            "🔁 Auto-approve on: next time this item is served, it posts without a tap"
+        )
+        assert self._flag(world, i["media"]) is True
+        ((kind, actor, channel, detail),) = self._audits(world, i["media"])
+        assert (kind, actor, channel) == ("user", world["user"], "telegram")
+        assert detail == {"v": 1, "event": "auto_approve", "on": True}
+        assert self._spent(world) == before + 2
+
+        r = tap(world, "back", i["id"])
+        assert r.edit_markup == prompts.card_keyboard(
+            i["id"], state="awaiting_approval", api_publishing_enabled=True
+        )
+
+        r = tap(world, "aa0", i["id"])
+        assert r.answer_text == "Auto-approve off"
+        assert self._flag(world, i["media"]) is False
+
+    def test_configure_reads_the_flag_the_toggle_wrote(self, world):
+        """The menu shows the flag as the ledger holds it (`_CARD_FACTS`): once
+        the toggle has turned an item's flag on, Configure opens with the
+        toggle on, and its tap turns the flag off."""
+        i = _intent(world, f"menu-on-{uuid.uuid4().hex[:6]}")
+        assert tap(world, "aa1", i["id"]).outcome == "executed"
+        assert self._flag(world, i["media"]) is True
+
+        r = tap(world, "cfg", i["id"])
+        assert r.outcome == "menu" and r.answer_text == ""
+        (toggle,) = r.edit_markup["inline_keyboard"][0]
+        assert toggle["text"] == "🔁 Auto-approve this item: on"
+        assert toggle["callback_data"] == f"v1:aa0:{i['id']}"
+
+    def test_the_toggles_answer_reads_the_serve_steps_facts(self, world):
+        i = _intent(world, f"menu-off-{uuid.uuid4().hex[:6]}")
+        _write(
+            world,
+            "UPDATE workspaces SET api_publishing_enabled = false WHERE id = %s",
+            (world["ws"],),
+        )
+        try:
+            r = tap(world, "aa1", i["id"])
+        finally:
+            _write(
+                world,
+                "UPDATE workspaces SET api_publishing_enabled = true WHERE id = %s",
+                (world["ws"],),
+            )
+        assert r.outcome == "executed"
+        assert r.answer_text.endswith("(once Instagram API posting is on)")
+
+    def test_another_workspaces_story_is_not_found_and_spends_nothing(self, world):
+        before = self._spent(world)
+        r = tap(world, "cfg", str(uuid.uuid4()))
+        assert r.outcome == "not_found" and r.edit_markup is None
+        assert self._spent(world) == before
+
+    def test_a_rejected_card_heals_on_touch(self, world):
+        i = _intent(world, f"menu-heal-{uuid.uuid4().hex[:6]}", state="rejected")
+        before = self._spent(world)
+        r = tap(world, "aa1", i["id"])
+        assert r.answer_text == "This item can't post again."
+        assert r.edit_markup == {"inline_keyboard": []}
+        assert self._flag(world, i["media"]) is False
+        assert self._spent(world) == before + 1
+
+    def test_an_item_removed_behind_the_menu_is_refused_and_writes_nothing(
+        self, world, monkeypatch
+    ):
+        """The race `set_item_auto_approve`'s `locked` refusal exists for: the
+        menu's read saw the item available, the database has it removed. The
+        flag's UPDATE skips the removed item, so the refusal follows no write;
+        nothing is spent, and the delivery commits."""
+        from src.services.target import prompts
+
+        i = _intent(world, f"menu-race-{uuid.uuid4().hex[:6]}")
+        _write(
+            world,
+            "UPDATE media_items SET state = 'removed' WHERE id = %s",
+            (i["media"],),
+        )
+        real = prompts.card_facts
+
+        async def stale(session, *, workspace_id, intent_id):
+            row = dict(
+                await real(session, workspace_id=workspace_id, intent_id=intent_id)
+            )
+            row["item_state"] = "available"
+            return row
+
+        monkeypatch.setattr(prompts, "card_facts", stale)
+        before = self._spent(world)
+        r = tap(world, "aa1", i["id"])
+        assert r.outcome == "locked"
+        assert r.answer_text == "This item can't post again."
+        assert self._flag(world, i["media"]) is False
+        assert self._audits(world, i["media"]) == []
+        assert self._spent(world) == before
+
+    def test_a_toggle_at_the_limit_is_told_and_keeps_the_flag(self, world):
+        """The flag's write ran, then the debit found the window full: the
+        write and its audit row roll back with the tap's savepoint, the tapper
+        is told, and the delivery commits with nothing written."""
+        from src.config.settings import settings
+
+        i = _intent(world, f"menu-cap-{uuid.uuid4().hex[:6]}")
+        limit = int(settings.TARGET_TAP_ADMISSION_PER_MINUTE)
+        # Seeded full in the window read back by name, as the decision tap's
+        # limit test seeds it.
+        window = self.ADMISSION._window()
+        _write(
+            world,
+            "INSERT INTO rate_counters (scope, key, window_start, count)"
+            " VALUES ('ws_admission', %s, %s, %s)"
+            " ON CONFLICT (scope, key, window_start) DO UPDATE SET count = EXCLUDED.count",
+            (world["ws"], window, limit),
+        )
+        try:
+            r = tap(world, "aa1", i["id"])
+            assert r.outcome == "too_many" and r.show_alert is True
+            assert self._flag(world, i["media"]) is False, "the write rolled back"
+            assert self._audits(world, i["media"]) == []
+            assert self.ADMISSION._count(world, window) == limit
+        finally:
+            _write(
+                world,
+                "DELETE FROM rate_counters WHERE scope = 'ws_admission' AND key = %s",
+                (world["ws"],),
+            )
+
+
+class TestDryRunLeavesTheTapOnTheJob:
+    def test_a_post_tap_under_dry_run_snapshots_the_decision_onto_the_job(self, world):
+        _write(
+            world,
+            "UPDATE workspaces SET dry_run_mode = true WHERE id = %s",
+            (world["ws"],),
+        )
+        try:
+            i = _intent(world, "dry-1")
+            r = tap(world, "post", i["id"])
+            assert r.outcome == "executed" and "dry run" in r.answer_text
+            payload = _one(
+                world,
+                "SELECT payload FROM jobs WHERE kind = 'publish_pipeline'"
+                " AND payload->>'intent_id' = %s",
+                (i["id"],),
+            )[0]
+            assert payload["dry_run"] is True, payload
+        finally:
+            _write(
+                world,
+                "UPDATE workspaces SET dry_run_mode = false WHERE id = %s",
+                (world["ws"],),
+            )
+
+
+#: #1286 — the tap's statement budget, counted at the cursor: the GUCs and
+#: lock timeout in one, the tapper and their name in one, the intent and its
+#: token in one, the flip, the job, the supersede of every binding in one,
+#: the admission debit, and the savepoint pair. The route adds its dedup
+#: insert and the commit.
+#: The budget is those 11 folds plus 13 current-context statements (canonical
+#: prefix/discovery/row locks, credentials/generation and policy/clock), plus
+#: the subject read and sole strict suitability query. Three prefix statements
+#: are reentrant; the subject read repeats locked fields. Those are bounded
+#: existing costs, not a reason to drop the safety contract.
+TAP_STATEMENT_BUDGET = 11 + 13 + 2
+
+
+class TestATapIsCheapOnRealRows:
+    def test_a_post_tap_spends_at_most_its_budget(self, world):
+        # From the card the ledger knows — the ordinary tap. An id it does
+        # not know is a twin, whose adoption reads twice more.
+        from sqlalchemy import event
+        from sqlalchemy.engine import Engine
+
+        statements: list[str] = []
+
+        def listen(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()))
+
+        event.listen(Engine, "before_cursor_execute", listen)
+        try:
+            i = _intent(world, "post-cheap")
+            r = tap(world, "post", i["id"], message_id=int(i["cards"]["a"]))
+        finally:
+            event.remove(Engine, "before_cursor_execute", listen)
+
+        assert r.outcome == "executed", r
+        assert _state(world, i["id"]) == "approved"
+        assert len(statements) <= TAP_STATEMENT_BUDGET, "\n".join(statements)
+        # The shape, not just the count: each fold is present as ONE statement.
+        assert sum("set_config(" in s for s in statements) == 1
+        # The tapper and their name, in ONE read: every statement that reads
+        # `user_identities`, bar the supersede, whose push predicate reads it
+        # inside its own one statement (`bindings.deliverable_binding_where`).
+        # Counted by exclusion, so a read added anywhere else is counted too.
+        identity_reads = [
+            s
+            for s in statements
+            if "user_identities" in s and "'prompt_supersede'" not in s
+        ]
+        assert len(identity_reads) == 1, "\n".join(identity_reads)
+        assert "SELECT user_id, display_name FROM" in identity_reads[0]
+        assert sum("has_ig_credential" in s for s in statements) == 1
+        assert sum("'prompt_supersede'" in s for s in statements) == 1
+        assert not any(s.startswith("SET LOCAL") for s in statements)
+        contexts = [
+            s
+            for s in statements
+            if "source_mix_policy_version" in s and "statement_timestamp()" in s
+        ]
+        assert len(contexts) == 1, "one shared current context, not repeated contexts"
+        verdicts = [s for s in statements if "FROM fn_source_asset_suitability(" in s]
+        assert len(verdicts) == 1, "one strict policy authority per approval"
+        subject_reads = [
+            s
+            for s in statements
+            if s.startswith("SELECT media_item_id,ig_account_id FROM post_intents ")
+        ]
+        assert len(subject_reads) == 1, "one bounded own-intent subject read"
+        assert (
+            "WHERE workspace_id=" in subject_reads[0] and "AND id=" in subject_reads[0]
+        )
+        intent_locks = [s for s in statements if "FOR UPDATE OF i" in s]
+        assert len(intent_locks) == 1
+        assert (
+            statements.index(contexts[0])
+            < statements.index(intent_locks[0])
+            < statements.index(subject_reads[0])
+            < statements.index(verdicts[0])
+        ), "canonical current context precedes locked intent and strict admission"
+
+
+# --- the review card is the workspace's to resolve ---------------------------
+
+
+def _parked(world, tag: str, *, publish_step="publish_called", op="ambiguous") -> dict:
+    """A `review_required` intent as the pipeline leaves it: the day debited
+    (a real bucket row, so a refund is observable), the container present,
+    and the cards already SUPERSEDED by the approve tap — so a resolution can
+    only reach them by ref."""
+    i = _intent(world, tag, state="review_required")
+    _write(
+        world,
+        f"UPDATE post_intents SET cap_consumed_on = {ACCOUNT_DAY}, publish_step = %s,"
+        " ig_container_id = 'c-1' WHERE id = %s",
+        (publish_step, i["id"]),
+    )
+    if op is not None:
+        # The publish permit the pipeline minted, in the state the park left it.
+        _write(
+            world,
+            "INSERT INTO provider_operations (workspace_id, intent_id, provider, op_kind,"
+            " business_key, generation, state, lease_token)"
+            " VALUES (%s, %s, 'ig', 'publish', %s, 1, %s, gen_random_uuid())",
+            (world["ws"], i["id"], f"ig:publish:{i['id']}:1", op),
+        )
+    _write(
+        world,
+        "INSERT INTO daily_post_counts (workspace_id, ig_account_id, local_date, count, cap_at_write)"
+        f" VALUES (%s, %s, {ACCOUNT_DAY}, 1, 3)"
+        " ON CONFLICT (workspace_id, ig_account_id, local_date) DO UPDATE SET count = 1",
+        (world["ws"], world["iga"]),
+    )
+    _write(
+        world,
+        "UPDATE channel_outbox SET state = 'superseded',"
+        ' payload = payload || \'{"outcome_text": "✅ Approved by Ada · earlier"}\''
+        " WHERE intent_id = %s AND kind = 'approval_prompt'",
+        (i["id"],),
+    )
+    return i
+
+
+def _op_state(world, intent_id):
+    row = _one(
+        world,
+        "SELECT state, response_ref FROM provider_operations"
+        " WHERE intent_id = %s AND op_kind = 'publish' ORDER BY generation DESC LIMIT 1",
+        (intent_id,),
+    )
+    if row is None:
+        return None
+    ref = row[1] if isinstance(row[1], dict) or row[1] is None else json.loads(row[1])
+    return row[0], ref
+
+
+def _day_count(world):
+    row = _one(
+        world,
+        "SELECT count FROM daily_post_counts WHERE workspace_id = %s AND ig_account_id = %s"
+        f" AND local_date = {ACCOUNT_DAY}",
+        (world["ws"], world["iga"]),
+    )
+    return row[0] if row else 0
+
+
+def _intent_cols(world, intent_id):
+    return _one(
+        world,
+        "SELECT state, publish_step, published_via, cap_refunded_at, attempts_by_step"
+        " FROM post_intents WHERE id = %s",
+        (intent_id,),
+    )
+
+
+class TestTheReviewCardIsTheTenantsToResolve:
+    """`review_required` is the workspace's to resolve: real rows, real
+    triggers, the tap's own connection and GUCs — the audit row names the
+    tapper, the resolution reaches the superseded cards by ref in BOTH groups,
+    and each transition-matrix edge keeps its cap rule."""
+
+    def test_retry_reapproves_debit_neutral_mints_the_publish_and_restates_both_cards(
+        self, world
+    ):
+        i = _parked(world, "review-retry")
+        assert _day_count(world) == 1
+        r = tap(world, "notposted", i["id"])
+        assert r.outcome == "executed", r.answer_text
+        assert "again" in r.answer_text.lower()
+        # The member's verdict ended the ambiguous op: the rail never sees a
+        # second permitted publish call beside an unresolved one.
+        state, ref = _op_state(world, i["id"])
+        assert state == "failed" and ref["verdict"] == "not_posted"
+        assert ref["by"] == world["user"]
+        state, step, _via, refunded, attempts = _intent_cols(world, i["id"])
+        assert (state, step) == ("approved", "none")
+        assert refunded is None and _day_count(world) == 0, (
+            "debit-neutral: the recorded day is refunded; the next flip re-debits"
+        )
+        assert attempts["retries"] == 1 and attempts["v"] == 1
+        assert _audit(world, i["id"]) == [
+            ("approved", "user", world["user"], "telegram")
+        ]
+        ((kind, key, payload),) = _write(
+            world,
+            "SELECT kind, serialization_key, payload FROM jobs"
+            " WHERE payload->>'intent_id' = %s AND kind = 'publish_pipeline'",
+            (i["id"],),
+            fetch=True,
+        )
+        assert key == "ig:acct-w4-tap"
+        assert (payload if isinstance(payload, dict) else json.loads(payload))[
+            "dry_run"
+        ] is False
+        edits = _supersedes(world, i["id"])
+        assert len(edits) == 2 and {b for b, _ in edits} == set(
+            world["bindings"].values()
+        )
+        for _b, p in edits:
+            assert "Approved by Ada" in p["outcome_text"]
+            assert p["supersedes_ref"] in i["cards"].values()
+            assert "reply_markup" not in p, "the review buttons go with the line"
+        assert set(_card_states(world, i["id"]).values()) == {"superseded"}
+
+    def test_itposted_confirms_a_publish_call_with_the_posted_effects(self, world):
+        i = _parked(world, "review-posted")
+        r = tap(world, "itposted", i["id"])
+        assert r.outcome == "executed", r.answer_text
+        state, ref = _op_state(world, i["id"])
+        assert state == "succeeded" and ref["verdict"] == "posted"
+        state, step, via, refunded, _ = _intent_cols(world, i["id"])
+        assert (state, step, via) == ("posted", "effect_confirmed", "api")
+        assert refunded is None and _day_count(world) == 1, "the debit stands"
+        assert _audit(world, i["id"]) == [("posted", "user", world["user"], "telegram")]
+        (times,) = _one(
+            world, "SELECT times_posted FROM media_items WHERE id = %s", (i["media"],)
+        )
+        assert times == 1
+        (locks,) = _one(
+            world,
+            "SELECT count(*) FROM post_locks WHERE media_item_id = %s AND kind = 'recent'"
+            " AND created_by_user_id = %s",
+            (i["media"], world["user"]),
+        )
+        assert locks == 1
+        assert all(
+            "Posted by Ada" in p["outcome_text"] for _, p in _supersedes(world, i["id"])
+        )
+
+    def test_itposted_without_a_publish_call_is_told_why_and_writes_nothing(
+        self, world
+    ):
+        i = _parked(world, "review-noposted", publish_step="container_ready", op=None)
+        r = tap(world, "itposted", i["id"])
+        assert r.outcome == "nothing_to_confirm" and r.show_alert is True
+        assert "post again" in r.answer_text.lower()
+        assert _intent_cols(world, i["id"])[0] == "review_required"
+        assert _audit(world, i["id"]) == [] and _supersedes(world, i["id"]) == []
+
+    def test_itposted_after_instagram_answered_no_is_refused_the_same_way(self, world):
+        """`publish_step` stays `publish_called` when the permit resolved
+        `failed`; the op's state is the discriminator, not the step."""
+        i = _parked(world, "review-refused", op="failed")
+        r = tap(world, "itposted", i["id"])
+        assert r.outcome == "nothing_to_confirm"
+        assert _intent_cols(world, i["id"])[0] == "review_required"
+        assert _op_state(world, i["id"])[0] == "failed"
+
+    def test_giveup_cancels_and_keeps_the_debit(self, world):
+        i = _parked(world, "review-giveup")
+        r = tap(world, "giveup", i["id"])
+        assert r.outcome == "executed" and "Cancelled" in r.answer_text
+        state, _, _, refunded, _ = _intent_cols(world, i["id"])
+        assert state == "cancelled" and refunded is None
+        assert _op_state(world, i["id"])[0] == "failed", (
+            "the op retires with the intent"
+        )
+        assert _day_count(world) == 1, "a review may have published — no refund"
+        assert _audit(world, i["id"]) == [
+            ("cancelled", "user", world["user"], "telegram")
+        ]
+        assert all(
+            "Cancelled by Ada" in p["outcome_text"]
+            for _, p in _supersedes(world, i["id"])
+        )
+
+    def test_a_review_tap_on_a_card_that_moved_on_answers(self, world):
+        i = _parked(world, "review-moved")
+        assert tap(world, "notposted", i["id"]).outcome == "executed"
+        r = tap(world, "giveup", i["id"])
+        assert r.outcome == "answered" and "Approved" in r.answer_text
+        assert _intent_cols(world, i["id"])[0] == "approved"
+        assert len(_audit(world, i["id"])) == 1, "the second tap wrote nothing"
+
+
+class TestPostedMyselfThroughTheTap:
+    """Manual mode's own tap, as `svc_ingress` through the real dispatcher."""
+
+    def test_a_cadence_story_debits_once_and_a_repeat_tap_debits_nothing(self, world):
+        before = _day_count(world)
+        i = _intent(world, "posted-tap-c")
+        assert tap(world, "posted", i["id"]).outcome == "executed"
+        assert _state(world, i["id"]) == "posted"
+        assert _day_count(world) == before + 1
+
+        assert tap(world, "posted", i["id"]).outcome == "answered"
+        assert _day_count(world) == before + 1
+
+    def test_a_planned_story_debits_nothing_and_stamps_its_day(self, world):
+        before = _day_count(world)
+        i = _intent(world, "posted-tap-p", origin="planned")
+        assert tap(world, "posted", i["id"]).outcome == "executed"
+        assert _one(
+            world,
+            f"SELECT state, published_via, cap_consumed_on = {ACCOUNT_DAY}"
+            "  FROM post_intents WHERE id = %s",
+            (i["id"],),
+        ) == ("posted", "manual", True)
+        assert _day_count(world) == before

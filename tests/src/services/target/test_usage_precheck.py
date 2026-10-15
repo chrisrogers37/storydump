@@ -1,0 +1,158 @@
+"""The lazy inline usage pre-check (#915).
+
+Advisory ONLY, behind a default-off flag (the flag lives at the executor
+seam; this module is the cache + decision). The binding rules:
+in-process cache keyed on provider_account_ref (shared across duplicate
+workspace rows of one real account), a 5 min TTL, NO background
+refresh, ≤ one usage query per publish attempt, and miss/stale/error ⇒
+PROCEED — error 9 remains the arbiter.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.services.target.meta_adapter import StubMetaAdapter
+from src.services.target.usage_precheck import UsagePrecheck
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+class TestTheReadIsTenantScoped:
+    """The token the usage read spends belongs to ONE workspace (#1369).
+
+    The cache is keyed on `provider_account_ref` and that is right: Meta's
+    quota belongs to the real Instagram account, so "shared across duplicate
+    workspace rows of one real account" (module docstring) is the intended
+    behaviour.
+
+    The TOKEN is a different question. `uq_ig_account_live` is unique on
+    `(workspace_id, provider_account_ref)`, so two workspaces may legitimately
+    hold the same real account — which is the very state the cache note
+    anticipates. So the usage read names its workspace, as `create_container`,
+    `publish` and `container_status` do with `ctx.workspace_id`: an unscoped
+    read would be a bare sessionmaker with no GUCs and an ordering that
+    prefers the freshest active row across every tenant.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_workspace_reaches_the_usage_read(self):
+        seen = {}
+
+        class _Meta:
+            async def usage(self, ref, *, workspace_id=None):
+                seen["ref"], seen["ws"] = ref, workspace_id
+                return {"quota_usage": 1, "quota_total": 50}
+
+        await UsagePrecheck().check(_Meta(), "ig-1", workspace_id="ws-a")
+        assert seen == {"ref": "ig-1", "ws": "ws-a"}
+
+    @pytest.mark.asyncio
+    async def test_the_cache_is_still_keyed_on_the_account_not_the_workspace(self):
+        """Two workspaces on one real account share the quota reading.
+
+        Deliberate, and the reason the workspace is threaded through rather
+        than keyed into the cache: the quota is Meta's, per account.
+        """
+        calls = []
+
+        class _Meta:
+            async def usage(self, ref, *, workspace_id=None):
+                calls.append(workspace_id)
+                return {"quota_usage": 1, "quota_total": 50}
+
+        precheck = UsagePrecheck()
+        await precheck.check(_Meta(), "ig-1", workspace_id="ws-a")
+        await precheck.check(_Meta(), "ig-1", workspace_id="ws-b")
+        assert calls == ["ws-a"], "the second workspace rode the cached reading"
+
+
+class TestTheDecision:
+    @pytest.mark.asyncio
+    async def test_under_cap_proceeds_with_exactly_one_read(self):
+        """Mutation that reddens: a second read per check, or defer under cap."""
+        stub = StubMetaAdapter(quota_usage=3, quota_total=100)
+        check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "proceed"
+        assert len(stub.usage_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_at_or_over_cap_defers(self):
+        """The advisory's one job: skip doomed container/transit work when
+        Meta's own counter says the publish cannot land.
+        Mutation that reddens: compare with > instead of >=."""
+        stub = StubMetaAdapter(quota_usage=100, quota_total=100)
+        check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "defer"
+
+    @pytest.mark.asyncio
+    async def test_a_provider_error_proceeds_and_is_not_cached(self):
+        """Miss/stale/error ⇒ proceed — error 9 remains the
+        arbiter. And a failed read must not poison the cache: the NEXT check
+        re-reads. Mutation that reddens: defer on error, or cache the error."""
+        stub = StubMetaAdapter(
+            usage_outcomes=["transport", "ok"], quota_usage=1, quota_total=100
+        )
+        check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "proceed"
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "proceed"
+        assert len(stub.usage_calls) == 2, "the error must not have been cached"
+
+
+class TestTheCache:
+    @pytest.mark.asyncio
+    async def test_a_fresh_cache_answers_without_a_second_read(self):
+        """The load bound (≤ 1 query per attempt): within the TTL the cache
+        answers, including the DEFER answer — duplicate workspace rows of one
+        real account share the verdict.
+        Mutation that reddens: read on every check."""
+        stub = StubMetaAdapter(quota_usage=100, quota_total=100)
+        clock = FakeClock()
+        check = UsagePrecheck(ttl_seconds=300, clock=clock)
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "defer"
+        clock.t += 299
+        assert await check.check(stub, "igu-1", workspace_id="ws-a") == "defer"
+        assert len(stub.usage_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_stale_cache_rereads(self):
+        """No background refresh exists — staleness is resolved lazily,
+        at the next check. Mutation that reddens: never expiring the cache."""
+        stub = StubMetaAdapter(quota_usage=1, quota_total=100)
+        clock = FakeClock()
+        check = UsagePrecheck(ttl_seconds=300, clock=clock)
+        await check.check(stub, "igu-1", workspace_id="ws-a")
+        clock.t += 301
+        await check.check(stub, "igu-1", workspace_id="ws-a")
+        assert len(stub.usage_calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_the_cache_is_keyed_on_provider_account_ref(self):
+        """Two real accounts never share a verdict.
+        Mutation that reddens: a global (unkeyed) cache."""
+        stub = StubMetaAdapter(quota_usage=1, quota_total=100)
+        check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
+        await check.check(stub, "igu-1", workspace_id="ws-a")
+        await check.check(stub, "igu-2", workspace_id="ws-a")
+        assert stub.usage_calls == ["igu-1", "igu-2"]
+
+
+class TestADegenerateAnswerIsNotACap:
+    """A 200 with no quota total (an empty `data`, a row without `config`)
+    flattens to `quota_total = 0`; read as "0 >= 0 ⇒ at cap" it would defer
+    EVERY publish of the account and, cached, renew itself each TTL — the
+    inverse of "error ⇒ proceed" (#1299). No total is no verdict: proceed,
+    uncached, and say so."""
+
+    async def test_no_quota_total_proceeds_and_is_not_cached(self):
+        stub = StubMetaAdapter(quota_usage=0, quota_total=0)
+        check = UsagePrecheck(ttl_seconds=300, clock=FakeClock())
+        assert await check.check(stub, "acct", workspace_id="ws-a") == "proceed"
+        assert await check.check(stub, "acct", workspace_id="ws-a") == "proceed"
+        assert len(stub.usage_calls) == 2, "a degenerate answer must not be cached"

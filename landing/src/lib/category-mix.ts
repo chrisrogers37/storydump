@@ -1,0 +1,176 @@
+import { callBff, postJson } from "./bff";
+import { notAuthenticatedCopy, unreachableCopy } from "./refusal-copy";
+
+/**
+ * The posting mix — how often each CONNECTED FOLDER posts (sources are the
+ * groups). Everything inside a connected folder
+ * syncs, at any depth; to weight two subfolders separately, connect each as
+ * its own folder. A folder is explicit (a percentage), automatic (no row:
+ * it posts in proportion to its files, together with the other automatic
+ * folders never more than the smallest explicit weight), or Off (0: stays
+ * connected and synced, never posts). The API computes the share each folder
+ * actually gets (`effective`); the card only renders it.
+ */
+
+export type MixSourceRow = {
+  source_id: string;
+  provider: string;
+  name: string;
+  state: string;
+  media_count: number;
+  /** null = automatic; 0 = Off; otherwise the explicit fraction. */
+  ratio: number | null;
+  /** The share of posts this folder gets, in percent, as the planner draws it. */
+  effective: number;
+};
+export type CategoryMixResponse = { rows: MixSourceRow[] };
+export type MixWrite = { source_id: string; ratio: number };
+
+export type WeightMode = "explicit" | "automatic" | "off";
+export type CardRow = {
+  sourceId: string;
+  name: string;
+  mediaCount: number;
+  state: string;
+  mode: WeightMode;
+  /** The typed percentage; meaningful for explicit rows only. */
+  percent: number;
+  effective: number;
+};
+
+/** The card's rows: every connected folder, with how it is weighted. */
+export function cardRows(data: { rows?: MixSourceRow[] }): CardRow[] {
+  // An answer without `rows` is no folders, not a crash.
+  return (data.rows ?? []).map((r) => ({
+    sourceId: r.source_id,
+    name: r.name,
+    mediaCount: r.media_count,
+    state: r.state,
+    mode: r.ratio === null ? "automatic" : r.ratio === 0 ? "off" : "explicit",
+    percent: r.ratio === null ? 0 : round1(r.ratio * 100),
+    effective: r.effective,
+  }));
+}
+
+export type ToMixResult =
+  | { ok: true; rows: MixWrite[] }
+  | {
+      ok: false;
+      error: "sum_not_100" | "bad_percent" | "all_off";
+      total?: number;
+    };
+
+/**
+ * The card's rows → the API's rows. Explicit percentages must add up to 100
+ * (automatic rows are not in the sum: the API gives them the rest); an
+ * explicit 0 is Off, kept, never dropped; automatic rows are left out; every
+ * folder Off is refused — something must post.
+ */
+export function toMixBySource(rows: CardRow[]): ToMixResult {
+  const explicit = rows.filter((r) => r.mode === "explicit");
+  for (const r of explicit) {
+    if (!Number.isFinite(r.percent) || r.percent < 0 || r.percent > 100) {
+      return { ok: false, error: "bad_percent" };
+    }
+  }
+  // Zeros add nothing, so "some explicit weight" is "the total is above 0".
+  const total = explicit.reduce((a, r) => a + r.percent, 0);
+  // Rounded before the comparison: 33.3 × 3 is 99.89999… in floating point
+  // and must read as the 99.9 the service tolerates.
+  if (total > 0 && round1(Math.abs(total - 100)) > 0.1) {
+    return { ok: false, error: "sum_not_100", total: round1(total) };
+  }
+  if (
+    rows.length > 0 &&
+    total === 0 &&
+    !rows.some((r) => r.mode === "automatic")
+  ) {
+    return { ok: false, error: "all_off" };
+  }
+  return {
+    ok: true,
+    rows: rows
+      .filter((r) => r.mode !== "automatic")
+      .map((r) => ({
+        source_id: r.sourceId,
+        ratio: r.mode === "off" ? 0 : Math.round(r.percent * 100) / 10000,
+      })),
+  };
+}
+
+/**
+ * Shares as whole percents that add to what the shares add to. Each is rounded
+ * down, and the points that leaves over go to the largest remainders, the
+ * earlier row on a tie. Rounded one by one, 50.7, 29.6 and 19.7 read 51, 30
+ * and 20, which is 101.
+ */
+export function wholeShares(shares: number[]): number[] {
+  const whole = shares.map(Math.floor);
+  const sum = (values: number[]) => values.reduce((a, b) => a + b, 0);
+  let left = Math.round(sum(shares)) - sum(whole);
+  const byRemainder = shares
+    .map((share, i) => ({ i, remainder: share - whole[i] }))
+    .sort((a, b) => b.remainder - a.remainder || a.i - b.i);
+  for (const { i } of byRemainder) {
+    if (left <= 0) break;
+    whole[i] += 1;
+    left -= 1;
+  }
+  return whole;
+}
+
+/** An even split to one decimal; the remainder lands on the first row so the total is exactly 100. */
+export function evenSplit(count: number): number[] {
+  if (count <= 0) return [];
+  const each = Math.floor((100 / count) * 10) / 10;
+  const out = Array.from({ length: count }, () => each);
+  out[0] = round1(100 - each * (count - 1));
+  return out;
+}
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+export type SaveMixResult =
+  | { ok: true; rows: MixSourceRow[] }
+  | { ok: false; error: string; status: number };
+
+export async function saveCategoryMix(
+  workspaceId: string,
+  rows: MixWrite[],
+): Promise<SaveMixResult> {
+  const result = await callBff(
+    `/api/workspaces/${workspaceId}/category-mix`,
+    postJson({ rows }, "PUT"),
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error, status: result.status };
+  }
+  return {
+    ok: true,
+    rows: Array.isArray(result.data.rows) ? result.data.rows : [],
+  };
+}
+
+export function mixRefusalCopy(reason: unknown, status?: number): string {
+  if (status === 403 || reason === "http_403") {
+    return "You need to be an admin of this workspace to change the mix.";
+  }
+  switch (reason) {
+    case "invalid_mix_unknown_source":
+      return "One of these folders is no longer connected. Reload the page and try again. Nothing changed.";
+    case "invalid_mix_all_off":
+      return "At least one folder has to post: give a folder a percentage or set it to Automatic. Nothing changed.";
+    case "unauthenticated":
+    case "http_401":
+      return notAuthenticatedCopy("Nothing changed.");
+    case "unreachable":
+    case "target_router_unreachable":
+      return unreachableCopy("Nothing changed");
+  }
+  if (typeof reason === "string" && reason.startsWith("invalid_mix_")) {
+    return "The mix was refused: percentages must be between 0 and 100 and add up to 100. Nothing changed.";
+  }
+  return "Could not save the mix. Nothing changed — try again shortly.";
+}

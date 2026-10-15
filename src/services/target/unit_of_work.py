@@ -1,0 +1,547 @@
+"""The async unit of work (#857).
+
+The transaction substrate the target tier runs on. Three things
+live here because they are one contract, not three: the async engine, the
+tenant-scoped unit of work, and the transaction-per-checkpoint discipline that
+the egress floor enforces from the other side.
+
+## `max_overflow` is pinned to 0
+
+The inequality counts `pool_size + max_overflow`, and `max_overflow` is pinned
+to 0 — because a pool slot is an asyncio task rather than a connection,
+`pool_size` is already sized for the spike case, so overflow un-bounds the
+invariant for nothing. The invariant it protects:
+
+    Σ(replica × (pool + overflow)) = 3×(10+0) + 2×(10+0) = 50  ≥  peak DB-active tasks
+
+Pinning the async engine to the seam constant, never to a setting, is what
+keeps the target substrate correct whatever the environment says (#1216),
+and the gate asserts the constant rather than trusting the config.
+
+## The UoW is unconstructible without a tenant
+
+Not "raises on use" — unconstructible. RLS reads `app.tenant_id`, so
+a UoW that could exist without one would be a widened query waiting for a
+caller, which is the failure this retires at the transaction layer.
+
+**No role selection exists to make.** System
+operations go through the `SECURITY DEFINER` doors, not through a
+privileged UoW variant. So there is no `SYSTEM_SCOPE` analogue here and none
+should be added — a cross-tenant door on this surface would bypass the doors
+that exist precisely to be the audited way through.
+
+## Transaction-per-checkpoint, enforced rather than documented
+
+The rule: *"a database transaction never spans a provider call.
+Pipelines run transaction-per-checkpoint — open, write the checkpoint/permit,
+commit, then talk to the provider."* It is both the correctness seam (the
+permit protocol depends on permit-commit-before-call) and the premise of the
+connection arithmetic above.
+
+Enforcement is a ContextVar flag, armed by `transaction_discipline()` for the
+life of each transaction that enters it, which the egress floor checks before
+any provider call.
+
+**The flag is per-task, and that is the bound.** A call made directly inside
+the transaction, from a task spawned inside it, or via ``asyncio.to_thread`` is
+refused — those are the shapes the rule targets, where the connection is
+genuinely held across the call. A task spawned *before* the transaction opened,
+or work handed to ``run_in_executor`` with a fresh event loop, carries its own
+context and is not seen. Those are not violations in the same sense (such a
+task holds no connection of yours), but they are the edge: "ContextVar,
+therefore per-task, therefore blind across an executor boundary".
+"""
+
+from __future__ import annotations
+
+import contextvars
+from contextlib import asynccontextmanager, contextmanager
+from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+
+from src.config.db_url import userinfo
+from src.config.settings import settings
+from src.services.target.vocabulary import DATABASE_URL_VAR
+from src.utils.logger import logger
+from src.exceptions.base import StorydumpError
+
+#: Seam value. Pinned, not configurable, not read from settings — see the
+#: module docstring for why no overflow setting exists.
+MAX_OVERFLOW_SEAM = 0
+
+#: Seam value: 10 per replica, both lanes (`3×10 workers + 2×10 ingress`).
+#: Pinned for the same reason the overflow is. Leaving HALF the inequality
+#: configurable is a gap: with `pool_size` read from a setting, a production
+#: override silently breaks `Σ(replica × (pool + overflow)) = 50` and no gate
+#: can see it, because the test would read the same overridden value it is
+#: meant to be checking.
+POOL_SIZE_SEAM = 10
+
+#: How long a caller waits for a connection before being told there is none.
+#:
+#: **This is the saturation policy, and pinning `max_overflow` to 0 is what
+#: makes it one.** With burst capacity the SQLAlchemy default (30 s) is rarely
+#: reached; with overflow at 0 the pool cannot burst, so every saturation
+#: episode lands here.
+#:
+#: 30 s is pile-up, not the behaviour wanted
+#: ("visible backpressure, slip-a-slot rather than pile-up"): on a bulk replica
+#: with 50 task slots one episode parks up to 40 tasks for 30 s each, all still
+#: holding their slots. It is also >= `EgressPolicy.total_budget_s`, so a job
+#: could burn its entire provider budget waiting for a connection it never got
+#: — the substrate outlasting its own callers' timeouts.
+#:
+#: 3 s is derived, not picked: it sits **below the shortest egress timeout
+#: class** (`fast` = 5.0 s), so the substrate can never be the slowest thing in
+#: a call; and it is far above the expected wait, since the load model puts
+#: DB-active demand at ~2.5 against a pool of 10 — a wait of any length is
+#: already the tail, so failing fast there defers work rather than losing it.
+POOL_TIMEOUT_SEAM = 3.0
+#: The INGRESS pool's wait — the API's saturation policy. A tap
+#: that cannot get a connection within
+#: this budget is answered "Busy — tap again" and not admitted, so the
+#: tapper's spinner never outlives the budget and Telegram never redelivers a
+#: storm; a message update is refused 503 before admission instead. Below the
+#: worker's 3 s because the wait IS the user-visible latency here: the
+#: tap must be answered within 2 s end to end, redelivery included.
+INGRESS_POOL_TIMEOUT_SEAM = 1.0
+
+#: Set explicitly to 300 alongside pre-ping (#1216): `pool_pre_ping` catches a
+#: dead connection, and recycling runs IN ADDITION rather than at the -1
+#: (never) default.
+POOL_RECYCLE_SEAM = 300
+
+#: True inside `transaction_discipline()` in this task. Read by the egress floor.
+_IN_TRANSACTION: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "storydump_in_transaction", default=False
+)
+
+
+class TenantContextRequired(StorydumpError):
+    """A unit of work was requested without a tenant. Never widened."""
+
+
+class TransactionDisciplineError(StorydumpError):
+    """A provider call was attempted inside an open transaction."""
+
+
+def in_transaction() -> bool:
+    """Whether this task is inside `transaction_discipline()`."""
+    return _IN_TRANSACTION.get()
+
+
+@contextmanager
+def transaction_discipline():
+    """Mark this task as holding an open transaction for the block, so the
+    egress floor refuses a provider call made inside it.
+
+    The flag is reset from its token in a `finally`, never by assignment: a
+    bare reset would lose an outer block's value under nesting, and a leaked
+    flag would make every later provider call in the task raise — a wrong-way
+    failure that looks like the discipline working."""
+    token = _IN_TRANSACTION.set(True)
+    try:
+        yield
+    finally:
+        _IN_TRANSACTION.reset(token)
+
+
+def async_database_url(database: Optional[str] = None) -> str:
+    """The asyncpg URL built from the `DB_*` settings — the TEST HARNESS's
+    door, never a deployed root's.
+
+    *database* overrides the database name only: the harness runs against the
+    session-scoped test database rather than `settings.DB_NAME` — CI
+    provisions `TEST_DB_NAME` and has no `DB_NAME` database at all, so a URL
+    hardcoded to the latter passes locally (where a dev database happens to
+    exist) and fails there. The deployed roots do not call this: they take
+    `TARGET_DATABASE_URL` through `engine_url_from_env`, refusing without it.
+    """
+    # The user and password encoded (`src.config.db_url`), which SQLAlchemy
+    # decodes back: pasted raw, one carrying `@`, `/` or `%` was misread.
+    return (
+        f"postgresql+asyncpg://{userinfo(settings.DB_USER, settings.DB_PASSWORD)}"
+        f"{settings.DB_HOST}:{settings.DB_PORT}/{database or settings.DB_NAME}"
+    )
+
+
+def asyncpg_url(url: str) -> str:
+    """A platform-shaped `postgresql://` URL made asyncpg-safe — the deploy door
+    both roots share (worker and api), so the rewrite lives once.
+
+    Rewrites what the asyncpg driver refuses: the dialect suffix, and the
+    libpq-only `sslmode`/`channel_binding` query params (Neon appends both;
+    asyncpg takes `ssl=`).
+    """
+    url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    parts = urlsplit(url)
+    params = dict(parse_qsl(parts.query))
+    sslmode = params.pop("sslmode", None)
+    params.pop("channel_binding", None)
+    if sslmode and "ssl" not in params:
+        params["ssl"] = sslmode
+    return urlunsplit(parts._replace(query=urlencode(params)))
+
+
+def engine_url_from_env(env) -> Optional[str]:
+    """`TARGET_DATABASE_URL` from *env*, asyncpg-safe, or None when unset —
+    and None is the caller's to refuse: the worker exits 2 naming the variable
+    (`src.worker.main`), the API runs with no engine and answers 503 on every
+    data route (`src.api.app`). There is no settings-built fallback."""
+    url = (env.get(DATABASE_URL_VAR) or "").strip()
+    if not url:
+        # Blank is absent: a dashboard row saved empty must meet the callers'
+        # named refusal, never a traceback out of `create_engine`.
+        return None
+    return asyncpg_url(url)
+
+
+def create_engine(url: str, *, pool_timeout: float = POOL_TIMEOUT_SEAM) -> AsyncEngine:
+    """The async engine for *url*, with `max_overflow` pinned to the
+    seam. The worker takes the default wait; the API passes
+    `INGRESS_POOL_TIMEOUT_SEAM` (the only knob a caller may turn, and only to
+    one of the two seams). The URL is REQUIRED: a root that silently runs
+    against a database nobody named is the plausible-wrong-value casualty
+    the refusal exists to prevent."""
+    if not url:
+        raise ValueError(
+            f"create_engine needs the target database URL ({DATABASE_URL_VAR});"
+            " there is no settings-built fallback"
+        )
+    if pool_timeout not in (POOL_TIMEOUT_SEAM, INGRESS_POOL_TIMEOUT_SEAM):
+        raise ValueError(
+            "pool_timeout must be POOL_TIMEOUT_SEAM or INGRESS_POOL_TIMEOUT_SEAM"
+        )
+    return create_async_engine(
+        url,
+        pool_size=POOL_SIZE_SEAM,
+        max_overflow=MAX_OVERFLOW_SEAM,
+        pool_timeout=pool_timeout,
+        pool_recycle=POOL_RECYCLE_SEAM,
+        pool_pre_ping=True,
+        # A failed statement's logged error names the SQL, never the bound
+        # values: those are people's addresses, campaigns and tokens.
+        hide_parameters=True,
+    )
+
+
+class PoolWatch:
+    """The pool's arithmetic and its high-water mark, for the operating details
+    (`/api/v1/ops/health`) and the startup log: `size`,
+    `overflow`, `timeout_s`, `checked_out` now and `checked_out_peak` since
+    attach. The peak is kept by the pool's own checkout event, so it costs
+    nothing on the request path and misses no burst between two health
+    probes."""
+
+    def __init__(self, engine: AsyncEngine):
+        self._engine = engine
+        self.checked_out_peak = 0
+        # A composition-root fake has no pool; the watch then reports the
+        # seams and never a peak, rather than refusing to exist. The pool is
+        # read through the engine each time (a dispose recreates it; the
+        # listener rides `_dispatch` across the recreate).
+        pool = self._current_pool()
+        if pool is None:
+            return
+
+        def _on_checkout(dbapi_conn, record, proxy):  # noqa: ARG001 — event shape
+            # A listener that raises breaks EVERY checkout; the watch is
+            # telemetry and must never be the reason a request has no
+            # connection.
+            try:
+                now = self._current_pool().checkedout()
+            except Exception:  # noqa: BLE001 — telemetry only
+                return
+            if now > self.checked_out_peak:
+                self.checked_out_peak = now
+
+        from sqlalchemy import event
+
+        event.listen(pool, "checkout", _on_checkout)
+
+    def _current_pool(self):
+        pool = getattr(getattr(self._engine, "sync_engine", None), "pool", None)
+        return pool if pool is not None and hasattr(pool, "checkedout") else None
+
+    def snapshot(self) -> dict:
+        pool = self._current_pool()
+        return {
+            "size": pool.size() if pool is not None else POOL_SIZE_SEAM,
+            "overflow": MAX_OVERFLOW_SEAM,
+            "timeout_s": float(
+                getattr(pool, "_timeout", POOL_TIMEOUT_SEAM)
+                if pool is not None
+                else POOL_TIMEOUT_SEAM
+            ),
+            "checked_out": pool.checkedout() if pool is not None else 0,
+            "checked_out_peak": self.checked_out_peak,
+        }
+
+
+class UnitOfWork:
+    """A tenant-scoped async transaction.
+
+    Construction requires a tenant id. `actor_kind` is optional at construction
+    and required by the DATABASE for the covered tables — the triggers
+    refuse an anonymous write, so this module does not duplicate that check.
+    What it does is make setting the GUC easy and uniform, so a caller never
+    has to remember the statement.
+
+    A *lock_timeout* ("2s") bounds every lock wait of the transaction, riding
+    the same statement as the GUCs (:func:`apply_gucs`): past it the database
+    refuses the waiting statement and the block raises, so a request that must
+    not queue behind a long lock (a thumbnail behind a writer) answers instead
+    of holding a pooled connection. None, the default, sets no bound.
+    """
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        tenant_id: str,
+        *,
+        actor_kind: Optional[str] = None,
+        actor_user_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        lock_timeout: Optional[str] = None,
+    ):
+        if not tenant_id or not isinstance(tenant_id, str) or not tenant_id.strip():
+            raise TenantContextRequired(
+                "a unit of work requires a tenant id — RLS reads "
+                "app.tenant_id, so a tenant-less transaction would be a widened "
+                "query. System operations go through the doors (#857)."
+            )
+        self._engine = engine
+        self._tenant_id = tenant_id
+        self._actor_kind = actor_kind
+        self._actor_user_id = actor_user_id
+        self._channel = channel
+        self._lock_timeout = lock_timeout
+        self._session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    @property
+    def tenant_id(self) -> str:
+        return self._tenant_id
+
+    async def _apply_gucs(self, session) -> None:
+        await apply_gucs(
+            session,
+            tenant_id=self._tenant_id,
+            actor_kind=self._actor_kind,
+            actor_user_id=self._actor_user_id,
+            channel=self._channel,
+            lock_timeout=self._lock_timeout,
+        )
+
+    @asynccontextmanager
+    async def begin(self):
+        """Open the transaction, apply the GUCs, and mark the discipline flag."""
+        with transaction_discipline():
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._apply_gucs(session)
+                    yield session
+
+
+async def apply_gucs(
+    executor,
+    *,
+    tenant_id: str,
+    actor_kind: Optional[str] = None,
+    actor_user_id: Optional[str] = None,
+    channel: Optional[str] = None,
+    lock_timeout: Optional[str] = None,
+) -> None:
+    """`SET LOCAL` the tenancy/actor GUCs — the ONE spelling of the security
+    invariant, shared by the UoW and by raw-connection transactions (the
+    permit path). *executor* is anything with ``.execute`` (AsyncSession or
+    AsyncConnection).
+
+    LOCAL (`is_local=true`) rather than SESSION is what makes pool reuse safe:
+    the value dies with the transaction, so the next task to borrow the
+    connection cannot inherit another tenant's scope. Two hand-rolled copies
+    of this call is how a third ships `is_local=false` and leaks tenant scope
+    with no gate able to see it — hence one home.
+
+    One statement, not one per GUC: a tenant-scoped request pays this on every
+    unit of work, and four round trips for four `set_config` calls are the
+    largest avoidable cost on the read path (#1028). Only the non-None pairs
+    are sent — `set_config(x, NULL, true)` stores the empty string. An unset
+    actor can read `''` regardless: a pooled connection that set
+    `app.actor_kind` in an earlier transaction reads it back as `''`, not
+    NULL. The audit triggers treat `''` as unset for that reason (085, #1421).
+
+    Known coverage note: the permit path's raw-connection transaction does not
+    enter `transaction_discipline()`, so the discipline tripwire does not
+    cover the permit window. Inert — `acquire_permit` commits before
+    returning, so no provider call can happen inside it — named here because
+    this is where the next reader will look.
+    """
+    # `lock_timeout` rides the same statement (#1286): a tap bounds its wait on
+    # another tap's row lock, and a separate `SET LOCAL` would cost a second
+    # round trip.
+    pairs = [("app.tenant_id", tenant_id)] + [
+        (name, value)
+        for name, value in (
+            ("app.actor_kind", actor_kind),
+            ("app.actor_user_id", actor_user_id),
+            ("app.channel", channel),
+            ("lock_timeout", lock_timeout),
+        )
+        if value is not None
+    ]
+    calls = ", ".join(
+        f"set_config('{name}', :v{i}, true)" for i, (name, _) in enumerate(pairs)
+    )
+    await executor.execute(
+        text(f"SELECT {calls}"),
+        {f"v{i}": value for i, (_, value) in enumerate(pairs)},
+    )
+
+
+class WorkspaceClaims:
+    """Per-workspace tenant claims INSIDE a caller's transaction, and the
+    caller's own scope handed back at the end.
+
+    A sweep that reads the estate through a door (081, 082) and then writes
+    each row under its workspace's tenant claims several tenants in one
+    transaction. Each claim is `SET LOCAL` (:func:`apply_gucs`), so it dies
+    with the transaction — but not before the rest of the transaction runs.
+    `plan_slot` runs the prompt sweep inside a TENANT job's transaction and
+    then finalizes its own job; a sweep that left the session under the last
+    workspace it prompted would fence that finalization under the policies
+    (`jobs.JobFenced`, #1349). So the first claim records the caller's scope
+    and :meth:`release` restores it; a sweep that claimed nothing pays
+    nothing.
+
+    Claim OUTSIDE a savepoint the caller may roll back: `ROLLBACK TO
+    SAVEPOINT` reverts a `SET LOCAL` made inside it, and this object would
+    still believe the workspace is held. The actor restored is the one the
+    caller carried; `apply_gucs` sends only the non-None pairs, so a caller
+    that carried NO actor would be left as `system` — every worker path sets
+    `system` before any sweep, so that is the same value.
+    """
+
+    def __init__(self, executor):
+        self._executor = executor
+        self._before: Optional[tuple[str, Optional[str]]] = None
+        self.held: Optional[str] = None
+
+    async def claim(self, workspace_id: str) -> None:
+        """Hold *workspace_id*'s tenant with the `system` actor; a no-op when
+        it is already held."""
+        if workspace_id == self.held:
+            return
+        if self._before is None:
+            before = (
+                await self._executor.execute(
+                    text(
+                        "SELECT current_setting('app.tenant_id', true),"
+                        " current_setting('app.actor_kind', true)"
+                    )
+                )
+            ).one()
+            self._before = (before[0] or "", before[1] or None)
+        await apply_gucs(self._executor, tenant_id=workspace_id, actor_kind="system")
+        self.held = workspace_id
+
+    async def release(self) -> None:
+        """Hand the caller's scope back — the tenant and actor it carried
+        before the first claim. A no-op when nothing was claimed."""
+        if self._before is None:
+            return
+        tenant, actor = self._before
+        await apply_gucs(self._executor, tenant_id=tenant, actor_kind=actor)
+        self._before, self.held = None, None
+
+
+def unit_of_work(engine: AsyncEngine, tenant_id: str, **gucs) -> UnitOfWork:
+    """Factory. Present so call sites read as intent rather than construction."""
+    return UnitOfWork(engine, tenant_id, **gucs)
+
+
+def make_session_for(engine):
+    """Per-job transaction contexts with the GUC invariant applied once.
+
+    Tenant scope comes from the claimed row (system singletons carry none and
+    get an empty tenant id — fail-closed under any tenant policy); the actor
+    is `system`, the worker actor. Lives here beside `apply_gucs`,
+    which is the whole of its body: in `work_loop` it would force six service
+    modules to import the work loop from inside a function, because
+    `work_loop` imports them at module level (#1216).
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    def session_for(job: dict):
+        @asynccontextmanager
+        async def ctx():
+            # The discipline flag, armed for the job's session. Arming is
+            # safe because an executor that reaches the egress floor owns its
+            # transactions and runs with no job session open.
+            with transaction_discipline():
+                async with maker() as session:
+                    async with session.begin():
+                        await apply_gucs(
+                            session,
+                            tenant_id=str(job.get("workspace_id") or ""),
+                            actor_kind="system",
+                        )
+                        yield session
+
+        return ctx()
+
+    return session_for
+
+
+def poller_session_factory(engine, tenant_id: str):
+    """Sessions for the outbox poller with the GUC invariant pre-applied.
+
+    The poller opens its own transaction per tick and commits it; SET LOCAL
+    inside that transaction is what keeps pool reuse safe (`apply_gucs`).
+    Lives here beside `apply_gucs` for the same reason `make_session_for`
+    does (#1216).
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def factory():
+        # The discipline flag, armed for each poller session. The refresh
+        # executor's three phases each take one of these; arming here is
+        # what makes its provider call floor-checked as outside any
+        # transaction.
+        with transaction_discipline():
+            async with maker() as session:
+                await apply_gucs(session, tenant_id=tenant_id, actor_kind="system")
+                yield session
+
+    return factory
+
+
+#: Who is this connection, and does that login bypass row-level security?
+#: Asked of the catalog, never read off the URL: the configured login and the
+#: effective one can disagree, and only the effective one decides whether
+#: `p_tenant` policies apply (#751).
+CONNECTION_ROLE_SQL = (
+    "SELECT current_user::text AS login,"
+    " COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user),"
+    " false) AS bypassrls"
+)
+
+
+async def connection_role(conn) -> Optional[dict]:
+    """`{"user": <login>, "bypassrls": <bool>}` for *conn*, or None.
+
+    Diagnostic, so it never raises: the API samples it once at startup and the
+    worker on its election connection, and neither may die because a catalog
+    read failed. A None is reported as unknown, not invented as safe.
+    """
+    try:
+        row = (await conn.execute(text(CONNECTION_ROLE_SQL))).first()
+    except Exception as exc:  # noqa: BLE001 — see docstring: diagnostic only
+        logger.warning("connection role could not be sampled: %s", exc)
+        return None
+    if row is None:
+        return None
+    return {"user": str(row[0]), "bypassrls": bool(row[1])}

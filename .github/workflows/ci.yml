@@ -1,0 +1,282 @@
+# CONTINUOUS INTEGRATION
+# This workflow runs lint, tests, and security checks on every push/PR.
+# Runs on GitHub's cloud runners (ubuntu-latest).
+# Production deploys via Railway (auto-deploy from main branch).
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop, 'feature/*']
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      # Scope is the whole repository, not a directory list. tests/ is linted
+      # for the same reason src/ is: a test that does not run is not a weaker
+      # defect than code that does not work, and the pyflakes rules the repo
+      # selects (F811 in particular) catch a shadowed definition that no test
+      # count, tick or coverage number can show. The same argument reaches
+      # every other directory, which is why none are named — an allowlist here
+      # is complete only until the next directory lands, and it goes stale
+      # without turning anything red. Exclusions live in ruff.toml.
+      - name: Run ruff check
+        run: ruff check . --output-format=github
+
+      - name: Run ruff format check
+        run: ruff format . --check
+
+  telegram-ratchet:
+    name: Telegram ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # No install step, deliberately: the ratchet is stdlib-only, so it runs
+      # before and independently of the application's dependency tree. A gate
+      # that needs the app installed to tell you the app is coupled is a gate
+      # that goes dark exactly when the dependency tree is what broke.
+      #
+      # Its own job rather than a step inside Lint, because a ratchet's whole
+      # purpose is visibility: "Telegram ratchet" names the failure on the
+      # PR page, where a red step buried in Lint would read as a formatting nit.
+      - name: Run the Telegram ratchet
+        run: python scripts/telegram_ratchet.py
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: storyline_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest-cov
+
+      - name: Install package
+        # the CLI extra too: `storydump_cli` is tested here, with its real
+        # credential-store dependency rather than whatever is around
+        run: pip install -e '.[cli]'
+
+      - name: Install local media probe tools
+        # Tests fail if tools are absent; actual deployment versions are proven
+        # separately in the pinned Nixpacks image, not inferred from this runner.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Generate test encryption key
+        id: gen-key
+        run: echo "key=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests with coverage
+        env:
+          # Database configuration (individual components for Settings class)
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: test_user
+          DB_PASSWORD: test_password
+          DB_NAME: storyline_ai
+          TEST_DB_NAME: storyline_test
+          # Security — generate a fresh Fernet key per run instead of
+          # committing a static test key in the workflow file.
+          ENCRYPTION_KEY: ${{ steps.gen-key.outputs.key }}
+          # Integration coverage is MANDATORY here (#758). Without this, a
+          # service container that fails to come up makes every DB-backed test
+          # SKIP, and the run still exits 0 and shows a green tick — a pass
+          # that never executed the tests it claims to cover.
+          REQUIRE_TEST_DATABASE: "1"
+          LOG_LEVEL: DEBUG
+        run: |
+          pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing
+
+      # Test is a required check on main, and the upload gates nothing (no
+      # coverage threshold). `fail_ci_if_error: false` does not cover the
+      # action itself crashing, for example on a TLS handshake failure to
+      # Codecov. An outage at Codecov must not block every merge.
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        continue-on-error: true
+        # A stalled upload would otherwise hold Test, and the merge or deploy
+        # waiting on it, until the job's six-hour default timeout.
+        timeout-minutes: 5
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install pip-audit bandit
+
+      # This step GATES: a known-vulnerable pin fails the job. A real
+      # suppression carries the real advisory id and a comment saying why it
+      # does not apply; a placeholder is not a suppression, it is a disabled
+      # check.
+      - name: Run pip-audit
+        run: pip-audit -r requirements.txt
+
+      # Advisory: bandit's findings on this tree have not been triaged,
+      # so it reports without gating. pip-audit above DOES gate — a
+      # known-vulnerable pin fails CI.
+      - name: Run bandit security scan
+        run: bandit -r src/ storydump_cli/ -ll -ii --format json --output bandit-report.json || true
+        continue-on-error: true
+
+      - name: Upload bandit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-security-report
+          path: bandit-report.json
+        if: always()
+
+  front-end:
+    name: Front End
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: landing
+
+    # NO `paths:` FILTER, and that is the load-bearing choice rather than an
+    # omission (#1068/#1052).
+    #
+    # A filtered workflow is never SCHEDULED on a PR that touches none of its
+    # paths, so a check that is also REQUIRED can never arrive and the PR
+    # strands forever. Leaving this job unfiltered keeps the check always
+    # PRESENT, which is what makes it safe to require. Every job in this
+    # workflow runs on every PR.
+    #
+    # Running it on a backend-only PR costs runner time in parallel with
+    # `Test`, so it adds nothing to the wall-clock a person waits for, and a
+    # gate that costs nothing is a gate nobody routes around.
+    #
+    # REQUIRED: the `main` ruleset requires a pull request and every job in
+    # this workflow by name (Lint, Telegram ratchet, Test, Security
+    # Scan, Front End, Changelog Check). Renaming a job here strands every
+    # open PR on a check that never arrives, so a rename changes the ruleset
+    # in the same breath.
+    #
+    # `next build` is deliberately ABSENT: Vercel already builds every PR, so
+    # duplicating it here buys nothing but minutes.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned rather than floating, and mirrored by `engines` in
+          # landing/package.json so CI and a laptop agree on the contract.
+          node-version: '22'
+          cache: npm
+          # The lockfile is in landing/, not at the repo root; without this the
+          # cache key is computed from a file that does not exist and the
+          # install is uncached on every run.
+          cache-dependency-path: landing/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The package's own scripts where they exist, so a change to what `test`
+      # or `lint` means follows here without editing this file. `tsc` has no
+      # script and is invoked directly.
+      - name: Run tests
+        run: npm test
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      # This step GATES, like pip-audit in Security Scan: a known advisory
+      # against a runtime dependency, direct or transitive, fails the job.
+      # `--omit=dev` scopes it to a production install; the devDependencies
+      # it skips include the build's Tailwind toolchain and the CSS it
+      # bundles, not just test and lint tooling. There is no `--audit-level`:
+      # npm audit cannot suppress one advisory, so a severity floor would hide
+      # every advisory below it. Clear one with a bump or an `overrides` pin
+      # in landing/package.json; one with no fixed release is silenced only by
+      # an edit here, under pip-audit's suppression rule above. It lives here,
+      # not in Security Scan, because Node and landing/ are set up here.
+      #
+      # It runs whether or not the lockfile changed, so a newly published
+      # advisory turns every PR red until a bump lands. It runs last so a
+      # PR's own tests, typecheck and lint still report.
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev
+
+  changelog-check:
+    name: Changelog Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # A PR adds its entry as a new file in changelog.d/ and never edits
+      # CHANGELOG.md, so no two PRs change the same lines; a docs-only PR needs
+      # no fragment. changelog.d/README.md states the rule; the script holds it.
+      - name: Check the changelog fragment
+        run: python scripts/changelog_fragments.py check --base "origin/${{ github.base_ref }}"

@@ -1,0 +1,32 @@
+# Ruff configuration.
+#
+# `select` is declared explicitly rather than inherited from ruff's built-in
+# defaults. Ruff's default rule set is not a stable contract — it expands
+# between releases, so a project that relies on it has a lint policy defined by
+# whichever ruff version CI happened to install that day, not by the project.
+#
+# These are the rules the codebase is held to. Widening the set is a deliberate
+# change: add the rule here, fix the findings, and land both together.
+
+target-version = "py310"
+
+# Scope is the whole repository, declared here rather than as a directory list
+# in CI. An allowlist of directories is correct only until the next directory
+# is added, and it fails silently when it stops being complete: a directory
+# left off the list goes unlinted while the Lint check stays green.
+#
+# `extend-exclude` rather than `exclude` — plain `exclude` REPLACES ruff's
+# built-in exclusions, which would enlist `.venv/`, `build/` and friends.
+#
+# Markdown is excluded because ruff formats Python code blocks inside `.md`,
+# and the code in this repo's documentation is illustrative: snippets are
+# deliberately partial, so gating them would fail a code lint on a prose edit.
+extend-exclude = ["*.md"]
+
+[lint]
+select = [
+    "E4",  # pycodestyle — imports
+    "E7",  # pycodestyle — statement/comparison errors
+    "E9",  # pycodestyle — syntax/IO errors
+    "F",   # pyflakes — undefined names, unused imports
+]

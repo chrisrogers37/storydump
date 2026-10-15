@@ -1,0 +1,233 @@
+"""Token encryption utility for secure database storage.
+
+The key ring comes from ENCRYPTION_KEY, a single Fernet key, or from
+ENCRYPTION_KEYS (comma-separated, newest first), which takes precedence and
+is how a key is rotated (MultiFernet).
+"""
+
+import binascii
+from typing import Optional
+
+from cryptography.fernet import Fernet, MultiFernet, InvalidToken
+
+from src.config.settings import settings
+from src.utils.logger import logger
+
+
+class TokenEncryption:
+    """
+    Encrypt/decrypt sensitive tokens for database storage.
+
+    Uses MultiFernet for key rotation support. Encrypts with the primary
+    (first) key; decrypts by trying all keys in order.
+
+    Key configuration (checked in order):
+        1. ENCRYPTION_KEYS — comma-separated Fernet keys, newest first (rotation)
+        2. ENCRYPTION_KEY  — a single key, wrapped as MultiFernet
+
+    Rotation workflow:
+        1. Generate new key: TokenEncryption.generate_key()
+        2. Prepend to ENCRYPTION_KEYS: NEW_KEY,OLD_KEY
+        3. Deploy — new tokens encrypt with NEW_KEY, old tokens still decrypt
+        4. Enqueue the `reencrypt_credentials` system job (registered; its executor is
+           not yet built) to re-encrypt every row with NEW_KEY
+        5. Remove OLD_KEY from ENCRYPTION_KEYS
+
+    Usage:
+        encryption = TokenEncryption()
+        encrypted = encryption.encrypt("my_secret_token")
+        decrypted = encryption.decrypt(encrypted)
+    """
+
+    _instance: Optional["TokenEncryption"] = None
+    _cipher: Optional[MultiFernet] = None
+
+    def __new__(cls) -> "TokenEncryption":
+        """Singleton pattern - reuse cipher instance."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    _fernets: Optional[list] = None
+
+    def __init__(self):
+        """Initialize encryption cipher with key(s) from settings."""
+        if self._cipher is not None:
+            return
+
+        # A variable saved blank is absent, as every blank variable here is —
+        # so a blank rotation list never shadows a working ENCRYPTION_KEY.
+        keys_raw = (getattr(settings, "ENCRYPTION_KEYS", None) or "").strip()
+        single_key = (settings.ENCRYPTION_KEY or "").strip()
+
+        if keys_raw:
+            source = "ENCRYPTION_KEYS"
+            entries = keys_raw.split(",")
+        elif single_key:
+            source = "ENCRYPTION_KEY"
+            entries = [single_key]
+        else:
+            # Both roots print this at a refused boot (#1401), so the remedy is
+            # the production one first: a NEW key boots and then cannot read a
+            # single stored credential.
+            raise ValueError(
+                "ENCRYPTION_KEY not configured (nor ENCRYPTION_KEYS). Where credentials"
+                " are already stored, set the key they were encrypted with — a newly"
+                " generated key cannot read them. Only on a first install, generate"
+                ' one with: python -c "from src.utils.encryption import TokenEncryption;'
+                ' print(TokenEncryption.generate_key())"'
+            )
+
+        # The message names the variable that was read and, for the rotation
+        # list, the entry's position as the operator counts it — never a value.
+        fernets, bad = [], None
+        for position, entry in enumerate(entries, 1):
+            key = entry.strip()
+            if not key:
+                continue
+            try:
+                fernets.append(Fernet(key.encode()))
+            except (ValueError, binascii.Error) as e:
+                # A byte the environment could not decode fails to encode, and
+                # the codec's error quotes it — so it is not repeated.
+                why = (
+                    "it holds an undecodable byte"
+                    if isinstance(e, UnicodeError)
+                    else str(e)
+                )
+                bad = (
+                    f"entry {position} of {len(entries)} is not a Fernet key: {why}"
+                    if source == "ENCRYPTION_KEYS"
+                    else why
+                )
+                break
+        # Raised OUTSIDE the handler, as `src/config/settings.py` does and for its
+        # reason: `from None` only hides the codec's error from a rendered
+        # traceback, and as `__context__` it would still carry the whole key
+        # (`UnicodeEncodeError.object`).
+        if bad is not None:
+            raise ValueError(f"Invalid {source} format: {bad}")
+        if not fernets:
+            raise ValueError(f"Invalid {source} format: it names no key")
+        self._fernets = fernets
+        self._cipher = MultiFernet(fernets)
+
+    def encrypt(self, plaintext: str) -> str:
+        """
+        Encrypt a token with the primary (first) key.
+
+        Args:
+            plaintext: The sensitive token to encrypt
+
+        Returns:
+            Base64-encoded encrypted string (safe for database storage)
+        """
+        if not plaintext:
+            raise ValueError("Cannot encrypt empty string")
+
+        return self._cipher.encrypt(plaintext.encode()).decode()
+
+    def decrypt(self, ciphertext: str) -> str:
+        """
+        Decrypt a token, trying all configured keys in order.
+
+        First attempts MultiFernet (fast path). On failure, falls back to
+        trying each individual Fernet key so that a token encrypted with
+        any key in ENCRYPTION_KEYS can be recovered.
+
+        Args:
+            ciphertext: The encrypted token from database
+
+        Returns:
+            Original plaintext token
+
+        Raises:
+            ValueError: If decryption fails with all keys or data is corrupted
+        """
+        if not ciphertext:
+            raise ValueError("Cannot decrypt empty string")
+
+        ciphertext_bytes = ciphertext.encode()
+
+        # Fast path: MultiFernet tries all keys internally.
+        try:
+            return self._cipher.decrypt(ciphertext_bytes).decode()
+        except InvalidToken:
+            pass
+
+        # Explicit per-key fallback — handles edge cases where MultiFernet
+        # gives up early (e.g. version-byte mismatch before HMAC check).
+        for i, fernet in enumerate(self._fernets):
+            try:
+                result = fernet.decrypt(ciphertext_bytes).decode()
+                logger.info("Token decrypted by key index %s (per-key fallback)", i)
+                return result
+            except InvalidToken:
+                continue
+
+        key_count = len(self._fernets)
+        logger.error("Token decryption failed — all %s keys exhausted", key_count)
+        raise ValueError(
+            f"Failed to decrypt token. "
+            f"None of the {key_count} configured encryption keys can "
+            f"decrypt this data, or the data is corrupted."
+        )
+
+    def rotate(self, ciphertext: str) -> str:
+        """
+        Re-encrypts with the primary key unconditionally.
+
+        Output ciphertext will differ from input due to fresh IV and
+        timestamp.
+
+        Args:
+            ciphertext: The encrypted token to re-encrypt
+
+        Returns:
+            Token re-encrypted with the primary key
+
+        Raises:
+            ValueError: If decryption fails (no matching key or corrupted data)
+
+        Waits on the `reencrypt_credentials` executor
+        (`work_loop.UNBUILT_KINDS`); driven only by
+        `tests/src/utils/test_encryption.py` (#1325).
+        """
+        if not ciphertext:
+            raise ValueError("Cannot rotate empty string")
+
+        try:
+            return self._cipher.rotate(ciphertext.encode()).decode()
+        except InvalidToken:
+            logger.error("Token rotation failed - no matching key or corrupted data")
+            raise ValueError(
+                "Failed to rotate token. "
+                "This may indicate none of the configured keys can decrypt "
+                "this data, or the data is corrupted."
+            )
+
+    @staticmethod
+    def generate_key() -> str:
+        """
+        Generate a new encryption key.
+
+        Run this once during initial setup and store the result in .env:
+            ENCRYPTION_KEY=<generated_key>
+
+        For rotation, prepend the new key to ENCRYPTION_KEYS:
+            ENCRYPTION_KEYS=<new_key>,<old_key>
+
+        Returns:
+            A new Fernet key (base64-encoded, 44 characters)
+        """
+        return Fernet.generate_key().decode()
+
+    @classmethod
+    def reset(cls) -> None:
+        """
+        Reset the singleton instance.
+
+        Useful for testing or when encryption key changes.
+        """
+        cls._instance = None
+        cls._cipher = None

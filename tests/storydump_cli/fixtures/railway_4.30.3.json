@@ -1,0 +1,907 @@
+{
+  "railway_version": "4.30.3",
+  "captured": "synthetic",
+  "how": "Synthetic data in the shape of `railway status --json` (whole) and `railway deployment list --service <svc> --environment production --json` (the two newest, whole objects): placeholder ids and example names.",
+  "status": {
+    "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "name": "storydump",
+    "deletedAt": null,
+    "workspace": {
+      "name": "example"
+    },
+    "environments": {
+      "edges": [
+        {
+          "node": {
+            "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "name": "production",
+            "canAccess": true,
+            "deletedAt": null,
+            "serviceInstances": {
+              "edges": [
+                {
+                  "node": {
+                    "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                    "serviceId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "serviceName": "worker",
+                    "environmentId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "latestDeployment": {
+                      "canRedeploy": true,
+                      "id": "11111111-1111-4111-8111-111111111111",
+                      "meta": {
+                        "branch": "main",
+                        "buildOnly": false,
+                        "commitAuthor": "Example User",
+                        "commitHash": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+                        "commitMessage": "Add the example feature\n\nA short description of the change.",
+                        "configFile": "/railway.toml",
+                        "duration": 0,
+                        "fileServiceManifest": {
+                          "build": {
+                            "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                            "builder": "NIXPACKS"
+                          },
+                          "deploy": {
+                            "drainingSeconds": 60,
+                            "healthcheckPath": "/health",
+                            "healthcheckTimeout": 30,
+                            "preDeployCommand": [
+                              "python -m scripts.migration_runner apply"
+                            ],
+                            "restartPolicyMaxRetries": 10,
+                            "restartPolicyType": "ON_FAILURE"
+                          }
+                        },
+                        "imageDigest": "sha256:a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+                        "logsV2": true,
+                        "nixpacksProviders": [],
+                        "plan": "pro",
+                        "propertyFileMapping": {
+                          "build.buildCommand": "$.build.buildCommand",
+                          "build.builder": "$.build.builder",
+                          "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                          "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                          "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                          "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                          "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                          "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                        },
+                        "reason": "deploy",
+                        "repo": "example-org/storydump",
+                        "rootDirectory": null,
+                        "runtime": "V2",
+                        "serviceManifest": {
+                          "build": {
+                            "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                            "buildEnvironment": "V3",
+                            "builder": "NIXPACKS",
+                            "dockerfilePath": null,
+                            "nixpacksConfigPath": null,
+                            "nixpacksPlan": null,
+                            "watchPatterns": []
+                          },
+                          "deploy": {
+                            "cronSchedule": null,
+                            "drainingSeconds": 60,
+                            "healthcheckPath": "/health",
+                            "healthcheckTimeout": 30,
+                            "ipv6EgressEnabled": false,
+                            "limitOverride": null,
+                            "multiRegionConfig": {
+                              "us-east4-eqdc4a": {
+                                "numReplicas": 1
+                              }
+                            },
+                            "numReplicas": 1,
+                            "overlapSeconds": null,
+                            "preDeployCommand": [
+                              "python -m scripts.migration_runner apply"
+                            ],
+                            "preDeployTimeoutSeconds": null,
+                            "region": null,
+                            "registryCredentials": null,
+                            "requiredMountPath": null,
+                            "restartPolicyMaxRetries": 10,
+                            "restartPolicyType": "ON_FAILURE",
+                            "runtime": "V2",
+                            "sleepApplication": false,
+                            "startCommand": "python -m src.main",
+                            "useLegacyStacker": false
+                          }
+                        },
+                        "volumeMounts": []
+                      },
+                      "status": "SUCCESS",
+                      "createdAt": "2026-01-02T03:04:05.000Z",
+                      "deploymentStopped": false
+                    },
+                    "activeDeployments": [
+                      {
+                        "id": "11111111-1111-4111-8111-111111111111",
+                        "status": "SUCCESS",
+                        "createdAt": "2026-01-02T03:04:05.000Z",
+                        "meta": {
+                          "branch": "main",
+                          "buildOnly": false,
+                          "commitAuthor": "Example User",
+                          "commitHash": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+                          "commitMessage": "Add the example feature\n\nA short description of the change.",
+                          "configFile": "/railway.toml",
+                          "duration": 0,
+                          "fileServiceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "builder": "NIXPACKS"
+                            },
+                            "deploy": {
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE"
+                            }
+                          },
+                          "imageDigest": "sha256:a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+                          "logsV2": true,
+                          "nixpacksProviders": [],
+                          "plan": "pro",
+                          "propertyFileMapping": {
+                            "build.buildCommand": "$.build.buildCommand",
+                            "build.builder": "$.build.builder",
+                            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                          },
+                          "reason": "deploy",
+                          "repo": "example-org/storydump",
+                          "rootDirectory": null,
+                          "runtime": "V2",
+                          "serviceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "buildEnvironment": "V3",
+                              "builder": "NIXPACKS",
+                              "dockerfilePath": null,
+                              "nixpacksConfigPath": null,
+                              "nixpacksPlan": null,
+                              "watchPatterns": []
+                            },
+                            "deploy": {
+                              "cronSchedule": null,
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "ipv6EgressEnabled": false,
+                              "limitOverride": null,
+                              "multiRegionConfig": {
+                                "us-east4-eqdc4a": {
+                                  "numReplicas": 1
+                                }
+                              },
+                              "numReplicas": 1,
+                              "overlapSeconds": null,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "preDeployTimeoutSeconds": null,
+                              "region": null,
+                              "registryCredentials": null,
+                              "requiredMountPath": null,
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE",
+                              "runtime": "V2",
+                              "sleepApplication": false,
+                              "startCommand": "python -m src.main",
+                              "useLegacyStacker": false
+                            }
+                          },
+                          "volumeMounts": []
+                        }
+                      }
+                    ],
+                    "source": {
+                      "repo": "example-org/storydump",
+                      "image": null
+                    },
+                    "domains": {
+                      "serviceDomains": [],
+                      "customDomains": []
+                    },
+                    "cronSchedule": null,
+                    "nextCronRunAt": null,
+                    "startCommand": "python -m src.main"
+                  }
+                },
+                {
+                  "node": {
+                    "id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+                    "serviceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                    "serviceName": "storydump",
+                    "environmentId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "latestDeployment": {
+                      "canRedeploy": true,
+                      "id": "33333333-3333-4333-8333-333333333333",
+                      "meta": {
+                        "branch": "main",
+                        "buildOnly": false,
+                        "commitAuthor": "Example User",
+                        "commitHash": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+                        "commitMessage": "Add the example feature\n\nA short description of the change.",
+                        "configFile": "/railway.toml",
+                        "duration": 0,
+                        "fileServiceManifest": {
+                          "build": {
+                            "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                            "builder": "NIXPACKS"
+                          },
+                          "deploy": {
+                            "drainingSeconds": 60,
+                            "healthcheckPath": "/health",
+                            "healthcheckTimeout": 30,
+                            "preDeployCommand": [
+                              "python -m scripts.migration_runner apply"
+                            ],
+                            "restartPolicyMaxRetries": 10,
+                            "restartPolicyType": "ON_FAILURE"
+                          }
+                        },
+                        "imageDigest": "sha256:e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718",
+                        "logsV2": true,
+                        "nixpacksProviders": [],
+                        "plan": "pro",
+                        "propertyFileMapping": {
+                          "build.buildCommand": "$.build.buildCommand",
+                          "build.builder": "$.build.builder",
+                          "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                          "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                          "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                          "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                          "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                          "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                        },
+                        "reason": "deploy",
+                        "repo": "example-org/storydump",
+                        "rootDirectory": null,
+                        "runtime": "V2",
+                        "serviceManifest": {
+                          "build": {
+                            "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                            "buildEnvironment": "V3",
+                            "builder": "NIXPACKS",
+                            "dockerfilePath": null,
+                            "nixpacksConfigPath": null,
+                            "nixpacksPlan": null,
+                            "watchPatterns": []
+                          },
+                          "deploy": {
+                            "cronSchedule": null,
+                            "drainingSeconds": 60,
+                            "healthcheckPath": "/health",
+                            "healthcheckTimeout": 30,
+                            "ipv6EgressEnabled": false,
+                            "limitOverride": null,
+                            "multiRegionConfig": {
+                              "us-east4-eqdc4a": {
+                                "numReplicas": 1
+                              }
+                            },
+                            "numReplicas": 1,
+                            "overlapSeconds": null,
+                            "preDeployCommand": [
+                              "python -m scripts.migration_runner apply"
+                            ],
+                            "preDeployTimeoutSeconds": null,
+                            "region": null,
+                            "registryCredentials": null,
+                            "requiredMountPath": null,
+                            "restartPolicyMaxRetries": 10,
+                            "restartPolicyType": "ON_FAILURE",
+                            "runtime": "V2",
+                            "sleepApplication": false,
+                            "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+                            "useLegacyStacker": false
+                          }
+                        },
+                        "volumeMounts": []
+                      },
+                      "status": "SUCCESS",
+                      "createdAt": "2026-01-02T03:04:05.000Z",
+                      "deploymentStopped": false
+                    },
+                    "activeDeployments": [
+                      {
+                        "id": "33333333-3333-4333-8333-333333333333",
+                        "status": "SUCCESS",
+                        "createdAt": "2026-01-02T03:04:05.000Z",
+                        "meta": {
+                          "branch": "main",
+                          "buildOnly": false,
+                          "commitAuthor": "Example User",
+                          "commitHash": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+                          "commitMessage": "Add the example feature\n\nA short description of the change.",
+                          "configFile": "/railway.toml",
+                          "duration": 0,
+                          "fileServiceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "builder": "NIXPACKS"
+                            },
+                            "deploy": {
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE"
+                            }
+                          },
+                          "imageDigest": "sha256:e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718",
+                          "logsV2": true,
+                          "nixpacksProviders": [],
+                          "plan": "pro",
+                          "propertyFileMapping": {
+                            "build.buildCommand": "$.build.buildCommand",
+                            "build.builder": "$.build.builder",
+                            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                          },
+                          "reason": "deploy",
+                          "repo": "example-org/storydump",
+                          "rootDirectory": null,
+                          "runtime": "V2",
+                          "serviceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "buildEnvironment": "V3",
+                              "builder": "NIXPACKS",
+                              "dockerfilePath": null,
+                              "nixpacksConfigPath": null,
+                              "nixpacksPlan": null,
+                              "watchPatterns": []
+                            },
+                            "deploy": {
+                              "cronSchedule": null,
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "ipv6EgressEnabled": false,
+                              "limitOverride": null,
+                              "multiRegionConfig": {
+                                "us-east4-eqdc4a": {
+                                  "numReplicas": 1
+                                }
+                              },
+                              "numReplicas": 1,
+                              "overlapSeconds": null,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "preDeployTimeoutSeconds": null,
+                              "region": null,
+                              "registryCredentials": null,
+                              "requiredMountPath": null,
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE",
+                              "runtime": "V2",
+                              "sleepApplication": false,
+                              "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+                              "useLegacyStacker": false
+                            }
+                          },
+                          "volumeMounts": []
+                        }
+                      },
+                      {
+                        "id": "44444444-4444-4444-8444-444444444444",
+                        "status": "SUCCESS",
+                        "createdAt": "2026-01-01T03:04:05.000Z",
+                        "meta": {
+                          "branch": "main",
+                          "buildOnly": false,
+                          "commitAuthor": "Example User",
+                          "commitHash": "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c",
+                          "commitMessage": "Fix the example bug\n\nA short description of the fix.",
+                          "configFile": "/railway.toml",
+                          "duration": 12000,
+                          "fileServiceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "builder": "NIXPACKS"
+                            },
+                            "deploy": {
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE"
+                            }
+                          },
+                          "imageDigest": "sha256:2938475629384756293847562938475629384756293847562938475629384756",
+                          "isDraining": true,
+                          "logsV2": true,
+                          "nixpacksProviders": [],
+                          "plan": "pro",
+                          "propertyFileMapping": {
+                            "build.buildCommand": "$.build.buildCommand",
+                            "build.builder": "$.build.builder",
+                            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+                            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+                            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+                            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+                            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+                            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+                          },
+                          "reason": "deploy",
+                          "repo": "example-org/storydump",
+                          "rootDirectory": null,
+                          "runtime": "V2",
+                          "serviceManifest": {
+                            "build": {
+                              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+                              "buildEnvironment": "V3",
+                              "builder": "NIXPACKS",
+                              "dockerfilePath": null,
+                              "nixpacksConfigPath": null,
+                              "nixpacksPlan": null,
+                              "watchPatterns": []
+                            },
+                            "deploy": {
+                              "cronSchedule": null,
+                              "drainingSeconds": 60,
+                              "healthcheckPath": "/health",
+                              "healthcheckTimeout": 30,
+                              "ipv6EgressEnabled": false,
+                              "limitOverride": null,
+                              "multiRegionConfig": {
+                                "us-east4-eqdc4a": {
+                                  "numReplicas": 1
+                                }
+                              },
+                              "numReplicas": 1,
+                              "overlapSeconds": null,
+                              "preDeployCommand": [
+                                "python -m scripts.migration_runner apply"
+                              ],
+                              "preDeployTimeoutSeconds": null,
+                              "region": null,
+                              "registryCredentials": null,
+                              "requiredMountPath": null,
+                              "restartPolicyMaxRetries": 10,
+                              "restartPolicyType": "ON_FAILURE",
+                              "runtime": "V2",
+                              "sleepApplication": false,
+                              "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+                              "useLegacyStacker": false
+                            }
+                          },
+                          "volumeMounts": []
+                        }
+                      }
+                    ],
+                    "source": {
+                      "repo": "example-org/storydump",
+                      "image": null
+                    },
+                    "domains": {
+                      "serviceDomains": [
+                        {
+                          "id": "55555555-5555-4555-8555-555555555555",
+                          "domain": "example-production.up.railway.app",
+                          "targetPort": null
+                        }
+                      ],
+                      "customDomains": [
+                        {
+                          "id": "66666666-6666-4666-8666-666666666666",
+                          "domain": "api.example.test",
+                          "targetPort": 8080
+                        }
+                      ]
+                    },
+                    "cronSchedule": null,
+                    "nextCronRunAt": null,
+                    "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}"
+                  }
+                }
+              ]
+            },
+            "volumeInstances": {
+              "edges": []
+            }
+          }
+        }
+      ]
+    },
+    "services": {
+      "edges": [
+        {
+          "node": {
+            "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "name": "worker"
+          }
+        },
+        {
+          "node": {
+            "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "name": "storydump"
+          }
+        }
+      ]
+    }
+  },
+  "deployments": {
+    "worker": [
+      {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "status": "SUCCESS",
+        "createdAt": "2026-01-02T03:04:05.000Z",
+        "meta": {
+          "branch": "main",
+          "buildOnly": false,
+          "commitAuthor": "Example User",
+          "commitHash": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+          "commitMessage": "Add the example feature\n\nA short description of the change.",
+          "configFile": "/railway.toml",
+          "duration": 0,
+          "fileServiceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "builder": "NIXPACKS"
+            },
+            "deploy": {
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE"
+            }
+          },
+          "imageDigest": "sha256:a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+          "logsV2": true,
+          "nixpacksProviders": [],
+          "plan": "pro",
+          "propertyFileMapping": {
+            "build.buildCommand": "$.build.buildCommand",
+            "build.builder": "$.build.builder",
+            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+          },
+          "reason": "deploy",
+          "repo": "example-org/storydump",
+          "rootDirectory": null,
+          "runtime": "V2",
+          "serviceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "buildEnvironment": "V3",
+              "builder": "NIXPACKS",
+              "dockerfilePath": null,
+              "nixpacksConfigPath": null,
+              "nixpacksPlan": null,
+              "watchPatterns": []
+            },
+            "deploy": {
+              "cronSchedule": null,
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "ipv6EgressEnabled": false,
+              "limitOverride": null,
+              "multiRegionConfig": {
+                "us-east4-eqdc4a": {
+                  "numReplicas": 1
+                }
+              },
+              "numReplicas": 1,
+              "overlapSeconds": null,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "preDeployTimeoutSeconds": null,
+              "region": null,
+              "registryCredentials": null,
+              "requiredMountPath": null,
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE",
+              "runtime": "V2",
+              "sleepApplication": false,
+              "startCommand": "python -m src.main",
+              "useLegacyStacker": false
+            }
+          },
+          "volumeMounts": []
+        }
+      },
+      {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "status": "REMOVED",
+        "createdAt": "2026-01-01T03:04:05.000Z",
+        "meta": {
+          "branch": "main",
+          "buildOnly": false,
+          "commitAuthor": "Example User",
+          "commitHash": "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c",
+          "commitMessage": "Fix the example bug\n\nA short description of the fix.",
+          "configFile": "/railway.toml",
+          "duration": 12000,
+          "fileServiceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "builder": "NIXPACKS"
+            },
+            "deploy": {
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE"
+            }
+          },
+          "imageDigest": "sha256:0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c",
+          "isDraining": true,
+          "logsV2": true,
+          "nixpacksProviders": [],
+          "plan": "pro",
+          "propertyFileMapping": {
+            "build.buildCommand": "$.build.buildCommand",
+            "build.builder": "$.build.builder",
+            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+          },
+          "reason": "deploy",
+          "repo": "example-org/storydump",
+          "rootDirectory": null,
+          "runtime": "V2",
+          "serviceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "buildEnvironment": "V3",
+              "builder": "NIXPACKS",
+              "dockerfilePath": null,
+              "nixpacksConfigPath": null,
+              "nixpacksPlan": null,
+              "watchPatterns": []
+            },
+            "deploy": {
+              "cronSchedule": null,
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "ipv6EgressEnabled": false,
+              "limitOverride": null,
+              "multiRegionConfig": {
+                "us-east4-eqdc4a": {
+                  "numReplicas": 1
+                }
+              },
+              "numReplicas": 1,
+              "overlapSeconds": null,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "preDeployTimeoutSeconds": null,
+              "region": null,
+              "registryCredentials": null,
+              "requiredMountPath": null,
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE",
+              "runtime": "V2",
+              "sleepApplication": false,
+              "startCommand": "python -m src.main",
+              "useLegacyStacker": false
+            }
+          },
+          "volumeMounts": []
+        }
+      }
+    ],
+    "storydump": [
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "status": "SUCCESS",
+        "createdAt": "2026-01-02T03:04:05.000Z",
+        "meta": {
+          "branch": "main",
+          "buildOnly": false,
+          "commitAuthor": "Example User",
+          "commitHash": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+          "commitMessage": "Add the example feature\n\nA short description of the change.",
+          "configFile": "/railway.toml",
+          "duration": 0,
+          "fileServiceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "builder": "NIXPACKS"
+            },
+            "deploy": {
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE"
+            }
+          },
+          "imageDigest": "sha256:e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718e5f60718",
+          "logsV2": true,
+          "nixpacksProviders": [],
+          "plan": "pro",
+          "propertyFileMapping": {
+            "build.buildCommand": "$.build.buildCommand",
+            "build.builder": "$.build.builder",
+            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+          },
+          "reason": "deploy",
+          "repo": "example-org/storydump",
+          "rootDirectory": null,
+          "runtime": "V2",
+          "serviceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "buildEnvironment": "V3",
+              "builder": "NIXPACKS",
+              "dockerfilePath": null,
+              "nixpacksConfigPath": null,
+              "nixpacksPlan": null,
+              "watchPatterns": []
+            },
+            "deploy": {
+              "cronSchedule": null,
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "ipv6EgressEnabled": false,
+              "limitOverride": null,
+              "multiRegionConfig": {
+                "us-east4-eqdc4a": {
+                  "numReplicas": 1
+                }
+              },
+              "numReplicas": 1,
+              "overlapSeconds": null,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "preDeployTimeoutSeconds": null,
+              "region": null,
+              "registryCredentials": null,
+              "requiredMountPath": null,
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE",
+              "runtime": "V2",
+              "sleepApplication": false,
+              "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+              "useLegacyStacker": false
+            }
+          },
+          "volumeMounts": []
+        }
+      },
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "status": "SUCCESS",
+        "createdAt": "2026-01-01T03:04:05.000Z",
+        "meta": {
+          "branch": "main",
+          "buildOnly": false,
+          "commitAuthor": "Example User",
+          "commitHash": "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c",
+          "commitMessage": "Fix the example bug\n\nA short description of the fix.",
+          "configFile": "/railway.toml",
+          "duration": 12000,
+          "fileServiceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "builder": "NIXPACKS"
+            },
+            "deploy": {
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE"
+            }
+          },
+          "imageDigest": "sha256:2938475629384756293847562938475629384756293847562938475629384756",
+          "isDraining": true,
+          "logsV2": true,
+          "nixpacksProviders": [],
+          "plan": "pro",
+          "propertyFileMapping": {
+            "build.buildCommand": "$.build.buildCommand",
+            "build.builder": "$.build.builder",
+            "deploy.drainingSeconds": "$.deploy.drainingSeconds",
+            "deploy.healthcheckPath": "$.deploy.healthcheckPath",
+            "deploy.healthcheckTimeout": "$.deploy.healthcheckTimeout",
+            "deploy.preDeployCommand": "$.deploy.preDeployCommand",
+            "deploy.restartPolicyMaxRetries": "$.deploy.restartPolicyMaxRetries",
+            "deploy.restartPolicyType": "$.deploy.restartPolicyType"
+          },
+          "reason": "deploy",
+          "repo": "example-org/storydump",
+          "rootDirectory": null,
+          "runtime": "V2",
+          "serviceManifest": {
+            "build": {
+              "buildCommand": "pip install -r requirements.txt && pip install -e . && mkdir -p /tmp/media",
+              "buildEnvironment": "V3",
+              "builder": "NIXPACKS",
+              "dockerfilePath": null,
+              "nixpacksConfigPath": null,
+              "nixpacksPlan": null,
+              "watchPatterns": []
+            },
+            "deploy": {
+              "cronSchedule": null,
+              "drainingSeconds": 60,
+              "healthcheckPath": "/health",
+              "healthcheckTimeout": 30,
+              "ipv6EgressEnabled": false,
+              "limitOverride": null,
+              "multiRegionConfig": {
+                "us-east4-eqdc4a": {
+                  "numReplicas": 1
+                }
+              },
+              "numReplicas": 1,
+              "overlapSeconds": null,
+              "preDeployCommand": [
+                "python -m scripts.migration_runner apply"
+              ],
+              "preDeployTimeoutSeconds": null,
+              "region": null,
+              "registryCredentials": null,
+              "requiredMountPath": null,
+              "restartPolicyMaxRetries": 10,
+              "restartPolicyType": "ON_FAILURE",
+              "runtime": "V2",
+              "sleepApplication": false,
+              "startCommand": "uvicorn src.api.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+              "useLegacyStacker": false
+            }
+          },
+          "volumeMounts": []
+        }
+      }
+    ]
+  }
+}

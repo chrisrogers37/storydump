@@ -1,0 +1,1057 @@
+"""The Storydump API — the target tier's web surface (#1028, #1015).
+
+`create_app()` is a factory because an engine, a settings snapshot and a
+middleware stack assembled at import time cannot be handed a test double. The
+Procfile line is ``uvicorn src.api.app:app``, and the module exports `app`,
+built once at the bottom.
+
+What it mounts, and why each lives where it does:
+
+- ``/auth`` — sign-in hosted on the API, see `routes/auth.py`.
+- ``/api/v1`` — reads as resources, writes as the closed vocabulary, see
+  `routes/v1.py`.
+- ``/webhooks/telegram`` — the ingress route: the `/start` door (#1183)
+  and the group join path (#1242). A delivery is admitted only when it
+  carries the secret `TARGET_TELEGRAM_WEBHOOK_SECRET_TOKEN` holds (unset, every
+  delivery is refused), and is dispatched through `app.state.ingress`, which
+  the factory wires whenever an engine exists.
+  Chat-inbound COMMANDS are not dispatched (#854).
+- ``/health`` — Railway's probe (`railway.toml`): ok, the version and the
+  commit, nothing else; the operating details (whether a target engine is
+  configured, the login, the pool, the webhook) are ``/api/v1/ops/health``,
+  for `OPS_USER_IDS` alone. With ``/health/scheduling``,
+  ``/health/posting`` and ``/health/delivery``, see `routes/health.py`.
+
+The Mini App's URL, `/webapp/onboarding`, is answered with a redirect to the
+front end, because buttons already sent still navigate there (see
+`routes/retired.py`). There is deliberately no in-memory limiter (a
+process-local mutable singleton): pre-auth admission is the durable
+`rate_counters` ``preauth_ip`` scope inside the auth routes.
+
+The engine comes from `TARGET_DATABASE_URL` and from nothing else. Unset means
+``app.state.engine is None`` and every data route answers 503 naming the
+variable — never the settings-built URL, which on the deployed service points
+at nothing and on a misconfigured one would point at a legacy-shaped database
+(#1010's class of silent misdirection).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from contextlib import asynccontextmanager
+from typing import Mapping, Optional
+
+from sqlalchemy.exc import TimeoutError as PoolTimeout
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncEngine
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import ClientDisconnect
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+# `_TrustedHosts` and `_parse_host_port` are uvicorn's private parsing, used so
+# the edge-hop removal reads entries exactly as the walk does; the tests drive
+# both through `create_app`, so a uvicorn change that moves them fails there.
+from uvicorn.middleware.proxy_headers import (
+    ProxyHeadersMiddleware,
+    _parse_host_port,
+    _TrustedHosts,
+)
+
+from src.api.principal import BODY_TOO_LARGE_DETAIL, declared_length
+from src.api.routes.admissions import router as admissions_router
+from src.api.routes.auth import router as auth_router
+from src.api.routes.health import COMMIT_VAR, VERSION, AnswerCache
+from src.api.routes.health import router as health_router
+from src.api.routes.retired import router as retired_router
+from src.api.routes.v1 import IDEMPOTENCY_HEADER
+from src.api.routes.v1 import router as v1_router
+from src.api.routes.tokens import router as tokens_router
+from src.api.routes.ops import router as ops_router
+from src.api.routes import webhooks
+from src.api.routes.meta import router as meta_router
+from src.api.routes.public import WaitlistSlots, full_notices
+from src.api.routes.public import router as public_router
+from src.config.settings import parse_ops_user_ids, settings
+from src.exceptions.tenancy import (
+    CrossSiteRefused,
+    TenantResolutionError,
+    TokenRefused,
+)
+from src.services.target import (
+    archive_activation,
+    archive_composition,
+    email_sender,
+    oauth_states,
+    source_policy,
+)
+from src.services.target.commands import CommandNotBuilt, CommandRefused
+from src.services.target.connect_choice import ConnectChoiceRefused
+from src.services.target.health_reads import StatementTimedOut
+from src.services.target.instagram_sources import ArchiveRefused
+from src.services.target.invitations import InvitationRefused
+from src.services.target.category_mix import (
+    MixInvalid,
+    MixConflict,
+    MixProtocolRequired,
+    MixMembershipChange,
+    MixConversionUnavailable,
+)
+from src.services.target.provisioning import ProvisioningRefused
+from src.services.target.service_tokens import TokenArgsInvalid
+from src.services.target.unit_of_work import (
+    connection_role,
+    create_engine,
+    engine_url_from_env,
+    INGRESS_POOL_TIMEOUT_SEAM,
+    PoolWatch,
+)
+from src.services.target.vocabulary import DATABASE_URL_VAR, is_production
+from src.services.target.telegram_dispatch import TelegramDispatcher
+from src.services.target.webhook_ingress import AdmissionConflict, DeliveryReplayed
+from src.utils.logger import logger
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Standard security headers on every response. One strict policy for
+    every path: the Telegram Mini App exemption (frame-ancestors for
+    telegram.org) left with the Mini App."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=63072000; includeSubDomains"
+        )
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; frame-ancestors 'none'"
+        )
+        return response
+
+
+class DropAmbiguousForwardedForMiddleware:
+    """Drop X-Forwarded-For entirely when it arrives as more than one header.
+
+    A well-behaved single reverse proxy (the topology TRUSTED_PROXY_HOSTS
+    assumes) combines any inbound X-Forwarded-For into one string and appends
+    its own observed peer, producing exactly one outbound header. More than
+    one header instance reaching the origin means either the immediate proxy
+    did not behave that way, or the request took a shape a single-hop trust
+    model cannot interpret -- and there is no way to reconstruct, from the
+    flattened wire representation alone, which instance is genuinely the
+    trusted proxy's. Concatenating the instances is not a fix: whichever one
+    ends up last after concatenation still wins ProxyHeadersMiddleware's
+    right-to-left trust walk, so an attacker who controls ordering still wins.
+
+    So this drops the header instead of merging it, which makes
+    ProxyHeadersMiddleware fall back to the raw connecting peer -- the same
+    path it already takes when there is no X-Forwarded-For header at all.
+    Under normal operation behind a single well-behaved proxy this never
+    triggers; it exists for the anomalous case, and failing closed to the
+    shared edge IP beats failing open to an attacker-chosen identity. See #765.
+    """
+
+    _XFF = b"x-forwarded-for"
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "lifespan":
+            await self.app(scope, receive, send)
+            return
+
+        headers = list(scope.get("headers", []))
+        count = sum(1 for k, _ in headers if k.lower() == self._XFF)
+
+        if count > 1:
+            peer = scope.get("client")
+            logger.warning(
+                "Dropping X-Forwarded-For: %d header instances from peer %s "
+                "(ambiguous -- falling back to raw peer for trust attribution)",
+                count,
+                peer[0] if peer else "unknown",
+            )
+            scope["headers"] = [(k, v) for k, v in headers if k.lower() != self._XFF]
+
+        await self.app(scope, receive, send)
+
+
+class DropEdgeHopMiddleware:
+    """Remove the one hop Railway appends after the visitor (`EDGE_HOP_HOSTS`).
+
+    Behind Railway the edge's header reads `<visitor>, <hop>`, and the
+    trusted-proxy walk would stop at the hop: a public address, so every
+    visitor through it would share one set of limits. When the header's LAST
+    entry is in the hop ranges and something precedes it, this removes that
+    one entry and leaves the walk the rest. Once, by position: an unknown hop
+    is kept and keyed on, never skipped, and a second hop-range entry stays.
+
+    What it cannot tell apart is a hop from a client who itself holds a
+    hop-range address on a path where no hop is appended: that client's own
+    entry is removed and the walk reads the one before it. That entry is the
+    edge's own only while Railway's edge writes the header itself rather
+    than keeping a caller's value, which public reports describe but nothing
+    here has measured; were it kept, such a client could choose its address.
+    `EDGE_HOP_HOSTS` stays as narrow as the measured hops for that reason.
+
+    It needs no peer check of its own: the walk reads the header only from a
+    trusted proxy, and from anyone else ignores it, shortened or not. Runs
+    after the ambiguous-header drop, so there is at most one header to read.
+    The entry is parsed and matched by uvicorn's own helpers, as the walk
+    parses and matches it (a port or `[v6]:port` included).
+    """
+
+    _XFF = b"x-forwarded-for"
+
+    def __init__(self, app: ASGIApp, hop_hosts: list[str]) -> None:
+        self.app = app
+        self.hops = _TrustedHosts(hop_hosts)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "lifespan":
+            headers = scope.get("headers", [])
+            for i, (name, value) in enumerate(headers):
+                if name.lower() != self._XFF:
+                    continue
+                head, comma, last = value.rpartition(b",")
+                host, _ = _parse_host_port(last.decode("latin1").strip())
+                if comma and host in self.hops:
+                    headers = list(headers)
+                    headers[i] = (name, head)
+                    scope["headers"] = headers
+                break
+        await self.app(scope, receive, send)
+
+
+class BodySizeLimitMiddleware:
+    """Refuse a request body over *max_bytes* with 413, before a route reads it.
+
+    A declared Content-Length over the limit is refused before a byte is
+    read. A body without one is counted as it arrives: once the total passes
+    the limit the 413 goes out, the app is told the client disconnected — so
+    a route reading the body stops there — and nothing the app sends after
+    that reaches the client. Either way the connection is closed rather than
+    drained, so the rest of the body is never read.
+
+    The limit is the `API_REQUEST_BODY_MAX_BYTES` setting, which says why it
+    sits where it does; the Meta callbacks keep a tighter cap of their own
+    (`routes/meta.py`).
+    """
+
+    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        declared = declared_length(scope["headers"])
+        if declared is not None and declared > self.max_bytes:
+            await self._refuse(scope, receive, send, f"declared {declared}")
+            return
+
+        received = 0
+        started = False
+
+        async def bounded_receive() -> Message:
+            nonlocal received
+            if received > self.max_bytes:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    if not started:
+                        await self._refuse(scope, receive, send, "streamed")
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal started
+            if received > self.max_bytes:
+                return
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, bounded_receive, guarded_send)
+        except ClientDisconnect:
+            # The disconnect handed over above: the 413 is the answer.
+            if received <= self.max_bytes:
+                raise
+
+    async def _refuse(
+        self, scope: Scope, receive: Receive, send: Send, how: str
+    ) -> None:
+        client = scope.get("client")
+        logger.warning(
+            "refused %s %s from %s: request body over %d bytes (%s)",
+            scope.get("method"),
+            scope.get("path"),
+            client[0] if client else "unknown",
+            self.max_bytes,
+            how,
+        )
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": BODY_TOO_LARGE_DETAIL},
+            headers={"Connection": "close"},
+        )
+        await response(scope, receive, send)
+
+
+#: How often `_sample_webhook_live` re-reads what Telegram holds — the cadence
+#: is the API's to choose, so it is stated here and handed to the channel's
+#: `live_samples`. The CLI's `storydump health` reads the cached sample and
+#: states this bound in its help; the number should be findable from both ends.
+WEBHOOK_LIVE_SAMPLE_SECONDS = 60
+
+#: `TenantResolutionError.reason` → status, for the reasons the web surface can
+#: raise. Session reasons are 401 and the body does not say which (the
+#: distinct reasons exist for the log); a workspace the caller cannot see is
+#: 404, never 403 — the same 404 a workspace that does not exist gets; below
+#: the floor is 403. The chat-side reasons are not in this table
+#: because no web route resolves a chat; reaching the handler with one is a
+#: programming error, and it is answered as one (500 + log), never as a
+#: silently chosen client status.
+_TENANT_STATUS = {
+    "invalid_session": 401,
+    "expired_session": 401,
+    "revoked_session": 401,
+    "disabled_user": 401,
+    "not_a_member": 404,
+    "insufficient_role": 403,
+    # The token resolver's three answers: like their
+    # session twins, 401 and the response never says which.
+    "invalid_token": 401,
+    "expired_token": 401,
+    "revoked_token": 401,
+}
+_TENANT_DETAIL = {401: "authentication required", 404: "not found", 403: "forbidden"}
+
+#: `TokenRefused.reason` → 403 WITH the reason: a live token asked for
+#: something it may not have, and the CLI says the right sentence only if the
+#: answer names it. Pinned total over `TokenRefused.REASONS` by the factory
+#: test.
+_TOKEN_STATUS = {
+    "session_required": 403,
+    "readonly_token": 403,
+    "wrong_workspace": 403,
+    "not_ops": 403,
+}
+
+#: `CrossSiteRefused.reason` → 403 WITH the reason, so a refused browser
+#: post says why. Pinned total by the factory test.
+_CROSS_SITE_STATUS = {"cross_site": 403}
+
+#: `CommandRefused.reason` → status. Pinned TOTAL over `commands.REASONS` by
+#: the factory test, so a new reason cannot ship without a row here.
+_COMMAND_STATUS = {
+    "unknown_command": 404,
+    "not_built": 501,
+    "workspace_required": 400,
+    "invalid_args": 400,
+    "not_found": 404,
+    "illegal_transition": 409,
+    "manual_mode": 409,
+    "not_connected": 409,
+    "cancelling": 409,
+    "nothing_to_confirm": 409,
+    "may_have_posted": 409,
+    "locked": 409,
+    "media_unsuitable": 409,
+}
+
+#: `ProvisioningRefused.reason` → status (#1041).
+#:
+#: A caller-supplied value we will not store is 400 and NAMES which one, so a
+#: front end can point at the field rather than say "invalid".
+#:
+#: `slot_not_seeded` is deliberately ABSENT. It is a postcondition on the
+#: seeding invariant with no currently reachable path (see
+#: `provisioning.create_destination`), so reaching it is a programming error
+#: and is answered as one (500 + log) rather than as a client status somebody
+#: chose. Mapping it would turn a broken invariant into a number a front end
+#: renders and nobody investigates.
+_PROVISIONING_STATUS = {
+    "account_ref_required": 400,
+    "account_ref_too_long": 400,
+    # Raised by the typed route itself (`v1.create_account`).
+    "account_ref_requires_connect": 400,
+    # The typed-handle path (#1089). Mapped for the same reason as those
+    # above: these are values a person typed into a field, so the answer has to
+    # be a 400 naming which one. An unmapped reason falls through to `_unmapped`
+    # and is answered 500 — correct for a broken invariant, wrong for a typo.
+    "handle_required": 400,
+    "handle_malformed": 400,
+    "handle_too_long": 400,
+    "folder_required": 400,
+    "folder_not_a_drive_folder": 400,
+    # A pick inside, or containing, a folder already connected (connected
+    # folders are disjoint). A conflict with what is here, not a typo — 409,
+    # like `drive_not_connected`.
+    "source_nested": 409,
+    # The connected folders changed between the pick's check and its write
+    # (two admins at once): a conflict to retry, not a typo.
+    "sources_changed": 409,
+    # An admin who is not the person who connected Drive, at the folder
+    # browser or the pick (091): a floor, like `insufficient_role`.
+    "drive_not_yours": 403,
+}
+
+#: `InvitationRefused.reason` → status, total over `invitations.REASONS`.
+_INVITATION_STATUS = {
+    "not_acceptable": 404,
+    "identity_mismatch": 403,
+    # The CREATE half's refusals (#1172). Each is the caller's input being
+    # wrong rather than a state or an authorization fact, so 400 — and
+    # `already_invited` stays 400 rather than 409 for the same reason. A send
+    # replaces the address's pending invitation (`invitations.create`, under a
+    # per-addressee lock), so it is a backstop no product path reaches.
+    "already_invited": 400,
+    "email_required": 400,
+    "email_invalid": 400,
+    "invalid_channel": 400,
+    "invalid_role": 400,
+}
+_INVITATION_DETAIL = {
+    "not_acceptable": "invitation not acceptable",
+    "identity_mismatch": "identity proof mismatch",
+    "already_invited": "that address already has a pending invitation",
+    "email_required": "an email invitation needs an address",
+    "email_invalid": "that is not an address an invitation can be sent to",
+    "invalid_role": "role must be admin or member",
+    "invalid_channel": "delivery_channel must be email or telegram",
+}
+
+
+def _unmapped(request: Request, exc: Exception) -> JSONResponse:
+    logger.error("unmapped refusal on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": "internal error"})
+
+
+def _busy(reason: str) -> JSONResponse:
+    """The answer to load, not a fault: a 503 naming *reason*, which the
+    caller retries after a second."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "busy — try again", "reason": reason},
+        headers={"Retry-After": "1"},
+    )
+
+
+def _reason_detail(exc, status: int) -> dict:
+    """The ordinary refusal body: the message, and the machine-routable
+    reason the web's `target-api.ts::readError` matches on."""
+    return {"detail": str(exc), "reason": exc.reason}
+
+
+def _tenant_detail(exc, status: int) -> dict:
+    """No `reason` on the wire: the web surface must not learn which of
+    "not a member", "no such workspace" and "disabled" it met (no existence
+    oracle). The detail is keyed by the STATUS, not the reason."""
+    return {"detail": _TENANT_DETAIL[status]}
+
+
+def _invitation_detail(exc, status: int) -> dict:
+    """The invitation's own sentence, keyed by reason — `str(exc)` is the
+    service's wording and this table is the surface's."""
+    return {"detail": _INVITATION_DETAIL[exc.reason], "reason": exc.reason}
+
+
+def _command_body(exc, status: int) -> dict:
+    # `CommandNotBuilt` is the vocabulary's "known, not built yet": the body
+    # names the command so the caller can tell it from a typo, and its reason
+    # is the fixed `not_built` rather than the exception's message.
+    if isinstance(exc, CommandNotBuilt):
+        return {"command": exc.command, "detail": "not built", "reason": "not_built"}
+    # A refusal's facts ride beside its reason under their own key (`locked`:
+    # what is in the way, and whether an override gets past it), never inside
+    # the prose, and never able to overwrite `reason` or `detail`.
+    body = _reason_detail(exc, status)
+    if exc.facts:
+        body["facts"] = exc.facts
+    return body
+
+
+def _mapped(table: dict, content=_reason_detail, *, log: bool = True):
+    """A handler for a refusal whose `reason` this table maps to a status.
+
+    The five handlers below all make the same decision — look
+    the reason up, fall through to `_unmapped` when it is not there (which
+    is the pin `TestRefusalMappingsAreTotal` exists to keep honest), then
+    answer. What actually varies is the body and whether the refusal is
+    logged, so those are the arguments; everything else is this function.
+    """
+
+    async def handler(request: Request, exc):
+        status = table.get(exc.reason)
+        if status is None:
+            return _unmapped(request, exc)
+        if log:
+            logger.info("refused %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(status_code=status, content=content(exc, status))
+
+    return handler
+
+
+_SOURCE_POLICY_STATUS = {
+    "policy_conflict": 409,
+    "unsupported_source_policy": 400,
+    "invalid_source_policy": 400,
+    "source_not_found": 404,
+    "unsupported_source_provider": 400,
+    "archive_not_activated": 503,
+}
+
+
+def _source_policy_body(exc, status: int) -> dict:
+    body = _reason_detail(exc, status)
+    if exc.reason == "policy_conflict":
+        body["current_revision"] = exc.current_revision
+    return body
+
+
+#: `ConnectChoiceRefused.reason` → status, total over `connect_choice.REASONS`
+#: (#1644). A start's stale On preview is `MixConflict`'s 409, above.
+_ARCHIVE_CHOICE_STATUS = {
+    "invalid_archive_choice": 400,
+    "archive_not_activated": 503,
+}
+
+#: `ArchiveRefused.reason` → status, for the reasons a mix write can meet: an
+#: archive row's On/Off (`versioned_mix.mutate`, and `preview`, through
+#: `source_membership.set_archive_enabled`) is where the archive's refusals
+#: reach a route. NOT total, deliberately. `archive_not_activated` is the
+#: rollback case, archive rows still present after the capability was
+#: withdrawn: unavailable, as the source policy's is. Only a switch to On meets
+#: it: a switch to Off closes something and needs no capability. A value the
+#: client sent is 400 and a conflict with the current state is 409. Every other reason is
+#: an internal invariant (the allocation, sync and fence machinery's) and stays
+#: `_unmapped`'s logged 500, never a client status somebody chose. The
+#: Instagram callback catches `ArchiveRefused` itself, so none of its
+#: refusals reaches this table.
+_ARCHIVE_STATUS = {
+    "archive_not_activated": 503,
+    "archive_source_unavailable": 409,
+    "invalid_archive_choice": 400,
+    "mix_conflict": 409,
+}
+
+
+def _register_handlers(app: FastAPI) -> None:
+    """Service refusals → HTTP, once. No route speaks a status for these."""
+
+    @app.exception_handler(PoolTimeout)
+    async def _pool_saturated(request: Request, exc: PoolTimeout):
+        # The ingress pool's 1 s wait is met by every route,
+        # not only the webhook: a web request that cannot get a connection is
+        # told to retry rather than shown a 500 (the webhook route maps the
+        # same wait itself, before admission, and never reaches this).
+        logger.warning("pool saturated on %s %s", request.method, request.url.path)
+        return _busy("pool_saturated")
+
+    @app.exception_handler(StatementTimedOut)
+    async def _statement_timed_out(request: Request, exc: StatementTimedOut):
+        # A health read's statement cancelled under its cap is load, as a pool
+        # wait is, so it is told to retry. Not logged here: `health_reads`
+        # logs it once, for the read, and the health cache answers every hit
+        # of its window with the same refusal.
+        return _busy("statement_timeout")
+
+    app.add_exception_handler(
+        TenantResolutionError, _mapped(_TENANT_STATUS, _tenant_detail)
+    )
+
+    app.add_exception_handler(TokenRefused, _mapped(_TOKEN_STATUS, _reason_detail))
+
+    app.add_exception_handler(
+        CrossSiteRefused, _mapped(_CROSS_SITE_STATUS, _reason_detail)
+    )
+
+    @app.exception_handler(TokenArgsInvalid)
+    async def _token_args(request: Request, exc: TokenArgsInvalid):
+        return JSONResponse(
+            status_code=400, content={"detail": str(exc), "reason": "invalid_args"}
+        )
+
+    app.add_exception_handler(
+        CommandRefused, _mapped(_COMMAND_STATUS, _command_body, log=False)
+    )
+
+    app.add_exception_handler(
+        ProvisioningRefused, _mapped(_PROVISIONING_STATUS, _reason_detail)
+    )
+
+    @app.exception_handler(MixConflict)
+    async def _mix_conflict(request: Request, exc: MixConflict):
+        return JSONResponse(
+            status_code=409,
+            content={"reason": exc.reason, "current_revision": exc.current_revision},
+        )
+
+    @app.exception_handler(MixProtocolRequired)
+    async def _mix_protocol(request: Request, exc: MixProtocolRequired):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "reason": exc.reason,
+                "required_protocol_version": exc.required_protocol_version,
+            },
+        )
+
+    @app.exception_handler(MixMembershipChange)
+    @app.exception_handler(MixConversionUnavailable)
+    async def _mix_refused(request: Request, exc):
+        return JSONResponse(status_code=400, content={"reason": exc.reason})
+
+    @app.exception_handler(MixInvalid)
+    async def _mix(request: Request, exc: MixInvalid):
+        # The web's one code carrier is `reason` (`target-api.ts::readError`),
+        # matched as `[a-z0-9_]+` — so the refusal travels as
+        # `invalid_mix_<reason>`, not in `detail`.
+        logger.info("refused %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": str(exc),
+                "reason": "invalid_mix_source_set"
+                if exc.reason == "source_set"
+                else f"invalid_mix_{exc.reason}",
+            },
+        )
+
+    app.add_exception_handler(
+        source_policy.PolicyRefused, _mapped(_SOURCE_POLICY_STATUS, _source_policy_body)
+    )
+
+    app.add_exception_handler(
+        ConnectChoiceRefused, _mapped(_ARCHIVE_CHOICE_STATUS, _reason_detail)
+    )
+
+    app.add_exception_handler(ArchiveRefused, _mapped(_ARCHIVE_STATUS, _reason_detail))
+
+    app.add_exception_handler(
+        InvitationRefused, _mapped(_INVITATION_STATUS, _invitation_detail, log=False)
+    )
+
+    @app.exception_handler(DeliveryReplayed)
+    async def _replayed(request: Request, exc: DeliveryReplayed):
+        # Acknowledged WITHOUT re-execution — the same key and the same body.
+        return JSONResponse(status_code=200, content={"outcome": "replayed"})
+
+    @app.exception_handler(AdmissionConflict)
+    async def _conflict(request: Request, exc: AdmissionConflict):
+        # Channel-neutral wording: the exception already names the key that
+        # was reused, and which header carried it is the adapter's business.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "admission conflict: this key was already used for different content",
+                "reason": "admission_conflict",
+            },
+        )
+
+
+def _engine_from_env(env: Mapping[str, str]) -> Optional[AsyncEngine]:
+    url = engine_url_from_env(env)
+    if url is None:
+        logger.warning(
+            f"{DATABASE_URL_VAR} is unset or blank: the API has no target engine "
+            "and every data route answers 503 until it is configured"
+        )
+        return None
+    # The API's pool waits `INGRESS_POOL_TIMEOUT_SEAM`, not the worker's 3 s:
+    # the wait is the tap's user-visible latency.
+    return create_engine(url, pool_timeout=INGRESS_POOL_TIMEOUT_SEAM)
+
+
+def _ingress_workers(env: Mapping[str, str]) -> int:
+    """How many uvicorn processes serve this API — the Procfile's `--workers`
+    is not visible from inside a process, so the deployment states it in
+    `WEB_CONCURRENCY` (uvicorn's own variable); absent = one."""
+    raw = (env.get("WEB_CONCURRENCY") or "").strip()
+    try:
+        return max(1, int(raw)) if raw else 1
+    except ValueError:
+        return 1
+
+
+async def _register_webhook(app: FastAPI, env: Mapping[str, str]) -> None:
+    """Cache the startup registration's report on `app.state.webhook` for the
+    operating details (`/api/v1/ops/health`) — `reg.register_at_startup`
+    decides it and never raises, so this is the whole of the API's part: hand
+    it the bot transport this process speaks with, and keep what it says."""
+    from src.channels import telegram_webhook_registration as reg
+
+    app.state.webhook = await reg.register_at_startup(
+        env, transport_factory=_telegram_transport
+    )
+
+
+async def _sample_webhook_live(app: FastAPI, env: Mapping[str, str]) -> None:
+    """Cache each live webhook sample on `app.state.webhook_live` for the
+    operating details (`/api/v1/ops/health`). The loop, its cadence and its
+    never-raise rule are `reg.live_samples`; this task exists to hold the
+    latest one where the probe can read it, and is cancelled at shutdown like
+    the other two."""
+    from src.channels import telegram_webhook_registration as reg
+
+    async for sample in reg.live_samples(
+        env,
+        transport_factory=_telegram_transport,
+        interval=WEBHOOK_LIVE_SAMPLE_SECONDS,
+    ):
+        app.state.webhook_live = sample
+
+
+async def _sample_db_role(app: FastAPI) -> None:
+    """Fill `app.state.db_role` once, from the catalog; never raise.
+
+    Diagnostic (#751): a login with BYPASSRLS makes every tenant policy inert,
+    and this is how the login a deploy runs under is verified. A failure
+    leaves None — "not sampled" — never a guessed-safe value.
+    """
+    if app.state.engine is None:
+        return
+    try:
+        async with app.state.engine.connect() as conn:
+            app.state.db_role = await connection_role(conn)
+    except Exception as exc:  # noqa: BLE001 — diagnostic; never fails startup
+        logger.warning("database role not sampled at startup: %s", exc)
+
+
+def _warn_about_ops_user_ids(raw: str) -> None:
+    """Say at startup why the operating details and posture will refuse
+    everyone, since the refusal itself cannot: `OPS_USER_IDS` empty, or an
+    entry that is not a user id (named by position, never echoed)."""
+    ids, refused = parse_ops_user_ids(raw)
+    if not ids and not refused:
+        logger.warning(
+            "OPS_USER_IDS is empty: /api/v1/ops/health and /api/v1/ops/posture"
+            " refuse everyone. Set it to your user id (storydump whoami)."
+        )
+        return
+    for position in refused:
+        logger.warning(
+            "OPS_USER_IDS entry %d of %d is not a user id (a UUID, comma-"
+            "separated); it admits nobody",
+            position,
+            sum(1 for e in raw.split(",") if e.strip()),
+        )
+
+
+def _require_key_ring() -> None:
+    """Build the credential key ring, or refuse to start.
+
+    The connect callbacks encrypt every Instagram token and Drive grant
+    through it, and the Drive folder browser decrypts the workspace's grant
+    (`oauth_states.ring`). Built lazily, a missing or malformed key passed
+    Railway's health check and failed at those routes — a connect only after
+    the person had granted access at Meta or Google. A missing engine is
+    answered per route instead (503, and `/api/v1/ops/health` says so); nothing on the
+    probe would say the key is missing. Raised from startup, the lifespan
+    fails and uvicorn exits (one process: `WEB_CONCURRENCY` is unset in
+    production), the deploy fails its check, and the previous deploy keeps
+    serving.
+    """
+    try:
+        oauth_states.ring()
+    except oauth_states.RingUnavailable as exc:
+        # The remedy is named because the tempting one is wrong: a newly
+        # generated key starts, and then cannot read a stored credential.
+        logger.error(
+            "the credential key ring cannot load. %s The API encrypts every token"
+            " it connects and decrypts the Drive grant it browses with, so it needs"
+            " the key the stored credentials were encrypted with — the worker"
+            " service holds the same one. Refusing to start.",
+            exc,
+        )
+        raise
+
+
+def _cors_origins() -> list[str]:
+    """The ONE browser origin admitted (`settings.web_app_origin`); never "*",
+    and with no origin configured no origin is admitted."""
+    return [settings.web_app_origin] if settings.web_app_origin else []
+
+
+def _telegram_transport(env: Mapping[str, str]):
+    """The one bot transport the API's Telegram calls go through, or None
+    without the bot token (the same variable the worker sends with, so the
+    API never holds a second credential for the one bot)."""
+    from src.channels import telegram_webhook_registration as reg
+
+    token = env.get(reg.TOKEN_VAR)
+    if not token:
+        return None
+    from src.channels.telegram_transport import transport_from_env
+
+    return transport_from_env(token, env)
+
+
+#: `1` serves `/docs`, `/redoc` and `/openapi.json` — a development server's
+#: switch, ignored in production.
+API_DOCS_VAR = "API_DOCS"
+
+
+def _serves_docs(env: Mapping[str, str]) -> bool:
+    return (env.get(API_DOCS_VAR) or "").strip() == "1" and not is_production(env)
+
+
+def create_app(
+    *,
+    engine: Optional[AsyncEngine] = None,
+    env: Optional[Mapping[str, str]] = None,
+    archive_client=None,
+) -> FastAPI:
+    """Assemble the app. *engine* injects the target engine (tests, or a
+    composition root that owns the pool); otherwise it comes from *env*
+    (default: the process environment) and from nothing else. *archive_client*
+    is the test seam for the archive's HTTP client, used only if the archive is
+    armed; the app owns and closes whichever client it ends up with."""
+    # Resolved once: `os.environ` is a live mapping, so binding it here reads
+    # exactly what a read at each call site would, and `create_app(env=…)`'s
+    # seam is a single place. The `_lifespan` closure below captures the
+    # resolved mapping, not the decision.
+    env = os.environ if env is None else env
+
+    @asynccontextmanager
+    async def _lifespan(app_: FastAPI):
+        # First, so a process that cannot encrypt starts no task — in
+        # particular it never re-registers the production bot's webhook.
+        _require_key_ring()
+        _warn_about_ops_user_ids(settings.OPS_USER_IDS)
+        # The role sample and the webhook registration run as background
+        # tasks so startup never waits on the database or on Telegram (see
+        # `app.state.db_role` / `app.state.webhook` below); a task still
+        # pending at shutdown is cancelled rather than left to die with the loop.
+        tasks = [
+            asyncio.create_task(_sample_db_role(app_)),
+            asyncio.create_task(_register_webhook(app_, env)),
+            asyncio.create_task(_sample_webhook_live(app_, env)),
+        ]
+        try:
+            yield
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            archive_http = getattr(app_.state, "archive_client", None)
+            if archive_http is not None:
+                await archive_http.aclose()
+
+    # The interactive docs and the schema map every route for whoever asks,
+    # and nothing deployed reads them (the CLI and the web know their routes),
+    # so they are opt-in: `API_DOCS=1`, and never in production even then. A
+    # renamed environment or another host serves none.
+    docs = _serves_docs(env)
+    app = FastAPI(
+        title="Storydump API",
+        description="Sign-in, reads and commands for the target tier",
+        version=VERSION,
+        lifespan=_lifespan,
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
+    )
+    # The deployed commit, for `/health` (Railway sets it on a Git deploy).
+    from src.services.target import mix_conversion
+
+    app.state.mix_conversion_evidence = mix_conversion.load_evidence(
+        env.get(mix_conversion.RECORD_PATH),
+        service="api",
+        release_sha=env.get(COMMIT_VAR),
+    )
+    app.state.source_mix_capability = mix_conversion.capability(
+        env, "api", app.state.mix_conversion_evidence
+    )
+    app.state.commit = (env.get(COMMIT_VAR) or "").strip()[:7] or None
+    app.state.engine = engine if engine is not None else _engine_from_env(env)
+    # The archive. The key ring loads whatever the activation says (a deletion
+    # receipt is durable with it, and only with it); the capability and the
+    # preview port are the armed archive's and None otherwise, which is what
+    # every route reads as an inactive archive.
+    app.state.archive_keys = archive_activation.load_keys(env)
+    archive = archive_composition.build_api(
+        engine=app.state.engine,
+        env=env,
+        conversion=app.state.mix_conversion_evidence,
+        client=archive_client,
+    )
+    app.state.archive_capability = archive.capability if archive else None
+    app.state.archive_preview = archive.preview if archive else None
+    app.state.archive_client = archive.client if archive else None
+    # The invitation email's transport: sent from here,
+    # after the invitation commits, so its link never rests in a job row. None
+    # when RESEND_API_KEY and EMAIL_FROM are not both set — an invitation then
+    # answers `not_configured` and the inviter shares the link by hand.
+    app.state.email = email_sender.sender_from_env(
+        env, policy=email_sender.INTERACTIVE_POLICY
+    )
+    if app.state.email is None:
+        logger.info("invitation email is not configured: links are shared by hand")
+    else:
+        logger.info("invitation email is configured")
+    if settings.TARGET_SIGNUP_OPEN:
+        # A local stack's switch (092): said at startup, so it is never on
+        # in production unnoticed.
+        logger.warning(
+            "TARGET_SIGNUP_OPEN is on: any Google account can create a user, "
+            "admitted or not"
+        )
+    # Which database login this process holds, and whether it bypasses RLS
+    # (#751). Sampled ONCE, in the background, after startup — the
+    # operating details (`/api/v1/ops/health`) report the cached answer and
+    # still opens no connection of its own, so a database blip cannot fail the
+    # probe. None means "not sampled", never "safe": a login with BYPASSRLS
+    # makes every tenant policy inert, and this field is how the login a deploy
+    # runs under is verified.
+    app.state.db_role = None
+    # The webhook registration report (`_register_webhook`): None until the
+    # startup task has run; then `ok`, what Telegram holds, or why it was
+    # skipped — never the token or the secret.
+    app.state.webhook = None
+    # What Telegram holds for the webhook now (`_sample_webhook_live`, every
+    # minute): the backlog and the last delivery error — the signal that tells
+    # "Telegram is not delivering" from "our route is failing".
+    app.state.webhook_live = None
+    # The last answer of each `/health/*` axis, reused for `HEALTH_CACHE_SECONDS`
+    # so polling the unauthenticated routes cannot drain the shared pool. One per
+    # app, so every app a test builds starts empty.
+    app.state.health_cache = AnswerCache()
+
+    # The ingress seam: the `/start` door (#1183) and the group join path
+    # (#1242), beside the resolver door `fn_resolve_binding` (#854).
+    #
+    # ⚠ THIS DOES NOT DISPATCH CHAT-INBOUND COMMANDS. A `/start` payload
+    # carries its own resolution; a group message resolves its chat through
+    # `fn_group_member_seen`. An "approve" typed in a group is not dispatched (#854).
+    #
+    # Wired only when an engine exists: without one there is nothing to
+    # `connect` to, and a runtime whose `connect` fails would convert the
+    # route's honest 503 into a 500 mid-delivery.
+    bot = _telegram_transport(env)
+    app.state.tap_metrics = webhooks.TapMetrics()
+    # The waitlist route's per-process slots and full-limit notices
+    # (`routes/public.py`), and the admin's message for each signup it
+    # accepts, sent with the same bot.
+    app.state.waitlist_slots = WaitlistSlots()
+    app.state.waitlist_full = full_notices()
+    from src.channels import telegram_waitlist_ping as waitlist_ping
+    from src.services.target import callback_tokens, identity, signup_admissions
+
+    operators = settings.ops_user_ids
+
+    async def operator_chats():
+        # Its own short transaction, in the ping's background task.
+        async with app.state.engine.begin() as conn:
+            return await identity.telegram_ids_for(conn, operators)
+
+    def signup_keyboard(address: str) -> dict:
+        # ✅ Admit (#1723) carries the address's ref, never the address: the
+        # tap reads the entry back through `fn_waitlist`. Open waitlist ↗ is
+        # the owner area's page, only for an https origin, which is all
+        # Telegram takes in a URL button, as Configure's Approval settings ↗.
+        token = callback_tokens.admit_token(signup_admissions.ref(address))
+        row = [{"text": "✅ Admit", "callback_data": token}]
+        origin = settings.web_app_origin
+        if origin and origin.startswith("https://"):
+            row.append({"text": "Open waitlist ↗", "url": f"{origin}/ops/waitlist"})
+        return {"inline_keyboard": [row]}
+
+    app.state.waitlist_ping = waitlist_ping.from_settings(
+        bot, operators, operator_chats, signup_keyboard
+    )
+    app.state.ingress_workers = _ingress_workers(env)
+    app.state.pool_watch = (
+        PoolWatch(app.state.engine) if app.state.engine is not None else None
+    )
+    if app.state.pool_watch is not None:
+        snap = app.state.pool_watch.snapshot()
+        logger.info(
+            "ingress pool: size=%d overflow=%d timeout_s=%.1f workers=%d"
+            " → Σ ingress connections = %d (3×10 workers"
+            " + 2×10 ingress = 50)",
+            snap["size"],
+            snap["overflow"],
+            snap["timeout_s"],
+            app.state.ingress_workers,
+            (snap["size"] + snap["overflow"]) * app.state.ingress_workers,
+        )
+    app.state.ingress = (
+        webhooks.IngressRuntime(
+            connect=app.state.engine.connect,
+            dispatch=TelegramDispatcher(),
+            reply=None if bot is None else bot.send_text,
+            answer_callback=None if bot is None else bot.answer_callback,
+            edit=None if bot is None else bot.edit,
+        )
+        if app.state.engine is not None
+        else None
+    )
+
+    _register_handlers(app)
+
+    # Middleware. Starlette prepends, so the LAST added runs FIRST on the
+    # request path: CORS outermost, then the ambiguous-XFF drop (#765) and
+    # the removal of Railway's edge hop ahead of the trusted-proxy walk
+    # (#726), then the body limit — after the walk,
+    # so its refusal names the attributed client, and ahead of everything
+    # that could read a body — then security headers innermost.
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(
+        BodySizeLimitMiddleware, max_bytes=settings.API_REQUEST_BODY_MAX_BYTES
+    )
+    app.add_middleware(
+        ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts
+    )
+    app.add_middleware(DropEdgeHopMiddleware, hop_hosts=settings.edge_hop_hosts)
+    app.add_middleware(DropAmbiguousForwardedForMiddleware)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", IDEMPOTENCY_HEADER],
+    )
+
+    app.include_router(auth_router, prefix="/auth")
+    app.include_router(v1_router, prefix="/api/v1")
+    # The token routes and `/me/principal` share the
+    # v1 prefix and the v1 seams; their own file keeps the allowlist readable.
+    app.include_router(tokens_router, prefix="/api/v1")
+    # The read views: one file for the
+    # operator surface, tenant-scoped, admitted to tokens.
+    app.include_router(ops_router, prefix="/api/v1")
+    # The owner's admission off the waitlist (#1723): a write, so not among
+    # the `/ops` reads; for `OPS_USER_IDS`, admitted to tokens.
+    app.include_router(admissions_router, prefix="/api/v1")
+    app.include_router(webhooks.router, prefix="/webhooks")
+    # Meta's policy callbacks (#410). Under the same prefix as the other
+    # provider-called doors. Registering the URLs with Meta is a submission
+    # step, not a deploy step; this code does not do it.
+    app.include_router(meta_router, prefix="/webhooks/meta")
+    # What a visitor with no account reaches (`routes/public.py`): the
+    # marketing waitlist, outside `/api/v1` because every route there takes a
+    # principal.
+    app.include_router(public_router, prefix="/public")
+    # The Mini App's URL is baked into buttons real users still hold; it
+    # redirects rather than 404s (`routes/retired.py`).
+    app.include_router(retired_router)
+    # Railway's probe and the two dependency-touching axes (`routes/health.py`).
+    # Included LAST, so these routes sit last in the route table.
+    app.include_router(health_router)
+
+    return app
+
+
+app = create_app()

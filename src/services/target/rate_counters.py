@@ -1,0 +1,102 @@
+"""The durable counter idiom over `rate_counters` (#859).
+
+`056` shipped the table (composite PK ``(scope, key, window_start)``,
+`ck_rate_scope`, `ck_rate_nonneg`); the limit is deliberately NOT in the
+database. There is no function, trigger, or CHECK enforcing it — the
+advertised-DDL manifest classes the increment-and-check "illustrative" —
+because the limit must be compared against the CURRENT config value on every
+hit: counters have no refunds, so nothing needs a frozen copy, and "an abuse
+limit tightened mid-attack should bite immediately, not next window" (#859).
+
+So THE guard is the statement below — the `WHERE rc.count < :limit` inside the
+UPSERT, atomic under the row lock, never check-then-act. This module's only
+job is to be the one place that statement is written ("one idiom for
+every counter in the system").
+
+Scopes are deliberately not all tenant-shaped (`preauth_ip`, `email_global`,
+`tg_global` have no workspace), which is why `p_rate` is role-scoped
+``USING (true)`` and nothing here touches tenant GUCs. Every limit and window
+length arrives as a parameter — callers read config and
+pass values.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from sqlalchemy import text
+
+
+def window_start(now: datetime, window_seconds: int) -> datetime:
+    """*now* truncated to its fixed window (truncation is the caller's
+    job; each scope's window length comes from config)."""
+    if now.tzinfo is None:
+        raise ValueError("window_start requires an aware datetime")
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    elapsed = (now - epoch).total_seconds()
+    return epoch + timedelta(seconds=int(elapsed // window_seconds) * window_seconds)
+
+
+async def count(session, *, scope: str, key: str, window_start: datetime) -> int:
+    """The window's committed count, or 0 — a READ that spends nothing.
+
+    **Nothing under `src/` calls it**, and that is the point: tap admission
+    debits inside the flip and never reads first, which
+    `tests/src/services/target/test_telegram_dispatch.py`'s admission tests
+    assert by scripting this name as a tripwire and requiring it stay
+    untouched ("no read before the flip"). Kept as that tripwire's subject
+    and as the one spelling of the read, should a check that must not spend
+    ever want one (#1325; the tripwire is a reference). A caller would still
+    debit through :func:`increment`, whose `WHERE rc.count < :limit` is the
+    backstop when two callers race this read.
+    """
+    row = (
+        await session.execute(
+            text(
+                "SELECT count FROM rate_counters"
+                " WHERE scope = :scope AND key = :key AND window_start = :window_start"
+            ),
+            {"scope": scope, "key": key, "window_start": window_start},
+        )
+    ).first()
+    return int(row[0]) if row is not None else 0
+
+
+async def increment(
+    session,
+    *,
+    scope: str,
+    key: str,
+    window_start: datetime,
+    limit: int,
+) -> Optional[int]:
+    """One hit against a counter: the increment-and-check.
+
+    Returns the post-increment count, or **None when the window is over
+    limit** — the consuming site then defers (sender pacing) or rejects
+    (admission / pre-auth). Atomic: the first hit inserts at 1, every later
+    hit takes the row lock and re-reads the committed count, so concurrent
+    callers serialize and exactly `limit` hits succeed per window.
+
+    Runs in the CALLER's transaction and does not commit — an admission
+    check's debit belongs in the same transaction as what it admits.
+    """
+    row = (
+        await session.execute(
+            text(
+                "INSERT INTO rate_counters AS rc (scope, key, window_start, count)"
+                " VALUES (:scope, :key, :window_start, 1)"
+                " ON CONFLICT (scope, key, window_start)"
+                "   DO UPDATE SET count = rc.count + 1 WHERE rc.count < :limit"
+                " RETURNING count"
+            ),
+            {
+                "scope": scope,
+                "key": key,
+                "window_start": window_start,
+                "limit": limit,
+            },
+        )
+    ).first()
+    return int(row[0]) if row is not None else None

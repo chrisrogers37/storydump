@@ -1,0 +1,16 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "pip install -r requirements.txt && pip install -e ."
+
+[deploy]
+# Every deploy of either service first applies pending migrations through the
+# runner; `DATABASE_URL` on both services is the database-owner connection.
+preDeployCommand = "python -m scripts.migration_runner apply"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+# Give the old worker up to 60s to finish an in-flight step before SIGKILL
+# fires: a publish or a delivery it is mid-way through completes and commits,
+# and a lease it still holds lapses within 90s and is then re-readied.
+drainingSeconds = 60

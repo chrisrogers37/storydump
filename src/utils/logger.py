@@ -1,0 +1,85 @@
+"""Logging configuration."""
+
+import logging
+import sys
+from pathlib import Path
+from typing import Optional
+from src.config.settings import settings
+
+
+def setup_logger(
+    name: str = "storydump", level: int = None, log_file: Optional[str] = None
+) -> logging.Logger:
+    """
+    Setup and configure a logger.
+
+    Args:
+        name: Logger name
+        level: Logging level (defaults to settings.LOG_LEVEL)
+        log_file: Path to log file (defaults to logs/app.log)
+
+    Returns:
+        Configured logger instance
+    """
+    # Create logs directory if it doesn't exist
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+
+    # Get or create logger
+    logger_instance = logging.getLogger(name)
+
+    # Set level
+    if level is None:
+        level = getattr(logging, settings.LOG_LEVEL)
+    logger_instance.setLevel(level)
+
+    # Avoid adding duplicate handlers
+    if logger_instance.handlers:
+        return logger_instance
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_format = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    console_handler.setFormatter(console_format)
+
+    # File handler
+    if log_file is None:
+        log_file = str(log_dir / "app.log")
+
+    file_path = Path(log_file)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    file_handler = logging.FileHandler(file_path)
+    file_handler.setLevel(logging.INFO)
+    file_format = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    file_handler.setFormatter(file_format)
+
+    # Add handlers
+    logger_instance.addHandler(console_handler)
+    logger_instance.addHandler(file_handler)
+
+    # Prevent propagation to root logger
+    logger_instance.propagate = False
+
+    return logger_instance
+
+
+# Default logger instance
+logger = setup_logger()
+
+# Route httpx's logs through our logger's handlers so they appear in Railway
+# logs (otherwise they go to the root logger / stderr). No Telegram SDK is
+# installed, so httpx is the one library routed (#1216).
+for _lib_logger_name in ("httpx",):
+    _lib_logger = logging.getLogger(_lib_logger_name)
+    _lib_logger.setLevel(logging.WARNING)
+    for _handler in logger.handlers:
+        _lib_logger.addHandler(_handler)
+    _lib_logger.propagate = False

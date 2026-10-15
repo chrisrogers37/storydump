@@ -1,0 +1,531 @@
+"""The `reconcile_ambiguous` executor (#860).
+
+The permit rail is what manufactures ``publishing_ambiguous`` intents, and an
+ambiguity producer without its resolver strands every artefact the kill tests
+create.
+
+**One contract, parameterized by evidence authority.** The seam
+``reconciler_evidence_mode`` records the doc-cited verdict as the sets of
+container ``status_code`` values that are authoritative *after*
+``publish_called``. Setting the seam is a config change, never a design change,
+and the machinery below is mode-independent.
+
+The default is **container-verdict** mode. Both modes are built:
+evidence-capture remains correct for any account or API version where the
+positive value stops arriving, and building only the selected one would fail
+the permit-rail gate, which requires a test per mode.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import timedelta
+from typing import Any, Callable, Optional, Union
+
+from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
+
+#: Per-intent exponential backoff, capped at container expiry (~24 h).
+#: This is the ladder that kills the flat-poll pathology — roughly 15-20 status
+#: calls per ambiguous intent worst case, against ~1,440 at a flat 60 s poll.
+LADDER_SECONDS = (60, 300, 1800, 7200)
+
+#: Container expiry. The ladder never polls past it.
+CONTAINER_EXPIRY_SECONDS = 24 * 60 * 60
+
+#: The seam. Values from Meta's documentation.
+#:
+#: `FINISHED` IS THE TRAP AND IT IS DELIBERATELY NON-TERMINAL. After
+#: `publish_called` it means *ready to be published*, which is evidence the
+#: publish has NOT landed — not evidence that it failed. Classifying it
+#: authoritative-negative would terminalize a still-live publish as a definite
+#: non-event, which is the one wrong answer that is worse than no answer.
+#:
+#: The second mode and the stories observation are driven by
+#: `tests/scripts/test_l3_permit_rail.py`; production passes neither
+#: (#1325).
+EVIDENCE_MODES: dict[str, dict[str, frozenset]] = {
+    "container_verdict": {
+        "positive": frozenset({"PUBLISHED"}),
+        "negative": frozenset({"EXPIRED", "ERROR"}),
+    },
+    #: Both sets empty: the machine never self-terminalizes. Every exhausted
+    #: ladder parks `review_required` with the captured trail.
+    "evidence_capture": {
+        "positive": frozenset(),
+        "negative": frozenset(),
+    },
+}
+
+DEFAULT_MODE = "container_verdict"
+
+#: Verdicts this module can reach.
+POSITIVE, NEGATIVE, INCONCLUSIVE = "positive", "negative", "inconclusive"
+
+
+def classify(status_code: Optional[str], mode: str = DEFAULT_MODE) -> str:
+    """Map an observed container ``status_code`` to a verdict under *mode*.
+
+    Everything not in the mode's authoritative sets is INCONCLUSIVE — recorded
+    as evidence, never acted on, and the ladder continues. That includes
+    `ERROR`/`EXPIRED` sightings under evidence-capture mode, and `FINISHED`
+    under both.
+    """
+    try:
+        sets = EVIDENCE_MODES[mode]
+    except KeyError:
+        raise ValueError(f"unknown evidence mode: {mode!r}") from None
+    if status_code in sets["positive"]:
+        return POSITIVE
+    if status_code in sets["negative"]:
+        return NEGATIVE
+    return INCONCLUSIVE
+
+
+def next_delay_seconds(checks: int) -> Optional[int]:
+    """Seconds until the next ladder rung, or None once the ladder is spent.
+
+    *checks* is how many polls have already happened. The last rung repeats
+    until the cumulative wait reaches container expiry, at which point the
+    ladder is exhausted and the exhaustion tail runs.
+    """
+    if checks < 0:
+        raise ValueError("checks cannot be negative")
+    elapsed = 0
+    for i in range(checks + 1):
+        rung = LADDER_SECONDS[min(i, len(LADDER_SECONDS) - 1)]
+        if i == checks:
+            return None if elapsed + rung > CONTAINER_EXPIRY_SECONDS else rung
+        elapsed += rung
+    return None
+
+
+async def sweep_due(conn, *, limit: int, notify_after_seconds: int) -> list[dict]:
+    """Call the `fn_reconciler_sweep` door (shipped in migration 059).
+
+    The door owns the budget: ``p_lim`` bounds the WHOLE sweep across both
+    reasons, ladder-due rows taking priority over notify-window rows. This
+    module does not re-implement that split — an unresolved ambiguity blocks
+    its account's next publish via ``uq_publish_exclusive``, while a
+    notify-window row is informational, and the door already encodes that.
+
+    **Keys are the door's names minus the ``o_`` prefix, aliased in the SELECT
+    so there is one spelling.** The prefix is a SQL OUT-parameter convention
+    and does not belong in the Python contract. Aliasing here sets the names
+    where they are chosen rather than at the one call site that exists.
+
+    ``reason`` is ``ladder_due`` or ``notify_window`` and the caller MUST
+    branch on it: the two rows want opposite work (poll the provider vs. tell
+    the customer), and the second needs no provider seam at all. A ladder row
+    says nothing about how far its ladder has climbed: that is
+    :func:`checks_so_far`, read under the row's tenant once the caller holds it.
+    """
+    # A LIST of timedeltas, not a Postgres array LITERAL in a string. asyncpg
+    # binds `interval[]` from a Python sequence of timedeltas and REFUSES a
+    # str outright ("a sized iterable container expected"), so the literal
+    # form would make this door raise `DataError` on its first statement —
+    # every call, not an edge case (#1090).
+    rungs = [timedelta(seconds=s) for s in LADDER_SECONDS]
+    result = await conn.execute(
+        text(
+            "SELECT o_intent_id AS intent_id, o_workspace_id AS workspace_id,"
+            "       o_reason AS reason"
+            " FROM fn_reconciler_sweep("
+            "   :lim, CAST(:rungs AS interval[]),"
+            "   make_interval(secs => :notify))"
+        ),
+        {"lim": limit, "rungs": rungs, "notify": notify_after_seconds},
+    )
+    return [dict(r) for r in result.mappings().all()]
+
+
+async def checks_so_far(conn, *, intent_id) -> int:
+    """How far the ladder has climbed for one ambiguous intent — the ``checks``
+    that :func:`_record_evidence` keeps in ``last_error.evidence``; 0 for an
+    intent never polled.
+
+    The door says WHICH rows are due; without this every step would count as
+    the first, the ladder would never exhaust, and an intent whose poll stays
+    inconclusive would never reach `review_required` (#1276) — silently
+    holding its account's next publish. It is read HERE, per row, and the
+    caller claims the row's workspace first: `post_intents` is policy-covered
+    and the sweep's session carries no tenant, so one read for the whole sweep
+    before any claim would see nothing under `svc_worker` and answer 0 for
+    every row — the same ladder that never exhausts (#1349).
+    """
+    row = (
+        await conn.execute(
+            text(
+                "SELECT COALESCE((last_error->'evidence'->>'checks')::int, 0)"
+                "  FROM post_intents WHERE id = :intent"
+            ),
+            {"intent": str(intent_id)},
+        )
+    ).scalar()
+    return int(row or 0)
+
+
+async def record_no_surface(
+    conn, *, intent_id, workspace_id, retry_after_seconds: int
+) -> Union[int, str]:
+    """No push binding: record the ATTEMPT, and say so upward.
+
+    Two things must both be true and they pull opposite ways. The run must not
+    read as a delivery — `outbox.UNDELIVERABLE` is how that reaches the
+    ledger. And it must not park a job every 60 s for a condition that will
+    stand until someone adds a binding, which is what re-attempting on every
+    sweep would do. So the attempt is stamped and re-attempted on the
+    notify window, exactly the "once, not daily" bound on the notice
+    itself.
+
+    ``customer_notified`` is deliberately NOT set: it is the permanent latch
+    that says the customer WAS told, and nobody was. So the row stays due, and
+    the notice lands the moment a surface exists.
+
+    **The sweep calls this once its beat is known to return, never from the
+    row.** The stamp says the condition reached the ledger, and it gets there
+    only as the job ending `review_required`; a beat that raises ends nothing.
+    Stamped inside its row's transaction, the attempt would commit before the
+    beat's outcome is known, and a beat that then failed would leave the
+    window reading as told while nobody was. It scopes its own write, as
+    :func:`notify_parked_customer` does and for the same reason.
+
+    Returns `outbox.UNDELIVERABLE` on the beat that RECORDS the condition, and
+    `0` on the beats inside the window that follow it. The distinction being
+    drawn is between *a message was owed and could not be sent* and *nothing
+    was owed on this beat*, which is the same distinction the whole change is
+    about — not between "sent" and "not sent".
+    """
+    from src.services.target import intent_ledger, unit_of_work
+    from src.services.target.outbox import UNDELIVERABLE
+
+    await unit_of_work.apply_gucs(
+        conn, tenant_id=str(workspace_id), actor_kind="system"
+    )
+    fresh = (
+        await conn.execute(
+            text(
+                "UPDATE post_intents SET "
+                + intent_ledger.EVIDENCE_MERGE.format(
+                    seed='{"v": 1}', key="notify_attempted_at", value="now()"
+                )
+                + " WHERE id = :intent"
+                "   AND state = 'review_required'"
+                "   AND COALESCE("
+                "         CAST(last_error->'evidence'->>'notify_attempted_at'"
+                "              AS timestamptz),"
+                "         CAST('-infinity' AS timestamptz))"
+                "       < now() - make_interval(secs => :age)"
+                " RETURNING id"
+            ),
+            {"intent": str(intent_id), "age": float(retry_after_seconds)},
+        )
+    ).first()
+    if fresh is None:
+        # Already recorded inside this window. The condition still stands and
+        # is still visible — the `review_required` job from the first attempt
+        # and this intent's own stamp both persist — so re-reporting it on
+        # every 60 s beat would park a thousand jobs a day for one workspace
+        # and bury the signal it exists to raise. Bounded, not silenced.
+        return 0
+
+    logger.warning(
+        "reconciler: intent %s needs attention but its workspace has NO push"
+        " binding — nobody was told (#1090)",
+        intent_id,
+    )
+    return UNDELIVERABLE
+
+
+async def notify_parked_customer(
+    conn,
+    *,
+    intent_id,
+    workspace_id,
+    web_app_origin: Optional[str] = None,
+) -> Union[int, str]:
+    """Tell the workspace a parked post needs attention.
+
+    Returns the number of outbox rows written, or `outbox.UNDELIVERABLE`
+    when the workspace has no surface to receive it — **never a bare `0` for
+    both**, which is the shape that lets a producer report a clean
+    run to nobody. An unreachable workspace writes nothing here: the caller
+    records the attempt with :func:`record_no_surface`.
+
+    A `review_required` row: after the customer-notification window
+    the workspace gets "one workspace notification (\"a post needs attention\",
+    deep link to the web queue)". `fn_reconciler_sweep` (059) already selects
+    exactly these rows — state `review_required`, past the window, not yet
+    notified — and tags them ``notify_window``, and **this consumes that tag**
+    for #1090's notice.
+
+    **The stamp is an atomic claim, and it MERGES.** Two things matter here.
+    The claim (``NOT ... customer_notified`` inside the UPDATE) closes the
+    window between the sweep's read and this write — the door's own filter
+    cannot, because the loop runs between them. The merge preserves
+    ``last_error->'evidence'``: that object carries ``checks``,
+    ``last_checked_at`` and the full ``trail``, which is the operator's entire
+    inheritance on a parked intent (the resolution surface reads it), so
+    a ``jsonb_build_object`` rebuild of the kind :func:`_record_evidence` does
+    would notify the customer by destroying the evidence.
+
+    **Bindings are read before the claim**, for the reason spelled out at the
+    call — the same shape as `scheduler._notice_no_media`, and load-bearing
+    here because this latch never reopens.
+
+    *web_app_origin* is the front end's origin (`settings.web_app_origin`).
+    **Absent, the notice still fires without a link** — being told late is a
+    smaller failure than not being told, and a workspace whose deployment has
+    no web origin configured still needs to know a post is stuck.
+
+    **It scopes its own writes, and that is not defensive coding.**
+    `reconcile_ambiguous` is a SYSTEM singleton: it carries `workspace_id
+    NULL`, so `make_session_for` gives it ``app.tenant_id = ''``. The sweep
+    reads cross-tenant because `fn_reconciler_sweep` is SECURITY DEFINER —
+    and 059's own comment says the notification WRITE "then runs tenant-scoped
+    as svc_worker". Under an empty tenant every
+    statement below is invisible to `p_tenant`: the UPDATE matches no row,
+    `push_bindings` returns nothing, and this reports success having written
+    nothing. So the row's workspace is asserted here, through `apply_gucs`
+    rather than a hand-rolled `SET LOCAL` — its docstring is explicit that a
+    second copy of that call is how a third ships `is_local=false`.
+    """
+    from src.services.target import intent_ledger, outbox, prompts, unit_of_work
+
+    # The worker actor, matching `make_session_for`: the governance
+    # triggers on post_intents refuse a write that names no actor.
+    await unit_of_work.apply_gucs(
+        conn, tenant_id=str(workspace_id), actor_kind="system"
+    )
+
+    # Bindings BEFORE the claim, and here the ordering matters more than it
+    # does for the no-media notice: `customer_notified` is a permanent latch
+    # rather than a window, so stamping it for a workspace with no push
+    # binding (#1090) would spend the ONE allowed notification on an
+    # audience that cannot hear it, and the customer would never be told a
+    # post is stuck. Left unstamped, the row stays due — it is a genuinely
+    # outstanding condition — and the notice lands whenever a surface exists.
+    bindings = await prompts.push_bindings(conn, str(workspace_id))
+    if not bindings:
+        return outbox.UNDELIVERABLE
+
+    claimed = (
+        await conn.execute(
+            text(
+                "UPDATE post_intents SET "
+                + intent_ledger.EVIDENCE_MERGE.format(
+                    seed='{"v": 1}', key="customer_notified", value="true"
+                )
+                + " WHERE id = :intent"
+                "   AND state = 'review_required'"
+                "   AND NOT COALESCE("
+                "         CAST(last_error->'evidence'->>'customer_notified'"
+                "              AS boolean), false)"
+                " RETURNING id"
+            ),
+            {"intent": str(intent_id)},
+        )
+    ).first()
+    if claimed is None:
+        return 0
+
+    link = f" {web_app_origin}/dashboard/queue" if web_app_origin else ""
+    await outbox.fanout_notification(
+        conn,
+        workspace_id=workspace_id,
+        bindings=bindings,
+        intent_id=intent_id,
+        text=(
+            "\u26a0\ufe0f A post needs attention: it could not be confirmed"
+            " as published and is waiting for a decision. Open the queue to"
+            f" resolve it.{link}"
+        ),
+    )
+    logger.info(
+        "reconciler: parked intent %s past the notify window — notified %d binding(s)",
+        intent_id,
+        len(bindings),
+    )
+    return len(bindings)
+
+
+async def _record_evidence(conn, *, intent_id, checks: int, trail: list) -> None:
+    """`last_error.evidence` carries `{checks, last_checked_at}` plus the trail."""
+    await conn.execute(
+        text(
+            "UPDATE post_intents"
+            " SET last_error = jsonb_build_object("
+            "   'v', 1,"
+            "   'evidence', jsonb_build_object("
+            "     'checks', CAST(:checks AS int),"
+            "     'last_checked_at', now(),"
+            "     'trail', CAST(:trail AS jsonb)))"
+            " WHERE id = :intent"
+        ),
+        {"intent": str(intent_id), "checks": checks, "trail": json.dumps(trail)},
+    )
+
+
+async def observe(poll: Callable[..., Any], *, intent_id, workspace_id):
+    """Ask the provider for an ambiguous intent's container status, with NO
+    transaction open: the egress floor refuses a provider call inside one
+    (#1508). *poll* may be sync or async."""
+    status = poll(intent_id=intent_id, workspace_id=workspace_id)
+    if hasattr(status, "__await__"):
+        return await status
+    return status
+
+
+async def reconcile_intent(
+    conn,
+    *,
+    intent_id,
+    workspace_id,
+    status_code: Optional[str],
+    stories: Optional[Any] = None,
+    mode: str = DEFAULT_MODE,
+    checks: int = 0,
+    trail: Optional[list] = None,
+) -> str:
+    """One ladder step for one ambiguous intent, from what was observed.
+    Returns the outcome reached.
+
+    ``"posted"`` / ``"failed"`` terminalize; ``"pending"`` means the ladder
+    continues; ``"review_required"`` means the ladder is spent and the intent
+    is parked for the operator surface.
+
+    It writes, and never calls a provider: *status_code* is the container's
+    status, already observed (:func:`observe`) with no transaction open, and
+    *stories* the stories listing, when there is one. So it is drivable from
+    stubbed evidence, as the permit-rail gate requires, in both modes.
+    """
+    trail = list(trail or [])
+    trail.append({"status_code": status_code, "check": checks + 1})
+    verdict = classify(status_code, mode)
+
+    if verdict == POSITIVE:
+        await _terminalize(conn, intent_id=intent_id, state="posted", trail=trail)
+        return "posted"
+    if verdict == NEGATIVE:
+        await _terminalize(conn, intent_id=intent_id, state="failed", trail=trail)
+        return "failed"
+
+    if next_delay_seconds(checks + 1) is not None:
+        await _record_evidence(
+            conn, intent_id=intent_id, checks=checks + 1, trail=trail
+        )
+        return "pending"
+
+    # Ladder exhausted: the stories listing if one was observed, the full
+    # trail, then park.
+    #
+    # The stories listing is CORROBORATING, NEVER DISPOSITIVE. It has a 24 h
+    # lookback and two exclusions: responses omit Live Video
+    # stories, and a story created by resharing is not returned. So absence
+    # from the list is not proof it was never published, and this must not be
+    # read as a negative verdict on its own.
+    if stories is not None:
+        trail.append({"stories": stories})
+    await _record_evidence(conn, intent_id=intent_id, checks=checks + 1, trail=trail)
+    await _park_review_required(conn, intent_id=intent_id, workspace_id=workspace_id)
+    return "review_required"
+
+
+async def _terminalize(conn, *, intent_id, state: str, trail: list) -> None:
+    """Terminalize the intent AND the operation row it judged.
+
+    Every reconciler verdict also terminalizes the
+    ``provider_operations`` row, so no op stays ambiguous after its intent
+    resolves and the ``ix_ops_retire`` retention class eventually drains.
+    Skipping this is how a table grows a permanently un-retirable class.
+
+    The flip must land before the op is closed. A flip that matched no row —
+    the intent left `publishing_ambiguous`, or the session's tenant cannot see
+    it (#1349's shape) — raises instead, so the verdict never closes the op of
+    an intent that stayed put (#1438).
+    """
+    from src.services.target import provider_ops
+
+    await _record_evidence(conn, intent_id=intent_id, checks=len(trail), trail=trail)
+    sets = "state = :state"
+    if state == "posted":
+        # `ck_posted_complete` refuses a bare state flip, and it is right to:
+        # for the `api` route it demands ig_container_id, publish_step =
+        # 'effect_confirmed' AND a cap debit. A verdict that set only `state`
+        # would leave a posted row that cannot say what it posted.
+        sets += ", published_via = 'api', publish_step = 'effect_confirmed'"
+    flipped = (
+        await conn.execute(
+            text(
+                f"UPDATE post_intents SET {sets}"
+                " WHERE id = :intent AND state = 'publishing_ambiguous'"
+                " RETURNING id"
+            ),
+            {"intent": str(intent_id), "state": state},
+        )
+    ).first()
+    if flipped is None:
+        raise ValueError(
+            f"intent {intent_id} matched no 'publishing_ambiguous' row before its"
+            f" {state!r} verdict: it left that state, or this session's tenant"
+            " cannot see it"
+        )
+    result = await conn.execute(
+        text(
+            "SELECT id FROM provider_operations"
+            " WHERE intent_id = :intent AND op_kind = 'publish' AND state = 'ambiguous'"
+        ),
+        {"intent": str(intent_id)},
+    )
+    op_state = "succeeded" if state == "posted" else "failed"
+    for row in result.mappings().all():
+        await provider_ops._advance(
+            conn,
+            op_id=row["id"],
+            to_state=op_state,
+            response_ref={"v": 1, "evidence": trail},
+            from_state="ambiguous",
+        )
+
+
+async def _park_review_required(conn, *, intent_id, workspace_id) -> None:
+    """Park, and put the review on the card at once: the
+    workspace resolves its own `review_required` intent, so every card of it
+    is restated with the review line and the three resolution buttons. The
+    notice keeps the notify window (`notify_parked`). A park that matched no
+    row raises, as `_terminalize`'s flip does (#1438)."""
+    from datetime import datetime, timezone  # noqa: PLC0415 — local, as the module's other imports
+
+    from src.services.target import outbox, prompts  # noqa: PLC0415 — cycle
+
+    moved = (
+        await conn.execute(
+            text(
+                "UPDATE post_intents SET state = 'review_required'"
+                " WHERE id = :intent AND state = 'publishing_ambiguous'"
+                " RETURNING (SELECT COALESCE(a.tz, w.tz) FROM workspaces w"
+                "            JOIN ig_accounts a ON a.id = post_intents.ig_account_id"
+                "           WHERE w.id = post_intents.workspace_id) AS tz"
+            ),
+            {"intent": str(intent_id)},
+        )
+    ).first()
+    if moved is None:
+        raise ValueError(
+            f"intent {intent_id} matched no 'publishing_ambiguous' row before it was"
+            " parked: it left that state, or this session's tenant cannot see it"
+        )
+    line = prompts.outcome_line(
+        "review_required",
+        by=None,
+        at=datetime.now(timezone.utc),
+        tz=str(moved[0] or "UTC"),
+    )
+    await outbox.restate_everywhere(
+        conn,
+        workspace_id=str(workspace_id),
+        intent_id=str(intent_id),
+        outcome_text=line,
+    )

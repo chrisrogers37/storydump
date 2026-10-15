@@ -1,0 +1,419 @@
+"""The credential lifecycle executors (#942).
+
+Two executors and one provider door. `refresh_credential` consumes the clock's
+weekly mints: load the token, ask the provider for a fresh one, swap in place.
+`reauth_prompt` consumes the 062 cadence leg's mints: tell the human, through
+the workspace's own bindings, that posting for an account is paused until they
+reconnect. Between them, a credential cannot die silently.
+
+## Transaction discipline
+
+A database transaction never spans a provider call. The refresh executor is
+three phases — load+commit, provider call, write+commit — each phase on its
+own transaction from :func:`unit_of_work.poller_session_factory` (the same shape
+`deliver_outbox` uses: the lane's session is for the job row; the work rides
+tenant-GUC'd sessions of its own). The egress floor enforces this structurally:
+a provider call inside an open UoW transaction raises, so getting this wrong
+here is loud, not latent.
+
+## The failure taxonomy routes three ways
+
+- **Definitive auth-class rejection** (:class:`RefreshRejected` — the provider
+  ANSWERED and the answer is "this credential is bad"): `mark_dead` performs
+  both flips in one transaction — credential → ``expired``, account →
+  ``reauth_required``. No inline prompt mint: the 062 clock leg is the single
+  producer of `reauth_prompt` jobs and picks the account up on its next tick
+  (marker NULL = immediately eligible), so prompting has exactly one door.
+  The flips run under the account's source prefix and are bound to what the
+  token was issued under (#1644): a rejection that outlived a
+  reauthorization flips nothing.
+- **Transient** (network faults, 429, 5xx — no definitive answer): raise, and
+  the lane's ladder retries with the attempt consumed. Never `mark_dead` on a
+  fault: transient classes must not take the liveness edge.
+- **Undecryptable** (the ring cannot read the stored payload):
+  :func:`ig_login_oauth.load_credential` already performed and committed the
+  dead flips before raising — through the same wrapper, bound to the same
+  capture, as a rejection (`archive_lifecycle.credential_rejected`) — so the
+  job's work is therefore DONE: the executor returns success rather than
+  retrying a payload that cannot become readable.
+
+A ring this process cannot BUILD (`oauth_states.RingUnavailable`) takes none
+of the three: it raises before the payload is read, into the retry budget like
+a transient, and nothing flips — the payload is fine and the fixed key reads it.
+
+The token never appears in any raise, log, or error detail, on any path.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import httpx
+from sqlalchemy import text
+
+from src.exceptions.base import StorydumpError
+from src.services.target import (
+    archive_lifecycle,
+    audit,
+    egress,
+    google_drive_oauth,
+    google_oidc,
+    outbox,
+    unit_of_work,
+)
+from src.services.target import ig_login_oauth as oauth
+from src.services.target import oauth_states
+
+logger = logging.getLogger(__name__)
+
+
+class RefreshRejected(StorydumpError):
+    """The provider definitively rejected the credential (auth-class answer).
+
+    Carries the HTTP status only — never the token, never the response body
+    (a provider error body can echo request parameters back).
+    """
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"provider rejected the credential (HTTP {status_code})")
+
+
+class RefreshTransient(StorydumpError):
+    """No definitive answer (429/5xx). The lane's ladder owns the retry."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"transient refresh failure (HTTP {status_code})")
+
+
+#: Auth-class statuses on the refresh endpoint. 400 is included deliberately:
+#: the request shape is fixed (two params built by `refresh_params`), so a 400
+#: here can only be about the token. 429 and 5xx are transient.
+_REJECTED_STATUSES = frozenset({400, 401, 403})
+
+
+async def ig_refresh(
+    token: str, *, client: Optional[httpx.AsyncClient] = None
+) -> tuple[str, Optional[datetime]]:
+    """The real refresh door: `graph.instagram.com/refresh_access_token`.
+
+    Returns ``(new_token, expires_at)``. A per-call client is deliberate —
+    refreshes run at a weekly cadence per credential, so pooling would manage
+    a connection that is nearly always idle. *client* exists for tests.
+    """
+    params = oauth.refresh_params(token)
+    policy = egress.EgressPolicy(timeout_class="fast")
+    if client is not None:
+        resp = await egress.request(
+            client, "GET", oauth.REFRESH_URL, policy=policy, params=params
+        )
+    else:
+        async with httpx.AsyncClient() as own:
+            resp = await egress.request(
+                own, "GET", oauth.REFRESH_URL, policy=policy, params=params
+            )
+    if resp.status_code == 200:
+        body = resp.json()
+        new_token = body.get("access_token")
+        if not new_token:
+            # A 200 with no token is not an answer; retry, never mark dead.
+            raise RefreshTransient(200)
+        expires_at = None
+        if body.get("expires_in") is not None:
+            expires_at = datetime.now(timezone.utc) + timedelta(
+                seconds=int(body["expires_in"])
+            )
+        return new_token, expires_at
+    if resp.status_code in _REJECTED_STATUSES:
+        raise RefreshRejected(resp.status_code)
+    raise RefreshTransient(resp.status_code)
+
+
+#: Google answers 200 for a revoked grant and 400 for one that was already
+#: invalid. The SECOND IS THE OUTCOME WE WANTED — a user who disconnects twice,
+#: or whose token Google already dropped, ends in exactly the state the revoke
+#: was for. Collapsing them into "failed" would event a false alarm on the
+#: commonest repeat path (#1083).
+_REVOKE_SETTLED = frozenset({200, 400})
+
+
+async def revoke_workspace_credentials(deps, session, job) -> str:
+    """Best-effort Google revoke for a disconnected Drive source (#1083).
+
+    `disconnect_account` marks the credential `revoked` locally and stops
+    using it; this job tells Google, so the refresh token does not stay valid
+    on Google's side — withdrawn from us, live for them — until the user
+    finds it in their own Google account.
+
+    **Best-effort has three parts and all three are structural here rather than
+    careful.** This runs as a JOB, outside the disconnect's unit of work, which
+    is what makes them true: it cannot roll back the local revoke or the source
+    going `paused` (a different transaction, already committed), it cannot block
+    the user's disconnect (a different request, already returned), and a failure
+    has somewhere to be recorded. The placement is not a preference —
+    `command_executors.disconnect_account` states that a provider call inside a
+    unit of work violates this codebase's checkpoint discipline.
+
+    **The failure is never silent**, which is the requirement that needed
+    deciding rather than implementing. Two dispositions:
+
+    - TERMINAL (the payload will not decrypt): retrying cannot make it readable,
+      so an `revoke_failed` audit row is written and the job SUCCEEDS: recorded
+      in audit and abandoned — abandoning without a record
+      is a swallowed failure.
+    - RETRYABLE (a floor refusal, a 5xx, a rate limit): RAISED, so the job's own
+      retry budget runs and a persistent inability lands as a dead job row.
+      Auditing here instead would report a failure on the first blip.
+
+    A key ring this process cannot build (`RingUnavailable`) is RETRYABLE: the
+    payload is fine and the fixed key reads it. So the ring is built first,
+    outside the decrypt's `try` — inside it, a missing key would be audited
+    `undecryptable` and the revocation abandoned with the grant still live.
+
+    It reads the token only to spend it, never logs it, and never returns it.
+    """
+    payload = job.get("payload") or {}
+    credential_id = str(payload["credential_id"])
+    workspace_id = str(job["workspace_id"])
+    factory = unit_of_work.poller_session_factory(deps.engine, workspace_id)
+    keys = oauth_states.ring()
+
+    # Phase 1 — read and decrypt in its own transaction, committed before any
+    # provider talk. Same ordering as `refresh_credential` and for the same
+    # reason: a held transaction across a network call is a lock on a stranger.
+    async with factory() as s:
+        row = (
+            await s.execute(
+                text(
+                    "SELECT encrypted_payload FROM oauth_credentials"
+                    " WHERE id = :cid AND workspace_id = :ws"
+                ),
+                {"cid": credential_id, "ws": workspace_id},
+            )
+        ).first()
+    if row is None:
+        # The credential is gone — the grant it named cannot be revoked and
+        # nothing is owed. Not a failure.
+        logger.info("revoke_workspace_credentials %s: credential gone", job["id"])
+        return "absent"
+
+    try:
+        refresh_token = google_drive_oauth.decode_payload(
+            keys.decrypt(row[0])
+        ).refresh_token
+    except Exception:
+        # Deliberately not logging the exception: it can carry ciphertext.
+        await _audit_revoke_failed(
+            factory, workspace_id, credential_id, "undecryptable"
+        )
+        logger.warning(
+            "revoke_workspace_credentials %s: credential %s undecryptable —"
+            " audited and abandoned, the Google grant may still be live",
+            job["id"],
+            credential_id,
+        )
+        return "undecryptable"
+
+    async with httpx.AsyncClient() as client:
+        status = await google_oidc.revoke_token(client, token=refresh_token)
+
+    if status in _REVOKE_SETTLED:
+        return "revoked" if status == 200 else "already_invalid"
+
+    raise RevokeRetryable(status)
+
+
+class RevokeRetryable(StorydumpError):
+    """Google answered something that might succeed later. Carries the status
+    only — never the token, never the body."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"google revoke answered {status_code}")
+
+
+async def _audit_revoke_failed(factory, workspace_id, credential_id, reason) -> None:
+    """The `revoke_failed` record. Its own transaction,
+    so the record survives whatever the caller does next.
+
+    The commit is what makes that true, and it is this helper's to make:
+    `poller_session_factory` applies the GUCs and yields, so closing the
+    session rolls back, and `audit.record` writes "in the CALLER's
+    transaction" by contract. Without it the row is written and discarded --
+    and this is the only trace of a revoke that failed, on a branch that
+    deliberately lets the job SUCCEED.
+    """
+    async with factory() as s:
+        await audit.record(
+            s,
+            workspace_id=workspace_id,
+            entity_kind="oauth_credential",
+            entity_id_sql=":cid",
+            from_state="revoked",
+            to_state="revoked",
+            detail={"event": "revoke_failed", "reason": reason},
+            cid=credential_id,
+        )
+        await s.commit()
+
+
+async def refresh_credential(deps, session, job) -> str:
+    """Executor for the clock's `refresh_credential` mints.
+
+    A routine refresh swaps the token in place and keeps its authorization, so
+    an archive keeps its generation and epoch. A rejection is bound to what the
+    token was issued under, captured before the token is read
+    (`archive_lifecycle.credential_rejected`): after a reauthorization it
+    flips nothing (`stale`).
+    """
+    payload = job.get("payload") or {}
+    credential_id = str(payload["credential_id"])
+    workspace_id = str(job["workspace_id"])
+    factory = unit_of_work.poller_session_factory(deps.engine, workspace_id)
+
+    # Phase 1 — load, own transaction, committed before any provider talk.
+    try:
+        async with factory() as s:
+            # A credential revoked since this job was minted — a removed
+            # destination's — is left exactly as it is: no provider call, no
+            # flip. The clock mints only for `active` credentials, so this is
+            # the one-tick window between a mint and a removal.
+            state = await oauth.credential_state(s, credential_id=credential_id)
+            if state is not None and state != "active":
+                logger.info(
+                    "refresh_credential %s: credential %s is %s — nothing to refresh",
+                    job["id"],
+                    credential_id,
+                    state,
+                )
+                return "stale"
+            # Before the token, never after: a reauthorization that lands
+            # between the two reads then leaves the capture older than the
+            # token, and a rejection of it flips nothing.
+            captured = await archive_lifecycle.capture_credential(
+                s, workspace_id=workspace_id, credential_id=credential_id
+            )
+            token = await oauth.load_credential(
+                s, credential_id=credential_id, captured=captured
+            )
+    except oauth.CredentialUndecryptable:
+        # load_credential already flipped credential+account (under the
+        # account's source prefix, bound to `captured`) and committed;
+        # retrying cannot make the payload readable. The job is done.
+        logger.warning(
+            "refresh_credential %s: credential %s undecryptable — dead flips"
+            " already committed by load_credential",
+            job["id"],
+            credential_id,
+        )
+        return "undecryptable"
+    except oauth_states.OAuthStateRefused:
+        logger.warning(
+            "refresh_credential %s: credential %s has no row — nothing to refresh",
+            job["id"],
+            credential_id,
+        )
+        return "missing"
+
+    # Phase 2 — the provider call, outside any transaction (floor-enforced).
+    try:
+        new_token, expires_at = await deps.refresh(token)
+    except RefreshRejected as exc:
+        # Phase 3b — the liveness edge: both flips, one transaction, under
+        # the account's source prefix. The 062 clock leg mints the reauth
+        # prompt on its next tick.
+        async with factory() as s:
+            outcome = await archive_lifecycle.credential_rejected(
+                s,
+                workspace_id=workspace_id,
+                credential_id=credential_id,
+                captured=captured,
+            )
+            await s.commit()
+        if outcome == "stale":
+            logger.info(
+                "refresh_credential %s: credential %s rejected (HTTP %s), but it"
+                " was reauthorized after the token was read — nothing flipped",
+                job["id"],
+                credential_id,
+                exc.status_code,
+            )
+            return "stale"
+        logger.warning(
+            "refresh_credential %s: credential %s definitively rejected"
+            " (HTTP %s) — marked dead, account flipped to reauth_required",
+            job["id"],
+            credential_id,
+            exc.status_code,
+        )
+        return "rejected"
+
+    # Phase 3a — swap in place (same row id, no zero-credential
+    # window). The next tick's mint re-arms next_refresh_at.
+    async with factory() as s:
+        await oauth.swap_credential(
+            s, credential_id=credential_id, token=new_token, expires_at=expires_at
+        )
+        await s.commit()
+    return "refreshed"
+
+
+async def reauth_prompt(deps, session, job) -> str:
+    """Executor for the 062 cadence leg's mints.
+
+    Enqueues one `notification` outbox row per push binding. No provider call
+    happens here — the sender delivers; this executor only writes rows, so a
+    single transaction covers the check and the enqueue together.
+    """
+    from src.services.target import prompts
+
+    payload = job.get("payload") or {}
+    account_id = str(payload["ig_account_id"])
+    factory = unit_of_work.poller_session_factory(deps.engine, str(job["workspace_id"]))
+
+    async with factory() as s:
+        row = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT state, workspace_id, provider_account_ref"
+                        " FROM ig_accounts WHERE id = :a"
+                    ),
+                    {"a": account_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            logger.warning(
+                "reauth_prompt %s: account %s has no row", job["id"], account_id
+            )
+            return "missing"
+        if row["state"] != "reauth_required":
+            # Reconnected (or moved on) between mint and execution — a stale
+            # prompt must not fire. Success: the state machine already won.
+            return "stale"
+        bindings = await prompts.push_bindings(s, str(row["workspace_id"]))
+        if not bindings:
+            # No surface to say it on. The marker was stamped at mint, so the
+            # cadence re-prompts next week — by then a binding may exist.
+            logger.warning(
+                "reauth_prompt %s: workspace %s has no push binding — nothing enqueued",
+                job["id"],
+                row["workspace_id"],
+            )
+            return "no-surface"
+        body = (
+            f"⚠️ Instagram connection for {row['provider_account_ref']} needs"
+            " re-authorization. Posting for this account is paused until you"
+            " reconnect it from the dashboard."
+        )
+        await outbox.fanout_notification(
+            s, workspace_id=str(row["workspace_id"]), bindings=bindings, text=body
+        )
+        await s.commit()
+    return "prompted"

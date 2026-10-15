@@ -1,0 +1,5 @@
+# Preserve Railway's existing builder/archive. This archive supplies FFmpeg and
+# ffprobe 7.1; media_validation pins its text/option evidence to that runtime.
+[phases.setup]
+nixPkgs = ["...", "ffmpeg"]
+nixpkgsArchive = "bc8f8d1be58e8c8383e683a06e1e1e57893fff87"

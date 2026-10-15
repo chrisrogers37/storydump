@@ -1,0 +1,26 @@
+import { TextLink } from "@/components/landing/text-link"
+import { WaitlistForm } from "@/components/landing/waitlist-form"
+
+/** The top-of-page signup: the form, the locked price line, Sign in and the sample workspace. */
+export function HeroSignup() {
+  return (
+    <>
+      <div className="mt-8 max-w-xl">
+        <WaitlistForm variant="hero" />
+      </div>
+      <p className="mt-4 text-sm text-ink/70">
+        Free during beta · No credit card required{" "}
+        <span className="whitespace-nowrap">
+          · Already using Storydump? <TextLink href="/login" track={{ event: "Sign In Click", props: { location: "hero" } }}>
+            Sign in
+          </TextLink>
+        </span>
+      </p>
+      <p className="mt-3 text-sm">
+        <TextLink href="/demo" track={{ event: "Sample Workspace Click", props: { location: "hero" } }}>
+          See a sample workspace
+        </TextLink>
+      </p>
+    </>
+  )
+}

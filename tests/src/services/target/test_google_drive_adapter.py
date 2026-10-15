@@ -1,0 +1,1728 @@
+"""The real Drive read leg (#982) — `list_changes` against a mock transport.
+
+No test here reaches Google. Every request is served by `httpx.MockTransport`,
+so the shapes asserted are the shapes the adapter actually builds rather than
+the shapes it was described as building.
+
+The egress floor's private-address guard resolves DNS, which a unit test must
+not depend on, so the policy passed in turns that one guard off and leaves the
+rest on. The host allowlist deliberately STAYS on — `www.googleapis.com` being
+admitted is part of what these tests certify.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+
+from src.services.target.drive_adapter import (
+    checkpoint_incomplete,
+    DriveLostResponse,
+    DriveRetryableError,
+    DriveTerminalError,
+)
+from src.services.target import google_drive_adapter
+from src.services.target.egress import EgressPolicy
+from src.services.target.google_drive_adapter import (
+    SHARED_ROOT,
+    GoogleDriveAdapter,
+)
+from src.services.target.media_sync import DriveCredentialDead, DriveSourceGone
+
+#: The suffixes the fixtures below use for a video — the test's own data.
+INSTAGRAM_VIDEO_SUFFIXES = (".mp4", ".mov")
+
+CONFIG = {"v": 1, "folder_ref": "FOLDER123"}
+WS = "11111111-1111-1111-1111-111111111111"
+SRC = "22222222-2222-2222-2222-222222222222"
+#: Thumbnail links as Drive hands them out: short-lived, on its content host.
+THUMB = "https://lh3.googleusercontent.com/drive-storage/thumb-1=s220"
+FRESH = "https://lh3.googleusercontent.com/drive-storage/thumb-2=s220"
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
+
+
+def _policy() -> EgressPolicy:
+    return EgressPolicy().without(enforce_private_address_block=False)
+
+
+def _file(fid, name="a.jpg", mime="image/jpeg", md5="hash1", size="10"):
+    return {
+        "id": fid,
+        "name": name,
+        "mimeType": mime,
+        "md5Checksum": md5,
+        "size": size,
+        "modifiedTime": "2026-08-01T00:00:00Z",
+    }
+
+
+def _adapter(handler, *, token="tok", record=None, page_size=200):
+    async def token_provider(source_id, *, workspace_id, fresh=False):
+        if record is not None:
+            record.append(
+                (source_id, workspace_id)
+                if not fresh
+                else (source_id, workspace_id, "fresh")
+            )
+        if isinstance(token, Exception):
+            raise token
+        return token
+
+    return GoogleDriveAdapter(
+        token_provider=token_provider,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        policy=_policy(),
+        page_size=page_size,
+    )
+
+
+def _json_handler(payload, status=200, headers=None):
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["request"] = request
+        return httpx.Response(
+            status,
+            json=payload,
+            headers=headers or {"content-type": "application/json"},
+        )
+
+    return handler, seen
+
+
+class TestListChanges:
+    @pytest.mark.asyncio
+    async def test_maps_a_page_into_media_sync_item_shape(self):
+        handler, _ = _json_handler(
+            {"files": [_file("f1", name="cat.jpg") | {"thumbnailLink": THUMB}]}
+        )
+        items, checkpoint = await _adapter(handler).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items == [
+            {
+                "ref": "f1",
+                "name": "cat.jpg",
+                "kind": "image",
+                "mime_type": "image/jpeg",
+                "content_hash": "hash1",
+                "size_bytes": 10,
+                "modified_at": "2026-08-01T00:00:00Z",
+                "thumbnail_link": THUMB,
+                "folder_path": "",
+            }
+        ]
+        # media_sync reads exactly these five; the rest are additive.
+        assert {"ref", "name", "kind", "mime_type", "content_hash"} <= set(items[0])
+        assert not checkpoint_incomplete(checkpoint)
+
+    @pytest.mark.asyncio
+    async def test_video_mime_maps_to_the_video_kind(self):
+        handler, _ = _json_handler(
+            {"files": [_file("f2", name="clip.mp4", mime="video/mp4")]}
+        )
+        items, _ = await _adapter(handler).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items[0]["kind"] == "video"
+
+    @pytest.mark.asyncio
+    async def test_the_provider_mime_survives_a_name_that_carries_no_extension(self):
+        """The fixture is extensionless ON PURPOSE, and a normal-looking name
+        would prove nothing here.
+
+        A Drive file's name is whatever a person typed into Drive; nothing
+        requires a suffix, and `media_sync` writes that name straight into
+        `media_items.file_name`. So for provider media the filename is not a
+        classifier input at all, and `mimeType` is the only authoritative
+        signal the listing carries. Deriving `kind` from it and then dropping it
+        is what left `mime_type` NULL for every Drive row.
+
+        The control is the second assertion, coupled to the shipped suffix set
+        rather than a copy of it: this name is one the IG predicate would call
+        IMAGE, while the provider says video.
+        """
+        handler, _ = _json_handler(
+            {"files": [_file("f9", name="sunset clip", mime="video/quicktime")]}
+        )
+        items, _ = await _adapter(handler).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items[0]["mime_type"] == "video/quicktime"
+        assert items[0]["kind"] == "video"
+        # Control: the name is inert to every extension-based classifier.
+        assert Path(items[0]["name"]).suffix == ""
+        assert not items[0]["name"].lower().endswith(INSTAGRAM_VIDEO_SUFFIXES)
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_entry_never_reaches_the_item_shape(self):
+        """A positive control on the two probes above: the same helper that
+        builds a carried item also drops one, so a listing coming back empty
+        here is the skip firing rather than the fixture failing to arrive."""
+        handler, _ = _json_handler(
+            {"files": [_file("f10", name="doc", mime="application/pdf")]}
+        )
+        items, _ = await _adapter(handler).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items == []
+
+    @pytest.mark.asyncio
+    async def test_exhaustion_is_the_absent_token_not_a_short_page(self):
+        """A page well under `page_size` still says nothing about exhaustion —
+        only the token does. Asserted in both directions."""
+        handler, _ = _json_handler({"files": [_file("f1")], "nextPageToken": "MORE"})
+        _, checkpoint = await _adapter(handler, page_size=200).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert checkpoint["page_token"] == "MORE"
+        assert checkpoint["current"]["id"] == "FOLDER123", "never the bare token shape"
+
+        handler2, _ = _json_handler({"files": [_file("f1")]})
+        _, done = await _adapter(handler2).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert "page_token" not in done
+
+    @pytest.mark.asyncio
+    async def test_a_checkpoint_token_is_sent_back_as_pageToken(self):
+        handler, seen = _json_handler({"files": []})
+        at_root = {
+            "id": "FOLDER123",
+            "name": None,
+            "top": "FOLDER123",
+            "top_name": None,
+            "path": "",
+            "listed": True,
+        }
+        await _adapter(handler).list_changes(
+            CONFIG,
+            {
+                "v": 2,
+                "walk": "w",
+                "current": at_root,
+                "queue": [],
+                "page_token": "RESUME",
+            },
+            source_id=SRC,
+            workspace_id=WS,
+        )
+        assert "pageToken=RESUME" in str(seen["request"].url)
+
+    @pytest.mark.asyncio
+    async def test_the_request_carries_the_bearer_and_scopes_to_the_folder(self):
+        handler, seen = _json_handler({"files": []})
+        await _adapter(handler, token="TOKEN-XYZ").list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        request = seen["request"]
+        assert request.headers["authorization"] == "Bearer TOKEN-XYZ"
+        url = str(request.url)
+        assert "FOLDER123" in url and "in+parents" in url.replace("%20", "+")
+        assert "md5Checksum" in url
+        assert "thumbnailLink" in url
+        assert "trashed" in url
+
+    @pytest.mark.asyncio
+    async def test_both_ids_reach_the_token_provider(self):
+        """The workspace id is the credential's key (069) and the source id
+        names the folder; an adapter that dropped either would resolve the
+        wrong tenant's grant or mislabel the folder it was syncing."""
+        record: list = []
+        handler, _ = _json_handler({"files": []})
+        await _adapter(handler, record=record).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert record == [(SRC, WS)]
+
+
+class TestRefusals:
+    @pytest.mark.asyncio
+    async def test_a_config_with_no_folder_ref_is_refused_before_any_call(self):
+        called = []
+
+        def handler(request):
+            called.append(request)
+            return httpx.Response(200, json={"files": []})
+
+        with pytest.raises(DriveTerminalError, match="folder_ref"):
+            await _adapter(handler).list_changes(
+                {"v": 1}, None, source_id=SRC, workspace_id=WS
+            )
+        # The seam contract says validate_source_config runs FIRST. If it ran
+        # after the request, a shapeless config would still have listed the
+        # drive root once before refusing.
+        assert called == []
+
+    @pytest.mark.asyncio
+    async def test_root_name_is_refused_rather_than_silently_listing_the_parent(self):
+        called = []
+
+        def handler(request):
+            called.append(request)
+            return httpx.Response(200, json={"files": []})
+
+        with pytest.raises(DriveTerminalError, match="root_name"):
+            await _adapter(handler).list_changes(
+                {**CONFIG, "root_name": "sub"}, None, source_id=SRC, workspace_id=WS
+            )
+        assert called == []
+
+
+class TestSkips:
+    @pytest.mark.asyncio
+    async def test_a_file_with_no_md5_is_skipped_and_the_rest_survive(self):
+        handler, _ = _json_handler(
+            {
+                "files": [
+                    _file("good"),
+                    {"id": "nohash", "name": "x.jpg", "mimeType": "image/jpeg"},
+                ]
+            }
+        )
+        items, _ = await _adapter(handler).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["good"]
+
+    @pytest.mark.asyncio
+    async def test_a_mime_the_query_excludes_is_skipped(self):
+        handler, _ = _json_handler(
+            {"files": [_file("doc", mime="application/pdf"), _file("good")]}
+        )
+        items, _ = await _adapter(handler).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["good"]
+
+
+class TestErrorRouting:
+    """Each status selects one behaviour; the executor never parses bodies."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status,body,expected",
+        [
+            (401, {"error": {"message": "Invalid Credentials"}}, DriveCredentialDead),
+            (
+                403,
+                {"error": {"message": "Insufficient permission"}},
+                DriveCredentialDead,
+            ),
+            (
+                403,
+                {"error": {"message": "User Rate Limit Exceeded"}},
+                DriveRetryableError,
+            ),
+            (404, {"error": {"message": "File not found: F"}}, DriveSourceGone),
+            (429, {"error": {"message": "quota"}}, DriveRetryableError),
+            (500, {"error": {"message": "backend"}}, DriveRetryableError),
+            (503, {"error": {"message": "unavailable"}}, DriveRetryableError),
+            (400, {"error": {"message": "Invalid query"}}, DriveTerminalError),
+        ],
+    )
+    async def test_status_selects_the_routing_type(self, status, body, expected):
+        handler, _ = _json_handler(body, status=status)
+        with pytest.raises(expected):
+            await _adapter(handler).list_changes(
+                CONFIG, None, source_id=SRC, workspace_id=WS
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reason, message, expected",
+        [
+            # A limit passes, so it is retried: a daily limit read as a dead
+            # grant would flip the source to `error` and alert.
+            ("dailyLimitExceeded", "Daily Limit Exceeded", DriveRetryableError),
+            ("rateLimitExceeded", "Too many requests", DriveRetryableError),
+            ("userRateLimitExceeded", "Slow down", DriveRetryableError),
+            # One item the app may not reach: the item is gone to the app, not
+            # the credential dead, and a reconnect would not bring it back.
+            (
+                "appNotAuthorizedToFile",
+                "The user has not granted the app access to the file",
+                DriveSourceGone,
+            ),
+            (
+                "insufficientFilePermissions",
+                "The user does not have sufficient permissions for this file",
+                DriveSourceGone,
+            ),
+            # Any other 403 stays the credential's.
+            ("forbidden", "Forbidden", DriveCredentialDead),
+            # ...even when its message mentions a quota: a full Drive is not a
+            # limit, and does not pass. The message is read only when the body
+            # names no reason.
+            (
+                "storageQuotaExceeded",
+                "The user's Drive storage quota has been exceeded.",
+                DriveCredentialDead,
+            ),
+        ],
+    )
+    async def test_a_403_routes_on_googles_reason_first(
+        self, reason, message, expected
+    ):
+        record = []
+        handler, _ = _json_handler(
+            {
+                "error": {
+                    "code": 403,
+                    "message": message,
+                    "errors": [{"reason": reason, "message": message}],
+                }
+            },
+            status=403,
+        )
+        with pytest.raises(expected):
+            await _adapter(handler, record=record).list_changes(
+                CONFIG, None, source_id=SRC, workspace_id=WS
+            )
+        fresh = [call for call in record if len(call) == 3]
+        assert fresh == (
+            [(SRC, WS, "fresh")] if expected is DriveCredentialDead else []
+        ), "only a credential refusal re-mints the token"
+
+    @pytest.mark.asyncio
+    async def test_a_file_the_app_may_not_reach_is_a_gone_file_on_the_fetch(self):
+        from src.services.target.drive_adapter import DriveMediaGone
+
+        handler, _ = _json_handler(
+            {
+                "error": {
+                    "code": 403,
+                    "message": "no",
+                    "errors": [{"reason": "insufficientFilePermissions"}],
+                }
+            },
+            status=403,
+        )
+        with pytest.raises(DriveMediaGone):
+            await _adapter(handler).fetch_bytes(
+                {"v": 1, "folder_ref": "root"},
+                source_id=SRC,
+                workspace_id=WS,
+                file_ref="F",
+                max_bytes=1000,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_dead_transport_is_not_catchable_as_a_drive_error(self):
+        """`DriveLostResponse` is deliberately not a `DriveError`: "no answer
+        exists" must not be catchable as "it failed"."""
+
+        def handler(request):
+            raise httpx.ConnectError("boom")
+
+        from src.services.target.drive_adapter import DriveError
+
+        with pytest.raises(DriveLostResponse) as caught:
+            await _adapter(handler).list_changes(
+                CONFIG, None, source_id=SRC, workspace_id=WS
+            )
+        assert not isinstance(caught.value, DriveError)
+
+    @pytest.mark.asyncio
+    async def test_a_200_that_is_not_json_is_retryable_not_a_crash(self):
+        def handler(request):
+            return httpx.Response(
+                200, content=b"<html>nope", headers={"content-type": "text/html"}
+            )
+
+        with pytest.raises(DriveRetryableError):
+            await _adapter(handler).list_changes(
+                CONFIG, None, source_id=SRC, workspace_id=WS
+            )
+
+
+class TestGzip:
+    """Google serves gzip. The floor streams rather than buffering, so this is
+    the one transport property a mock could hide if it were never asserted."""
+
+    @pytest.mark.asyncio
+    async def test_a_gzip_encoded_body_is_decoded(self):
+        import gzip
+
+        payload = {"files": [_file("gz")]}
+        packed = gzip.compress(json.dumps(payload).encode())
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                content=packed,
+                headers={
+                    "content-type": "application/json",
+                    "content-encoding": "gzip",
+                },
+            )
+
+        items, _ = await _adapter(handler).list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["gz"]
+
+
+class TestCredentialFailurePropagates:
+    @pytest.mark.asyncio
+    async def test_a_dead_credential_reaches_the_caller_unchanged(self):
+        """`media_sync` routes on this type to flip the source to `error`; the
+        adapter must not re-wrap it into the ladder's vocabulary."""
+        handler, _ = _json_handler({"files": []})
+        adapter = _adapter(handler, token=DriveCredentialDead("no credential"))
+        with pytest.raises(DriveCredentialDead):
+            await adapter.list_changes(CONFIG, None, source_id=SRC, workspace_id=WS)
+
+
+class TestListFolders:
+    """The folder browser (#1165): the same `drive.readonly` grant,
+    the same floored transport, one more `q`."""
+
+    FOLDER_MIME = "application/vnd.google-apps.folder"
+
+    def _folder(self, fid, name):
+        return {"id": fid, "name": name}
+
+    @pytest.mark.asyncio
+    async def test_the_root_lists_folders_only_and_asks_the_workspace_token(self):
+        record = []
+        handler, seen = _json_handler({"files": [self._folder("f1", "Trips")]})
+        page = await _adapter(handler, record=record).list_folders(
+            parent=None, workspace_id=WS
+        )
+        assert (
+            page.folders == [{"id": "f1", "name": "Trips"}] and page.truncated is False
+        )
+        assert record == [(None, WS)]
+        q = seen["request"].url.params["q"]
+        assert "'root' in parents" in q and f"mimeType = '{self.FOLDER_MIME}'" in q
+        assert "trashed = false" in q
+        assert seen["request"].url.params["fields"] == "nextPageToken,files(id,name)"
+        assert seen["request"].headers["authorization"] == "Bearer tok"
+
+    @pytest.mark.asyncio
+    async def test_a_parent_narrows_the_query(self):
+        handler, seen = _json_handler({"files": []})
+        page = await _adapter(handler).list_folders(parent="abc_-123", workspace_id=WS)
+        assert page.folders == []
+        assert "'abc_-123' in parents" in seen["request"].url.params["q"]
+
+    @pytest.mark.asyncio
+    async def test_the_shared_root_lists_what_was_shared_to_the_account(self):
+        handler, seen = _json_handler(
+            {"files": [self._folder("s1", "From the client")]}
+        )
+        page = await _adapter(handler).list_folders(parent=SHARED_ROOT, workspace_id=WS)
+        assert page.folders == [{"id": "s1", "name": "From the client"}]
+        q = seen["request"].url.params["q"]
+        assert "sharedWithMe = true" in q and "in parents" not in q
+
+    @pytest.mark.asyncio
+    async def test_pages_are_followed_to_the_end(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.params.get("pageToken"))
+            if len(calls) == 1:
+                return httpx.Response(
+                    200,
+                    json={"files": [self._folder("f1", "A")], "nextPageToken": "p2"},
+                )
+            return httpx.Response(200, json={"files": [self._folder("f2", "B")]})
+
+        page = await _adapter(handler).list_folders(parent=None, workspace_id=WS)
+        assert [f["id"] for f in page.folders] == ["f1", "f2"]
+        assert calls == [None, "p2"] and page.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_the_cap_cuts_the_listing_and_says_so(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_LIST_CAP", 3)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.params.get("pageToken"):
+                return httpx.Response(200, json={"files": [self._folder("f4", "D")]})
+            return httpx.Response(
+                200,
+                json={
+                    "files": [self._folder(f"f{i}", n) for i, n in enumerate("ABC", 1)],
+                    "nextPageToken": "p2",
+                },
+            )
+
+        page = await _adapter(handler).list_folders(parent=None, workspace_id=WS)
+        assert [f["id"] for f in page.folders] == ["f1", "f2", "f3"]
+        assert page.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_a_parent_that_is_not_a_drive_id_is_refused_before_any_request(self):
+        handler, seen = _json_handler({"files": []})
+        for bad in ("x' or 1=1", "abc\n", ""):
+            with pytest.raises(DriveTerminalError):
+                await _adapter(handler).list_folders(parent=bad, workspace_id=WS)
+        assert "request" not in seen
+
+    @pytest.mark.asyncio
+    async def test_a_dead_grant_is_named_as_such(self):
+        handler, _ = _json_handler(
+            {"error": {"message": "Invalid Credentials"}}, status=401
+        )
+        with pytest.raises(DriveCredentialDead):
+            await _adapter(handler).list_folders(parent=None, workspace_id=WS)
+
+
+class TestOneRemintOnARefusedToken:
+    """A token the door handed out can die inside the request it was minted
+    for (#1247). Google's 401 buys exactly one re-mint (`fresh=True`) and one
+    retry; a second refusal is the grant's and propagates."""
+
+    @pytest.mark.asyncio
+    async def test_a_401_is_retried_once_with_a_fresh_token(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.headers["authorization"])
+            if len(calls) == 1:
+                return httpx.Response(
+                    401, json={"error": {"message": "Invalid Credentials"}}
+                )
+            return httpx.Response(200, json={"files": [{"id": "f1", "name": "Trips"}]})
+
+        record: list = []
+        tokens = iter(["tok-stale", "tok-fresh"])
+
+        async def token_provider(source_id, *, workspace_id, fresh=False):
+            record.append(fresh)
+            return next(tokens)
+
+        adapter = GoogleDriveAdapter(
+            token_provider=token_provider,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            policy=_policy(),
+        )
+        page = await adapter.list_folders(parent=None, workspace_id=WS)
+        assert [f["id"] for f in page.folders] == ["f1"]
+        assert record == [False, True]
+        assert calls == ["Bearer tok-stale", "Bearer tok-fresh"]
+
+    @pytest.mark.asyncio
+    async def test_a_remint_inside_the_walk_carries_to_the_next_request(self):
+        """The subfolder listing gets the 401; the media page that follows must
+        use the FRESH token, not resend the refused one."""
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.headers["authorization"])
+            if len(calls) == 1:
+                return httpx.Response(
+                    401, json={"error": {"message": "Invalid Credentials"}}
+                )
+            return httpx.Response(200, json={"files": []})
+
+        tokens = iter(["tok-stale", "tok-fresh"])
+
+        async def token_provider(source_id, *, workspace_id, fresh=False):
+            return next(tokens)
+
+        adapter = GoogleDriveAdapter(
+            token_provider=token_provider,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            policy=_policy(),
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items == [] and not checkpoint_incomplete(cp)
+        assert calls == ["Bearer tok-stale", "Bearer tok-fresh", "Bearer tok-fresh"]
+
+    @pytest.mark.asyncio
+    async def test_a_second_refusal_is_the_grants(self):
+        handler, _ = _json_handler(
+            {"error": {"message": "Invalid Credentials"}}, status=401
+        )
+        record: list = []
+        with pytest.raises(DriveCredentialDead):
+            await _adapter(handler, record=record).list_folders(
+                parent=None, workspace_id=WS
+            )
+        assert record == [(None, WS), (None, WS, "fresh")]
+
+
+def _folder_entry(fid, name):
+    return {"id": fid, "name": name, "mimeType": "application/vnd.google-apps.folder"}
+
+
+class TestTheWalkOverSubfolders:
+    """A picked folder's SUBFOLDERS are categories. The walk lists one media
+    page per call, and the cursor rides the checkpoint: `current` (the folder
+    being listed, with its name = the category), `queue` (folders still to
+    list), `page_token` (within the current folder). A checkpoint with none of
+    the three is the only statement that the walk is complete — the bound
+    stays announced, never absorbed."""
+
+    ROOT = "FOLDER123"
+
+    def _drive(self, *, root_files, subfolders, folder_files, pages=None):
+        """A Drive with `root_files` directly in the root, `subfolders`
+        [(id, name)], and `folder_files` {folder_id: [files]}. `pages` lets a
+        folder answer in two pages: {folder_id: split_index}."""
+        pages = pages or {}
+        calls: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            token = request.url.params.get("pageToken")
+            calls.append({"q": q, "pageToken": token})
+            parent = q.split("'")[1]
+            if "mimeType = 'application/vnd.google-apps.folder'" in q:
+                # Lazy walk: every popped folder is asked
+                # for ITS subfolders once; only the root has any here.
+                children = subfolders if parent == self.ROOT else []
+                return httpx.Response(
+                    200, json={"files": [_folder_entry(i, n) for i, n in children]}
+                )
+            files = root_files if parent == self.ROOT else folder_files.get(parent, [])
+            if parent in pages:
+                split = pages[parent]
+                if token is None:
+                    return httpx.Response(
+                        200,
+                        json={"files": files[:split], "nextPageToken": f"{parent}-p2"},
+                    )
+                return httpx.Response(200, json={"files": files[split:]})
+            return httpx.Response(200, json={"files": files})
+
+        return _adapter(handler), calls
+
+    @pytest.mark.asyncio
+    async def test_the_root_and_each_subfolder_are_listed_and_the_subfolder_names_the_category(
+        self,
+    ):
+        adapter, calls = self._drive(
+            root_files=[_file("r1", name="loose.jpg")],
+            subfolders=[
+                ("ANNOUNCEMENTS", "announcements"),
+                ("BEHIND_THE_SCENES", "behind-the-scenes"),
+            ],
+            folder_files={
+                "ANNOUNCEMENTS": [_file("m1", name="a.jpg")],
+                "BEHIND_THE_SCENES": [_file("s1", name="clip.mp4", mime="video/mp4")],
+            },
+        )
+        seen = []
+        checkpoint = None
+        for _ in range(10):
+            items, checkpoint = await adapter.list_changes(
+                CONFIG, checkpoint, source_id=SRC, workspace_id=WS
+            )
+            seen.extend((i["ref"], i.get("category")) for i in items)
+            if not checkpoint_incomplete(checkpoint):
+                break
+        assert not checkpoint_incomplete(checkpoint), (
+            "the walk must end with a complete checkpoint"
+        )
+        assert seen == [
+            ("r1", None),
+            ("m1", "announcements"),
+            ("s1", "behind-the-scenes"),
+        ]
+        # Each folder is asked for its subfolders exactly once as it is
+        # popped (the lazy walk), then paged for media: three of each.
+        folder_listings = [
+            c for c in calls if "application/vnd.google-apps.folder" in c["q"]
+        ]
+        assert len(folder_listings) == 3
+        assert f"'{self.ROOT}' in parents" in folder_listings[0]["q"]
+        assert len(calls) == 6
+
+    @pytest.mark.asyncio
+    async def test_the_cursor_survives_a_paged_folder_and_resumes_where_it_stopped(
+        self,
+    ):
+        adapter, calls = self._drive(
+            root_files=[],
+            subfolders=[("ANNOUNCEMENTS", "announcements")],
+            folder_files={"ANNOUNCEMENTS": [_file("m1"), _file("m2"), _file("m3")]},
+            pages={"ANNOUNCEMENTS": 2},
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        # First call: the root (empty) — the cursor moves to `announcements`.
+        assert (
+            items == []
+            and cp["current"]["name"] == "announcements"
+            and cp.get("queue") == []
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["m1", "m2"] and cp[
+            "page_token"
+        ] == "ANNOUNCEMENTS-p2"
+        assert cp["current"]["name"] == "announcements"
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["m3"] and not checkpoint_incomplete(cp)
+        assert calls[-1]["pageToken"] == "ANNOUNCEMENTS-p2"
+
+    @pytest.mark.asyncio
+    async def test_a_folder_with_no_subfolders_is_a_flat_listing(self):
+        adapter, calls = self._drive(
+            root_files=[_file("r1")], subfolders=[], folder_files={}
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["r1"] and not checkpoint_incomplete(cp)
+        assert all(i.get("category") is None for i in items)
+
+    def test_only_the_bare_checkpoint_is_complete(self):
+        from src.services.target.drive_adapter import checkpoint_incomplete
+
+        assert checkpoint_incomplete({"v": 1}) is False
+        assert checkpoint_incomplete(None) is False
+        assert checkpoint_incomplete({"v": 1, "page_token": "p2"}) is True
+        assert (
+            checkpoint_incomplete(
+                {"v": 1, "current": {"id": "X", "name": "x"}, "queue": []}
+            )
+            is True
+        )
+        assert (
+            checkpoint_incomplete({"v": 1, "queue": [{"id": "Y", "name": "y"}]}) is True
+        )
+        # The v2 walk: a token alone, with or without the
+        # cap's `truncated` mark, is complete; a `current` is not.
+        assert checkpoint_incomplete({"v": 2, "walk": "w"}) is False
+        assert checkpoint_incomplete({"v": 2, "walk": "w", "truncated": True}) is False
+        assert (
+            checkpoint_incomplete(
+                {"v": 2, "walk": "w", "current": {"id": "X", "name": "x"}, "queue": []}
+            )
+            is True
+        )
+
+
+class TestAWalkSurvivesWhatDriveDoesMidWalk:
+    """#1251: a subfolder deleted or unshared while the walk is on
+    it must not wedge the source, and an expired page token must not either."""
+
+    ROOT = "FOLDER123"
+
+    def _adapter_with(self, handler):
+        return _adapter(handler)
+
+    @pytest.mark.asyncio
+    async def test_a_vanished_subfolder_is_skipped_and_the_walk_goes_on(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            parent = q.split("'")[1]
+            if "vnd.google-apps.folder" in q:
+                children = (
+                    [_folder_entry("GONE", "gone"), _folder_entry("KEEP", "keep")]
+                    if parent == self.ROOT
+                    else []
+                )
+                return httpx.Response(200, json={"files": children})
+            if parent == "GONE":
+                return httpx.Response(
+                    404, json={"error": {"message": "File not found"}}
+                )
+            return httpx.Response(
+                200, json={"files": [_file("k1")] if parent == "KEEP" else []}
+            )
+
+        adapter = self._adapter_with(handler)
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert items == [] and cp["current"]["id"] == "GONE"
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert items == [] and cp["current"]["id"] == "KEEP", (
+            "skipped, and the cursor advanced"
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["k1"] and not checkpoint_incomplete(cp)
+        # #1545: a folder the walk could not list leaves it partial, never whole.
+        assert cp.get("partial") is True and "whole" not in cp
+
+    @pytest.mark.asyncio
+    async def test_the_root_itself_gone_is_still_the_sources_fault(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "vnd.google-apps.folder" in request.url.params["q"]:
+                return httpx.Response(200, json={"files": []})
+            return httpx.Response(404, json={"error": {"message": "File not found"}})
+
+        with pytest.raises(DriveSourceGone):
+            await self._adapter_with(handler).list_changes(
+                CONFIG, None, source_id=SRC, workspace_id=WS
+            )
+
+    @pytest.mark.asyncio
+    async def test_an_expired_page_token_restarts_the_folder_not_the_source(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.params.get("pageToken"):
+                return httpx.Response(400, json={"error": {"message": "Invalid Value"}})
+            return httpx.Response(200, json={"files": [_file("m1")]})
+
+        current = {
+            "id": "ANNOUNCEMENTS",
+            "name": "announcements",
+            "top": "ANNOUNCEMENTS",
+            "top_name": "announcements",
+            "path": "announcements",
+            "listed": True,
+        }
+        cp = {
+            "v": 2,
+            "walk": "w1",
+            "current": current,
+            "queue": [],
+            "page_token": "stale",
+        }
+        items, cp2 = await self._adapter_with(handler).list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert items == [] and cp2["current"] == current and cp2["queue"] == []
+        assert "page_token" not in cp2 and cp2["walk"] == "w1"
+        items, cp3 = await self._adapter_with(handler).list_changes(
+            CONFIG, cp2, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["m1"] and not checkpoint_incomplete(cp3)
+
+
+class TestTheWalkGoesToAnyDepth:
+    """Sources are the groups: every folder under a
+    connected folder is walked, lazily — a folder is asked for its subfolders
+    once, when it is popped — and a file's `category` is the TOP-LEVEL folder
+    it sits under (None for the root's own files), with `folder_path` the
+    folder's path under the root. The cursor is v2 and carries a walk token
+    the sync mints; a pre-v2 in-flight cursor starts the walk over; no cursor
+    is ever the bare `page_token` shape."""
+
+    ROOT = "FOLDER123"
+
+    def _tree(self, tree, files, *, pages=None, gone_listing=(), stale=()):
+        """`tree` {parent_id: [(id, name)]}, `files` {folder_id: [entries]};
+        `pages` {folder_id: split} answers a folder in two pages; a folder in
+        `gone_listing` answers 404 to its subfolder listing; a pageToken in
+        `stale` is refused with 400."""
+        pages = pages or {}
+        stale = set(stale)  # a refused token is refused ONCE, then honoured
+        calls: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            token = request.url.params.get("pageToken")
+            parent = q.split("'")[1]
+            is_listing = "mimeType = 'application/vnd.google-apps.folder'" in q
+            calls.append(
+                {"q": q, "pageToken": token, "parent": parent, "listing": is_listing}
+            )
+            if is_listing:
+                if parent in gone_listing:
+                    return httpx.Response(
+                        404, json={"error": {"message": "File not found"}}
+                    )
+                return httpx.Response(
+                    200,
+                    json={
+                        "files": [_folder_entry(i, n) for i, n in tree.get(parent, [])]
+                    },
+                )
+            if token in stale:
+                stale.discard(token)
+                return httpx.Response(400, json={"error": {"message": "Invalid Value"}})
+            entries = files.get(parent, [])
+            if parent in pages:
+                split = pages[parent]
+                if token is None:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "files": entries[:split],
+                            "nextPageToken": f"{parent}-p2",
+                        },
+                    )
+                return httpx.Response(200, json={"files": entries[split:]})
+            return httpx.Response(200, json={"files": entries})
+
+        return _adapter(handler), calls
+
+    async def _walk(self, adapter, checkpoint=None, limit=30, config=CONFIG):
+        seen, cursors = [], []
+        for _ in range(limit):
+            items, checkpoint = await adapter.list_changes(
+                config, checkpoint, source_id=SRC, workspace_id=WS
+            )
+            cursors.append(checkpoint)
+            seen.extend(
+                (i["ref"], i.get("category"), i.get("folder_path")) for i in items
+            )
+            if not checkpoint_incomplete(checkpoint):
+                return seen, cursors
+        raise AssertionError("the walk did not complete")
+
+    @pytest.mark.asyncio
+    async def test_files_directly_in_the_connected_folder_carry_its_own_name(self):
+        """The connected folder's picked name labels its root files; a
+        subfolder's files are labelled by the subfolder; a folder
+        picked without a name labels its root files with nothing."""
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("OLD", "old")]},
+            files={self.ROOT: [_file("r1")], "OLD": [_file("o1")]},
+        )
+        seen, _ = await self._walk(
+            adapter, config={**CONFIG, "folder_name": "announcements"}
+        )
+        assert {(ref, cat) for ref, cat, _ in seen} == {
+            ("r1", "announcements"),
+            ("o1", "old"),
+        }
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("OLD", "old")]},
+            files={self.ROOT: [_file("r1")], "OLD": [_file("o1")]},
+        )
+        seen, _ = await self._walk(adapter, config={**CONFIG, "folder_name": "  "})
+        assert {(ref, cat) for ref, cat, _ in seen} == {("r1", None), ("o1", "old")}
+
+    @pytest.mark.asyncio
+    async def test_files_at_any_depth_carry_their_top_level_folder_and_their_path(self):
+        adapter, calls = self._tree(
+            tree={
+                self.ROOT: [
+                    ("ANNOUNCEMENTS", "announcements"),
+                    ("BEHIND_THE_SCENES", "behind-the-scenes"),
+                ],
+                "ANNOUNCEMENTS": [("Y2025", "2025")],
+                "Y2025": [("JULY", "july")],
+            },
+            files={
+                self.ROOT: [_file("r1")],
+                "ANNOUNCEMENTS": [_file("m1")],
+                "Y2025": [_file("m2")],
+                "JULY": [_file("m3")],
+                "BEHIND_THE_SCENES": [_file("s1", name="clip.mp4", mime="video/mp4")],
+            },
+        )
+        seen, cursors = await self._walk(adapter)
+        # Breadth-first: the root, its two folders, then what they contain.
+        assert seen == [
+            ("r1", None, ""),
+            ("m1", "announcements", "announcements"),
+            ("s1", "behind-the-scenes", "behind-the-scenes"),
+            ("m2", "announcements", "announcements/2025"),
+            ("m3", "announcements", "announcements/2025/july"),
+        ]
+        listings = [c["parent"] for c in calls if c["listing"]]
+        assert sorted(listings) == sorted(
+            [self.ROOT, "ANNOUNCEMENTS", "BEHIND_THE_SCENES", "Y2025", "JULY"]
+        ), "each folder is asked for its subfolders exactly once"
+        final = cursors[-1]
+        assert final["v"] == 2 and isinstance(final["walk"], str) and final["walk"]
+        assert {c["walk"] for c in cursors} == {final["walk"]}, "one token per walk"
+
+    @pytest.mark.asyncio
+    async def test_the_start_cursors_token_is_carried_through_unchanged(self):
+        adapter, _ = self._tree(
+            tree={self.ROOT: [("ANNOUNCEMENTS", "announcements")]},
+            files={self.ROOT: [_file("r1")], "ANNOUNCEMENTS": [_file("m1")]},
+        )
+        seen, cursors = await self._walk(
+            adapter, {"v": 2, "walk": "minted-by-the-sync"}
+        )
+        assert [r for r, _, _ in seen] == ["r1", "m1"]
+        assert all(c["walk"] == "minted-by-the-sync" for c in cursors)
+        assert cursors[-1] == {
+            "v": 2,
+            "walk": "minted-by-the-sync",
+            "seen": 1,
+            "whole": True,
+        }, "complete: the token, the folder count and nothing skipped, nothing pending"
+
+    @pytest.mark.asyncio
+    async def test_a_pre_v2_in_flight_cursor_is_ignored_and_the_walk_starts_over(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("ANNOUNCEMENTS", "announcements")]},
+            files={self.ROOT: [_file("r1")], "ANNOUNCEMENTS": [_file("m1")]},
+        )
+        stale = {
+            "v": 1,
+            "current": {"id": "ANNOUNCEMENTS", "name": "announcements"},
+            "queue": [],
+            "page_token": "p9",
+        }
+        items, cp = await adapter.list_changes(
+            CONFIG, stale, source_id=SRC, workspace_id=WS
+        )
+        assert calls[0]["listing"] and calls[0]["parent"] == self.ROOT, (
+            "started over at the root"
+        )
+        assert [i["ref"] for i in items] == ["r1"] and cp["v"] == 2 and cp["walk"]
+        assert cp["current"]["id"] == "ANNOUNCEMENTS"
+
+    @pytest.mark.asyncio
+    async def test_no_cursor_is_ever_the_bare_page_token_shape(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: []},
+            files={self.ROOT: [_file("r1"), _file("r2"), _file("r3")]},
+            pages={self.ROOT: 2},
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, None, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["r1", "r2"]
+        assert (
+            cp["page_token"] == f"{self.ROOT}-p2" and cp["current"]["id"] == self.ROOT
+        )
+        items, cp = await adapter.list_changes(
+            CONFIG, cp, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["r3"] and not checkpoint_incomplete(cp)
+        assert calls[-1]["pageToken"] == f"{self.ROOT}-p2"
+
+    @pytest.mark.asyncio
+    async def test_the_walk_cap_stops_queuing_and_is_carried_to_completion(
+        self, monkeypatch
+    ):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_WALK_CAP", 2)
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("A", "a"), ("B", "b"), ("C", "c")], "A": [("A1", "a1")]},
+            files={
+                "A": [_file("fa")],
+                "B": [_file("fb")],
+                "C": [_file("fc")],
+                "A1": [_file("fa1")],
+            },
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa", "fb"], (
+            "folders past the cap never sync"
+        )
+        assert cursors[-1].get("truncated") is True, "the cut is carried to completion"
+        assert "whole" not in cursors[-1]
+        assert not checkpoint_incomplete(cursors[-1])
+
+    @pytest.mark.asyncio
+    async def test_an_expired_token_restart_does_not_relist_the_folder(self):
+        adapter, calls = self._tree(
+            tree={
+                self.ROOT: [("ANNOUNCEMENTS", "announcements")],
+                "ANNOUNCEMENTS": [("SUB", "sub")],
+            },
+            files={"ANNOUNCEMENTS": [_file("m1"), _file("m2")], "SUB": [_file("z1")]},
+            pages={"ANNOUNCEMENTS": 1},
+            stale={"ANNOUNCEMENTS-p2"},
+        )
+        seen, cursors = await self._walk(adapter)
+        # The first page of announcements is listed twice (the restart), its
+        # subfolders are asked for once, and `sub` is walked once.
+        assert [c["parent"] for c in calls if c["listing"]].count("ANNOUNCEMENTS") == 1
+        assert [r for r, _, _ in seen].count("z1") == 1
+        assert ("m1", "announcements", "announcements") in seen
+
+    @pytest.mark.asyncio
+    async def test_a_vanished_nested_folder_is_skipped_including_a_404_on_its_listing(
+        self,
+    ):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("GONE", "gone"), ("KEEP", "keep")]},
+            files={"KEEP": [_file("k1")]},
+            gone_listing={"GONE"},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["k1"]
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
+
+    @pytest.mark.asyncio
+    async def test_a_folder_reachable_twice_is_walked_once_and_a_cycle_does_not_spin(
+        self,
+    ):
+        adapter, calls = self._tree(
+            tree={
+                self.ROOT: [("A", "a")],
+                "A": [("B", "b")],
+                "B": [("A", "a"), (self.ROOT, "root")],  # a cycle, and the root again
+            },
+            files={"A": [_file("fa")], "B": [_file("fb")]},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa", "fb"], "each file once"
+        listings = [c["parent"] for c in calls if c["listing"]]
+        assert sorted(listings) == sorted([self.ROOT, "A", "B"]), (
+            "each folder listed once"
+        )
+        assert not cursors[-1].get("truncated"), "a cycle is not a size cap"
+        assert not cursors[-1].get("partial") and cursors[-1].get("whole") is True, (
+            "a folder reached twice is walked once: nothing was skipped"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_child_id_outside_the_drive_id_shape_is_skipped(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("X' or 'a'='a", "evil"), ("OK1", "ok")]},
+            files={"OK1": [_file("k1")]},
+        )
+        seen, _ = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["k1"]
+        assert not any("X' or" in c["q"] for c in calls), "never spliced into a query"
+
+    @pytest.mark.asyncio
+    async def test_a_root_outside_the_drive_id_shape_is_refused_before_any_request(
+        self,
+    ):
+        from src.services.target.drive_adapter import DriveTerminalError
+
+        adapter, calls = self._tree(tree={}, files={})
+        with pytest.raises(DriveTerminalError):
+            await adapter.list_changes(
+                {**CONFIG, "folder_ref": "X' or 'a'='a"},
+                None,
+                source_id=SRC,
+                workspace_id=WS,
+            )
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_stored_cursor_missing_walk_fields_is_healed_not_crashed(self):
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("ANNOUNCEMENTS", "announcements")]},
+            files={"ANNOUNCEMENTS": [_file("m1")]},
+        )
+        thin = {
+            "v": 2,
+            "walk": "w",
+            "current": {"id": "ANNOUNCEMENTS", "name": "announcements"},
+            "queue": [],
+        }
+        items, cp = await adapter.list_changes(
+            CONFIG, thin, source_id=SRC, workspace_id=WS
+        )
+        assert [i["ref"] for i in items] == ["m1"] and items[0]["folder_path"] == ""
+        assert not checkpoint_incomplete(cp)
+
+    @pytest.mark.asyncio
+    async def test_past_the_cap_no_listing_request_is_spent(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_WALK_CAP", 1)
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("A", "a"), ("B", "b")], "A": [("A1", "a1")]},
+            files={"A": [_file("fa")], "A1": [_file("fa1")]},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa"]
+        assert [c["parent"] for c in calls if c["listing"]] == [self.ROOT], (
+            "once the cap is hit, a popped folder is not asked for its subfolders"
+        )
+        assert cursors[-1].get("truncated") is True
+
+    # #1545: the sync tombstones what a walk that saw the WHOLE tree no longer
+    # lists, so every way a walk skips part of the tree rides the completed
+    # cursor (the folder cap as `truncated`, every other skip as `partial`),
+    # and only a walk that skipped nothing ends `whole`. The vanished-folder
+    # skips are pinned in their own tests above; a folder reached twice is
+    # walked once and skips nothing (the cycle test).
+
+    @pytest.mark.asyncio
+    async def test_the_subfolder_cap_leaves_the_walk_partial(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "FOLDER_LIST_CAP", 2)
+        adapter, calls = self._tree(
+            tree={self.ROOT: [("A", "a"), ("B", "b"), ("C", "c")]},
+            files={"A": [_file("fa")], "B": [_file("fb")], "C": [_file("fc")]},
+        )
+        seen, cursors = await self._walk(adapter)
+        assert [r for r, _, _ in seen] == ["fa", "fb"], "past the cap, never synced"
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_subfolder_page_token_leaves_the_walk_partial(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            parent = q.split("'")[1]
+            if "vnd.google-apps.folder" in q:
+                if parent == self.ROOT:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "files": [_folder_entry("A", "a")],
+                            "nextPageToken": "same",
+                        },
+                    )
+                return httpx.Response(200, json={"files": []})
+            return httpx.Response(
+                200, json={"files": [_file("fa")] if parent == "A" else []}
+            )
+
+        seen, cursors = await self._walk(_adapter(handler))
+        assert [r for r, _, _ in seen] == ["fa"]
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("listing", ["media", "subfolders"])
+    async def test_an_incomplete_search_leaves_the_walk_partial(self, listing):
+        # Drive's `incompleteSearch`: the page may leave files out, so what it
+        # did not list is not known to be gone.
+        def handler(request: httpx.Request) -> httpx.Response:
+            q = request.url.params["q"]
+            is_folders = "vnd.google-apps.folder" in q
+            assert "incompleteSearch" in request.url.params["fields"]
+            body: dict = {"files": [] if is_folders else [_file("fa")]}
+            if is_folders == (listing == "subfolders"):
+                body["incompleteSearch"] = True
+            return httpx.Response(200, json=body)
+
+        seen, cursors = await self._walk(_adapter(handler))
+        assert [r for r, _, _ in seen] == ["fa"]
+        assert cursors[-1].get("partial") is True and "whole" not in cursors[-1]
+
+
+class TestFetchBytes:
+    """The media bytes for the approval card: metadata first, so a file over
+    the cap is refused before a download; then `alt=media` under the
+    workspace grant."""
+
+    def _drive(self, *, size="5", body=b"12345", status=200):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            if "alt=media" in str(request.url):
+                return httpx.Response(
+                    200, content=body, headers={"content-type": "image/jpeg"}
+                )
+            if status != 200:
+                return httpx.Response(
+                    status, json={"error": {"message": "File not found"}}
+                )
+            return httpx.Response(
+                200, json={"size": size, "mimeType": "image/jpeg", "name": "a.jpg"}
+            )
+
+        return _adapter(handler), calls
+
+    @pytest.mark.asyncio
+    async def test_bytes_name_and_mime_come_back_under_the_grant(self):
+        adapter, calls = self._drive()
+        content, name, mime = await adapter.fetch_bytes(
+            {"v": 1, "folder_ref": "root"},
+            source_id=SRC,
+            workspace_id=WS,
+            file_ref="FILE1",
+            max_bytes=10,
+        )
+        assert (content, name, mime) == (b"12345", "a.jpg", "image/jpeg")
+        assert any("alt=media" in c and "/files/FILE1" in c for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_a_file_over_the_cap_is_refused_before_any_download(self):
+        from src.services.target.drive_adapter import DriveMediaTooLarge
+
+        adapter, calls = self._drive(size="11")
+        with pytest.raises(DriveMediaTooLarge):
+            await adapter.fetch_bytes(
+                {"v": 1, "folder_ref": "root"},
+                source_id=SRC,
+                workspace_id=WS,
+                file_ref="FILE1",
+                max_bytes=10,
+            )
+        assert not any("alt=media" in c for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_a_ref_outside_the_drive_id_shape_is_refused_before_any_request(self):
+        from src.services.target.drive_adapter import DriveTerminalError
+
+        adapter, calls = self._drive()
+        with pytest.raises(DriveTerminalError):
+            await adapter.fetch_bytes(
+                {"v": 1, "folder_ref": "root"},
+                source_id=SRC,
+                workspace_id=WS,
+                file_ref="x/../y",
+                max_bytes=10,
+            )
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_missing_file_is_named_as_such(self):
+        from src.services.target.drive_adapter import DriveMediaGone
+
+        adapter, _ = self._drive(status=404)
+        with pytest.raises(DriveMediaGone):
+            await adapter.fetch_bytes(
+                {"v": 1, "folder_ref": "root"},
+                source_id=SRC,
+                workspace_id=WS,
+                file_ref="FILE1",
+                max_bytes=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_adapter_built_without_a_policy_still_fetches(self, monkeypatch):
+        """The worker constructs the adapter with no policy (the floor's
+        default applies per call); the media policy must derive from that,
+        never from None (#1259), which would fail the fetch on every card.
+
+        That default resolves each host before any request, so the lookup is
+        answered through the floor's own `resolver=` seam rather than by real
+        DNS, and the test needs no network. The media request then reaches the
+        stub's address: the derived policy kept the check and pinned to it."""
+        from functools import partial
+
+        from src.services.target import egress
+
+        public = "93.184.216.34"
+        monkeypatch.setattr(
+            egress, "request", partial(egress.request, resolver=lambda host: [public])
+        )
+        adapter, calls = self._drive()
+        adapter._policy = None
+        content, name, mime = await adapter.fetch_bytes(
+            {"v": 1, "folder_ref": "root"},
+            source_id=SRC,
+            workspace_id=WS,
+            file_ref="FILE1",
+            max_bytes=10,
+        )
+        media_hosts = [httpx.URL(c).host for c in calls if "alt=media" in c]
+        assert content == b"12345" and media_hosts == [public], calls
+
+    @pytest.mark.asyncio
+    async def test_a_body_larger_than_the_metadata_said_is_still_refused(self):
+        """The byte cap rides the media policy, so a metadata size that lied
+        cannot pull more than `max_bytes`."""
+        from src.services.target.drive_adapter import DriveMediaTooLarge
+
+        adapter, _ = self._drive(size="5", body=b"x" * (20 * 1024))
+        with pytest.raises(DriveMediaTooLarge):
+            await adapter.fetch_bytes(
+                {"v": 1, "folder_ref": "root"},
+                source_id=SRC,
+                workspace_id=WS,
+                file_ref="FILE1",
+                max_bytes=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_refused_token_on_the_bytes_path_is_re_minted_once(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            if "alt=media" in str(request.url):
+                if len([c for c in calls if "alt=media" in c]) == 1:
+                    return httpx.Response(401, json={"error": {"message": "expired"}})
+                return httpx.Response(
+                    200, content=b"12345", headers={"content-type": "image/jpeg"}
+                )
+            return httpx.Response(
+                200, json={"size": "5", "mimeType": "image/jpeg", "name": "a.jpg"}
+            )
+
+        record = []
+        adapter = _adapter(handler, record=record)
+        content, _, _ = await adapter.fetch_bytes(
+            {"v": 1, "folder_ref": "root"},
+            source_id=SRC,
+            workspace_id=WS,
+            file_ref="FILE1",
+            max_bytes=10,
+        )
+        assert content == b"12345"
+        assert len([c for c in calls if "alt=media" in c]) == 2, (
+            "one re-mint, one retry"
+        )
+        assert (
+            any(
+                getattr(r, "fresh", None)
+                or (isinstance(r, tuple) and True in r)
+                or "fresh" in str(r)
+                for r in record
+            )
+            or len(record) >= 2
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_of_the_bytes_after_good_metadata_is_the_files_fault(self):
+        from src.services.target.drive_adapter import DriveMediaGone
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "alt=media" in str(request.url):
+                return httpx.Response(
+                    403, json={"error": {"message": "cannotDownloadFile"}}
+                )
+            return httpx.Response(
+                200, json={"size": "5", "mimeType": "image/jpeg", "name": "a.jpg"}
+            )
+
+        record = []
+        adapter = _adapter(handler, record=record)
+        with pytest.raises(DriveMediaGone):
+            await adapter.fetch_bytes(
+                {"v": 1, "folder_ref": "root"},
+                source_id=SRC,
+                workspace_id=WS,
+                file_ref="FILE1",
+                max_bytes=10,
+            )
+
+
+class TestFolderAncestors:
+    """The chain of a folder's parents up to the Drive root (connected folders
+    are disjoint, so a pick is checked against the folders already connected).
+    Read under the workspace grant; bounded; a folder with no parent, or a
+    shared-drive root, ends the chain."""
+
+    def _drive(self, parents):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            fid = str(request.url).split("/files/")[1].split("?")[0]
+            if fid not in parents:
+                return httpx.Response(
+                    404, json={"error": {"message": "File not found"}}
+                )
+            body = {"id": fid}
+            if parents[fid]:
+                body["parents"] = [parents[fid]]
+            return httpx.Response(200, json=body)
+
+        return _adapter(handler), calls
+
+    @pytest.mark.asyncio
+    async def test_the_chain_is_walked_to_the_root(self):
+        adapter, calls = self._drive(
+            {"CHILD": "PARENT", "PARENT": "GRAND", "GRAND": "ROOT", "ROOT": None}
+        )
+        chain = await adapter.folder_ancestors(workspace_id=WS, folder_ref="CHILD")
+        assert chain == ["PARENT", "GRAND", "ROOT"]
+        assert all("fields=parents" in c for c in calls) and len(calls) == 4
+
+    @pytest.mark.asyncio
+    async def test_a_folder_with_no_parent_is_its_own_chain_end(self):
+        adapter, calls = self._drive({"LONE": None})
+        assert await adapter.folder_ancestors(workspace_id=WS, folder_ref="LONE") == []
+
+    @pytest.mark.asyncio
+    async def test_the_walk_is_bounded(self, monkeypatch):
+        from src.services.target import google_drive_adapter as mod
+
+        monkeypatch.setattr(mod, "ANCESTOR_CAP", 3)
+        parents = {f"F{i}": f"F{i + 1}" for i in range(10)}
+        adapter, calls = self._drive(parents)
+        chain = await adapter.folder_ancestors(workspace_id=WS, folder_ref="F0")
+        assert len(chain) == 3 and len(calls) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_ref_outside_the_id_shape_is_refused_before_any_request(self):
+        from src.services.target.drive_adapter import DriveTerminalError
+
+        adapter, calls = self._drive({})
+        with pytest.raises(DriveTerminalError):
+            await adapter.folder_ancestors(workspace_id=WS, folder_ref="x y")
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_parent_that_is_not_an_id_ends_the_chain_rather_than_a_query(self):
+        adapter, calls = self._drive({"CHILD": "bad id", "bad id": None})
+        assert await adapter.folder_ancestors(workspace_id=WS, folder_ref="CHILD") == []
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_parent_the_grant_cannot_read_ends_the_chain(self):
+        # OWNERS is not in the map's readable set: the 404 on it ends the chain.
+        adapter2, calls2 = self._drive({"CHILD": "OWNERS"})
+        assert await adapter2.folder_ancestors(workspace_id=WS, folder_ref="CHILD") == [
+            "OWNERS"
+        ]
+        assert len(calls2) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_grant_dying_mid_chain_is_the_grants_fault_not_a_shorter_chain(
+        self,
+    ):
+        from src.services.target.media_sync import DriveCredentialDead
+
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            fid = str(request.url).split("/files/")[1].split("?")[0]
+            if fid == "CHILD":
+                return httpx.Response(200, json={"id": "CHILD", "parents": ["PARENT"]})
+            return httpx.Response(401, json={"error": {"message": "expired"}})
+
+        with pytest.raises(DriveCredentialDead):
+            await _adapter(handler).folder_ancestors(
+                workspace_id=WS, folder_ref="CHILD"
+            )
+
+
+class TestFetchThumbnail:
+    """The thumbnail route's fetch (#1634): the stored link, under the
+    workspace grant. A dead link is re-read from Drive once and that link
+    tried once. Nothing that is not a raster picture within the cap comes
+    back, and the token reaches only Drive's thumbnail hosts and its API."""
+
+    def _drive(self, *, thumbs, current=FRESH, meta_status=200):
+        """`thumbs` maps a link to its answers in order, each (status, body,
+        content type); `current` is the link `files.get` names now."""
+        calls: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            calls.append((url, request.headers.get("authorization", "")))
+            if request.url.host == "www.googleapis.com":
+                if meta_status != 200:
+                    return httpx.Response(
+                        meta_status, json={"error": {"message": "File not found"}}
+                    )
+                return httpx.Response(
+                    200, json={"thumbnailLink": current} if current else {}
+                )
+            status, body, content_type = thumbs[url].pop(0)
+            return httpx.Response(
+                status, content=body, headers={"content-type": content_type}
+            )
+
+        return _adapter(handler, token="TOKEN-XYZ"), calls
+
+    async def _fetch(self, adapter, link=THUMB):
+        return await adapter.fetch_thumbnail(
+            source_id=SRC, workspace_id=WS, file_ref="FILE1", link=link
+        )
+
+    @staticmethod
+    def _hosts(calls):
+        return [httpx.URL(url).host for url, _ in calls]
+
+    @pytest.mark.asyncio
+    async def test_a_live_link_answers_with_the_picture_under_the_grant(self):
+        adapter, calls = self._drive(thumbs={THUMB: [(200, JPEG, "image/jpeg")]})
+        thumbnail = await self._fetch(adapter)
+        assert (thumbnail.content, thumbnail.content_type) == (JPEG, "image/jpeg")
+        assert calls == [(THUMB, "Bearer TOKEN-XYZ")]
+
+    @pytest.mark.parametrize("dead", [401, 403, 404, 410])
+    @pytest.mark.asyncio
+    async def test_an_expired_link_is_reread_once_and_retried_once(self, dead):
+        adapter, calls = self._drive(
+            thumbs={
+                THUMB: [(dead, b"", "text/html")],
+                FRESH: [(200, JPEG, "image/png")],
+            }
+        )
+        thumbnail = await self._fetch(adapter)
+        assert (thumbnail.content, thumbnail.content_type) == (JPEG, "image/png")
+        assert self._hosts(calls) == [
+            "lh3.googleusercontent.com",
+            "www.googleapis.com",
+            "lh3.googleusercontent.com",
+        ]
+        reread, retry = calls[1][0], calls[2][0]
+        assert "/files/FILE1?" in reread and "fields=thumbnailLink" in reread
+        assert retry == FRESH
+        assert {auth for _, auth in calls} == {"Bearer TOKEN-XYZ"}
+
+    @pytest.mark.asyncio
+    async def test_a_link_still_dead_after_its_one_retry_is_none_with_no_loop(self):
+        adapter, calls = self._drive(
+            thumbs={THUMB: [(403, b"", "text/html")], FRESH: [(403, b"", "text/html")]}
+        )
+        assert await self._fetch(adapter) is None
+        assert len(calls) == 3
+
+    @pytest.mark.parametrize("current", [None, THUMB])
+    @pytest.mark.asyncio
+    async def test_a_dead_link_drive_has_no_other_for_is_none_without_a_retry(
+        self, current
+    ):
+        adapter, calls = self._drive(
+            thumbs={THUMB: [(404, b"", "text/html")]}, current=current
+        )
+        assert await self._fetch(adapter) is None
+        assert self._hosts(calls) == ["lh3.googleusercontent.com", "www.googleapis.com"]
+
+    @pytest.mark.asyncio
+    async def test_a_file_gone_from_drive_is_none(self):
+        adapter, _ = self._drive(
+            thumbs={THUMB: [(404, b"", "text/html")]}, meta_status=404
+        )
+        assert await self._fetch(adapter) is None
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [
+            "image/svg+xml",
+            "image/svg+xml; charset=utf-8",
+            "text/html",
+            "application/octet-stream",
+            "",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_anything_but_a_raster_picture_is_refused_and_never_retried(
+        self, content_type
+    ):
+        adapter, calls = self._drive(
+            thumbs={THUMB: [(200, b"<svg onload='alert(1)'/>", content_type)]}
+        )
+        assert await self._fetch(adapter) is None
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_size_cap_holds(self):
+        over = b"\xff" * (google_drive_adapter.THUMBNAIL_MAX_BYTES + 1)
+        adapter, calls = self._drive(thumbs={THUMB: [(200, over, "image/jpeg")]})
+        assert await self._fetch(adapter) is None
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_picture_at_the_cap_is_served(self):
+        at_cap = b"\xff" * google_drive_adapter.THUMBNAIL_MAX_BYTES
+        adapter, _ = self._drive(thumbs={THUMB: [(200, at_cap, "image/jpeg")]})
+        assert (await self._fetch(adapter)).content == at_cap
+
+    @pytest.mark.parametrize(
+        "link",
+        [
+            "https://thumbnails.example/t.png",
+            # The API host is Drive's, but not a thumbnail host: the policy
+            # for this fetch admits the thumbnail hosts alone.
+            "https://www.googleapis.com/drive/v3/files/FILE1?alt=media",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_link_off_drives_thumbnail_hosts_never_receives_the_token(
+        self, link
+    ):
+        adapter, calls = self._drive(thumbs={})
+        assert await self._fetch(adapter, link=link) is None
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_ref_outside_the_drive_id_shape_is_refused_before_any_request(
+        self,
+    ):
+        adapter, calls = self._drive(thumbs={})
+        with pytest.raises(DriveTerminalError):
+            await adapter.fetch_thumbnail(
+                source_id=SRC, workspace_id=WS, file_ref="x/../y", link=THUMB
+            )
+        assert calls == []

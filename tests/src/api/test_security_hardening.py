@@ -1,0 +1,648 @@
+"""Tests for security hardening: headers, X-Forwarded-For attribution, and the
+cookie session's origin check."""
+
+import pytest
+from fastapi import Depends
+from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
+
+from src.api.principal import COOKIE, current_principal
+from src.config.settings import settings
+from src.services.target import service_tokens, sessions
+from tests.src.api.conftest import post_body, post_messages
+
+
+# =============================================================================
+# Security headers (#382)
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestSecurityHeaders:
+    """Verify security headers are set on every response."""
+
+    def test_health_endpoint_has_security_headers(self, client):
+        resp = client.get("/health")
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
+        assert resp.headers["X-Frame-Options"] == "DENY"
+        assert "max-age=" in resp.headers["Strict-Transport-Security"]
+        assert "default-src" in resp.headers["Content-Security-Policy"]
+        assert "Referrer-Policy" in resp.headers
+
+    def test_csp_blocks_frames(self, client):
+        resp = client.get("/health")
+        assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
+
+    def test_hsts_includes_subdomains(self, client):
+        resp = client.get("/health")
+        assert "includeSubDomains" in resp.headers["Strict-Transport-Security"]
+
+    def test_every_path_blocks_frames(self, client):
+        """One strict policy everywhere: the Telegram Mini App exemption left
+        with the Mini App (#1028), including on a refused API response."""
+        for path in ("/health", "/api/v1/me", "/no-such-path"):
+            resp = client.get(path)
+            assert resp.headers["X-Frame-Options"] == "DENY", path
+            assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
+            assert "telegram.org" not in resp.headers["Content-Security-Policy"]
+
+
+class TestForwardedForAttribution:
+    """Who the app believes the client is, when the caller writes the header (#726).
+
+    The pre-auth counter and the waitlist's shared counter key on one value:
+    `request.client.host`, as rewritten by uvicorn's ProxyHeadersMiddleware
+    (`client_ip` in `src/api/principal.py`). If a caller can choose that value,
+    they get a fresh bucket per request and both counters stop accumulating —
+    silently, which is the part worth testing.
+
+    The topology these tests model, which is the real one:
+
+        attacker box (public IP) -> edge (private IP, our TCP peer) -> app
+
+    A standards-compliant proxy APPENDS the address it observed, so the app
+    receives "<whatever the caller sent>, <caller's real address>". Every entry
+    except the last is caller-controlled. Under `trusted_hosts=["*"]` uvicorn
+    returns the FIRST entry; under a named set it walks from the right and
+    returns the first untrusted one.
+
+    Scope: these assert the ATTRIBUTION layer -- what ProxyHeadersMiddleware
+    computes, given a configuration. What a counter then does with that value
+    depends on where the consumer sits in the assembled app, which nothing here
+    can see; that the pre-auth counter reads the CORRECTED value through the
+    real stack is asserted in `test_auth_routes.py` (#776).
+    """
+
+    EDGE = "10.0.0.5"  # our TCP peer: the platform edge
+    CALLER = "192.0.2.50"  # the caller's real address, appended by the edge
+    FORGED = "198.51.100.7"  # what the caller writes into the header
+
+    @staticmethod
+    def _attributed(trusted_hosts, xff, peer):
+        """Run the real middleware; return the client host it attributes."""
+        import asyncio
+
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        seen = {}
+
+        async def app(scope, receive, send):
+            seen["host"] = scope["client"][0] if scope.get("client") else None
+
+        headers = [(b"x-forwarded-for", xff.encode())] if xff else []
+        middleware = ProxyHeadersMiddleware(app, trusted_hosts=trusted_hosts)
+        asyncio.run(
+            middleware(
+                {"type": "http", "client": (peer, 54321), "headers": headers},
+                None,
+                None,
+            )
+        )
+        return seen["host"]
+
+    def _configured(self):
+        from src.config.settings import settings
+
+        return settings.trusted_proxy_hosts
+
+    def test_the_wildcard_is_not_configured(self):
+        """The wildcard is the defect itself, not merely a loose setting.
+
+        Asserted on the parsed value rather than on the literal string, so it
+        also catches "*" arriving via the environment.
+        """
+        assert "*" not in self._configured(), (
+            "TRUSTED_PROXY_HOSTS contains the wildcard. uvicorn then honours "
+            "X-Forwarded-For from any peer and takes its leftmost entry, which "
+            "the caller writes — see #726."
+        )
+
+    def test_a_forged_leading_entry_does_not_win_behind_the_edge(self):
+        got = self._attributed(
+            self._configured(), f"{self.FORGED}, {self.CALLER}", peer=self.EDGE
+        )
+        assert got == self.CALLER, (
+            f"attributed to {got!r}; the caller forged {self.FORGED!r} and the "
+            f"edge appended the truth {self.CALLER!r}"
+        )
+
+    def test_a_forged_private_hop_does_not_launder_the_claim(self):
+        """A caller who pads the chain with a trusted-looking hop still loses.
+
+        The edge appends last, so the rightmost entry is the one it observed
+        no matter what precedes it.
+        """
+        got = self._attributed(
+            self._configured(),
+            f"{self.FORGED}, 10.0.0.9, {self.CALLER}",
+            peer=self.EDGE,
+        )
+        assert got == self.CALLER
+
+    def test_a_direct_caller_cannot_forge_at_all(self):
+        """Reaching the app directly, the caller is not a trusted peer, so the
+        header is not read and their real address stands."""
+        got = self._attributed(self._configured(), self.FORGED, peer=self.CALLER)
+        assert got == self.CALLER
+
+    def test_no_public_address_can_join_the_trusted_set(self):
+        """The default is the private ranges precisely because a public client
+        can never hold one. Pins that property rather than the literal list."""
+        for public in ("192.0.2.50", "198.51.100.7", "203.0.113.9", "8.8.8.8"):
+            got = self._attributed(self._configured(), "1.2.3.4", peer=public)
+            assert got == public, f"{public} was treated as a trusted proxy"
+
+    def test_the_checks_can_fail(self):
+        """The predicate against the vulnerable configuration it never sees.
+
+        Without this, every assertion above would also pass against a middleware
+        that ignored X-Forwarded-For entirely, and nothing here would prove the
+        tests observe the setting at all.
+        """
+        forged_chain = f"{self.FORGED}, {self.CALLER}"
+
+        # The wildcard takes the leftmost, caller-written entry...
+        assert self._attributed(["*"], forged_chain, peer=self.EDGE) == self.FORGED
+        # ...and believes a direct caller with no proxy in front of them.
+        assert self._attributed(["*"], self.FORGED, peer=self.CALLER) == self.FORGED
+        # A named set rejects both.
+        assert (
+            self._attributed([self.EDGE], forged_chain, peer=self.EDGE) == self.CALLER
+        )
+
+
+class TestForwardedForAmbiguity:
+    """Multiple X-Forwarded-For headers, a shape `TRUSTED_PROXY_HOSTS` alone does
+    not close (#726, #759, #765).
+
+    ProxyHeadersMiddleware reads headers via ``dict(scope["headers"])``, which
+    keeps only the LAST of a repeated header name. A caller who sends
+    X-Forwarded-For as two separate header instances instead of one
+    comma-joined value can make an attacker-chosen value survive that dict
+    collapse regardless of TRUSTED_PROXY_HOSTS -- TestForwardedForAttribution
+    above only proves the single-header case is closed.
+
+    Merging every X-Forwarded-For instance into one comma-joined value before
+    ProxyHeadersMiddleware runs does not work: whichever instance ends up last
+    after concatenation still wins the right-to-left trust walk, so an attacker
+    who controls ordering still wins -- the same forgery, by a different
+    mechanism.
+
+    DropAmbiguousForwardedForMiddleware (src/api/app.py) closes this
+    differently: it does not try to reconstruct which instance is "real" from
+    an inherently ambiguous wire shape. More than one X-Forwarded-For instance
+    drops the header entirely, and ProxyHeadersMiddleware falls back to the
+    raw connecting peer -- the same path test_a_direct_caller_cannot_forge_at_all
+    above already proves is safe.
+    """
+
+    EDGE = "10.0.0.5"
+    CALLER = "192.0.2.50"
+    FORGED = "198.51.100.7"
+
+    @staticmethod
+    def _attributed(headers, peer, trusted_hosts=None):
+        """Run the real two-middleware stack; return the attributed client host.
+
+        ``headers`` is a list of (name, value) str tuples, one entry per raw
+        header INSTANCE -- multiple x-forwarded-for entries model the
+        ambiguous wire shape this middleware exists for.
+        """
+        import asyncio
+
+        from src.api.app import DropAmbiguousForwardedForMiddleware
+        from src.config.settings import settings
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        seen = {}
+
+        async def app(scope, receive, send):
+            seen["host"] = scope["client"][0] if scope.get("client") else None
+
+        raw = [(k.encode(), v.encode()) for k, v in headers]
+        stack = DropAmbiguousForwardedForMiddleware(
+            ProxyHeadersMiddleware(
+                app, trusted_hosts=trusted_hosts or settings.trusted_proxy_hosts
+            )
+        )
+        asyncio.run(
+            stack({"type": "http", "client": (peer, 54321), "headers": raw}, None, None)
+        )
+        return seen["host"]
+
+    @classmethod
+    def _xff(cls, values, peer, trusted_hosts=None):
+        """Convenience: one X-Forwarded-For header instance per value."""
+        return cls._attributed(
+            [("x-forwarded-for", v) for v in values], peer, trusted_hosts
+        )
+
+    def test_two_headers_real_then_forged_does_not_attribute_to_the_forgery(self):
+        """The exact #765 shape: edge's real header first, forged bare one second."""
+        got = self._xff([f"{self.FORGED}, {self.CALLER}", self.FORGED], peer=self.EDGE)
+        assert got != self.FORGED, f"attributed to the forged value {self.FORGED!r}"
+
+    def test_two_headers_forged_then_real_does_not_attribute_to_the_forgery(self):
+        """Same shape, reversed -- the drop must not depend on arrival order."""
+        got = self._xff([self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE)
+        assert got != self.FORGED
+
+    def test_ambiguous_xff_falls_back_to_the_raw_peer(self):
+        """Falls back exactly where "no X-Forwarded-For at all" already lands
+        -- not CALLER (unrecoverable from a flattened, ambiguous shape) and
+        never FORGED."""
+        got = self._xff([self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE)
+        assert got == self.EDGE
+
+    def test_three_or_more_headers_still_drops(self):
+        """Not fooled by header count -- any count > 1 is ambiguous."""
+        got = self._xff(
+            [self.FORGED, self.CALLER, self.FORGED, self.FORGED], peer=self.EDGE
+        )
+        assert got == self.EDGE
+
+    def test_a_single_header_is_unaffected(self):
+        """A single header keeps the walk: the caller's real address wins."""
+        got = self._xff([f"{self.FORGED}, {self.CALLER}"], peer=self.EDGE)
+        assert got == self.CALLER
+
+    def test_no_header_at_all_is_unaffected(self):
+        got = self._xff([], peer=self.EDGE)
+        assert got == self.EDGE
+
+    def test_mixed_case_header_name_is_still_counted(self):
+        """scope["headers"] names are lowercase per the ASGI spec, but the
+        count must not silently miss a non-conformant server/middleware."""
+        got = self._attributed(
+            [
+                ("X-Forwarded-For", f"{self.FORGED}, {self.CALLER}"),
+                ("x-forwarded-for", self.FORGED),
+            ],
+            peer=self.EDGE,
+        )
+        assert got == self.EDGE
+
+    def test_untrusted_peer_is_unaffected_by_the_drop(self):
+        """A direct, untrusted caller was never attributed from XFF anyway --
+        the drop must not change that outcome."""
+        got = self._xff(
+            [self.FORGED, f"{self.FORGED}, {self.CALLER}"], peer=self.CALLER
+        )
+        assert got == self.CALLER
+
+
+class TestRailwayEdgeAttribution:
+    """Who the assembled app believes the client is behind Railway's edge.
+
+    Production's access log showed every request arriving from 100.64.0.x,
+    Railway's edge, with the visitor's address unread: every IP-keyed control
+    counted all visitors as one. Railway's edge writes X-Forwarded-For itself,
+    as "<client>" or, when it routes through its Fastly CDN,
+    "<client>, <Fastly edge>". Driven through `create_app`, so these pin the
+    middleware as the app assembles it, not a copy.
+    """
+
+    EDGE = "100.64.0.13"  # Railway's edge, our TCP peer in production
+    CALLER = "192.0.2.50"
+    FORGED = "198.51.100.7"
+    FASTLY = "151.101.2.10"  # in Fastly's published 151.101.0.0/16
+
+    @pytest.fixture
+    def seen_from(self):
+        """``seen_from(peer, *xff)`` -> the client host the app attributes."""
+        from fastapi.responses import PlainTextResponse
+
+        from src.api.app import create_app
+
+        app = create_app(env={})
+
+        async def whoami(request):
+            return PlainTextResponse(request.client.host)
+
+        app.add_route("/whoami", whoami)
+
+        def seen(peer, *xff):
+            headers = [("X-Forwarded-For", v) for v in xff]
+            client = TestClient(app, client=(peer, 4321))
+            return client.get("/whoami", headers=headers).text
+
+        return seen
+
+    def test_the_visitor_is_read_through_railways_edge(self, seen_from):
+        assert seen_from(self.EDGE, self.CALLER) == self.CALLER
+
+    def test_an_ipv6_visitor_is_read_through_railways_edge(self, seen_from):
+        assert seen_from(self.EDGE, "2001:db8::1") == "2001:db8::1"
+
+    def test_a_forged_entry_left_of_the_edges_does_not_win(self, seen_from):
+        """Should the edge ever append rather than overwrite, the caller's own
+        entry sits left of what it observed and is never reached."""
+        assert seen_from(self.EDGE, f"{self.FORGED}, {self.CALLER}") == self.CALLER
+
+    def test_the_cdn_hop_is_not_skipped(self, seen_from):
+        """Through someone's Fastly service the client entry is whatever that
+        service wrote, so the walk stops at the Fastly edge: shared, never
+        forged."""
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.FASTLY}")
+        assert got == self.FASTLY
+
+
+class TestRailwayEdgeHop:
+    """The one hop Railway appends after the visitor (`EDGE_HOP_HOSTS`).
+
+    In the header the edge sends from 100.64.0.x, the hop is the one entry
+    after the visitor's (`HOP`). Driven through `create_app`, like the class
+    above.
+    """
+
+    EDGE = TestRailwayEdgeAttribution.EDGE
+    CALLER = TestRailwayEdgeAttribution.CALLER
+    FORGED = TestRailwayEdgeAttribution.FORGED
+    FASTLY = TestRailwayEdgeAttribution.FASTLY
+    HOP = "152.233.47.69"
+    OTHER_HOP = "152.233.48.10"  # outside the measured range
+
+    seen_from = TestRailwayEdgeAttribution.seen_from
+
+    def test_the_hop_is_removed_and_the_visitor_read(self, seen_from):
+        assert seen_from(self.EDGE, f"{self.CALLER}, {self.HOP}") == self.CALLER
+
+    def test_a_forged_entry_left_of_the_visitor_still_loses(self, seen_from):
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.CALLER}, {self.HOP}")
+        assert got == self.CALLER
+
+    def test_only_one_hop_is_ever_removed(self, seen_from):
+        """A client holding a hop-range address, behind the hop, is that
+        address: the second hop-range entry stays and the walk stops there."""
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.HOP}, {self.HOP}")
+        assert got == self.HOP
+
+    def test_a_hop_with_a_port_is_removed(self, seen_from):
+        assert seen_from(self.EDGE, f"{self.CALLER}, {self.HOP}:443") == self.CALLER
+
+    def test_the_only_entry_is_never_removed(self, seen_from):
+        assert seen_from(self.EDGE, self.HOP) == self.HOP
+
+    def test_an_unknown_hop_is_kept_and_keyed_on(self, seen_from):
+        got = seen_from(self.EDGE, f"{self.CALLER}, {self.OTHER_HOP}")
+        assert got == self.OTHER_HOP
+
+    def test_the_cdn_hop_is_still_not_skipped(self, seen_from):
+        got = seen_from(self.EDGE, f"{self.FORGED}, {self.FASTLY}, {self.HOP}")
+        assert got == self.FASTLY
+
+    def test_an_untrusted_peers_header_stays_ignored(self, seen_from):
+        assert seen_from(self.CALLER, f"{self.FORGED}, {self.HOP}") == self.CALLER
+
+    def test_a_hop_range_peer_is_not_trusted(self, seen_from):
+        assert seen_from(self.HOP, self.FORGED) == self.HOP
+
+    def test_a_wildcard_hop_list_is_refused(self):
+        from src.config.settings import Settings, SettingsError
+
+        for broad in (
+            "*",
+            "0.0.0.0/0",
+            "152.0.0.0/8",
+            "::/0",
+            "nonsense",
+            "152.233.47.66/24",
+            "::ffff:0:0/96",
+            "64:ff9b::/96",
+        ):
+            with pytest.raises(SettingsError, match="EDGE_HOP_HOSTS"):
+                Settings(EDGE_HOP_HOSTS=broad)
+        assert Settings(EDGE_HOP_HOSTS="152.233.47.0/24, 192.0.2.7").edge_hop_hosts
+
+
+# =============================================================================
+# Request body limit
+# =============================================================================
+
+
+class TestBodySizeLimit:
+    """No route reads more of a request body than the API admits.
+
+    Driven through the real app, so these pin BodySizeLimitMiddleware as
+    `create_app` registers it rather than a copy of it. The limit is lowered
+    to LIMIT so the bodies stay small, and a probe route reads its whole body,
+    recording that it ran and then how much it read.
+    """
+
+    LIMIT = 1024
+
+    @pytest.fixture
+    def probe(self, monkeypatch):
+        from fastapi import Response
+        from fastapi.testclient import TestClient
+
+        from src.api.app import create_app
+        from src.config.settings import settings
+
+        monkeypatch.setattr(settings, "API_REQUEST_BODY_MAX_BYTES", self.LIMIT)
+        app = create_app(env={})
+        seen = []
+
+        async def read_it_all(request):
+            seen.append("ran")
+            seen.append(len(await request.body()))
+            return Response()
+
+        app.add_route("/probe", read_it_all, methods=["POST"])
+        return TestClient(app), seen
+
+    def test_a_declared_length_over_the_limit_never_reaches_the_route(self, probe):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * (self.LIMIT + 1))
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        assert resp.headers["connection"] == "close"
+        assert seen == [], "the route ran on a body the limit refused"
+
+    def test_an_undeclared_body_is_cut_off_once_it_passes_the_limit(self, probe):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * (self.LIMIT + 1), streamed=True)
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        # The route ran -- no length was declared to refuse on -- and the read
+        # it began never completed.
+        assert seen == ["ran"]
+
+    @pytest.mark.parametrize("streamed", [False, True], ids=["declared", "streamed"])
+    def test_a_body_at_the_limit_reaches_its_route(self, probe, streamed):
+        client, seen = probe
+        resp = post_body(client, "/probe", b"x" * self.LIMIT, streamed=streamed)
+        assert resp.status_code == 200, resp.text
+        assert seen == ["ran", self.LIMIT]
+
+    async def test_the_limit_is_on_the_total_across_messages(self, probe):
+        """Each message is under the limit and their total is over it: the
+        limit counts the whole body, not one message at a time."""
+        client, seen = probe
+        resp, received = await post_messages(client.app, "/probe", [b"x" * 600] * 2)
+        assert received == [600, 600]
+        assert max(received) <= self.LIMIT < sum(received)
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "request body too large"}
+        # The route ran -- no length was declared to refuse on -- and the read
+        # it began never completed.
+        assert seen == ["ran"]
+
+
+class TestRoutesReadTheirOwnBodies:
+    def test_no_route_declares_a_body_parameter(self, app):
+        """A route reads its own body after its gate, so none declares a body
+        parameter for the framework to parse first; bounds on the body live in
+        the app's body size limit and in the routes themselves."""
+        routes = [route for route in app.routes if isinstance(route, APIRoute)]
+        assert routes, "no APIRoute to walk"
+        declared = sorted(
+            f"{method} {route.path}"
+            for route in routes
+            if route.body_field is not None
+            for method in route.methods
+        )
+        assert declared == [], declared
+
+
+# =============================================================================
+# CSRF: a cookie-carried session on a state-changing request
+# =============================================================================
+
+FRONT_ORIGIN = "https://app.example.test"
+SELF_ORIGIN = "http://testserver"  # TestClient's base URL: the API's own origin
+FOREIGN_ORIGIN = "https://evil.example.test"
+
+
+@pytest.mark.unit
+class TestCookieOriginCheck:
+    """`SameSite=Lax` keeps the cookie off a cross-SITE post, not off a post
+    from a sibling host of the same registrable domain. So a cookie session
+    on a POST must come from `web_app_origin` or the API's own origin, by
+    ``Origin`` or else ``Referer``; a bearer (the CLI's `sdt_` token, the
+    front end's server side) is not ambient and is not checked."""
+
+    @pytest.fixture
+    def world(self, app, monkeypatch):
+        monkeypatch.setattr(settings, "WEB_APP_URL", FRONT_ORIGIN, raising=False)
+        seen = []
+
+        async def resolve(conn, *, token_hash):
+            seen.append(token_hash)
+            return sessions.Session(id="sess", user_id="user")
+
+        async def resolve_token(conn, *, token_hash):
+            seen.append(token_hash)
+            return service_tokens.TokenPrincipal(
+                token_id="tok",
+                name="cli",
+                role="operator",
+                user_id="user",
+                workspace_id=None,
+                expires_at=None,
+            )
+
+        monkeypatch.setattr(sessions, "resolve", resolve)
+        monkeypatch.setattr(service_tokens, "resolve", resolve_token)
+
+        # A probe on the real app: the real dependency and the real handlers.
+        async def probe(principal=Depends(current_principal)):
+            return {"kind": principal.kind}
+
+        app.add_api_route("/zz-probe", probe, methods=["GET", "POST"])
+        client = TestClient(app)
+        client.cookies.set(COOKIE, "opaque")
+        return client, seen
+
+    def _post(self, world, **headers):
+        client, seen = world
+        return client.post("/zz-probe", headers=headers), seen
+
+    def test_a_foreign_origin_is_refused_by_name(self, world):
+        resp, seen = self._post(world, Origin=FOREIGN_ORIGIN)
+        assert resp.status_code == 403
+        assert resp.json()["reason"] == "cross_site"
+        assert seen == [], "a forged request must not even slide the session"
+
+    def test_no_origin_and_no_referer_is_refused(self, world):
+        resp, seen = self._post(world)
+        assert resp.status_code == 403 and resp.json()["reason"] == "cross_site"
+        assert seen == []
+
+    def test_a_null_origin_is_refused(self, world):
+        resp, _ = self._post(world, Origin="null")
+        assert resp.status_code == 403
+
+    def test_a_foreign_referer_is_refused(self, world):
+        resp, _ = self._post(world, Referer=f"{FOREIGN_ORIGIN}/page")
+        assert resp.status_code == 403
+
+    def test_a_prefix_of_the_front_end_is_not_the_front_end(self, world):
+        resp, _ = self._post(world, Origin=f"{FRONT_ORIGIN}.evil.example.test")
+        assert resp.status_code == 403
+
+    @pytest.mark.parametrize("origin", [FRONT_ORIGIN, SELF_ORIGIN])
+    def test_an_admitted_origin_passes(self, world, origin):
+        resp, seen = self._post(world, Origin=origin)
+        assert resp.status_code == 200, resp.text
+        assert len(seen) == 1
+
+    def test_the_front_ends_referer_stands_in_for_a_missing_origin(self, world):
+        resp, _ = self._post(world, Referer=f"{FRONT_ORIGIN}/dashboard/settings")
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.parametrize("origin", [FOREIGN_ORIGIN, None])
+    def test_a_session_bearer_is_not_checked(self, world, origin):
+        """The front end's server side forwards the session as a bearer
+        (`landing/src/lib/target-api.ts`) and sends no browser Origin."""
+        headers = {"Authorization": "Bearer opaque"}
+        if origin:
+            headers["Origin"] = origin
+        resp, _ = self._post(world, **headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"kind": "session"}
+
+    @pytest.mark.parametrize("origin", [FOREIGN_ORIGIN, None])
+    def test_an_api_token_is_not_checked(self, world, origin):
+        headers = {"Authorization": "Bearer sdt_abc"}
+        if origin:
+            headers["Origin"] = origin
+        resp, _ = self._post(world, **headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"kind": "token"}
+
+    def test_a_cookie_get_is_not_checked(self, world):
+        client, seen = world
+        resp = client.get("/zz-probe", headers={"Origin": FOREIGN_ORIGIN})
+        assert resp.status_code == 200, resp.text
+        assert len(seen) == 1
+
+    def test_signout_by_cookie_from_a_foreign_origin_is_refused(
+        self, world, monkeypatch
+    ):
+        """`/auth/signout` takes no principal, so it checks for itself: a
+        hidden form on a sibling host must not sign a person out of
+        everything."""
+
+        async def never(conn, *, token_hash):
+            raise AssertionError("a forged sign-out must revoke nothing")
+
+        monkeypatch.setattr(sessions, "revoke", never)
+        monkeypatch.setattr(sessions, "revoke_all_for_user", never)
+        client, _ = world
+        resp = client.post(
+            "/auth/signout?everywhere=true", headers={"Origin": FOREIGN_ORIGIN}
+        )
+        assert resp.status_code == 403 and resp.json()["reason"] == "cross_site"
+
+    def test_signout_by_cookie_from_the_front_end_revokes(self, world, monkeypatch):
+        revoked = []
+
+        async def revoke(conn, *, token_hash):
+            revoked.append(token_hash)
+            return True
+
+        monkeypatch.setattr(sessions, "revoke", revoke)
+        client, _ = world
+        resp = client.post("/auth/signout", headers={"Origin": FRONT_ORIGIN})
+        assert resp.status_code == 200 and len(revoked) == 1

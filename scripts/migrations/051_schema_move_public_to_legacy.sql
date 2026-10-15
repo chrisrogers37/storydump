@@ -1,0 +1,52 @@
+-- Migration: 051_schema_move_public_to_legacy.sql
+-- Description: The M.3 step-3c schema move (plan 04; shape and rejected
+--   alternatives: D39). Rename the legacy lineage out of public wholesale and
+--   re-create an empty public for the F.2 target schema to land in. One
+--   numbered migration, one transaction: the rename and the re-create are the
+--   same fact or neither happens.
+--
+--   THIS FILE IS THE CORPUS LINEAGE BOUNDARY. Below it is the legacy lineage
+--   (001-050 - the schema the running application uses until cutover); above
+--   it is the target schema, created into the empty public this file leaves
+--   behind. Anything numbered BELOW the boundary is created into the schema
+--   that becomes legacy, and is therefore lost to the target - which is why
+--   the substrate files sit above this one and not, as first assumed, below.
+--   The runner:schema-move marker is what makes the boundary derivable:
+--   callers ask legacy_lineage_max() instead of naming a version, so
+--   renumbering this file moves the boundary with it and no second inventory
+--   has to be kept in step.
+--
+--   No schema_version self-stamp. That table is in legacy from here on; the
+--   runner ledger (runner schema, invariant across schema-level operations)
+--   is the only migration history that survives the boundary.
+--
+--   uuid-ossp rides into legacy and drops with it at 3g - the target uses
+--   gen_random_uuid() only (02 section 0), which needs no extension on PG15.
+--
+--   PRECONDITION, made true by construction rather than asserted here: the F.2
+--   files assume an empty public. In CI that is replay-from-empty; in
+--   production it is this file. Privileges for the window actor are
+--   established in full by the step-0 bootstrap (scripts/window), not here -
+--   role DDL is cluster-privilege work the runner login must not hold.
+--
+--   WHAT THE POSTCONDITIONS BELOW ARE FOR. They are the adoption probe: the
+--   falsifiable question they answer is "has the move been applied to THIS
+--   database", which is what runner adopt needs at M.3 step 3a and what
+--   distinguishes a moved database from an unmoved one. They deliberately do
+--   NOT try to prove the rename preserved the inventory - ALTER SCHEMA RENAME
+--   moves the namespace and not the objects in it, so an inventory comparison
+--   across it cannot fail, and a check that cannot fail proves nothing. The
+--   inventory assertion that CAN fail lives in the lineage lane test, where it
+--   is derived from the legacy models rather than from a written-down list.
+--
+-- Rollback: legs 1-2 of the 04 in-window lever - DROP SCHEMA public CASCADE;
+--   ALTER SCHEMA legacy RENAME TO public. Lossless in place until 3g runs.
+-- Created: 2026-08-12
+-- Issue: #746
+-- runner:schema-move
+-- runner:postcondition SELECT NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public')
+-- runner:postcondition SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'legacy')
+
+ALTER SCHEMA public RENAME TO legacy;
+
+CREATE SCHEMA public;

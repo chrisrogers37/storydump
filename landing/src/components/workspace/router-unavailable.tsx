@@ -1,0 +1,56 @@
+import Link from "next/link";
+import { CloudOff } from "lucide-react";
+
+/**
+ * What a screen shows when it could not ask the question.
+ *
+ * NOT an empty state and never styled as one. "You have no workspaces" and "we
+ * could not find out whether you have workspaces" send a reader to opposite
+ * actions, and only one of them is something they can act on. An empty state
+ * here would be a confident wrong answer — the failure direction nobody checks,
+ * because it reads as good news.
+ *
+ * It is also not an alarm. No warning colour, no error icon, no apology
+ * paragraph. It is the rare state — a deploy in flight, a pool saturated —
+ * and the styling is calm on purpose,
+ * because a reader who meets it once should be told "ask again shortly",
+ * not "something is broken".
+ *
+ * THE DEFAULT `detail` SAYS "being connected", WHICH IS WRONG. It is the
+ * sentence eight screens render when they pass no `detail` of their own, so
+ * correcting it changes what a person reads on every one of them — a copy
+ * change, not a cleanup.
+ */
+export function RouterUnavailable({
+  what,
+  detail = "Nothing is wrong with your account. This part of Storydump is being connected — check back shortly.",
+  retryHref,
+}: {
+  what: string;
+  /** The sentence under the heading; the default is the "being connected" one. */
+  detail?: string;
+  /** Where "Try again" goes — the same page, for a state that clears itself. */
+  retryHref?: string;
+}) {
+  return (
+    <div className="flex min-h-[40vh] items-center justify-center">
+      <div className="max-w-sm space-y-4 text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+          <CloudOff className="h-6 w-6 text-muted-foreground" aria-hidden />
+        </div>
+        <div className="space-y-1.5">
+          <h2 className="font-medium">{what} is not available yet.</h2>
+          <p className="text-sm text-muted-foreground">{detail}</p>
+        </div>
+        {retryHref && (
+          <Link
+            href={retryHref}
+            className="inline-block text-sm font-medium text-foreground underline-offset-4 hover:underline"
+          >
+            Try again
+          </Link>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,65 @@
+/**
+ * The overview's condition panel and the tab row it links to say the same
+ * words about the same thing (`conditions.ts`) — only because both call the
+ * same helper. The panel's side is tested in `conditions.test.ts`; these pin
+ * the row's side, at the two call sites where the words are the property:
+ * the Accounts row's title and the Drive card's state badge.
+ *
+ * WHY SOURCE-READING. Replacing either call site with an inline expression
+ * keeps tsc, lint and every other test green — the helpers stay imported and
+ * stay tested — so nothing else notices the two surfaces drifting apart. The
+ * `destination-badge-contract` shape, and its bound: this matches TEXT. It
+ * catches the call being dropped; it cannot catch the call made and its
+ * result discarded.
+ *
+ * AN UNREADABLE SOURCE IS A FAILURE, NEVER A SKIP.
+ */
+
+import { describe, expect, it } from "vitest";
+import { readFileSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const SETTINGS = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../components/dashboard/settings",
+);
+
+function source(file: string): string {
+  const at = path.join(SETTINGS, file);
+  try {
+    return readFileSync(at, "utf8");
+  } catch (err) {
+    throw new Error(
+      `cannot read ${at} — the same-words contract is unverified, which is ` +
+        `not the same as satisfied: ${err}`,
+    );
+  }
+}
+
+describe("the rows the condition panel links to use the panel's words", () => {
+  it("the Accounts row is titled with the shared destination name", () => {
+    expect(source("accounts-tab.tsx")).toContain("{destinationName(account)}");
+  });
+
+  it("the Drive card's badge prints the shared source-state label", () => {
+    expect(source("drive-card.tsx")).toContain("{sourceStateLabel(source.state)}");
+  });
+});
+
+// The same source-reading pin, for the Drive card's warning about Google's
+// unverified-app page. Dropping or inverting the call site, rendering nothing,
+// or detaching the sentence from the button it describes all keep tsc, lint
+// and drive.test.ts green, so only the card's text can say it. The same bound
+// as above: it catches the call dropped, not the call made and discarded.
+describe("the Drive card shows Google's warning and ties it to the button", () => {
+  it("computes the warning from the grant, renders it, and describes the button with it", () => {
+    const card = source("drive-card.tsx");
+    expect(card).toContain(
+      "const connectWarning = drive ? driveConnectWarning(drive.status) : null;",
+    );
+    expect(card).toContain("{connectWarning && (");
+    expect(card).toContain("{connectWarning}");
+    expect(card).toContain("aria-describedby={connectWarning ? hintId : undefined}");
+  });
+});

@@ -1,0 +1,598 @@
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Notice } from "@/components/ui/notice";
+import {
+  settingsRefusalCopy,
+  submitRenameWorkspace,
+  submitCommand,
+  submitSettingsChange,
+} from "@/lib/command-client";
+import type { SettingsView } from "@/lib/dashboard-payloads";
+import { slotLabels, timeZoneOptions } from "@/lib/schedule";
+import { WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
+import { DangerZoneCard } from "./danger-zone-card";
+import { RepostCadenceCard } from "./repost-cadence-card";
+import { SignInSessionsCard } from "./sign-in-sessions-card";
+import { Unavailable } from "./unavailable";
+
+/**
+ * ── The writes here reach the port ─────────────────────────────────────
+ *
+ * The schedule and the settings-backed switches write one `settings_change`
+ * on the command client (#1057), which carries the `Idempotency-Key` the port
+ * requires and mints a fresh submission identity per save.
+ *
+ * No `editable` gate (#1344): a flag with one value is the mirror image of a
+ * permanently-false one (#1070). Every control here is rendered and enabled.
+ *
+ * ── Not every toggle on this screen is a `settings_change` ──────────────
+ *
+ * Two of the three are (`dry_run_mode`, and the one this tier calls
+ * `enable_instagram_api`, which the workspace row calls
+ * `api_publishing_enabled`). `is_paused` is not in the port's settings
+ * allowlist — pausing is `pause_workspace` / `resume_workspace`, one command
+ * per direction — so its row carries `command` instead of a key and the
+ * switch submits whichever direction it moves in. A row with no source on
+ * this tier is left out rather than shown as permanently "not available".
+ */
+
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => ({
+  value: String(i),
+  label: i === 0 ? "12 AM" : i < 12 ? `${i} AM` : i === 12 ? "12 PM" : `${i - 12} PM`,
+}));
+
+type ToggleKey = "is_paused" | "dry_run_mode" | "enable_instagram_api";
+
+/**
+ * What a saved schedule means, said exactly. The clock advances an account's
+ * cursor from the slot it already holds (`fn_next_slot`, under the settings
+ * in force at that tick), so a post already on the clock keeps its time; an
+ * account carrying its own posting override never adopts the workspace's
+ * hours (`COALESCE(account, workspace)` in the tick), hence "accounts on the
+ * workspace schedule"; and a workspace being deleted has no clock until it
+ * is restored (the tick skips it). Exported so the wording is pinned.
+ */
+export function scheduleSavedNotice(workspaceState: string): string {
+  // `ck_ws_state` also admits `suspended`, which nothing writes; it
+  // would read "restored" here, which is the closest true sentence.
+  if (workspaceState !== "active") {
+    return "Schedule saved. It applies once the workspace is restored.";
+  }
+  return (
+    "Schedule saved. A post already on the clock keeps its time; from the next one, " +
+    "accounts on the workspace schedule follow the new hours and cadence."
+  );
+}
+
+/**
+ * THE predicate for "this switch moves". Exported because the #1155 gate
+ * asserts against it: a test that restated it would agree with itself while
+ * diverging from what ships — a hand-rolled copy of a shipped rule is a copy
+ * that can be wrong on its own.
+ */
+export function isLiveToggle(row: {
+  settingsKey: string | null;
+  command?: { on: string; off: string };
+  inertReason?: string;
+}): boolean {
+  return (row.settingsKey !== null || row.command !== undefined) && !row.inertReason;
+}
+
+/**
+ * `settingsKey` is the column name the PORT accepts, or null when this toggle
+ * is not a `settings_change` at all. The mapping is stated once here rather
+ * than inferred at the call site — and a toggle added without one is inert by
+ * default rather than live and refused.
+ *
+ * **A switch is live only when the port accepts the write AND something reads
+ * the value.** `settingsKey` alone answers the first half, and taking it as
+ * settling both is #1155: a save that confirms and does nothing manufactures
+ * a belief. Every switch on this screen has its reader — the publish leg reads
+ * `dry_run_mode` and `api_publishing_enabled`, the clock, the prompt sweep and
+ * the publish leg read `is_paused` — and a row with none is left out.
+ *
+ * So `inertReason` answers "why does this switch not move", which has
+ * THREE causes, not two, and the string says which:
+ *   1. no command at all (`settingsKey: null` and no `command`) — none here
+ *   2. no column to read (`settings[key] === null`) — renders `Unavailable`
+ *   3. **the write lands and nothing consumes it** — the #1155 case
+ *
+ * Cause 3 keeps its real `settingsKey`, because saying `null` would claim the
+ * port has no such setting, which is false and would send the next person to
+ * add a command that already exists.
+ */
+type ToggleRow = {
+  key: ToggleKey;
+  label: string;
+  description: string;
+  /** The `settings_change` key this switch writes — null for a command-backed one. */
+  settingsKey: string | null;
+  /**
+   * A switch that is not a `settings_change` at all: two commands, one per
+   * direction (`is_paused` → `pause_workspace` / `resume_workspace`).
+   */
+  command?: { on: string; off: string };
+  /**
+   * Why this switch does not move. Required when it has neither a key nor a
+   * command, and also set when the port accepts the write but nothing acts on
+   * the value.
+   */
+  inertReason?: string;
+};
+
+export const TOGGLES: ToggleRow[] = [
+  {
+    key: "is_paused",
+    label: "Pause Posting",
+    description:
+      "Hold everything: no new posts are scheduled and approved posts wait until you resume",
+    // Not a `settings_change`: pausing is two commands, one per direction,
+    // and the clock, the prompt sweep and the publish leg all read the flag.
+    settingsKey: null,
+    command: { on: "pause_workspace", off: "resume_workspace" },
+  },
+  {
+    key: "dry_run_mode",
+    label: "Dry Run Mode",
+    description:
+      "Rehearse: posts approved from now on complete as if published and are marked dry run; nothing reaches Instagram",
+    settingsKey: "dry_run_mode",
+  },
+  {
+    key: "enable_instagram_api",
+    label: "Instagram API",
+    // Approvals act only while this is on (`ApprovalsCard`), and the
+    // positions and flags people set are kept while it is off.
+    description:
+      "Use Instagram API for direct posting. While it is off every story asks; turning it back on resumes the approvals you set.",
+    // Renamed once at the read seam (`dashboard-payloads.ts`); the port's name
+    // is what goes on the wire.
+    settingsKey: "api_publishing_enabled",
+  },
+];
+
+export function GeneralTab({
+  settings,
+  workspaceId,
+  workspaceName,
+  workspaceState,
+  restorableUntil,
+  isOwner,
+  members,
+  categoryMix,
+  approvals,
+}: {
+  settings: SettingsView;
+  workspaceId: string;
+  workspaceName: string;
+  /** `workspaces.state`; drives the Delete / Restore card (#1127). */
+  workspaceState: string;
+  /** Server-computed restore deadline while offboarding, else null. */
+  restorableUntil: string | null;
+  /** The card is owner-only; the page decides from the session's role. */
+  isOwner: boolean;
+  /** The Members card, rendered ABOVE the danger zone: deleting the workspace
+   * is the last thing on the page, not something people scroll past. */
+  members?: React.ReactNode;
+  /** The Category mix card, rendered right after the schedule it shapes. */
+  categoryMix?: React.ReactNode;
+  /**
+   * The Approvals card, right after the Toggles card whose Instagram API
+   * switch it depends on. Its own card, not a row of the toggles: a position
+   * is a three-way choice, and the toggles are booleans.
+   */
+  approvals?: React.ReactNode;
+}) {
+  const router = useRouter();
+  const [name, setName] = useState(workspaceName);
+  const [savingName, setSavingName] = useState(false);
+  const [postsPerDay, setPostsPerDay] = useState(settings.posts_per_day ?? 0);
+  const [hoursStart, setHoursStart] = useState(
+    settings.posting_hours_start === null ? "" : String(settings.posting_hours_start),
+  );
+  const [hoursEnd, setHoursEnd] = useState(
+    settings.posting_hours_end === null ? "" : String(settings.posting_hours_end),
+  );
+  const [tz, setTz] = useState(settings.tz ?? "UTC");
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // A successful save says so. The card re-reads the workspace after a write
+  // (`router.refresh()`), which leaves the boxes showing exactly what was
+  // typed — indistinguishable from a save that never happened. The mix card
+  // already confirms.
+  const [notice, setNotice] = useState<{
+    card: "name" | "schedule";
+    text: string;
+    // The schedule copy speaks of the workspace's clock as it was at save
+    // time; a Delete on this tab changes that, so the box shows only while
+    // the state it described still holds.
+    state: string;
+  } | null>(null);
+  // The child cards report through `onError`; a refusal there must not leave
+  // a green "saved" standing above the red box it caused.
+  const report = (message: string | null) => {
+    setNotice(null);
+    setError(message);
+  };
+
+  /**
+   * The switch positions, which move optimistically and are put back if the
+   * port refuses. Seeded from the server values; only the toggles that have a
+   * value at all are ever read from here.
+   */
+  const [toggleState, setToggleState] = useState<Partial<Record<ToggleKey, boolean>>>(
+    () =>
+      Object.fromEntries(
+        TOGGLES.map((t) => [t.key, settings[t.key]]).filter(
+          ([, v]) => typeof v === "boolean",
+        ),
+      ),
+  );
+  const [togglingKey, setTogglingKey] = useState<ToggleKey | null>(null);
+
+  /**
+   * The workspace's own name.
+   *
+   * Its own card and its own command — NOT folded into the schedule save. A
+   * rename is identity, the rest of this tab is posting behaviour, and the port
+   * takes them as different commands with different floors (`rename_workspace`
+   * is `admin`, `settings_change` is not). One button for both would refuse the
+   * pair on the stricter of the two and leave the person unable to tell which
+   * half was rejected.
+   */
+  async function saveName() {
+    setError(null);
+    setNotice(null);
+    setSavingName(true);
+    const result = await submitRenameWorkspace(workspaceId, name);
+    setSavingName(false);
+
+    if (!result.ok) {
+      setError(settingsRefusalCopy(result.error, result.status));
+      return;
+    }
+    setNotice({
+      card: "name",
+      text: "Workspace name saved.",
+      state: workspaceState,
+    });
+    // Re-read: the name is rendered in the header and the workspace switcher
+    // too, and leaving those showing the old one would be the same half-written
+    // screen the schedule save avoids.
+    router.refresh();
+  }
+
+  /**
+   * All three schedule fields in ONE command, deliberately.
+   *
+   * They are saved by a single button and the port validates the map as a
+   * unit, so splitting them into three commands would make a refusal of the
+   * end hour leave the other two already written — a half-applied schedule
+   * with no way to name what happened.
+   */
+  async function saveSchedule() {
+    setError(null);
+    setNotice(null);
+    setSavingSchedule(true);
+    const result = await submitSettingsChange(workspaceId, {
+      posts_per_day: postsPerDay,
+      posting_hours_start: Number(hoursStart),
+      posting_hours_end: Number(hoursEnd),
+      tz,
+    });
+    setSavingSchedule(false);
+
+    if (!result.ok) {
+      setError(settingsRefusalCopy(result.error, result.status));
+      return;
+    }
+    setNotice({
+      card: "schedule",
+      text: scheduleSavedNotice(workspaceState),
+      state: workspaceState,
+    });
+    // Re-read rather than keep the submitted values on screen. This card is
+    // not the only thing rendered from `settings`, and a write that updated
+    // only the boxes it was typed into would leave the rest of the tab showing
+    // pre-write state with nothing marking the difference.
+    router.refresh();
+  }
+
+  /**
+   * A toggle sends the value it is moving TO, never a bare `setting_name` for
+   * the server to flip whatever it finds: that is not expressible as a
+   * `settings_change` and is a worse contract anyway, since two clicks racing
+   * would flip twice from a state neither of them read.
+   */
+  async function toggle(row: ToggleRow, next: boolean) {
+    const key = row.key;
+    setError(null);
+    setNotice(null);
+    setTogglingKey(key);
+    const previous = toggleState[key];
+    setToggleState((prev) => ({ ...prev, [key]: next }));
+
+    // A command-backed row submits whichever direction it moves in; the
+    // others are one `settings_change` carrying the value they move TO.
+    const result = row.command
+      ? await submitCommand(workspaceId, next ? row.command.on : row.command.off)
+      : await submitSettingsChange(workspaceId, { [row.settingsKey!]: next });
+    setTogglingKey(null);
+
+    if (!result.ok) {
+      // Put the switch back where it was. Leaving it on the new position
+      // beside an error message shows a state the workspace is not in.
+      setToggleState((prev) => ({ ...prev, [key]: previous }));
+      setError(settingsRefusalCopy(result.error, result.status));
+      return;
+    }
+    router.refresh();
+  }
+
+  return (
+    <div className="space-y-6 pt-4">
+      {error && (
+        <Notice tone="error" className="mb-4">
+          {error}
+        </Notice>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Workspace</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="workspace-name">Workspace name</Label>
+            <Input
+              id="workspace-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              maxLength={WORKSPACE_NAME_MAX}
+              placeholder="e.g. Northside Coffee"
+            />
+          </div>
+          {notice?.card === "name" && (
+            <Notice tone="success">{notice.text}</Notice>
+          )}
+          <Button
+            onClick={saveName}
+            disabled={
+              savingName || name.trim().length === 0 || name.trim() === workspaceName
+            }
+          >
+            {savingName ? "Saving..." : "Save Name"}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Posting schedule</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-4">
+            <div className="space-y-2">
+              <Label htmlFor="posts-per-day">Posts per day</Label>
+              {settings.posts_per_day === null ? (
+                <Unavailable />
+              ) : (
+                <Input
+                  id="posts-per-day"
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={postsPerDay}
+                  onChange={(e) => setPostsPerDay(Number(e.target.value))}
+                />
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label>Start hour</Label>
+              {settings.posting_hours_start === null ? (
+                <Unavailable />
+              ) : (
+                <Select value={hoursStart} onValueChange={setHoursStart}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {HOUR_OPTIONS.map((h) => (
+                      <SelectItem key={h.value} value={h.value}>
+                        {h.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label>End hour</Label>
+              {settings.posting_hours_end === null ? (
+                <Unavailable />
+              ) : (
+                <Select value={hoursEnd} onValueChange={setHoursEnd}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {HOUR_OPTIONS.map((h) => (
+                      <SelectItem key={h.value} value={h.value}>
+                        {h.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label>Time zone</Label>
+              <Select value={tz} onValueChange={setTz}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {timeZoneOptions(tz).map((zone) => (
+                    <SelectItem key={zone} value={zone}>
+                      {zone}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          {/*
+            The clock's slots, in the zone above — computed the way
+            `fn_next_slot` computes them, from the values on screen, so the
+            sentence changes as the person changes the schedule. A workspace
+            born on the web starts on UTC, and "2 PM" in UTC is 10 AM in New
+            York; this line is where that becomes visible before it becomes a
+            missed slot.
+          */}
+          {slotLabels(
+            hoursStart === "" ? null : Number(hoursStart),
+            hoursEnd === "" ? null : Number(hoursEnd),
+            postsPerDay,
+          ).length > 0 && (
+            <p className="text-sm text-muted-foreground">
+              Posts go out at{" "}
+              {slotLabels(
+                hoursStart === "" ? null : Number(hoursStart),
+                hoursEnd === "" ? null : Number(hoursEnd),
+                postsPerDay,
+              ).join(", ")}{" "}
+              ({tz}).
+            </p>
+          )}
+          {notice?.card === "schedule" && notice.state === workspaceState && (
+            <Notice tone="success">{notice.text}</Notice>
+          )}
+          <Button onClick={saveSchedule} disabled={savingSchedule}>
+            {savingSchedule ? "Saving..." : "Save Schedule"}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {categoryMix}
+
+      {/*
+        CaptionStyleCard is NOT rendered: the control does not work.
+        `caption_style` is read by no code in the tier — `prompts.render_card`
+        takes no style argument and always emits `📸 {who}` with separators,
+        which is exactly what the card's "Enhanced" option describes. So
+        "Enhanced" is honest and "Simple" is not: selecting it would save
+        successfully, the card would re-read and show "Simple", and every
+        approval card would stay emoji-formatted.
+
+        Left out rather than reduced to a one-option select or a disabled
+        control, and no flag gates it (#1344): a permanently-false affordance
+        has a longer half-life than the one being removed, because someone
+        eventually flips it to see what happens (#1070). The column, the CHECK
+        and the port's allowlist are in place; `render_card` is the piece that
+        does not honour the style (#1366, #1363: a control is a promise that
+        something happens).
+      */}
+
+      <RepostCadenceCard
+        repostTtlDays={settings.repost_ttl_days}
+        skipTtlDays={settings.skip_ttl_days}
+        defaults={settings.defaults}
+        workspaceId={workspaceId}
+        onError={report}
+      />
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Toggles</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {TOGGLES.map((row, i) => {
+            const value = settings[row.key];
+            const position = toggleState[row.key] ?? value;
+            // Reasons a switch does not move, and they are not the same
+            // fact: this setting has no command behind it, or the command
+            // works and nothing reads what it writes (#1155).
+            const wired = isLiveToggle(row);
+            return (
+              <div key={row.key}>
+                {i > 0 && <Separator className="mb-4" />}
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-0.5">
+                    <Label>{row.label}</Label>
+                    <p className="text-sm text-muted-foreground">
+                      {row.description}
+                    </p>
+                  </div>
+                  {/*
+                    A null here is a MISSING COLUMN, not an off switch. Drawing
+                    it as unchecked would state that the feature is off for this
+                    workspace, which nothing establishes.
+                  */}
+                  {value === null || typeof position !== "boolean" ? (
+                    <Unavailable />
+                  ) : (
+                    <div className="flex items-center gap-3">
+                      {/*
+                        Said only where it is the ACTIVE reason: `wired` is
+                        the only thing that makes a switch inert — and that is
+                        exactly when the reason is true.
+                      */}
+                      {!wired && row.inertReason && (
+                        <span className="text-sm text-muted-foreground">
+                          {row.inertReason}
+                        </span>
+                      )}
+                      <Switch
+                        checked={position}
+                        disabled={!wired || togglingKey !== null}
+                        aria-label={row.label}
+                        onCheckedChange={
+                          wired ? (next) => toggle(row, next) : undefined
+                        }
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </CardContent>
+      </Card>
+
+      {approvals}
+
+      {members}
+
+      <SignInSessionsCard />
+
+      {/*
+        Owner-only, and gated HERE rather than left to the port's 403: a delete
+        control an admin cannot use is a promise the screen cannot keep, the
+        same shape as the toggles above (#1155).
+      */}
+      {isOwner && (
+        <DangerZoneCard
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          state={workspaceState}
+          restorableUntil={restorableUntil}
+        />
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,995 @@
+"""The offboarding workflow against a real database (#1090).
+
+`fn_offboard_finalize` (`059`) and the `offboard_workspace` job kind (`056`)
+run here end to end, so the load-bearing assertion is the happy path: it
+runs, the row goes, and the cascade takes the tenant's data with it.
+
+Three properties need a real database and cannot be faked:
+
+* **The cascade.** `ON DELETE CASCADE` is the mechanism the workflow relies
+  on for "everything workspace-keyed dies", and a mock cannot cascade.
+* **The job erasing itself.** `jobs.workspace_id` cascades too, so finalizing
+  deletes the very row the loop is holding a lease on. That is what forces the
+  finalize leg into its own committed transaction, and only a real transaction
+  demonstrates the rollback it avoids.
+* **The parked drain's audit row.** It is written on the path that raises, so
+  the claim is precisely that it survives a rollback — untestable without one.
+
+The transit seam is faked (it is a provider); the database is not.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import uuid
+
+import psycopg2
+import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+
+from src.services.target import commands, jobs, offboarding
+from src.services.target.commands import Command, CommandRefused
+from src.services.target.offboarding import (
+    TERMINAL_STATES,
+    DrainTimedOut,
+    execute_offboard,
+)
+from src.services.target.unit_of_work import asyncpg_url, unit_of_work
+from src.services.target.work_loop import WorkerConfig, WorkerDeps
+from tests.scripts.conftest import (
+    _scratch,
+    as_user,
+    fetch_one,
+    replay_advertised_stream,
+    seed_workspace_chain,
+)
+
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
+
+
+@pytest.fixture(scope="module")
+def off_db(admin_conn, owner_actor):
+    gen = _scratch(admin_conn, owner=owner_actor, roles=[])
+    db = next(gen)
+    try:
+        owner_stream = replay_advertised_stream(db, owner_actor, admin_conn)
+        yield {
+            "owner_stream": owner_stream,
+            "ingress": as_user(db, "svc_ingress"),
+            "worker": as_user(db, "svc_worker"),
+        }
+    finally:
+        gen.close()
+
+
+def _migrate(dsn: str, sql: str, params=()):
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(sql, params)
+            row = cur.fetchone() if cur.description else None
+        conn.commit()
+        return row
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def ws(off_db):
+    """A fresh workspace chain per test. Offboarding is destructive and
+    terminal, so a module-scoped tenant would let the first finalize delete the
+    subject of every test after it."""
+    conn = psycopg2.connect(off_db["owner_stream"])
+    try:
+        chain = seed_workspace_chain(conn, f"off-{uuid.uuid4().hex[:8]}")
+    finally:
+        conn.close()
+    return {k: str(v) for k, v in chain.items()}
+
+
+def _one(off_db, sql, params=()):
+    return fetch_one(off_db["owner_stream"], sql, params)
+
+
+def _intent(off_db, ws, state="awaiting_approval", transit=None, intent_id=None):
+    (media,) = _migrate(
+        off_db["owner_stream"],
+        "INSERT INTO media_items (workspace_id, source_id, content_hash, file_name,"
+        " media_kind, provider_file_ref) VALUES (%s, %s, %s, 'f.jpg', 'image', %s)"
+        " RETURNING id",
+        (ws["ws"], ws["src"], f"h-{uuid.uuid4().hex[:8]}", f"r-{uuid.uuid4().hex[:6]}"),
+    )
+    # A publishing/ambiguous row is not free-form: `ck_ambiguous_called` pins
+    # `publish_step='publish_called'` and `ck_publishing_debited` requires the
+    # cap already debited, because ambiguity exists only AFTER the permit
+    # committed. Seeding one without both is a row the schema refuses.
+    draining = state in ("publishing", "publishing_ambiguous")
+    (intent,) = _migrate(
+        off_db["owner_stream"],
+        "INSERT INTO post_intents (id, workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, state,"
+        " transit_asset_ref, publish_step, cap_consumed_on)"
+        " VALUES (%s, %s, %s, %s, %s, 'manual', now(), %s, %s, %s, %s) RETURNING id",
+        (
+            str(intent_id or uuid.uuid4()),
+            ws["ws"],
+            ws["iga"],
+            media,
+            f"acct-{uuid.uuid4().hex[:6]}",
+            state,
+            transit,
+            "publish_called" if draining else "none",
+            "today" if draining else None,
+        ),
+    )
+    return str(intent)
+
+
+def _credential(off_db, ws):
+    (cid,) = _migrate(
+        off_db["owner_stream"],
+        "INSERT INTO oauth_credentials (workspace_id, provider,"
+        " state, encrypted_payload) VALUES (%s, 'gdrive', 'active', %s)"
+        " RETURNING id",
+        (ws["ws"], b"x"),
+    )
+    return str(cid)
+
+
+def _first_id():
+    """An intent id that sorts before any random one: the drain walks `ORDER BY id`."""
+    return "00000000" + uuid.uuid4().hex[8:]
+
+
+@contextlib.contextmanager
+def _without_edge(off_db, from_state, to_state):
+    """The guard refuses this edge inside the block, deterministically, and has it
+    back after: the database is the module's, so no test may leave it changed."""
+    edge = (from_state, to_state)
+    _migrate(
+        off_db["owner_stream"],
+        "DELETE FROM post_intent_transitions WHERE from_state = %s AND to_state = %s",
+        edge,
+    )
+    try:
+        yield
+    finally:
+        _migrate(
+            off_db["owner_stream"],
+            "INSERT INTO post_intent_transitions (from_state, to_state)"
+            " VALUES (%s, %s)",
+            edge,
+        )
+
+
+def _refusals(off_db, ws, intent_id=None):
+    """How many `offboard_cancel_refused` records the workspace holds."""
+    sql = (
+        "SELECT count(*) FROM audit_events WHERE workspace_id = %s"
+        "   AND detail->>'event' = 'offboard_cancel_refused'"
+    )
+    params = (ws["ws"],)
+    if intent_id is not None:
+        sql += " AND detail->>'intent_id' = %s"
+        params += (intent_id,)
+    return _one(off_db, sql, params)[0]
+
+
+# --- the command: the workflow's entry edge ----------------------------------
+
+
+async def _command(
+    dsn: str, ws: str, user: str, args: dict, *, kind="offboard_workspace"
+):
+    engine = create_async_engine(asyncpg_url(dsn), poolclass=NullPool)
+    try:
+        uow = unit_of_work(
+            engine, ws, actor_kind="user", actor_user_id=user, channel="web"
+        )
+        async with uow.begin() as session:
+            assert (
+                await session.execute(text("SELECT current_user"))
+            ).scalar() == "svc_ingress"
+            return await commands.execute(
+                session,
+                Command(
+                    kind=kind,
+                    workspace_id=ws,
+                    actor_user_id=user,
+                    channel="web",
+                    args=args,
+                ),
+            )
+    finally:
+        await engine.dispose()
+
+
+def offboard(off_db, ws, **args):
+    return asyncio.run(_command(off_db["ingress"], ws["ws"], ws["user"], args))
+
+
+def restore(off_db, ws):
+    return asyncio.run(
+        _command(off_db["ingress"], ws["ws"], ws["user"], {}, kind="restore_workspace")
+    )
+
+
+def _account_credential(off_db, ws, state="active"):
+    """An ACCOUNT-owned credential. `_credential` above makes a SOURCE-owned one,
+    and the restore interlock keys on the account side."""
+    (cid,) = _migrate(
+        off_db["owner_stream"],
+        "INSERT INTO oauth_credentials (workspace_id, ig_account_id, provider,"
+        " state, encrypted_payload) VALUES (%s, %s, 'ig_login', %s, %s)"
+        " RETURNING id",
+        (ws["ws"], ws["iga"], state, b"x"),
+    )
+    return str(cid)
+
+
+def _account_state(off_db, ws):
+    (state,) = _one(off_db, "SELECT state FROM ig_accounts WHERE id = %s", (ws["iga"],))
+    return state
+
+
+class TestTheCommand:
+    def test_confirm_is_required_and_its_absence_writes_nothing(self, off_db, ws):
+        """Owner only, explicit and confirmed. This is the one command whose
+        effect is irreversible after the grace window, so an empty POST body
+        must not start it."""
+        for args in ({}, {"confirm": "yes"}, {"confirm": False}):
+            with pytest.raises(CommandRefused) as err:
+                offboard(off_db, ws, **args)
+            assert err.value.reason == "invalid_args"
+        assert _one(
+            off_db,
+            "SELECT state, offboarding_at FROM workspaces WHERE id = %s",
+            (ws["ws"],),
+        ) == ("active", None)
+        assert (
+            _one(
+                off_db, "SELECT count(*) FROM jobs WHERE workspace_id = %s", (ws["ws"],)
+            )[0]
+            == 0
+        )
+
+    def test_starts_the_workflow_and_stamps_the_grace_anchor(self, off_db, ws):
+        out = offboard(off_db, ws, confirm=True)
+        assert out.outcome == "enqueued" and out.data["state"] == "offboarding"
+        row = _one(
+            off_db,
+            "SELECT state, offboarding_at IS NOT NULL FROM workspaces WHERE id = %s",
+            (ws["ws"],),
+        )
+        assert row == ("offboarding", True)
+        job = _one(
+            off_db,
+            "SELECT kind, state, lane, serialization_key, workspace_id::text"
+            "  FROM jobs WHERE id = %s",
+            (out.data["job_id"],),
+        )
+        assert job == (
+            "offboard_workspace",
+            "ready",
+            "bulk",
+            f"ws:{ws['ws']}",
+            ws["ws"],
+        )
+
+    def test_a_second_offboard_is_refused_and_does_not_move_the_deletion_date(
+        self, off_db, ws
+    ):
+        """Re-stamping `offboarding_at` would silently restart a 30-day clock
+        the owner believes is already running."""
+        offboard(off_db, ws, confirm=True)
+        first = _one(
+            off_db, "SELECT offboarding_at FROM workspaces WHERE id = %s", (ws["ws"],)
+        )[0]
+        with pytest.raises(CommandRefused) as err:
+            offboard(off_db, ws, confirm=True)
+        assert err.value.reason == "illegal_transition"
+        assert (
+            _one(
+                off_db,
+                "SELECT offboarding_at FROM workspaces WHERE id = %s",
+                (ws["ws"],),
+            )[0]
+            == first
+        )
+
+
+# --- the job: the five legs --------------------------------------------------
+
+
+class _Transit:
+    """Matches `CloudinaryTransit.destroy`'s SIGNATURE, not the caller's
+    convenience — keyword-only `media_kind`, bool return, "gone NOW" semantics.
+
+    A fake shaped like its caller rather than like the provider agrees with the
+    code under test, so a leg that could never work in production would pass
+    every assertion here."""
+
+    def __init__(self, refuse=(), raise_on=()):
+        self.destroyed = []
+        self._refuse = set(refuse)
+        self._raise_on = set(raise_on)
+
+    async def destroy(self, transit_asset_ref: str, *, media_kind: str) -> bool:
+        assert media_kind in ("image", "video"), media_kind
+        if transit_asset_ref in self._raise_on:
+            raise RuntimeError("provider said no")
+        if transit_asset_ref in self._refuse:
+            return False
+        self.destroyed.append(transit_asset_ref)
+        return True
+
+
+def _deps(
+    off_db,
+    *,
+    transit,
+    grace,
+    drain_timeout,
+    drain_limit=WorkerConfig.offboard_drain_limit,
+):
+    engine = create_async_engine(asyncpg_url(off_db["worker"]), poolclass=NullPool)
+    return WorkerDeps(
+        engine=engine,
+        transit=transit,
+        config=WorkerConfig(
+            offboard_grace_seconds=grace,
+            offboard_drain_timeout_seconds=drain_timeout,
+            offboard_drain_recheck_seconds=30,
+            offboard_drain_limit=drain_limit,
+        ),
+    )
+
+
+def run_job(
+    off_db,
+    ws,
+    *,
+    transit=None,
+    grace=0,
+    drain_timeout=15 * 60,
+    drain_limit=WorkerConfig.offboard_drain_limit,
+):
+    """One `offboard_workspace` run, as `svc_worker`, in the shape the work
+    loop supplies: the loop's session, a claimed job row."""
+    job = _one(
+        off_db,
+        "SELECT id::text FROM jobs WHERE workspace_id = %s"
+        "   AND kind = 'offboard_workspace' AND state = 'ready'"
+        " ORDER BY run_at LIMIT 1",
+        (ws["ws"],),
+    )
+    assert job is not None, "no ready offboard job to run"
+
+    async def _go():
+        deps = _deps(
+            off_db,
+            transit=transit,
+            grace=grace,
+            drain_timeout=drain_timeout,
+            drain_limit=drain_limit,
+        )
+        try:
+            uow = unit_of_work(deps.engine, ws["ws"], actor_kind="system")
+            async with uow.begin() as session:
+                assert (
+                    await session.execute(text("SELECT current_user"))
+                ).scalar() == "svc_worker"
+                return await execute_offboard(
+                    deps, session, {"id": job[0], "workspace_id": ws["ws"]}
+                )
+        finally:
+            await deps.engine.dispose()
+
+    return asyncio.run(_go())
+
+
+class TestTheWorkflow:
+    def test_the_first_run_drains_revokes_and_schedules_the_finalizer(self, off_db, ws):
+        live = _intent(off_db, ws, transit="cloudinary/abc")
+        credential = _credential(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        transit = _Transit()
+
+        out = run_job(off_db, ws, transit=transit, grace=3600)
+
+        assert out["outcome"] == "drained"
+        # The seeded chain carries an intent of its own, so the property is
+        # "nothing live is left", not a count the fixture can move.
+        assert out["refused"] == 0 and out["revoked"] == 1
+        assert _one(
+            off_db,
+            "SELECT count(*) FROM post_intents WHERE workspace_id = %s"
+            "   AND NOT (state = ANY(%s))",
+            (ws["ws"], list(TERMINAL_STATES)),
+        ) == (0,)
+        assert transit.destroyed == ["cloudinary/abc"]
+        assert (
+            _one(off_db, "SELECT state FROM post_intents WHERE id = %s", (live,))[0]
+            == "cancelled"
+        )
+        assert (
+            _one(
+                off_db,
+                "SELECT state FROM oauth_credentials WHERE id = %s",
+                (credential,),
+            )[0]
+            == "revoked"
+        )
+        assert (
+            _one(
+                off_db,
+                "SELECT transit_asset_ref FROM post_intents WHERE id = %s",
+                (live,),
+            )[0]
+            == "cloudinary/abc"
+        ), "the ref stays: leg 1 froze the row, and it dies with the cascade anyway"
+        # Leg 2: the provider call is a job, not an inline call.
+        assert (
+            _one(
+                off_db,
+                "SELECT count(*) FROM jobs WHERE kind = 'revoke_workspace_credentials'"
+                "   AND workspace_id = %s",
+                (ws["ws"],),
+            )[0]
+            == 1
+        )
+        successor = _one(
+            off_db,
+            "SELECT run_at = (SELECT offboarding_at + interval '3600 seconds'"
+            "                   FROM workspaces WHERE id = %s)"
+            "  FROM jobs WHERE id = %s",
+            (ws["ws"], out["successor"]),
+        )
+        assert successor == (True,), "the finalizer is scheduled for the window's end"
+
+        # #1361: `_mint_successor` writes its own INSERT — a self-excluding,
+        # kind-scoped successor mint at a computed `run_at`, which
+        # `jobs.enqueue` does not model — and carries the lane's deadline
+        # (#1288) all the same, measured from `run_at`, NOT from `now()`.
+        # Asserted as the exact interval rather than as `IS NOT NULL`, because
+        # `IS NOT NULL` is satisfied by `now() + 6 h`, the failure this test
+        # exists to catch: the finalizer is minted up to
+        # `GRACE_SECONDS_DEFAULT` (thirty days) before it is due, so a deadline
+        # anchored at mint is already spent when the job becomes runnable and
+        # `budget_exhausted` ends the workflow on its first claim. Checked
+        # against that mutant: with `IS NOT NULL` it passed.
+        budget_attempts, budget_seconds = jobs.LANE_BUDGETS[offboarding.LANE]
+        from_run_at, attempts = _one(
+            off_db,
+            "SELECT deadline_at = run_at + make_interval(secs => %s), max_attempts"
+            "  FROM jobs WHERE id = %s",
+            (budget_seconds, out["successor"]),
+        )
+        assert from_run_at is True, (
+            "the successor's deadline must be the lane's budget from RUN_AT"
+        )
+        assert attempts == budget_attempts, (
+            "and the lane's attempt budget, not a hand-copied 5"
+        )
+
+    def test_a_second_run_of_the_same_legs_changes_nothing(self, off_db, ws):
+        """Legs are idempotent because a re-claimed lease reruns them; the rows
+        are the progress marker, so there is nothing to get out of step."""
+        _intent(off_db, ws)
+        _credential(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        run_job(off_db, ws, grace=3600)
+        before = _one(
+            off_db, "SELECT count(*) FROM jobs WHERE workspace_id = %s", (ws["ws"],)
+        )
+        out = run_job(off_db, ws, grace=3600)
+        assert out["outcome"] == "grace"
+        assert out["cancelled"] == 0 and out["revoked"] == 0
+        assert (
+            _one(
+                off_db, "SELECT count(*) FROM jobs WHERE workspace_id = %s", (ws["ws"],)
+            )
+            == before
+        ), "no second successor and no second revoke job"
+
+    def test_the_finalize_run_deletes_the_workspace_and_cascades(self, off_db, ws):
+        """The door's happy path.
+
+        Everything workspace-keyed goes with the cascade; `audit_events`
+        survives, by design and without an FK."""
+        _intent(off_db, ws)
+        _credential(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+
+        # TWO runs, and that is the contract rather than an inconvenience: the
+        # first run's cancels live in the loop's open transaction, and the
+        # door runs in its own and would not see them.
+        first = run_job(off_db, ws, grace=0)
+        assert first["outcome"] == "drained"
+        out = run_job(off_db, ws, grace=0)
+
+        assert out["outcome"] == "finalized"
+        assert _one(
+            off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)
+        ) == (0,)
+        # One query rather than six connections, and a dict comparison rather
+        # than a loop: the failure output then NAMES every table that outlived
+        # the cascade instead of stopping at the first.
+        tables = (
+            "post_intents",
+            "media_items",
+            "media_sources",
+            "ig_accounts",
+            "oauth_credentials",
+            "workspace_members",
+        )
+        counts = _one(
+            off_db,
+            "SELECT "
+            + ", ".join(
+                f"(SELECT count(*) FROM {t} WHERE workspace_id = %s)" for t in tables
+            ),
+            (ws["ws"],) * len(tables),
+        )
+        assert dict(zip(tables, counts)) == dict.fromkeys(tables, 0)
+        assert (
+            _one(
+                off_db,
+                "SELECT count(*) FROM audit_events WHERE workspace_id = %s",
+                (ws["ws"],),
+            )[0]
+            > 0
+        ), "audit outlives the tenant"
+
+    def test_the_job_row_is_erased_by_the_cascade_it_triggers(self, off_db, ws):
+        """Why the finalize leg owns its transaction. `jobs.workspace_id`
+        cascades, so the row the loop holds a lease on disappears mid-run; had
+        the DELETE ridden the loop's session, the loop's own `finalize_job`
+        would raise `JobFenced` inside it and roll the deletion back."""
+        offboard(off_db, ws, confirm=True)
+        job = _one(
+            off_db,
+            "SELECT id::text FROM jobs WHERE workspace_id = %s AND kind = 'offboard_workspace'",
+            (ws["ws"],),
+        )[0]
+        run_job(off_db, ws, grace=0)  # drains; mints the finalizer
+        run_job(off_db, ws, grace=0)  # finalizes, erasing both job rows
+        assert _one(off_db, "SELECT count(*) FROM jobs WHERE id = %s", (job,)) == (0,)
+
+    def test_a_restore_inside_the_window_stops_the_workflow(self, off_db, ws):
+        """The owner may back out within the grace window. The job
+        must not delete a workspace that is no longer offboarding."""
+        offboard(off_db, ws, confirm=True)
+        _migrate(
+            off_db["owner_stream"],
+            "UPDATE workspaces SET state = 'active', offboarding_at = NULL WHERE id = %s",
+            (ws["ws"],),
+        )
+        out = run_job(off_db, ws, grace=0)
+        assert out == {"outcome": "not_offboarding", "state": "active"}
+        assert _one(
+            off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)
+        ) == (1,)
+
+    def test_an_already_finalized_workspace_is_not_an_error(self, off_db, ws):
+        offboard(off_db, ws, confirm=True)
+        run_job(off_db, ws, grace=0)
+        run_job(off_db, ws, grace=0)
+
+        async def _go():
+            deps = _deps(off_db, transit=None, grace=0, drain_timeout=15 * 60)
+            try:
+                uow = unit_of_work(deps.engine, ws["ws"], actor_kind="system")
+                async with uow.begin() as session:
+                    return await execute_offboard(
+                        deps,
+                        session,
+                        {"id": str(uuid.uuid4()), "workspace_id": ws["ws"]},
+                    )
+            finally:
+                await deps.engine.dispose()
+
+        assert asyncio.run(_go()) == {"outcome": "already_finalized"}
+
+    def test_a_refused_cancel_does_not_abort_the_rest_of_the_drain(self, off_db, ws):
+        """#1422: the drain promises "a refusal on one intent is recorded and the
+        rest continue". A refusal is a Postgres error and aborts the
+        transaction, so without a savepoint per row the NEXT cancel fails on
+        the aborted transaction and the whole offboard fails with it.
+
+        In production a refusal needs a race — the row moved between the
+        drain's SELECT and its UPDATE. Here the `approved → cancelled` edge is
+        removed for the run, so the guard refuses deterministically, and the
+        refused intent sorts FIRST (the drain walks `ORDER BY id`), so every
+        other cancel runs after the refusal.
+        """
+        refused = _intent(off_db, ws, state="approved", intent_id=_first_id())
+        cancelled = _intent(off_db, ws)  # awaiting_approval: its edge stays
+        offboard(off_db, ws, confirm=True)
+        with _without_edge(off_db, "approved", "cancelled"):
+            out = run_job(off_db, ws, grace=3600)
+
+        # Two cancels (the chain's own `scheduled` intent and `cancelled`) and
+        # one refusal, which must not also count as a cancel.
+        assert out["outcome"] == "drained", out
+        assert (out["cancelled"], out["refused"]) == (2, 1), out
+        state = "SELECT state FROM post_intents WHERE id = %s"
+        assert _one(off_db, state, (refused,))[0] == "approved"
+        assert _one(off_db, state, (cancelled,))[0] == "cancelled"
+        # #1441: the refusal leaves a durable record, not only a log line.
+        assert _refusals(off_db, ws, refused) == 1
+
+    def test_a_refusals_record_survives_a_run_that_then_raises(self, off_db, ws):
+        """The record is committed in its own transaction, so it outlives the
+        run's rollback — here the drain timing out on a still-publishing intent,
+        which raises after the refusal was recorded."""
+        refused = _intent(off_db, ws, state="approved", intent_id=_first_id())
+        _intent(off_db, ws, state="publishing_ambiguous")
+        offboard(off_db, ws, confirm=True)
+        with _without_edge(off_db, "approved", "cancelled"):
+            with pytest.raises(DrainTimedOut):
+                run_job(off_db, ws, grace=0, drain_timeout=0)
+        assert _refusals(off_db, ws, refused) == 1
+
+
+class TestTheDrainIsBoundedBySubtransactions:
+    """#1441: each cancel rides its own savepoint, and a backend caches 64
+    subtransaction ids. A run that wrote in more would mark every other
+    backend's snapshot suboverflowed until it ended."""
+
+    def test_a_run_cancels_at_most_64_and_the_rest_drain_at_once(self, off_db, ws):
+        credential = _credential(off_db, ws)
+        for _ in range(70):  # plus the chain's own `scheduled` intent: 71 live
+            _intent(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        out = run_job(off_db, ws, grace=3600)
+
+        assert (out["cancelled"], out["refused"]) == (64, 0), out
+        # One subtransaction id per writing savepoint: the rows it cancelled
+        # carry them as xmin, so this counts the savepoints that wrote.
+        assert _one(
+            off_db,
+            "SELECT count(DISTINCT xmin::text) FROM post_intents"
+            " WHERE workspace_id = %s AND state = 'cancelled'",
+            (ws["ws"],),
+        ) == (64,)
+        assert _one(
+            off_db,
+            "SELECT count(*) FROM post_intents WHERE workspace_id = %s"
+            "   AND state <> 'cancelled'",
+            (ws["ws"],),
+        ) == (7,)
+        assert (out["outcome"], out["more"]) == ("draining", True), out
+        assert _one(
+            off_db,
+            "SELECT run_at <= now() FROM jobs WHERE id = %s",
+            (out["successor"],),
+        ) == (True,), "the rest drain on the next run now, not at the window's end"
+        assert _one(
+            off_db, "SELECT state FROM oauth_credentials WHERE id = %s", (credential,)
+        ) == ("active",), "revoke waits for the drain to finish"
+
+        # The next run cancels the rest, and only then do legs 2-3 run.
+        out = run_job(off_db, ws, grace=3600)
+        assert (out["outcome"], out["cancelled"], out["more"]) == ("drained", 7, False)
+        assert _one(
+            off_db,
+            "SELECT count(*) FROM post_intents WHERE workspace_id = %s"
+            "   AND state <> 'cancelled'",
+            (ws["ws"],),
+        ) == (0,)
+        assert _one(
+            off_db, "SELECT state FROM oauth_credentials WHERE id = %s", (credential,)
+        ) == ("revoked",)
+
+    def test_exactly_64_live_drain_and_revoke_in_one_run(self, off_db, ws):
+        """64 cancels with nothing left is the last run, not a bounded one: legs
+        2-3 run in it. Re-running at once needs the bound to have stopped the
+        drain with intents left, not 64 cancels alone."""
+        credential = _credential(off_db, ws)
+        for _ in range(63):  # plus the chain's own `scheduled` intent: 64 live
+            _intent(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        out = run_job(off_db, ws, grace=3600)
+
+        assert (out["outcome"], out["cancelled"], out["more"]) == (
+            "drained",
+            64,
+            False,
+        ), out
+        assert out["revoked"] == 1, out
+        assert _one(
+            off_db, "SELECT state FROM oauth_credentials WHERE id = %s", (credential,)
+        ) == ("revoked",), "the run that cancelled the last intent revokes"
+
+    def test_while_publishing_drains_a_bounded_run_rechecks_at_once(self, off_db, ws):
+        """The bound's next run does not wait for the recheck either, while an
+        intent is still publishing: its cancels are what stop the rest posting."""
+        for _ in range(70):
+            _intent(off_db, ws)
+        _intent(off_db, ws, state="publishing_ambiguous")
+        offboard(off_db, ws, confirm=True)
+        out = run_job(off_db, ws, grace=3600, drain_timeout=900)
+
+        assert (out["outcome"], out["publishing"], out["cancelled"]) == (
+            "draining",
+            1,
+            64,
+        ), out
+        assert _one(
+            off_db,
+            "SELECT run_at <= now() FROM jobs WHERE id = %s",
+            (out["successor"],),
+        ) == (True,)
+
+    def test_refusals_do_not_use_up_the_bound(self, off_db, ws):
+        """A refused cancel's savepoint rolls back and holds no subtransaction id,
+        so refusals that sort first do not strand the intents behind them."""
+        for _ in range(64):
+            _intent(off_db, ws, state="approved", intent_id=_first_id())
+        offboard(off_db, ws, confirm=True)
+        with _without_edge(off_db, "approved", "cancelled"):
+            out = run_job(off_db, ws, grace=3600)
+
+        assert _refusals(off_db, ws) == 64
+        # The chain's own `scheduled` intent sorts after them, and is cancelled.
+        assert (out["cancelled"], out["refused"], out["more"]) == (1, 64, False), out
+
+    def test_a_run_the_bound_did_not_stop_waits_for_the_window(self, off_db, ws):
+        """A run that read its limit with fewer than 64 cancels does not re-run at
+        once: a window of refusals would otherwise become back-to-back runs of a
+        few cancels each, recording the same refusals every time."""
+        for _ in range(2):
+            _intent(off_db, ws, state="approved", intent_id=_first_id())
+        _intent(off_db, ws, intent_id="00000001" + uuid.uuid4().hex[8:])  # third
+        offboard(off_db, ws, confirm=True)
+        with _without_edge(off_db, "approved", "cancelled"):
+            out = run_job(off_db, ws, grace=3600, drain_limit=3)
+
+        assert (out["cancelled"], out["refused"], out["more"]) == (1, 2, True), out
+        assert _one(
+            off_db,
+            "SELECT run_at = (SELECT offboarding_at + interval '3600 seconds'"
+            "                   FROM workspaces WHERE id = %s)"
+            "  FROM jobs WHERE id = %s",
+            (ws["ws"], out["successor"]),
+        ) == (True,)
+
+
+class TestTheDrainPark:
+    """Leg 1: a drain that times out parks the leg and alerts the operator
+    RATHER THAN revoking under live work, which would destroy the
+    reconciliation evidence."""
+
+    def _publishing(self, off_db, ws):
+        _intent(off_db, ws, state="publishing_ambiguous")
+        return _credential(off_db, ws)
+
+    def test_inside_the_timeout_it_waits_and_leaves_credentials_alive(self, off_db, ws):
+        credential = self._publishing(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        out = run_job(off_db, ws, grace=0, drain_timeout=900)
+        assert out["outcome"] == "draining" and out["publishing"] == 1
+        assert (
+            _one(
+                off_db,
+                "SELECT state FROM oauth_credentials WHERE id = %s",
+                (credential,),
+            )[0]
+            == "active"
+        ), "credentials must stay alive while publishing work drains"
+        assert _one(
+            off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)
+        ) == (1,)
+        assert out["successor"], "a recheck is scheduled rather than the job dying"
+
+    def test_past_the_timeout_it_parks_loudly_and_the_record_survives_the_raise(
+        self, off_db, ws
+    ):
+        """The audit row is written on the path that RAISES, so the claim under
+        test is that it survives the rollback — which it only does because it is
+        committed in its own transaction."""
+        credential = self._publishing(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        with pytest.raises(DrainTimedOut):
+            run_job(off_db, ws, grace=0, drain_timeout=0)
+        assert (
+            _one(
+                off_db,
+                "SELECT state FROM oauth_credentials WHERE id = %s",
+                (credential,),
+            )[0]
+            == "active"
+        ), "the park must not revoke under live work"
+        assert _one(
+            off_db, "SELECT count(*) FROM workspaces WHERE id = %s", (ws["ws"],)
+        ) == (1,)
+        assert _one(
+            off_db,
+            "SELECT count(*) FROM audit_events WHERE workspace_id = %s"
+            "   AND detail->>'event' = 'offboard_drain_timeout'",
+            (ws["ws"],),
+        ) == (1,)
+        # The actor spelling this writer does NOT share with the other three
+        # (`audit.ACTOR_SYSTEM_CHANNEL`): the poller session sets no
+        # `app.channel`, and a NULL there would lose the only thing the row
+        # says about who ran the drain.
+        assert _one(
+            off_db,
+            "SELECT actor_user_id, channel FROM audit_events"
+            " WHERE workspace_id = %s AND detail->>'event' = 'offboard_drain_timeout'",
+            (ws["ws"],),
+        ) == (None, "system")
+
+
+class TestTheTransitSeam:
+    def test_with_no_transit_store_the_refs_are_reported_not_silently_skipped(
+        self, off_db, ws
+    ):
+        """The transit TTL sweep is the backstop, so a missing seam
+        delays nothing — but a skip nobody can see is how a backstop becomes an
+        assumption."""
+        _intent(off_db, ws, transit="cloudinary/orphan")
+        offboard(off_db, ws, confirm=True)
+        out = run_job(off_db, ws, transit=None, grace=3600)
+        assert out["transit"] == {"reaped": 0, "left_to_ttl": 1, "seam": "absent"}
+
+    def test_a_refused_delete_is_counted_and_does_not_abort_the_others(
+        self, off_db, ws
+    ):
+        """Best-effort means the sweep continues. One provider refusal must not
+        cost the other assets their reap, nor the offboard its progress."""
+        _intent(off_db, ws, transit="cloudinary/refused")
+        _intent(off_db, ws, transit="cloudinary/raised")
+        _intent(off_db, ws, transit="cloudinary/fine")
+        offboard(off_db, ws, confirm=True)
+        # Both provider failure shapes: `destroy` answers False for a polite
+        # refusal and raises for anything else. Counting only the exception
+        # would report a refusal as a successful reap.
+        transit = _Transit(
+            refuse={"cloudinary/refused"}, raise_on={"cloudinary/raised"}
+        )
+        out = run_job(off_db, ws, transit=transit, grace=3600)
+        assert out["transit"] == {"reaped": 1, "left_to_ttl": 2, "seam": "wired"}
+        assert transit.destroyed == ["cloudinary/fine"]
+        assert out["outcome"] == "drained", (
+            "a refused asset does not stall the workflow"
+        )
+
+
+class TestTheRestore:
+    """The way back (#1127). The interlock tests are the load-bearing
+    ones: flipping the workspace back is the obvious half and the harmless
+    half."""
+
+    def test_it_flips_state_back_and_clears_the_anchor(self, off_db, ws):
+        offboard(off_db, ws, confirm=True)
+        result = restore(off_db, ws)
+        assert result.outcome == "executed"
+        state, anchor = _one(
+            off_db,
+            "SELECT state, offboarding_at FROM workspaces WHERE id = %s",
+            (ws["ws"],),
+        )
+        assert state == "active"
+        assert anchor is None
+
+    def test_an_account_with_a_revoked_credential_needs_reconnect(self, off_db, ws):
+        """THE INTERLOCK. `fn_clock_tick`'s due-scan reads `a.state='active'`
+        and never consults credential state, and offboarding never touches
+        `ig_accounts.state` — so without this flip a restored workspace resumes
+        planning slots whose every publish fails against a revoked credential.
+
+        Revert-check: drop the second UPDATE from the executor and this goes
+        red, because the account is left `active`."""
+        _account_credential(off_db, ws)
+        assert _account_state(off_db, ws) == "active"
+        offboard(off_db, ws, confirm=True)
+        # Leg 2 lives in the JOB, not the command — the credential is not
+        # revoked until the workflow runs. `grace=3600` keeps the window open so
+        # legs 1-3 run and leg 5 does not.
+        run_job(off_db, ws, grace=3600)
+        result = restore(off_db, ws)
+        assert _account_state(off_db, ws) == "reauth_required"
+        assert result.data["accounts_needing_reconnect"] == 1
+
+    def test_restoring_before_the_workflow_runs_needs_no_reconnect(self, off_db, ws):
+        """An owner who changes their mind immediately has revoked nothing, so
+        nothing is stranded in `reauth_required`. The flip keys on the credential
+        actually being revoked rather than on the offboard having been started —
+        those come apart exactly here."""
+        _account_credential(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        result = restore(off_db, ws)
+        assert _account_state(off_db, ws) == "active"
+        assert result.data["accounts_needing_reconnect"] == 0
+
+    def test_a_manual_destination_keeps_posting(self, off_db, ws):
+        """A destination with no credential row has nothing to reconnect, and a
+        blanket freeze would strand the only kind the estate currently has."""
+        offboard(off_db, ws, confirm=True)
+        result = restore(off_db, ws)
+        assert _account_state(off_db, ws) == "active"
+        assert result.data["accounts_needing_reconnect"] == 0
+
+    def test_restoring_a_workspace_that_is_not_offboarding_is_refused(self, off_db, ws):
+        with pytest.raises(CommandRefused) as caught:
+            restore(off_db, ws)
+        assert caught.value.reason == "illegal_transition"
+        assert "not offboarding" in str(caught.value)
+
+    def test_restoring_past_the_grace_window_is_refused(self, off_db, ws):
+        """Within the grace window only. The guard is policy — safety
+        is structural, since `fn_offboard_finalize` deletes the row — so it has
+        to hold in the interval BEFORE the finalizer runs."""
+        offboard(off_db, ws, confirm=True)
+        _migrate(
+            off_db["owner_stream"],
+            "UPDATE workspaces SET offboarding_at = now() - interval '31 days'"
+            " WHERE id = %s",
+            (ws["ws"],),
+        )
+        with pytest.raises(CommandRefused) as caught:
+            restore(off_db, ws)
+        assert caught.value.reason == "illegal_transition"
+        assert "grace window closed" in str(caught.value)
+        (state,) = _one(
+            off_db, "SELECT state FROM workspaces WHERE id = %s", (ws["ws"],)
+        )
+        assert state == "offboarding"
+
+    def test_the_state_check_is_what_refuses_not_the_anchor_arithmetic(
+        self, off_db, ws
+    ):
+        """With `state = 'offboarding'` dropped from the WHERE, every other
+        test still passes, because a
+        non-offboarding workspace has a NULL `offboarding_at` and the grace
+        comparison is then NULL — refusing by accident rather than by rule.
+
+        The state is CONSTRUCTED rather than driven, deliberately: no product
+        writer can currently produce a stamped anchor on a non-offboarding
+        workspace (offboard sets both, restore clears both, finalize deletes the
+        row). That unreachability is exactly what the precondition preserves, so
+        the guard is pinned against the day a suspend path stamps one."""
+        _migrate(
+            off_db["owner_stream"],
+            "UPDATE workspaces SET state = 'suspended', offboarding_at = now()"
+            " WHERE id = %s",
+            (ws["ws"],),
+        )
+        with pytest.raises(CommandRefused) as caught:
+            restore(off_db, ws)
+        assert caught.value.reason == "illegal_transition"
+        assert "not offboarding" in str(caught.value)
+        (state,) = _one(
+            off_db, "SELECT state FROM workspaces WHERE id = %s", (ws["ws"],)
+        )
+        assert state == "suspended"
+
+    def test_the_two_refusals_do_not_read_the_same(self, off_db, ws):
+        """Both are `illegal_transition`; a caller must still be able to tell
+        "never started" from "too late", because the remedies differ — one is
+        "nothing to undo", the other is "the data is going away"."""
+        with pytest.raises(CommandRefused) as never_started:
+            restore(off_db, ws)
+        offboard(off_db, ws, confirm=True)
+        _migrate(
+            off_db["owner_stream"],
+            "UPDATE workspaces SET offboarding_at = now() - interval '31 days'"
+            " WHERE id = %s",
+            (ws["ws"],),
+        )
+        with pytest.raises(CommandRefused) as too_late:
+            restore(off_db, ws)
+        assert str(never_started.value) != str(too_late.value)
+
+    def test_a_pending_offboard_job_no_ops_after_a_restore(self, off_db, ws):
+        """No job is cancelled on restore; the workflow re-reads state and
+        stands down on its own."""
+        offboard(off_db, ws, confirm=True)
+        restore(off_db, ws)
+        assert run_job(off_db, ws, grace=0)["outcome"] == "not_offboarding"

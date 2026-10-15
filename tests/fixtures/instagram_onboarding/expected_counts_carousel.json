@@ -1,0 +1,217 @@
+{
+  "schema": 1,
+  "settings": {
+    "page_size": 25,
+    "repost_window_days": 30,
+    "effective_minimum_age_days": 90,
+    "daily_slots": 3,
+    "share": 1
+  },
+  "formulas": {
+    "first_card_max_graph": "ceil(0.1 * N / 25) + 16",
+    "first_card_max_cdn": "4",
+    "first_card_max_observed": "N / 4, a quarter of the parents",
+    "traversal_max_graph": "3 * N + 64",
+    "traversal_max_turns": "N + 128",
+    "runway_days": "candidates // daily_slots, whole days rounded down (content_runway.days_left); share 1 means the one source supplies the whole pool"
+  },
+  "about": "Hand-authored expectations fixed before the carousel-heavy fixture or harness is run. These are item counts derived from the position cycles, never the output of the suitability evaluator.",
+  "budget_note": "At indices 0 and 1 modulo 10 the post is a single image; the other eight are carousels. Carousel ordinal j has 2,3,5,10,20 slides at j modulo 5. Thus a 50-post block has 40 carousels, 320 slides and 10 singles: 330 items. The accepted image stays single. The final 2022 image replaces a 20-slide carousel, subtracting 19 items. Carousel ordinal 0 (recent index 2) is empty instead of two slides: subtract 2 items and add one unavailable post exclusion; represented=N-1. Ordinal 4 (recent index 6) has a twenty-first child beyond the one permitted page: 20 indexed slides and one truncation, with no follow-up read. Therefore items=6.6N-21 and slides=6.4N-22. For N=500,2000,10000 the old range is whole 450-post cycles (LCM 50 kinds/sizes, 9 attribution), giving not-detected:credited:unknown=6:2:1, then subtract 19 from not-detected. For N=100 the nine ten-post old blocks sum by attribution to 426/130/52 before replacing the final 20-slide carousel, hence 407/130/52. Recent weighted counts are 50/328/1318/6598. Every fourth carousel has video at position 1 and its distinct middle position; metadata candidacy is unaffected. All ceilings remain the original post-based ceilings.",
+  "carousel": {
+    "100": {
+      "groups": {
+        "recent": 10,
+        "accepted_image": 1,
+        "not_detected": 59,
+        "credited": 20,
+        "unknown": 10
+      },
+      "observed": 100,
+      "represented": 99,
+      "candidates": 407,
+      "eligible_before_selection": 0,
+      "candidate_exclusions": {
+        "too_recent": 50,
+        "credited_excluded": 130,
+        "attribution_unknown": 52,
+        "unavailable": 1
+      },
+      "oldest_observed_at": "2022-06-15T09:30:00+00:00",
+      "destination": {
+        "state": "ready",
+        "remedy": null,
+        "leading_exclusion": {
+          "reason": "credited_excluded",
+          "count": 130
+        }
+      },
+      "partial_coverage": false,
+      "partial_coverage_basis": "No ceiling: the coordinated scan counter ends at 100, below LISTING_CEILING, so no lane's ceiling_reached is set; remaining clears once both lanes are complete and no helper is pending or deferred (instagram_sync.py:374-376, :419-425). True while indexing, false at completion.",
+      "runway_days": 135,
+      "first_card": {
+        "max_graph": 17,
+        "max_cdn": 4,
+        "max_observed": 25
+      },
+      "traversal": {
+        "max_graph": 364,
+        "max_turns": 228,
+        "max_cdn": 0,
+        "max_downloads": 0,
+        "max_decodes": 0
+      },
+      "items": 639,
+      "slides": 618,
+      "carousel_children_truncated": 1,
+      "carousels": 79
+    },
+    "500": {
+      "groups": {
+        "recent": 50,
+        "accepted_image": 1,
+        "not_detected": 299,
+        "credited": 100,
+        "unknown": 50
+      },
+      "observed": 500,
+      "represented": 499,
+      "candidates": 1961,
+      "eligible_before_selection": 0,
+      "candidate_exclusions": {
+        "too_recent": 328,
+        "credited_excluded": 660,
+        "attribution_unknown": 330,
+        "unavailable": 1
+      },
+      "oldest_observed_at": "2022-06-15T09:30:00+00:00",
+      "destination": {
+        "state": "ready",
+        "remedy": null,
+        "leading_exclusion": {
+          "reason": "credited_excluded",
+          "count": 660
+        }
+      },
+      "partial_coverage": false,
+      "partial_coverage_basis": "No ceiling: the scan counter ends at 500, below LISTING_CEILING (see the 100 row).",
+      "runway_days": 653,
+      "first_card": {
+        "max_graph": 18,
+        "max_cdn": 4,
+        "max_observed": 125
+      },
+      "traversal": {
+        "max_graph": 1564,
+        "max_turns": 628,
+        "max_cdn": 0,
+        "max_downloads": 0,
+        "max_decodes": 0
+      },
+      "items": 3279,
+      "slides": 3178,
+      "carousel_children_truncated": 1,
+      "carousels": 399
+    },
+    "2000": {
+      "groups": {
+        "recent": 200,
+        "accepted_image": 1,
+        "not_detected": 1199,
+        "credited": 400,
+        "unknown": 200
+      },
+      "observed": 2000,
+      "represented": 1999,
+      "candidates": 7901,
+      "eligible_before_selection": 0,
+      "candidate_exclusions": {
+        "too_recent": 1318,
+        "credited_excluded": 2640,
+        "attribution_unknown": 1320,
+        "unavailable": 1
+      },
+      "oldest_observed_at": "2022-06-15T09:30:00+00:00",
+      "destination": {
+        "state": "ready",
+        "remedy": null,
+        "leading_exclusion": {
+          "reason": "credited_excluded",
+          "count": 2640
+        }
+      },
+      "partial_coverage": false,
+      "partial_coverage_basis": "No ceiling: the scan counter ends at 2000, below LISTING_CEILING (see the 100 row).",
+      "runway_days": 2633,
+      "first_card": {
+        "max_graph": 24,
+        "max_cdn": 4,
+        "max_observed": 500
+      },
+      "traversal": {
+        "max_graph": 6064,
+        "max_turns": 2128,
+        "max_cdn": 0,
+        "max_downloads": 0,
+        "max_decodes": 0
+      },
+      "items": 13179,
+      "slides": 12778,
+      "carousel_children_truncated": 1,
+      "carousels": 1599
+    },
+    "10000": {
+      "groups": {
+        "recent": 1000,
+        "accepted_image": 1,
+        "not_detected": 5999,
+        "credited": 2000,
+        "unknown": 1000
+      },
+      "observed": 10000,
+      "represented": 9999,
+      "candidates": 39581,
+      "eligible_before_selection": 0,
+      "candidate_exclusions": {
+        "too_recent": 6598,
+        "credited_excluded": 13200,
+        "attribution_unknown": 6600,
+        "unavailable": 1
+      },
+      "oldest_observed_at": "2022-06-15T09:30:00+00:00",
+      "destination": {
+        "state": "ready",
+        "remedy": null,
+        "leading_exclusion": {
+          "reason": "credited_excluded",
+          "count": 13200
+        }
+      },
+      "partial_coverage": true,
+      "partial_coverage_basis": [
+        "src/services/target/instagram_archive_adapter.py:42 LISTING_CEILING = 10_000, and :10-11: the newest 10,000 posts are the documented listing ceiling, not a complete inventory.",
+        "instagram_archive_adapter.py:505-506 _advance: ceiling_reached = (seen == LISTING_CEILING) and more = not ceiling_reached; :548 takes no next window once it is reached; :699-702 novel[:LISTING_CEILING - seen] lets the 10,000th parent in exactly, so all 10,000 are observed.",
+        "src/services/target/instagram_sync.py:693-696 _land: when the coordinated scan_seen equals LISTING_CEILING both lanes are marked complete and clamped; :88-91 _clamp_ceiling sets ceiling_reached true in each.",
+        "instagram_sync.py:419-425 status(): partial = remaining OR any lane checkpoint's ceiling_reached. remaining clears when the helpers drain (:374-376) but ceiling_reached stays, so the flag is still true at completion; progress() passes it through at :531.",
+        "src/services/target/destination_readiness.py:109-116 partial_coverage(): any drawn archive source is partial; src/services/target/category_mix.py:615 and :635 expose it as partial_coverage, and it is compatible with state ready (its docstring, :110-111).",
+        "So at N = 10000 the flag is true even though nothing was skipped: an account with exactly 10,000 posts cannot be told from a longer, truncated one."
+      ],
+      "runway_days": 13193,
+      "first_card": {
+        "max_graph": 56,
+        "max_cdn": 4,
+        "max_observed": 2500
+      },
+      "traversal": {
+        "max_graph": 30064,
+        "max_turns": 10128,
+        "max_cdn": 0,
+        "max_downloads": 0,
+        "max_decodes": 0
+      },
+      "items": 65979,
+      "slides": 63978,
+      "carousel_children_truncated": 1,
+      "carousels": 7999
+    }
+  }
+}

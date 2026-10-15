@@ -1,0 +1,1816 @@
+"""The RLS runtime harness against the full schema (#751).
+
+`test_rls_harness.py` proves the PREMISE on a one-table probe (owner bypasses,
+login confined, the schema gate structurally blind, tenant context leaks
+across connection reuse). This module is the other half: the DECLARED RUNTIME
+LOGINS against the schema production runs — the full advertised stream, which
+arm (b) of `advertised_ddl_replay` holds equal to the migration files,
+replayed under the declared actors.
+
+EXERCISED, not asserted-present: the policy census below is every row of
+`pg_policies` (58), asserted equal to the live catalog at (table, cmd, roles)
+grain — so a smuggled permissive policy on an already-covered table is a red
+test — and every census row carries a DISPOSITION naming how this module
+drives it (matrix read+write as both logins, a door's definer body, a direct
+machinery probe) or disclosing that it is evaluated-but-not-effect-driven in
+this world (the zero-row sweeps). Every zero/denial assertion is paired with
+a positive control on its own axis.
+
+Two schema truths asserted rather than assumed:
+- ABSENT tenant context yields an EMPTY SET on the tenant tables (the
+  policies read the GUC via ``NULLIF(current_setting(..., true), '')``) —
+  deliberately different from the probe harness's 42704 — EXCEPT ``jobs``,
+  whose policy is ``workspace_id = T OR workspace_id IS NULL`` by design:
+  absent context sees exactly the system rows, and the matrix pins that.
+- Governance mutations (workspaces, workspace_members, channel_bindings,
+  ig_accounts, oauth_credentials) require the actor GUCs; write probes set
+  them the way every runtime unit of work does.
+
+Out of CI reach, stated rather than faked: the clause "runtime
+deployment env contains connection strings for exactly svc_ingress and
+svc_worker" is a deployment property (an ops gate), and whether any prod path
+connects as an owner-equivalent role (#751) needs prod credentials the test
+suite does not hold.
+"""
+
+import hashlib
+import uuid
+
+import psycopg2
+import psycopg2.errors
+import pytest
+
+from tests.scripts.conftest import (
+    NOLOGIN_ROLES,
+    SERVICE_ROLES,
+    _scratch,
+    as_user,
+    replay_advertised_stream,
+    seed_workspace_chain,
+)
+
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
+
+WS_A_NAME = "f4-tenant-a"
+WS_B_NAME = "f4-tenant-b"
+
+LOGINS = ("svc_worker", "svc_ingress")
+T = ("svc_ingress", "svc_worker")  # the tenant-policy TO-list, alphabetical
+
+#: THE ORACLE — every policy in 058/060 at (policy, table, cmd, roles) grain,
+#: with its disposition in this module. Asserted equal to pg_policies by
+#: test_the_census_matches_the_catalog_exactly; dispositions are asserted
+#: complete (every row has one) and honest (the disclosed set is pinned).
+#: Disposition vocabulary:
+#:   matrix        — read AND write driven as both logins via the isolation matrix
+#:   matrix-read   — read-only policy driven via the matrix SELECT leg
+#:   insert-pair   — INSERT policy driven by an own-succeeds/foreign-refused pair
+#:   door:<fn>     — evaluated inside that SECURITY DEFINER body; "armed" doors
+#:                   move rows under it, the rest evaluate it over this world
+#:   machinery     — driven by a direct probe as the granted login
+#:   auth          — driven by the auth-plane tests (ingress inserts + sweep)
+POLICY_CENSUS = {
+    ("p_tenant_workspaces", "workspaces", "ALL", T): "matrix",
+    ("p_clock_ws", "workspaces", "SELECT", ("svc_clock",)): "door:fn_clock_tick",
+    (
+        "p_maint_ws",
+        "workspaces",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_offboard_finalize",
+    (
+        "p_member_ws",
+        "workspaces",
+        "SELECT",
+        ("svc_membership",),
+    ): "door:fn_invitation_accept",
+    ("p_tenant", "workspace_members", "ALL", T): "matrix",
+    (
+        "p_member_members",
+        "workspace_members",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_invitation_accept",
+    ("p_tenant", "workspace_invitations", "ALL", T): "matrix",
+    (
+        "p_maint_invites",
+        "workspace_invitations",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_reaper_sweep",
+    (
+        "p_member_invites",
+        "workspace_invitations",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_invitation_accept",
+    ("p_user_plane", "users", "ALL", T): "matrix-userplane",
+    ("p_user_plane", "user_identities", "ALL", T): "matrix-userplane",
+    ("p_user_plane", "onboarding_sessions", "ALL", T): "matrix-userplane",
+    (
+        "p_maint_onboard",
+        "onboarding_sessions",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_reaper_sweep",
+    ("p_tenant", "channel_bindings", "ALL", T): "matrix",
+    (
+        "p_member_binds",
+        "channel_bindings",
+        "SELECT",
+        ("svc_membership",),
+    ): "door:fn_invitation_accept",
+    ("p_tenant", "ig_accounts", "ALL", T): "matrix",
+    ("p_clock_acct_s", "ig_accounts", "SELECT", ("svc_clock",)): "door:fn_clock_tick",
+    ("p_clock_acct_u", "ig_accounts", "UPDATE", ("svc_clock",)): "door:fn_clock_tick",
+    # 081: the one table svc_maintenance lacked for the estate-health doors
+    # (fn_health_destinations and fn_health_scheduling_lag read it).
+    (
+        "p_maint_accts",
+        "ig_accounts",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_health_destinations",
+    # 082: the three tables svc_maintenance lacked for the worker's doors.
+    (
+        "p_maint_bindings",
+        "channel_bindings",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_sender_sweep",
+    (
+        "p_maint_media",
+        "media_items",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_prompts_due",
+    (
+        "p_maint_sources",
+        "media_sources",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_stranded_sources",
+    # 086: the reaper re-arms the source of a sync it ends past its deadline.
+    (
+        "p_maint_sources_rearm",
+        "media_sources",
+        "UPDATE",
+        ("svc_maintenance",),
+    ): "door:fn_reaper_sweep",
+    # 104: the two tables svc_maintenance lacked for the activation funnel.
+    (
+        "p_maint_users",
+        "users",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_activation_funnel",
+    (
+        "p_maint_members",
+        "workspace_members",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_activation_funnel",
+    ("p_tenant", "provider_quarantine", "ALL", T): "matrix",
+    (
+        "p_claim_quar",
+        "provider_quarantine",
+        "SELECT",
+        ("svc_claim",),
+    ): "door:fn_claim_job",
+    ("p_tenant", "media_sources", "ALL", T): "matrix",
+    ("p_clock_src_s", "media_sources", "SELECT", ("svc_clock",)): "door:fn_clock_tick",
+    ("p_clock_src_u", "media_sources", "UPDATE", ("svc_clock",)): "door:fn_clock_tick",
+    ("p_tenant", "oauth_credentials", "ALL", T): "matrix",
+    (
+        "p_clock_cred_s",
+        "oauth_credentials",
+        "SELECT",
+        ("svc_clock",),
+    ): "door:fn_clock_tick",
+    (
+        "p_clock_cred_u",
+        "oauth_credentials",
+        "UPDATE",
+        ("svc_clock",),
+    ): "door:fn_clock_tick",
+    ("p_tenant", "media_items", "ALL", T): "matrix",
+    ("p_tenant", "media_source_destinations", "ALL", T): "matrix",
+    ("p_tenant", "instagram_archive_generations", "ALL", T): "matrix",
+    ("p_tenant", "instagram_source_policies", "ALL", T): "matrix",
+    ("p_tenant", "instagram_media_index", "ALL", T): "matrix",
+    ("p_tenant", "instagram_media_assets", "ALL", T): "matrix",
+    ("p_tenant", "instagram_item_tombstones", "ALL", T): "matrix",
+    ("p_tenant", "instagram_artifacts", "ALL", T): "matrix",
+    ("p_tenant", "instagram_intent_provenance", "ALL", T): "matrix",
+    ("p_tenant", "instagram_operation_provenance", "ALL", T): "matrix",
+    # 138: the selected-preparation discovery door reads current bound proof.
+    (
+        "p_selected_preparation_read",
+        "instagram_intent_provenance",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_selected_preparation_due",
+    (
+        "p_selected_preparation_read",
+        "instagram_media_index",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_selected_preparation_due",
+    (
+        "p_selected_preparation_read",
+        "instagram_media_assets",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_selected_preparation_due",
+    # 142: verified Meta identity mappings — the logins' own tenant rows (the
+    # write half is the current flag alone, `SELF_ASSIGN`), the deauthorize
+    # door's read and the reconciliation discovery's read.
+    ("p_tenant", "meta_identity_mappings", "ALL", T): "matrix",
+    (
+        "p_maint_meta_mappings",
+        "meta_identity_mappings",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_meta_subject_mappings",
+    (
+        "p_clock_meta_mappings",
+        "meta_identity_mappings",
+        "SELECT",
+        ("svc_clock",),
+    ): "door:fn_archive_reconcile_jobs",
+    # 144: the redaction door reads and deletes immutable captures of fenced
+    # generations (the intent provenance read is 138's policy).
+    (
+        "p_maint_redact_read",
+        "instagram_operation_provenance",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_archive_redact_generation_records",
+    (
+        "p_maint_redact_delete",
+        "instagram_operation_provenance",
+        "DELETE",
+        ("svc_maintenance",),
+    ): "door:fn_archive_redact_generation_records",
+    (
+        "p_maint_redact_delete",
+        "instagram_intent_provenance",
+        "DELETE",
+        ("svc_maintenance",),
+    ): "door:fn_archive_redact_generation_records",
+    (
+        "p_maint_redact_read",
+        "instagram_artifacts",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_archive_redact_generation_records",
+    (
+        "p_maint_redact_delete",
+        "instagram_artifacts",
+        "DELETE",
+        ("svc_maintenance",),
+    ): "door:fn_archive_redact_generation_records",
+    ("p_tenant", "post_locks", "ALL", T): "matrix",
+    (
+        "p_maint_locks",
+        "post_locks",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_reaper_sweep",
+    ("p_tenant", "category_post_case_mix", "ALL", T): "matrix",
+    ("p_tenant", "post_intents", "ALL", T): "matrix",
+    (
+        "p_maint_intents",
+        "post_intents",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_reconciler_sweep",
+    (
+        "p_transitions_read",
+        "post_intent_transitions",
+        "SELECT",
+        (
+            "svc_claim",
+            "svc_clock",
+            "svc_ingress",
+            "svc_maintenance",
+            "svc_membership",
+            "svc_worker",
+        ),
+    ): "matrix-read",
+    ("p_audit_ins", "audit_events", "INSERT", T): "insert-pair",
+    ("p_audit_sel", "audit_events", "SELECT", T): "matrix-read",
+    (
+        "p_audit_sys",
+        "audit_events",
+        "INSERT",
+        ("svc_claim", "svc_clock", "svc_maintenance", "svc_membership"),
+    ): "door:fn_invitation_accept",
+    (
+        "p_audit_retention_sel",
+        "audit_events",
+        "SELECT",
+        ("svc_maintenance",),
+    ): "door:fn_retention_batch",
+    (
+        "p_audit_retention_del",
+        "audit_events",
+        "DELETE",
+        ("svc_maintenance",),
+    ): "door:fn_retention_batch",
+    ("p_tenant", "daily_post_counts", "ALL", T): "matrix",
+    (
+        "p_maint_dpc",
+        "daily_post_counts",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_retention_batch",
+    ("p_jobs", "jobs", "ALL", T): "matrix",
+    ("p_claim_jobs", "jobs", "ALL", ("svc_claim",)): "door:fn_claim_job",
+    ("p_clock_jobs", "jobs", "ALL", ("svc_clock",)): "door:fn_clock_tick",
+    ("p_maint_jobs", "jobs", "ALL", ("svc_maintenance",)): "door:fn_retention_batch",
+    ("p_tenant", "channel_outbox", "ALL", T): "matrix",
+    (
+        "p_maint_outbox",
+        "channel_outbox",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_retention_batch",
+    (
+        "p_member_outbox",
+        "channel_outbox",
+        "INSERT",
+        ("svc_membership",),
+    ): "door:fn_invitation_accept",
+    ("p_tenant", "provider_operations", "ALL", T): "matrix",
+    (
+        "p_maint_ops",
+        "provider_operations",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_retention_batch",
+    ("p_dedup", "command_dedup", "ALL", ("svc_ingress",)): "machinery",
+    (
+        "p_maint_dedup",
+        "command_dedup",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_auth_plane_sweep",
+    ("p_rate", "rate_counters", "ALL", T): "machinery",
+    (
+        "p_maint_rate",
+        "rate_counters",
+        "ALL",
+        ("svc_maintenance",),
+    ): "door:fn_retention_batch",
+    ("p_auth_ingress_sessions", "session_tokens", "ALL", ("svc_ingress",)): "auth",
+    ("p_auth_sweep_sessions", "session_tokens", "ALL", ("svc_maintenance",)): "auth",
+    ("p_auth_ingress_states", "oauth_states", "ALL", ("svc_ingress",)): "auth",
+    ("p_auth_sweep_states", "oauth_states", "ALL", ("svc_maintenance",)): "auth",
+    ("p_auth_ingress_svctok", "service_tokens", "ALL", ("svc_ingress",)): "auth",
+    # 141: an Instagram connect's applied result, the API's alone — its
+    # callback inserts one and the initiating member session reads it.
+    (
+        "p_ingress_connection_results",
+        "oauth_connection_results",
+        "ALL",
+        ("svc_ingress",),
+    ): "insert-pair",
+    # 090: the removals record, the membership doors' alone (102 revoked the
+    # logins' read and dropped their policy).
+    (
+        "p_member_removals",
+        "workspace_member_removals",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_member_remove",
+    # 092: the owner's sign-up admissions — global, and read only by the door.
+    (
+        "p_member_admissions",
+        "signup_admissions",
+        "SELECT",
+        ("svc_membership",),
+    ): "door:fn_signup_admitted",
+    # 100: the marketing waitlist — the API may add an address, nothing else.
+    (
+        "p_ingress_waitlist",
+        "waitlist_entries",
+        "INSERT",
+        ("svc_ingress",),
+    ): "machinery",
+    # 099: a person's own Telegram unlink — the door's read and delete.
+    (
+        "p_member_identities",
+        "user_identities",
+        "ALL",
+        ("svc_membership",),
+    ): "door:fn_identity_unlink",
+    # 098: the doors read an inviter's account state — users' id and state
+    # only, by column grant.
+    (
+        "p_member_users",
+        "users",
+        "SELECT",
+        ("svc_membership",),
+    ): "door:fn_invitation_accept",
+    # 129: the admission doors write the admissions and read the waitlist —
+    # global tables the runtime logins still hold no grant on.
+    (
+        "p_member_admissions_ins",
+        "signup_admissions",
+        "INSERT",
+        ("svc_membership",),
+    ): "door:fn_signup_admit",
+    # 133's trigger-only definer (`TRIGGER_DEFINERS`) updates through it too,
+    # with no policy of its own.
+    (
+        "p_member_admissions_upd",
+        "signup_admissions",
+        "UPDATE",
+        ("svc_membership",),
+    ): "door:fn_signup_link",
+    (
+        "p_member_waitlist",
+        "waitlist_entries",
+        "SELECT",
+        ("svc_membership",),
+    ): "door:fn_waitlist",
+}
+
+# 143: the Meta deletion receipts are the doors' alone — svc_maintenance's
+# receive, status, scope and progress doors, and the clock's cleanup sweep.
+for _name, _table in (
+    ("p_maint_meta_receipts", "meta_deletion_receipts"),
+    ("p_maint_meta_scopes", "meta_deletion_receipt_scopes"),
+    ("p_maint_meta_generations", "meta_deletion_receipt_generations"),
+    ("p_maint_meta_capabilities", "meta_deletion_receipt_capabilities"),
+):
+    POLICY_CENSUS[(_name, _table, "ALL", ("svc_maintenance",))] = (
+        "door:fn_meta_deletion_receive"
+    )
+for _name, _table, _cmd in (
+    ("p_clock_meta_receipts_s", "meta_deletion_receipts", "SELECT"),
+    ("p_clock_meta_receipts_u", "meta_deletion_receipts", "UPDATE"),
+    ("p_clock_meta_scopes_s", "meta_deletion_receipt_scopes", "SELECT"),
+    ("p_clock_meta_scopes_u", "meta_deletion_receipt_scopes", "UPDATE"),
+    ("p_clock_meta_generations", "meta_deletion_receipt_generations", "SELECT"),
+):
+    POLICY_CENSUS[(_name, _table, _cmd, ("svc_clock",))] = (
+        "door:fn_meta_receipt_cleanup_jobs"
+    )
+
+# 110: metadata and row-lock predicates evaluated by the canonical job doors.
+_SOURCE_READ_ROLES = ("svc_claim", "svc_clock", "svc_maintenance")
+for _table in (
+    "workspaces",
+    "ig_accounts",
+    "media_sources",
+    "oauth_credentials",
+    "instagram_archive_generations",
+    "category_post_case_mix",
+    "media_source_destinations",
+):
+    POLICY_CENSUS[("p_source_read", _table, "SELECT", _SOURCE_READ_ROLES)] = (
+        "door:fn_claim_job"
+    )
+for _table in (
+    "workspaces",
+    "ig_accounts",
+    "media_sources",
+    "oauth_credentials",
+    "instagram_archive_generations",
+):
+    POLICY_CENSUS[("p_source_read_lock", _table, "UPDATE", _SOURCE_READ_ROLES)] = (
+        "door:fn_claim_job"
+    )
+
+#: The tenant-GUC tables (policies whose predicate reads app.tenant_id),
+#: derived from the census so there is one oracle, not two.
+GUC_TABLES = sorted(
+    {
+        table
+        for (_, table, _, roles), _d in POLICY_CENSUS.items()
+        if roles == T
+        and table
+        not in ("users", "user_identities", "onboarding_sessions", "rate_counters")
+    }
+    | {"audit_events"}
+)
+
+#: Tables whose ALL-policy rows the matrix WRITE leg drives (self-assign
+#: UPDATE). audit_events is INSERT/SELECT-only for the logins by grant.
+MATRIX_WRITE_TABLES = sorted(set(GUC_TABLES) - {"audit_events"})
+
+#: The column the write leg self-assigns where the logins' UPDATE grant is a
+#: column grant: a mapping's current flag is the only column they may write
+#: (142). Every other table self-assigns its tenant key.
+SELF_ASSIGN = {"meta_identity_mappings": "is_current"}
+
+#: Governance tables (055's tg_audit_* attach list): mutations need actors.
+GOVERNANCE = {
+    "workspaces",
+    "workspace_members",
+    "channel_bindings",
+    "ig_accounts",
+    "oauth_credentials",
+}
+
+#: Doors: name -> (permitted login, exercising call). One registry, so the
+#: pairing cannot drift; the catalog census asserts the keyset and grants.
+DOORS = {
+    "fn_selected_preparation_due": (
+        "svc_worker",
+        "SELECT * FROM fn_selected_preparation_due(0)",
+    ),
+    "fn_mix_conversion_jobs": (
+        "svc_worker",
+        "SELECT fn_mix_conversion_jobs(0, 'synthetic-run', repeat('a',64))",
+    ),
+    "fn_claim_job": (
+        "svc_worker",
+        "SELECT * FROM fn_claim_job('interactive', 'f4-runner', interval '2 minutes', 4)",
+    ),
+    "fn_extend_leases": (
+        "svc_worker",
+        "SELECT fn_extend_leases(ARRAY[]::uuid[], interval '2 minutes')",
+    ),
+    "fn_clock_tick": (
+        "svc_worker",
+        "SELECT * FROM fn_clock_tick(5, interval '5 minutes',"
+        " '{\"reap_expired\": 1}'::jsonb)",
+    ),
+    "fn_reconciler_sweep": (
+        "svc_worker",
+        "SELECT * FROM fn_reconciler_sweep(5, ARRAY[interval '1 minute'], interval '1 day')",
+    ),
+    "fn_reaper_sweep": (
+        "svc_worker",
+        "SELECT * FROM fn_reaper_sweep(5, interval '1 day', interval '1 day')",
+    ),
+    # The fourteenth door (076): the
+    # reaper's listing of stale approved stories, read across tenants for the
+    # reap executor's per-row park.
+    "fn_reaper_stale_approved": (
+        "svc_worker",
+        "SELECT * FROM fn_reaper_stale_approved(interval '3 days', 5)",
+    ),
+    "fn_retention_batch": (
+        "svc_worker",
+        "SELECT * FROM fn_retention_batch('jobs_ok', interval '90 days', 5)",
+    ),
+    "fn_offboard_finalize": (
+        "svc_worker",
+        "SELECT fn_offboard_finalize('00000000-0000-0000-0000-000000000000'::uuid, interval '1 day')",
+    ),
+    "fn_auth_plane_sweep": (
+        "svc_worker",
+        "SELECT fn_auth_plane_sweep(interval '1 day', interval '1 day', interval '1 day', 100)",
+    ),
+    "fn_resolve_binding": (
+        "svc_ingress",
+        "SELECT * FROM fn_resolve_binding('telegram_group', '-1000')",
+    ),
+    "fn_group_member_seen": (
+        "svc_ingress",
+        "SELECT * FROM fn_group_member_seen('telegram_group', '-1000',"
+        " '00000000-0000-0000-0000-000000000000'::uuid)",
+    ),
+    "fn_invitation_accept": (
+        "svc_ingress",
+        "SELECT * FROM fn_invitation_accept('nope',"
+        " '00000000-0000-0000-0000-000000000000'::uuid, 'telegram', NULL, 1, 'web')",
+    ),
+    # The tenth door (064, #1037): a user-plane READ, so its exercising call
+    # carries no arguments — the caller is app.actor_user_id, read inside the
+    # body, and an unclaimed session reads zero rows rather than anyone's.
+    # The thirteenth door (068, #1242): the revoke for every join edge. Three
+    # uuids that name nobody. The door checks its caller first (102), so
+    # in an unclaimed session the body raises (by message); the call only runs
+    # as the denied login, whose missing EXECUTE refuses it before the body.
+    "fn_member_remove": (
+        "svc_ingress",
+        "SELECT * FROM fn_member_remove('00000000-0000-4000-8000-000000000001'::uuid,"
+        " '00000000-0000-4000-8000-000000000002'::uuid,"
+        " '00000000-0000-4000-8000-000000000003'::uuid)",
+    ),
+    "fn_memberships_for_caller": (
+        "svc_ingress",
+        "SELECT * FROM fn_memberships_for_caller()",
+    ),
+    # 092: may a new Google account create its user? One boolean
+    # for one address — an address nobody admitted or invited answers false.
+    "fn_signup_admitted": (
+        "svc_ingress",
+        "SELECT fn_signup_admitted('nobody@example.com')",
+    ),
+    # 099: a person unlinks their own Telegram identity. A uuid
+    # that names nobody answers not_linked, never a raise.
+    "fn_identity_unlink": (
+        "svc_ingress",
+        "SELECT fn_identity_unlink('00000000-4000-4000-8000-000000000099'::uuid,"
+        " 'telegram')",
+    ),
+    # 115: an invited person's own invitations, and a fresh link.
+    # An address nobody invited lists nothing and rotates nothing.
+    "fn_invitations_for": (
+        "svc_ingress",
+        "SELECT * FROM fn_invitations_for("
+        "'00000000-4000-4000-8000-000000000099'::uuid, 'nobody@example.com', 20)",
+    ),
+    "fn_invitation_reissue": (
+        "svc_ingress",
+        "SELECT * FROM fn_invitation_reissue("
+        "'00000000-4000-4000-8000-000000000099'::uuid, 'nobody@example.com', 'x')",
+    ),
+    # 129 (#1723): admitting from the waitlist. The list, the
+    # admission and the claim are the API's; storing the link the email
+    # carried is the worker's. Each call runs only as the login denied it, so
+    # nothing is ever admitted, stored or claimed here.
+    "fn_waitlist": (
+        "svc_ingress",
+        "SELECT * FROM fn_waitlist(20, NULL)",
+    ),
+    "fn_signup_admit": (
+        "svc_ingress",
+        "SELECT fn_signup_admit('nobody@example.com')",
+    ),
+    "fn_signup_link": (
+        "svc_worker",
+        "SELECT fn_signup_link('nobody@example.com', 'x')",
+    ),
+    "fn_signup_claim": (
+        "svc_ingress",
+        "SELECT fn_signup_claim('x')",
+    ),
+    # The estate-health doors (081, #751): the estate-wide reads behind
+    # /health/posting and /health/scheduling, each a health-module query.
+    # The four posting/lag reads are the API's alone; the three backpressure
+    # reads are shared with the worker, whose status line renders the same
+    # snapshot — the one place a door has TWO permitted logins; the read that
+    # NAMES the waiting tenant is the worker's alone; the Meta callback's
+    # account lookup (the third tenant-less read on the API) is the API's.
+    "fn_health_posting_freshness": (
+        "svc_ingress",
+        "SELECT * FROM fn_health_posting_freshness()",
+    ),
+    "fn_health_publish_attempts": (
+        "svc_ingress",
+        "SELECT * FROM fn_health_publish_attempts()",
+    ),
+    "fn_health_destinations": (
+        "svc_ingress",
+        "SELECT * FROM fn_health_destinations()",
+    ),
+    "fn_health_scheduling_lag": (
+        "svc_ingress",
+        "SELECT * FROM fn_health_scheduling_lag()",
+    ),
+    "fn_health_ready_lanes": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT * FROM fn_health_ready_lanes()",
+    ),
+    "fn_health_outbox_pending": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT fn_health_outbox_pending()",
+    ),
+    "fn_health_oldest_tenant_wait": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT * FROM fn_health_oldest_tenant_wait()",
+    ),
+    "fn_health_oldest_tenant_wait_named": (
+        "svc_worker",
+        "SELECT * FROM fn_health_oldest_tenant_wait_named()",
+    ),
+    "fn_meta_accounts_for_ref": (
+        "svc_ingress",
+        "SELECT * FROM fn_meta_accounts_for_ref('no-such-ref')",
+    ),
+    # The worker's doors (082, #751): the tenant-less
+    # sweeps' reads. The sender sweep is one door (its INSERT … SELECT is one
+    # statement); the other four return rows with their workspace ids and the
+    # worker writes per workspace under that tenant.
+    "fn_sender_sweep": (
+        "svc_worker",
+        # a bound of 0: the probe proves EXECUTE, it must not mint a job
+        "SELECT fn_sender_sweep('tg:', 3, 600, 30, 0)",
+    ),
+    "fn_prompts_due": (
+        "svc_worker",
+        "SELECT * FROM fn_prompts_due(50)",
+    ),
+    "fn_prompts_pending": (
+        "svc_worker",
+        "SELECT * FROM fn_prompts_pending(50)",
+    ),
+    "fn_settled_cards": (
+        "svc_worker",
+        "SELECT * FROM fn_settled_cards(ARRAY['posted'], 50)",
+    ),
+    "fn_stranded_sources": (
+        "svc_worker",
+        "SELECT * FROM fn_stranded_sources(0, 10)",
+    ),
+    # 089 (#1413): the planned stories that will not be served —
+    # the prompt sweeper's miss leg reads them and ends each under its tenant.
+    "fn_planned_misses": (
+        "svc_worker",
+        "SELECT * FROM fn_planned_misses(50, interval '1 hour')",
+    ),
+    # 101 (#1482): the outbox's delivery failures and deliveries in
+    # a window, estate-wide, behind /health/delivery. Counts only, shared with
+    # the worker like the backpressure reads.
+    "fn_health_outbox_failures": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT * FROM fn_health_outbox_failures(3600)",
+    ),
+    "fn_health_outbox_sent": (
+        ("svc_ingress", "svc_worker"),
+        "SELECT fn_health_outbox_sent(3600)",
+    ),
+    # 104 (#1481): the activation funnel, counts only across every
+    # workspace. The worker's login alone, the one the psql escape hatch
+    # connects as; no API principal until an operator principal exists (#1124).
+    "fn_activation_funnel": (
+        "svc_worker",
+        "SELECT * FROM fn_activation_funnel(now() - interval '30 days')",
+    ),
+    # 106 (#1481): who is owed the activation nudge, user ids and a
+    # stage. The worker's login alone, which runs the sweep; never the API's.
+    "fn_activation_stalled": (
+        "svc_worker",
+        "SELECT * FROM fn_activation_stalled("
+        "now() - interval '30 days', interval '72 hours', 20)",
+    ),
+    # 142-145 (#1644): the Meta callbacks' tenant-free doors are
+    # the API's; the receipt scope reads, progress, redaction and the two
+    # job-minting doors are the worker's. No call writes: the reads name
+    # nobody, and the writers get an invalid input, an empty scope or a bound
+    # of 0.
+    "fn_meta_subject_mappings": (
+        "svc_ingress",
+        "SELECT * FROM fn_meta_subject_mappings('instagram:1', '1')",
+    ),
+    "fn_meta_deletion_receive": (
+        "svc_ingress",
+        "SELECT * FROM fn_meta_deletion_receive('nope', ARRAY[]::text[], 1, '1',"
+        " NULL, 'x', 300)",
+    ),
+    "fn_meta_deletion_status": (
+        "svc_ingress",
+        "SELECT * FROM fn_meta_deletion_status(repeat('0', 64))",
+    ),
+    "fn_meta_receipt_scope": (
+        "svc_worker",
+        "SELECT * FROM fn_meta_receipt_scope("
+        "'00000000-0000-0000-0000-000000000000'::uuid)",
+    ),
+    "fn_meta_receipt_progress": (
+        "svc_worker",
+        "SELECT fn_meta_receipt_progress("
+        "'00000000-0000-0000-0000-000000000000'::uuid,"
+        " '00000000-0000-0000-0000-000000000000'::uuid,"
+        " '00000000-0000-0000-0000-000000000000'::uuid, 'nope', '{}'::jsonb, NULL, 60)",
+    ),
+    "fn_archive_redact_generation_records": (
+        "svc_worker",
+        "SELECT * FROM fn_archive_redact_generation_records("
+        "'00000000-0000-0000-0000-000000000000'::uuid, ARRAY[]::uuid[])",
+    ),
+    "fn_meta_receipt_cleanup_jobs": (
+        "svc_worker",
+        "SELECT fn_meta_receipt_cleanup_jobs(0)",
+    ),
+    "fn_archive_reconcile_jobs": (
+        "svc_worker",
+        "SELECT fn_archive_reconcile_jobs(0, 'synthetic-run', repeat('a', 64))",
+    ),
+}
+
+#: SECURITY DEFINER functions that are no door: a trigger runs them, and
+#: EXECUTE on them is granted to no role. name -> (owner, the table whose
+#: trigger runs it). Kept apart from `DOORS` rather than added to it, because
+#: every check made of a door assumes a login that holds EXECUTE: PostgreSQL
+#: asks for EXECUTE on a trigger's function when the trigger is created, never
+#: when a write fires it.
+TRIGGER_DEFINERS = {
+    # 133 (#1740): an account created at an admitted address uses
+    # the admission up, whichever login inserts the user.
+    "trg_users_consume_admission": ("svc_membership", "users"),
+}
+
+
+def _exec(dsn, sql, params=None, tenant=None, actor=False, fetch=False):
+    """One statement on a fresh connection. ``tenant`` sets the tenant GUC;
+    ``actor`` additionally sets the actor GUCs the way every runtime unit of
+    work does (governance triggers refuse anonymous mutations)."""
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            if tenant is not None:
+                cur.execute("SET app.tenant_id = %s", (str(tenant),))
+            if actor:
+                cur.execute("SET app.actor_kind = 'user'")
+                cur.execute("SET app.actor_user_id = %s", (str(uuid.uuid4()),))
+            cur.execute(sql, params)
+            if fetch:
+                return cur.fetchall()
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def _scalar(dsn, sql, params=None, tenant=None):
+    return _exec(dsn, sql, params=params, tenant=tenant, fetch=True)[0][0]
+
+
+def _external_ref(name: str) -> str:
+    return "-100" + str(int(hashlib.sha256(name.encode()).hexdigest()[:8], 16))
+
+
+def _seed_tenant(conn, name: str) -> dict:
+    """One tenant's satellite set over the shared parent chain — every
+    GUC-reading table populated. Seeded as the window actor (the table
+    owner); owner bypass is the sanctioned seeding path the probe harness
+    proved, and the SUBJECT here is the logins."""
+    ids = seed_workspace_chain(conn, name)
+    ws, iga, mi = ids["ws"], ids["iga"], ids["media"]
+    from tests.scripts.test_instagram_catalog_gate import (
+        insert_asset,
+        seed_archive_evidence,
+    )
+
+    with conn.cursor() as cur:
+        archive = seed_archive_evidence(cur, ids)
+        insert_asset(cur, archive, item=archive["item"])
+        # 142: one verified mapping on the archive's credential, so the
+        # mappings' matrix positives read a row of the tenant's own.
+        cur.execute(
+            "INSERT INTO meta_identity_mappings (workspace_id, ig_account_id,"
+            " credential_id, authorization_id, app_identity, subject_ref,"
+            " account_ref, method, authorized_at, verified_at)"
+            " VALUES (%s, %s, %s, %s, 'instagram:1', %s, %s, 'oauth_exchange',"
+            " now(), now())",
+            (
+                ws,
+                iga,
+                archive["credential"],
+                str(uuid.uuid4()),
+                str(int(hashlib.sha256(name.encode()).hexdigest()[:12], 16)),
+                str(int(hashlib.sha256(name.encode()).hexdigest()[12:24], 16)),
+            ),
+        )
+    conn.commit()
+    ids["invite_hash"] = hashlib.sha256(f"invite-{name}".encode()).hexdigest()
+    with conn.cursor() as cur:
+        cur.execute(
+            # 098: an invitation admits only while its inviter is still an
+            # owner or admin there, so the seeded one is the owner's.
+            "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+            " delivery_channel, expires_at, role, invited_by_user_id)"
+            " VALUES (%s, %s, 'telegram', now() + interval '7 days', 'member', %s)",
+            (ws, ids["invite_hash"], ids["user"]),
+        )
+        cur.execute(
+            "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+            " VALUES (%s, 'telegram_group', %s)",
+            (ws, _external_ref(name)),
+        )
+        cur.execute(
+            "INSERT INTO provider_quarantine"
+            " (workspace_id, provider, scope_ref, quarantined_until)"
+            " VALUES (%s, 'ig', %s, now() + interval '1 hour')",
+            (ws, f"ig:quarantined-{name}"),
+        )
+        cur.execute(
+            # 069: a gdrive credential is the WORKSPACE's — no owner column.
+            "INSERT INTO oauth_credentials"
+            " (workspace_id, provider, encrypted_payload)"
+            " VALUES (%s, 'gdrive', 'ct')",
+            (ws,),
+        )
+        cur.execute(
+            "INSERT INTO post_locks (workspace_id, media_item_id, kind)"
+            " VALUES (%s, %s, 'hold')",
+            (ws, mi),
+        )
+        cur.execute(
+            # 090: a removed person per tenant — the rows the logins are
+            # denied (102), so that denial is not an empty table read.
+            "INSERT INTO workspace_member_removals (workspace_id, user_id)"
+            " VALUES (%s, %s)",
+            (ws, ids["user"]),
+        )
+        cur.execute(
+            "INSERT INTO category_post_case_mix (workspace_id, category, ratio)"
+            " VALUES (%s, 'cat', 0.5)",
+            (ws,),
+        )
+        cur.execute(
+            "INSERT INTO audit_events"
+            " (workspace_id, entity_kind, entity_id, to_state, actor_kind)"
+            " VALUES (%s, 'workspace', %s, 'seeded', 'system')",
+            (ws, ws),
+        )
+        cur.execute(
+            "INSERT INTO daily_post_counts"
+            " (workspace_id, ig_account_id, local_date, count, cap_at_write)"
+            " VALUES (%s, %s, current_date, 1, 25)",
+            (ws, iga),
+        )
+        cur.execute(
+            "INSERT INTO jobs (workspace_id, kind, lane, serialization_key,"
+            " payload, max_attempts) VALUES (%s, 'publish_pipeline',"
+            " 'interactive', %s, '{\"v\": 1}', 3)",
+            (ws, f"ig:{iga}"),
+        )
+        cur.execute("SELECT id FROM channel_bindings WHERE workspace_id = %s", (ws,))
+        binding = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, payload)"
+            " VALUES (%s, %s, 'notification', '{\"v\": 1}')",
+            (ws, binding),
+        )
+        cur.execute(
+            "INSERT INTO provider_operations"
+            " (workspace_id, intent_id, provider, op_kind, business_key, lease_token)"
+            " VALUES (%s, %s, 'ig', 'publish', %s, %s)",
+            (ws, ids["intent"], f"bk-{name}", str(uuid.uuid4())),
+        )
+    conn.commit()
+    return ids
+
+
+def _arm_world(conn, a: dict) -> None:
+    """Rows that make the armed doors do observable work: a system job (also
+    the p_jobs OR-IS-NULL pin), a slot-due ig_account for the clock, and a
+    retention-eligible succeeded job (updated_at is writable at INSERT — the
+    touch trigger is BEFORE UPDATE only)."""
+    with conn.cursor() as cur:
+        cur.execute("SET app.actor_kind = 'migration'")
+        cur.execute(
+            "INSERT INTO jobs (workspace_id, kind, lane, serialization_key,"
+            " payload, max_attempts) VALUES (NULL, 'reap_expired', 'bulk',"
+            " 'system:reap', '{\"v\": 1}', 3)"
+        )
+        cur.execute(
+            "UPDATE ig_accounts SET next_slot_at = now() - interval '1 minute'"
+            " WHERE id = %s",
+            (a["iga"],),
+        )
+        # System row (NULL workspace) ON PURPOSE: the matrix write leg
+        # self-assigns every tenant row, and the touch trigger would reset
+        # this row's age — order-dependence measured, not theorized.
+        cur.execute(
+            "INSERT INTO jobs (workspace_id, kind, lane, serialization_key,"
+            " payload, max_attempts, state, updated_at)"
+            " VALUES (NULL, 'retention_sweep', 'bulk', %s, '{\"v\": 1}', 3,"
+            " 'succeeded', now() - interval '365 days')",
+            (f"old:{uuid.uuid4()}",),
+        )
+    conn.commit()
+
+
+@pytest.fixture(scope="module")
+def target(admin_conn, owner_actor):
+    """The replayed full schema + passwords + two seeded tenants, once.
+
+    Module-scoped (the per-test template idiom cannot hold a role-carrying
+    template: grants to cluster roles make drop_service_roles destroy it —
+    see conftest's hardened-drop notes). ``_scratch`` is driven directly the
+    way ``roleless_db`` does; everything after the first ``next`` sits inside
+    the try so a failed replay or seed cannot leak the scratch DB and roles
+    into the session (the documented cascade class)."""
+    gen = _scratch(admin_conn, owner=owner_actor, roles=[])
+    owner_window_db = next(gen)
+    try:
+        dsn = replay_advertised_stream(owner_window_db, owner_actor, admin_conn)
+        conn = psycopg2.connect(dsn)
+        try:
+            a = _seed_tenant(conn, WS_A_NAME)
+            b = _seed_tenant(conn, WS_B_NAME)
+            _arm_world(conn, a)
+        finally:
+            conn.close()
+        yield {
+            "worker": as_user(owner_window_db, "svc_worker"),
+            "ingress": as_user(owner_window_db, "svc_ingress"),
+            "owner_stream": dsn,
+            "a": a,
+            "b": b,
+        }
+    finally:
+        gen.close()
+
+
+def _login_dsn(target, login):
+    return target["worker"] if login == "svc_worker" else target["ingress"]
+
+
+class TestRuntimeTenantIsolationMatrix:
+    """Absent/wrong ``app.tenant_id`` cannot read or mutate as the
+    exact runtime logins — driven per GUC-reading table, per login, read AND
+    write, each zero paired with a positive on the same axis."""
+
+    @pytest.mark.parametrize("login", LOGINS)
+    @pytest.mark.parametrize("table", GUC_TABLES)
+    def test_select_matrix(self, target, table, login):
+        dsn = _login_dsn(target, login)
+        key = "id" if table == "workspaces" else "workspace_id"
+        own = _scalar(dsn, f"SELECT count(*) FROM {table}", tenant=target["a"]["ws"])
+        assert own >= 1, (
+            f"{table}/{login}: positive control found no rows under the OWN"
+            f" tenant — the zero assertions would be vacuous"
+        )
+        foreign = _scalar(
+            dsn,
+            f"SELECT count(*) FROM {table} WHERE {key} = %s",
+            params=(str(target["b"]["ws"]),),
+            tenant=target["a"]["ws"],
+        )
+        assert foreign == 0, f"{table}/{login}: tenant A can see tenant B's rows"
+        absent = _scalar(dsn, f"SELECT count(*) FROM {table}")
+        if table == "jobs":
+            # p_jobs is `workspace_id = T OR workspace_id IS NULL` BY DESIGN:
+            # absent context sees exactly the system rows — pinned, not
+            # accidentally satisfied by a world with no system jobs.
+            system = _scalar(
+                target["owner_stream"],
+                "SELECT count(*) FROM jobs WHERE workspace_id IS NULL",
+            )
+            assert system >= 1, "the armed world must carry a system job"
+            assert absent == system, (
+                "jobs under absent context must see exactly the system rows"
+            )
+            assert own > system, "own context must add tenant rows on top"
+        else:
+            assert absent == 0, (
+                f"{table}/{login}: absent tenant context returned rows —"
+                f" NULLIF-wrapped GUC must match nothing"
+            )
+
+    @pytest.mark.parametrize("login", LOGINS)
+    @pytest.mark.parametrize("table", MATRIX_WRITE_TABLES)
+    def test_update_matrix(self, target, table, login):
+        """The write half, generically: a self-assign UPDATE exercises USING
+        and WITH CHECK on every ALL-policy without table-specific payloads.
+        Governance tables get the actor GUCs, as every runtime write does."""
+        dsn = _login_dsn(target, login)
+        key = "id" if table == "workspaces" else "workspace_id"
+        column = SELF_ASSIGN.get(table, key)
+        actor = table in GOVERNANCE
+        own = _exec(
+            dsn,
+            f"UPDATE {table} SET {column} = {column} WHERE {key} = %s",
+            params=(str(target["a"]["ws"]),),
+            tenant=target["a"]["ws"],
+            actor=actor,
+        )
+        assert own >= 1, (
+            f"{table}/{login}: the write positive touched no rows —"
+            f" the foreign zero below would be vacuous"
+        )
+        foreign = _exec(
+            dsn,
+            f"UPDATE {table} SET {column} = {column} WHERE {key} = %s",
+            params=(str(target["b"]["ws"]),),
+            tenant=target["a"]["ws"],
+            actor=actor,
+        )
+        assert foreign == 0, f"{table}/{login}: cross-tenant UPDATE moved rows"
+
+    def test_cross_tenant_insert_is_refused_by_the_policy_not_a_missing_grant(
+        self, target
+    ):
+        """The refusal must be RLS's (WITH CHECK), not a grant accident — the
+        message is matched, and the same-verb positive proves the grant."""
+        ok = _exec(
+            target["worker"],
+            "INSERT INTO category_post_case_mix (workspace_id, category, ratio)"
+            " VALUES (%s, 'ins-own', 0.1)",
+            params=(str(target["a"]["ws"]),),
+            tenant=target["a"]["ws"],
+        )
+        assert ok == 1
+        with pytest.raises(
+            psycopg2.errors.InsufficientPrivilege,
+            match="row-level security policy",
+        ):
+            _exec(
+                target["worker"],
+                "INSERT INTO category_post_case_mix (workspace_id, category, ratio)"
+                " VALUES (%s, 'smuggled', 0.1)",
+                params=(str(target["b"]["ws"]),),
+                tenant=target["a"]["ws"],
+            )
+
+    def test_audit_insert_carries_the_tenant_or_is_refused(self, target):
+        ok = _exec(
+            target["worker"],
+            "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
+            " to_state, actor_kind) VALUES (%s, 'workspace', %s, 'f4', 'user')",
+            params=(str(target["a"]["ws"]), str(target["a"]["ws"])),
+            tenant=target["a"]["ws"],
+        )
+        assert ok == 1
+        with pytest.raises(
+            psycopg2.errors.InsufficientPrivilege,
+            match="row-level security policy",
+        ):
+            _exec(
+                target["worker"],
+                "INSERT INTO audit_events (workspace_id, entity_kind, entity_id,"
+                " to_state, actor_kind) VALUES (%s, 'workspace', %s, 'f4', 'user')",
+                params=(str(target["b"]["ws"]), str(target["b"]["ws"])),
+                tenant=target["a"]["ws"],
+            )
+
+    def test_connection_results_are_the_apis_own_tenant_rows(self, target):
+        """141: the API inserts a result into its own tenant only and reads
+        only that tenant's, never with no tenant set; a result is never
+        rewritten (no UPDATE grant), and the worker holds no grant at all.
+        Each refusal beside its positive on the same axis."""
+        owner = target["owner_stream"]
+
+        def seed(tenant):
+            session = _exec(
+                owner,
+                "INSERT INTO session_tokens (user_id, token_hash, expires_at)"
+                " VALUES (%s, %s, now() + interval '1 day') RETURNING id",
+                params=(str(tenant["user"]), uuid.uuid4().hex),
+                fetch=True,
+            )[0][0]
+            return (str(tenant["ws"]), str(tenant["user"]), str(session))
+
+        insert = (
+            "INSERT INTO oauth_connection_results (workspace_id, user_id,"
+            " session_id, ig_account_id, outcome, history_enabled, mix_revision,"
+            " mix_reset_applied, expires_at) VALUES (%s, %s, %s, %s,"
+            " 'connected_history_off', false, 0, false, now() + interval '15 minutes')"
+        )
+        a = (*seed(target["a"]), str(target["a"]["iga"]))
+        b = (*seed(target["b"]), str(target["b"]["iga"]))
+        assert _exec(owner, insert, params=b) == 1
+        a_ws = target["a"]["ws"]
+
+        assert _exec(target["ingress"], insert, params=a, tenant=a_ws) == 1
+        with pytest.raises(
+            psycopg2.errors.InsufficientPrivilege, match="row-level security policy"
+        ):
+            _exec(target["ingress"], insert, params=b, tenant=a_ws)
+        own = "SELECT count(*) FROM oauth_connection_results"
+        assert _scalar(target["ingress"], own, tenant=a_ws) >= 1
+        assert (
+            _scalar(
+                target["ingress"],
+                own + " WHERE workspace_id = %s",
+                params=(b[0],),
+                tenant=a_ws,
+            )
+            == 0
+        )
+        assert _scalar(target["ingress"], own) == 0
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+            _exec(
+                target["ingress"],
+                "UPDATE oauth_connection_results SET history_enabled = true",
+                tenant=a_ws,
+            )
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+            _scalar(target["worker"], own, tenant=a_ws)
+
+    def test_userplane_and_machinery_probes(self, target):
+        """The `true`-predicate login policies, driven at their grants:
+        user-plane reads as both logins; rate_counters as both; command_dedup
+        as ingress only — svc_worker holds no grant there, which is asserted
+        as the denial it is. waitlist_entries (100) is ingress's to add to and
+        no one's to read: the INSERT lands and a read back is refused."""
+        for login in LOGINS:
+            dsn = _login_dsn(target, login)
+            assert _scalar(dsn, "SELECT count(*) FROM users") >= 2
+            assert (
+                _exec(
+                    dsn,
+                    "INSERT INTO rate_counters (scope, key, window_start, count)"
+                    " VALUES ('ws_admission', %s, date_trunc('hour', now()), 1)",
+                    params=(f"f4:{login}",),
+                )
+                == 1
+            )
+        assert (
+            _exec(
+                target["ingress"],
+                "INSERT INTO command_dedup"
+                " (channel, principal, external_ref, fingerprint)"
+                " VALUES ('web', 'f4-session', %s, 'fp')",
+                params=(str(uuid.uuid4()),),
+            )
+            == 1
+        )
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+            _exec(
+                target["worker"],
+                "INSERT INTO command_dedup"
+                " (channel, principal, external_ref, fingerprint)"
+                " VALUES ('web', 'f4-worker', 'x', 'fp')",
+            )
+        assert (
+            _exec(
+                target["ingress"],
+                "INSERT INTO waitlist_entries (email) VALUES (%s)",
+                params=(f"f4-{uuid.uuid4().hex[:8]}@example.com",),
+            )
+            == 1
+        )
+        for login in LOGINS:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _scalar(
+                    _login_dsn(target, login), "SELECT count(*) FROM waitlist_entries"
+                )
+
+    def test_the_census_matches_the_catalog_exactly(self, target):
+        """THE completeness gate, at (policy, table, cmd, roles) grain — a
+        smuggled permissive policy on an already-covered table is a census
+        diff, not a silent pass (the table-granular form could not see
+        that)."""
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT policyname, tablename, cmd, roles FROM pg_policies"
+            " WHERE schemaname = 'public'",
+            fetch=True,
+        )
+        catalog = {(r[0], r[1], r[2], tuple(sorted(r[3]))) for r in rows}
+        census = {(p, t, c, tuple(sorted(roles))) for (p, t, c, roles) in POLICY_CENSUS}
+        assert catalog == census, (
+            f"policy census drift: only-in-catalog={sorted(catalog - census)},"
+            f" only-in-census={sorted(census - catalog)}"
+        )
+        # 138 adds two selected-proof maintenance reads; 141 the API's
+        # connection results; 142 the mappings' three, 143 the receipts'
+        # nine, 144 the redaction door's five, and 146 the asset's two.
+        assert len(POLICY_CENSUS) == 115
+
+    def test_every_census_row_has_a_disposition_and_the_split_is_honest(self):
+        by_kind = {}
+        for row, disp in POLICY_CENSUS.items():
+            by_kind.setdefault(disp.split(":")[0], []).append(row)
+        assert set(by_kind) == {
+            "matrix",
+            "matrix-read",
+            "matrix-userplane",
+            "insert-pair",
+            "door",
+            "machinery",
+            "auth",
+        }
+        # Exact split, so a re-tagged disposition is a visible diff:
+        assert len(by_kind["matrix"]) == 26
+        # 081: p_maint_accts; 082: the three maintenance reads; 086: the
+        # reaper's source re-arm; 090: the removals record; 092: the sign-up
+        # admissions; 098: the inviter's account state; 099: the Telegram
+        # unlink; 104: the activation funnel's two reads; 129: the admission
+        # doors' two writes and their read of the waitlist; 142: the mappings'
+        # two reads; 143: the receipts' nine; 144: the redaction door's five.
+        assert len(by_kind["door"]) == 74
+        assert len(by_kind["auth"]) == 5
+        # every door named in a disposition exists in the DOORS registry
+        for row, disp in POLICY_CENSUS.items():
+            if disp.startswith("door:"):
+                assert disp.split(":", 1)[1] in DOORS, row
+
+
+class TestAbsentContextAndConnectionReuse:
+    """The real schema's absent-context shape is quiet (empty set) — asserted
+    with its paired positive — and therefore the session-`SET` reuse leak the
+    probe module proved reproduces here, on the production schema."""
+
+    def test_unset_guc_is_empty_not_error_with_paired_positive(self, target):
+        assert _scalar(target["worker"], "SELECT count(*) FROM media_items") == 0
+        assert (
+            _scalar(
+                target["worker"],
+                "SELECT count(*) FROM media_items",
+                tenant=target["a"]["ws"],
+            )
+            >= 1
+        )
+
+    def test_session_set_leaks_on_the_real_schema_too(self, target):
+        conn = psycopg2.connect(target["worker"])
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.tenant_id = %s", (str(target["a"]["ws"]),))
+                cur.execute("SELECT count(*) FROM media_items")
+                assert cur.fetchone()[0] >= 1
+            with conn.cursor() as cur:  # the next request; sets nothing
+                cur.execute("SELECT count(*) FROM media_items")
+                assert cur.fetchone()[0] >= 1, (
+                    "expected the session GUC to persist across requests on a"
+                    " reused connection — if empty, the GUC lifetime changed"
+                )
+        finally:
+            conn.close()
+
+
+class TestDoorsAreExercisedAndExclusive:
+    """system-role policies are exercised only through their doors. Armed
+    doors move rows and assert the counts; the zero-world sweeps assert their
+    exact empty shape (disclosed as evaluated-not-effect-driven)."""
+
+    def test_fn_claim_job_claims_and_fn_extend_leases_extends(self, target):
+        claimed = _exec(target["worker"], DOORS["fn_claim_job"][1], fetch=True)
+        assert claimed, "expected the seeded ready job to be claimable"
+        job_id = claimed[0][0]
+        lease_token = _scalar(
+            target["owner_stream"],
+            "SELECT lease_token FROM jobs WHERE id = %s",
+            params=(str(job_id),),
+        )
+        assert lease_token is not None, "a claimed job must carry its lease"
+        extended = _scalar(
+            target["worker"],
+            "SELECT fn_extend_leases(ARRAY[%s]::uuid[], interval '2 minutes')",
+            params=(str(lease_token),),
+        )
+        assert extended == 1
+
+    def test_fn_claim_job_skips_quarantined_serialization_keys(self, target):
+        """The quarantine exclusion, driven: a ready job whose key is
+        quarantined is not served."""
+        q_key = f"ig:quarantined-{WS_A_NAME}"
+        _exec(
+            target["owner_stream"],
+            "INSERT INTO jobs (workspace_id, kind, lane, serialization_key,"
+            " payload, max_attempts) VALUES (%s, 'publish_pipeline',"
+            " 'interactive', %s, '{\"v\": 1}', 3)",
+            params=(str(target["a"]["ws"]), q_key),
+        )
+        for _ in range(4):  # drain every claimable interactive job
+            if not _exec(target["worker"], DOORS["fn_claim_job"][1], fetch=True):
+                break
+        held = _scalar(
+            target["owner_stream"],
+            "SELECT count(*) FROM jobs WHERE serialization_key = %s"
+            " AND state = 'ready'",
+            params=(q_key,),
+        )
+        assert held == 1, "the quarantined-key job must never be claimed"
+
+    def test_fn_clock_tick_enqueues_for_the_armed_world(self, target):
+        row = _exec(target["worker"], DOORS["fn_clock_tick"][1], fetch=True)
+        assert len(row) == 1
+        assert sum(row[0]) >= 1, (
+            f"an armed world (due slot + recurring singleton) must make the"
+            f" tick do observable work; got {row[0]}"
+        )
+        plan_jobs = _scalar(
+            target["owner_stream"],
+            "SELECT count(*) FROM jobs WHERE kind IN ('plan_slot', 'reap_expired')",
+        )
+        assert plan_jobs >= 2, "the tick's enqueues must be visible in jobs"
+
+    def test_fn_retention_batch_reaps_the_aged_succeeded_job(self, target):
+        world = _exec(
+            target["owner_stream"],
+            "SELECT kind, lane, state, now() - updated_at > interval '90 days'"
+            " FROM jobs ORDER BY created_at",
+            fetch=True,
+        )
+        reaped = _exec(target["worker"], DOORS["fn_retention_batch"][1], fetch=True)
+        assert reaped == [(1,)], (
+            f"exactly the year-old succeeded job should age out, got {reaped};"
+            f" jobs world before sweep: {world}"
+        )
+
+    def test_fn_reconciler_sweep_finds_nothing_ambiguous_here(self, target):
+        """Nothing in this world is ambiguous, asserted as the EXACT empty
+        return (the door returns due rows; fetchall can never be None so
+        is-not-None would assert nothing). Its effect path belongs to the
+        intent-lifecycle world of `test_l3_permit_rail.py`."""
+        assert (
+            _exec(target["worker"], DOORS["fn_reconciler_sweep"][1], fetch=True) == []
+        )
+
+    def test_fn_reaper_sweep_expires_the_overdue_intents(self, target):
+        """The reaper IS armed by this world: both seeded intents sit at
+        their slot with no activity, so the expiry leg moves exactly those
+        two — asserted by count AND by the observable state change."""
+        reaped = _exec(target["worker"], DOORS["fn_reaper_sweep"][1], fetch=True)
+        assert reaped == [(2,)], f"expected the two overdue intents, got {reaped}"
+        expired = _scalar(
+            target["owner_stream"],
+            "SELECT count(*) FROM post_intents WHERE state = 'expired'",
+        )
+        assert expired == 2, "the reaper's count must be visible as intent state"
+
+    def test_fn_offboard_finalize_refuses_by_name(self, target):
+        """Message-match is deliberate here (the module otherwise asserts
+        SQLSTATEs): RaiseException alone cannot say WHICH guard fired, and
+        the guard's identity is the assertion."""
+        with pytest.raises(psycopg2.errors.RaiseException, match="not finalizable"):
+            _exec(
+                target["worker"],
+                "SELECT fn_offboard_finalize(%s, interval '0 days')",
+                params=(str(target["a"]["ws"]),),
+                fetch=True,
+            )
+
+    def test_fn_invitation_accept_admits_a_member_as_ingress(self, target):
+        new_user = _scalar(
+            target["owner_stream"], "INSERT INTO users DEFAULT VALUES RETURNING id"
+        )
+        row = _exec(
+            target["ingress"],
+            "SELECT * FROM fn_invitation_accept(%s, %s, 'telegram', %s, %s, 'web')",
+            params=(
+                target["b"]["invite_hash"],
+                str(new_user),
+                f"proof:{new_user}",
+                4242421,
+            ),
+            fetch=True,
+        )
+        assert len(row) == 1 and str(row[0][0]) == str(target["b"]["ws"])
+        member = _scalar(
+            target["owner_stream"],
+            "SELECT count(*) FROM workspace_members WHERE workspace_id = %s"
+            " AND user_id = %s",
+            params=(str(target["b"]["ws"]), str(new_user)),
+        )
+        assert member == 1, "the accepted invitation must have admitted the member"
+
+    def test_fn_memberships_for_caller_answers_for_the_claimed_caller_only(
+        self, target
+    ):
+        """The tenth door, driven as ingress: tenant A's seeded owner claims
+        itself and reads exactly A — B's membership is not in the answer —
+        and a session that claimed nothing reads nothing, the fail-closed
+        half the body's NULLIF on the unset GUC exists for."""
+        conn = psycopg2.connect(target["ingress"])
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET app.actor_user_id = %s", (str(target["a"]["user"]),))
+                cur.execute(DOORS["fn_memberships_for_caller"][1])
+                listed = [str(r[0]) for r in cur.fetchall()]
+        finally:
+            conn.close()
+        assert listed == [str(target["a"]["ws"])], listed
+        unclaimed = _exec(
+            target["ingress"], DOORS["fn_memberships_for_caller"][1], fetch=True
+        )
+        assert unclaimed == [], "an unclaimed session must read nothing"
+
+    def test_the_membership_doors_name_pg_temp_last_on_their_path(self, target):
+        """Both membership doors run under `search_path = pg_catalog,
+        public, pg_temp` — the join door by 102's ALTER, the remove door by the
+        SET clause its CREATE OR REPLACE restates (a replace without one would
+        clear it). Read off `proconfig`, the setting each door runs under."""
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT p.proname, p.proconfig FROM pg_proc p"
+            " JOIN pg_namespace n ON n.oid = p.pronamespace"
+            " WHERE n.nspname = 'public'"
+            " AND p.proname IN ('fn_group_member_seen', 'fn_member_remove')",
+            fetch=True,
+        )
+        pinned = ["search_path=pg_catalog, public, pg_temp"]
+        assert dict(rows) == {
+            "fn_group_member_seen": pinned,
+            "fn_member_remove": pinned,
+        }
+
+    @pytest.mark.parametrize("door", sorted(DOORS))
+    def test_each_door_is_denied_to_the_other_login(self, target, door):
+        """EXECUTE is per-signature, so the denial calls the real signature —
+        a bare door() would 42883 and prove nothing (and does, if mistyped:
+        UndefinedFunction is not InsufficientPrivilege)."""
+        permitted, call = DOORS[door]
+        allowed = {permitted} if isinstance(permitted, str) else set(permitted)
+        others = {"svc_ingress", "svc_worker"} - allowed
+        # 081's three backpressure doors are granted to BOTH logins — the one
+        # shape with no other login to deny; their denial to PUBLIC is the
+        # catalog test's (grantees == exactly the permitted set).
+        assert others or door.startswith("fn_health_"), door
+        for login in others:
+            other = target["ingress" if login == "svc_ingress" else "worker"]
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _exec(other, call)
+
+    def test_the_catalog_agrees_on_every_door_and_its_grants(self, target):
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT p.proname, r.rolname FROM pg_proc p"
+            " JOIN pg_namespace n ON n.oid = p.pronamespace"
+            " JOIN pg_roles r ON r.oid = p.proowner"
+            " WHERE n.nspname = 'public' AND p.prosecdef",
+            fetch=True,
+        )
+        catalog = {r[0] for r in rows}
+        owner_of = {r[0]: r[1] for r in rows}
+        # Every definer is a door or a trigger's, never both: the two censuses
+        # together are the catalog, exactly.
+        assert not set(DOORS) & set(TRIGGER_DEFINERS)
+        census = set(DOORS) | set(TRIGGER_DEFINERS)
+        assert catalog == census, (
+            f"SECURITY DEFINER census drift: only-in-catalog="
+            f"{sorted(catalog - census)},"
+            f" only-in-module={sorted(census - catalog)}"
+        )
+        for door, (permitted, _call) in DOORS.items():
+            grants = _exec(
+                target["owner_stream"],
+                "SELECT grantee FROM information_schema.routine_privileges"
+                " WHERE routine_schema = 'public' AND routine_name = %s"
+                " AND privilege_type = 'EXECUTE'",
+                params=(door,),
+                fetch=True,
+            )
+            # subtract only THIS door's owner (its implicit EXECUTE row) —
+            # a blanket four-role subtraction would hide a stray grant to a
+            # different door-owner role.
+            grantees = {g[0] for g in grants} - {owner_of[door]}
+            allowed = {permitted} if isinstance(permitted, str) else set(permitted)
+            assert grantees == allowed, (
+                f"{door}: EXECUTE grantees {sorted(grantees)},"
+                f" expected exactly {sorted(allowed)}"
+            )
+
+    @pytest.mark.parametrize("function", sorted(TRIGGER_DEFINERS))
+    def test_each_trigger_definer_is_bound_and_no_login_may_call_it(
+        self, target, function
+    ):
+        """A trigger's definer, held to its own terms rather than a door's: its
+        owner, `trigger` returned and no argument taken, VOLATILE (it writes),
+        the pinned path, an enabled trigger on its table that runs it, and
+        EXECUTE held by the owner alone. A NULL ACL would be PostgreSQL's
+        default, which lets PUBLIC execute; a grant to a login would make it a
+        door."""
+        owner, table = TRIGGER_DEFINERS[function]
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT r.rolname, format_type(p.prorettype, NULL), p.pronargs,"
+            "       p.provolatile, p.proconfig, p.proacl IS NULL,"
+            "       ARRAY(SELECT COALESCE(g.rolname, 'PUBLIC')"
+            "               FROM aclexplode(p.proacl) a"
+            "               LEFT JOIN pg_roles g ON g.oid = a.grantee"
+            "              WHERE a.privilege_type = 'EXECUTE' ORDER BY 1),"
+            "       ARRAY(SELECT c.relname::text FROM pg_trigger t"
+            "               JOIN pg_class c ON c.oid = t.tgrelid"
+            "              WHERE t.tgfoid = p.oid AND NOT t.tgisinternal"
+            "                AND t.tgenabled = 'O' ORDER BY 1)"
+            "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+            "  JOIN pg_roles r ON r.oid = p.proowner"
+            " WHERE n.nspname = 'public' AND p.proname = %s AND p.prosecdef",
+            params=(function,),
+            fetch=True,
+        )
+        assert rows == [
+            (
+                owner,
+                "trigger",
+                0,
+                "v",
+                ["search_path=pg_catalog, public, pg_temp"],
+                False,
+                [owner],
+                [table],
+            )
+        ], rows
+        for login in LOGINS:
+            assert (
+                _scalar(
+                    target["owner_stream"],
+                    "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                    params=(login, f"{function}()"),
+                )
+                is False
+            ), login
+
+    def test_every_definer_function_pins_its_search_path_with_pg_temp_last(
+        self, target
+    ):
+        """The census of `public`'s SECURITY DEFINER functions (103): each one
+        pins `search_path = pg_catalog, public, pg_temp`, with pg_temp named
+        and last, as PostgreSQL's guidance for definer functions asks. A door
+        added later carries the path in its own CREATE, or this names it."""
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT p.oid::regprocedure::text, p.proconfig"
+            "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+            " WHERE n.nspname = 'public' AND p.prosecdef"
+            "   AND NOT EXISTS (SELECT 1 FROM pg_depend d"
+            "                    WHERE d.classid = 'pg_proc'::regclass"
+            "                      AND d.objid = p.oid AND d.deptype = 'e')",
+            fetch=True,
+        )
+        assert len(rows) >= len(DOORS), "the census must reach every registered door"
+        pinned = "search_path=pg_catalog, public, pg_temp"
+        stray = sorted(fn for fn, config in rows if pinned not in (config or []))
+        assert stray == [], f"definer functions without {pinned!r}: {stray}"
+
+
+class TestDirectPathsAreShut:
+    """Only tenant-owned archive observations and assets may be deleted directly.
+    Census every runtime grant; the live archive gate proves its RLS boundary.
+    All other deletions require their narrow doors.
+    """
+
+    def test_only_archive_catalog_rows_have_runtime_delete(self, target):
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT grantee, table_name FROM information_schema.role_table_grants"
+            " WHERE grantee IN %s AND privilege_type = 'DELETE'"
+            " AND table_schema = 'public'",
+            params=(tuple(LOGINS),),
+            fetch=True,
+        )
+        assert set(rows) == {
+            (role, table)
+            for role in ("svc_ingress", "svc_worker")
+            for table in ("instagram_media_index", "instagram_media_assets")
+        }
+
+    @pytest.mark.parametrize("table", ["audit_events", "jobs", "media_items"])
+    def test_direct_delete_is_denied_live(self, target, table):
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+            _exec(
+                target["worker"],
+                f"DELETE FROM {table} WHERE workspace_id = %s",
+                params=(str(target["a"]["ws"]),),
+                tenant=target["a"]["ws"],
+            )
+
+    def test_the_removal_record_is_the_membership_doors_alone(self, target):
+        """No login holds a grant on `workspace_member_removals`, so
+        only the svc_membership doors read or write it. Each login's denial is
+        live and paired with its own read of `workspace_members` under the same
+        claim, beside the records it is denied (one per tenant, seeded by the
+        owner); the grant catalog names svc_membership alone."""
+        assert (
+            _scalar(
+                target["owner_stream"], "SELECT count(*) FROM workspace_member_removals"
+            )
+            >= 2
+        )
+        for login in LOGINS:
+            dsn = _login_dsn(target, login)
+            assert (
+                _scalar(
+                    dsn,
+                    "SELECT count(*) FROM workspace_members",
+                    tenant=target["a"]["ws"],
+                )
+                >= 1
+            ), f"{login}: the positive control read no membership"
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _exec(
+                    dsn,
+                    "SELECT count(*) FROM workspace_member_removals",
+                    tenant=target["a"]["ws"],
+                )
+        grants = _exec(
+            target["owner_stream"],
+            "SELECT r.rolname, a.privilege_type"
+            "  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,"
+            "       aclexplode(c.relacl) a JOIN pg_roles r ON r.oid = a.grantee"
+            " WHERE n.nspname = 'public' AND c.relname = 'workspace_member_removals'"
+            "   AND a.grantee <> c.relowner",
+            fetch=True,
+        )
+        assert sorted(grants) == [
+            ("svc_membership", "INSERT"),
+            ("svc_membership", "SELECT"),
+            ("svc_membership", "UPDATE"),
+        ]
+
+    def test_set_role_fails_for_every_service_role(self, target, owner_actor):
+        for role in sorted(set(SERVICE_ROLES) - {"svc_worker"}):
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                _exec(target["worker"], f'SET ROLE "{role}"')
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT r.rolname, g.rolname FROM pg_auth_members m"
+            " JOIN pg_roles r ON r.oid = m.roleid"
+            " JOIN pg_roles g ON g.oid = m.member"
+            " WHERE r.rolname LIKE 'svc_%' OR g.rolname LIKE 'svc_%'",
+            fetch=True,
+        )
+        # The bootstrap's two documented grants, exactly, and nothing else:
+        # door-owner roles to the window actor (function-ownership machinery)
+        # and the transient owner self-grant (revoked by the stand-down a
+        # test world never runs). The runtime logins appear on neither side
+        # of any membership.
+        assert set(rows) == {(r, "svc_migration") for r in NOLOGIN_ROLES} | {
+            ("svc_migration", owner_actor)
+        }, f"unexpected service-role memberships: {sorted(rows)}"
+
+
+class TestAuthPlaneMaintenanceOnlyThroughTheSweep:
+    """Auth-plane maintenance succeeds only through fn_auth_plane_sweep —
+    direct DELETE fails as every login, and the sweep's bounds are proven on
+    BOTH sides: the expired row goes, the live row on the SAME table stays."""
+
+    def test_direct_delete_denied_to_both_logins(self, target):
+        for table in ("session_tokens", "oauth_states", "service_tokens"):
+            for login in LOGINS:
+                with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                    _exec(_login_dsn(target, login), f"DELETE FROM {table}")
+
+    def test_the_sweep_reaps_expired_only_and_never_service_tokens(self, target):
+        user = target["a"]["user"]
+        _exec(
+            target["ingress"],
+            "INSERT INTO session_tokens (token_hash, user_id, expires_at)"
+            " VALUES ('f4-expired', %s, now() - interval '2 days'),"
+            "        ('f4-live', %s, now() + interval '2 days')",
+            params=(str(user), str(user)),
+        )
+        # 077: a token has exactly one subject — this one is the user's.
+        _exec(
+            target["ingress"],
+            "INSERT INTO service_tokens (name, token_hash, role, user_id)"
+            " VALUES ('f4-survivor', 'f4-service-survivor', 'readonly', %s)",
+            params=(str(user),),
+        )
+        _exec(target["worker"], DOORS["fn_auth_plane_sweep"][1], fetch=True)
+        remaining = _exec(
+            target["owner_stream"],
+            "SELECT token_hash FROM session_tokens"
+            " WHERE token_hash IN ('f4-expired', 'f4-live')",
+            fetch=True,
+        )
+        assert remaining == [("f4-live",)], (
+            f"the sweep must reap exactly the expired session, got {remaining}"
+            " — the same-table survivor is the overreach control"
+        )
+        assert (
+            _scalar(
+                target["owner_stream"],
+                "SELECT count(*) FROM service_tokens"
+                " WHERE token_hash = 'f4-service-survivor'",
+            )
+            == 1
+        ), "service_tokens sits outside the sweep by design (060's asymmetry)"
+
+
+class TestZeroNullGates:
+    """Tenant keys are NOT NULL everywhere but the three sanctioned columns,
+    the presence half is asserted (a dropped column would otherwise vanish
+    from the census), and jobs' pairing CHECK is driven in both directions
+    with its positive."""
+
+    def test_workspace_id_presence_and_nullability(self, target):
+        rows = _exec(
+            target["owner_stream"],
+            "SELECT c.relname, a.attnotnull FROM pg_attribute a"
+            " JOIN pg_class c ON c.oid = a.attrelid"
+            " JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " WHERE n.nspname = 'public' AND a.attname = 'workspace_id'"
+            " AND c.relkind = 'r'",
+            fetch=True,
+        )
+        present = {r[0] for r in rows}
+        assert present >= set(GUC_TABLES) - {"workspaces"}, (
+            f"tables missing a workspace_id column entirely:"
+            f" {sorted(set(GUC_TABLES) - {'workspaces'} - present)}"
+        )
+        nullable = {r[0] for r in rows if not r[1]}
+        assert nullable == {"jobs", "oauth_states", "service_tokens"}, (
+            f"nullable workspace_id: {sorted(nullable)} — sanctioned NULLs are"
+            f" jobs' system-kind pairing and the two auth-plane pre-tenant"
+            f" columns (060)"
+        )
+
+    def test_jobs_pairing_check_refuses_both_mismatches(self, target):
+        """The armed world's system job (NULL + reap_expired) is the standing
+        positive for the second direction; both refusals name the pairing
+        constraint so an unrelated CHECK cannot satisfy them."""
+        assert (
+            _scalar(
+                target["owner_stream"],
+                "SELECT count(*) FROM jobs WHERE workspace_id IS NULL"
+                " AND kind = 'reap_expired'",
+            )
+            >= 1
+        )
+        with pytest.raises(
+            psycopg2.errors.CheckViolation, match="ck_jobs_system_kinds"
+        ):
+            _exec(
+                target["owner_stream"],
+                "INSERT INTO jobs (workspace_id, kind, lane, serialization_key,"
+                " payload, max_attempts) VALUES (NULL, 'publish_pipeline',"
+                " 'interactive', 'k', '{\"v\":1}', 3)",
+            )
+        with pytest.raises(
+            psycopg2.errors.CheckViolation, match="ck_jobs_system_kinds"
+        ):
+            _exec(
+                target["owner_stream"],
+                "INSERT INTO jobs (workspace_id, kind, lane, serialization_key,"
+                " payload, max_attempts) VALUES (%s, 'reap_expired',"
+                " 'bulk', 'k2', '{\"v\":1}', 3)",
+                params=(str(target["a"]["ws"]),),
+            )

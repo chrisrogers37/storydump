@@ -1,0 +1,534 @@
+"""Instagram Login OAuth, target-side (#863).
+
+The flow runs on the target tables — `oauth_states` and `oauth_credentials`.
+Each deliberate choice is named below so a reader can tell a decision from a
+drift.
+
+## Deliberate choices
+
+1. **State lives in `oauth_states`, not in a signed self-describing token.** A
+   row is consumed with a one-shot CAS, because replay protection has to be a
+   fact about storage: a stateless token cannot be single-use.
+
+2. **The TTL is 900s**: 15 minutes for *every* purpose.
+
+3. **The credential is a row under the MultiFernet ring** in
+   `src/utils/encryption.py`, under `ENCRYPTION_KEYS`.
+
+4. **Refresh has no host branch.** `graph.instagram.com` accepts
+   `grant_type=ig_refresh_token` + the token alone, while the FB host needs
+   `fb_exchange_token` plus client id/secret — and sending IG-flavoured params
+   to the FB host produces Meta error 101, "Missing client_id parameter". No
+   FB-vintage credential can exist here: `ck_credentials_provider` has **no**
+   `fb_login_legacy` value, so the FB host is unreachable by construction
+   rather than by convention.
+
+5. **Reconnect is "last issued wins", enforced in the ISSUE transaction.**
+   "Last consumed wins" does not hold —
+   independently issued rows never consume one another, so both callbacks
+   could land. Issuing a reconnect state invalidates prior live states for the
+   same target in the same transaction, so at most one live state exists per
+   target at any commit.
+
+## What this module does NOT do, stated rather than implied
+
+The dead-token symptom gate has three halves, and this module owns one. The
+credential flip to `expired` / `reauth_required` is here; the **dispatcher**
+declining to mint further intents and the **publish pipeline** recording the
+fault are elsewhere (#863). Nothing here pretends to close the chain.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+import logging
+import re
+from typing import Optional
+
+import httpx
+from sqlalchemy import text
+
+from src.exceptions.base import RefusalError, StorydumpError
+from src.services.target import egress, vocabulary
+from src.services.target.oauth_states import OAuthStateRefused, ring
+
+logger = logging.getLogger(__name__)
+
+#: When a freshly stored credential first comes due for refresh: a
+#: cadence that clears Meta's 24-hour minimum age.
+#: A PostgreSQL interval literal; the value is pinned by test.
+FIRST_REFRESH_INTERVAL = "7 days"
+
+#: The scopes the flow requests. Meta App Review (#410) turns on the app's
+#: *use case*, not on this list.
+REQUIRED_SCOPES = ("instagram_business_basic", "instagram_business_content_publish")
+
+#: The Instagram Login hosts: unversioned, and separate from the Meta Graph
+#: API. `GRAPH_BASE` is also the host an Instagram-Login token publishes on,
+#: so `instagram_graph` reads it from here — one spelling of the host.
+API_BASE = "https://api.instagram.com"
+GRAPH_BASE = "https://graph.instagram.com"
+
+AUTHORIZE_URL = f"{API_BASE}/oauth/authorize"
+TOKEN_URL = f"{API_BASE}/oauth/access_token"
+LONG_LIVED_URL = f"{GRAPH_BASE}/access_token"
+REFRESH_URL = f"{GRAPH_BASE}/refresh_access_token"
+#: Who the long-lived token belongs to — the real Meta id and the handle.
+PROFILE_URL = f"{GRAPH_BASE}/me"
+
+PROVIDER = vocabulary.PROVIDER_IG_LOGIN
+
+
+class CredentialUndecryptable(StorydumpError):
+    """No key in the ring decrypts this payload.
+
+    Fail CLOSED. The credential flips `expired` and the account flips
+    `reauth_required`; the re-auth path recovers it. Never guess, never log
+    ciphertext.
+    """
+
+
+def authorization_url(state: str, *, redirect_uri: str, client_id: str) -> str:
+    from urllib.parse import urlencode
+
+    return f"{AUTHORIZE_URL}?" + urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": ",".join(REQUIRED_SCOPES),
+            "response_type": "code",
+            "state": state,
+        }
+    )
+
+
+def refresh_params(current_token: str) -> dict[str, str]:
+    """The IG-host refresh shape, and ONLY that shape.
+
+    `graph.instagram.com/refresh_access_token` accepts the token alone. A
+    FB-host credential would need `fb_exchange_token` + client id/secret, and
+    getting it wrong produces Meta error 101. The target cannot reach that host:
+    `ck_credentials_provider` has no `fb_login_legacy` value, so no
+    FB-vintage credential exists to refresh.
+    """
+    return {"grant_type": "ig_refresh_token", "access_token": current_token}
+
+
+async def store_credential(
+    conn, *, workspace_id, ig_account_id, token: str, expires_at=None
+) -> str:
+    """Write the destination's `ig_login` credential — or, on a reconnect,
+    replace the one it already has IN PLACE (`uq_credential_per_account`
+    admits one row per account and provider; same id, no gap, no second
+    row). Encrypted with ring key 0. Returns the id.
+
+    The Drive leg's `store_credential` has the same shape; the conflict
+    target repeats the partial index's predicate because Postgres cannot
+    infer a partial unique index without it."""
+    result = await conn.execute(
+        text(
+            "INSERT INTO oauth_credentials"
+            " (workspace_id, ig_account_id, provider, encrypted_payload,"
+            "  expires_at, next_refresh_at, state)"
+            # next_refresh_at = now() + the refresh cadence (7 days from
+            # issue), NOT now(): Meta refuses to refresh a long-lived token
+            # younger than 24 hours (the recorded min-age floor), and an
+            # immediately-due refresh would be a definitive 400, which the
+            # refresh leg rightly treats as "dead" and flips the account to
+            # reauth_required minutes after it was connected. Armed, so the
+            # credential is visible to the refresh leg; late enough to clear
+            # the floor. The clock re-arms the same cadence after each refresh.
+            " VALUES (:ws, :acct, :provider, :payload, :exp,"
+            f"         now() + interval '{FIRST_REFRESH_INTERVAL}', 'active')"
+            " ON CONFLICT (workspace_id, ig_account_id, provider)"
+            "   WHERE ig_account_id IS NOT NULL"
+            " DO UPDATE SET encrypted_payload = EXCLUDED.encrypted_payload,"
+            "               expires_at = EXCLUDED.expires_at,"
+            f"               next_refresh_at = now() + interval '{FIRST_REFRESH_INTERVAL}',"
+            "               state = 'active'"
+            " RETURNING id"
+        ),
+        {
+            "ws": str(workspace_id),
+            "acct": str(ig_account_id),
+            "provider": PROVIDER,
+            "payload": ring().encrypt(token),
+            "exp": expires_at,
+        },
+    )
+    return str(result.scalar_one())
+
+
+async def swap_credential(conn, *, credential_id, token: str, expires_at=None) -> None:
+    """Reconnect: replace the payload IN PLACE, same row id.
+
+    There is no window where the account has zero credentials: deleting and
+    re-inserting would open exactly that window, and it is the kind of window
+    nothing in the test suite would notice.
+    """
+    result = await conn.execute(
+        text(
+            "UPDATE oauth_credentials"
+            " SET encrypted_payload = :payload, expires_at = :exp, state = 'active'"
+            # A revoked credential (a removed destination's) stays revoked: a
+            # refresh that was in flight when the account was removed must not
+            # bring the token back to life. `expired` → `active` IS allowed —
+            # that is the reconnect edge.
+            " WHERE id = :cid AND state <> 'revoked'"
+        ),
+        {
+            "cid": str(credential_id),
+            "payload": ring().encrypt(token),
+            "exp": expires_at,
+        },
+    )
+    if result.rowcount == 0:
+        raise OAuthStateRefused(f"no credential {credential_id} to swap")
+
+
+async def credential_state(conn, *, credential_id) -> Optional[str]:
+    """The credential's state, or None when there is no such row — read
+    before a refresh so a credential revoked since the job was minted is left
+    alone (`refresh_credential`'s "stale" outcome)."""
+    row = (
+        await conn.execute(
+            text("SELECT state FROM oauth_credentials WHERE id = :cid"),
+            {"cid": str(credential_id)},
+        )
+    ).first()
+    return None if row is None else row[0]
+
+
+async def load_credential(conn, *, credential_id, captured) -> str:
+    """Decrypt, or FAIL CLOSED.
+
+    A payload no ring entry decrypts flips the credential `expired`
+    and the account `reauth_required`. It never guesses and never logs
+    ciphertext — the exception carries the credential id and nothing else.
+
+    **The flip is `archive_lifecycle.credential_rejected`'s, the one door every
+    definitive rejection takes** (#1644), so it keeps the common lock
+    order and moves an archive's epoch like the others. A caller passes the
+    credential's `captured` (`archive_lifecycle.capture_credential`), read
+    BEFORE this call: the flip then takes the account's source prefix first,
+    writes an archive's state change through the epoch writer, and flips
+    nothing when the credential was reconnected since (the unreadable payload
+    is not what is stored now). It is a required argument so that a bare flip
+    is never silent: None, which `capture_credential` answers for a credential
+    no archive can be on, is the bare `mark_dead`.
+
+    The ring is built FIRST, outside the `try`: one that cannot be built
+    (:class:`~src.services.target.oauth_states.RingUnavailable`) propagates
+    having read and flipped nothing — a flip made on a missing key would
+    outlive restoring the key.
+    """
+    keys = ring()
+    result = await conn.execute(
+        text(
+            "SELECT encrypted_payload, workspace_id::text FROM oauth_credentials"
+            " WHERE id = :cid"
+        ),
+        {"cid": str(credential_id)},
+    )
+    row = result.first()
+    if row is None:
+        raise OAuthStateRefused(f"no credential {credential_id}")
+    try:
+        return keys.decrypt(row[0])
+    except Exception as exc:
+        # Imported late: `archive_lifecycle` imports this module for `mark_dead`.
+        from src.services.target import archive_lifecycle
+
+        # COMMIT the flip before raising. Fail-closed means the state change
+        # SURVIVES the failure — if it rides on the caller's transaction it is
+        # rolled back with the exception, and the credential stays `active`
+        # while nothing can read it. A test asserts the flip, not only that the
+        # call raised.
+        outcome = await archive_lifecycle.credential_rejected(
+            conn,
+            workspace_id=row[1],
+            credential_id=credential_id,
+            captured=captured,
+        )
+        await conn.commit()
+        raise CredentialUndecryptable(
+            f"credential {credential_id} decrypts under no key in the ring; "
+            + (
+                "flipped expired and the account to reauth_required"
+                if outcome == "rejected"
+                else "reconnected since it was read, so nothing was flipped"
+            )
+        ) from exc
+
+
+async def mark_dead(conn, *, credential_id) -> None:
+    """The half that IS this module's: the credential and account state flip.
+
+    The other two halves — the dispatcher minting no further intents, and the
+    publish pipeline recording the fault — are theirs (#863), and this
+    function deliberately does not reach into either.
+    """
+    result = await conn.execute(
+        text(
+            "UPDATE oauth_credentials SET state = 'expired'"
+            # Only a LIVE credential dies here: a revoked one (a removed
+            # destination's) is already dead and must not be relabelled.
+            " WHERE id = :cid AND state = 'active'"
+            " RETURNING ig_account_id"
+        ),
+        {"cid": str(credential_id)},
+    )
+    row = result.first()
+    if row is None or row[0] is None:
+        return
+    await conn.execute(
+        text(
+            "UPDATE ig_accounts SET state = 'reauth_required'"
+            # From `active` only: a `disabled` (removed) row must not come
+            # back to the list as "reconnect needed" because a stale refresh
+            # job ran after the removal.
+            " WHERE id = :acct AND state = 'active'"
+        ),
+        {"acct": str(row[0])},
+    )
+
+
+# ---------------------------------------------------------------------------
+# The connect leg (#1220 / #1041): the code exchange and the route's
+# three-way "which state do I mint" — the Drive leg's shape, on Instagram.
+# ---------------------------------------------------------------------------
+
+#: The closed set of exchange refusals. They stay distinct in the LOG — which
+#: of the three provider calls failed, and how — and all collapse to one
+#: `exchange_failed` on the error page, because to the person every one of
+#: them is "the last step did not complete" (the callback does that collapse).
+REASONS = (
+    "exchange_failed",
+    "malformed_response",
+    "long_lived_failed",
+    "profile_failed",
+)
+
+
+class IgOAuthRefused(RefusalError):
+    """The grant could not be completed. ``reason`` is one of :data:`REASONS`,
+    and no token ever rides in the message."""
+
+    _prefix = "instagram grant refused"
+
+    def __init__(self, reason: str, detail: str = ""):
+        if reason not in REASONS:
+            raise ValueError(f"unknown IgOAuthRefused reason {reason!r}")
+        self.detail = detail
+        super().__init__(reason, detail)
+
+
+@dataclass(frozen=True)
+class IgIdentity:
+    """Who one token is for, as one `/me` read of that same token says.
+
+    `user_id` is the REAL account id `ig_accounts.provider_account_ref` keys on
+    (054). `app_scoped_id` is `id`: the person's id inside THIS Meta app, which
+    is what a Meta callback's `signed_request.user_id` names — a different
+    value from `user_id`, never derived from it and never assumed equal. It is
+    None unless the answer carried digits, because a mapping is only worth
+    what the read proved. `username` is display."""
+
+    app_scoped_id: Optional[str]
+    user_id: str
+    username: Optional[str]
+
+
+@dataclass(frozen=True)
+class IgGrant:
+    """A long-lived Instagram Login token and who it is for. `ig_user_id` is
+    the REAL account id `ig_accounts.provider_account_ref` keys on (054);
+    `username` is display, and may be None if the profile read omitted it.
+    `app_scoped_id` is the identity read's `id` (see `IgIdentity`), last and
+    optional so a constructor may omit it."""
+
+    access_token: str
+    expires_at: Optional[datetime]
+    ig_user_id: str
+    username: Optional[str]
+    app_scoped_id: Optional[str] = None
+
+
+def _json_object(response: httpx.Response, *, reason: str) -> dict:
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise IgOAuthRefused(reason, "the endpoint did not answer JSON") from exc
+    if not isinstance(body, dict):
+        raise IgOAuthRefused(reason, "the endpoint body is not a JSON object")
+    return body
+
+
+async def exchange_code(
+    client: httpx.AsyncClient,
+    *,
+    code: str,
+    redirect_uri: str,
+    client_id: str,
+    client_secret: str,
+) -> IgGrant:
+    """Trade the authorization code for a long-lived token and its owner —
+    three provider calls, every one through the egress floor, none inside a
+    transaction (the caller commits the state consume first).
+
+    1. ``POST api.instagram.com/oauth/access_token`` — code → short-lived token.
+       Instagram appends ``#_`` to the code it hands back; it is stripped here.
+    2. ``GET graph.instagram.com/access_token?grant_type=ig_exchange_token`` —
+       short-lived → long-lived (60 days; `expires_in` is relative, so the
+       expiry is stamped here).
+    3. ``GET graph.instagram.com/me?fields=id,user_id,username`` — who it is
+       for (`read_identity`): the account's id and the app-scoped id.
+
+    Refuses BY NAME at each step; bodies are never logged (they carry tokens).
+    """
+    policy = egress.EgressPolicy(timeout_class="standard")
+
+    short = await egress.request(
+        client,
+        "POST",
+        TOKEN_URL,
+        policy=policy,
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri,
+            # Instagram appends a literal `#_` to the code it hands back; strip
+            # exactly that suffix — `rstrip` would eat a trailing `_` that is
+            # part of the code.
+            "code": code.removesuffix("#_"),
+        },
+    )
+    if short.status_code != 200:
+        raise IgOAuthRefused(
+            "exchange_failed", f"token endpoint answered {short.status_code}"
+        )
+    body = _json_object(short, reason="malformed_response")
+    # Instagram Login wraps the answer in a one-element `data` list.
+    token_data = (
+        body["data"][0] if isinstance(body.get("data"), list) and body["data"] else body
+    )
+    short_token = (
+        token_data.get("access_token") if isinstance(token_data, dict) else None
+    )
+    if not isinstance(short_token, str) or not short_token:
+        raise IgOAuthRefused(
+            "malformed_response", "no access token in the code exchange"
+        )
+
+    long_lived = await egress.request(
+        client,
+        "GET",
+        LONG_LIVED_URL,
+        policy=policy,
+        params={
+            "grant_type": "ig_exchange_token",
+            "client_secret": client_secret,
+            "access_token": short_token,
+        },
+    )
+    if long_lived.status_code != 200:
+        raise IgOAuthRefused(
+            "long_lived_failed",
+            f"long-lived exchange answered {long_lived.status_code}",
+        )
+    body = _json_object(long_lived, reason="malformed_response")
+    token = body.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise IgOAuthRefused(
+            "malformed_response", "no access token in the long-lived exchange"
+        )
+    expires_at = egress.expires_at_from(body.get("expires_in"))
+
+    identity = await read_identity(client, token, policy=policy)
+    return IgGrant(
+        access_token=token,
+        expires_at=expires_at,
+        ig_user_id=identity.user_id,
+        username=identity.username,
+        app_scoped_id=identity.app_scoped_id,
+    )
+
+
+#: What a Meta app-scoped id looks like: digits, bounded. Anything else is not
+#: an id the callbacks could ever name.
+_APP_SCOPED_ID = re.compile("[0-9]{1,64}")
+
+
+def _app_scoped_id(value) -> Optional[str]:
+    """`id` as a digit string, or None. A JSON number is read as its digits
+    (as `user_id` is)."""
+    if isinstance(value, int):
+        value = str(value)
+    if isinstance(value, str) and _APP_SCOPED_ID.fullmatch(value):
+        return value
+    return None
+
+
+async def read_identity(
+    client: httpx.AsyncClient, token: str, *, policy: egress.EgressPolicy
+) -> IgIdentity:
+    """Who *token* is for: ``GET graph.instagram.com/me?fields=id,user_id,username``
+    through the egress floor, outside any transaction, one request.
+
+    The code exchange and the reconciliation of older credentials both come
+    here, so the id Meta's callbacks later name is read from the same endpoint,
+    with the same token, in both cases. The token never rides in a message.
+    Refuses by name as the exchange does: ``profile_failed`` for a refused read,
+    ``malformed_response`` for an answer that is not an object or names no
+    ``user_id``. A missing or non-digit ``id`` is not a refusal here: it is
+    ``app_scoped_id=None``, and the caller that needs it refuses.
+    """
+    profile = await egress.request(
+        client,
+        "GET",
+        PROFILE_URL,
+        policy=policy,
+        params={"fields": "id,user_id,username", "access_token": token},
+    )
+    if profile.status_code != 200:
+        raise IgOAuthRefused(
+            "profile_failed", f"profile read answered {profile.status_code}"
+        )
+    body = _json_object(profile, reason="malformed_response")
+    ig_user_id = body.get("user_id")
+    if ig_user_id is None or str(ig_user_id).strip() == "":
+        raise IgOAuthRefused("malformed_response", "no user_id in the profile")
+    username = body.get("username")
+    return IgIdentity(
+        app_scoped_id=_app_scoped_id(body.get("id")),
+        user_id=str(ig_user_id),
+        username=username if isinstance(username, str) and username else None,
+    )
+
+
+async def connect_purpose(conn, *, workspace_id, ig_account_id) -> Optional[str]:
+    """Which state the connect route mints for this destination, in one query:
+    ``None`` when the account is not this workspace's (the route answers 404 —
+    never 403, since a destination's existence is not disclosed across
+    tenants), ``"connect"`` when it has never been credentialed, ``"reconnect"``
+    once it has — so `issue_state`'s last-issued-wins retires a stale state."""
+    credentialed = (
+        await conn.execute(
+            text(
+                "SELECT EXISTS ("
+                "  SELECT 1 FROM oauth_credentials c"
+                "   WHERE c.ig_account_id = a.id AND c.workspace_id = a.workspace_id"
+                "     AND c.provider = :provider"
+                ") AS credentialed"
+                "  FROM ig_accounts a"
+                " WHERE a.id = :acct AND a.workspace_id = :ws AND a.state <> 'moved'"
+            ),
+            {"acct": str(ig_account_id), "ws": str(workspace_id), "provider": PROVIDER},
+        )
+    ).scalar()
+    if credentialed is None:
+        return None
+    return "reconnect" if credentialed else "connect"

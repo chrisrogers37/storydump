@@ -1,0 +1,3928 @@
+"""Gate — the checkpointed publish-pipeline executor against a
+real database (#915, #862).
+
+The gate, verbatim where it binds: *"pipeline resumes correctly from EVERY
+checkpoint kill (via provider_ops.resume_unresolved — a kill between permit
+and publish call lands publishing_ambiguous with zero retries, resolved by
+the reconciler); error-9 defers."*
+
+Harness idioms are `test_l3_permit_rail.py`'s: module-scoped scratch database
+replayed from the advertised stream, schema-OWNER connections (RLS bypassed —
+`test_rls_runtime_harness.py` owns policy proofs; mixing them here
+would make a permit failure and a policy failure indistinguishable), one
+persistent event loop, intents born directly in their state under the
+migration actor.
+
+**Kill fidelity.** A "kill" is an exception raised at an injected provider
+seam — the executor deliberately catches nothing it does not type, so the
+exception propagates exactly as a process death would leave the database:
+committed checkpoints stay, the uncommitted transaction is gone. The database
+cannot tell the difference, which is what makes the resume proofs real. Each
+resume runs under a FRESH lease token (the reaper + re-claim path), so the
+proofs also cover fencing of the dead owner.
+
+**At-most-once is COUNTED**: `StubMetaAdapter` records every call (a stub
+that counts, not a docstring that promises).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+import time
+import uuid
+from datetime import date, datetime, timedelta, timezone
+
+import psycopg2
+import pytest
+
+from src.services.target.meta_adapter import StubMetaAdapter
+from src.services.target.drive_adapter import DriveTerminalError
+from src.services.target.publish_pipeline import (
+    CANCELLED,
+    DEFERRED_CAP,
+    DEFERRED_META_CAP,
+    FETCH_RETRY_SECONDS,
+    FAILED,
+    PARKED_AMBIGUOUS,
+    POISONED,
+    POSTED,
+    RETRY_SCHEDULED,
+    run_publish_pipeline,
+)
+from src.config.defaults import DEFAULT_REPOST_TTL_DAYS
+from src.services.target.usage_precheck import UsagePrecheck
+from tests.scripts.conftest import (
+    _scratch,
+    async_url,
+    reap_as_worker,
+    replay_advertised_stream,
+    seed_workspace_chain,
+)
+
+pytestmark = pytest.mark.integration
+
+DAY = date(2026, 3, 1)  # the recorded-debit day for intents born debited
+
+
+@pytest.fixture(scope="module")
+def pipe_db(admin_conn, owner_actor):
+    gen = _scratch(admin_conn, owner=owner_actor, roles=[])
+    db = next(gen)
+    try:
+        dsn = replay_advertised_stream(db, owner_actor, admin_conn)
+        conn = psycopg2.connect(dsn)
+        try:
+            chain = seed_workspace_chain(conn, "l5-pipe")
+        finally:
+            conn.close()
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        engine = create_async_engine(
+            async_url(dsn),
+            poolclass=NullPool,
+            connect_args={"server_settings": {"app.actor_kind": "system"}},
+        )
+        try:
+            yield {
+                "owner": dsn,
+                "ws": chain["ws"],
+                "iga": chain["iga"],
+                "user": chain["user"],
+                "engine": engine,
+            }
+        finally:
+            _run(engine.dispose())
+    finally:
+        gen.close()
+
+
+@pytest.fixture(autouse=True)
+def _clean_slate(pipe_db):
+    """Per-test teardown for the module-scoped database: cap-bucket rows
+    (today's AND the fixed DAY the debited-birth helper stamps) and the
+    account's next_slot_at. A leaked today-row flips a later test's flip from
+    PROCEED to DEFERRED — a cross-test heisenfailure this fixture deletes as
+    a class rather than remembering per test."""
+    yield
+    _exec(
+        pipe_db,
+        "DELETE FROM daily_post_counts WHERE workspace_id = %s",
+        (pipe_db["ws"],),
+    )
+    _exec(
+        pipe_db,
+        "UPDATE ig_accounts SET next_slot_at = NULL WHERE id = %s",
+        (pipe_db["iga"],),
+    )
+
+
+def _exec(pipe_db, sql, params=None, fetch=False):
+    conn = psycopg2.connect(pipe_db["owner"])
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET app.actor_kind = 'migration'")
+            cur.execute(sql, params)
+            if fetch:
+                return cur.fetchall()
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def _new_intent(
+    pipe_db,
+    *,
+    state="approved",
+    publish_step="none",
+    cancel_requested=False,
+    transit_ref=None,
+    ref=None,
+    media_kind="image",
+    debited=None,
+    origin="cadence",
+    slot_in_s=0,
+    age_s=0,
+    approval_rule=None,
+):
+    """An intent born directly in *state* on a fresh media item (the shared
+    template: migration-actor birth, fresh media per uq_intent_live_subject,
+    debited states carry cap_consumed_on + a real bucket row so refunds have
+    something to return). *slot_in_s* moves its slot from now and *age_s*
+    ages its `entered_state_at` — the two clocks the reaper's expiry legs
+    read. A planned story (*origin*) is born approved or earlier here: born
+    later it would need its day without its debit."""
+    ws, iga = pipe_db["ws"], pipe_db["iga"]
+    ref = ref or f"acct-{uuid.uuid4()}"
+    if debited is None:
+        debited = state in ("publishing", "publishing_ambiguous", "review_required")
+    assert origin == "cadence" or not debited, "a planned story debits nothing"
+    rows = _exec(
+        pipe_db,
+        "INSERT INTO media_items (workspace_id, source_id, content_hash,"
+        " file_name, media_kind, provider_file_ref)"
+        " SELECT %s, id, %s, 'f.jpg', %s, %s FROM media_sources"
+        " WHERE workspace_id = %s LIMIT 1 RETURNING id",
+        (ws, f"h-{uuid.uuid4()}", media_kind, f"r-{uuid.uuid4()}", ws),
+        fetch=True,
+    )
+    media = rows[0][0]
+    step = "publish_called" if state == "publishing_ambiguous" else publish_step
+    cols, vals = "", ""
+    params = [
+        ws,
+        iga,
+        media,
+        ref,
+        slot_in_s,
+        age_s,
+        state,
+        step,
+        cancel_requested,
+        origin,
+    ]
+    if debited:
+        # A debited birth: the recorded day and, for a story past the container
+        # step, a container id; a stepped-back story (the float) carries its
+        # debit without one.
+        cols += ", cap_consumed_on, ig_container_id"
+        vals += ", %s, %s"
+        container = (
+            f"ctr-{uuid.uuid4()}"
+            if publish_step not in ("none", "transit_uploaded")
+            else None
+        )
+        params.extend([DAY, container])
+        _exec(
+            pipe_db,
+            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
+            " local_date, count, cap_at_write) VALUES (%s, %s, %s, 1, 3)"
+            " ON CONFLICT (workspace_id, ig_account_id, local_date)"
+            " DO UPDATE SET count = daily_post_counts.count + 1",
+            (ws, iga, DAY),
+        )
+    if transit_ref:
+        cols += ", transit_asset_ref"
+        vals += ", %s"
+        params.append(transit_ref)
+    if approval_rule:
+        # Born approved by a rule (#1477): the stamp is written only at birth
+        # or by the approval it names (110's `tg_intent_person_or_rule`).
+        cols += ", approval_rule"
+        vals += ", %s"
+        params.append(approval_rule)
+    rows = _exec(
+        pipe_db,
+        "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
+        " provider_account_ref, approval_mode, schedule_slot_at, entered_state_at,"
+        " state, publish_step, cancel_requested, origin" + cols + ")"
+        " VALUES (%s, %s, %s, %s, 'manual', now() + make_interval(secs => %s),"
+        " now() - make_interval(secs => %s), %s, %s, %s, %s" + vals + ")"
+        " RETURNING id",
+        params,
+        fetch=True,
+    )
+    return str(rows[0][0]), ref
+
+
+def _leased_job(pipe_db, intent_id, *, ref, attempts=1, max_attempts=5, dry_run=False):
+    """A claimed `publish_pipeline` job row, exactly as fn_claim_job hands one
+    to the composition root (leased, token minted, attempts incremented)."""
+    token = str(uuid.uuid4())
+    rows = _exec(
+        pipe_db,
+        "INSERT INTO jobs (workspace_id, kind, lane, serialization_key,"
+        " payload, max_attempts, attempts, state, lease_token, locked_by,"
+        " locked_until)"
+        " VALUES (%s, 'publish_pipeline', 'bulk', %s,"
+        "         %s, %s, %s, 'leased', %s, 'w-gate', now() + interval '300s')"
+        " RETURNING id",
+        (
+            str(pipe_db["ws"]),
+            f"ig:{ref}",
+            f'{{"v": 1, "intent_id": "{intent_id}", "dry_run": {"true" if dry_run else "false"}}}',
+            max_attempts,
+            attempts,
+            token,
+        ),
+        fetch=True,
+    )
+    return _job_row(pipe_db, rows[0][0])
+
+
+def _job_row(pipe_db, job_id):
+    r = _exec(
+        pipe_db,
+        "SELECT id, workspace_id, kind, lane, serialization_key, payload,"
+        " state, attempts, max_attempts, lease_token, run_at"
+        " FROM jobs WHERE id = %s",
+        (job_id,),
+        fetch=True,
+    )[0]
+    return {
+        "id": r[0],
+        "workspace_id": r[1],
+        "kind": r[2],
+        "lane": r[3],
+        "serialization_key": r[4],
+        "payload": r[5],
+        "state": r[6],
+        "attempts": r[7],
+        "max_attempts": r[8],
+        "lease_token": r[9],
+        "run_at": r[10],
+    }
+
+
+def _reclaim(pipe_db, job_id):
+    """The reaper + re-claim path a real resume rides: fresh token, attempts
+    incremented (the claim does that), lease window reopened."""
+    token = str(uuid.uuid4())
+    _exec(
+        pipe_db,
+        "UPDATE jobs SET state = 'leased', lease_token = %s,"
+        " locked_by = 'w-gate2', locked_until = now() + interval '300s',"
+        " attempts = attempts + 1 WHERE id = %s",
+        (token, job_id),
+    )
+    return _job_row(pipe_db, job_id)
+
+
+def _intent_row(pipe_db, intent_id):
+    r = _exec(
+        pipe_db,
+        "SELECT state, publish_step, ig_container_id, ig_media_id,"
+        " transit_asset_ref, cap_consumed_on, cap_refunded_at, last_error,"
+        " media_item_id::text, attempts_by_step, cancel_requested"
+        " FROM post_intents WHERE id = %s",
+        (intent_id,),
+        fetch=True,
+    )[0]
+    return {
+        "state": r[0],
+        "publish_step": r[1],
+        "ig_container_id": r[2],
+        "ig_media_id": r[3],
+        "transit_asset_ref": r[4],
+        "last_error": r[7],
+        "media_item_id": r[8],
+        "cap_consumed_on": r[5],
+        "cap_refunded_at": r[6],
+        "attempts_by_step": r[9]
+        if isinstance(r[9], dict)
+        else json.loads(r[9] or "{}"),
+        "cancel_requested": r[10],
+    }
+
+
+def _ops(pipe_db, intent_id):
+    return [
+        {"op_kind": r[0], "state": r[1], "generation": r[2], "response": r[3]}
+        for r in _exec(
+            pipe_db,
+            "SELECT op_kind, state, generation, response_ref"
+            " FROM provider_operations WHERE intent_id = %s"
+            " ORDER BY op_kind, generation",
+            (intent_id,),
+            fetch=True,
+        )
+    ]
+
+
+def _bucket(pipe_db, day):
+    rows = _exec(
+        pipe_db,
+        "SELECT count FROM daily_post_counts WHERE workspace_id = %s"
+        " AND ig_account_id = %s AND local_date = %s",
+        (pipe_db["ws"], pipe_db["iga"], day),
+        fetch=True,
+    )
+    return rows[0][0] if rows else None
+
+
+class FakeTransit:
+    """The transit seam, counting. The REAL TransitStore is proven by its own
+    unit gate (`tests/src/services/target/test_transit.py`); here it would
+    drag the cloudinary SDK into a database gate — same reasoning as the
+    reconciler's injected poll."""
+
+    def __init__(
+        self,
+        *,
+        upload_kills=None,
+        destroy_raises=False,
+        ready_script=None,
+        ready_hook=None,
+    ):
+        self.upload_calls: list[dict] = []
+        self.url_calls: list[str] = []
+        self.destroy_calls: list[str] = []
+        self.ready_calls: list[str] = []
+        self._upload_kills = upload_kills
+        self._destroy_raises = destroy_raises
+        self._ready_script = list(ready_script or [])
+        self._ready_hook = ready_hook
+        self._n = 0
+
+    async def ready(self, ref, *, media_kind, sleep=None, **_):
+        # The readiness probe: scripted per call, True by default.
+        # Its answer carries what the probe saw, as the real one's.
+        from src.services.target.transit import Readiness
+
+        self.ready_calls.append(ref)
+        if self._ready_hook is not None:
+            # Another writer touching the story while the pipeline holds it.
+            self._ready_hook()
+        # An entry is True, False (the CDN does not know the asset: 404 and its
+        # GIF) or an int — that status, not serving.
+        scripted = self._ready_script.pop(0) if self._ready_script else True
+        status = (
+            scripted
+            if isinstance(scripted, int) and not isinstance(scripted, bool)
+            else None
+        )
+        ok = scripted is True
+        if status is not None:
+            observation = {
+                "status": status,
+                "content_type": "text/html",
+                "length": None,
+                "request_id": "fake-rid",
+                "elapsed_ms": 9,
+                "polls": 20,
+                "magic": None,
+            }
+        elif ok:
+            observation = {
+                "status": 206,
+                "content_type": "image/jpeg",
+                "length": 137673,
+                "request_id": "fake-rid",
+                "elapsed_ms": 12,
+                "polls": 1,
+                "magic": "jpeg",
+            }
+        else:
+            observation = {
+                "status": 404,
+                "content_type": "image/gif",
+                "length": None,
+                "request_id": "fake-rid",
+                "elapsed_ms": 9,
+                "polls": 20,
+                "magic": None,
+            }
+        return Readiness(bool(ok), observation)
+
+    async def upload(self, content, *, workspace_id, media_kind):
+        self._n += 1
+        ref = f"ws/{workspace_id}/t{self._n}"
+        self.upload_calls.append(
+            {"workspace_id": workspace_id, "media_kind": media_kind, "ref": ref}
+        )
+        if self._upload_kills is not None and self._upload_kills.pop(0):
+            # The upload HAPPENED (recorded above) and the worker died before
+            # the checkpoint — the K2 shape: an orphan asset for the sweep.
+            raise Killed("after upload, before checkpoint")
+        return ref
+
+    def delivery_url(self, ref, *, media_kind, variant=0):
+        # The float: variant n is a url Meta has never seen.
+        self.url_calls.append(ref)
+        return f"https://cdn.example/{ref}?sig=x&v={variant}"
+
+    async def destroy(self, ref, *, media_kind):
+        self.destroy_calls.append(ref)
+        if self._destroy_raises:
+            raise ConnectionError("destroy transport lost")
+        return True
+
+
+class Killed(Exception):
+    """The kill instrument. The executor types every catch, so this
+    propagates exactly as a process death leaves the database."""
+
+
+class KillBefore:
+    """Wrap one adapter method to die BEFORE the provider sees the call —
+    the permit-committed-call-never-made shape."""
+
+    def __init__(self, inner, method: str):
+        self._inner = inner
+        self._method = method
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name != self._method:
+            return attr
+
+        async def killer(*a, **kw):
+            raise Killed(f"before {name}")
+
+        return killer
+
+
+async def _fetch_bytes(intent_row):
+    return b"media-bytes"
+
+
+class KillAtFetch:
+    def __init__(self):
+        self.calls = 0
+
+    async def __call__(self, intent_row):
+        self.calls += 1
+        raise Killed("at media_fetch")
+
+
+async def _no_sleep(_seconds):
+    return None
+
+
+def _deps(pipe_db, meta, transit=None, **overrides):
+    kwargs = {
+        "engine": pipe_db["engine"],
+        "meta": meta,
+        "transit": transit or FakeTransit(),
+        "media_fetch": _fetch_bytes,
+        "sleep": _no_sleep,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+_LOOP = asyncio.new_event_loop()
+
+
+def _run(coro):
+    return _LOOP.run_until_complete(coro)
+
+
+def _today_utc():
+    return datetime.now(timezone.utc).date()
+
+
+class TestTheFlipIntegration:
+    def test_a_sibling_publishing_on_the_same_account_defers_without_an_error(
+        self, pipe_db
+    ):
+        """Key 4 (`uq_publish_exclusive`): while one intent of a real account
+        is `publishing`, a sibling's flip is refused by the index. The refusal
+        must not abort the admission transaction: the deferral's own writes
+        would fail ("current transaction is aborted") and the job would burn
+        an attempt on the failure ladder. The flip runs in a savepoint, and
+        the sibling waits a few seconds and tries again — NOT the account's
+        next product slot, hours away, which a cap denial rightly waits for
+        (#1301) — attempt restored, no error."""
+        from src.services.target.publish_pipeline import (
+            BUSY_RETRY_SECONDS,
+            DEFERRED_BUSY,
+        )
+
+        slot = datetime.now(timezone.utc) + timedelta(hours=2)
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (slot, pipe_db["iga"]),
+        )
+        busy, ref = _new_intent(pipe_db, state="publishing")
+        sibling, _ = _new_intent(pipe_db, ref=ref)
+        job = _leased_job(pipe_db, sibling, ref=ref, attempts=1)
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+        before = datetime.now(timezone.utc)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == DEFERRED_BUSY
+        assert _intent_row(pipe_db, sibling)["state"] == "approved"
+        assert _intent_row(pipe_db, busy)["state"] == "publishing"
+        after = _job_row(pipe_db, job["id"])
+        assert after["state"] == "ready" and after["attempts"] == 0
+        wait = (after["run_at"] - before).total_seconds()
+        assert 0 < wait <= BUSY_RETRY_SECONDS[0] + 5, (
+            f"a busy account is retried in seconds, not at the next slot ({wait:.0f}s)"
+        )
+        assert transit.upload_calls == [] and meta.create_calls == []
+        audits = _exec(
+            pipe_db,
+            "SELECT detail->>'reason' FROM audit_events WHERE entity_id = %s"
+            " AND detail->>'event' = 'cap_deferred'",
+            (sibling,),
+            fetch=True,
+        )
+        assert [a[0] for a in audits] == ["exclusive"]
+
+    def test_proceed_debits_exactly_once_on_the_way_to_posted(self, pipe_db):
+        """The PROCEED arm: the flip inside the pipeline debits the
+        account-local day exactly once for the whole ladder."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+        assert outcome == POSTED
+        assert _bucket(pipe_db, _today_utc()) == 1
+
+    def test_deferred_reschedules_to_the_next_slot_and_audits_cap_deferred(
+        self, pipe_db
+    ):
+        """The DEFERRED arm: "the worker reschedules the job to the account's
+        next slot (jobs.run_at); the intent stays 'approved'; audit row
+        'cap_deferred'." Plus the attempt the claim consumed is restored —
+        deferral is normal operation, not a failure."""
+        slot = datetime.now(timezone.utc) + timedelta(hours=2)
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (slot, pipe_db["iga"]),
+        )
+        _exec(
+            pipe_db,
+            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
+            " local_date, count, cap_at_write) VALUES (%s, %s, %s, 3, 3)",
+            (pipe_db["ws"], pipe_db["iga"], _today_utc()),
+        )
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == DEFERRED_CAP
+        assert _intent_row(pipe_db, intent)["state"] == "approved"
+        after = _job_row(pipe_db, job["id"])
+        assert after["state"] == "ready"
+        assert abs((after["run_at"] - slot).total_seconds()) < 1
+        assert after["attempts"] == 0, "a deferral must restore the claim's attempt"
+        assert transit.upload_calls == [] and meta.create_calls == [], (
+            "a cap-denied intent must cost zero provider work"
+        )
+        audits = _exec(
+            pipe_db,
+            "SELECT detail->>'reason' FROM audit_events WHERE entity_id = %s"
+            " AND detail->>'event' = 'cap_deferred'",
+            (intent,),
+            fetch=True,
+        )
+        assert [a[0] for a in audits] == ["cap"]
+
+    def test_a_raced_terminal_intent_cancels_the_job_and_leaks_no_debit(self, pipe_db):
+        """The raise arm: (1,0) — the debit landed, the flip matched no
+        approved row (the intent terminalized under us). The transaction rolls
+        back WHOLE: no cap slot leaks, the job routes to cancelled."""
+        intent, ref = _new_intent(pipe_db, state="cancelled")
+        job = _leased_job(pipe_db, intent, ref=ref)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+        assert outcome == CANCELLED
+        assert _bucket(pipe_db, _today_utc()) in (None, 0), (
+            "the (1,0) rollback must take the debit with it"
+        )
+        assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
+
+
+class TestTheHappyPath:
+    def test_the_full_ladder_lands_posted_with_every_effect(self, pipe_db):
+        """The publishing→posted row of the transition matrix, effect by
+        effect, plus the container id persisted before any publish call and
+        the best-effort inline destroy after commit."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        # The approval card exactly as the TAP leaves it (#1276): the
+        # card row is already `superseded` with "✅ Approved by Ada" and the
+        # tap's own edit row has been sent. The leg must finish that sentence
+        # on a card whose buttons are already gone (#1220).
+        binding = _exec(
+            pipe_db,
+            "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+            " VALUES (%s, 'telegram_group', %s) RETURNING id",
+            (pipe_db["ws"], f"-100{intent[:8]}"),
+            fetch=True,
+        )[0][0]
+        _exec(
+            pipe_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            " VALUES (%s, %s, 'approval_prompt', %s,"
+            ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text",'
+            ' "outcome_text": "✅ Approved by Ada · 12:00 UTC"}\','
+            " 'superseded', '77001'),"
+            " (%s, %s, 'prompt_supersede', %s,"
+            ' \'{"v": 1, "external_message_ref": "77001", "sent_as": "text",'
+            ' "outcome_text": "✅ Approved by Ada · 12:00 UTC"}\','
+            " 'sent', '77001')",
+            (pipe_db["ws"], binding, intent, pipe_db["ws"], binding, intent),
+        )
+        meta = StubMetaAdapter(ready_after_polls=1)
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == POSTED
+
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "posted"
+        assert row["publish_step"] == "effect_confirmed"
+        card = _exec(
+            pipe_db,
+            "SELECT state, payload->>'outcome_text' FROM channel_outbox"
+            " WHERE intent_id = %s AND kind = 'approval_prompt'",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert card[0] == "superseded" and card[1].startswith("✅ Posted"), (
+            f"the card did not gain the terminal line — got {card!r}"
+        )
+        edits = _exec(
+            pipe_db,
+            "SELECT state, payload->>'outcome_text', payload->>'supersedes_ref'"
+            " FROM channel_outbox WHERE intent_id = %s AND kind = 'prompt_supersede'"
+            " ORDER BY created_at",
+            (intent,),
+            fetch=True,
+        )
+        assert edits[-1][0] == "pending" and edits[-1][1].startswith("✅ Posted"), (
+            f"no edit was queued for the posted line — got {edits!r}"
+        )
+        assert edits[-1][2] == "77001", "the edit addresses the card's message"
+        assert row["ig_media_id"] and row["ig_media_id"].startswith("media-")
+        assert row["ig_container_id"] == meta.publish_calls[0]["container_id"], (
+            "the container the publish call used is the persisted one"
+        )
+        assert row["transit_asset_ref"] == transit.upload_calls[0]["ref"]
+
+        ops = _ops(pipe_db, intent)
+        assert [(o["op_kind"], o["state"], o["generation"]) for o in ops] == [
+            ("container_create", "succeeded", 1),
+            ("publish", "succeeded", 1),
+        ]
+        assert meta.create_calls[0]["media_url"].startswith("https://cdn.example/")
+        assert len(meta.publish_calls) == 1
+        assert len(meta.status_calls) >= 2, "readiness was actually polled"
+
+        media_row = _exec(
+            pipe_db,
+            "SELECT m.times_posted, m.last_posted_at FROM media_items m"
+            " JOIN post_intents i ON i.media_item_id = m.id WHERE i.id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert media_row[0] == 1 and media_row[1] is not None
+        lock = _exec(
+            pipe_db,
+            "SELECT l.kind, l.ig_account_id, l.expires_at,"
+            "       round(EXTRACT(epoch FROM (l.expires_at - l.created_at))/86400)"
+            "  FROM post_locks l"
+            " JOIN post_intents i ON i.media_item_id = l.media_item_id"
+            " WHERE i.id = %s",
+            (intent,),
+            fetch=True,
+        )
+        assert len(lock) == 1 and lock[0][0] == "recent"
+        assert lock[0][1] is not None and lock[0][2] is not None
+        # The SPAN, not merely that one exists (#1365). This workspace has no
+        # `repost_ttl_days`, so the lock is the product default — and it must
+        # be the SAME default the manual `posted` path applies, which is the
+        # one `posted_effects` documents and the Settings card shows. A worker
+        # default of its own would lock a worker publish and a human's "mark
+        # as posted" for different spans, for the same `kind`, and asserting
+        # only `IS NOT NULL` here would not see it.
+        assert lock[0][3] == DEFAULT_REPOST_TTL_DAYS, (
+            "a worker publish must lock for the product default, as the manual"
+            " path does — not a span of its own"
+        )
+        acct = _exec(
+            pipe_db,
+            "SELECT last_posted_at FROM ig_accounts WHERE id = %s",
+            (pipe_db["iga"],),
+            fetch=True,
+        )[0][0]
+        assert acct is not None
+        assert transit.destroy_calls == [row["transit_asset_ref"]], "inline destroy"
+        assert _job_row(pipe_db, job["id"])["state"] == "succeeded"
+        edges = _exec(
+            pipe_db,
+            "SELECT from_state, to_state, actor_kind FROM audit_events"
+            " WHERE entity_id = %s AND from_state IS DISTINCT FROM to_state"
+            " ORDER BY created_at",
+            (intent,),
+            fetch=True,
+        )
+        assert [(e[0], e[1]) for e in edges] == [
+            ("approved", "publishing"),
+            ("publishing", "posted"),
+        ]
+        assert all(e[2] == "system" for e in edges)
+
+    def test_a_failed_inline_destroy_does_not_unpost(self, pipe_db):
+        """The inline destroy is best-effort BY DESIGN — the 48 h transit
+        sweep is the guarantee. A destroy transport loss after the
+        terminal commit must not turn a posted outcome into an error."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        transit = FakeTransit(destroy_raises=True)
+        outcome = _run(
+            run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter(), transit))
+        )
+        assert outcome == POSTED
+        assert _intent_row(pipe_db, intent)["state"] == "posted"
+        assert len(transit.destroy_calls) == 1, "the destroy was attempted"
+
+    def test_the_posted_line_reaches_the_card_on_every_binding(self, pipe_db):
+        """The card is restated on EVERY active Telegram binding that shows
+        it, one edit each. The two cards share a message id, so an edit
+        keyed on the message alone would reach only one chat."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        bindings = [
+            _seed_card(pipe_db, intent),
+            _seed_card(pipe_db, intent, chat=f"-200{intent[:8]}"),
+        ]
+        deps = _deps(pipe_db, StubMetaAdapter())
+        assert _run(run_publish_pipeline(job, **deps)) == POSTED
+        edits = _exec(
+            pipe_db,
+            "SELECT binding_id, payload->>'supersedes_ref', payload->>'outcome_text'"
+            " FROM channel_outbox WHERE intent_id = %s AND kind = 'prompt_supersede'"
+            "   AND state = 'pending'",
+            (intent,),
+            fetch=True,
+        )
+        posted = sorted(
+            (b, msg) for b, msg, line in edits if line.startswith("✅ Posted")
+        )
+        assert posted == sorted((b, "77001") for b in bindings), edits
+
+
+class TestTheLinesNameTheRule:
+    """#1477: the lines the pipeline writes for a story a rule approved name
+    the rule where a person's name would stand — the posted line and a dry
+    run's here; the waiting line beside the cap wait's own test — read from the
+    story's own `approval_rule`."""
+
+    def test_the_posted_line_names_the_rule(self, pipe_db):
+        intent, ref = _new_intent(pipe_db, approval_rule="auto")
+        _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(ready_after_polls=1)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == POSTED
+        assert _card_line(pipe_db, intent).startswith("✅ Posted by YOLO · ")
+
+    def test_a_dry_runs_line_names_the_rule(self, pipe_db):
+        from src.services.target.publish_pipeline import POSTED_DRY_RUN
+
+        intent, ref = _new_intent(pipe_db, approval_rule="item")
+        _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, dry_run=True)
+        deps = _deps(pipe_db, StubMetaAdapter(), FakeTransit())
+        assert _run(run_publish_pipeline(job, **deps)) == POSTED_DRY_RUN
+        assert _card_line(pipe_db, intent).startswith(
+            "🧪 Dry run — not published by Auto-approve · "
+        )
+
+
+class TestTheFetchRung:
+    """The fetch and the upload are provider calls too (#1276): a file
+    that is gone or too large fails the intent with its refund; anything else
+    rides the ladder; a dead credential skips the ladder and lands on a human.
+    None of them may reach the loop's blanket reschedule, which would hold the
+    account's `uq_publish_exclusive` forever."""
+
+    def test_fetch_resolves_the_sources_provider_and_config(self, pipe_db):
+        """The pipeline joins source identity under the media's workspace."""
+        from src.worker import _publish_media_fetch
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        source, file_ref = _exec(
+            pipe_db,
+            "SELECT m.source_id, m.provider_file_ref FROM media_items m"
+            " JOIN post_intents i ON i.media_item_id = m.id WHERE i.id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        config = {
+            "v": 1,
+            "folder_ref": "folder-for-this-source",
+            "root_name": "stories",
+        }
+        _exec(
+            pipe_db,
+            "UPDATE media_sources SET config = %s::jsonb WHERE id = %s",
+            (json.dumps(config), source),
+        )
+        calls = []
+
+        class Adapter:
+            async def fetch_bytes(self, received_config, received_ref, **kwargs):
+                calls.append((received_config, received_ref, kwargs))
+                return b"media-bytes", "story.jpg", "image/jpeg"
+
+        fetch = _publish_media_fetch({"gdrive": Adapter()})
+        assert (
+            _run(
+                run_publish_pipeline(
+                    job, **_deps(pipe_db, StubMetaAdapter(), media_fetch=fetch)
+                )
+            )
+            == POSTED
+        )
+        assert len(calls) == 1
+        assert calls[0][:2] == (config, file_ref)
+        assert calls[0][2]["source_id"] == str(source)
+        assert calls[0][2]["workspace_id"] == str(pipe_db["ws"])
+
+    def test_a_provider_missing_from_the_registry_fails_and_refunds(self, pipe_db):
+        from src.worker import _publish_media_fetch
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter()
+        fetch = _publish_media_fetch({"another-provider": object()})
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, media_fetch=fetch)))
+            == FAILED
+        )
+        assert _intent_row(pipe_db, intent)["cap_refunded_at"] is not None
+        assert _bucket(pipe_db, _today_utc()) == 0
+        assert _job_row(pipe_db, job["id"])["state"] == "failed"
+        assert meta.create_calls == []
+
+    def test_a_gone_or_oversized_file_fails_and_refunds_with_the_reason(self, pipe_db):
+        from src.services.target.drive_adapter import DriveMediaTooLarge
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+
+        async def too_large(intent_row):
+            raise DriveMediaTooLarge(
+                "drive file f is 9000000 bytes; the cap is 8388608; "
+                "https://provider.invalid/media?access_token=private-provider-secret"
+            )
+
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, StubMetaAdapter(), media_fetch=too_large)
+            )
+        )
+        assert outcome == FAILED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "failed" and row["cap_refunded_at"] is not None
+        assert _bucket(pipe_db, _today_utc()) == 0, "the refund returned the slot"
+        assert _job_row(pipe_db, job["id"])["state"] == "failed"
+        reason = _exec(
+            pipe_db,
+            "SELECT last_error->'error'->>'type', last_error->'error'->>'message'"
+            " FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert reason == ("DriveMediaTooLarge", None)
+
+    def test_any_other_fetch_failure_rides_the_ladder_with_the_reason(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+
+        from src.services.target.drive_adapter import DriveRetryableError
+
+        async def flaky(intent_row):
+            raise DriveRetryableError("drive answered 503")
+
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, StubMetaAdapter(), media_fetch=flaky)
+            )
+        )
+        assert outcome == RETRY_SCHEDULED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved" and row["publish_step"] == "none"
+        assert _job_row(pipe_db, job["id"])["state"] != "failed"
+        reason = _exec(
+            pipe_db,
+            "SELECT last_error->'error'->>'type' FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0][0]
+        assert reason == "DriveRetryableError"
+
+    def test_a_dead_credential_skips_the_ladder_and_lands_on_a_human(self, pipe_db):
+        from src.services.target.meta_adapter import (
+            OAUTH_ERROR_CODE,
+            MetaRetryableError,
+        )
+
+        class _NoToken(StubMetaAdapter):
+            async def create_container(self, provider_account_ref, **kw):
+                raise MetaRetryableError(
+                    code=OAUTH_ERROR_CODE,
+                    message="no ig_login credential — connect Instagram",
+                )
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1, max_attempts=5)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, _NoToken())))
+        assert outcome == POISONED, "one attempt, not five: a retry mints no token"
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert _job_row(pipe_db, job["id"])["state"] == "review_required"
+        reason = _exec(
+            pipe_db,
+            "SELECT last_error->'error'->>'code', last_error->'error'->>'message'"
+            " FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert reason[0] == str(OAUTH_ERROR_CODE) and "connect Instagram" in reason[1]
+
+
+class TestTheReadinessPoll:
+    """A typed failure during the poll is one more pending rung — except a
+    dead credential, which goes to a human at once, as at the effects."""
+
+    def test_a_dead_credential_during_the_poll_lands_on_a_human_at_once(self, pipe_db):
+        from src.services.target.meta_adapter import (
+            OAUTH_ERROR_CODE,
+            MetaRetryableError,
+        )
+
+        class _NoTokenAtPoll(StubMetaAdapter):
+            async def container_status(self, container_id, **kw):
+                raise MetaRetryableError(
+                    code=OAUTH_ERROR_CODE, message="ig_login credential is 'revoked'"
+                )
+
+        intent, ref = _new_intent(
+            pipe_db,
+            state="publishing",
+            publish_step="container_created",
+            transit_ref=f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}",
+        )
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET ig_container_id = %s WHERE id = %s",
+            (f"pre-ctr-{uuid.uuid4()}", intent),
+        )
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1, max_attempts=5)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, _NoTokenAtPoll())))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        reason = _exec(
+            pipe_db,
+            "SELECT last_error->'error'->>'code', last_error->'error'->>'message'"
+            " FROM post_intents WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert reason[0] == str(OAUTH_ERROR_CODE) and "revoked" in reason[1]
+
+    def test_a_lost_answer_during_the_poll_is_one_more_pending_rung(self, pipe_db):
+        from src.services.target.meta_adapter import MetaLostResponse
+
+        class _Flaky(StubMetaAdapter):
+            async def container_status(self, container_id, **kw):
+                raise MetaLostResponse("GET ctr: ReadTimeout")
+
+        intent, ref = _new_intent(
+            pipe_db,
+            state="publishing",
+            publish_step="container_created",
+            transit_ref=f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}",
+        )
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET ig_container_id = %s WHERE id = %s",
+            (f"pre-ctr-{uuid.uuid4()}", intent),
+        )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, _Flaky())))
+        assert outcome == RETRY_SCHEDULED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved" and row["publish_step"] == "container_created"
+
+    def test_a_ready_checkpoint_that_matches_no_row_stops_before_the_publish(
+        self, pipe_db
+    ):
+        """#1438: the `container_ready` checkpoint is state-guarded: a miss
+        raises, as the checkpoints either side of it do, before the publish
+        permit and the provider's publish call."""
+        intent, ref = _new_intent(
+            pipe_db,
+            state="publishing",
+            publish_step="container_created",
+            transit_ref=f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}",
+        )
+
+        class _StepsBackWhilePolled(StubMetaAdapter):
+            async def container_status(self, container_id, **kw):
+                _exec(
+                    pipe_db,
+                    "UPDATE post_intents SET state = 'approved' WHERE id = %s",
+                    (intent,),
+                )
+                return await super().container_status(container_id, **kw)
+
+        meta = _StepsBackWhilePolled()
+        job = _leased_job(pipe_db, intent, ref=ref)
+        with pytest.raises(ValueError) as raised:
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert meta.publish_calls == [], "a missed checkpoint must not reach Meta"
+        assert "left 'publishing' mid-ladder" in str(raised.value)
+        assert [op for op in _ops(pipe_db, intent) if op["op_kind"] == "publish"] == []
+
+
+class TestPauseAndDryRun:
+    """Settings › General: Pause Posting holds an approved intent before the
+    cap is spent; Dry Run completes it as if published — the debit, the
+    rotation, the card — with no provider call."""
+
+    def _flag(self, pipe_db, column, value):
+        _exec(
+            pipe_db,
+            f"UPDATE workspaces SET {column} = %s WHERE id = %s",
+            (value, pipe_db["ws"]),
+        )
+
+    def test_a_paused_workspace_holds_the_job_and_spends_nothing(self, pipe_db):
+        from src.services.target.publish_pipeline import DEFERRED_PAUSED
+
+        self._flag(pipe_db, "is_paused", True)
+        try:
+            intent, ref = _new_intent(pipe_db)
+            job = _leased_job(pipe_db, intent, ref=ref)
+            meta = StubMetaAdapter()
+            outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+            assert outcome == DEFERRED_PAUSED
+            row = _intent_row(pipe_db, intent)
+            assert row["state"] == "approved", "held, not flipped"
+            assert _bucket(pipe_db, _today_utc()) in (None, 0), "no debit while paused"
+            assert meta.create_calls == [] and meta.publish_calls == []
+            after = _job_row(pipe_db, job["id"])
+            assert after["state"] != "failed"
+            assert after["attempts"] == job["attempts"] - 1, "the hold burns no attempt"
+        finally:
+            self._flag(pipe_db, "is_paused", False)
+
+    def test_a_cancel_asked_for_while_paused_is_honoured_not_held(self, pipe_db):
+        from src.services.target.publish_pipeline import CANCELLED
+
+        self._flag(pipe_db, "is_paused", True)
+        try:
+            intent, ref = _new_intent(pipe_db, cancel_requested=True)
+            job = _leased_job(pipe_db, intent, ref=ref)
+            outcome = _run(
+                run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter()))
+            )
+            assert outcome == CANCELLED
+            assert _intent_row(pipe_db, intent)["state"] == "cancelled"
+        finally:
+            self._flag(pipe_db, "is_paused", False)
+
+    def test_a_dry_run_completes_as_posted_without_a_provider(self, pipe_db):
+        """The decision is the JOB's snapshot, taken at approve — the
+        workspace flag is OFF here and the run is still a dry run."""
+        from src.services.target.publish_pipeline import POSTED_DRY_RUN
+
+        self._flag(pipe_db, "dry_run_mode", False)
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, dry_run=True)
+        binding = _exec(
+            pipe_db,
+            "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+            " VALUES (%s, 'telegram_group', %s) RETURNING id",
+            (pipe_db["ws"], f"-100{intent[:8]}"),
+            fetch=True,
+        )[0][0]
+        _exec(
+            pipe_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            " VALUES (%s, %s, 'approval_prompt', %s,"
+            ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text"}\', \'superseded\', \'77002\')',
+            (pipe_db["ws"], binding, intent),
+        )
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == POSTED_DRY_RUN
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "posted" and row["publish_step"] == "effect_confirmed"
+        via = _exec(
+            pipe_db,
+            "SELECT published_via, ig_media_id, ig_container_id FROM post_intents"
+            " WHERE id = %s",
+            (intent,),
+            fetch=True,
+        )[0]
+        assert via == ("dry_run", "dry-run", None)
+        assert meta.create_calls == [] and meta.publish_calls == [], "no provider call"
+        assert transit.upload_calls == [], "no transit upload either"
+        assert _bucket(pipe_db, _today_utc()) == 1, "the cap is spent, as a post would"
+        lock = _exec(
+            pipe_db,
+            "SELECT count(*) FROM post_locks l JOIN post_intents i"
+            " ON i.media_item_id = l.media_item_id WHERE i.id = %s AND l.kind = 'recent'",
+            (intent,),
+            fetch=True,
+        )[0][0]
+        assert lock == 1, "the rotation moves on"
+        edits = _exec(
+            pipe_db,
+            "SELECT payload->>'outcome_text' FROM channel_outbox"
+            " WHERE intent_id = %s AND kind = 'prompt_supersede' ORDER BY created_at",
+            (intent,),
+            fetch=True,
+        )
+        assert edits and edits[-1][0].startswith("🧪 Dry run"), edits
+        assert _job_row(pipe_db, job["id"])["state"] == "succeeded"
+
+    def test_a_dry_run_reclaimed_after_the_flip_never_climbs_the_ladder(self, pipe_db):
+        """The crash between the flip and the confirm: the re-claimed job finds
+        `publishing` at step `none` with no
+        permits — and confirms as a dry run, never fetching or calling Meta."""
+        from src.services.target.publish_pipeline import POSTED_DRY_RUN
+
+        intent, ref = _new_intent(pipe_db, state="publishing", publish_step="none")
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=2, dry_run=True)
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+
+        async def never(intent_row):
+            raise AssertionError("a dry run must not fetch media")
+
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, transit, media_fetch=never)
+            )
+        )
+        assert outcome == POSTED_DRY_RUN
+        assert _intent_row(pipe_db, intent)["state"] == "posted"
+        assert meta.create_calls == [] and transit.upload_calls == []
+
+    def test_a_pause_that_lands_after_the_flip_steps_back_at_step_none(self, pipe_db):
+        """A pause that lands after the flip steps the story back with its
+        debit (#1306), so no wait holds the account's slot."""
+        from src.services.target.publish_pipeline import DEFERRED_PAUSED
+
+        self._flag(pipe_db, "is_paused", True)
+        try:
+            intent, ref = _new_intent(pipe_db, state="publishing", publish_step="none")
+            job = _leased_job(pipe_db, intent, ref=ref)
+            meta = StubMetaAdapter()
+            outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+            assert outcome == DEFERRED_PAUSED
+            row = _intent_row(pipe_db, intent)
+            assert row["state"] == "approved" and row["cap_consumed_on"] is not None
+            assert meta.create_calls == []
+        finally:
+            self._flag(pipe_db, "is_paused", False)
+
+
+class TestColdEntryAtEveryCheckpoint:
+    """The gate's resume clause, strongest form: an intent LEFT at each
+    checkpoint by a death (its transaction committed, the process gone)
+    completes to posted when the job is re-claimed. Every rung is an entry
+    point, and no rung re-does work a prior rung committed."""
+
+    @pytest.mark.parametrize(
+        "step", ["none", "transit_uploaded", "container_created", "container_ready"]
+    )
+    def test_entry_at_each_committed_checkpoint_reaches_posted(self, pipe_db, step):
+        kwargs = {"state": "publishing", "publish_step": step}
+        if step in ("transit_uploaded", "container_created", "container_ready"):
+            kwargs["transit_ref"] = f"ws/{pipe_db['ws']}/pre-{uuid.uuid4()}"
+        intent, ref = _new_intent(pipe_db, **kwargs)
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+        if step in ("container_created", "container_ready"):
+            # any cid polls FINISHED on the default stub (ready_after_polls=0);
+            # minting it through create_container would pollute the counter
+            # this test asserts on
+            _exec(
+                pipe_db,
+                "UPDATE post_intents SET ig_container_id = %s WHERE id = %s",
+                (f"pre-ctr-{uuid.uuid4()}", intent),
+            )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == POSTED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "posted" and row["publish_step"] == "effect_confirmed"
+        assert len(meta.publish_calls) == 1
+        expected_uploads = 1 if step == "none" else 0
+        assert len(transit.upload_calls) == expected_uploads, (
+            "a committed checkpoint is never re-done"
+        )
+        expected_creates = 1 if step in ("none", "transit_uploaded") else 0
+        assert len(meta.create_calls) == expected_creates
+
+
+class TestKillResume:
+    """The kill matrix: a death at each provider seam, then a re-claimed
+    resume. What each kill leaves behind (committed checkpoints, unresolved
+    permits, orphan uploads) is exactly what a process death leaves — the
+    executor catches nothing untyped, so the Killed exception IS the crash."""
+
+    def _fresh(self, pipe_db, **stub_kw):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        return intent, ref, job, StubMetaAdapter(**stub_kw)
+
+    def test_K1_kill_after_the_flip_resumes_from_the_top_with_one_debit(self, pipe_db):
+        intent, ref, job, meta = self._fresh(pipe_db)
+        killer = KillAtFetch()
+        with pytest.raises(Killed):
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, media_fetch=killer)))
+        assert _intent_row(pipe_db, intent)["state"] == "publishing"
+        job2 = _reclaim(pipe_db, job["id"])
+        transit = FakeTransit()
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        assert _bucket(pipe_db, _today_utc()) == 1, (
+            "the flip committed once; the resume must not re-debit"
+        )
+        assert len(transit.upload_calls) == 1
+
+    def test_K2_kill_after_the_upload_orphans_one_asset_and_reuploads(self, pipe_db):
+        """The recoverable-effect cost: a duplicate transit upload is a second
+        short-lived asset — the sweep's to reap, never a reason to park."""
+        intent, ref, job, meta = self._fresh(pipe_db)
+        transit = FakeTransit(upload_kills=[True, False])
+        with pytest.raises(Killed):
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert _intent_row(pipe_db, intent)["publish_step"] == "none", (
+            "the checkpoint after the dead upload must not exist"
+        )
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        assert len(transit.upload_calls) == 2, "the orphan plus the used one"
+        assert (
+            _intent_row(pipe_db, intent)["transit_asset_ref"]
+            == transit.upload_calls[1]["ref"]
+        )
+
+    def test_K3_kill_between_container_permit_and_call_repermits_gen2(self, pipe_db):
+        """The container arm: permit committed, call never made.
+        An orphaned container is INERT — the resume marks the op failed
+        (lost_response), bumps the generation, creates fresh. NEVER
+        intent-level ambiguity."""
+        intent, ref, job, meta = self._fresh(pipe_db)
+        killing = KillBefore(meta, "create_container")
+        with pytest.raises(Killed):
+            _run(run_publish_pipeline(job, **_deps(pipe_db, killing)))
+        assert meta.create_calls == [], "no call was made under the dead permit"
+        assert _intent_row(pipe_db, intent)["state"] == "publishing", (
+            "container loss must not park the intent"
+        )
+        job2 = _reclaim(pipe_db, job["id"])
+        assert _run(run_publish_pipeline(job2, **_deps(pipe_db, meta))) == POSTED
+        ops = _ops(pipe_db, intent)
+        containers = [o for o in ops if o["op_kind"] == "container_create"]
+        assert [(o["generation"], o["state"]) for o in containers] == [
+            (1, "failed"),
+            (2, "succeeded"),
+        ]
+        assert containers[0]["response"]["error"] == "lost_response"
+
+    def test_K3b_a_kill_between_a_variants_permit_and_call_resumes_on_that_variant(
+        self, pipe_db
+    ):
+        """The float: the same K3 shape at a fresh url. The orphan
+        permit is resolved lost, the resume re-permits on the NEXT generation
+        and offers the same variant — a url Meta never saw, since the call
+        never happened."""
+        intent, ref, job, meta = self._fresh(pipe_db)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET attempts_by_step ="
+            ' \'{"v": 1, "fetch_refusals": 1}\' WHERE id = %s',
+            (intent,),
+        )
+        killing = KillBefore(meta, "create_container")
+        with pytest.raises(Killed):
+            _run(run_publish_pipeline(job, **_deps(pipe_db, killing)))
+        assert meta.create_calls == []
+        job2 = _reclaim(pipe_db, job["id"])
+        assert _run(run_publish_pipeline(job2, **_deps(pipe_db, meta))) == POSTED
+        containers = [
+            o for o in _ops(pipe_db, intent) if o["op_kind"] == "container_create"
+        ]
+        assert [(o["generation"], o["state"]) for o in containers] == [
+            (1, "failed"),
+            (2, "succeeded"),
+        ]
+        assert containers[0]["response"]["error"] == "lost_response"
+        assert containers[1]["response"]["url_variant"] == 1
+        assert meta.create_calls[0]["media_url"].endswith("v=1")
+
+    def test_K4_kill_before_the_readiness_poll_resumes_the_poll_only(self, pipe_db):
+        intent, ref, job, meta = self._fresh(pipe_db)
+        transit = FakeTransit()
+        killing = KillBefore(meta, "container_status")
+        with pytest.raises(Killed):
+            _run(run_publish_pipeline(job, **_deps(pipe_db, killing, transit)))
+        assert _intent_row(pipe_db, intent)["publish_step"] == "container_created"
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        assert len(transit.upload_calls) == 1 and len(meta.create_calls) == 1, (
+            "resume from container_created re-does nothing upstream"
+        )
+
+    def test_K5_kill_between_publish_permit_and_call_parks_with_ZERO_calls(
+        self, pipe_db
+    ):
+        """THE named case, verbatim in the gate: 'a kill between permit and
+        publish call lands publishing_ambiguous with ZERO retries'. The
+        resumed pipeline must not place the call the dead permit authorized —
+        at-most-once survives because the one authorization is never
+        re-called, and the count proves it."""
+        intent, ref, job, meta = self._fresh(pipe_db)
+        killing = KillBefore(meta, "publish")
+        with pytest.raises(Killed):
+            _run(run_publish_pipeline(job, **_deps(pipe_db, killing)))
+        assert meta.publish_calls == []
+        assert _intent_row(pipe_db, intent)["publish_step"] == "publish_called", (
+            "the permit IS the durable record that a publish may have been attempted"
+        )
+        job2 = _reclaim(pipe_db, job["id"])
+        outcome = _run(run_publish_pipeline(job2, **_deps(pipe_db, meta)))
+        assert outcome == PARKED_AMBIGUOUS
+        assert meta.publish_calls == [], "ZERO publish calls, ever, on this permit"
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "publishing_ambiguous"
+        publish_ops = [o for o in _ops(pipe_db, intent) if o["op_kind"] == "publish"]
+        assert [(o["generation"], o["state"]) for o in publish_ops] == [
+            (1, "ambiguous")
+        ]
+        assert _job_row(pipe_db, job["id"])["state"] == "succeeded"
+        assert _bucket(pipe_db, _today_utc()) == 1, "the debit stands under ambiguity"
+
+    def test_K6_lost_publish_response_parks_and_never_recalls(self, pipe_db):
+        """The other half: the call WAS placed and the response died on
+        the wire. One call total, park, and a further resume still refuses to
+        re-call — the reconciler owns it."""
+        intent, ref, job, meta = self._fresh(pipe_db, publish_outcomes=["transport"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert outcome == PARKED_AMBIGUOUS
+        assert len(meta.publish_calls) == 1
+        assert _intent_row(pipe_db, intent)["state"] == "publishing_ambiguous"
+        job3 = _reclaim(pipe_db, job["id"])
+        # The job terminalized 'succeeded'; a fresh claim of the SAME job is
+        # not possible in production (terminal rows are never re-readied) —
+        # but a DUPLICATE job for the same intent is. Model that instead.
+        _exec(
+            pipe_db,
+            "UPDATE jobs SET state = 'cancelled', lease_token = NULL WHERE id = %s",
+            (job3["id"],),
+        )
+        dup = _leased_job(pipe_db, intent, ref=f"dup-{uuid.uuid4()}")
+        outcome2 = _run(run_publish_pipeline(dup, **_deps(pipe_db, meta)))
+        assert outcome2 == PARKED_AMBIGUOUS
+        assert len(meta.publish_calls) == 1, "still exactly one provider call"
+        assert _job_row(pipe_db, dup["id"])["state"] == "succeeded"
+
+    def test_a_stale_owner_cannot_resume_over_the_new_one(self, pipe_db):
+        """Fencing end-to-end: after a re-claim, the DEAD owner's job dict
+        (old token) is refused at the first domain transaction."""
+        from src.services.target.jobs import JobFenced
+
+        intent, ref, job, meta = self._fresh(pipe_db)
+        _reclaim(pipe_db, job["id"])  # the new owner exists; old token stale
+        with pytest.raises(JobFenced):
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert meta.create_calls == [] and meta.publish_calls == []
+
+    def test_a_stale_owner_is_fenced_before_any_provider_work(self, pipe_db):
+        """The survivor-killer: for an APPROVED intent a stale owner is fenced
+        at the flip anyway, but for a PUBLISHING intent the first lease assert
+        is what stands between a zombie worker and REAL provider work —
+        without the load-time assert, the stale owner performs a genuine
+        transit upload before any checkpoint refuses it.
+        Executor mutation that reddens: drop assert_lease from _load."""
+        from src.services.target.jobs import JobFenced
+
+        intent, ref = _new_intent(pipe_db, state="publishing", publish_step="none")
+        job = _leased_job(pipe_db, intent, ref=ref)
+        _reclaim(pipe_db, job["id"])  # the old token is now a zombie's
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+        fetch = KillAtFetch()  # counting; must never be reached
+        with pytest.raises(JobFenced):
+            _run(
+                run_publish_pipeline(
+                    job, **_deps(pipe_db, meta, transit, media_fetch=fetch)
+                )
+            )
+        assert fetch.calls == 0 and transit.upload_calls == [], (
+            "a fenced worker must be refused BEFORE it does provider work"
+        )
+
+
+class TestError9:
+    def test_error_9_defers_to_the_next_slot_and_the_next_run_publishes_gen2(
+        self, pipe_db
+    ):
+        """Error 9 at the publish call, the whole arc: a cap, not a fault —
+        permit resolves failed (Meta said it definitively did not happen),
+        job reschedules to the account's next slot with the attempt
+        restored, cap_deferred audits, NO quarantine row, debit and key 4
+        stand. The next-slot run re-permits generation 2 and publishes —
+        exactly one provider call per authorization."""
+        slot = datetime.now(timezone.utc) + timedelta(hours=1)
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (slot, pipe_db["iga"]),
+        )
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        meta = StubMetaAdapter(publish_outcomes=["error_9"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert outcome == DEFERRED_META_CAP
+
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved", (
+            "a cap wait steps back too: the slot is free for the hours"
+        )
+        assert row["publish_step"] == "publish_called"
+        assert row["cap_refunded_at"] is None
+        assert _bucket(pipe_db, _today_utc()) == 1, "the debit stands"
+        after = _job_row(pipe_db, job["id"])
+        assert after["state"] == "ready"
+        assert abs((after["run_at"] - slot).total_seconds()) < 1
+        assert after["attempts"] == 0, "deferral is normal operation, not an attempt"
+        publish_ops = [o for o in _ops(pipe_db, intent) if o["op_kind"] == "publish"]
+        assert [(o["generation"], o["state"]) for o in publish_ops] == [(1, "failed")]
+        assert publish_ops[0]["response"]["error"] == 9
+        quarantine = _exec(
+            pipe_db,
+            "SELECT count(*) FROM provider_quarantine WHERE workspace_id = %s",
+            (pipe_db["ws"],),
+            fetch=True,
+        )
+        assert quarantine[0][0] == 0, "a cap is not a fault: no quarantine row"
+        audits = _exec(
+            pipe_db,
+            "SELECT detail->>'reason', from_state FROM audit_events"
+            " WHERE entity_id = %s AND detail->>'event' = 'cap_deferred'",
+            (intent,),
+            fetch=True,
+        )
+        # The wait's audit row names the state the story waits in: it steps
+        # back before the row is written (#1306).
+        assert audits == [("error_9", "approved")]
+
+        job2 = _reclaim(pipe_db, job["id"])
+        assert _run(run_publish_pipeline(job2, **_deps(pipe_db, meta))) == POSTED
+        publish_ops = [o for o in _ops(pipe_db, intent) if o["op_kind"] == "publish"]
+        assert [(o["generation"], o["state"]) for o in publish_ops] == [
+            (1, "failed"),
+            (2, "succeeded"),
+        ]
+        assert len(meta.publish_calls) == 2, "one call per authorization"
+        assert _bucket(pipe_db, _today_utc()) == 1, "no re-debit on the retry"
+
+
+class TestDefinitiveFailureClassification:
+    def test_a_terminal_provider_error_fails_and_refunds_in_one_tx(self, pipe_db):
+        """publishing→failed on a terminal provider error, with the cap refund
+        in the same tx."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(publish_outcomes=["terminal"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert outcome == FAILED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "failed"
+        assert row["cap_refunded_at"] is not None
+        assert _bucket(pipe_db, _today_utc()) == 0, "the refund returned the slot"
+        assert _job_row(pipe_db, job["id"])["state"] == "failed"
+
+    def test_a_retryable_error_reschedules_on_the_ladder_keeping_the_attempt(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        meta = StubMetaAdapter(publish_outcomes=["retryable"])
+        before = datetime.now(timezone.utc)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert outcome == RETRY_SCHEDULED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved" and row["publish_step"] == "publish_called"
+        after = _job_row(pipe_db, job["id"])
+        assert after["state"] == "ready"
+        assert after["attempts"] == 1, "a FAILURE keeps its attempt"
+        rung = (after["run_at"] - before).total_seconds()
+        assert 50 < rung < 90, f"first backoff rung is 60s, got {rung}"
+
+    def test_attempts_exhausted_on_a_retryable_class_poisons_to_review(self, pipe_db):
+        """publishing→review_required, debit RETAINED — only the
+        operator's resolve-failed refunds from there."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(publish_outcomes=["retryable"])
+        binding = _seed_card(pipe_db, intent)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["cap_refunded_at"] is None
+        assert _bucket(pipe_db, _today_utc()) == 1, "poison retains the debit"
+        assert _job_row(pipe_db, job["id"])["state"] == "review_required"
+        # The card keeps buttons: the workspace resolves its own
+        # review. The restate stores no keyboard; the sender renders the three
+        # resolutions when it claims the edit, from the story's state (#1477).
+        edit = _review_edit(pipe_db, intent, binding)
+        assert "Needs review" in edit["outcome_text"]
+        assert "reply_markup" not in edit
+        assert "attention" in _notices(pipe_db, intent, binding)[0]
+
+    def test_a_lost_container_create_retries_on_the_ladder_never_parks(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        meta = StubMetaAdapter(create_outcomes=["transport"])
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == RETRY_SCHEDULED
+        assert (
+            _intent_row(pipe_db, intent)["state"] == "approved"
+        )  # every wait steps back
+        containers = [
+            o for o in _ops(pipe_db, intent) if o["op_kind"] == "container_create"
+        ]
+        assert [(o["generation"], o["state"]) for o in containers] == [(1, "failed")]
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        assert len(transit.upload_calls) == 1, "the transit asset is reused"
+        assert len(meta.create_calls) == 2
+
+    def test_a_dead_container_steps_back_and_recreates_fresh(self, pipe_db):
+        """Readiness ERROR: the container is definitively gone. The ladder
+        steps BACK to transit_uploaded (the asset is still valid) and the
+        next run creates a fresh container under generation 2."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        meta = StubMetaAdapter(status_script=["ERROR"])
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == RETRY_SCHEDULED
+        row = _intent_row(pipe_db, intent)
+        assert row["publish_step"] == "transit_uploaded"
+        # #938: the rewound row carries no container id. The dead one is not
+        # merely unused — it is a pointer to a resource that no longer exists,
+        # and the next reader is a human. The id itself is not lost: the
+        # container_create op records it in `response_ref` under its own
+        # generation, which is also where the ladder reads generations from.
+        assert row["ig_container_id"] is None
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        containers = [
+            o for o in _ops(pipe_db, intent) if o["op_kind"] == "container_create"
+        ]
+        assert [(o["generation"], o["state"]) for o in containers] == [
+            (1, "succeeded"),
+            (2, "succeeded"),
+        ]
+        assert len(transit.upload_calls) == 1
+
+
+class TestADeadContainerIdDoesNotOutliveItsContainer:
+    """#938: on the RETRY path a stale container id lives only "between two
+    instants" — the step-back and the next run.
+
+    On the POISON path the early `return POISONED` means the step-back UPDATE is
+    never reached at all, and the row waits in `review_required` for a person to
+    resolve it (`resolve_review`, whose retry calls `publish_cap.resolve_retry`
+    and clears the id). So a poisoned row would keep the dead id while it waits,
+    which is the case an operator actually reads — and one column on the
+    step-back UPDATE does not touch it.
+    """
+
+    def test_a_dead_container_that_exhausts_attempts_poisons_without_the_dead_id(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(status_script=["ERROR"])
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["ig_container_id"] is None
+        # `publish_step` is deliberately NOT rewound here. It records how far
+        # the ladder got, which is what an operator resolving the intent needs;
+        # the container id is a pointer to a live resource, and there is no
+        # longer one. A NULL says that honestly where a dead id claims the
+        # opposite.
+        assert row["publish_step"] == "container_created"
+        containers = [
+            o for o in _ops(pipe_db, intent) if o["op_kind"] == "container_create"
+        ]
+        # The id is recorded where the history belongs, so clearing the row
+        # column loses nothing forensic.
+        assert containers and containers[0]["response"]["container_id"]
+
+    def test_a_poison_that_did_NOT_rewind_keeps_its_container_id(self, pipe_db):
+        """The guard that stops this becoming a blanket clear.
+
+        Poison is shared by every retryable class. A poison after a failed
+        PUBLISH leaves a container that is still LIVE and reusable — nulling its
+        id there would throw away a valid pointer, and the resulting row would
+        be no more honest than a row that keeps a dead id (#938), only wrong in
+        the other direction. Only a caller that rewound past the container rung
+        is saying the container is gone.
+        """
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(publish_outcomes=["retryable"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["ig_container_id"] is not None, (
+            "the container was never abandoned — this poison did not rewind"
+        )
+
+
+class TestRoutingAndCancel:
+    def test_an_ambiguous_intent_is_the_reconcilers_never_touched(self, pipe_db):
+        intent, ref = _new_intent(pipe_db, state="publishing_ambiguous")
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta)))
+        assert outcome == PARKED_AMBIGUOUS
+        assert _intent_row(pipe_db, intent)["state"] == "publishing_ambiguous"
+        assert meta.publish_calls == [] and meta.create_calls == []
+        assert _job_row(pipe_db, job["id"])["state"] == "succeeded"
+
+    def test_a_review_required_intent_is_the_operators(self, pipe_db):
+        intent, ref = _new_intent(pipe_db, state="review_required")
+        job = _leased_job(pipe_db, intent, ref=ref)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+        assert outcome == CANCELLED
+        assert _intent_row(pipe_db, intent)["state"] == "review_required"
+        assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
+
+    def test_a_terminal_intent_cancels_the_duplicate_job(self, pipe_db):
+        intent, ref = _new_intent(pipe_db, state="expired")
+        job = _leased_job(pipe_db, intent, ref=ref)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+        assert outcome == CANCELLED
+        assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
+
+    def test_cancel_requested_is_honored_before_the_flip_only(self, pipe_db):
+        """approved→cancelled is always honorable pre-publish, and
+        force-cancel after is forbidden. Pre-flip honor costs zero provider
+        work and zero debit."""
+        intent, ref = _new_intent(pipe_db, cancel_requested=True)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter()
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == CANCELLED
+        assert _intent_row(pipe_db, intent)["state"] == "cancelled"
+        assert _bucket(pipe_db, _today_utc()) in (None, 0)
+        assert transit.upload_calls == [] and meta.create_calls == []
+        assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
+        edges = _exec(
+            pipe_db,
+            "SELECT from_state, to_state FROM audit_events"
+            " WHERE entity_id = %s AND to_state = 'cancelled'",
+            (intent,),
+            fetch=True,
+        )
+        assert ("approved", "cancelled") in [tuple(e) for e in edges]
+
+
+class TestATerminalStoryLosesItsTransitCopy:
+    """The inline destroy at every end, not only `posted` and the worker's
+    cancel: a FAILED story's copy goes after the fail commits, and a story
+    GIVEN UP from review — in the API, which holds no transit credentials —
+    mints a `publish_pipeline` job that meets the intent `cancelled`,
+    destroys the copy and finalizes, posting nothing. Otherwise the copy
+    would wait for the 48 h sweep (every 6 h): up to ~54 h on Cloudinary."""
+
+    def test_a_failed_story_s_copy_is_destroyed_after_the_fail_commits(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        transit = FakeTransit()
+        meta = StubMetaAdapter(publish_outcomes=["terminal"])
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit))) == (
+            FAILED
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "failed"
+        assert transit.destroy_calls == [row["transit_asset_ref"]]
+        assert row["transit_asset_ref"] == transit.upload_calls[0]["ref"]
+
+    def test_a_failed_destroy_leaves_the_story_failed(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        transit = FakeTransit(destroy_raises=True)
+        meta = StubMetaAdapter(publish_outcomes=["terminal"])
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit))) == (
+            FAILED
+        )
+        assert len(transit.destroy_calls) == 1, "attempted, and swallowed"
+        assert _intent_row(pipe_db, intent)["state"] == "failed"
+        assert _job_row(pipe_db, job["id"])["state"] == "failed"
+
+    def test_a_fetch_failure_has_no_copy_to_destroy(self, pipe_db):
+        from src.services.target.drive_adapter import DriveMediaTooLarge
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        transit = FakeTransit()
+
+        async def too_large(intent_row):
+            raise DriveMediaTooLarge("too large")
+
+        outcome = _run(
+            run_publish_pipeline(
+                job,
+                **_deps(pipe_db, StubMetaAdapter(), transit, media_fetch=too_large),
+            )
+        )
+        assert outcome == FAILED and transit.destroy_calls == []
+
+    def _give_up(self, pipe_db, intent):
+        from src.services.target import commands
+        from src.services.target.commands import Command
+        from src.services.target.unit_of_work import unit_of_work
+
+        async def go():
+            uow = unit_of_work(
+                pipe_db["engine"],
+                str(pipe_db["ws"]),
+                actor_kind="user",
+                actor_user_id=str(pipe_db["user"]),
+                channel="web",
+            )
+            async with uow.begin() as session:
+                return await commands.execute(
+                    session,
+                    Command(
+                        kind="resolve_review",
+                        workspace_id=str(pipe_db["ws"]),
+                        actor_user_id=str(pipe_db["user"]),
+                        channel="web",
+                        args={"intent_id": intent, "resolution": "cancel"},
+                    ),
+                )
+
+        return _run(go())
+
+    def _minted(self, pipe_db, intent):
+        return _exec(
+            pipe_db,
+            "SELECT id, serialization_key, state FROM jobs"
+            " WHERE kind = 'publish_pipeline' AND payload->>'intent_id' = %s",
+            (intent,),
+            fetch=True,
+        )
+
+    def test_a_give_up_mints_the_job_that_destroys_the_copy(self, pipe_db):
+        intent, ref = _new_intent(
+            pipe_db,
+            state="review_required",
+            publish_step="publish_called",
+            transit_ref="ws/x/given-up",
+        )
+        out = self._give_up(pipe_db, intent)
+        assert out.outcome == "executed" and out.data["state"] == "cancelled"
+        minted = self._minted(pipe_db, intent)
+        assert [(m[1], m[2]) for m in minted] == [(f"ig:{ref}", "ready")]
+
+        # The worker claims it (the claim's shape, as `_reclaim` writes it):
+        # the intent is already terminal, so the copy goes and nothing posts.
+        job = _reclaim(pipe_db, minted[0][0])
+        transit, meta = FakeTransit(), StubMetaAdapter()
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit))) == (
+            CANCELLED
+        )
+        assert transit.destroy_calls == ["ws/x/given-up"]
+        assert transit.upload_calls == [] and meta.create_calls == []
+        assert meta.publish_calls == []
+        assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "cancelled"
+        assert row["cap_refunded_at"] is None, "a give-up retains its debit"
+
+        # A second claim (a crash between the destroy and the finalize, a
+        # reaper re-ready) is the same idempotent route, never an error loop.
+        again = _reclaim(pipe_db, job["id"])
+        assert _run(run_publish_pipeline(again, **_deps(pipe_db, meta, transit))) == (
+            CANCELLED
+        )
+        assert transit.destroy_calls == ["ws/x/given-up"] * 2
+        assert meta.publish_calls == []
+
+    def test_a_give_up_without_a_copy_mints_nothing(self, pipe_db):
+        intent, _ = _new_intent(
+            pipe_db, state="review_required", publish_step="container_ready"
+        )
+        assert self._give_up(pipe_db, intent).data["state"] == "cancelled"
+        assert self._minted(pipe_db, intent) == []
+
+
+class TestThePrecheck:
+    def test_an_over_cap_advisory_defers_before_any_work_including_the_flip(
+        self, pipe_db
+    ):
+        """The pre-check runs immediately before the flip and its
+        whole value is skipping doomed work — so an over-cap advisory must
+        leave NO debit, NO transit upload, NO container."""
+        slot = datetime.now(timezone.utc) + timedelta(minutes=30)
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (slot, pipe_db["iga"]),
+        )
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=1)
+        meta = StubMetaAdapter(quota_usage=100, quota_total=100)
+        transit = FakeTransit()
+        outcome = _run(
+            run_publish_pipeline(
+                job,
+                **_deps(
+                    pipe_db, meta, transit, precheck=UsagePrecheck(ttl_seconds=300)
+                ),
+            )
+        )
+        assert outcome == DEFERRED_META_CAP
+        assert _intent_row(pipe_db, intent)["state"] == "approved"
+        assert _bucket(pipe_db, _today_utc()) in (None, 0), "no debit before the flip"
+        assert transit.upload_calls == [] and meta.create_calls == []
+        # The adapter is addressed by the ACCOUNT's live identity, not the
+        # intent's snapshot of it (a pre-connect intent carries the manual
+        # placeholder; the connect rewrites only the account, #1276).
+        account_ref = _exec(
+            pipe_db,
+            "SELECT provider_account_ref FROM ig_accounts WHERE id = %s",
+            (pipe_db["iga"],),
+            fetch=True,
+        )[0][0]
+        assert meta.usage_calls == [account_ref]
+        after = _job_row(pipe_db, job["id"])
+        assert after["state"] == "ready" and after["attempts"] == 0
+        audits = _exec(
+            pipe_db,
+            "SELECT detail->>'reason' FROM audit_events"
+            " WHERE entity_id = %s AND detail->>'event' = 'cap_deferred'",
+            (intent,),
+            fetch=True,
+        )
+        assert [a[0] for a in audits] == ["meta_advisory"]
+
+    def test_under_the_cap_the_check_reads_once_and_the_publish_proceeds(self, pipe_db):
+        """The other answer, through `_admit` with a real `UsagePrecheck`:
+        one usage read, then the ladder runs to `posted` untouched."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(quota_usage=1, quota_total=100)
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, precheck=UsagePrecheck(ttl_seconds=300))
+            )
+        )
+        assert outcome == POSTED
+        assert len(meta.usage_calls) == 1
+        assert _intent_row(pipe_db, intent)["state"] == "posted"
+
+    def test_a_dry_run_never_reads_usage_even_with_the_check_armed(self, pipe_db):
+        """Dry Run Mode's contract is that nothing reaches Instagram; the
+        usage read is a Meta call with the account's token, and Meta's cap
+        must not hold a rehearsal that spends none of it (#1299)."""
+        from src.services.target.publish_pipeline import POSTED_DRY_RUN
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, dry_run=True)
+        meta = StubMetaAdapter(quota_usage=100, quota_total=100)
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, precheck=UsagePrecheck(ttl_seconds=300))
+            )
+        )
+        assert outcome == POSTED_DRY_RUN
+        assert meta.usage_calls == [] and meta.create_calls == []
+
+    def test_the_default_is_off_no_precheck_no_usage_reads(self, pipe_db):
+        """The flag is OFF by default — the default executor call makes
+        zero usage reads (a cost the check has not yet earned)."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter()
+        assert _run(run_publish_pipeline(job, **_deps(pipe_db, meta))) == POSTED
+        assert meta.usage_calls == []
+
+
+class TestTheJobsDoors:
+    def test_a_fenced_reschedule_is_refused_not_silently_dropped(self, pipe_db):
+        """`reschedule_job` is CAS'd like finalization: after a re-claim, the
+        dead owner's reschedule matches zero rows and RAISES — a silent zero
+        would let a stale worker believe it deferred a job the new owner is
+        actively running.
+        Executor mutation that reddens: drop the rowcount check."""
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from src.services.target.jobs import JobFenced, reschedule_job
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        _reclaim(pipe_db, job["id"])  # stale-ify the first token
+
+        async def go():
+            maker = async_sessionmaker(pipe_db["engine"], expire_on_commit=False)
+            async with maker() as session:
+                async with session.begin():
+                    await reschedule_job(
+                        session,
+                        job["id"],
+                        job["lease_token"],
+                        run_at=datetime.now(timezone.utc),
+                        restore_attempt=True,
+                    )
+
+        with pytest.raises(JobFenced):
+            _run(go())
+        assert _job_row(pipe_db, job["id"])["state"] == "leased", (
+            "the new owner's lease survives the stale reschedule attempt"
+        )
+
+
+def _seed_card(pipe_db, intent, *, chat=None, tapped=True):
+    """The approval card exactly as the tap leaves it: the card row already
+    `superseded` with the tap's line, the tap's own edit sent. Untapped, it is
+    a sent card that still has its buttons. A second *chat* puts the same card
+    on a further binding, under the same message id: Telegram numbers messages
+    per chat, so two chats can share one."""
+    binding = _exec(
+        pipe_db,
+        "INSERT INTO channel_bindings (workspace_id, channel, external_ref)"
+        " VALUES (%s, 'telegram_group', %s) RETURNING id",
+        (pipe_db["ws"], chat or f"-100{intent[:8]}"),
+        fetch=True,
+    )[0][0]
+    if not tapped:
+        _exec(
+            pipe_db,
+            "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+            " payload, state, external_message_ref)"
+            " VALUES (%s, %s, 'approval_prompt', %s,"
+            ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text"}\', \'sent\', \'77001\')',
+            (pipe_db["ws"], binding, intent),
+        )
+        return binding
+    _exec(
+        pipe_db,
+        "INSERT INTO channel_outbox (workspace_id, binding_id, kind, intent_id,"
+        " payload, state, external_message_ref)"
+        " VALUES (%s, %s, 'approval_prompt', %s,"
+        ' \'{"v": 2, "text": "📸 f.jpg", "sent_as": "text",'
+        ' "outcome_text": "✅ Approved by Ada · 12:00 UTC"}\','
+        " 'superseded', '77001'),"
+        " (%s, %s, 'prompt_supersede', %s,"
+        ' \'{"v": 1, "external_message_ref": "77001", "sent_as": "text",'
+        ' "outcome_text": "✅ Approved by Ada · 12:00 UTC"}\','
+        " 'sent', '77001')",
+        (pipe_db["ws"], binding, intent, pipe_db["ws"], binding, intent),
+    )
+    return binding
+
+
+def _card_line(pipe_db, intent):
+    return _exec(
+        pipe_db,
+        "SELECT payload->>'outcome_text' FROM channel_outbox"
+        " WHERE intent_id = %s AND kind = 'approval_prompt'",
+        (intent,),
+        fetch=True,
+    )[0][0]
+
+
+def _review_edit(pipe_db, intent, binding):
+    """The pending card edit the park queued on *binding* — its payload."""
+    rows = _exec(
+        pipe_db,
+        "SELECT payload FROM channel_outbox"
+        " WHERE intent_id = %s AND binding_id = %s AND kind = 'prompt_supersede'"
+        "   AND state = 'pending' ORDER BY created_at DESC LIMIT 1",
+        (intent, binding),
+        fetch=True,
+    )
+    assert rows, "no pending card edit was queued"
+    payload = rows[0][0]
+    return payload if isinstance(payload, dict) else json.loads(payload)
+
+
+def _notices(pipe_db, intent, binding):
+    """The notifications for *intent* on *binding* — one per push binding is
+    written, and the module-scoped world accumulates bindings across tests."""
+    return [
+        r[0]
+        for r in _exec(
+            pipe_db,
+            "SELECT payload->>'text' FROM channel_outbox"
+            " WHERE intent_id = %s AND binding_id = %s AND kind = 'notification'"
+            " ORDER BY created_at",
+            (intent, binding),
+            fetch=True,
+        )
+    ]
+
+
+class TestTheFirstFetch:
+    """Meta's "media could not be fetched" (9004) is a FETCH failure every
+    time it happens, so it rides the ladder like any retryable answer and can
+    never lock a file or fail a story on its own; the ladder's end is the
+    workspace's review.
+
+    The frame must serve before Meta is told to fetch it, a 9004 is
+    retried — and every terminal outcome is said on the card and to the
+    workspace at once."""
+
+    def test_a_frame_not_serving_is_retried_never_handed_to_meta(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter()
+        transit = FakeTransit(ready_script=[False])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == RETRY_SCHEDULED
+        assert transit.ready_calls and meta.create_calls == [], (
+            "a URL that does not serve must not reach Meta"
+        )
+        row = _intent_row(pipe_db, intent)
+        # A 404 after the whole probe budget is an asset the CDN does not
+        # know: the story steps back to step `none` without its ref and the
+        # next run uploads afresh (#1306) — still on
+        # the ladder, still never handed to Meta.
+        assert row["state"] == "approved" and row["publish_step"] == "none"
+        assert row["transit_asset_ref"] is None
+        assert row["last_error"]["error"]["type"] == "TransitNotReady"
+        # What the probe last saw rides the reason.
+        assert row["last_error"]["error"]["probe"]["status"] == 404
+        assert row["last_error"]["error"]["probe"]["content_type"] == "image/gif"
+        assert _job_row(pipe_db, job["id"])["state"] == "ready"
+
+    def test_a_refused_fetch_is_retried_at_once_with_a_fresh_url_and_posts(
+        self, pipe_db
+    ):
+        """The float: a url Meta has never seen clears a refusal
+        at once — five of six in the experiments. One run, two container
+        calls, the second on variant 1; the job's attempt untouched; the story
+        posts with no error left on it."""
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal", "ok"], ready_after_polls=1)
+        transit = FakeTransit()
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == POSTED
+        urls = [c["media_url"] for c in meta.create_calls]
+        assert len(urls) == 2 and urls[0].endswith("v=0") and urls[1].endswith("v=1")
+        ops = _exec(
+            pipe_db,
+            "SELECT state, generation, response_ref::text FROM provider_operations"
+            " WHERE intent_id = %s AND op_kind = 'container_create' ORDER BY generation",
+            (intent,),
+            fetch=True,
+        )
+        refused, accepted = json.loads(ops[0][2]), json.loads(ops[1][2])
+        assert ops[0][0] == "failed" and refused["fetch_failed"]
+        assert refused["url_variant"] == 0 and refused["meta"]["subcode"] == 2207052
+        assert refused["meta"]["fbtrace_id"] and isinstance(refused["elapsed_ms"], int)
+        assert refused["probe"]["status"] == 206 and refused["probe"]["magic"] == "jpeg"
+        assert ops[1][0] == "succeeded" and accepted["url_variant"] == 1
+        assert accepted["container_id"] and accepted["probe"]["status"] == 206
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "posted"
+        assert row["last_error"] is None, "posted clears the error"
+        assert row["attempts_by_step"]["fetch_refusals"] == 1
+        assert _job_row(pipe_db, job["id"])["attempts"] == 1, (
+            "a fresh url costs no attempt"
+        )
+        assert _notices(pipe_db, intent, binding) == []
+        assert _card_line(pipe_db, intent).startswith("✅ Posted")
+
+    def test_a_round_is_three_fresh_urls_then_the_story_steps_back(self, pipe_db):
+        """Four refusals in one run — the first url and three fresh ones —
+        and the story leaves the slot: `approved`, progress and debit kept,
+        the job due in 30 s with its attempt restored, the wait audited with
+        its class and rung, nothing said to the workspace."""
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal"] * 4)
+        transit = FakeTransit()
+        before = datetime.now(timezone.utc)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+        assert outcome == RETRY_SCHEDULED
+        urls = [c["media_url"] for c in meta.create_calls]
+        assert [u.rsplit("v=", 1)[1] for u in urls] == ["0", "1", "2", "3"]
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved", "a waiting story holds no slot"
+        assert row["publish_step"] == "transit_uploaded" and row["transit_asset_ref"]
+        assert row["cap_consumed_on"] is not None, "the debit stays through the wait"
+        counters = row["attempts_by_step"]
+        assert counters["fetch_refusals"] == 4 and counters["fetch_waits"] == 1
+        assert counters["float_since"]
+        after = _job_row(pipe_db, job["id"])
+        assert after["state"] == "ready" and after["attempts"] == 0, (
+            "a fetch wait restores the attempt: the float's bound is its own ladder"
+        )
+        wait = (after["run_at"] - before).total_seconds()
+        assert 0 < wait <= FETCH_RETRY_SECONDS[0] * 1.3
+        hops = _exec(
+            pipe_db,
+            "SELECT from_state, to_state, detail::text FROM audit_events"
+            " WHERE entity_id = %s ORDER BY created_at",
+            (intent,),
+            fetch=True,
+        )
+        assert ("publishing", "approved") in [(h[0], h[1]) for h in hops]
+        waits = [json.loads(h[2]) for h in hops if h[2] and "float_wait" in h[2]]
+        assert waits and waits[-1]["class"] == "fetch" and waits[-1]["rung"] == 1
+        assert waits[-1]["seconds"] == FETCH_RETRY_SECONDS[0]
+        assert _notices(pipe_db, intent, binding) == [], "a wait says nothing"
+
+    def test_the_next_round_offers_urls_meta_has_never_seen_and_re_enters_at_its_step(
+        self, pipe_db
+    ):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal"] * 5 + ["ok"])
+        transit = FakeTransit()
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            == RETRY_SCHEDULED
+        )
+        day = _intent_row(pipe_db, intent)["cap_consumed_on"]
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        variants = [c["media_url"].rsplit("v=", 1)[1] for c in meta.create_calls]
+        assert variants == ["0", "1", "2", "3", "4", "5"], (
+            "no round re-offers a refused url"
+        )
+        assert len(transit.upload_calls) == 1, "re-entry continues at its step"
+        assert _bucket(pipe_db, day) == 1, "one debit across both runs"
+        row = _intent_row(pipe_db, intent)
+        assert (
+            row["state"] == "posted" and row["attempts_by_step"]["fetch_refusals"] == 5
+        )
+
+    def test_a_sibling_publishes_while_the_story_waits(self, pipe_db):
+        waiting, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, waiting, ref=ref)
+        transit = FakeTransit()
+        meta = StubMetaAdapter(create_outcomes=["terminal"] * 4)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            == RETRY_SCHEDULED
+        )
+        sibling, _ = _new_intent(pipe_db, ref=ref)
+        job_s = _leased_job(pipe_db, sibling, ref=ref)
+        assert (
+            _run(run_publish_pipeline(job_s, **_deps(pipe_db, StubMetaAdapter())))
+            == POSTED
+        ), "the slot is free while the story waits"
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(
+                run_publish_pipeline(job2, **_deps(pipe_db, StubMetaAdapter(), transit))
+            )
+            == POSTED
+        )
+
+    def test_the_fetch_ladder_is_indexed_by_fetch_waits_not_job_attempts(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET attempts_by_step = %s::jsonb WHERE id = %s",
+            (
+                json.dumps(
+                    {
+                        "v": 1,
+                        "fetch_refusals": 4,
+                        "fetch_waits": 1,
+                        "float_since": "2030-01-01T00:00:00+00:00",
+                    }
+                ),
+                intent,
+            ),
+        )
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=3)
+        meta = StubMetaAdapter(create_outcomes=["terminal"] * 4)
+        before = datetime.now(timezone.utc)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+            == RETRY_SCHEDULED
+        )
+        after = _job_row(pipe_db, job["id"])
+        wait = (after["run_at"] - before).total_seconds()
+        assert FETCH_RETRY_SECONDS[1] * 0.9 <= wait <= FETCH_RETRY_SECONDS[1] * 1.3, (
+            f"the second fetch wait, not the job's third attempt ({wait:.0f}s)"
+        )
+        assert after["attempts"] == 2, "restored"
+        assert _intent_row(pipe_db, intent)["attempts_by_step"]["fetch_waits"] == 2
+
+    def test_the_sixth_fetch_wait_parks_the_story_and_says_how_long_it_tried(
+        self, pipe_db
+    ):
+        """The ladder's end is the review card, not a verdict on the file: the
+        workspace looks and chooses — the cap is retained, no lock, and the
+        notice says how long Instagram was tried."""
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        since = (datetime.now(timezone.utc) - timedelta(minutes=33)).isoformat()
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET attempts_by_step = %s::jsonb WHERE id = %s",
+            (
+                json.dumps(
+                    {
+                        "v": 1,
+                        "fetch_refusals": 24,
+                        "fetch_waits": 6,
+                        "float_since": since,
+                    }
+                ),
+                intent,
+            ),
+        )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal"] * 4)
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["last_error"]["error"]["code"] == 9004
+        assert row["cap_refunded_at"] is None
+        locks = _exec(
+            pipe_db,
+            "SELECT count(*) FROM post_locks WHERE media_item_id = %s",
+            (row["media_item_id"],),
+            fetch=True,
+        )[0][0]
+        assert locks == 0
+        edit = _review_edit(pipe_db, intent, binding)
+        assert "Needs review" in edit["outcome_text"] and "reply_markup" not in edit
+        notices = _notices(pipe_db, intent, binding)
+        assert len(notices) == 1 and "33 minutes" in notices[0]
+
+    def test_a_container_meta_cannot_find_is_recreated_not_republished(self, pipe_db):
+        """Meta can answer the publish call "resource does not exist" about a
+        container it has reported ready. Recreate it on a short wait, never
+        re-publish the id."""
+        from src.services.target.publish_pipeline import CONTAINER_GONE_RETRY_SECONDS
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(publish_outcomes=["container_gone", "ok"])
+        transit = FakeTransit()
+        before = datetime.now(timezone.utc)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            == RETRY_SCHEDULED
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved" and row["publish_step"] == "transit_uploaded"
+        assert (
+            row["ig_container_id"] is None
+            and row["attempts_by_step"]["container_gone"] == 1
+        )
+        after = _job_row(pipe_db, job["id"])
+        assert (
+            0
+            < (after["run_at"] - before).total_seconds()
+            <= CONTAINER_GONE_RETRY_SECONDS[0] * 1.3
+        )
+        assert after["attempts"] == 0
+        gone = _exec(
+            pipe_db,
+            "SELECT response_ref::text FROM provider_operations"
+            " WHERE intent_id = %s AND op_kind = 'publish' ORDER BY generation",
+            (intent,),
+            fetch=True,
+        )
+        assert json.loads(gone[0][0])["container_gone"] is True
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        assert len(meta.create_calls) == 2
+        assert (
+            meta.publish_calls[1]["container_id"]
+            != meta.publish_calls[0]["container_id"]
+        )
+
+    def test_an_ordinary_retryable_answer_steps_back_too(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["retryable"])  # code 4, the rate limit
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+            == RETRY_SCHEDULED
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved" and row["publish_step"] == "transit_uploaded"
+        assert _job_row(pipe_db, job["id"])["attempts"] == 1, (
+            "an ordinary retryable answer still spends the attempt (its ladder is the job's)"
+        )
+
+    def test_a_container_still_pending_steps_back(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(ready_after_polls=99)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+            == RETRY_SCHEDULED
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved" and row["publish_step"] == "container_created"
+        assert row["ig_container_id"], "the container is kept for the next poll"
+
+    def test_busy_re_checks_back_off(self, pipe_db):
+        from src.services.target.publish_pipeline import (
+            BUSY_RETRY_SECONDS,
+            DEFERRED_BUSY,
+        )
+
+        busy, ref = _new_intent(pipe_db, state="publishing")
+        sibling, _ = _new_intent(pipe_db, ref=ref)
+        job = _leased_job(pipe_db, sibling, ref=ref, attempts=1)
+        waits = []
+        for _ in range(4):
+            before = datetime.now(timezone.utc)
+            assert (
+                _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+                == DEFERRED_BUSY
+            )
+            after = _job_row(pipe_db, job["id"])
+            waits.append(round((after["run_at"] - before).total_seconds()))
+            job = _reclaim(pipe_db, job["id"])
+        expected = list(BUSY_RETRY_SECONDS) + [BUSY_RETRY_SECONDS[-1]]
+        assert all(abs(w - e) <= 2 for w, e in zip(waits, expected)), (waits, expected)
+        assert waits[0] < waits[1] < waits[2], (
+            f"each busy re-check waits longer than the last: {waits}"
+        )
+
+    def test_a_local_cap_wait_says_when_on_the_card(self, pipe_db):
+        """The local arm: the flip's cap deferral is a
+        wait of hours, so the card's line says when — the same line the
+        Meta error-9 arm writes. Nothing else is said (no notice)."""
+        slot = datetime.now(timezone.utc) + timedelta(hours=2)
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (slot, pipe_db["iga"]),
+        )
+        _exec(
+            pipe_db,
+            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
+            " local_date, count, cap_at_write) VALUES (%s, %s, %s, 3, 3)",
+            (pipe_db["ws"], pipe_db["iga"], _today_utc()),
+        )
+        intent, ref = _new_intent(pipe_db)
+        _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+            == DEFERRED_CAP
+        )
+        line = _card_line(pipe_db, intent)
+        assert line.startswith("✅ Approved · posts tomorrow"), line
+        notices = _exec(
+            pipe_db,
+            "SELECT count(*) FROM channel_outbox WHERE intent_id = %s"
+            " AND kind NOT IN ('approval_prompt', 'prompt_supersede')",
+            (intent,),
+            fetch=True,
+        )[0][0]
+        assert notices == 0, "a cap wait is said on the card, never as a notice"
+
+    def test_error_9_steps_back_and_the_card_says_when(self, pipe_db):
+        slot = datetime.now(timezone.utc) + timedelta(hours=2)
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (slot, pipe_db["iga"]),
+        )
+        intent, ref = _new_intent(pipe_db)
+        _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(publish_outcomes=["error_9", "ok"])
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta))) == DEFERRED_META_CAP
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved" and row["cap_consumed_on"] is not None
+        assert row["ig_container_id"], "the container is kept for the slot"
+        line = _card_line(pipe_db, intent)
+        assert line.startswith("✅ Approved · posts "), line
+        job2 = _reclaim(pipe_db, job["id"])
+        assert _run(run_publish_pipeline(job2, **_deps(pipe_db, meta))) == POSTED
+
+    def test_a_stepped_back_story_is_held_while_the_workspace_is_paused(self, pipe_db):
+        from src.services.target.publish_pipeline import DEFERRED_PAUSED
+
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal"] * 4)
+        transit = FakeTransit()
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            == RETRY_SCHEDULED
+        )
+        _exec(
+            pipe_db,
+            "UPDATE workspaces SET is_paused = true WHERE id = %s",
+            (pipe_db["ws"],),
+        )
+        try:
+            job2 = _reclaim(pipe_db, job["id"])
+            assert (
+                _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit)))
+                == DEFERRED_PAUSED
+            )
+        finally:
+            _exec(
+                pipe_db,
+                "UPDATE workspaces SET is_paused = false WHERE id = %s",
+                (pipe_db["ws"],),
+            )
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved" and row["cap_consumed_on"] is not None
+        assert len(meta.create_calls) == 4, "nothing more spent while paused"
+
+    def test_a_cancel_while_floating_refunds_and_destroys(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal"] * 4)
+        transit = FakeTransit()
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            == RETRY_SCHEDULED
+        )
+        day = _intent_row(pipe_db, intent)["cap_consumed_on"]
+        assert _bucket(pipe_db, day) == 1
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET cancel_requested = true WHERE id = %s",
+            (intent,),
+        )
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit)))
+            == CANCELLED
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "cancelled" and row["cap_refunded_at"] is not None
+        assert _bucket(pipe_db, day) == 0, "the debit it carried is returned"
+        assert transit.destroy_calls == [
+            row["transit_asset_ref"] or transit.upload_calls[0]["ref"]
+        ]
+
+    def test_a_file_that_is_gone_says_so_at_once(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+
+        async def gone(_intent):
+            raise DriveTerminalError("the file is gone")
+
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, StubMetaAdapter(), media_fetch=gone)
+            )
+        )
+        assert outcome == FAILED
+        assert _card_line(pipe_db, intent).startswith("⚠️ Failed")
+        notices = _notices(pipe_db, intent, binding)
+        assert len(notices) == 1 and "media is unavailable" in notices[0], notices
+        assert (
+            _exec(
+                pipe_db,
+                "SELECT count(*) FROM post_locks WHERE media_item_id = %s",
+                (_intent_row(pipe_db, intent)["media_item_id"],),
+                fetch=True,
+            )[0][0]
+            == 0
+        ), "a missing file is not an unsupported one"
+
+    def test_poison_says_so_at_once_and_latches_the_reconciler_notice(self, pipe_db):
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(create_outcomes=["retryable"])
+        outcome = _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["last_error"]["evidence"]["customer_notified"] is True, (
+            "the reconciler's six-hour notice must find the latch set"
+        )
+        assert row["last_error"]["error"]["code"] == 4, "the reason survives the latch"
+        assert _card_line(pipe_db, intent).startswith("👀 Needs review")
+        notices = _notices(pipe_db, intent, binding)
+        assert len(notices) == 1 and "needs attention" in notices[0], notices
+
+    def test_poison_with_nobody_to_tell_keeps_the_reconciler_s_backstop(self, pipe_db):
+        """No push binding at poison time: no latch, so the six-hour notice
+        still fires once a binding exists (the reconciler's own rule)."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5, max_attempts=5)
+        meta = StubMetaAdapter(create_outcomes=["retryable"])
+        _exec(
+            pipe_db,
+            "UPDATE channel_bindings SET state = 'revoked' WHERE workspace_id = %s",
+            (pipe_db["ws"],),
+        )
+        try:
+            outcome = _run(
+                run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit()))
+            )
+        finally:
+            _exec(
+                pipe_db,
+                "UPDATE channel_bindings SET state = 'active' WHERE workspace_id = %s",
+                (pipe_db["ws"],),
+            )
+        assert outcome == POISONED
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert not (row["last_error"].get("evidence") or {}).get("customer_notified"), (
+            "nobody could hear: the latch must stay off"
+        )
+
+    # -- step-backs, waits and cancels (#1306) --------------------------------
+
+    def test_a_swept_asset_is_uploaded_again_never_reported(self, pipe_db):
+        """#1306: a story that waited past the transit sweep (48 h — a weekend
+        without slots, a long pause) re-enters to a frame the CDN no longer
+        knows. A 404 after the probe's budget means the asset is gone: the
+        story steps back to step `none` without its ref and the next run
+        uploads again — never a review card for a frame nobody could have
+        fetched."""
+        intent, ref = _new_intent(
+            pipe_db,
+            publish_step="transit_uploaded",
+            transit_ref="ws/x/swept",
+            debited=True,
+        )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        transit = FakeTransit(ready_script=[404])
+        meta = StubMetaAdapter()
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            == RETRY_SCHEDULED
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved" and row["publish_step"] == "none"
+        assert row["transit_asset_ref"] is None, "the swept ref is dropped"
+        assert row["cap_consumed_on"] is not None, "the debit is kept"
+        assert meta.create_calls == [] and transit.upload_calls == []
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        assert len(transit.upload_calls) == 1, "one fresh upload, then the post"
+        assert _bucket(pipe_db, DAY) == 1, "still one debit"
+
+    def test_a_frame_not_yet_serving_keeps_its_asset(self, pipe_db):
+        """Every other not-ready answer (a CDN 503, a derivation still
+        running) is 'not yet': the asset and the step stay, the ladder
+        retries the probe."""
+        intent, ref = _new_intent(
+            pipe_db,
+            publish_step="transit_uploaded",
+            transit_ref="ws/x/slow",
+            debited=True,
+        )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        transit = FakeTransit(ready_script=[503])
+        assert (
+            _run(
+                run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter(), transit))
+            )
+            == RETRY_SCHEDULED
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["publish_step"] == "transit_uploaded"
+        assert row["transit_asset_ref"] == "ws/x/slow"
+
+    def test_a_fallback_wait_says_nothing_on_the_card(self, pipe_db):
+        """#1306: with no slot stamped, a cap deferral re-checks in a minute
+        (the fallback rung). A wait of a minute is not said on the card —
+        twenty deferred stories would otherwise edit their cards every
+        minute all day."""
+        _exec(
+            pipe_db,
+            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
+            " local_date, count, cap_at_write) VALUES (%s, %s, %s, 3, 3)",
+            (pipe_db["ws"], pipe_db["iga"], _today_utc()),
+        )
+        intent, ref = _new_intent(pipe_db)
+        _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+            == DEFERRED_CAP
+        )
+        assert _card_line(pipe_db, intent) == "✅ Approved by Ada · 12:00 UTC"
+        after = _job_row(pipe_db, job["id"])
+        wait = (after["run_at"] - datetime.now(timezone.utc)).total_seconds()
+        assert 0 < wait <= 65, wait
+
+    @pytest.mark.parametrize(
+        "rule, line",
+        [
+            (None, "✅ Approved · posts tomorrow"),
+            # A rule-approved story's waiting line names the rule (#1477).
+            ("returning", "✅ Approved by Returning items · posts tomorrow"),
+        ],
+    )
+    def test_a_local_cap_wait_on_a_slot_today_promises_tomorrow(
+        self, pipe_db, rule, line
+    ):
+        """The day's count is at the cap, so a slot later today cannot post
+        (unless a sibling's cancel frees one): the honest line is "posts
+        tomorrow", without a time the clock has not chosen yet."""
+        from zoneinfo import ZoneInfo
+
+        # The account's LOCAL day must not end inside the slot's two-minute
+        # margin, or "later today" is tomorrow. So the account is given a zone
+        # where it is noon right now (`Etc/GMT±N` is IANA's fixed-offset
+        # family, sign inverted: `Etc/GMT-5` is UTC+5) — the cap's day is the
+        # account's day, whatever the wall clock says here.
+        utc_now = datetime.now(timezone.utc)
+        offset = 12 - utc_now.hour  # -11 … 12
+        tz = (
+            "Etc/GMT"
+            if offset == 0
+            else f"Etc/GMT{'-' if offset > 0 else '+'}{abs(offset)}"
+        )
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET tz = %s WHERE id = %s",
+            (tz, pipe_db["iga"]),
+        )
+        local_now = utc_now.astimezone(ZoneInfo(tz))
+        assert local_now.hour == 12, (tz, local_now)
+        slot = local_now + timedelta(minutes=2)
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (slot, pipe_db["iga"]),
+        )
+        _exec(
+            pipe_db,
+            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
+            " local_date, count, cap_at_write) VALUES (%s, %s, %s, 3, 3)",
+            (pipe_db["ws"], pipe_db["iga"], local_now.date()),
+        )
+        intent, ref = _new_intent(pipe_db, approval_rule=rule)
+        _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+            == DEFERRED_CAP
+        )
+        assert _card_line(pipe_db, intent) == line
+
+    def test_an_advisory_wait_says_when_on_the_card(self, pipe_db):
+        """Meta's own quota answer (the usage pre-check) is a wait of hours
+        like the cap's: the card says when."""
+        slot = datetime.now(timezone.utc) + timedelta(minutes=30)
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (slot, pipe_db["iga"]),
+        )
+        intent, ref = _new_intent(pipe_db)
+        _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(quota_usage=100, quota_total=100)
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, precheck=UsagePrecheck(ttl_seconds=300))
+            )
+        )
+        assert outcome == DEFERRED_META_CAP
+        assert _card_line(pipe_db, intent).startswith("✅ Approved · posts ")
+
+    def test_the_advisory_precheck_is_skipped_on_re_entry(self, pipe_db):
+        """A stepped-back story was admitted once and carries its debit: the
+        advisory pre-check does not send it to the next slot with an asset the
+        sweep would reap."""
+        intent, ref = _new_intent(
+            pipe_db,
+            publish_step="transit_uploaded",
+            transit_ref="ws/x/t1",
+            debited=True,
+        )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(quota_usage=100, quota_total=100)
+        outcome = _run(
+            run_publish_pipeline(
+                job, **_deps(pipe_db, meta, precheck=UsagePrecheck(ttl_seconds=300))
+            )
+        )
+        assert outcome == POSTED
+        assert len(meta.create_calls) == 1
+
+    def test_a_refused_video_frame_waits_with_its_url(self, pipe_db):
+        """A fresh url for a video is a fresh encode — tens of seconds, not
+        the probe's budget — so a refused video offers no fresh urls in the
+        run: it steps back at once and offers the same url after the wait,
+        which was accepted at +30 s in 10 of 17 trials."""
+        intent, ref = _new_intent(pipe_db, media_kind="video")
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(
+            create_outcomes=["terminal", "terminal", "ok"], ready_after_polls=1
+        )
+        transit = FakeTransit()
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit)))
+            == RETRY_SCHEDULED
+        )
+        assert len(meta.create_calls) == 1, "no fresh url inside the run"
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "approved"
+        assert row["attempts_by_step"]["fetch_refusals"] == 1
+        assert row["attempts_by_step"]["fetch_waits"] == 1
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, meta, transit)))
+            == RETRY_SCHEDULED
+        )
+        row = _intent_row(pipe_db, intent)
+        assert row["attempts_by_step"]["fetch_refusals"] == 2, (
+            "the ledger's count climbs with the url pinned (#1306)"
+        )
+        assert row["attempts_by_step"]["fetch_waits"] == 2
+        job3 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job3, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        assert all(c["media_url"].endswith("v=0") for c in meta.create_calls)
+
+    def test_busy_waits_reset_when_the_story_gets_in(self, pipe_db):
+        """The busy back-off is per stretch of waiting: a story that got in
+        starts its next wait at the first rung."""
+        intent, ref = _new_intent(pipe_db)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET attempts_by_step ="
+            ' \'{"v": 1, "busy_waits": 2}\' WHERE id = %s',
+            (intent,),
+        )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+            == POSTED
+        )
+        assert _intent_row(pipe_db, intent)["attempts_by_step"]["busy_waits"] == 0
+
+    def test_a_cancel_after_the_flips_rollback_is_honoured(self, pipe_db, monkeypatch):
+        """A real flip rolls back before a competing cancel can take the intent.
+
+        The canonical prefix owns the intent during the flip: a synchronous
+        side writer there would wait on this very transaction. Commit the cancel
+        after rollback, before the existing exception route rereads the subject.
+        """
+        from contextlib import asynccontextmanager
+        from src.services.target import publish_cap, publish_pipeline
+
+        intent, ref = _new_intent(
+            pipe_db,
+            publish_step="transit_uploaded",
+            transit_ref="ws/x/t1",
+            debited=True,
+        )
+        job = _leased_job(pipe_db, intent, ref=ref)
+        real_flip = publish_cap.flip_to_publishing
+        real_tx = publish_pipeline._leased_tx
+        flipped = []
+        cancelled_after_rollback = []
+
+        async def lose_flip(session, **kw):
+            outcome = await real_flip(session, **kw)
+            assert outcome is publish_cap.FlipOutcome.PROCEED
+            # This real transition remains uncommitted and must roll back.
+            from sqlalchemy import text
+
+            assert (
+                await session.scalar(
+                    text("SELECT state FROM post_intents WHERE id=:id"), dict(id=intent)
+                )
+                == "publishing"
+            )
+            flipped.append(True)
+            raise publish_cap.IntentNotApproved("injected failure after the real flip")
+
+        @asynccontextmanager
+        async def cancel_after_rollback(uow, leased_job):
+            try:
+                async with real_tx(uow, leased_job) as session:
+                    yield session
+            except publish_cap.IntentNotApproved:
+                assert _intent_row(pipe_db, intent)["state"] == "approved"
+                assert _bucket(pipe_db, DAY) == 1
+                # Bounded even if a future transaction regression retains locks.
+                conn = psycopg2.connect(pipe_db["owner"], connect_timeout=2)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SET app.actor_kind = 'migration'")
+                        cur.execute("SET lock_timeout = '1s'")
+                        cur.execute("SET statement_timeout = '2s'")
+                        cur.execute(
+                            "UPDATE post_intents SET cancel_requested=true WHERE id=%s",
+                            (intent,),
+                        )
+                        assert cur.rowcount == 1
+                finally:
+                    conn.close()
+                cancelled_after_rollback.append(True)
+                raise
+
+        monkeypatch.setattr(publish_cap, "flip_to_publishing", lose_flip)
+        monkeypatch.setattr(publish_pipeline, "_leased_tx", cancel_after_rollback)
+        transit = FakeTransit()
+        assert (
+            _run(
+                asyncio.wait_for(
+                    run_publish_pipeline(
+                        job, **_deps(pipe_db, StubMetaAdapter(), transit)
+                    ),
+                    timeout=10,
+                )
+            )
+            == CANCELLED
+        )
+        assert flipped == [True] and cancelled_after_rollback == [True]
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "cancelled" and row["cap_refunded_at"] is not None
+        assert _bucket(pipe_db, DAY) == 0, "the debit it carried is returned"
+        assert transit.destroy_calls == ["ws/x/t1"]
+        assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
+
+    def test_a_pause_at_the_post_flip_hold_steps_back(self, pipe_db):
+        """#1306: a pause landing between the flip and the ladder steps the
+        story back too, so no wait holds the slot; the re-entrant flip takes
+        it in again with its debit."""
+        from src.services.target.publish_pipeline import DEFERRED_PAUSED
+
+        intent, ref = _new_intent(pipe_db, state="publishing", publish_step="none")
+        job = _leased_job(pipe_db, intent, ref=ref)
+        _exec(
+            pipe_db,
+            "UPDATE workspaces SET is_paused = true WHERE id = %s",
+            (pipe_db["ws"],),
+        )
+        try:
+            assert (
+                _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+                == DEFERRED_PAUSED
+            )
+            row = _intent_row(pipe_db, intent)
+            assert row["state"] == "approved", "a wait never holds the slot"
+            assert row["cap_consumed_on"] is not None and _bucket(pipe_db, DAY) == 1
+        finally:
+            _exec(
+                pipe_db,
+                "UPDATE workspaces SET is_paused = false WHERE id = %s",
+                (pipe_db["ws"],),
+            )
+        job2 = _reclaim(pipe_db, job["id"])
+        assert (
+            _run(run_publish_pipeline(job2, **_deps(pipe_db, StubMetaAdapter())))
+            == POSTED
+        )
+        assert _bucket(pipe_db, DAY) == 1, "no second debit on re-entry"
+
+    def test_a_bump_keeps_keys_another_writer_added_meanwhile(self, pipe_db):
+        """#1306: the counters are merged onto the row,
+        never written wholesale from the pipeline's copy, so a key another
+        writer adds while the story is held survives the bump."""
+        intent, ref = _new_intent(pipe_db)
+        job = _leased_job(pipe_db, intent, ref=ref)
+
+        fired = []
+
+        def touch():
+            # Once, at the first probe — between the pipeline's read of the
+            # counters and its first bump.
+            if fired:
+                return
+            fired.append(True)
+            _exec(
+                pipe_db,
+                "UPDATE post_intents SET attempts_by_step ="
+                " attempts_by_step || '{\"note\": 1}' WHERE id = %s",
+                (intent,),
+            )
+
+        transit = FakeTransit(ready_hook=touch)
+        meta = StubMetaAdapter(create_outcomes=["terminal", "ok"], ready_after_polls=1)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, transit))) == POSTED
+        )
+        counters = _intent_row(pipe_db, intent)["attempts_by_step"]
+        assert counters["note"] == 1 and counters["fetch_refusals"] == 1, counters
+
+    def test_a_cancel_after_midnight_refunds_the_recorded_day(self, pipe_db):
+        """A stepped-back story debited on day D and cancelled on a later day
+        returns D's slot, never the current day's (`refund_cap`
+        targets `cap_consumed_on`)."""
+        intent, ref = _new_intent(
+            pipe_db,
+            publish_step="transit_uploaded",
+            transit_ref="ws/x/t1",
+            debited=True,
+            cancel_requested=True,
+        )
+        assert _bucket(pipe_db, DAY) == 1 and DAY != _today_utc()
+        job = _leased_job(pipe_db, intent, ref=ref)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, StubMetaAdapter())))
+            == CANCELLED
+        )
+        assert _bucket(pipe_db, DAY) == 0
+        assert _bucket(pipe_db, _today_utc()) in (None, 0)
+
+
+class TestTheFloatsSafetyNets:
+    """An approval is never silently undone. The only
+    exits from Approved are Posted and Needs review — a dead job and the
+    reaper's safety net end on the review card with its three buttons and
+    one honest line, never a story that reads Approved forever."""
+
+    @staticmethod
+    async def _park(conn, job):
+        """The spent job's park as the worker runs it, minus the savepoint: the
+        state change, then the courtesy it is owed."""
+        from src.services.target import work_loop
+
+        parked = await work_loop._settle_exhausted(conn, job)
+        await work_loop._notify_exhausted(conn, job, parked)
+        return parked
+
+    async def _as_worker(self, pipe_db, fn):
+        from src.services.target.unit_of_work import apply_gucs
+
+        async with pipe_db["engine"].connect() as conn:
+            async with conn.begin():
+                await apply_gucs(
+                    conn, tenant_id=str(pipe_db["ws"]), actor_kind="system"
+                )
+                return await fn(conn)
+
+    def test_a_dead_job_parks_a_story_mid_ladder_for_review(self, pipe_db):
+
+        intent, ref = _new_intent(
+            pipe_db, state="publishing", publish_step="transit_uploaded"
+        )
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required"
+        assert row["cap_refunded_at"] is None, (
+            "review retains the debit; give up refunds"
+        )
+        edit = _review_edit(pipe_db, intent, binding)
+        assert "Needs review" in edit["outcome_text"] and "reply_markup" not in edit
+        notices = _notices(pipe_db, intent, binding)
+        assert len(notices) == 1 and "fault on our side" in notices[0]
+        assert row["last_error"]["evidence"]["customer_notified"] is True
+
+    def test_a_dead_job_parks_a_waiting_story_for_review(self, pipe_db):
+        """From a stepped-back `approved` row: the second edge of 076."""
+
+        intent, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        meta = StubMetaAdapter(create_outcomes=["terminal"] * 4)
+        assert (
+            _run(run_publish_pipeline(job, **_deps(pipe_db, meta, FakeTransit())))
+            == RETRY_SCHEDULED
+        )
+        assert _intent_row(pipe_db, intent)["state"] == "approved"
+        dead = _reclaim(pipe_db, job["id"])
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, dead)))
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "review_required" and row["cap_consumed_on"] is not None
+        assert "Needs review" in _review_edit(pipe_db, intent, binding)["outcome_text"]
+        assert len(_notices(pipe_db, intent, binding)) == 1
+
+    def test_a_dead_job_on_a_settled_story_parks_nothing(self, pipe_db):
+
+        intent, ref = _new_intent(pipe_db, state="skipped")
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
+        _run(self._as_worker(pipe_db, lambda conn: self._park(conn, job)))
+        assert _intent_row(pipe_db, intent)["state"] == "skipped"
+
+    def test_a_dead_job_whose_courtesy_faults_still_parks_its_story(
+        self, pipe_db, monkeypatch
+    ):
+        """Through the worker's spent-budget path. The park's courtesy (the
+        card restated, the notice) rides the exhausted notice's savepoint and
+        may fail there alone; the flip to review must not fail with it. A
+        story left `publishing` keeps its account's `uq_publish_exclusive`
+        slot, and nothing moves a plain `publishing` row once its job has
+        ended, so the account would stop posting with no alert."""
+        from sqlalchemy import text
+
+        from src.services.target import publish_pipeline
+        from src.services.target.work_loop import WorkerConfig
+        from src.worker import compose
+
+        intent, ref = _new_intent(
+            pipe_db, state="publishing", publish_step="transit_uploaded"
+        )
+        job = _leased_job(pipe_db, intent, ref=ref, attempts=5)
+        faulted = []
+
+        async def faulty_courtesy(session, **kwargs):
+            faulted.append(kwargs["intent_id"])
+            # A fault inside the database, as an outbox write can raise one.
+            await session.execute(text("SELECT 1 / 0"))
+
+        async def crashed(session, job):
+            raise RuntimeError("the fifth untyped crash")
+
+        monkeypatch.setattr(publish_pipeline, "_restate_and_notify", faulty_courtesy)
+        app = compose(engine=pipe_db["engine"], config=WorkerConfig(), env={})
+        loop = next(wl for wl in app.loops if wl.lane == "bulk")
+        loop._registry = {**app.registry, "publish_pipeline": crashed}
+        _run(loop._run_job(job))
+
+        assert faulted == [str(intent)], "the courtesy fault never fired"
+        assert _job_row(pipe_db, job["id"])["state"] == "failed"
+        (held,) = _exec(
+            pipe_db,
+            "SELECT count(*) FROM post_intents WHERE provider_account_ref = %s"
+            " AND state IN ('publishing', 'publishing_ambiguous')",
+            (ref,),
+            fetch=True,
+        )[0]
+        state = _intent_row(pipe_db, intent)["state"]
+        assert (state, held) == ("review_required", 0), (
+            f"the story is left {state!r} and {held} row(s) hold its account's"
+            " publish slot"
+        )
+
+    def test_reaper_releases_door_and_prior_subject_locks(self, pipe_db, monkeypatch):
+        """Actual worker role: no job lock survives into source cleanup."""
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        from src.services.target import publish_pipeline, scheduler
+        from tests.scripts.conftest import as_user
+
+        expired_job = _expired_lease(pipe_db)
+        stale = [_new_intent(pipe_db)[0] for _ in range(2)]
+        for iid in stale:
+            _exec(
+                pipe_db,
+                "UPDATE post_intents SET entered_state_at=now()-interval '4 days' WHERE id=%s",
+                (iid,),
+            )
+        engine = create_async_engine(
+            async_url(as_user(pipe_db["owner"], "svc_worker")), poolclass=NullPool
+        )
+        transactions, held_jobs = [], []
+        real = publish_pipeline.park_for_review
+
+        async def observed(conn, **kw):
+            transactions.append(
+                (await conn.execute(text("SELECT txid_current()"))).scalar()
+            )
+            async with engine.connect() as probe:
+                async with probe.begin():
+                    from src.services.target.unit_of_work import apply_gucs
+
+                    await apply_gucs(
+                        probe, tenant_id=str(pipe_db["ws"]), actor_kind="system"
+                    )
+                    try:
+                        await probe.execute(
+                            text("SELECT id FROM jobs WHERE id=:id FOR UPDATE NOWAIT"),
+                            {"id": str(expired_job)},
+                        )
+                    except Exception as exc:
+                        held_jobs.append(type(exc).__name__)
+            return await real(conn, **kw)
+
+        monkeypatch.setattr(publish_pipeline, "park_for_review", observed)
+
+        async def run():
+            return await scheduler.execute_reap_expired(
+                engine,
+                limit=10,
+                approval_ttl_seconds=86400,
+                approved_ttl_seconds=72 * 3600,
+            )
+
+        try:
+            _run(run())
+        finally:
+            _run(engine.dispose())
+        assert not held_jobs, "fn_reaper_sweep job locks leaked into source cleanup"
+        assert len(transactions) == 2 and len(set(transactions)) == 2, (
+            "each subject must release its transaction before the next"
+        )
+        assert [_intent_row(pipe_db, iid)["state"] for iid in stale] == [
+            "review_required"
+        ] * 2
+
+    def test_the_reaper_parks_a_stale_approved_story_and_leaves_a_floating_one(
+        self, pipe_db
+    ):
+        from src.services.target.scheduler import execute_reap_expired
+
+        stale, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, stale)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET entered_state_at = now() - interval '4 days',"
+            " cap_consumed_on = current_date WHERE id = %s",
+            (stale,),
+        )
+        floating, _ = _new_intent(pipe_db)  # approved a moment ago
+        touched = _run(
+            execute_reap_expired(
+                pipe_db["engine"],
+                limit=10,
+                approval_ttl_seconds=86400,
+                approved_ttl_seconds=72 * 3600,
+            )
+        )
+        assert touched >= 1
+        row = _intent_row(pipe_db, stale)
+        assert row["state"] == "review_required", "parked, never expired"
+        assert row["cap_consumed_on"] is not None
+        assert "Needs review" in _review_edit(pipe_db, stale, binding)["outcome_text"]
+        notices = _notices(pipe_db, stale, binding)
+        assert len(notices) == 1 and "lost track" in notices[0]
+        assert _intent_row(pipe_db, floating)["state"] == "approved", (
+            "inside the TTL: untouched"
+        )
+
+    def test_the_reaper_lists_through_a_door_and_parks_as_the_worker_role(
+        self, pipe_db
+    ):
+        """#1306: the reap job is a system singleton, so with
+        `app.tenant_id = ''` a plain SELECT over post_intents matches
+        nothing under `p_tenant` once the worker runs as svc_worker — the
+        reconciler's case too. The leg lists through a SECURITY DEFINER
+        door and asserts each row's tenant before it parks. Proven as the
+        ROLE with an empty tenant, the worker's shape as svc_worker."""
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        from src.services.target.scheduler import execute_reap_expired
+        from tests.scripts.conftest import as_user
+
+        stale, ref = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, stale)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET entered_state_at = now() - interval '4 days',"
+            " cap_consumed_on = current_date WHERE id = %s",
+            (stale,),
+        )
+        engine = create_async_engine(
+            async_url(as_user(pipe_db["owner"], "svc_worker")),
+            poolclass=NullPool,
+        )
+
+        async def as_the_worker():
+            async with engine.connect() as conn:
+                assert (
+                    await conn.execute(text("SELECT current_user"))
+                ).scalar() == "svc_worker"
+            return await execute_reap_expired(
+                engine,
+                limit=10,
+                approval_ttl_seconds=86400,
+                approved_ttl_seconds=72 * 3600,
+            )
+
+        try:
+            touched = _run(as_the_worker())
+        finally:
+            _run(engine.dispose())
+        assert touched >= 1
+        row = _intent_row(pipe_db, stale)
+        assert row["state"] == "review_required", "parked by the role, not the owner"
+        assert "Needs review" in _review_edit(pipe_db, stale, binding)["outcome_text"]
+        assert len(_notices(pipe_db, stale, binding)) == 1
+
+    def test_the_reaper_leaves_a_paused_workspaces_stories_alone(self, pipe_db):
+        """A paused workspace's approvals wait on purpose: the safety net is
+        for a story the system lost track of, not one the workspace
+        parked (#1306)."""
+        from src.services.target.scheduler import execute_reap_expired
+
+        stale, ref = _new_intent(pipe_db)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET entered_state_at = now() - interval '4 days'"
+            " WHERE id = %s",
+            (stale,),
+        )
+        _exec(
+            pipe_db,
+            "UPDATE workspaces SET is_paused = true WHERE id = %s",
+            (pipe_db["ws"],),
+        )
+        try:
+            _run(
+                execute_reap_expired(
+                    pipe_db["engine"],
+                    limit=10,
+                    approval_ttl_seconds=86400,
+                    approved_ttl_seconds=72 * 3600,
+                )
+            )
+            assert _intent_row(pipe_db, stale)["state"] == "approved"
+        finally:
+            _exec(
+                pipe_db,
+                "UPDATE workspaces SET is_paused = false WHERE id = %s",
+                (pipe_db["ws"],),
+            )
+
+    def test_the_reaper_cancels_a_stale_story_the_workspace_asked_to_cancel(
+        self, pipe_db
+    ):
+        """A stale approved story flagged `cancel_requested` has no job left
+        to honour the flag: the reaper honours it — the refund it carries
+        first, then `cancelled` — rather than parking a story the workspace
+        already gave up on (#1306)."""
+        from src.services.target.scheduler import execute_reap_expired
+
+        stale, ref = _new_intent(pipe_db, cancel_requested=True, debited=True)
+        binding = _seed_card(pipe_db, stale)
+        _exec(
+            pipe_db,
+            "UPDATE post_intents SET entered_state_at = now() - interval '4 days'"
+            " WHERE id = %s",
+            (stale,),
+        )
+        touched = _run(
+            execute_reap_expired(
+                pipe_db["engine"],
+                limit=10,
+                approval_ttl_seconds=86400,
+                approved_ttl_seconds=72 * 3600,
+            )
+        )
+        assert touched >= 1
+        row = _intent_row(pipe_db, stale)
+        assert row["state"] == "cancelled" and row["cap_refunded_at"] is not None
+        assert _bucket(pipe_db, DAY) == 0, "the debit it carried is returned"
+        assert _notices(pipe_db, stale, binding) == [], "nothing to review"
+
+    def test_one_stale_rows_fault_does_not_fail_the_sweep(self, pipe_db, monkeypatch):
+        """#1306: a savepoint per row, as the settled-cards sweep has — one
+        story's fault (a zone, a lost binding) must not roll back the door's
+        expiries and re-crash the reap job every tick."""
+        from src.services.target import publish_pipeline
+        from src.services.target.scheduler import execute_reap_expired
+
+        bad, _ = _new_intent(pipe_db)
+        good, _ = _new_intent(pipe_db)
+        binding = _seed_card(pipe_db, good)
+        for stale in (bad, good):
+            _exec(
+                pipe_db,
+                "UPDATE post_intents SET entered_state_at = now() - interval '4 days'"
+                " WHERE id = %s",
+                (stale,),
+            )
+        real = publish_pipeline.park_for_review
+
+        async def faulty(session, **kw):
+            if kw["intent_id"] == str(bad):
+                # A fault INSIDE the database — the transaction is aborted
+                # from here unless a savepoint isolates the row.
+                from sqlalchemy import text
+
+                await session.execute(text("SELECT 1 / 0"))
+            return await real(session, **kw)
+
+        monkeypatch.setattr(publish_pipeline, "park_for_review", faulty)
+        touched = _run(
+            execute_reap_expired(
+                pipe_db["engine"],
+                limit=10,
+                approval_ttl_seconds=86400,
+                approved_ttl_seconds=72 * 3600,
+            )
+        )
+        assert touched >= 1
+        assert _intent_row(pipe_db, good)["state"] == "review_required"
+        assert _intent_row(pipe_db, bad)["state"] == "approved", (
+            "left for the next tick"
+        )
+        assert len(_notices(pipe_db, good, binding)) == 1
+
+
+# --- #1235: the reaper's cancel leg (087) ---------------------------------------
+
+#: The four states a cancel the user asked for waits in (055's seeded edges).
+WAITING_STATES = ("scheduled", "prompt_pending", "awaiting_approval", "approved")
+
+
+def _waiting(pipe_db, state, *, flagged, slot_in_s=3600, age_s=0):
+    """An undebited intent in *state*, its slot an hour ahead unless a test
+    moves it, so no expiry leg reaches it by accident."""
+    intent, _ = _new_intent(
+        pipe_db,
+        state=state,
+        cancel_requested=flagged,
+        slot_in_s=slot_in_s,
+        age_s=age_s,
+    )
+    return intent
+
+
+def _states(pipe_db, intents):
+    """The states of *intents*, in order, in one read."""
+    rows = dict(
+        _exec(
+            pipe_db,
+            "SELECT id::text, state FROM post_intents WHERE id = ANY(%s::uuid[])",
+            (list(intents),),
+            fetch=True,
+        )
+    )
+    return [rows[str(i)] for i in intents]
+
+
+def _sweep(pipe_db, lim):
+    """The door alone, bounded by *lim*; the rows it moved."""
+    return _exec(
+        pipe_db,
+        "SELECT fn_reaper_sweep(%s, interval '24 hours', interval '72 hours')",
+        (lim,),
+        fetch=True,
+    )[0][0]
+
+
+class TestTheReapersCancelLeg:
+    """087 (#1235): a cancel the user asked for ends `cancelled` at the
+    reaper's next sweep in every waiting state, ahead of the expiry legs —
+    never for a row carrying a debit, which only the paths that refund it may
+    cancel."""
+
+    def test_a_flagged_row_in_each_waiting_state_ends_cancelled(self, pipe_db):
+        """Audited as the reaper. The flag's writers strip a story's cards
+        themselves; a card sent after the flag (the prompt sweep does not read
+        it) loses its buttons to the settled-card sweep that follows the reap."""
+        intents = [_waiting(pipe_db, s, flagged=True) for s in WAITING_STATES]
+        bindings = [_seed_card(pipe_db, i, tapped=False) for i in intents]
+        _run(reap_as_worker(pipe_db["owner"]))
+        assert _states(pipe_db, intents) == ["cancelled"] * 4
+        audited = _exec(
+            pipe_db,
+            "SELECT from_state, actor_kind FROM audit_events"
+            " WHERE entity_id = ANY(%s::uuid[]) AND to_state = 'cancelled'",
+            (intents,),
+            fetch=True,
+        )
+        assert sorted(audited) == sorted((s, "reaper") for s in WAITING_STATES)
+        for intent, binding in zip(intents, bindings):
+            assert "Cancelled" in _card_line(pipe_db, intent)
+            assert "Cancelled" in _review_edit(pipe_db, intent, binding)["outcome_text"]
+
+    def test_an_unflagged_waiting_row_is_left_alone(self, pipe_db):
+        """The leg's control: only the flag ends a story."""
+        intents = [_waiting(pipe_db, s, flagged=False) for s in WAITING_STATES]
+        _run(reap_as_worker(pipe_db["owner"]))
+        assert _states(pipe_db, intents) == list(WAITING_STATES)
+
+    def test_a_flag_outranks_an_expiry_in_the_same_sweep(self, pipe_db):
+        """A flagged row past its slot or its approval TTL ends `cancelled`,
+        the label the reaper's cancel leg applies (#1235). Its unflagged twin
+        still expires — the expiry legs' positive control."""
+        past = {
+            flagged: [
+                _waiting(pipe_db, "scheduled", flagged=flagged, slot_in_s=-60),
+                _waiting(
+                    pipe_db, "awaiting_approval", flagged=flagged, age_s=2 * 86400
+                ),
+            ]
+            for flagged in (True, False)
+        }
+        _run(reap_as_worker(pipe_db["owner"]))
+        assert _states(pipe_db, past[True]) == ["cancelled"] * 2
+        assert _states(pipe_db, past[False]) == ["expired"] * 2
+
+    def test_the_leg_draws_on_the_sweeps_one_budget(self, pipe_db):
+        """`p_lim` is the sweep's TOTAL across its legs: at p_lim = 1 a sweep
+        moves one row, and the two cancels go before the expiry. The module's
+        other work is drained before the rows are seeded."""
+        _sweep(pipe_db, 100000)
+        rows = [_waiting(pipe_db, "awaiting_approval", flagged=True) for _ in range(2)]
+        rows.append(_waiting(pipe_db, "scheduled", flagged=False, slot_in_s=-60))
+        for _ in range(10):  # a lease elsewhere lapsing mid-test may take a sweep
+            assert _sweep(pipe_db, 1) <= 1
+            if _states(pipe_db, rows)[2] == "expired":
+                break
+        assert _states(pipe_db, rows) == ["cancelled", "cancelled", "expired"]
+
+    def test_a_debited_story_is_left_for_the_path_that_refunds_it(self, pipe_db):
+        """A floating story steps back to `approved` with its cap debit (076).
+        The sweep leaves it — cancelled there, the debit would be stranded —
+        and its own job refunds it and cancels it, as
+        `test_a_cancel_while_floating_refunds_and_destroys` pins."""
+        intent, _ = _new_intent(pipe_db, cancel_requested=True, debited=True)
+        _run(reap_as_worker(pipe_db["owner"]))
+        row = _intent_row(pipe_db, intent)
+        assert (row["state"], row["cap_refunded_at"]) == ("approved", None)
+        assert _bucket(pipe_db, DAY) == 1, "the debit is still owed, not lost"
+
+    def test_a_sweep_between_the_jobs_load_and_its_cancel_is_benign(
+        self, pipe_db, monkeypatch
+    ):
+        """The two cancels, interleaved: the job loaded the flagged story, the
+        reaper ended it, then the job's own cancel met a terminal row. The job
+        ends `cancelled`, as in either serial order
+        (`test_a_raced_terminal_intent_cancels_the_job_and_leaks_no_debit`,
+        `test_cancel_requested_is_honored_before_the_flip_only`) — not a crash
+        and a retry."""
+        from src.services.target import publish_pipeline
+
+        intent, ref = _new_intent(pipe_db, cancel_requested=True)
+        job = _leased_job(pipe_db, intent, ref=ref)
+        real = publish_pipeline._honour_cancel
+
+        async def the_reaper_first(uow, ctx, transit):
+            # _load has committed; acquire the reaper's own locks before the
+            # job enters its cancel transaction, never under held intent/lease.
+            conn = psycopg2.connect(pipe_db["owner"], connect_timeout=2)
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET app.actor_kind = 'migration'")
+                    cur.execute("SET lock_timeout = '1s'")
+                    cur.execute("SET statement_timeout = '2s'")
+                    cur.execute(
+                        "SELECT fn_reaper_sweep(%s, interval '24 hours', interval '72 hours')",
+                        (500,),
+                    )
+                    assert cur.fetchone()[0] >= 1
+            finally:
+                conn.close()
+            assert _intent_row(pipe_db, intent)["state"] == "cancelled", (
+                "positive control"
+            )
+            return await real(uow, ctx, transit)
+
+        monkeypatch.setattr(publish_pipeline, "_honour_cancel", the_reaper_first)
+        outcome = _run(
+            asyncio.wait_for(
+                run_publish_pipeline(
+                    job, **_deps(pipe_db, StubMetaAdapter(), FakeTransit())
+                ),
+                timeout=10,
+            )
+        )
+        assert outcome == CANCELLED
+        assert _job_row(pipe_db, job["id"])["state"] == "cancelled"
+        audited = _exec(
+            pipe_db,
+            "SELECT actor_kind FROM audit_events WHERE entity_id = %s"
+            " AND to_state = 'cancelled'",
+            (intent,),
+            fetch=True,
+        )
+        assert audited == [("reaper",)]
+
+    def test_a_story_the_job_cancels_under_the_sweep_does_not_fail_it(self, pipe_db):
+        """The other order of the same two cancellers: the job cancels a
+        flagged `approved` story (`_cancel_in`) while the sweep waits on its
+        row. At READ COMMITTED the sweep rechecks the UPDATE's own quals, not
+        its subquery's, so the leg repeats the waiting states; without that it
+        writes to the row the job has just cancelled, the terminal freeze
+        refuses it, and every leg of the sweep rolls back. Driven
+        deterministically: the job's cancel holds its transaction open until
+        the sweep is seen waiting on the row."""
+        intent = _waiting(pipe_db, "approved", flagged=True)
+        job = psycopg2.connect(pipe_db["owner"])
+        swept: dict = {}
+        t = None
+
+        def sweep():
+            try:
+                swept["n"] = _sweep(pipe_db, 500)
+            except Exception as exc:  # noqa: BLE001 — the assertion target
+                swept["error"] = exc
+
+        try:
+            with job.cursor() as cur:
+                cur.execute("SET app.actor_kind = 'system'")
+                cur.execute(
+                    "UPDATE post_intents SET state = 'cancelled'"
+                    " WHERE id = %s AND state = 'approved'",
+                    (intent,),
+                )
+                assert cur.rowcount == 1, "positive control: the job's cancel"
+            t = threading.Thread(target=sweep)
+            t.start()
+            blocked = 0
+            for _ in range(100):  # the sweep must be seen WAITING on the job's row
+                blocked = _exec(
+                    pipe_db,
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE %s = ANY(pg_blocking_pids(pid))",
+                    (job.get_backend_pid(),),
+                    fetch=True,
+                )[0][0]
+                if blocked:
+                    break
+                time.sleep(0.05)
+            assert blocked, "the sweep never waited on the job's row: no race was run"
+            job.commit()
+            t.join(timeout=10)
+            assert not t.is_alive() and "error" not in swept, swept
+        finally:
+            job.close()  # an open transaction rolls back here, releasing the sweep
+            if t is not None:
+                t.join(timeout=10)
+        assert _intent_row(pipe_db, intent)["state"] == "cancelled"
+
+
+class TestEveryLegRunsInTheFinalBody:
+    """The stream's last definition of `fn_reaper_sweep` carries every leg: 089
+    redefines it on 087's body (#1413), so one file holds 076's six, 086's
+    deadline leg (#1429), 087's cancel leg (#1235) and 089's cadence-only slot
+    expiry. One sweep, as the worker runs it, over a world holding one row for
+    each leg to take, and one test per leg reading its row: a body that dropped
+    a leg fails by the leg's name."""
+
+    @pytest.fixture(scope="class")
+    def swept(self, pipe_db):
+        leased, ref = _new_intent(pipe_db)
+        lease = _leased_job(pipe_db, leased, ref=ref)["id"]
+        _exec(
+            pipe_db,
+            "UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = %s",
+            (lease,),
+        )
+        flagged = _waiting(pipe_db, "scheduled", flagged=True)
+        late = _waiting(pipe_db, "prompt_pending", flagged=False, slot_in_s=-60)
+        stale = _waiting(pipe_db, "awaiting_approval", flagged=False, age_s=2 * 86400)
+        lock = _exec(
+            pipe_db,
+            "INSERT INTO post_locks (workspace_id, media_item_id, kind, expires_at)"
+            " VALUES (%s, %s, 'skip', now() - interval '1 minute') RETURNING id",
+            (pipe_db["ws"], _intent_row(pipe_db, late)["media_item_id"]),
+            fetch=True,
+        )[0][0]
+        invite = _exec(
+            pipe_db,
+            "INSERT INTO workspace_invitations (workspace_id, token_hash,"
+            " delivery_channel, expires_at) VALUES (%s, %s, 'telegram',"
+            " now() - interval '1 minute') RETURNING id",
+            (pipe_db["ws"], f"h-{uuid.uuid4()}"),
+            fetch=True,
+        )[0][0]
+        user = _exec(
+            pipe_db, "INSERT INTO users DEFAULT VALUES RETURNING id", fetch=True
+        )[0][0]
+        _exec(
+            pipe_db,
+            "INSERT INTO onboarding_sessions (user_id, expires_at)"
+            " VALUES (%s, now() - interval '1 minute')",
+            (user,),
+        )
+        # A kind a sweep re-mints, never claimed, a minute past its deadline.
+        deadline = _exec(
+            pipe_db,
+            "INSERT INTO jobs (workspace_id, kind, lane, serialization_key, run_at,"
+            " deadline_at, payload, max_attempts) VALUES (%s, 'plan_slot', 'bulk',"
+            " %s, now() - interval '2 minutes', now() - interval '1 minute',"
+            " '{\"v\": 1}', 3) RETURNING id",
+            (pipe_db["ws"], f"legs:{uuid.uuid4()}"),
+            fetch=True,
+        )[0][0]
+        _run(reap_as_worker(pipe_db["owner"]))
+        return {
+            "lease": lease,
+            "flagged": flagged,
+            "late": late,
+            "stale": stale,
+            "lock": lock,
+            "invite": invite,
+            "user": user,
+            "deadline": deadline,
+        }
+
+    def test_the_lease_leg_re_readies_an_expired_lease(self, pipe_db, swept):
+        assert _job_row(pipe_db, swept["lease"])["state"] == "ready"
+
+    def test_the_cancel_leg_ends_a_flagged_waiting_story(self, pipe_db, swept):
+        assert _intent_row(pipe_db, swept["flagged"])["state"] == "cancelled"
+
+    def test_the_slot_leg_expires_a_story_past_its_slot(self, pipe_db, swept):
+        assert _intent_row(pipe_db, swept["late"])["state"] == "expired"
+
+    def test_the_approval_leg_expires_a_card_past_its_ttl(self, pipe_db, swept):
+        assert _intent_row(pipe_db, swept["stale"])["state"] == "expired"
+
+    def test_the_lock_leg_deletes_an_expired_lock(self, pipe_db, swept):
+        assert _exec(
+            pipe_db,
+            "SELECT count(*) FROM post_locks WHERE id = %s",
+            (swept["lock"],),
+            fetch=True,
+        ) == [(0,)]
+
+    def test_the_invitation_leg_expires_a_pending_invitation(self, pipe_db, swept):
+        assert _exec(
+            pipe_db,
+            "SELECT state FROM workspace_invitations WHERE id = %s",
+            (swept["invite"],),
+            fetch=True,
+        ) == [("expired",)]
+
+    def test_the_onboarding_leg_deletes_an_expired_session(self, pipe_db, swept):
+        assert _exec(
+            pipe_db,
+            "SELECT count(*) FROM onboarding_sessions WHERE user_id = %s",
+            (swept["user"],),
+            fetch=True,
+        ) == [(0,)]
+
+    def test_the_deadline_leg_ends_a_ready_job_past_its_deadline(self, pipe_db, swept):
+        assert _exec(
+            pipe_db,
+            "SELECT state, payload->>'ended' FROM jobs WHERE id = %s",
+            (swept["deadline"],),
+            fetch=True,
+        ) == [("failed", "deadline")]
+
+
+class TestAPlannedStoryOutsideTheCap:
+    """Through the real ladder (#1413): a
+    planned story neither spends the account's daily cap nor waits on it, so
+    a spent day posts it at once and the day's cadence is what it would have
+    been without it. Meta's own limit still holds it."""
+
+    def _day_at(self, pipe_db, count):
+        _exec(
+            pipe_db,
+            "INSERT INTO daily_post_counts (workspace_id, ig_account_id,"
+            " local_date, count, cap_at_write) VALUES (%s, %s, %s, %s, 3)",
+            (pipe_db["ws"], pipe_db["iga"], _today_utc(), count),
+        )
+
+    def _slot_in(self, pipe_db, delta):
+        _exec(
+            pipe_db,
+            "UPDATE ig_accounts SET next_slot_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc) + delta, pipe_db["iga"]),
+        )
+
+    def _cap_deferrals(self, pipe_db, intent):
+        return [
+            r[0]
+            for r in _exec(
+                pipe_db,
+                "SELECT detail->>'reason' FROM audit_events WHERE entity_id = %s"
+                " AND detail->>'event' = 'cap_deferred'",
+                (intent,),
+                fetch=True,
+            )
+        ]
+
+    def _post(
+        self, pipe_db, meta=None, *, origin="cadence", card=False, dry_run=False, **deps
+    ):
+        """An approved story and one real run of the pipeline for it: the
+        story's id and the run's outcome."""
+        intent, ref = _new_intent(pipe_db, origin=origin)
+        if card:
+            _seed_card(pipe_db, intent)
+        job = _leased_job(pipe_db, intent, ref=ref, dry_run=dry_run)
+        meta = meta or StubMetaAdapter()
+        return intent, _run(run_publish_pipeline(job, **_deps(pipe_db, meta, **deps)))
+
+    def test_on_a_spent_day_it_posts_at_once(self, pipe_db):
+        self._slot_in(pipe_db, timedelta(hours=2))
+        self._day_at(pipe_db, 3)
+
+        intent, outcome = self._post(pipe_db, origin="planned", card=True)
+
+        assert outcome == POSTED, "no deferral: the spent day is the cadence's"
+        assert _bucket(pipe_db, _today_utc()) == 3, "and the post spent nothing"
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "posted" and row["cap_consumed_on"] == _today_utc()
+        assert self._cap_deferrals(pipe_db, intent) == []
+        assert "tomorrow" not in _card_line(pipe_db, intent)
+
+    def test_the_cadence_that_day_is_what_it_would_have_been(self, pipe_db):
+        """Two of three cadence posts are spent; the planned post takes none
+        of the third, so the next cadence story posts, and the one after it
+        waits for tomorrow, as it would without the planned post."""
+        self._slot_in(pipe_db, timedelta(hours=2))
+        self._day_at(pipe_db, 2)
+
+        assert self._post(pipe_db, origin="planned")[1] == POSTED
+        assert _bucket(pipe_db, _today_utc()) == 2
+        assert self._post(pipe_db)[1] == POSTED
+        assert _bucket(pipe_db, _today_utc()) == 3
+
+        fourth, outcome = self._post(pipe_db)
+        assert outcome == DEFERRED_CAP
+        assert _intent_row(pipe_db, fourth)["state"] == "approved"
+        assert self._cap_deferrals(pipe_db, fourth) == ["cap"]
+
+    def test_a_dry_run_of_it_on_a_spent_day_leaves_the_count_unchanged(self, pipe_db):
+        """A rehearsal: record the day's count, approve a planned story in dry
+        run, read the same count afterwards."""
+        from src.services.target.publish_pipeline import POSTED_DRY_RUN
+
+        self._slot_in(pipe_db, timedelta(hours=2))
+        self._day_at(pipe_db, 3)
+        meta = StubMetaAdapter()
+
+        intent, outcome = self._post(pipe_db, meta, origin="planned", dry_run=True)
+
+        assert outcome == POSTED_DRY_RUN
+        assert _bucket(pipe_db, _today_utc()) == 3
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "posted" and row["cap_consumed_on"] == _today_utc()
+        assert meta.create_calls == [] and meta.publish_calls == []
+
+    def test_a_failure_after_its_flip_leaves_the_count_unchanged(self, pipe_db):
+        """The refund that rides a terminal failure returns nothing for a
+        story that took nothing: the cadence's two debits stand."""
+        self._day_at(pipe_db, 2)
+        meta = StubMetaAdapter(publish_outcomes=["terminal"])
+
+        intent, outcome = self._post(pipe_db, meta, origin="planned")
+
+        assert outcome == FAILED
+        assert _bucket(pipe_db, _today_utc()) == 2
+        row = _intent_row(pipe_db, intent)
+        assert row["state"] == "failed" and row["cap_refunded_at"] is not None
+
+    def test_meta_still_holds_it(self, pipe_db):
+        """The advisory pre-check is Meta's own limit, not ours: it defers a
+        planned story like any other, before the flip and any work."""
+        self._slot_in(pipe_db, timedelta(minutes=30))
+        meta = StubMetaAdapter(quota_usage=100, quota_total=100)
+        transit = FakeTransit()
+
+        intent, outcome = self._post(
+            pipe_db,
+            meta,
+            origin="planned",
+            transit=transit,
+            precheck=UsagePrecheck(ttl_seconds=300),
+        )
+
+        assert outcome == DEFERRED_META_CAP
+        assert _intent_row(pipe_db, intent)["state"] == "approved"
+        assert _bucket(pipe_db, _today_utc()) is None
+        assert transit.upload_calls == [] and meta.create_calls == []
+        assert self._cap_deferrals(pipe_db, intent) == ["meta_advisory"]
+
+
+def _expired_lease(pipe_db):
+    intent, ref = _new_intent(pipe_db)
+    job = _leased_job(pipe_db, intent, ref=ref)["id"]
+    _exec(
+        pipe_db,
+        "UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = %s",
+        (job,),
+    )
+    return job
+
+
+def _job_past_its_deadline(pipe_db):
+    return _exec(
+        pipe_db,
+        "INSERT INTO jobs (workspace_id, kind, lane, serialization_key, run_at,"
+        " deadline_at, payload, max_attempts) VALUES (%s, 'plan_slot', 'bulk',"
+        " %s, now() - interval '2 minutes', now() - interval '1 minute',"
+        " '{\"v\": 1}', 3) RETURNING id",
+        (pipe_db["ws"], f"order:{uuid.uuid4()}"),
+        fetch=True,
+    )[0][0]
+
+
+def _expired_onboarding_session(pipe_db):
+    user = _exec(pipe_db, "INSERT INTO users DEFAULT VALUES RETURNING id", fetch=True)[
+        0
+    ][0]
+    _exec(
+        pipe_db,
+        "INSERT INTO onboarding_sessions (user_id, expires_at)"
+        " VALUES (%s, now() - interval '1 minute')",
+        (user,),
+    )
+    return user
+
+
+def _sessions_left(pipe_db, user):
+    return _exec(
+        pipe_db,
+        "SELECT count(*) FROM onboarding_sessions WHERE user_id = %s",
+        (user,),
+        fetch=True,
+    )[0][0]
+
+
+class TestTheSweepsLegOrder:
+    """The order the legs run in decides who gets a short budget. The lease leg
+    goes first (liveness comes first, 059) and 086's deadline leg last, so a
+    backlog of expired jobs cannot take the budget of the legs above; a test
+    per adjacency that a large budget cannot tell apart."""
+
+    def test_the_lease_leg_is_served_before_the_cancel_leg(self, pipe_db):
+        _sweep(pipe_db, 100000)  # the module's other work drained
+        lease = _expired_lease(pipe_db)
+        flagged = _waiting(pipe_db, "scheduled", flagged=True)
+
+        assert _sweep(pipe_db, 1) == 1
+        assert _job_row(pipe_db, lease)["state"] == "ready", "the lease was recovered"
+        assert _states(pipe_db, [flagged]) == ["scheduled"], "the cancel waits its turn"
+
+    def test_the_deadline_leg_takes_only_what_the_legs_above_leave(self, pipe_db):
+        _sweep(pipe_db, 100000)
+        session = _expired_onboarding_session(pipe_db)
+        late = _job_past_its_deadline(pipe_db)
+
+        assert _sweep(pipe_db, 1) == 1
+        assert _sessions_left(pipe_db, session) == 0, "the onboarding leg took the one"
+        assert _job_row(pipe_db, late)["state"] == "ready", "the backlog waits"
+
+        assert _sweep(pipe_db, 1) == 1, "and is served once the legs above are empty"
+        assert _job_row(pipe_db, late)["state"] == "failed"
+
+    def test_the_sweep_counts_the_cancels_it_ends(self, pipe_db):
+        """`execute_reap_expired` hands the stale-approved leg `limit - n`, so a
+        leg that under-counted would let the executor exceed its budget."""
+        _sweep(pipe_db, 100000)
+        flagged = [_waiting(pipe_db, "scheduled", flagged=True) for _ in range(3)]
+
+        assert _sweep(pipe_db, 500) == 3
+        assert _states(pipe_db, flagged) == ["cancelled"] * 3

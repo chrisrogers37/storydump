@@ -1,0 +1,83 @@
+import { NextRequest, NextResponse } from "next/server";
+import { idempotencyKeyFor } from "@/lib/commands";
+import {
+  passThrough,
+  readJsonBody,
+  refuseCrossSite,
+  requireSessionToken,
+} from "@/lib/route-guards";
+import { targetFetch } from "@/lib/target-api";
+import { workspaceNameValid } from "@/lib/workspace-name";
+import type { Workspace } from "@/lib/workspaces";
+
+/** GET /api/workspaces — the ones this user is a member of. Possibly none. */
+export async function GET() {
+  const token = await requireSessionToken();
+  if (token instanceof NextResponse) return token;
+
+  const result = await targetFetch<{ workspaces: Workspace[] }>(
+    "/workspaces",
+    token,
+  );
+
+  // An empty list and an unreachable router are NOT the same answer and must
+  // not share a status. "You have no workspaces yet" sends someone to create
+  // one; "we could not ask" must not.
+  if (!result.ok) return passThrough(result);
+  return NextResponse.json({ workspaces: result.data.workspaces });
+}
+
+/**
+ * POST /api/workspaces — create one, with this user as its owner.
+ *
+ * ATOMICITY IS THE ROUTER'S AND IT IS NOT OPTIONAL. `ct_workspaces_owner_at_insert`
+ * is a DEFERRED constraint trigger, so a workspace with no owner row does not
+ * fail at the INSERT — it fails at COMMIT. Creating the workspace and the
+ * membership in two transactions therefore does not half-work; it fails, late,
+ * with an error that points at neither statement.
+ */
+export async function POST(request: NextRequest) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
+  const token = await requireSessionToken();
+  if (token instanceof NextResponse) return token;
+
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody instanceof NextResponse) return parsedBody;
+  // `null` parses as valid JSON, and destructuring it throws where nothing
+  // catches it, so a body of `null` is answered `malformed_body` by name.
+  if (parsedBody.raw == null) {
+    return NextResponse.json({ error: "malformed_body" }, { status: 400 });
+  }
+  const { name } = parsedBody.raw as { name?: unknown };
+
+  // `workspaces.name` is VARCHAR(100) NOT NULL — `WORKSPACE_NAME_MAX`, which
+  // both forms cap at. Checked here so a blank field is a field error
+  // next to the input rather than a 500 from a constraint.
+  const trimmed = typeof name === "string" ? name.trim() : "";
+  if (!workspaceNameValid(trimmed)) {
+    return NextResponse.json({ error: "invalid_name" }, { status: 400 });
+  }
+
+  // `Idempotency-Key` is REQUIRED, not optional. `POST /workspaces` reaches the
+  // port through `_dispatch`, whose first statement refuses a keyless command
+  // (`v1.py:104-109`) — before the body is even read. Without it the port
+  // answers a 400 that `createWorkspaceRefusalCopy` cannot name, so a person
+  // sees only "That did not work. This one is on us." and nothing is written.
+  //
+  // Identity is the trimmed NAME, which is the only thing stable across a retry
+  // of this submission — the workspace id is minted server-side per request, so
+  // it cannot serve. Dedup is scoped `(channel, principal, external_ref)`, so the
+  // name never collides across users, and `principal` is the SESSION: a
+  // double-click replays, while a deliberate second workspace of the same name
+  // later is a new session and is created.
+  const result = await targetFetch<Workspace>("/workspaces", token, {
+    method: "POST",
+    body: JSON.stringify({ name: trimmed }),
+    headers: { "Idempotency-Key": idempotencyKeyFor("create_workspace", trimmed) },
+  });
+
+  if (!result.ok) return passThrough(result);
+  return NextResponse.json(result.data, { status: 201 });
+}

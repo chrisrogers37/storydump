@@ -1,0 +1,92 @@
+"use client";
+
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+} from "recharts";
+import { BarChart3 } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState } from "@/components/dashboard/empty-state";
+import type { StatsResponse } from "@/lib/dashboard-payloads";
+import { formatCalendarDate } from "@/lib/zoned-dates";
+
+/**
+ * One bar per day, from the cap ledger (#1044 `stats.posts_by_day`).
+ *
+ * `daily_post_counts` records what was POSTED against the capacity in force
+ * when it was written, so a stack of outcomes (posted, skipped, rejected) is
+ * not what this data is — drawing one would need three series the ledger does
+ * not carry. One bar and the day's cap beside it is the honest reading of the
+ * same rows, and the cap is the more useful second number anyway: it says
+ * whether a quiet day was quiet or full.
+ */
+
+/** One bar: a row of `stats.posts_by_day`, which is where the cap comes from. */
+type DayCount = StatsResponse["posts_by_day"][number];
+
+export function PostingChart({ data }: { data: DayCount[] }) {
+  // `local_date` already names the workspace's day; label it as that day,
+  // never as an instant read on the viewer's clock. The axis names the date,
+  // and the tooltip names its weekday too ("Fri, Oct 9"), from the same day.
+  const formatted = data.map((d) => ({
+    ...d,
+    label: formatCalendarDate(d.local_date, { month: "short", day: "numeric" }),
+    day: formatCalendarDate(d.local_date, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    }),
+  }));
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Daily posting activity</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {formatted.length === 0 ? (
+          <EmptyState
+            icon={BarChart3}
+            title="No Stories out yet"
+            description="This chart fills in as your Stories go out."
+          />
+        ) : (
+          // The library draws its bars inside <g tabindex="-1">. A click or a
+          // tap focuses that layer, and a browser outlines a focused SVG
+          // element: a box round every bar. Those layers take no outline. The
+          // surface, where a keyboard's focus lands, keeps its own.
+          <ResponsiveContainer
+            width="100%"
+            height={300}
+            className="[&_g[tabindex='-1']]:outline-none"
+          >
+            <BarChart data={formatted}>
+              <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
+              <XAxis
+                dataKey="label"
+                tick={{ fontSize: 12 }}
+                interval="preserveStartEnd"
+              />
+              <YAxis tick={{ fontSize: 12 }} allowDecimals={false} />
+              <Tooltip
+                labelFormatter={(label, payload) =>
+                  payload?.[0]?.payload?.day ?? label
+                }
+                formatter={(value, name) => [
+                  value as number,
+                  name === "count" ? "posted" : "capacity",
+                ]}
+              />
+              <Bar dataKey="count" fill="var(--chart-1)" radius={[2, 2, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </CardContent>
+    </Card>
+  );
+}

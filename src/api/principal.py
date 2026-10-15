@@ -1,0 +1,618 @@
+"""The web principal — the session, resolved once per request.
+
+One FastAPI dependency answers "who is calling": the ``sd_session`` cookie, or
+``Authorization: Bearer <the same opaque value>`` for a front end that forwards
+the cookie from its server side. Those are ONE credential with two carriers,
+not two credentials — the bearer form exists so SSR can call the API without
+the browser, and it is verified by the same hash lookup. Verification is
+`sessions.resolve`, which also slides the expiry; nothing here re-implements it.
+
+The second credential is the API token:
+a bearer value that starts with ``sdt_`` is routed to `service_tokens.resolve`
+and yields a token principal — a person-bound token acts as its person over
+the ``cli`` channel, a workspace service identity has no person and reads.
+The prefix routes BEARER values only; the cookie is always a session. Tokens
+are admitted to :data:`TOKEN_ROUTES` and nowhere else: every other route
+depends on `require_session`, which refuses a token with a reason the CLI can
+act on. That allowlist is the contract the gate enumerates.
+
+A user with no workspace is a valid principal. Tenancy is decided per route by
+the central gate (`tenant_resolution.authorize_member`), never here — on the
+greenfield every user starts tenant-less, so refusing them at the door would
+refuse every new sign-up.
+
+The lookup runs on a raw engine connection rather than a unit of work: the UoW
+is unconstructible without a tenant, and authentication precedes tenancy by
+definition (`session_tokens` and `users` are user-plane — `058` class 3,
+`060` — readable before any ``app.tenant_id`` exists).
+
+Refusals are the `TenantResolutionError` the resolver raises; the app maps that
+type once (invalid/expired/revoked session → 401), so this module speaks no
+HTTP except for the one condition that is the deployment's rather than the
+caller's: no target database configured, which is a 503 named after the
+variable, never a silent fallback to the settings-built URL (#1010's class).
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+from collections.abc import Iterable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Optional
+from urllib.parse import urlsplit
+
+from fastapi import Depends, HTTPException, Request, Response
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from src.config.settings import settings
+from src.exceptions.tenancy import (
+    CrossSiteRefused,
+    TenantResolutionError,
+    TokenRefused,
+)
+from src.services.target import (
+    commands,
+    rate_counters,
+    service_tokens,
+    sessions,
+    tenant_resolution,
+)
+from src.services.target.unit_of_work import unit_of_work
+from src.services.target.vocabulary import DATABASE_URL_VAR
+
+#: The session cookie. One name, imported by the auth routes and the tests.
+COOKIE = "sd_session"
+
+#: The `command_dedup.channel` and `app.channel` GUC value for the web
+#: surface (`webhook_ingress.CHANNELS`). The browser's sessions, the two
+#: OAuth callbacks and the v1 command adapter are one channel; four
+#: spellings of it is how a dedup row lands under a name nothing reads.
+WEB_CHANNEL = "web"
+
+#: The routes a token may reach, as ``(method, path)`` after the router
+#: prefix. Everything else is session-only by dependency. No minting route
+#: is here, whatever the token's role — a token never mints a token.
+TOKEN_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/v1/me/principal"),
+        ("GET", "/api/v1/me/tokens"),
+        ("DELETE", "/api/v1/me/tokens/{token_id}"),
+        ("GET", "/api/v1/workspaces/{ws}/tokens"),
+        ("DELETE", "/api/v1/workspaces/{ws}/tokens/{token_id}"),
+        ("POST", "/api/v1/workspaces/{ws}/commands/{command}"),
+        # the Queue read, for the CLI's `planned` (#1413)
+        ("GET", "/api/v1/workspaces/{ws}/intents"),
+        # the read views (`src/api/routes/ops.py`)
+        ("GET", "/api/v1/ops/workspaces/{ws}/story/{intent_id}"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/cards/{intent_id}"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/floating"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/account/{key}"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/jobs"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/outbox"),
+        ("GET", "/api/v1/ops/workspaces/{ws}/burst"),
+        ("GET", "/api/v1/ops/posture"),
+        # the operating details (`require_ops`)
+        ("GET", "/api/v1/ops/health"),
+        # the owner's waitlist and an admission off it, for the CLI's
+        # `waitlist` and `admit` (#1723; `require_ops`)
+        ("GET", "/api/v1/ops/waitlist"),
+        ("POST", "/api/v1/admissions"),
+    }
+)
+
+
+@dataclass(frozen=True)
+class Principal:
+    """Who is calling: a session (which row, which user) or a token.
+
+    A session principal is ``Principal(session_id=…, user_id=…)``: the
+    defaults are its shape. A token principal has ``kind="token"``,
+    ``channel="cli"`` and the token's facts; a service identity is the one
+    with no ``user_id``.
+    """
+
+    session_id: Optional[str]
+    user_id: Optional[str]
+    kind: str = "session"
+    channel: str = WEB_CHANNEL
+    token_id: Optional[str] = None
+    token_name: Optional[str] = None
+    token_role: Optional[str] = None
+    token_workspace_id: Optional[str] = None
+    token_expires_at: Optional[datetime] = None
+
+    @property
+    def is_token(self) -> bool:
+        return self.kind == "token"
+
+    @property
+    def is_service_identity(self) -> bool:
+        return self.kind == "token" and self.user_id is None
+
+    @property
+    def actor_kind(self) -> str:
+        """The `app.actor_kind` GUC: a person is a user whichever carrier
+        they arrive on; a service identity is the operator kind."""
+        return "operator" if self.is_service_identity else "user"
+
+    @property
+    def dedup_principal(self) -> str:
+        """The `command_dedup.principal` slot: the session id, or the token
+        id under a prefix so the two namespaces can never collide."""
+        if self.is_token:
+            return f"token:{self.token_id}"
+        return self.session_id or ""
+
+
+def require_engine(request: Request) -> AsyncEngine:
+    """The target engine, or a 503 that names the missing variable.
+
+    `TARGET_DATABASE_URL` unset must never quietly become the settings-built
+    URL: on the deployed service that URL points at nothing (production sets
+    no `DB_*`), and on a misconfigured one it would point at a legacy-shaped
+    database — a wrong answer that reads as a right one.
+    """
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"target database not configured: set {DATABASE_URL_VAR}",
+        )
+    return engine
+
+
+def _covers(domain: str, host: str) -> bool:
+    """Whether a cookie scoped to *domain* is sent to *host* — RFC 6265 §5.1.3
+    domain-matching, which is exact-or-subdomain and nothing cleverer."""
+    return host == domain or host.endswith("." + domain)
+
+
+def session_delivery_gap() -> Optional[str]:
+    """Why a session minted here could not be read by the configured front end,
+    or ``None`` when it can.
+
+    The sign-in leg mints a session on the API host and the front end reads it
+    from the browser's cookie jar. Those are only the same jar when the cookie's
+    scope covers BOTH hosts, and nothing in the request tells you it does not —
+    the sign-in succeeds, the cookie is set, and the front end simply never sees
+    it, so the person is bounced back to `/login` having just signed in.
+
+    That state is not hypothetical (#1117): it goes unnoticed because every
+    individual part of it works.
+
+    ``WEB_APP_URL`` unset is NOT a gap here. It is the documented fail-closed
+    reading — no browser origin is admitted and sign-in lands on the API's own
+    root — and changing that is a deployment decision, not this gate's.
+
+    KNOWN BOUND, because a gate that implies more than it checks is worse than
+    none: this compares host suffixes and does NOT consult the Public Suffix
+    List. ``SESSION_COOKIE_DOMAIN`` set to a public suffix (``up.railway.app``
+    is one) passes this check and is still rejected by every browser. The PSL
+    is the browser's to enforce and we do not carry a copy.
+    """
+    front = settings.web_app_origin
+    if not front:
+        return None
+    base = settings.OAUTH_REDIRECT_BASE_URL
+    if not base:
+        return None
+    api_host = urlsplit(base).hostname
+    web_host = urlsplit(front).hostname
+    if not api_host or not web_host:
+        return None
+    if api_host == web_host:
+        return None
+    domain = (settings.SESSION_COOKIE_DOMAIN or "").lstrip(".")
+    if not domain:
+        return (
+            f"the session cookie is host-only on {api_host} and the front end "
+            f"is {web_host}, which will never receive it: set "
+            f"SESSION_COOKIE_DOMAIN to a domain covering both hosts"
+        )
+    if not _covers(domain, api_host) or not _covers(domain, web_host):
+        return (
+            f"SESSION_COOKIE_DOMAIN={domain} does not cover both {api_host} "
+            f"and {web_host}, so the front end will never receive the session: "
+            f"serve the API and the front end from one registrable domain"
+        )
+    return None
+
+
+def require_deliverable_session() -> None:
+    """A 503 that names the variable when sign-in would mint a session the
+    front end cannot read — the same posture as `require_engine`, for the same
+    reason: the condition is the deployment's, not the caller's.
+
+    This refuses at the START of the leg. Sending someone to Google for a
+    sign-in we already know we cannot deliver spends their consent on a round
+    trip that ends at the login page it began on.
+    """
+    gap = session_delivery_gap()
+    if gap is not None:
+        raise HTTPException(
+            status_code=503, detail=f"sign-in cannot deliver a session: {gap}"
+        )
+
+
+def presented_bearer(request: Request) -> Optional[str]:
+    """The ``Authorization: Bearer`` value alone, or None."""
+    auth = request.headers.get("authorization", "")
+    if auth[:7].lower() == "bearer ":
+        value = auth[7:].strip()
+        if value:
+            return value
+    return None
+
+
+def presented_token(request: Request) -> Optional[str]:
+    """The opaque session value the request carries, bearer first."""
+    return presented_bearer(request) or request.cookies.get(COOKIE) or None
+
+
+#: The methods a cookie may carry from anywhere: they change nothing.
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _origin_of(url: str) -> Optional[str]:
+    """``scheme://host[:port]`` of *url*, lowercased, or None when it has
+    neither — the form a browser sends in ``Origin``."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+def require_same_origin(request: Request) -> None:
+    """Refuse a COOKIE-carried, state-changing request another site's page
+    made — ``CrossSiteRefused("cross_site")``, a 403 that names it.
+
+    A bearer passes untouched: it is not ambient, so a page cannot make a
+    browser attach one, and the CLI's tokens and the front end's server side
+    (which forwards the session as a bearer, `landing/src/lib/target-api.ts`)
+    never meet this check. Admitted: `settings.web_app_origin` and the API's
+    own origin. ``Origin`` decides; a browser that sends none on a post still
+    sends ``Referer``, whose origin stands in. Neither is a refusal rather
+    than a pass — a cookie with no provenance is exactly what a forged
+    request looks like when its page sets ``Referrer-Policy: no-referrer``.
+    """
+    if request.method in SAFE_METHODS or presented_bearer(request) is not None:
+        return
+    claimed = request.headers.get("origin")
+    if claimed is None:
+        claimed = _origin_of(request.headers.get("referer", ""))
+    admitted = {_origin_of(str(request.base_url))}
+    if settings.web_app_origin:
+        admitted.add(_origin_of(settings.web_app_origin))
+    if claimed is None or claimed.lower() not in admitted:
+        raise CrossSiteRefused(
+            "cross_site",
+            f"{request.method} {request.url.path} from {claimed or 'no origin'}",
+        )
+
+
+async def current_principal(request: Request) -> Principal:
+    """FastAPI dependency: authenticate, slide or stamp, return the principal.
+
+    A bearer value with the token prefix is a token and resolves through the
+    token resolver; every other value — bearer or cookie — is a session and
+    resolves through `sessions.resolve`. A COOKIE on a state-changing request
+    must also come from an admitted origin (`require_same_origin`), checked
+    before the lookup so a forged request does not even slide the session.
+    """
+    engine = require_engine(request)
+    bearer = presented_bearer(request)
+    if bearer is not None and service_tokens.is_token(bearer):
+        async with engine.begin() as conn:
+            token = await service_tokens.resolve(
+                conn, token_hash=service_tokens.token_hash(bearer)
+            )
+        return Principal(
+            session_id=None,
+            user_id=token.user_id,
+            kind="token",
+            channel="cli",
+            token_id=token.token_id,
+            token_name=token.name,
+            token_role=token.role,
+            token_workspace_id=token.workspace_id,
+            token_expires_at=token.expires_at,
+        )
+    value = bearer or request.cookies.get(COOKIE) or None
+    if value is None:
+        raise TenantResolutionError("invalid_session", "no session presented")
+    require_same_origin(request)
+    async with engine.begin() as conn:
+        session = await sessions.resolve(conn, token_hash=sessions.token_hash(value))
+    return Principal(session_id=session.id, user_id=session.user_id)
+
+
+async def require_ops(
+    principal: Principal = Depends(current_principal),
+) -> Principal:
+    """FastAPI dependency for the estate-wide routes: a person named in
+    `OPS_USER_IDS`, on a session or a person-bound token. A service identity
+    has no person and is refused, and so is everyone while the setting is
+    empty. A dependency, not a call in the handler, so a route cannot forget
+    it (`TestTheAllowlist` holds every estate-wide token route to it)."""
+    if not settings.is_ops(principal.user_id):
+        raise TokenRefused("not_ops", "this route is for the people in OPS_USER_IDS")
+    return principal
+
+
+def refuse_token_write(principal: Principal) -> None:
+    """The write rule for tokens, its workspace-less half: a service identity
+    never writes, and a ``readonly`` person-bound token never writes
+    either. A person-bound ``operator`` token proceeds as its person, and a
+    session is no token. The command route adds the workspace half
+    (`v1._refuse_token_write`); `POST /admissions`, which has no workspace,
+    takes this half alone."""
+    if principal.is_service_identity:
+        raise TokenRefused("readonly_token", "a service identity reads only")
+    if principal.is_token and principal.token_role != "operator":
+        raise TokenRefused("readonly_token", "this token is read-only")
+
+
+def require_own_workspace(principal: Principal, workspace_id: str) -> None:
+    """A workspace service identity addresses its own workspace and no other
+    — the one check both routers make, with the one sentence."""
+    if principal.token_workspace_id != workspace_id:
+        raise TokenRefused("wrong_workspace", "this token belongs to another workspace")
+
+
+def not_found(headers: Optional[dict[str, str]] = None) -> HTTPException:
+    """The house 404: a row the caller may not see and a row that is not
+    there answer identically (no existence oracle). *headers* ride
+    along, for a route whose every answer carries its own (an archive
+    thumbnail's no-store).
+
+    A FUNCTION rather than a module constant, deliberately: a raised
+    exception instance carries `__traceback__` and `__context__`, so a
+    shared one would pin a request's frames until the next raise replaced
+    them. The detail string is the thing worth having in one place.
+    """
+    return HTTPException(status_code=404, detail="not found", headers=headers)
+
+
+async def require_session(
+    principal: Principal = Depends(current_principal),
+) -> Principal:
+    """FastAPI dependency for every route outside :data:`TOKEN_ROUTES`: a
+    session passes through; a token is refused with ``session_required``."""
+    if principal.is_token:
+        raise TokenRefused(
+            "session_required", "this route needs a signed-in web session"
+        )
+    return principal
+
+
+def set_session_cookie(response: Response, value: str) -> None:
+    """HttpOnly, Secure, SameSite=Lax; Domain from settings so a
+    same-site front end's server side can read it (None = host-only)."""
+    response.set_cookie(
+        COOKIE,
+        value,
+        max_age=sessions.SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=settings.SESSION_COOKIE_SECURE,
+        samesite="lax",
+        domain=settings.SESSION_COOKIE_DOMAIN,
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    """Same attributes as the set, or the browser keeps the old cookie."""
+    response.delete_cookie(
+        COOKIE,
+        httponly=True,
+        secure=settings.SESSION_COOKIE_SECURE,
+        samesite="lax",
+        domain=settings.SESSION_COOKIE_DOMAIN,
+        path="/",
+    )
+
+
+# --- the tenant seams, shared by every router --------------------------------
+#
+# These four were `v1._open_tenant`, `v1._member`, `v1._admin` and
+# `v1._json_object`: private names in the biggest router that `tokens.py`,
+# `ops.py` and the shared test conftest all reached across for. They are
+# cross-router gates like the ones above, so they live here, as public names.
+#
+# `floor_session` calls `open_tenant` as a BARE MODULE GLOBAL (`member_session`
+# and `admin_session` are it at a fixed floor), and every caller outside this
+# module reaches these through the module attribute
+# (`principal_mod.open_tenant(...)`). A from-import would bind the original
+# function at import time and the conftest's monkeypatch would not reach it —
+# a unit test that quietly opens a real unit of work.
+
+
+@asynccontextmanager
+async def open_tenant(request: Request, workspace_id: str, principal: Principal):
+    """The request's tenant-scoped unit of work: tenant + actor GUCs applied,
+    one transaction. The one seam the unit gate replaces.
+
+    The GUCs come from the principal: a person is ``user`` on ``web`` or, via
+    a person-bound token, on ``cli``; a service identity is ``operator`` with
+    no user, which the audit triggers read as such. The triggers never see a
+    token's name — that rides the direct `cli_command` row.
+    """
+    async with unit_of_work(
+        require_engine(request),
+        workspace_id,
+        actor_kind=principal.actor_kind,
+        actor_user_id=principal.user_id,
+        channel=principal.channel,
+    ).begin() as session:
+        session.info["archive_capability"] = getattr(
+            request.app.state, "archive_capability", None
+        )
+        yield session
+
+
+async def _gate(session, workspace_id: str, principal: Principal, floor: str):
+    """The ONE gate at *floor*."""
+    await tenant_resolution.authorize_member(
+        session, workspace_id, principal.user_id, minimum_role=floor
+    )
+
+
+@asynccontextmanager
+async def floor_session(
+    request: Request, workspace_id: str, principal: Principal, floor: str
+):
+    """Open the tenant's unit of work and run the ONE gate at *floor*.
+
+    A route whose floor is by design a command's passes that command's
+    `commands.ROLE_FLOOR` entry rather than a role name, so the route and the
+    command cannot drift apart."""
+    async with open_tenant(request, workspace_id, principal) as session:
+        await _gate(session, workspace_id, principal, floor)
+        yield session
+
+
+def connect_session(request: Request, workspace_id: str, principal: Principal):
+    """`floor_session` for an OAuth connect leg that learns its purpose inside
+    the session: gated at the lower of the connect purposes' floors
+    (`commands.lowest_connect_floor`), and `require_connect_floor` checks the
+    purpose's own once it is read."""
+    return floor_session(
+        request, workspace_id, principal, commands.lowest_connect_floor()
+    )
+
+
+async def require_connect_floor(
+    session, workspace_id: str, principal: Principal, purpose: str
+) -> None:
+    """Inside a `connect_session`, require the floor of the command *purpose*
+    stands for (`commands.connect_floor`). One equal to the session's gate
+    needs no second read."""
+    floor = commands.connect_floor(purpose)
+    if floor != commands.lowest_connect_floor():
+        await _gate(session, workspace_id, principal, floor)
+
+
+def member_session(request: Request, workspace_id: str, principal: Principal):
+    """Open the tenant's unit of work and run the ONE gate — every read."""
+    return floor_session(request, workspace_id, principal, "member")
+
+
+@asynccontextmanager
+async def reader_session(request: Request, workspace_id: str, principal: Principal):
+    """A read a token may make (`TOKEN_ROUTES`): a service identity reads its
+    own workspace with nothing to gate on; everyone else passes the member
+    gate (`member_session`)."""
+    if principal.is_service_identity:
+        require_own_workspace(principal, workspace_id)
+        async with open_tenant(request, workspace_id, principal) as session:
+            yield session
+        return
+    async with member_session(request, workspace_id, principal) as session:
+        yield session
+
+
+def admin_session(request: Request, workspace_id: str, principal: Principal):
+    """`member_session`, at the admin floor."""
+    return floor_session(request, workspace_id, principal, "admin")
+
+
+def parse_json_object(raw: bytes) -> Optional[dict[str, Any]]:
+    """*raw* as a JSON object, or None when it is not one."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):  # deep nesting fits in a small body
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def json_object(request: Request) -> dict[str, Any]:
+    """The body as a JSON object; an empty body is an empty object."""
+    raw = await request.body()
+    if not raw.strip():
+        return {}
+    body = parse_json_object(raw)
+    if body is None:
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    return body
+
+
+#: The detail of every 413 that refuses a request body for its size.
+BODY_TOO_LARGE_DETAIL = "request body too large"
+
+
+def declared_length(raw_headers: Iterable[tuple[bytes, bytes]]) -> int | None:
+    """The declared ``Content-Length``, read from ASGI raw headers (names
+    lowercased, as the server hands them over): an int, or None when the
+    header is absent or not an integer. The first such header answers, as it
+    does for `Request.headers`."""
+    for name, value in raw_headers:
+        if name == b"content-length":
+            try:
+                return int(value.decode("latin-1"))
+            except ValueError:
+                return None
+    return None
+
+
+#: Pre-auth admission, 30/min per client (an IPv4 address or an IPv6
+#: /64, :func:`address_key`), scope `preauth_ip`.
+PREAUTH_LIMIT = 30
+PREAUTH_WINDOW_SECONDS = 60
+PREAUTH_SCOPE = "preauth_ip"
+
+
+def address_key(raw: Optional[str]) -> Optional[str]:
+    """The key one client is counted under: an IPv4 address, or an IPv6
+    address's /64 (one subscriber holds a whole /64, so keying on the address
+    alone would hand a script 2^64 limits). None when *raw* is not an
+    address."""
+    try:
+        ip = ipaddress.ip_address((raw or "").strip())
+    except ValueError:
+        return None
+    if ip.version == 4:
+        return str(ip)
+    if ip.ipv4_mapped:
+        return str(ip.ipv4_mapped)
+    return str(ipaddress.IPv6Network((ip.packed, 64), strict=False))
+
+
+def client_ip(request: Request) -> str:
+    """The attributed peer as a counter key (:func:`address_key`) —
+    `request.client.host` AFTER ProxyHeadersMiddleware has applied the
+    trusted-proxy walk (#726/#765), which is the client-IP source
+    rule. Never a header read here; the one other address a counter may key
+    on is :func:`preauth_guard`'s *client*, which a caller passes only after
+    verifying who sent it."""
+    host = request.client.host if request.client else "unknown"
+    return address_key(host) or host
+
+
+async def preauth_guard(
+    conn,
+    request: Request,
+    *,
+    detail: str,
+    key_prefix: str = "",
+    limit: Optional[int] = None,
+    client: Optional[str] = None,
+) -> None:
+    """Spend one of the caller's pre-auth admissions in *conn*'s transaction;
+    429 with *detail* past the limit. *key_prefix* gives a route its own
+    counter under the same scope; *limit* replaces `PREAUTH_LIMIT` for it;
+    *client* replaces the attributed peer, for a caller that vouches for the
+    address it forwards."""
+    count = await rate_counters.increment(
+        conn,
+        scope=PREAUTH_SCOPE,
+        key=key_prefix + (client or client_ip(request)),
+        window_start=rate_counters.window_start(
+            datetime.now(timezone.utc), PREAUTH_WINDOW_SECONDS
+        ),
+        limit=PREAUTH_LIMIT if limit is None else limit,
+    )
+    if count is None:
+        raise HTTPException(status_code=429, detail=detail)

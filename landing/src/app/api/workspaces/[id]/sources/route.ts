@@ -1,0 +1,93 @@
+import { NextRequest, NextResponse } from "next/server";
+import {
+  passThrough,
+  readJsonBody,
+  refuseCrossSite,
+  requireWorkspace,
+} from "@/lib/route-guards";
+import { targetFetch } from "@/lib/target-api";
+
+/**
+ * POST /api/workspaces/[id]/sources — pick a Drive folder as a media source
+ * UNDER the workspace's grant (the target route is
+ * `POST /workspaces/{ws}/sources`, which refuses `drive_not_connected`).
+ *
+ * ## Why this is REST and not a command
+ *
+ * Commands for verbs on workspace state, REST for resources (#1053). A Drive
+ * folder is a resource and the vocabulary has no name for creating one, so
+ * routing it through the command client to be tidier would mean amending a
+ * vocabulary that is not amended lightly. `sync_now`, a verb, goes the other
+ * way.
+ *
+ * No `Idempotency-Key`, and not by omission: the target route is idempotent on
+ * the FOLDER by construction, under an advisory lock
+ * (`get_or_create_media_source`). A second submit of the same folder returns
+ * the same source at 200 rather than 201. There is nothing for a submission
+ * key to add.
+ *
+ * ## What it does NOT return
+ *
+ * `{source_id, created}` and nothing else. It deliberately does not read the
+ * folder — that is the Drive seam (#982) and a separate build — so a caller
+ * cannot render a file count or a category list from this, and must not
+ * pretend to.
+ */
+export async function POST(
+  request: NextRequest,
+  context: { params: Promise<{ id: string }> },
+) {
+  const refused = refuseCrossSite(request);
+  if (refused) return refused;
+
+  const guard = await requireWorkspace(context);
+  if (guard instanceof NextResponse) return guard;
+  const { token, id } = guard;
+
+  const parsedBody = await readJsonBody(request);
+  if (parsedBody instanceof NextResponse) return parsedBody;
+
+  const body = parsedBody.raw as { folder_ref?: unknown; root_name?: unknown; folder_name?: unknown; protocol_version?: unknown; expected_revision?: unknown; enabled?: unknown };
+  const folderRef = typeof body?.folder_ref === "string" ? body.folder_ref.trim() : "";
+  if (!folderRef) {
+    return NextResponse.json({ error: "folder_required" }, { status: 400 });
+  }
+
+  // Shape only. WHAT a valid folder reference is belongs to the port, which
+  // accepts a bare id or a folder URL and refuses anything else BY NAME
+  // (`folder_ref_from`). A second copy of that rule here is the copy that
+  // would go stale — and it is a rule with a documented trap, where a
+  // markerless URL reduced to `https:` would silently merge two unrelated
+  // folders onto one source.
+  const rootName = typeof body?.root_name === "string" ? body.root_name.trim() : "";
+  // The picker's display name for the folder (`config.folder_name`): what
+  // the card shows, never what the adapter reads.
+  const folderName = typeof body?.folder_name === "string" ? body.folder_name.trim() : "";
+
+  const result = await targetFetch<{ source_id?: string; created?: boolean }>(
+    `/workspaces/${id}/sources`,
+    token,
+    {
+      method: "POST",
+      resourceMetadata:true,
+      body: JSON.stringify({
+        ...body,
+        folder_ref: folderRef,
+        ...(rootName ? { root_name: rootName } : {}),
+        ...(folderName ? { folder_name: folderName } : {}),
+      }),
+    },
+  );
+
+  if (!result.ok) return passThrough(result);
+
+  const sourceId = result.data?.source_id;
+  if (typeof sourceId !== "string") {
+    return NextResponse.json({ error: "malformed_response" }, { status: 502 });
+  }
+
+  // `created` distinguishes a new source from the same folder submitted twice.
+  // Passed through rather than flattened: "added" and "you already had this
+  // one" are different sentences, and only the caller can say them.
+  return NextResponse.json({ ...result.data, sourceId, created: result.data?.created === true });
+}

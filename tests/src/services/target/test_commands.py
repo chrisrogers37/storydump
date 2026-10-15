@@ -1,0 +1,777 @@
+"""The interaction-layer port — unit gate.
+
+Four properties are pinned here:
+
+1. **The vocabulary equals the listed commands, in both directions.** The list
+   is the inbound bullet of `tests/fixtures/design_rows/01-target-architecture.md`:
+   adding a command is a deliberate change there, ratchet-visible. A
+   per-command route table would make the ROUTES the vocabulary and the list a
+   description of them; parsing the list makes it the authority and the enum a
+   copy that cannot drift silently — in EITHER direction, which is why the
+   assertion is set-equality rather than a subset check.
+2. **Every command has a role floor.** The gate is one function; a command it
+   has no floor for would be refused by construction, so the table's totality
+   is what stands between "one central gate" and "one central gate plus a
+   KeyError".
+3. **The not-built set is named.** A vocabulary command without an executor
+   answers "not built" rather than being missing from the enum. Pinning the set
+   means it can only shrink deliberately; a new executor that forgets to leave
+   the tuple reddens this test, which is the visibility the pin exists for.
+4. **`ingest` owns the order** — refuse cold, admit, execute — so no adapter
+   re-types it. The seams are the module attributes the port calls through
+   (`tenant_resolution.authorize_member`, `webhook_ingress.admit`, `REGISTRY`),
+   patched the way the rest of the tier's tests patch theirs.
+
+**What this file does NOT prove, so nobody reads its green as more than it
+is:** the executors are patched here, so no executor BODY runs. The bodies run
+in `tests/scripts/test_command_executors_gate.py` (every executor, as
+`svc_ingress`, effects read back) and in
+`tests/scripts/test_web_router_x2_gate.py`.
+"""
+
+from __future__ import annotations
+
+import pathlib
+import re
+
+import pytest
+
+from src.exceptions.tenancy import TenantResolutionError
+from src.services.target import commands as port
+from src.services.target import tenant_resolution, webhook_ingress
+from src.services.target.commands import (
+    Command,
+    CommandNotBuilt,
+    CommandRefused,
+    CommandResult,
+    UnknownCommand,
+    execute,
+    ingest,
+)
+from src.services.target.webhook_ingress import DeliveryReplayed
+from src.services.target.workspaces import InvalidWorkspaceArgs
+
+DOC = (
+    pathlib.Path(__file__).resolve().parents[4]
+    / "tests/fixtures/design_rows/01-target-architecture.md"
+)
+
+
+def _doc_vocabulary() -> set[str]:
+    """Every backticked identifier in the fixture's inbound bullet.
+
+    Anchored to the bullet that opens with "**Inbound:**" rather than a line
+    number, so an edit above it does not move the goalposts; the identifiers
+    are the backticked words that look like command names (lowercase + underscore).
+    """
+    text = DOC.read_text()
+    m = re.search(r"\*\*Inbound:\*\*(.*?)\n", text)
+    assert m, "the inbound bullet moved or was renamed — re-anchor the parser"
+    names = set(re.findall(r"`([a-z_]+)`", m.group(1)))
+    # The bullet may also name the table the vocabulary is enforced by; that is
+    # not a command. Anything else backticked in that sentence IS one.
+    return names - {"src/services/core/**"}
+
+
+class TestVocabularyIsTheDocs:
+    def test_set_equality_with_01_in_both_directions(self):
+        doc = _doc_vocabulary()
+        code = set(port.VOCABULARY)
+        assert code == doc, (
+            f"only in code: {sorted(code - doc)}; only in doc: {sorted(doc - code)}"
+        )
+
+    def test_the_doc_parser_is_not_vacuous(self):
+        """A parser that matched nothing would make equality trivially false,
+        so this is not a tautology guard; it exists so a fixture rewrite that
+        empties the match shows up as 'parser broke', not 'vocabulary broke'."""
+        assert len(_doc_vocabulary()) >= 20
+
+    def test_no_duplicates_and_stable_order(self):
+        assert len(port.VOCABULARY) == len(set(port.VOCABULARY))
+
+    def test_the_webhook_route_reads_the_vocabularys_header(self):
+        """The route READS the header the CLI SENDS. Two literals and
+        `storydump webhook status` reports a refusal Telegram never sees."""
+        from src.api.routes import webhooks
+        from src.services.target import vocabulary
+
+        assert webhooks.SECRET_HEADER is vocabulary.WEBHOOK_SECRET_HEADER
+
+
+class TestEveryCommandHasAFloorAndAnExecutorSlot:
+    def test_role_floor_is_total(self):
+        assert set(port.ROLE_FLOOR) == set(port.VOCABULARY)
+
+    def test_floors_are_the_closed_ladder(self):
+        assert set(port.ROLE_FLOOR.values()) <= set(port.FLOORS)
+
+    def test_registry_is_total(self):
+        assert set(port.REGISTRY) == set(port.VOCABULARY)
+
+    def test_the_not_built_set_is_exactly_this(self):
+        """Shrinks deliberately. Building an executor = remove its name here
+        in the same change: the visible edit this pin exists for."""
+        assert set(port.UNBUILT) == {
+            "autopost_now",
+            "move_account",
+            "change_role",
+            "transfer_ownership",
+            "clear_quarantine",
+        }
+        for name in port.UNBUILT:
+            assert port.REGISTRY[name] is None
+
+    def test_the_offboard_key_matches_the_one_the_successor_guards_on(self):
+        """`command_executors.offboard_workspace` mints the first job and
+        `offboarding._mint_successor` matches its duplicate guard on the same
+        key. If those two spellings drifted the guard would silently stop
+        guarding, so the helper is the single spelling and this pins it."""
+        from src.services.target import offboarding
+
+        assert offboarding.serialization_key("abc") == "ws:abc"
+
+    def test_built_executors_are_callables(self):
+        for name, fn in port.REGISTRY.items():
+            if name not in port.UNBUILT:
+                assert callable(fn), name
+
+    def test_a_refusal_reason_outside_the_closed_set_is_a_programming_error(self):
+        with pytest.raises(ValueError):
+            CommandRefused("because")
+
+
+class TestTheConnectLegsReadTheirPurposesFloor:
+    def test_each_connect_purpose_stands_for_a_command(self):
+        assert port.CONNECT_PURPOSE_KIND == {
+            "connect": "connect_account",
+            "reconnect": "reconnect_account",
+        }
+        assert set(port.CONNECT_PURPOSE_KIND.values()) <= set(port.ROLE_FLOOR)
+
+    @pytest.mark.parametrize(
+        "purpose,kind",
+        [("connect", "connect_account"), ("reconnect", "reconnect_account")],
+    )
+    def test_a_purposes_floor_follows_its_commands_entry(
+        self, monkeypatch, purpose, kind
+    ):
+        monkeypatch.setitem(port.ROLE_FLOOR, kind, "owner")
+        assert port.connect_floor(purpose) == "owner"
+
+    @pytest.mark.parametrize(
+        "connect,reconnect,lowest",
+        [
+            ("admin", "admin", "admin"),
+            ("owner", "admin", "admin"),
+            ("admin", "owner", "admin"),
+            ("member", "admin", "member"),
+            ("user", "admin", "user"),
+        ],
+    )
+    def test_the_lowest_connect_floor_admits_both_purposes(
+        self, monkeypatch, connect, reconnect, lowest
+    ):
+        monkeypatch.setitem(port.ROLE_FLOOR, "connect_account", connect)
+        monkeypatch.setitem(port.ROLE_FLOOR, "reconnect_account", reconnect)
+        assert port.lowest_connect_floor() == lowest
+
+
+def _cmd(kind="approve", **args) -> Command:
+    return Command(
+        kind=kind,
+        workspace_id="ws-1",
+        actor_user_id="user-1",
+        channel="web",
+        args=args,
+    )
+
+
+class _Session:
+    """A stand-in for the UoW session: the port never touches it directly,
+    it only hands it to the gate and the executor."""
+
+
+@pytest.fixture
+def gate(monkeypatch):
+    """The central gate, recording what it was asked; ``gate.refuse`` makes
+    it raise, ``gate.role`` is what it answers."""
+
+    class Log(list):
+        refuse = None
+        role = "owner"
+
+    log = Log()
+
+    async def authorize_member(session, ws, user, minimum_role="member"):
+        log.append((ws, user, minimum_role))
+        if log.refuse is not None:
+            raise log.refuse
+        return log.role
+
+    monkeypatch.setattr(tenant_resolution, "authorize_member", authorize_member)
+    return log
+
+
+@pytest.fixture
+def executor(monkeypatch):
+    """`approve` (and `settings_change`) answered by a recording executor."""
+    seen = []
+
+    async def run(session, command):
+        seen.append(command)
+        return CommandResult("executed", {"state": "approved"})
+
+    monkeypatch.setitem(port.REGISTRY, "approve", run)
+    monkeypatch.setitem(port.REGISTRY, "settings_change", run)
+    return seen
+
+
+class TestExecuteIsTheOnePath:
+    async def test_unknown_command_is_refused_before_anything_runs(self, gate):
+        with pytest.raises(UnknownCommand):
+            await execute(_Session(), _cmd(kind="frobnicate"))
+        assert gate == []
+
+    async def test_not_built_is_named_and_refused_AFTER_the_gate(self, gate):
+        """The gate runs first on purpose: a non-member must not learn which
+        commands exist by probing 501s on a workspace they cannot see."""
+        with pytest.raises(CommandNotBuilt) as exc:
+            await execute(_Session(), _cmd(kind="transfer_ownership"))
+        assert exc.value.command == "transfer_ownership"
+        assert gate == [("ws-1", "user-1", "owner")]
+
+    async def test_gate_refusal_propagates_and_the_executor_never_runs(
+        self, gate, executor
+    ):
+        gate.refuse = TenantResolutionError("not_a_member")
+        with pytest.raises(TenantResolutionError):
+            await execute(_Session(), _cmd())
+        assert executor == []
+
+    async def test_the_executor_receives_the_command_and_its_result_is_returned(
+        self, gate, executor
+    ):
+        out = await execute(_Session(), _cmd(intent_id="i-1"))
+        assert out == CommandResult("executed", {"state": "approved"})
+        assert executor[0].args == {"intent_id": "i-1"}
+
+    async def test_the_gate_is_asked_for_the_commands_own_floor(self, gate, executor):
+        await execute(_Session(), _cmd(kind="settings_change"))
+        await execute(_Session(), _cmd(kind="approve"))
+        assert [asked[2] for asked in gate] == ["admin", "member"]
+
+    async def test_create_workspace_has_no_membership_to_gate(self, gate, monkeypatch):
+        """The one command with no workspace yet: the gate is NOT consulted,
+        because there is no workspace_members row to consult."""
+
+        async def run(session, command):
+            return CommandResult("executed", {"workspace_id": "ws-new"})
+
+        monkeypatch.setitem(port.REGISTRY, "create_workspace", run)
+        cmd = Command(
+            kind="create_workspace",
+            workspace_id=None,
+            actor_user_id="user-1",
+            channel="web",
+            args={"name": "Mine"},
+        )
+        out = await execute(_Session(), cmd)
+        assert gate == []
+        assert out.data == {"workspace_id": "ws-new"}
+
+    async def test_a_workspace_command_without_a_workspace_is_refused(self, gate):
+        cmd = Command(
+            kind="approve", workspace_id=None, actor_user_id="u", channel="web", args={}
+        )
+        with pytest.raises(CommandRefused) as exc:
+            await execute(_Session(), cmd)
+        assert exc.value.reason == "workspace_required"
+        assert gate == []
+
+    async def test_operator_floor_refuses_a_user_principal(self, gate):
+        """`clear_quarantine` is operator-only, and no principal this tier
+        builds can satisfy that floor. The refusal must be a ROLE refusal —
+        not a 'not built' — so the surface does not advertise operator
+        commands to members."""
+        with pytest.raises(TenantResolutionError) as exc:
+            await execute(_Session(), _cmd(kind="clear_quarantine"))
+        assert exc.value.reason == "insufficient_role"
+        assert gate == [], "the membership gate must not be asked for an operator floor"
+
+    async def test_a_writer_refusal_is_mapped_once_here(self, gate, monkeypatch):
+        async def run(session, command):
+            raise InvalidWorkspaceArgs("tz is not a zone")
+
+        monkeypatch.setitem(port.REGISTRY, "settings_change", run)
+        with pytest.raises(CommandRefused) as exc:
+            await execute(_Session(), _cmd(kind="settings_change"))
+        assert exc.value.reason == "invalid_args"
+
+
+@pytest.fixture
+def admission(monkeypatch):
+    """`webhook_ingress.admit` recorded; ``admission.refuse`` makes it raise."""
+
+    class Log(list):
+        refuse = None
+
+    log = Log()
+
+    async def admit(session, *, channel, external_ref, payload, principal):
+        log.append((channel, external_ref, payload, principal))
+        if log.refuse is not None:
+            raise log.refuse
+
+    monkeypatch.setattr(webhook_ingress, "admit", admit)
+    return log
+
+
+class TestIngestOwnsTheOrder:
+    async def test_unknown_is_refused_before_admission(self, admission, gate):
+        with pytest.raises(UnknownCommand):
+            await ingest(
+                _Session(),
+                _cmd(kind="frobnicate"),
+                external_ref="k-1",
+                principal="sess-1",
+                payload={},
+            )
+        assert admission == [] and gate == []
+
+    async def test_admits_under_the_commands_channel_then_executes(
+        self, admission, gate, executor
+    ):
+        out = await ingest(
+            _Session(),
+            _cmd(intent_id="i-1"),
+            external_ref="k-1",
+            principal="sess-1",
+            payload={"intent_id": "i-1"},
+        )
+        assert admission == [("web", "k-1", {"intent_id": "i-1"}, "sess-1")]
+        assert gate == [("ws-1", "user-1", "member")]
+        assert out.outcome == "executed"
+
+    async def test_a_replay_propagates_and_nothing_executes(
+        self, admission, gate, executor
+    ):
+        admission.refuse = DeliveryReplayed("same key, same body")
+        with pytest.raises(DeliveryReplayed):
+            await ingest(
+                _Session(), _cmd(), external_ref="k-1", principal="sess-1", payload={}
+            )
+        assert gate == [] and executor == []
+
+
+class TestSetItemLinkIsInThePort:
+    """#1413: a member gives an item the link its story
+    asks a person to add by hand, since a story published through the API
+    cannot carry one. The floor of `schedule_item`, with an executor."""
+
+    def test_named_at_the_member_floor_with_an_executor(self):
+        assert "set_item_link" in port.VOCABULARY
+        assert port.ROLE_FLOOR["set_item_link"] == "member"
+        assert port.REGISTRY["set_item_link"] is not None
+        assert "set_item_link" not in port.UNBUILT
+
+
+class TestSetItemAutoApproveIsInThePort:
+    """#1477: the item's Auto-approve flag, a member's standing Approve, set
+    from Configure on a card and from the library. The floor of `approve`,
+    with an executor. It has no CLI verb: the CLI's own pin on its verbs
+    (`test_every_verb_maps_to_a_port_command`) holds that."""
+
+    def test_named_at_the_member_floor_with_an_executor(self):
+        from src.services.target import command_executors
+
+        assert "set_item_auto_approve" in port.VOCABULARY
+        assert port.ROLE_FLOOR["set_item_auto_approve"] == "member"
+        assert (
+            port.REGISTRY["set_item_auto_approve"]
+            is command_executors.set_item_auto_approve
+        )
+        assert "set_item_auto_approve" not in port.UNBUILT
+
+
+class TestSetSourceApprovalIsInThePort:
+    """#1477: a folder's approval position, set from the web's Approvals
+    card. Admin, like every position, with an executor, and no CLI verb."""
+
+    def test_named_at_the_admin_floor_with_an_executor(self):
+        from src.services.target import command_executors
+
+        assert "set_source_approval" in port.VOCABULARY
+        assert port.ROLE_FLOOR["set_source_approval"] == "admin"
+        assert (
+            port.REGISTRY["set_source_approval"]
+            is command_executors.set_source_approval
+        )
+        assert "set_source_approval" not in port.UNBUILT
+
+
+class TestDisableAccountIsInThePort:
+    """The "active ↔ disabled (user command, audited)" edge has a name,
+    `disable_account`, the web's Remove. In the vocabulary, at the admin floor
+    like every other destination act, with an executor."""
+
+    @pytest.fixture(autouse=True)
+    def no_archive(self, monkeypatch):
+        """The archive half takes the source prefix on a real transaction; its
+        truth is the lifecycle gate's. Here the destination's half is pinned."""
+        from src.services.target import archive_lifecycle
+
+        async def remove_account_archive(session, *, workspace_id, ig_account_id):
+            return None
+
+        monkeypatch.setattr(
+            archive_lifecycle, "remove_account_archive", remove_account_archive
+        )
+
+    def test_named_at_the_admin_floor_with_an_executor(self):
+        assert "disable_account" in port.VOCABULARY
+        assert port.ROLE_FLOOR["disable_account"] == "admin"
+        assert port.REGISTRY["disable_account"] is not None
+        assert "disable_account" not in port.UNBUILT
+
+    @pytest.mark.parametrize(
+        "refusal, expected",
+        [("already_disabled", "illegal_transition"), ("not_found", "not_found")],
+    )
+    async def test_the_executor_translates_the_destinations_refusals(
+        self, monkeypatch, refusal, expected
+    ):
+        from src.services.target import command_executors, provisioning
+
+        async def disable_destination(session, *, workspace_id, ig_account_id):
+            raise provisioning.ProvisioningRefused(refusal, "scripted")
+
+        monkeypatch.setattr(provisioning, "disable_destination", disable_destination)
+        command = port.Command(
+            kind="disable_account",
+            workspace_id="ws",
+            actor_user_id="u",
+            channel="web",
+            args={"ig_account_id": "acct"},
+        )
+        with pytest.raises(port.CommandRefused) as info:
+            await command_executors.disable_account(object(), command)
+        assert info.value.reason == expected
+
+    async def test_the_executor_reports_what_moved(self, monkeypatch):
+        from src.services.target import command_executors, provisioning, readers
+
+        async def disable_destination(session, *, workspace_id, ig_account_id):
+            return {
+                "credential_revoked": True,
+                "intents_cancelled": 2,
+                "intents_flagged": 0,
+            }
+
+        async def no_live_cards(executor, sql, **params):
+            return []  # the flagged intents whose cards would lose their buttons
+
+        monkeypatch.setattr(provisioning, "disable_destination", disable_destination)
+        monkeypatch.setattr(readers, "rows", no_live_cards)
+        command = port.Command(
+            kind="disable_account",
+            workspace_id="ws",
+            actor_user_id="u",
+            channel="web",
+            args={"ig_account_id": "acct"},
+        )
+        result = await command_executors.disable_account(object(), command)
+        assert result.outcome == "executed"
+        assert result.data == {
+            "ig_account_id": "acct",
+            "state": "disabled",
+            "credential_revoked": True,
+            "intents_cancelled": 2,
+            "intents_flagged": 0,
+        }
+
+
+class TestACancellingCardOffersNoLever:
+    """`cancel` and `disable_account` set `cancel_requested`; until the worker
+    terminalizes, the four intent commands refuse the card by name —
+    acting on it would post for a destination someone removed."""
+
+    @pytest.mark.parametrize("kind", ["approve", "skip", "reject", "mark_posted"])
+    async def test_refused_as_illegal_transition(self, monkeypatch, kind):
+        from src.services.target import command_executors
+
+        async def _intent_row(session, command):
+            return {
+                "id": "i1",
+                "state": "awaiting_approval",
+                "cancel_requested": True,
+                "media_item_id": "m1",
+                "ig_account_id": "a1",
+                "provider_account_ref": "ref",
+                "api_publishing_enabled": True,
+                "repost_ttl_days": 30,
+                "skip_ttl_days": 7,
+                "eff_ppd": 3,
+                "eff_tz": "UTC",
+            }
+
+        monkeypatch.setattr(command_executors, "_intent_row", _intent_row)
+        command = port.Command(
+            kind=kind,
+            workspace_id="ws",
+            actor_user_id="u",
+            channel="web",
+            args={"intent_id": "i1"},
+        )
+        with pytest.raises(port.CommandRefused) as info:
+            await getattr(command_executors, kind)(object(), command)
+        assert info.value.reason == "cancelling"
+
+
+class TestRemoveMember:
+    """An admin removes membership explicitly — the revoke for every
+    join edge. Owner and self are refused by name; a non-member is not found."""
+
+    def _command(self, user_id="u-2", actor="u-1"):
+        return port.Command(
+            kind="remove_member",
+            workspace_id="ws",
+            actor_user_id=actor,
+            channel="web",
+            args={"user_id": user_id},
+        )
+
+    async def test_removes_a_member_and_reports_the_role(self, monkeypatch):
+        from src.services.target import command_executors, workspaces
+
+        async def remove_member(session, *, workspace_id, user_id, by_user_id):
+            assert (workspace_id, user_id, by_user_id) == ("ws", "u-2", "u-1")
+            return "member"
+
+        monkeypatch.setattr(workspaces, "remove_member", remove_member)
+        result = await command_executors.remove_member(object(), self._command())
+        assert result.outcome == "executed"
+        assert result.data == {"user_id": "u-2", "removed_role": "member"}
+
+    @pytest.mark.parametrize(
+        "raised, reason",
+        [
+            (LookupError("not_found"), "not_found"),
+            (ValueError("owner"), "illegal_transition"),
+            (ValueError("self"), "illegal_transition"),
+        ],
+    )
+    async def test_refusals_are_named(self, monkeypatch, raised, reason):
+        from src.services.target import command_executors, workspaces
+
+        async def remove_member(session, **kw):
+            raise raised
+
+        monkeypatch.setattr(workspaces, "remove_member", remove_member)
+        with pytest.raises(port.CommandRefused) as info:
+            await command_executors.remove_member(object(), self._command())
+        assert info.value.reason == reason
+
+    def test_it_is_built_at_the_admin_floor(self):
+        assert port.REGISTRY["remove_member"] is not None
+        assert port.ROLE_FLOOR["remove_member"] == "admin"
+
+
+class _DoorExec:
+    """One service statement, scripted: every call is recorded, and each
+    answers *row* from ``first()`` and *rowcount* from ``rowcount``."""
+
+    def __init__(self, row=None, *, rowcount=1):
+        self.row, self.rowcount, self.calls = row, rowcount, []
+
+    async def execute(self, statement, params=None):
+        self.calls.append((str(statement), params))
+        row = self.row
+
+        class _R:
+            rowcount = self.rowcount
+
+            def first(self_inner):
+                return row
+
+        return _R()
+
+
+class TestInviteMemberIsByEmailOnly:
+    """Per person, by email: a Telegram or hint-only invitation names no
+    address, and the web's accept would take it with no identity proof — an
+    open link by another name."""
+
+    @pytest.mark.parametrize("channel", ["telegram", "sms", None])
+    async def test_a_channel_other_than_email_is_refused_before_any_sql(self, channel):
+        from src.services.target import command_executors
+
+        command = port.Command(
+            kind="invite_member",
+            workspace_id="ws",
+            actor_user_id="u-1",
+            channel="web",
+            args={"email": "a@b.co", "delivery_channel": channel},
+        )
+        with pytest.raises(port.CommandRefused) as info:
+            await command_executors.invite_member(object(), command)
+        assert info.value.reason == "invalid_args"
+        assert "by email" in str(info.value)
+
+
+class TestRevokeInvitation:
+    """An admin withdraws a pending invitation. Anything no longer pending —
+    accepted, revoked, swept as expired, unknown, another workspace's — is not found."""
+
+    INVITATION = "3f8a1c2e-5b4d-4e6f-9a1b-7c2d3e4f5a6b"
+
+    def _command(self, invitation_id=INVITATION):
+        return port.Command(
+            kind="revoke_invitation",
+            workspace_id="ws",
+            actor_user_id="u-1",
+            channel="web",
+            args={"invitation_id": invitation_id},
+        )
+
+    async def test_revokes_a_pending_invitation(self, monkeypatch):
+        from src.services.target import command_executors, invitations
+
+        seen = []
+
+        async def revoke(session, *, workspace_id, invitation_id):
+            seen.append((workspace_id, invitation_id))
+            return True
+
+        monkeypatch.setattr(invitations, "revoke", revoke)
+        result = await command_executors.revoke_invitation(object(), self._command())
+        assert seen == [("ws", self.INVITATION)]
+        assert result.outcome == "executed"
+        assert result.data == {"invitation_id": self.INVITATION}
+
+    async def test_an_invitation_no_longer_pending_is_not_found(self, monkeypatch):
+        from src.services.target import command_executors, invitations
+
+        async def revoke(session, **kw):
+            return False
+
+        monkeypatch.setattr(invitations, "revoke", revoke)
+        with pytest.raises(port.CommandRefused) as info:
+            await command_executors.revoke_invitation(object(), self._command())
+        assert info.value.reason == "not_found"
+
+    async def test_an_id_that_is_not_one_is_refused_before_any_sql(self, monkeypatch):
+        from src.services.target import command_executors, invitations
+
+        async def revoke(session, **kw):  # pragma: no cover - must not run
+            raise AssertionError("the service was reached with a malformed id")
+
+        monkeypatch.setattr(invitations, "revoke", revoke)
+        with pytest.raises(port.CommandRefused) as info:
+            await command_executors.revoke_invitation(
+                object(), self._command(invitation_id="not-an-id")
+            )
+        assert info.value.reason == "invalid_args"
+
+    def test_it_is_built_at_the_floor_of_the_command_that_invites(self):
+        assert port.REGISTRY["revoke_invitation"] is not None
+        assert port.ROLE_FLOOR["revoke_invitation"] == port.ROLE_FLOOR["invite_member"]
+
+    @pytest.mark.parametrize("rowcount, revoked", [(1, True), (0, False)])
+    async def test_the_service_moves_only_a_pending_row_of_this_workspace(
+        self, rowcount, revoked
+    ):
+        from src.services.target import invitations
+
+        ex = _DoorExec(rowcount=rowcount)
+        assert (
+            await invitations.revoke(ex, workspace_id="ws", invitation_id="inv-1")
+            is revoked
+        )
+        ((sql, params),) = ex.calls
+        assert sql.startswith("UPDATE workspace_invitations SET state = 'revoked'")
+        assert "workspace_id = :ws" in sql
+        assert "id = :id" in sql
+        assert "state = 'pending'" in sql
+        assert params == {"ws": "ws", "id": "inv-1"}
+
+
+class TestRemoveMemberGoesThroughTheDoor:
+    """The runtime never deletes: `workspaces.remove_member` asks the
+    `fn_member_remove` door and maps its named answers."""
+
+    async def test_removed_reports_the_role_and_names_the_door(self):
+        from src.services.target import workspaces
+
+        ex = _DoorExec(("removed", "member"))
+        role = await workspaces.remove_member(
+            ex, workspace_id="ws", user_id="u2", by_user_id="u1"
+        )
+        assert role == "member"
+        (
+            (sql, params),
+            (revoke_sql, revoke_params),
+            (invites_sql, invites_params),
+            _retire,
+        ) = ex.calls
+        assert "fn_member_remove(" in sql and "DELETE" not in sql.upper()
+        assert params == {"ws": "ws", "u": "u2", "by": "u1"}
+        # 090: the service identities the removed person minted go with them,
+        # in the same transaction — this workspace's, and only theirs.
+        assert "UPDATE service_tokens SET revoked_at = now()" in revoke_sql
+        assert "created_by_user_id = :u" in revoke_sql
+        assert "workspace_id = :ws" in revoke_sql
+        assert revoke_params == {"ws": "ws", "u": "u2"}
+        # 098: so do the pending invitations they sent or were sent.
+        assert "UPDATE workspace_invitations SET state = 'revoked'" in invites_sql
+        assert "invited_by_user_id = :u" in invites_sql
+        assert "SELECT lower(primary_email) FROM users" in invites_sql
+        assert "provider = 'telegram'" in invites_sql
+        assert "workspace_id = :ws" in invites_sql
+        assert "state = 'pending'" in invites_sql
+        assert invites_params == {"ws": "ws", "u": "u2"}
+
+    async def test_a_removal_retires_the_persons_live_states_in_that_workspace(
+        self,
+    ):
+        """Once the door answers removed, one retire selecting this
+        person AND this workspace, whatever the provider."""
+        from src.services.target import workspaces
+
+        ex = _DoorExec(("removed", "member"))
+        await workspaces.remove_member(
+            ex, workspace_id="ws", user_id="u2", by_user_id="u1"
+        )
+        _door, _revoke, _invites, (sql, params) = ex.calls
+        assert sql.startswith("UPDATE oauth_states SET consumed_at = now()")
+        assert "consumed_at IS NULL" in sql and "provider" not in sql
+        assert "user_id = :uid" in sql and "workspace_id = :ws" in sql
+        assert params == {"uid": "u2", "ws": "ws"}
+
+    async def test_a_refused_removal_revokes_nothing(self):
+        from src.services.target import workspaces
+
+        ex = _DoorExec(("owner", "owner"))
+        with pytest.raises(ValueError):
+            await workspaces.remove_member(
+                ex, workspace_id="ws", user_id="u2", by_user_id="u1"
+            )
+        assert len(ex.calls) == 1
+
+    @pytest.mark.parametrize(
+        "row, exc, text_",
+        [
+            (("not_found", None), LookupError, "not_found"),
+            (None, LookupError, "not_found"),
+            (("owner", "owner"), ValueError, "owner"),
+            (("self", None), ValueError, "self"),
+        ],
+    )
+    async def test_the_doors_refusals_come_back_by_name(self, row, exc, text_):
+        from src.services.target import workspaces
+
+        with pytest.raises(exc) as info:
+            await workspaces.remove_member(
+                _DoorExec(row), workspace_id="ws", user_id="u2", by_user_id="u1"
+            )
+        assert str(info.value) == text_

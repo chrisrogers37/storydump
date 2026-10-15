@@ -1,0 +1,845 @@
+/**
+ * The per-submission identity property, tested at the layer that owns it.
+ *
+ * The property that matters: **a genuine second edit BACK TO A PREVIOUS VALUE
+ * must not be silently deduped.** That is the failure a content-hash key
+ * causes, and it is invisible — the port answers 200, the UI says saved, the
+ * setting does not move.
+ *
+ * These tests run the client's real output through the route's real spec and
+ * the real key derivation, rather than asserting that two UUIDs differ. The
+ * chain is what can break: a client that reuses an id, a spec that keys on
+ * something else, a derivation that collapses two submissions onto one key.
+ * Asserting on the last link tests all three.
+ *
+ * What is NOT proven here: that the port then admits all three. That lives in
+ * `command_dedup` and is proven against a real database in
+ * `tests/scripts/test_p3_settings_idempotency.py`, which consumes keys of this
+ * exact shape.
+ */
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { idempotencyKeyFor, parseCommand } from "./commands";
+import { replayedCopy } from "./refusal-copy";
+import {
+  REPLAYED_ERROR,
+  offboardingRefusalCopy,
+  settingsRefusalCopy,
+  submitCommand,
+  submitOffboardWorkspace,
+  submitRestoreWorkspace,
+  submitSettingsChange,
+  submitDisableAccount,
+  disableAccountRefusalCopy,
+  submitRemoveMember,
+  removeMemberRefusalCopy,
+  submitScheduleItem,
+  scheduleRefusalCopy,
+  scheduleOverrideCopy,
+  submitInviteMember,
+  inviteMemberRefusalCopy,
+  submitRevokeInvitation,
+  revokeEndedIt,
+  revokeInvitationRefusalCopy,
+  rescheduleRefusalCopy,
+  REPEAT_COPY,
+  submitSetItemLink,
+  linkRefusalCopy,
+  LINK_URL_MAX,
+  submitSetItemAutoApprove,
+  autoApproveRefusalCopy,
+  submitSetSourceApproval,
+  sourceApprovalRefusalCopy,
+} from "./command-client";
+
+const WS = "11111111-1111-4111-8111-111111111111";
+
+type Captured = { url: string; init: RequestInit };
+
+let captured: Captured[];
+
+/** Reply with `body` at `status`, recording every call. */
+function stubFetch(body: unknown = {}, status = 200) {
+  captured = [];
+  const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+    captured.push({ url, init });
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    } as unknown as Response;
+  });
+  vi.stubGlobal("fetch", fetchMock);
+}
+
+/** The body the browser actually sent, parsed back. */
+function sentBody(i: number): Record<string, unknown> {
+  return JSON.parse(String(captured[i].init.body));
+}
+
+/**
+ * The key the PORT would receive for call `i` — derived by running the sent
+ * body through the route's own spec and the one key derivation, not by
+ * re-implementing either.
+ */
+function portKey(i: number, command = "settings_change"): string {
+  const parsed = parseCommand(command, sentBody(i));
+  if (!parsed.ok) throw new Error(`the route would refuse call ${i}: ${parsed.error}`);
+  return idempotencyKeyFor(command, parsed.identity);
+}
+
+beforeEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("an edit back to a previous value", () => {
+  it("keys three distinct submissions when the value returns to where it started", async () => {
+    stubFetch();
+
+    // The sequence that matters. Not two calls: two of ANY key scheme
+    // usually differ. It is the THIRD, whose content matches the first, that
+    // separates a per-submission key from a content hash.
+    await submitSettingsChange(WS, { caption_style: "enhanced" });
+    await submitSettingsChange(WS, { caption_style: "simple" });
+    await submitSettingsChange(WS, { caption_style: "enhanced" });
+
+    const keys = [portKey(0), portKey(1), portKey(2)];
+    expect(new Set(keys).size).toBe(3);
+
+    // Stated as its own assertion because it is the whole point: calls 0 and 2
+    // carry IDENTICAL content. Keyed on a content hash, these two keys
+    // would be equal and the third write would be acknowledged, not executed.
+    expect(sentBody(0).settings).toEqual(sentBody(2).settings);
+    expect(keys[0]).not.toBe(keys[2]);
+  });
+
+  it("keys two identical resubmissions distinctly — a deliberate retry is not a replay", async () => {
+    stubFetch();
+
+    // Its cost, asserted rather than assumed: this scheme dedups a
+    // double-submit of one attempt but NOT a deliberate second one. Someone
+    // pressing Save twice on purpose gets two writes.
+    await submitSettingsChange(WS, { posts_per_day: 3 });
+    await submitSettingsChange(WS, { posts_per_day: 3 });
+
+    expect(portKey(0)).not.toBe(portKey(1));
+  });
+
+  it("mints the identity per CALL, so no caller can hold one across submissions", async () => {
+    stubFetch();
+    await submitSettingsChange(WS, { posts_per_day: 1 });
+    await submitSettingsChange(WS, { posts_per_day: 2 });
+
+    // The structural half of the rule. `submitCommand` takes no id parameter,
+    // so a component cannot pass a `useState` one in — which is exactly how a
+    // mount-scoped id would arrive.
+    expect(sentBody(0).submission_id).not.toBe(sentBody(1).submission_id);
+    expect(submitCommand.length).toBeLessThanOrEqual(3);
+  });
+});
+
+describe("what the browser sends", () => {
+  it("posts to the command route and lets the SERVER set Idempotency-Key", async () => {
+    stubFetch();
+    await submitSettingsChange(WS, { dry_run_mode: true });
+
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/settings_change`);
+    // The browser must not set the header. The route derives it from the
+    // identity, so a browser-set one would be a second, unvalidated source.
+    const headers = captured[0].init.headers as Record<string, string>;
+    expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain(
+      "idempotency-key",
+    );
+  });
+
+  it("wraps the settings map where the port expects it, and adds nothing else", async () => {
+    stubFetch();
+    await submitSettingsChange(WS, { caption_style: "simple" });
+
+    const body = sentBody(0);
+    expect(body.settings).toEqual({ caption_style: "simple" });
+    // submission_id and settings — no client-side copy of the allowlist, no
+    // re-stated workspace id, nothing the port did not ask for.
+    expect(Object.keys(body).sort()).toEqual(["settings", "submission_id"]);
+  });
+
+  it("produces a body the route's own spec accepts", async () => {
+    stubFetch();
+    await submitSettingsChange(WS, { posts_per_day: 4 });
+
+    // The client and the spec are separate files that must agree. This is the
+    // seam a rename would break silently.
+    expect(parseCommand("settings_change", sentBody(0)).ok).toBe(true);
+  });
+});
+
+describe("a replay is reported as a failure, not a success", () => {
+  it("treats 200 outcome=replayed as a refusal", async () => {
+    // The port acknowledges a same-key/same-body call at HTTP 200 WITHOUT
+    // executing it (`app.py:247-250`). For a settings write, reporting that as
+    // success is precisely the harm this file guards against.
+    stubFetch({ outcome: "replayed" }, 200);
+
+    const result = await submitSettingsChange(WS, { posts_per_day: 5 });
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe(REPLAYED_ERROR);
+  });
+
+  it("says the change was not saved, in the copy a person reads", () => {
+    // The one sentence that must never appear for this reason is a reassuring
+    // one. Pinned so a later copy edit cannot soften it into "saved".
+    const copy = settingsRefusalCopy(REPLAYED_ERROR);
+    expect(copy).toMatch(/not saved/i);
+
+    // Every occurrence of "saved" is negated. Written as a scan rather than
+    // one clever regex because the property is about EVERY occurrence, and a
+    // lookaround gets the direction wrong: the negation here precedes the
+    // word, so `(?!.*not)` passes text that reads "Saved, but ... not".
+    const occurrences = [...copy.matchAll(/saved/gi)];
+    expect(occurrences.length).toBeGreaterThan(0);
+    for (const m of occurrences) {
+      expect(copy.slice(0, m.index).toLowerCase()).toMatch(/\bnot\s+$/);
+    }
+  });
+
+  it("passes a normal success through", async () => {
+    stubFetch({ outcome: "executed", settings: { posts_per_day: 5 } }, 200);
+    const result = await submitSettingsChange(WS, { posts_per_day: 5 });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("refusals", () => {
+  it("surfaces the port's reason rather than a status code", async () => {
+    stubFetch({ detail: "unknown setting 'is_paused'", reason: "invalid_args" }, 400);
+    const result = await submitSettingsChange(WS, { is_paused: true });
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe("invalid_args");
+  });
+
+  it("reports an unreachable app without claiming anything about the write", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("network");
+      }),
+    );
+    const result = await submitCommand(WS, "settings_change", { settings: { tz: "UTC" } });
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe("unreachable");
+    expect(settingsRefusalCopy("unreachable")).toMatch(/Nothing changed/i);
+  });
+
+  it("does not borrow the queue's sentences", () => {
+    // `intents.ts::refusalCopy` answers about posts and the queue. If these
+    // two ever get folded together, a settings failure starts talking about a
+    // post that moved on.
+    expect(settingsRefusalCopy("illegal_transition")).not.toMatch(/queue|post/i);
+  });
+});
+
+describe("a refusal's facts reach the caller through the same allow-list (#1413)", () => {
+  // The port sends facts on its planning refusals; which command is beside the
+  // point here, so the stub answers any.
+  it("surfaces the facts the route relayed", async () => {
+    stubFetch({ error: "locked", facts: { overridable: true, in_the_way: ["recent"] } }, 409);
+    expect(await submitCommand(WS, "schedule_item", {})).toEqual({
+      ok: false,
+      error: "locked",
+      status: 409,
+      facts: { overridable: true, in_the_way: ["recent"] },
+    });
+  });
+
+  it("re-checks them, so the browser holds no free text even if the route relayed some", async () => {
+    stubFetch(
+      { error: "locked", facts: { overridable: true, note: "Bearer eyJhbGciOi...", at_rule: "two words" } },
+      409,
+    );
+    expect(await submitCommand(WS, "schedule_item", {})).toEqual({
+      ok: false,
+      error: "locked",
+      status: 409,
+      facts: { overridable: true },
+    });
+  });
+
+  it("adds no facts key to a refusal that has none", async () => {
+    stubFetch({ error: "illegal_transition" }, 409);
+    // toStrictEqual: an undefined `facts` key is still a key.
+    expect(await submitCommand(WS, "approve", {})).toStrictEqual({
+      ok: false,
+      error: "illegal_transition",
+      status: 409,
+    });
+  });
+});
+
+describe("a permission refusal is not a network blip", () => {
+  // The port maps `insufficient_role` to 403 and answers `{detail: "forbidden"}`
+  // — no `error`, no `reason` — so `submitCommand` synthesises `http_403` and
+  // every reason branch misses. Without the status check, a member refused for
+  // their ROLE and a browser that could not reach the app would get the SAME
+  // sentence, and the two remedies are opposite: "ask an admin" versus "try
+  // again shortly" (#1154).
+
+  it("names the permission problem instead of the generic failure", () => {
+    const copy = settingsRefusalCopy("http_403", 403);
+    expect(copy).toMatch(/permission/i);
+    expect(copy).not.toMatch(/try again shortly/i);
+  });
+
+  it("says who CAN do it — a refusal with no next step is half a message", () => {
+    expect(settingsRefusalCopy("http_403", 403)).toMatch(/admin|owner/i);
+  });
+
+  it("keys on the status, not the synthesised string", () => {
+    // `http_403` is a stand-in the client invents; the status is the real signal.
+    // If the port ever sends a reason alongside the 403, this must still fire.
+    expect(settingsRefusalCopy("something_else", 403)).toMatch(/permission/i);
+  });
+
+  it("does not swallow the other refusals", () => {
+    // A transport failure must keep its own sentence: same screen, opposite remedy.
+    expect(settingsRefusalCopy("unreachable", 0)).toMatch(/cannot reach/i);
+    expect(settingsRefusalCopy("invalid_name", 400)).toMatch(/give the workspace a name/i);
+    expect(settingsRefusalCopy("whatever", 500)).toMatch(/try again shortly/i);
+  });
+});
+
+describe("offboarding — the way in and the way back (#1127)", () => {
+  it("starts offboarding with the intent STATED, under a fresh submission id", async () => {
+    stubFetch({ outcome: "enqueued", state: "offboarding" }, 202);
+    const result = await submitOffboardWorkspace(WS);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/offboard_workspace`);
+    expect(sentBody(0).confirm).toBe(true);
+    expect(typeof sentBody(0).submission_id).toBe("string");
+    expect(portKey(0, "offboard_workspace")).toMatch(/^offboard_workspace:/);
+  });
+
+  it("restores with an empty body, under a fresh submission id", async () => {
+    stubFetch({ outcome: "executed", state: "active" }, 200);
+    const result = await submitRestoreWorkspace(WS);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/restore_workspace`);
+    expect(Object.keys(sentBody(0))).toEqual(["submission_id"]);
+  });
+
+  it("two attempts are two submissions, never one deduped by content", async () => {
+    stubFetch({ outcome: "enqueued" }, 202);
+    await submitOffboardWorkspace(WS);
+    await submitOffboardWorkspace(WS);
+    expect(portKey(0, "offboard_workspace")).not.toBe(portKey(1, "offboard_workspace"));
+  });
+});
+
+describe("offboardingRefusalCopy", () => {
+  it("names the owner on a role refusal — not 'an admin', because admins cannot", () => {
+    expect(offboardingRefusalCopy("http_403", 403)).toMatch(/owner/i);
+    expect(offboardingRefusalCopy("http_403", 403)).not.toMatch(/admin/i);
+  });
+
+  it("asks for the typed confirmation when the intent was not stated", () => {
+    expect(offboardingRefusalCopy("confirm_required")).toMatch(/type the workspace name/i);
+  });
+
+  it("sends a stale screen back to the current state on an illegal transition", () => {
+    // Covers all three port refusals that share the reason: already
+    // offboarding, not offboarding, and the grace window having closed.
+    expect(offboardingRefusalCopy("illegal_transition")).toMatch(/reload/i);
+  });
+
+  it("does not smooth a replay into success", () => {
+    expect(offboardingRefusalCopy(REPLAYED_ERROR)).toMatch(/not/i);
+  });
+
+  it("has a sentence for the unknown case that promises nothing", () => {
+    expect(offboardingRefusalCopy("something_new")).toMatch(/nothing changed/i);
+  });
+});
+
+describe("removing a destination — disable_account", () => {
+  const ACCOUNT = "55555555-5555-4555-8555-555555555555";
+
+  it("sends the account id under a fresh submission id, to the port's door", async () => {
+    stubFetch({ outcome: "executed", ig_account_id: ACCOUNT }, 200);
+    const result = await submitDisableAccount(WS, ACCOUNT);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/disable_account`);
+    expect(sentBody(0).ig_account_id).toBe(ACCOUNT);
+    expect(typeof sentBody(0).submission_id).toBe("string");
+    expect(portKey(0, "disable_account")).toMatch(/^disable_account:/);
+  });
+
+  it("two attempts are two submissions", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitDisableAccount(WS, ACCOUNT);
+    await submitDisableAccount(WS, ACCOUNT);
+    expect(portKey(0, "disable_account")).not.toBe(portKey(1, "disable_account"));
+  });
+});
+
+describe("disableAccountRefusalCopy", () => {
+  it("names the admin floor on a role refusal", () => {
+    expect(disableAccountRefusalCopy("http_403", 403)).toMatch(/admin/i);
+  });
+
+  it("sends a stale screen back when the destination is gone or already removed", () => {
+    expect(disableAccountRefusalCopy("not_found")).toMatch(/reload/i);
+    expect(disableAccountRefusalCopy("illegal_transition")).toMatch(/already/i);
+  });
+
+  it("does not smooth a replay into success", () => {
+    expect(disableAccountRefusalCopy(REPLAYED_ERROR)).toMatch(/not/i);
+  });
+
+  it("has a sentence for the unknown case that promises nothing", () => {
+    expect(disableAccountRefusalCopy("something_new")).toMatch(/nothing changed/i);
+  });
+});
+
+describe("planning a story — schedule_item (#1413)", () => {
+  const plan = {
+    accountId: "55555555-5555-4555-8555-555555555555",
+    itemId: "66666666-6666-4666-8666-666666666666",
+    localAt: "2026-10-03T14:30",
+  };
+
+  it("sends the account, the item and the wall time as typed, to the port's door", async () => {
+    stubFetch({ outcome: "executed", state: "scheduled" }, 200);
+    const result = await submitScheduleItem(WS, plan);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/schedule_item`);
+    const { submission_id, ...args } = sentBody(0);
+    expect(typeof submission_id).toBe("string");
+    expect(args).toEqual({
+      ig_account_id: plan.accountId,
+      media_item_id: plan.itemId,
+      local_at: plan.localAt,
+    });
+    expect(portKey(0, "schedule_item")).toMatch(/^schedule_item:/);
+  });
+
+  it("two attempts are two submissions, so a deliberate retry is never deduped", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitScheduleItem(WS, plan);
+    await submitScheduleItem(WS, plan);
+    expect(portKey(0, "schedule_item")).not.toBe(portKey(1, "schedule_item"));
+  });
+
+  it("surfaces the port's reason, not a status code", async () => {
+    stubFetch({ error: "locked" }, 409);
+    expect(await submitScheduleItem(WS, plan)).toEqual({
+      ok: false,
+      error: "locked",
+      status: 409,
+    });
+  });
+
+  it("sends override_locks only when the person chose to override", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitScheduleItem(WS, { ...plan, overrideLocks: true });
+    await submitScheduleItem(WS, plan);
+    expect(sentBody(0).override_locks).toBe(true);
+    expect("override_locks" in sentBody(1)).toBe(false);
+    // The override is a second, deliberate submission, never a replay of the first.
+    expect(portKey(0, "schedule_item")).not.toBe(portKey(1, "schedule_item"));
+  });
+});
+
+describe("planning a repeating story — schedule_item with repeat (#485)", () => {
+  const plan = {
+    accountId: "22222222-2222-4222-8222-222222222222",
+    itemId: "33333333-3333-4333-8333-333333333333",
+    localAt: "2026-10-15T16:07",
+  };
+
+  it.each([
+    ["a one-off", null],
+    ["a daily rule", { unit: "day" as const, every: 1 }],
+    ["a weekly rule", { unit: "week" as const, every: 2, days: [1, 4] }],
+  ])("%s", async (_, repeat) => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitScheduleItem(WS, { ...plan, repeat });
+    const args = sentBody(0);
+    // A rule rides as chosen; a one-off carries none at all.
+    expect("repeat" in args).toBe(repeat !== null);
+    if (repeat !== null) expect(args.repeat).toEqual(repeat);
+    expect(parseCommand("schedule_item", args).ok).toBe(true);
+  });
+
+  it("names a rule the port refused, scheduling or rescheduling", () => {
+    const facts = { repeat: "invalid" };
+    expect(scheduleRefusalCopy("invalid_args", 400, facts)).toBe(REPEAT_COPY.invalid);
+    expect(rescheduleRefusalCopy("invalid_args", 400, facts)).toBe(REPEAT_COPY.invalid);
+    // A weekly series' days that leave out its story's day.
+    const offDay = { repeat: "off_day" };
+    expect(scheduleRefusalCopy("invalid_args", 400, offDay)).toBe(REPEAT_COPY.off_day);
+    expect(rescheduleRefusalCopy("invalid_args", 400, offDay)).toBe(REPEAT_COPY.off_day);
+    // A time's rule is said by its own sentence.
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "past" })).toMatch(/already passed/);
+  });
+});
+
+describe("scheduleRefusalCopy", () => {
+  it("names the member floor on a role refusal", () => {
+    expect(scheduleRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+  });
+
+  it("says a lock or the item itself keeps it out", () => {
+    expect(scheduleRefusalCopy("locked", 409)).toMatch(/lock/i);
+  });
+
+  it("says the item already waits on that account when it is a duplicate", () => {
+    expect(scheduleRefusalCopy("illegal_transition", 409)).toMatch(/already/i);
+  });
+
+  it("asks for another time when the port refuses the time", () => {
+    expect(scheduleRefusalCopy("invalid_args", 400)).toMatch(/time/i);
+  });
+
+  it("sends a stale screen back when the account or the item is gone", () => {
+    expect(scheduleRefusalCopy("not_found", 404)).toMatch(/reload/i);
+  });
+
+  it("does not smooth a replay into success", () => {
+    expect(scheduleRefusalCopy(REPLAYED_ERROR)).toMatch(/not/i);
+  });
+
+  it("has a sentence for the unknown case that promises nothing", () => {
+    expect(scheduleRefusalCopy("something_new")).toMatch(/nothing was scheduled/i);
+  });
+
+  // With the refusal's facts (`refusal-facts.ts`), each sentence can name its remedy.
+  it("says which rule a refused time broke", () => {
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "past" })).toMatch(/passed/i);
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "skipped" })).toMatch(/daylight/i);
+    // The sentence with no rule names the horizon too ("within 365 days"), so
+    // only "more than" tells the horizon's own sentence from it.
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "horizon" })).toMatch(
+      /more than 365 days/,
+    );
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "shape" })).toMatch(
+      /date and a time/,
+    );
+    expect(scheduleRefusalCopy("invalid_args", 400, { at_rule: "not_a_date" })).toMatch(
+      /date and a time/,
+    );
+  });
+
+  it("says which of the two is gone", () => {
+    expect(scheduleRefusalCopy("not_found", 404, { missing: "account" })).toMatch(/account.*reload/i);
+    expect(scheduleRefusalCopy("not_found", 404, { missing: "item" })).toMatch(/item.*reload/i);
+  });
+
+  it("names what keeps a blocked item out", () => {
+    expect(
+      scheduleRefusalCopy("locked", 409, { in_the_way: ["reject"], overridable: false }),
+    ).toMatch(/rejected/);
+    expect(
+      scheduleRefusalCopy("locked", 409, { in_the_way: ["item_archived"], overridable: false }),
+    ).toMatch(/no longer available/);
+  });
+
+  it("says Instagram can't post an item it can't, rather than that the item is gone", () => {
+    // The item is still in the library, so "no longer available" would send a
+    // person looking for it; another item is the remedy.
+    const copy = scheduleRefusalCopy("locked", 409, {
+      in_the_way: ["item_unsupported"],
+      overridable: false,
+    });
+    expect(copy).toMatch(/Instagram can't post it/);
+    expect(copy).not.toMatch(/no longer available/);
+  });
+
+  it("tells a person whose earlier story was just cancelled to plan it again once it clears", () => {
+    expect(
+      scheduleRefusalCopy("illegal_transition", 409, {
+        existing: { state: "scheduled", origin: "planned", cancel_requested: true },
+      }),
+    ).toMatch(/cancelled.*again/i);
+  });
+
+  it("says whether the story already waiting was planned or is a regular slot", () => {
+    expect(
+      scheduleRefusalCopy("illegal_transition", 409, { existing: { origin: "planned" } }),
+    ).toMatch(/already scheduled/i);
+    expect(
+      scheduleRefusalCopy("illegal_transition", 409, { existing: { origin: "cadence" } }),
+    ).toMatch(/regular/i);
+  });
+
+  it("never reads a duplicate with no `existing` as no conflict", () => {
+    expect(scheduleRefusalCopy("illegal_transition", 409, {})).toMatch(/already/i);
+  });
+});
+
+describe("scheduleOverrideCopy", () => {
+  it("says what the override gets past, and asks", () => {
+    expect(scheduleOverrideCopy({ in_the_way: ["recent"], overridable: true })).toBe(
+      "It was posted on this account recently. Schedule it anyway?",
+    );
+  });
+
+  it("names both warnings when both are in the way", () => {
+    expect(scheduleOverrideCopy({ in_the_way: ["skip", "recent"], overridable: true })).toMatch(
+      /skipped recently and it was posted/,
+    );
+  });
+});
+
+describe("removing a member — remove_member (the revoke for every join edge)", () => {
+  const MEMBER = "66666666-6666-4666-8666-666666666666";
+
+  it("sends the user id under a fresh submission id, to the port's door", async () => {
+    stubFetch({ outcome: "executed", user_id: MEMBER, removed_role: "member" }, 200);
+    const result = await submitRemoveMember(WS, MEMBER);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/remove_member`);
+    expect(sentBody(0).user_id).toBe(MEMBER);
+    expect(portKey(0, "remove_member")).toMatch(/^remove_member:/);
+  });
+
+  it("names the admin floor, the owner rule, and a stale screen", () => {
+    expect(removeMemberRefusalCopy("http_403", 403)).toMatch(/admin/i);
+    expect(removeMemberRefusalCopy("illegal_transition")).toMatch(/owner/i);
+    expect(removeMemberRefusalCopy("not_found")).toMatch(/reload/i);
+  });
+});
+
+describe("inviting a person — invite_member (#1563)", () => {
+  it("sends the address and the role under a fresh submission id, to the port's door", async () => {
+    stubFetch({ outcome: "executed", invitation_id: "i", invite_token: "t", role: "admin" }, 200);
+    const result = await submitInviteMember(WS, { email: "partner@example.com", role: "admin" });
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/invite_member`);
+    expect(sentBody(0)).toMatchObject({ email: "partner@example.com", role: "admin" });
+    expect(portKey(0, "invite_member")).toMatch(/^invite_member:/);
+  });
+
+  it("keys two invitations of the same person apart, so the second is made and not replayed", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitInviteMember(WS, { email: "partner@example.com", role: "member" });
+    await submitInviteMember(WS, { email: "partner@example.com", role: "member" });
+    expect(portKey(0, "invite_member")).not.toBe(portKey(1, "invite_member"));
+  });
+
+  it("names the admin floor, a bad address, and a link that cannot come back", () => {
+    expect(inviteMemberRefusalCopy("http_403", 403)).toMatch(/admin/i);
+    // The port's one code for every invitation refusal, and the route's own.
+    for (const code of ["invalid_args", "invalid_email"]) {
+      expect(inviteMemberRefusalCopy(code, 400), code).toMatch(/email address/i);
+    }
+    expect(inviteMemberRefusalCopy("invalid_role", 400)).toMatch(/member or admin/i);
+    expect(inviteMemberRefusalCopy(REPLAYED_ERROR, 200)).toMatch(/invite them again/i);
+  });
+
+  it("does not claim nothing was made when the answer was lost, only when refused", () => {
+    // The invitation may have committed before an answer went missing.
+    for (const [code, status] of [["unreachable", 0], ["something_new", 500]] as const) {
+      const copy = inviteMemberRefusalCopy(code, status);
+      expect(copy, code).toMatch(/couldn't confirm.*check pending invitations/i);
+      expect(copy, code).not.toMatch(/nothing was created/i);
+    }
+    expect(inviteMemberRefusalCopy("http_401", 401)).toMatch(/not signed in.*nothing was created/i);
+  });
+});
+
+describe("withdrawing an invitation — revoke_invitation", () => {
+  const INVITATION = "22222222-2222-4222-8222-222222222222";
+
+  it("sends the invitation's id under a fresh submission id, to the port's door", async () => {
+    stubFetch({ outcome: "executed", invitation_id: INVITATION }, 200);
+    const result = await submitRevokeInvitation(WS, INVITATION);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/revoke_invitation`);
+    expect(sentBody(0)).toMatchObject({ invitation_id: INVITATION });
+    expect(portKey(0, "revoke_invitation")).toMatch(/^revoke_invitation:/);
+  });
+
+  it("names the admin floor and an invitation that is no longer pending", () => {
+    expect(revokeInvitationRefusalCopy("http_403", 403)).toMatch(/admin/i);
+    expect(revokeInvitationRefusalCopy("not_found", 404)).toMatch(/no longer pending/i);
+  });
+
+  it("says nothing changed when the app is unreachable or the session is gone", () => {
+    // No answer, or a server's error: it may have gone through, so nothing claims it didn't.
+    expect(revokeInvitationRefusalCopy("unreachable", 0)).toMatch(/couldn't confirm/i);
+    expect(revokeInvitationRefusalCopy("http_502", 502)).toMatch(/couldn't confirm/i);
+    expect(revokeInvitationRefusalCopy("unreachable", 0)).not.toMatch(/nothing changed/i);
+    expect(revokeInvitationRefusalCopy("http_401", 401)).toMatch(/not signed in.*nothing changed/i);
+    expect(revokeInvitationRefusalCopy("something_new", 400)).toMatch(/nothing changed/i);
+  });
+
+  it("takes a shown link down when its invitation is revoked now or was no longer pending", () => {
+    expect(revokeEndedIt({ ok: true })).toBe(true);
+    expect(revokeEndedIt({ ok: false, error: "not_found" })).toBe(true);
+    for (const error of ["unreachable", "insufficient_role", "http_500"]) {
+      expect(revokeEndedIt({ ok: false, error }), error).toBe(false);
+    }
+  });
+});
+
+describe("rescheduleRefusalCopy (#1413)", () => {
+  it("names the rule a refused time broke, in the words scheduling uses", () => {
+    expect(rescheduleRefusalCopy("invalid_args", 400, { at_rule: "past" })).toBe(
+      scheduleRefusalCopy("invalid_args", 400, { at_rule: "past" }),
+    );
+    expect(rescheduleRefusalCopy("invalid_args", 400, { at_rule: "skipped" })).toMatch(/daylight/i);
+    expect(rescheduleRefusalCopy("invalid_args", 400)).toMatch(/time/i);
+  });
+
+  it("says why the story can no longer move", () => {
+    // The port moves only a planned story still in `scheduled`.
+    expect(rescheduleRefusalCopy("illegal_transition", 409)).toMatch(/moved on.*reload/i);
+    expect(rescheduleRefusalCopy("cancelling", 409)).toMatch(/being cancelled/i);
+    expect(rescheduleRefusalCopy("not_found", 404)).toMatch(/no longer.*reload/i);
+  });
+
+  it("tells a permission refusal and a lost session apart from a blip", () => {
+    expect(rescheduleRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+    expect(rescheduleRefusalCopy("http_401", 401)).toMatch(/not signed in/i);
+    expect(rescheduleRefusalCopy("unreachable", 0)).toMatch(/nothing was moved/i);
+    expect(rescheduleRefusalCopy("something_new", 500)).toMatch(/nothing changed/i);
+  });
+});
+
+describe("an item's link — set_item_link (#1413)", () => {
+  const ITEM = "66666666-6666-4666-8666-666666666666";
+
+  it("sends the item and the link as typed, to the port's door", async () => {
+    stubFetch({ outcome: "executed", media_item_id: ITEM, link_url: "https://example.com/menu" }, 200);
+    const result = await submitSetItemLink(WS, ITEM, "https://example.com/menu");
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/set_item_link`);
+    const { submission_id, ...args } = sentBody(0);
+    expect(typeof submission_id).toBe("string");
+    expect(args).toEqual({ media_item_id: ITEM, link_url: "https://example.com/menu" });
+    expect(portKey(0, "set_item_link")).toMatch(/^set_item_link:/);
+  });
+
+  it("sends a clear as an explicit null, never a missing key", async () => {
+    stubFetch({ outcome: "executed", media_item_id: ITEM, link_url: null }, 200);
+    await submitSetItemLink(WS, ITEM, null);
+    expect("link_url" in sentBody(0)).toBe(true);
+    expect(sentBody(0).link_url).toBeNull();
+  });
+
+  it("two attempts are two submissions, so setting a link again after a clear is never deduped", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitSetItemLink(WS, ITEM, "https://example.com/menu");
+    await submitSetItemLink(WS, ITEM, "https://example.com/menu");
+    expect(portKey(0, "set_item_link")).not.toBe(portKey(1, "set_item_link"));
+  });
+});
+
+describe("linkRefusalCopy (#1413)", () => {
+  it("states the whole rule, since the port's refusal names no part of it", () => {
+    const sentence = linkRefusalCopy("invalid_args", 400);
+    expect(sentence).toMatch(/https:\/\//);
+    expect(sentence).toContain(LINK_URL_MAX.toLocaleString("en-US"));
+    expect(sentence).toMatch(/no spaces/i);
+    expect(sentence).toMatch(/user name or password/i);
+  });
+
+  it("says the item is gone, and how to see where things stand", () => {
+    expect(linkRefusalCopy("not_found", 404)).toMatch(/no longer in the library.*reload/i);
+  });
+
+  it("tells a permission refusal and a lost session apart from a blip", () => {
+    expect(linkRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+    expect(linkRefusalCopy("http_401", 401)).toMatch(/not signed in/i);
+    expect(linkRefusalCopy("unreachable", 0)).toMatch(/link was not saved/i);
+    expect(linkRefusalCopy("something_new", 500)).toMatch(/nothing changed/i);
+  });
+});
+
+describe("an item's Auto-approve — set_item_auto_approve (#1477)", () => {
+  const ITEM = "77777777-7777-4777-8777-777777777777";
+
+  it("sends the item and the flag it moves to, to the port's door", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    const result = await submitSetItemAutoApprove(WS, ITEM, true);
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/set_item_auto_approve`);
+    const { submission_id, ...args } = sentBody(0);
+    expect(typeof submission_id).toBe("string");
+    expect(args).toEqual({ media_item_id: ITEM, auto_approve: true });
+    expect(portKey(0, "set_item_auto_approve")).toMatch(/^set_item_auto_approve:/);
+  });
+
+  it("two attempts are two submissions, so on, off and on again are never deduped", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitSetItemAutoApprove(WS, ITEM, true);
+    await submitSetItemAutoApprove(WS, ITEM, false);
+    await submitSetItemAutoApprove(WS, ITEM, true);
+    expect(sentBody(1).auto_approve).toBe(false);
+    expect(portKey(0, "set_item_auto_approve")).not.toBe(portKey(2, "set_item_auto_approve"));
+  });
+});
+
+describe("autoApproveRefusalCopy (#1477)", () => {
+  it("says the item is gone, whether it was never here or has been removed", () => {
+    expect(autoApproveRefusalCopy("not_found", 404)).toMatch(/no longer in the library.*reload/i);
+    // A removed item is refused `locked`, with `item_removed` in the way.
+    expect(autoApproveRefusalCopy("locked", 409)).toBe(autoApproveRefusalCopy("not_found", 404));
+  });
+
+  it("tells a permission refusal and a lost session apart from a blip", () => {
+    expect(autoApproveRefusalCopy("insufficient_role", 403)).toMatch(/member/i);
+    expect(autoApproveRefusalCopy("http_401", 401)).toMatch(/not signed in/i);
+    expect(autoApproveRefusalCopy("unreachable", 0)).toMatch(/auto-approve did not change/i);
+    expect(autoApproveRefusalCopy(REPLAYED_ERROR, 200)).toBe(replayedCopy());
+    expect(autoApproveRefusalCopy("something_new", 500)).toMatch(/nothing changed/i);
+  });
+});
+
+describe("a folder's approval position — set_source_approval (#1477)", () => {
+  const SOURCE = "88888888-8888-4888-8888-888888888888";
+
+  it("sends the folder and its position, to the port's door", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    const result = await submitSetSourceApproval(WS, SOURCE, "auto");
+    expect(result.ok).toBe(true);
+    expect(captured[0].url).toBe(`/api/workspaces/${WS}/commands/set_source_approval`);
+    const { submission_id, ...args } = sentBody(0);
+    expect(typeof submission_id).toBe("string");
+    expect(args).toEqual({ source_id: SOURCE, approval_mode: "auto" });
+    expect(portKey(0, "set_source_approval")).toMatch(/^set_source_approval:/);
+  });
+
+  it("sends Workspace default as an explicit null, never a missing key", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitSetSourceApproval(WS, SOURCE, null);
+    expect("approval_mode" in sentBody(0)).toBe(true);
+    expect(sentBody(0).approval_mode).toBeNull();
+    expect(portKey(0, "set_source_approval")).toMatch(/^set_source_approval:/);
+  });
+
+  it("two attempts are two submissions, so going back to a position is never deduped", async () => {
+    stubFetch({ outcome: "executed" }, 200);
+    await submitSetSourceApproval(WS, SOURCE, "auto");
+    await submitSetSourceApproval(WS, SOURCE, "auto");
+    expect(portKey(0, "set_source_approval")).not.toBe(portKey(1, "set_source_approval"));
+  });
+});
+
+describe("sourceApprovalRefusalCopy (#1477)", () => {
+  it("names the admin floor on a role refusal", () => {
+    expect(sourceApprovalRefusalCopy("insufficient_role", 403)).toMatch(/admin/i);
+    expect(sourceApprovalRefusalCopy("http_403", 403)).toMatch(/admin/i);
+  });
+
+  it("sends a stale screen back when the folder is gone or the value was refused", () => {
+    expect(sourceApprovalRefusalCopy("not_found", 404)).toMatch(/no longer here.*reload/i);
+    expect(sourceApprovalRefusalCopy("invalid_args", 400)).toMatch(/reload/i);
+  });
+
+  it("tells a lost session and an unreachable app apart from a blip", () => {
+    expect(sourceApprovalRefusalCopy("http_401", 401)).toMatch(/not signed in/i);
+    expect(sourceApprovalRefusalCopy("unreachable", 0)).toMatch(/nothing changed/i);
+    expect(sourceApprovalRefusalCopy(REPLAYED_ERROR, 200)).toBe(replayedCopy());
+    expect(sourceApprovalRefusalCopy("something_new", 500)).toMatch(/nothing changed/i);
+  });
+});

@@ -1,0 +1,341 @@
+"""The Drive connect leg — the pure half and the floor-driven half (a
+target-tier sibling of `google_oidc`).
+
+Driven through the egress seam exactly as `test_google_oidc.py` drives the
+sign-in exchange (`capture_egress`, shared). The token-endpoint REQUEST shape
+is pinned once, there, because both legs post it through one function
+(`google_oidc.code_grant`); what is pinned here is what THIS leg adds to it —
+the PKCE verifier (RFC 7636) — and what it makes of the answer. Nothing here
+touches a database: the state mint meets a connection that records its
+statements, and the row the grant becomes is the gate's business
+(`tests/scripts/test_gdrive_oauth_gate.py`).
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+from cryptography.fernet import Fernet
+
+from src.services.target import google_drive_oauth as drive
+from src.services.target import oauth_states
+from tests.src.services.target.conftest import (
+    APPENDIX_B_CHALLENGE,
+    APPENDIX_B_VERIFIER,
+    capture_egress,
+    drive_grant,
+)
+
+CLIENT_ID = "cid.apps.googleusercontent.com"
+REDIRECT = "https://api.test/auth/google-drive/callback"
+
+#: The token endpoint's answer to an offline `drive.readonly` grant.
+GRANT = {
+    "access_token": "ya29.access",
+    "refresh_token": "1//refresh",
+    "expires_in": 3599,
+    "scope": "https://www.googleapis.com/auth/drive.readonly",
+    "token_type": "Bearer",
+}
+
+
+class _Conn:
+    """Records each statement and its parameters. A mint reads nothing back
+    but the retire's `rowcount`."""
+
+    def __init__(self):
+        self.statements = []
+
+    async def execute(self, statement, params=None):
+        self.statements.append((str(statement), params))
+        return SimpleNamespace(rowcount=0)
+
+
+class TestIssueConnectState:
+    async def test_stores_the_verifier_encrypted_and_returns_its_challenge(
+        self, ring_env, monkeypatch
+    ):
+        """The state pins the workspace as its own target; the verifier minted
+        with it reaches the row only as ciphertext under the ring, and the
+        caller gets back that verifier's S256 challenge."""
+        ring_env(key=Fernet.generate_key().decode())
+        monkeypatch.setattr(
+            oauth_states, "new_code_verifier", lambda: APPENDIX_B_VERIFIER
+        )
+        conn = _Conn()
+        state, challenge = await drive.issue_connect_state(
+            conn, purpose="connect", user_id="u-1", workspace_id="ws-1"
+        )
+        sql, params = conn.statements[-1]
+        assert sql.startswith("INSERT INTO oauth_states") and params["state"] == state
+        assert (params["provider"], params["target"]) == (drive.PROVIDER, "ws-1")
+        assert challenge == APPENDIX_B_CHALLENGE
+        assert oauth_states.ring().decrypt(params["verifier"]) == APPENDIX_B_VERIFIER
+        assert APPENDIX_B_VERIFIER not in str(conn.statements)
+
+
+class TestAuthorizationUrl:
+    def test_asks_for_offline_readonly_access_on_a_consent_screen(self):
+        url = drive.authorization_url(
+            client_id=CLIENT_ID,
+            redirect_uri=REDIRECT,
+            state="st4te",
+            code_challenge=APPENDIX_B_CHALLENGE,
+        )
+        parts = urlsplit(url)
+        q = parse_qs(parts.query)
+        assert f"{parts.scheme}://{parts.netloc}{parts.path}" == drive.AUTHORIZE_URL
+        assert q["response_type"] == ["code"]
+        assert q["client_id"] == [CLIENT_ID]
+        assert q["redirect_uri"] == [REDIRECT]
+        assert q["state"] == ["st4te"]
+        # drive.readonly and nothing else: the narrowest scope that
+        # lists and downloads a pre-existing folder — neither drive.file
+        # nor drive.metadata.readonly can; the narrower path is the
+        # Picker (#327).
+        assert q["scope"] == ["https://www.googleapis.com/auth/drive.readonly"]
+        # offline + consent is what makes Google issue a refresh token, and
+        # re-issue it on a repeat grant.
+        assert q["access_type"] == ["offline"]
+        assert q["prompt"] == ["consent"]
+        # Not an OIDC flow: no nonce. The state row pins user and workspace.
+        assert "nonce" not in q
+        # PKCE (RFC 7636 §4.3): the challenge it was handed, under S256 —
+        # never `plain`.
+        assert q["code_challenge"] == [APPENDIX_B_CHALLENGE]
+        assert q["code_challenge_method"] == ["S256"]
+
+
+class TestExchangeCode:
+    """`egress.request` patched; what this leg makes of the token endpoint's
+    answer is the contract (the request shape is `test_google_oidc`'s pin)."""
+
+    @staticmethod
+    def _answer(monkeypatch, **over):
+        """The token endpoint's answer: GRANT unless overridden."""
+        return capture_egress(monkeypatch, **({"body": GRANT} | over))
+
+    @staticmethod
+    async def _exchange():
+        return await drive.exchange_code(
+            None,
+            code="c0de",
+            redirect_uri=REDIRECT,
+            client_id=CLIENT_ID,
+            client_secret="s3cret",
+            code_verifier=APPENDIX_B_VERIFIER,
+        )
+
+    async def test_posts_the_code_grant_and_keeps_both_tokens(self, monkeypatch):
+        seen = self._answer(monkeypatch)
+        before = datetime.now(timezone.utc)
+        grant = await self._exchange()
+        after = datetime.now(timezone.utc)
+        # The request rides `google_oidc.code_grant`, whose shape is pinned
+        # there; this leg's own claim is that it is the code grant at all,
+        # with the PKCE verifier beside the code (RFC 7636 §4.5).
+        assert seen["data"]["grant_type"] == "authorization_code"
+        assert seen["data"]["code"] == "c0de"
+        assert seen["data"]["code_verifier"] == APPENDIX_B_VERIFIER
+        assert grant.access_token == "ya29.access"
+        assert grant.refresh_token == "1//refresh"
+        # `expires_in` is relative to the exchange, so the expiry is bounded
+        # by the clock on either side of it rather than pinned to an instant.
+        ttl = timedelta(seconds=3599)
+        assert before + ttl <= grant.expires_at <= after + ttl
+
+    async def test_a_token_endpoint_error_is_refused_by_name(self, monkeypatch):
+        self._answer(monkeypatch, status=400, body={"error": "invalid_grant"})
+        with pytest.raises(drive.DriveOAuthRefused) as exc:
+            await self._exchange()
+        assert exc.value.reason == "exchange_failed"
+
+    async def test_a_grant_without_a_refresh_token_is_refused_not_stored(
+        self, monkeypatch
+    ):
+        """The leg stores the refresh token. A grant without one would work for
+        an hour and then strand the source; the URL asked for one with
+        `prompt=consent`, so its absence is refused by name rather than kept."""
+        self._answer(monkeypatch, body={**GRANT, "refresh_token": None})
+        with pytest.raises(drive.DriveOAuthRefused) as exc:
+            await self._exchange()
+        assert exc.value.reason == "no_refresh_token"
+
+    async def test_a_grant_that_narrowed_the_scope_is_refused(self, monkeypatch):
+        """Google's consent screen can grant a subset of what was asked."""
+        self._answer(
+            monkeypatch,
+            body={**GRANT, "scope": "https://www.googleapis.com/auth/userinfo.email"},
+        )
+        with pytest.raises(drive.DriveOAuthRefused) as exc:
+            await self._exchange()
+        assert exc.value.reason == "scope_not_granted"
+
+    async def test_a_body_that_is_not_json_or_lacks_the_access_token_is_malformed(
+        self, monkeypatch
+    ):
+        self._answer(monkeypatch, raw=b"<html>")
+        with pytest.raises(drive.DriveOAuthRefused) as exc:
+            await self._exchange()
+        assert exc.value.reason == "malformed_response"
+        self._answer(monkeypatch, body={**GRANT, "access_token": ""})
+        with pytest.raises(drive.DriveOAuthRefused) as exc:
+            await self._exchange()
+        assert exc.value.reason == "malformed_response"
+
+    async def test_a_missing_expires_in_leaves_the_expiry_unknown(self, monkeypatch):
+        body = dict(GRANT)
+        del body["expires_in"]
+        self._answer(monkeypatch, body=body)
+        grant = await self._exchange()
+        assert grant.expires_at is None
+
+    def test_every_reason_the_leg_can_raise_has_a_redirect(self):
+        """The map is TOTAL over the vocabulary because the vocabulary IS its
+        key set: the constructor admits nothing else, so the callback cannot
+        meet a reason it has no redirect for. Two redirects, no more."""
+        assert set(drive.REDIRECT_REASON) == {
+            "exchange_failed",
+            "malformed_response",
+            "no_refresh_token",
+            "scope_not_granted",
+            "grant_revoked",
+            "refresh_failed",
+            "client_misconfigured",
+        }
+        assert set(drive.REDIRECT_REASON.values()) == {
+            "exchange_failed",
+            "grant_incomplete",
+        }
+        for reason in drive.REDIRECT_REASON:
+            assert drive.DriveOAuthRefused(reason).reason == reason
+        with pytest.raises(ValueError):
+            drive.DriveOAuthRefused("not_a_reason", "x")
+
+
+class TestPayloadEnvelope:
+    """ONE encrypted column carries both tokens. The envelope is the contract
+    between this writer and `drive_credentials` (the only reader), versioned
+    so the reader takes only the version it knows (`v` 1) and refuses any
+    other as malformed."""
+
+    def test_round_trips_both_tokens_under_a_version(self):
+        plaintext = drive.encode_payload(drive_grant())
+        assert json.loads(plaintext)["v"] == drive.PAYLOAD_VERSION
+        assert drive.decode_payload(plaintext) == drive.DrivePayload(
+            access_token="ya29.access", refresh_token="1//refresh"
+        )
+
+    @pytest.mark.parametrize(
+        "plaintext",
+        [
+            "ya29.bare-token",  # a bare token, which no writer produces (#1054)
+            json.dumps({"v": 2, "access_token": "a", "refresh_token": "r"}),
+            json.dumps({"v": 1, "access_token": "a"}),
+            json.dumps({"v": 1, "access_token": "", "refresh_token": "r"}),
+            json.dumps([1, 2]),
+        ],
+    )
+    def test_anything_but_a_v1_envelope_is_malformed(self, plaintext):
+        with pytest.raises(drive.DrivePayloadMalformed):
+            drive.decode_payload(plaintext)
+
+
+class TestRefreshAccessToken:
+    """#1247: the read path mints a fresh access token from the
+    refresh token. `egress.request` patched; what this leg makes of the token
+    endpoint's answer is the contract."""
+
+    @staticmethod
+    def _answer(monkeypatch, **over):
+        body = {
+            "access_token": "ya29.fresh",
+            "expires_in": 3599,
+            "token_type": "Bearer",
+        }
+        return capture_egress(monkeypatch, **({"body": body} | over))
+
+    @staticmethod
+    async def _refresh():
+        return await drive.refresh_access_token(
+            None,
+            refresh_token="1//refresh",
+            client_id=CLIENT_ID,
+            client_secret="s3cret",
+        )
+
+    async def test_posts_the_refresh_grant_and_keeps_the_refresh_token(
+        self, monkeypatch
+    ):
+        seen = self._answer(monkeypatch)
+        before = datetime.now(timezone.utc)
+        grant = await self._refresh()
+        after = datetime.now(timezone.utc)
+        assert seen["data"]["grant_type"] == "refresh_token"
+        assert seen["data"]["refresh_token"] == "1//refresh"
+        assert "code" not in seen["data"] and "redirect_uri" not in seen["data"]
+        assert grant.access_token == "ya29.fresh"
+        # Google issues no new refresh token on a refresh; the stored one lives on.
+        assert grant.refresh_token == "1//refresh"
+        ttl = timedelta(seconds=3599)
+        assert before + ttl <= grant.expires_at <= after + ttl
+
+    async def test_a_rotated_refresh_token_is_kept_when_google_sends_one(
+        self, monkeypatch
+    ):
+        self._answer(
+            monkeypatch,
+            body={
+                "access_token": "ya29.fresh",
+                "refresh_token": "1//rotated",
+                "expires_in": 60,
+            },
+        )
+        assert (await self._refresh()).refresh_token == "1//rotated"
+
+    @pytest.mark.parametrize("status", [400, 401])
+    async def test_invalid_grant_is_the_named_definitive_refusal(
+        self, monkeypatch, status
+    ):
+        """The grant is gone on Google's side (revoked, or the app removed):
+        the definitive class — the caller flips the row to `expired`. On
+        whatever status Google puts it: 400 or 401."""
+        self._answer(monkeypatch, status=status, body={"error": "invalid_grant"})
+        with pytest.raises(drive.DriveOAuthRefused) as exc:
+            await self._refresh()
+        assert exc.value.reason == "grant_revoked"
+
+    @pytest.mark.parametrize("error", ["invalid_client", "unauthorized_client"])
+    async def test_our_own_misconfiguration_is_named_not_called_weather(
+        self, monkeypatch, error
+    ):
+        self._answer(monkeypatch, status=401, body={"error": error})
+        with pytest.raises(drive.DriveOAuthRefused) as exc:
+            await self._refresh()
+        assert exc.value.reason == "client_misconfigured"
+
+    async def test_no_expires_in_assumes_googles_hour_rather_than_never(
+        self, monkeypatch
+    ):
+        self._answer(monkeypatch, body={"access_token": "ya29.fresh"})
+        before = datetime.now(timezone.utc)
+        grant = await self._refresh()
+        assert before + timedelta(seconds=3599) <= grant.expires_at
+        assert grant.expires_at <= datetime.now(timezone.utc) + timedelta(seconds=3600)
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    async def test_a_transient_answer_is_refused_transiently(self, monkeypatch, status):
+        self._answer(monkeypatch, status=status, body={"error": "backend"})
+        with pytest.raises(drive.DriveOAuthRefused) as exc:
+            await self._refresh()
+        assert exc.value.reason == "refresh_failed"
+
+    async def test_an_answer_without_a_token_is_malformed(self, monkeypatch):
+        self._answer(monkeypatch, body={"token_type": "Bearer"})
+        with pytest.raises(drive.DriveOAuthRefused) as exc:
+            await self._refresh()
+        assert exc.value.reason == "malformed_response"
