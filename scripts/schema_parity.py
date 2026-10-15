@@ -47,6 +47,7 @@ DIMENSIONS = (
     "views",
     "extensions",
     "roles",
+    "settings",
     "memberships",
     "database",
     "default_acls",
@@ -267,7 +268,7 @@ def extract(conn, *, read_only=False):
             ):
                 put("triggers", row, deparse=("definition",))
             for row in rows(
-                f"SELECT {relname} || '@' || quote_ident(co.conname) || ':' || t.tgtype || ':' || t.tgfoid::regprocedure::text AS key, t.tgenabled AS enabled, t.tgdeferrable AS deferrable, t.tginitdeferred AS initially_deferred, t.tgfoid::regprocedure::text AS function, t.tgtype AS kind, encode(t.tgargs,'hex') AS arguments, pg_get_expr(t.tgqual,t.tgrelid) AS condition FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_constraint co ON co.oid=t.tgconstraint WHERE t.tgrelid IN ({allowed}) AND t.tgisinternal AND {_member_free('pg_trigger', 't')}"
+                f"SELECT {relname} || '@' || CASE WHEN co.conrelid<>0 THEN co.conrelid::regclass::text ELSE co.contypid::regtype::text END || '.' || quote_ident(co.conname) || ':' || t.tgtype || ':' || t.tgfoid::regprocedure::text AS key, t.tgenabled AS enabled, t.tgdeferrable AS deferrable, t.tginitdeferred AS initially_deferred, t.tgfoid::regprocedure::text AS function, t.tgtype AS kind, encode(t.tgargs,'hex') AS arguments, pg_get_expr(t.tgqual,t.tgrelid) AS condition FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_constraint co ON co.oid=t.tgconstraint WHERE t.tgrelid IN ({allowed}) AND t.tgisinternal AND {_member_free('pg_trigger', 't')}"
             ):
                 put("internal_triggers", row, deparse=("condition",))
             for row in rows(
@@ -310,6 +311,20 @@ def extract(conn, *, read_only=False):
                     put("roles", row)
                 elif not name.startswith("pg_"):
                     reported["outside_roles"].setdefault("roles", []).append(name)
+            for row in rows(
+                "SELECT CASE WHEN s.setdatabase=0 THEN '*' ELSE '<database>' END AS database, CASE WHEN s.setrole=0 THEN 'PUBLIC' ELSE r.rolname END AS role, s.setconfig AS config FROM pg_db_role_setting s LEFT JOIN pg_roles r ON r.oid=s.setrole WHERE s.setdatabase=0 OR s.setdatabase=(SELECT oid FROM pg_database WHERE datname=current_database())"
+            ):
+                row["role"] = normalize_role(row["role"], owner)
+                row["config"] = sorted(row["config"])
+                row["key"] = row["database"] + "@" + row["role"]
+                if row["role"] in ("<owner>", "PUBLIC") or row["role"].startswith(
+                    "svc_"
+                ):
+                    put("settings", row)
+                else:
+                    reported["outside_roles"].setdefault("settings", {})[
+                        row.pop("key")
+                    ] = row
             options = ", m.inherit_option, m.set_option" if version >= 160000 else ""
             for row in rows(
                 "SELECT r.rolname AS role, member.rolname AS member, grantor.rolname AS grantor, m.admin_option"
@@ -389,7 +404,7 @@ def extract(conn, *, read_only=False):
                 put("foreign_servers", row, acl_kind="s")
             # User mapping options may contain credentials and are never extracted.
             for row in rows(
-                "SELECT s.srvname AS server, CASE WHEN m.umuser=0 THEN 'PUBLIC' ELSE r.rolname END AS role FROM pg_user_mapping m JOIN pg_foreign_server s ON s.oid=m.umserver LEFT JOIN pg_roles r ON r.oid=m.umuser"
+                "SELECT s.srvname AS server, CASE WHEN m.umuser=0 THEN 'PUBLIC' ELSE r.rolname END AS role FROM pg_user_mappings m JOIN pg_foreign_server s ON s.oid=m.srvid LEFT JOIN pg_roles r ON r.oid=m.umuser"
             ):
                 row["role"] = normalize_role(row["role"], owner)
                 row["key"] = row["server"] + "@" + row["role"]

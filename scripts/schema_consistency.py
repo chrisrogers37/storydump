@@ -2,7 +2,9 @@
 
 The pinned commit is the schema-code base. Only migration files absent at that
 commit are replayed; edits or removals to its migration files are refused.
-DATABASE_URL names an administrator on a disposable local PostgreSQL cluster.
+DATABASE_URL and REPLAY_DATABASE_URL name administrators on two independent
+disposable local PostgreSQL clusters. Service roles start absent on both; the
+script removes the roles it creates after dropping its databases.
 """
 
 from __future__ import annotations
@@ -62,14 +64,57 @@ def check_migration_history(base_dir, current_dir):
     return sorted(set(current) - set(base))
 
 
-def run(database_url, *, root=ROOT, pin=BASE_FILE, output_dir=None):
+def require_isolated_clusters(administrators):
+    """Reject shared cluster state and service roles supplied by another run."""
+    identifiers = []
+    for admin in administrators:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT system_identifier FROM pg_catalog.pg_control_system()"
+            )
+            identifiers.append(cursor.fetchone()[0])
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError(
+            "code and replay databases must use independent PostgreSQL clusters"
+        )
+    for admin in administrators:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT rolname FROM pg_catalog.pg_roles WHERE left(rolname,4)='svc_' ORDER BY rolname"
+            )
+            roles = [row[0] for row in cursor.fetchall()]
+        if roles:
+            raise ValueError(
+                "disposable clusters must start without svc_* roles: "
+                + ", ".join(roles)
+            )
+
+
+def drop_service_roles(admin):
+    """All matching roles belong to this run because both clusters start empty."""
+    with admin.cursor() as cursor:
+        cursor.execute(
+            "SELECT rolname FROM pg_catalog.pg_roles WHERE left(rolname,4)='svc_' ORDER BY rolname"
+        )
+        for (role,) in cursor.fetchall():
+            cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+
+
+def run(
+    database_url, replay_database_url, *, root=ROOT, pin=BASE_FILE, output_dir=None
+):
     revision = base_revision(root, pin)
     archive = subprocess.check_output(["git", "archive", revision], cwd=root)
     names = ["parity_code_" + uuid.uuid4().hex, "parity_migrations_" + uuid.uuid4().hex]
-    admin = psycopg2.connect(database_url)
-    admin.autocommit = True
-    created = []
+    administrators, created = [], []
+    isolated = False
     try:
+        for database in (database_url, replay_database_url):
+            admin = psycopg2.connect(database)
+            admin.autocommit = True
+            administrators.append(admin)
+        require_isolated_clusters(administrators)
+        isolated = True
         with tempfile.TemporaryDirectory(prefix="schema-consistency-") as temporary:
             base_root = Path(temporary)
             with tarfile.open(fileobj=io.BytesIO(archive)) as source:
@@ -77,18 +122,21 @@ def run(database_url, *, root=ROOT, pin=BASE_FILE, output_dir=None):
             later = check_migration_history(
                 base_root / "scripts/migrations", root / "scripts/migrations"
             )
-            with admin.cursor() as cursor:
-                for name in names:
+            for admin, name in zip(administrators, names):
+                with admin.cursor() as cursor:
                     cursor.execute(
                         sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(
                             sql.Identifier(name)
                         )
                     )
-                    created.append(name)
-            dsns = [make_dsn(database_url, dbname=name) for name in names]
+                created.append((admin, name))
+            dsns = [
+                make_dsn(database, dbname=name)
+                for database, name in zip((database_url, replay_database_url), names)
+            ]
             for directory, dsn in ((root, dsns[0]), (base_root, dsns[1])):
-                # The module resolves from cwd, so the archived code really builds
-                # the base side even with an editable installation on the host.
+                # The module resolves from cwd, so the archived code builds the
+                # base side even with an editable installation on the host.
                 env = {**os.environ, "DATABASE_URL": dsn}
                 env.pop("PYTHONPATH", None)
                 subprocess.run(
@@ -129,27 +177,48 @@ def run(database_url, *, root=ROOT, pin=BASE_FILE, output_dir=None):
             print(f"base {revision}; {len(replay.applied)} migration(s) replayed")
             return print_comparison(first, second)
     finally:
-        with admin.cursor() as cursor:
-            for name in reversed(created):
-                cursor.execute(
-                    sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
-                        sql.Identifier(name)
+        cleanup_errors = []
+        for admin, name in reversed(created):
+            try:
+                with admin.cursor() as cursor:
+                    cursor.execute(
+                        sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
+                            sql.Identifier(name)
+                        )
                     )
-                )
-        admin.close()
+            except psycopg2.Error as exc:
+                cleanup_errors.append(str(exc))
+        for admin in administrators:
+            try:
+                if isolated:
+                    drop_service_roles(admin)
+            except psycopg2.Error as exc:
+                cleanup_errors.append(str(exc))
+            finally:
+                admin.close()
+        if cleanup_errors:
+            raise RuntimeError(
+                "disposable cluster cleanup failed: " + "; ".join(cleanup_errors)
+            )
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
+    parser.add_argument(
+        "--replay-database-url", default=os.environ.get("REPLAY_DATABASE_URL")
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
     if not args.database_url:
         parser.error("set DATABASE_URL or pass --database-url")
+    if not args.replay_database_url:
+        parser.error("set REPLAY_DATABASE_URL or pass --replay-database-url")
     try:
-        return run(args.database_url, output_dir=args.out)
+        return run(args.database_url, args.replay_database_url, output_dir=args.out)
     except (
         ValueError,
+        RuntimeError,
         OSError,
         subprocess.CalledProcessError,
         psycopg2.Error,

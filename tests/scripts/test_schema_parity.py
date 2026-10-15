@@ -398,3 +398,141 @@ def test_internal_constraint_trigger_state_gates(catalog_db):
         d.startswith("internal_triggers ")
         for d in parity.schema_diff(before, parity.schema_signature(catalog_db))
     )
+
+
+@pytest.mark.integration
+def test_database_owner_extracts_every_dimension_without_superuser(
+    admin_conn, owner_actor
+):
+    from tests.scripts.conftest import _scratch, as_user
+
+    bracket = _scratch(admin_conn, owner=owner_actor, roles=[])
+    administrator_dsn = next(bracket)
+    owner_dsn = as_user(administrator_dsn, owner_actor)
+    try:
+        build_database(owner_dsn)
+        from psycopg2 import sql
+
+        execute(
+            administrator_dsn,
+            sql.SQL(
+                "CREATE FOREIGN DATA WRAPPER parity_wrapper NO HANDLER; GRANT USAGE ON FOREIGN DATA WRAPPER parity_wrapper TO {}"
+            ).format(sql.Identifier(owner_actor)),
+        )
+        execute(
+            owner_dsn,
+            "CREATE SERVER parity_server FOREIGN DATA WRAPPER parity_wrapper; CREATE USER MAPPING FOR CURRENT_USER SERVER parity_server OPTIONS (password 'example-secret')",
+        )
+        expected = parity.schema_signature(administrator_dsn)
+        actual = parity.schema_signature(owner_dsn)
+        assert actual["catalog"]["roles"]["<owner>"]["superuser"] is False
+        assert parity.counts(actual) == parity.FLOORS
+        assert parity.schema_diff(expected, actual) == []
+        assert actual["catalog"]["user_mappings"] == {
+            "parity_server@<owner>": {"server": "parity_server", "role": "<owner>"}
+        }
+        assert "example-secret" not in json.dumps(actual)
+    finally:
+        bracket.close()
+
+
+def test_consistency_requires_independent_clean_clusters():
+    class Admin:
+        def __init__(self, identifier, roles=()):
+            self.identifier, self.roles = identifier, roles
+            self.statements = []
+
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, query):
+            self.statements.append(query)
+
+        def fetchone(self):
+            return (self.identifier,)
+
+        def fetchall(self):
+            return [(name,) for name in self.roles]
+
+    with pytest.raises(ValueError, match="independent PostgreSQL clusters"):
+        schema_consistency.require_isolated_clusters([Admin(1), Admin(1)])
+    with pytest.raises(ValueError, match="without svc_\\* roles"):
+        schema_consistency.require_isolated_clusters(
+            [Admin(1), Admin(2, ["svc_worker"])]
+        )
+    clean = [Admin(1), Admin(2)]
+    schema_consistency.require_isolated_clusters(clean)
+    assert all(all(q.startswith("SELECT ") for q in a.statements) for a in clean)
+
+
+@pytest.mark.integration
+def test_role_properties_and_membership_edges_gate(catalog_db):
+    before = parity.schema_signature(catalog_db)
+    execute(
+        catalog_db,
+        "ALTER ROLE svc_worker CONNECTION LIMIT 1; GRANT svc_clock TO svc_worker",
+    )
+    differences = parity.schema_diff(before, parity.schema_signature(catalog_db))
+    assert any(d.startswith("roles svc_worker.connection_limit:") for d in differences)
+    assert any(d.startswith("memberships svc_clock->svc_worker") for d in differences)
+
+
+@pytest.mark.integration
+def test_database_role_settings_gate_with_portable_names(catalog_db):
+    from psycopg2 import sql
+
+    before = parity.schema_signature(catalog_db)
+    database = parse_dsn(catalog_db)["dbname"]
+    execute(
+        catalog_db,
+        sql.SQL(
+            "ALTER ROLE svc_worker IN DATABASE {} SET search_path TO public; ALTER DATABASE {} SET row_security=on"
+        ).format(sql.Identifier(database), sql.Identifier(database)),
+    )
+    after = parity.schema_signature(catalog_db)
+    assert after["catalog"]["settings"]["<database>@svc_worker"]["config"] == [
+        "search_path=public"
+    ]
+    assert after["catalog"]["settings"]["<database>@PUBLIC"]["config"] == [
+        "row_security=on"
+    ]
+    assert any(d.startswith("settings ") for d in parity.schema_diff(before, after))
+    assert database not in json.dumps(after["catalog"]["settings"])
+
+
+@pytest.mark.integration
+def test_duplicate_foreign_key_names_keep_each_internal_trigger(catalog_db):
+    execute(
+        catalog_db,
+        "CREATE TABLE public.parity_parent(id int PRIMARY KEY); CREATE TABLE public.parity_child_a(parent int CONSTRAINT shared_parent REFERENCES public.parity_parent(id)); CREATE TABLE public.parity_child_b(parent int CONSTRAINT shared_parent REFERENCES public.parity_parent(id))",
+    )
+    before = parity.schema_signature(catalog_db)
+    triggers = {
+        key: value
+        for key, value in before["catalog"]["internal_triggers"].items()
+        if key.startswith("public.parity_parent@")
+    }
+    assert len(triggers) == 4
+    execute(
+        catalog_db,
+        "DO $$DECLARE name text; BEGIN SELECT t.tgname INTO name FROM pg_trigger t JOIN pg_constraint c ON c.oid=t.tgconstraint WHERE t.tgrelid='public.parity_parent'::regclass AND c.conrelid='public.parity_child_a'::regclass LIMIT 1; EXECUTE format('ALTER TABLE public.parity_parent DISABLE TRIGGER %I',name); END$$",
+    )
+    after = parity.schema_signature(catalog_db)
+    assert (
+        len(
+            [
+                d
+                for d in parity.schema_diff(before, after)
+                if d.startswith(
+                    "internal_triggers public.parity_parent@public.parity_child_a."
+                )
+            ]
+        )
+        == 1
+    )

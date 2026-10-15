@@ -285,7 +285,7 @@ jobs:
     name: Schema consistency
     runs-on: ubuntu-latest
     services:
-      postgres:
+      postgres-code:
         image: postgres:17
         env:
           POSTGRES_USER: test_user
@@ -293,6 +293,19 @@ jobs:
           POSTGRES_DB: storyline_test
         ports:
           - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres-replay:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: storyline_test
+        ports:
+          - 5433:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -310,6 +323,7 @@ jobs:
       - name: Compare schema code with the migration tail
         env:
           DATABASE_URL: postgresql://test_user:test_password@localhost:5432/storyline_test
+          REPLAY_DATABASE_URL: postgresql://test_user:test_password@localhost:5433/storyline_test
         run: python -m scripts.schema_consistency --out schema-consistency
       - uses: actions/upload-artifact@v4
         if: always()
