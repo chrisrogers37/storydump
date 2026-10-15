@@ -969,10 +969,10 @@ def build_registry(deps: WorkerDeps) -> dict:
 
 
 #: Kinds a sweep re-mints on its own: their `failed` is a log line, never a
-#: tenant notice ("will not retry" would be a lie). `publish_pipeline` is NOT
-#: here: only `approve` mints it, and its own ceiling covers the errors it
-#: types — an exception that ESCAPES it is exactly the case the workspace must
-#: hear about, or the intent strands in `publishing` with nobody told.
+#: tenant notice ("will not retry" would be a lie). The publish pipeline's
+#: producers call `jobs.mint_publish_job`; a sweep does not re-mint it. Its own
+#: ceiling covers typed errors, while an escaped exception needs a workspace
+#: notice so an intent stranded in `publishing` is visible.
 _REMINTED_KINDS = frozenset(
     {
         "deliver_outbox",

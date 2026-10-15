@@ -381,8 +381,8 @@ class TestChunkChaining:
         # the lane's deadline beside its attempt budget, and a failing
         # chunk ends at whichever bound it reaches first. The lane's budget,
         # both halves, asserted as VALUES. `is not None` would accept any
-        # interval at all — including one measured from the wrong instant
-        # . Same reason `max_attempts` is compared rather than merely
+        # interval at all — including one measured from the wrong instant.
+        # The same reasoning means `max_attempts` is compared rather than merely
         # checked for presence.
         budget_attempts, budget_seconds = jobs.LANE_BUDGETS["bulk"]
         assert chunks[0]["deadline_at"] - chunks[0]["run_at"] == timedelta(

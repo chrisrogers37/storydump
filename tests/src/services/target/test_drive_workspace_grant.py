@@ -1,4 +1,4 @@
-"""The workspace-level Drive grant (workspace Drive grant;).
+"""One Drive grant supplies every folder in a workspace.
 
 One Google grant per WORKSPACE, every folder under it. Pinned here, against
 scripted executors: the connect leg reads and writes the workspace's ownerless

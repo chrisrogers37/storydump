@@ -752,9 +752,9 @@ def _drop_roles_hardened(cur, roles: tuple) -> None:
     databases actually blocking them (asked of pg_shdepend) and retry once.
 
     THE OWNERSHIP PREDICATE IS ABSOLUTE: `_is_suite_db` gates every drop.
-    The step-0 bootstrap is a deployment artifact — a dev or staging
-    database it was legitimately run against carries these same grants and
-    must never be touched by a test sweep, live backends or not. A non-suite
+    A dev or staging database built from the schema code can carry these
+    same service-role grants. A test sweep never touches those databases,
+    live backends or not. A non-suite
     blocker is therefore named and the failure re-raised, loudly.
 
     THE MUTEX IS CHECKED HERE rather than at `drop_service_roles` because
@@ -762,7 +762,7 @@ def _drop_roles_hardened(cur, roles: tuple) -> None:
     callers are the ones worth covering: `_sweep_leftovers`, which this file's
     own header calls the most destructive thing here, and the `owner_actor`
     teardown. Guarding the public door instead would cover one of three and
-    leave the destructive path on call-path coverage, exactly the shape.
+    leave the destructive path protected only by its current callers.
     Enumerating doors is the shape `SUITE_CLUSTER_LOCK_KEY`'s own docstring
     warns against — coverage by container, not by enumeration.
     """

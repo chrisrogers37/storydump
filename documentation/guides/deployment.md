@@ -10,7 +10,7 @@ step is [`cloud-deployment.md`](cloud-deployment.md).
 
 ## Prerequisites
 
-- [ ] GitHub account (public repository)
+- [ ] GitHub account with access to the private repository
 - [ ] Railway account ([railway.app](https://railway.app))
 - [ ] Neon account ([console.neon.tech](https://console.neon.tech))
 - [ ] Vercel account, for the web front end ([`landing-vercel-deployment.md`](landing-vercel-deployment.md))
@@ -70,9 +70,9 @@ psql "$DATABASE_URL" -c "\dt"               # the target tables, in `public`
 
 ### The runtime login
 
-- [ ] Decide what `TARGET_DATABASE_URL` connects as. The design is `svc_ingress`
-  for the API and `svc_worker` for the worker, which step 0 created; each needs
-  a password and a connection string of its own.
+- [ ] Set each service's `TARGET_DATABASE_URL` to its runtime login: `svc_ingress`
+  for the API and `svc_worker` for the worker. `src/models/target/ddl/01_roles.sql`
+  defines these roles; each needs a password and a connection string of its own.
   The API's operating details report the login it actually holds (`db_role`,
   `storydump health --json`, for `OPS_USER_IDS`).
 
