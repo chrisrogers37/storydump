@@ -37,12 +37,11 @@ Instagram*. A publish loop that debits and fails every time moves that number
 and lands nothing. A monitor resting on it would go green on exactly the failure
 it exists to catch, one layer inward.
 
-`post_intents.state = 'posted'` is the landing, and the DATABASE enforces that
-it carries proof. `ck_posted_complete` refuses a `posted` row unless it is
-`manual` with a debited cap, or `api` with
-`ig_container_id IS NOT NULL AND publish_step = 'effect_confirmed'`. The
-strongest available assertion that a post reached Instagram is a constraint the
-schema will not let a row violate.
+`post_intents.state = 'posted'` is the landing. `ck_posted_complete` requires a
+debited cap for every posted row. API posts also require an Instagram container
+ID and `publish_step = 'effect_confirmed'`; dry runs require the confirmed
+effect step and are excluded from the aggregates below. The database enforces
+the evidence each publication mode requires.
 
 So both are returned and each answers something the other cannot:
 
