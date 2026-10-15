@@ -365,7 +365,7 @@ def require_role_privilege(conn, column: str, flag: str) -> None:
     `tests/scripts/conftest.py::actor_lacks_createrole` runs the same query and
     returns the missing privilege as a reason instead.
 
-    CI's `postgres:15` service makes `POSTGRES_USER` the cluster superuser, so
+    CI's PostgreSQL service makes `POSTGRES_USER` the cluster superuser, so
     these gates genuinely run there; a local role created by hand often has
     neither flag, and a silent pass would read as coverage that was never taken.
     """
