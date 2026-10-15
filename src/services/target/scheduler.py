@@ -607,10 +607,9 @@ async def execute_retention_sweep(
     Runs ONE retention class, `rate_counters`, through the `04_functions.sql` door
     `fn_retention_batch`. Each call deletes at most *batch* rows in a short
     transaction of its own from *session_factory*, repeated until a call
-    comes back short or *budget_seconds* is spent. The other classes the door knows stay
-    unswept: each changes something a reader relies on (the audit trail, the
-    cap ledger's `debited_total`, the snapshots), so each is its own
-    decision.
+    comes back short or *budget_seconds* is spent. The door accepts only
+    `rate_counters`; the audit trail, cap ledger and archive exports remain
+    outside this sweep.
     """
     stop_at = time.monotonic() + budget_seconds
     total = 0

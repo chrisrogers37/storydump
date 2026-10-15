@@ -298,13 +298,9 @@ def test_the_owner_login_executes_the_doors_it_deploys(world):
 
 
 def test_the_live_door_filters_landings_from_every_posting_signal(world):
-    """The one `posted` row `ck_posted_complete` accepts with no provider
-    evidence (`legacy_backfill`) and a dry run are excluded from every posting
-    signal. The filter lives in the door's body, read here from the LIVE
-    function in the replayed world rather than from the migration file: a later
-    DROP+CREATE with another filter would pass a file pin and fail this one."""
+    """The live function excludes dry runs from the posting count and age."""
     src = _run(_door_source(world["owner"]))
-    assert src.count("published_via NOT IN ('legacy_backfill', 'dry_run')") == 2
+    assert src.count("published_via <> 'dry_run'") == 2
 
 
 def test_the_api_login_never_holds_a_foreign_workspace_id_but_the_worker_may(world):

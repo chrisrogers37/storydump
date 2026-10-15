@@ -130,7 +130,7 @@ def _new_intent(ledger, state: str, *, origin: str | None = None) -> str:
     * The state-completeness CHECKs (``ck_posted_complete``,
       ``ck_publishing_debited``, ``ck_ambiguous_called``) mean several states
       cannot simply be asserted into existence. Each is satisfied by its own
-      documented route: ``posted`` via the ``legacy_backfill`` exemption, the
+      documented route: ``posted`` via a manual post carrying a cap debit, the
       publishing pair by carrying a cap debit, and ``publishing_ambiguous`` by
       also recording that publish was called.
 
@@ -149,11 +149,8 @@ def _new_intent(ledger, state: str, *, origin: str | None = None) -> str:
     c = ledger["chain"]
     extra_cols, extra_vals = "", []
     if state == "posted":
-        # `ck_posted_complete` exempts the legacy_backfill route, which is the
-        # only way to assert a `posted` row into existence without also
-        # fabricating a container id, publish step and cap debit.
-        extra_cols = ", published_via"
-        extra_vals = ["legacy_backfill"]
+        extra_cols = ", published_via, cap_consumed_on"
+        extra_vals = ["manual", "2026-01-01"]
     elif state in ("publishing", "publishing_ambiguous"):
         extra_cols = ", cap_consumed_on, publish_step"
         extra_vals = [
@@ -195,7 +192,7 @@ COMPLETION = {
     "publishing_ambiguous": (
         ", cap_consumed_on = DATE '2026-01-01', publish_step = 'publish_called'"
     ),
-    "posted": ", published_via = 'legacy_backfill'",
+    "posted": ", published_via = 'manual', cap_consumed_on = current_date",
 }
 
 
@@ -702,9 +699,9 @@ class TestTheInsertGuard:
             ledger,
             "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
             " provider_account_ref, approval_mode, schedule_slot_at, state,"
-            " published_via)"
+            " published_via, cap_consumed_on)"
             " VALUES (%s, %s, %s, 'guard-a', 'manual', now(), 'posted',"
-            " 'legacy_backfill')",
+            " 'manual', current_date)",
             (c["ws"], c["iga"], c["media"]),
         )
         assert not ok and "born scheduled" in msg, msg
@@ -718,9 +715,9 @@ class TestTheInsertGuard:
             ledger,
             "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
             " provider_account_ref, approval_mode, schedule_slot_at, state,"
-            " published_via)"
+            " published_via, cap_consumed_on)"
             " VALUES (%s, %s, %s, 'guard-b', 'manual', now(), 'posted',"
-            " 'legacy_backfill')",
+            " 'manual', current_date)",
             (c["ws"], c["iga"], c["media"]),
             actor="migration",
         )
@@ -1001,8 +998,8 @@ class TestTheGuardsAreLoadBearing:
         sql = (
             "INSERT INTO post_intents (workspace_id, ig_account_id, media_item_id,"
             " provider_account_ref, approval_mode, schedule_slot_at, state,"
-            " published_via) VALUES (%s, %s, %s, %s, 'manual', now(), 'posted',"
-            " 'legacy_backfill')"
+            " published_via, cap_consumed_on) VALUES (%s, %s, %s, %s, 'manual', now(), 'posted',"
+            " 'manual', current_date)"
         )
         ok, msg, _ = _attempt(ledger, sql, (c["ws"], c["iga"], c["media"], "lb-1"))
         assert not ok and "born scheduled" in msg, msg

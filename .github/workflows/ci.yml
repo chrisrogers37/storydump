@@ -82,6 +82,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Migration tests build the pinned schema-code base from history.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5

@@ -6,6 +6,11 @@
       "version": 0,
       "probe": "SELECT to_regclass('public.workspaces') IS NOT NULL AND to_regprocedure('public.fn_safe_tz(text)') IS NOT NULL",
       "note": "the initial schema, built from code"
+    },
+    {
+      "version": 1,
+      "probe": "SELECT (NOT EXISTS (SELECT 1 FROM pg_description d JOIN pg_proc p ON d.classoid = 'pg_proc'::regclass AND d.objoid = p.oid JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public')) AND (NOT EXISTS (SELECT 1 FROM pg_description d JOIN pg_class c ON d.classoid = 'pg_class'::regclass AND d.objoid = c.oid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public')) AND (NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prosecdef AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) setting WHERE setting LIKE 'search_path=%'))) AND (NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.post_intents'::regclass AND attname = 'legacy_queue_item_id' AND NOT attisdropped)) AND (EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.post_intents'::regclass AND conname = 'ck_intent_via' AND pg_get_constraintdef(oid) NOT LIKE '%legacy_backfill%')) AND (EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.post_intents'::regclass AND conname = 'ck_posted_complete' AND pg_get_constraintdef(oid) NOT LIKE '%legacy_backfill%')) AND (EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('public.fn_retention_batch(text,interval,integer)') AND prosrc LIKE '%rate_counters%' AND prosrc NOT LIKE '%jobs_ok%' AND prosrc NOT LIKE '%audit_events%' AND prosrc NOT LIKE '%daily_post_counts%' AND prosrc NOT LIKE '%jobs_bad%' AND prosrc NOT LIKE '%provider_operations%' AND prosrc NOT LIKE '%channel_outbox%'))",
+      "note": "the catalog refresh, intent vocabulary and worker retention contract"
     }
   ]
 }

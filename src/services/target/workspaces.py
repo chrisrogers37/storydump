@@ -1049,9 +1049,7 @@ async def stats(executor, *, workspace_id: str) -> dict[str, Any]:
         # Counted as `posts_by_day` counts: only stories that spend the cap
         # (`_SPENDS_CAP_SQL`), since a story a person planned is outside the
         # cadence the mix draws, and windowed on the local date the post
-        # debited the cap, the date `daily_post_counts` counts it on. A
-        # `legacy_backfill` row never debited the cap, so it is outside the
-        # window here as it is in the ledger.
+        # debited the cap, the date `daily_post_counts` counts it on.
         "SELECT m.source_id::text AS k, count(*) AS n"
         "  FROM post_intents i"
         "  JOIN media_items m ON m.workspace_id = i.workspace_id AND m.id = i.media_item_id"
