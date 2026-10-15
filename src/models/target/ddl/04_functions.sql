@@ -206,41 +206,10 @@ $$;
 
 CREATE FUNCTION fn_retention_batch(p_class text, p_keep interval, p_batch int)
 RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-DECLARE n int := 0; tbl text;
+DECLARE n int := 0;
 BEGIN
   PERFORM set_config('app.actor_kind', 'reaper', true);
-  IF p_class = 'audit_events' THEN
-    tbl := 'audit_export_' || to_char(clock_timestamp(), 'YYYYMMDD_HH24MISS_US');
-    EXECUTE format(
-      'CREATE TABLE archive.%I AS SELECT * FROM audit_events
-        WHERE created_at < now() - %L::interval ORDER BY id LIMIT %s',
-      tbl, p_keep, p_batch);
-    EXECUTE format(
-      'DELETE FROM audit_events WHERE id IN (SELECT id FROM archive.%I)', tbl);
-    GET DIAGNOSTICS n = ROW_COUNT;
-  ELSIF p_class = 'jobs_ok' THEN
-    DELETE FROM jobs WHERE id IN (SELECT id FROM jobs
-      WHERE state IN ('succeeded','cancelled') AND updated_at < now() - p_keep LIMIT p_batch);
-    GET DIAGNOSTICS n = ROW_COUNT;
-  ELSIF p_class = 'jobs_bad' THEN
-    DELETE FROM jobs WHERE id IN (SELECT id FROM jobs
-      WHERE state IN ('failed','review_required') AND updated_at < now() - p_keep LIMIT p_batch);
-    GET DIAGNOSTICS n = ROW_COUNT;
-  ELSIF p_class = 'provider_operations' THEN
-    DELETE FROM provider_operations WHERE id IN (SELECT id FROM provider_operations
-      WHERE state IN ('succeeded','failed') AND updated_at < now() - p_keep LIMIT p_batch);
-    GET DIAGNOSTICS n = ROW_COUNT;
-  ELSIF p_class = 'channel_outbox' THEN
-    DELETE FROM channel_outbox WHERE id IN (SELECT id FROM channel_outbox
-      WHERE state IN ('sent','superseded','failed','ambiguous')
-        AND updated_at < now() - p_keep LIMIT p_batch);
-    GET DIAGNOSTICS n = ROW_COUNT;
-  ELSIF p_class = 'daily_post_counts' THEN
-    DELETE FROM daily_post_counts WHERE (workspace_id, ig_account_id, local_date) IN (
-      SELECT workspace_id, ig_account_id, local_date FROM daily_post_counts
-       WHERE local_date < (now() - p_keep)::date LIMIT p_batch);
-    GET DIAGNOSTICS n = ROW_COUNT;
-  ELSIF p_class = 'rate_counters' THEN
+  IF p_class = 'rate_counters' THEN
     DELETE FROM rate_counters WHERE (scope, key, window_start) IN (
       SELECT scope, key, window_start FROM rate_counters
        WHERE window_start < now() - p_keep LIMIT p_batch);
@@ -512,16 +481,16 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
 $$;
 
 -- Landings and their freshness, estate-wide, for /health/posting: confirmed
--- posts (never a legacy_backfill or dry_run row), the age of the freshest,
+-- posts (never a dry_run row), the age of the freshest,
 -- every intent ever and the age of the oldest. A SECURITY DEFINER read owned
 -- by svc_maintenance; EXECUTE for svc_ingress, the surface's login. Exists
 -- because p_tenant hides every row from a tenant-less read.
 CREATE FUNCTION fn_health_posting_freshness()
 RETURNS TABLE (o_posted_ever bigint, o_last_post_age_seconds numeric, o_intents_ever bigint, o_oldest_intent_age_seconds numeric)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-  SELECT count(*) FILTER (WHERE state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')),
+  SELECT count(*) FILTER (WHERE state = 'posted' AND published_via <> 'dry_run'),
          min(EXTRACT(EPOCH FROM now() - entered_state_at))
-           FILTER (WHERE state = 'posted' AND published_via NOT IN ('legacy_backfill', 'dry_run')),
+           FILTER (WHERE state = 'posted' AND published_via <> 'dry_run'),
          count(*),
          max(EXTRACT(EPOCH FROM now() - created_at))
     FROM post_intents

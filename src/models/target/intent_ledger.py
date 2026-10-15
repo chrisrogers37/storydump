@@ -113,7 +113,6 @@ class PostIntent(TargetBase):
         JSONB, nullable=False, server_default=text(r"""'{"v"\:1}'""")
     )
     last_error = Column(JSONB, nullable=True)
-    legacy_queue_item_id = Column(UUID(as_uuid=True), nullable=True)
     entered_state_at = Column(TZ, nullable=False, server_default=text("now()"))
     created_at, updated_at = timestamps()
     # `post_intents.origin`: a planned story (one a person scheduled for a chosen time) beside the
@@ -150,7 +149,7 @@ class PostIntent(TargetBase):
             "approval_mode IN ('auto','manual')", name="ck_intent_approval"
         ),
         CheckConstraint(
-            "published_via IN ('api','manual','legacy_backfill','dry_run')",
+            "published_via IN ('api','manual','dry_run')",
             name="ck_intent_via",
         ),
         CheckConstraint(
@@ -176,7 +175,6 @@ class PostIntent(TargetBase):
         ),
         CheckConstraint(
             "state <> 'posted'"
-            " OR published_via = 'legacy_backfill'"
             " OR (published_via = 'manual' AND cap_consumed_on IS NOT NULL)"
             " OR (published_via = 'dry_run' AND publish_step = 'effect_confirmed'"
             " AND cap_consumed_on IS NOT NULL)"

@@ -166,7 +166,6 @@ _POSTED_BY = {
     "api": {"ig_container_id": "c-earlier", "publish_step": "effect_confirmed"},
     "dry_run": {"publish_step": "effect_confirmed"},
     "manual": {},
-    "legacy_backfill": {},
 }
 
 
@@ -461,7 +460,7 @@ class TestWhatWaits:
         failure here before it is a silent approval."""
         assert _checked(world, "ck_intent_via") == tuple(sorted(_POSTED_BY))
 
-    @pytest.mark.parametrize("via", ["manual", "dry_run", "legacy_backfill"])
+    @pytest.mark.parametrize("via", ["manual", "dry_run"])
     def test_returning_waits_when_the_only_earlier_post_was_not_through_the_api(
         self, world, via
     ):

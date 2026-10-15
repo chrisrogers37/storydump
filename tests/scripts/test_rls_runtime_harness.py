@@ -3,18 +3,19 @@
 `test_rls_harness.py` proves the PREMISE on a one-table probe (owner bypasses,
 login confined, the schema gate structurally blind, tenant context leaks
 across connection reuse). This module is the other half: the DECLARED RUNTIME
-LOGINS against the schema production runs — the full advertised stream, which
-arm (b) of `advertised_ddl_replay` holds equal to the migration files,
-replayed under the declared actors.
+LOGINS against the schema built from code under its non-superuser owner.
 
-EXERCISED, not asserted-present: the policy census below is every row of
-`pg_policies` (58), asserted equal to the live catalog at (table, cmd, roles)
+EXERCISED, not asserted-present: the policy census below includes all 115 rows of
+`pg_policies`, asserted equal to the live catalog at (table, cmd, roles)
 grain — so a smuggled permissive policy on an already-covered table is a red
 test — and every census row carries a DISPOSITION naming how this module
 drives it (matrix read+write as both logins, a door's definer body, a direct
 machinery probe) or disclosing that it is evaluated-but-not-effect-driven in
-this world (the zero-row sweeps). Every zero/denial assertion is paired with
-a positive control on its own axis.
+this world (the zero-row sweeps). Maintenance witnesses identify their exercised
+commands and explicitly disclose granted commands they do not exercise. Owner
+sessions assume the maintenance role for isolated probes and roll back their
+writes; runtime logins do not assume that role. Every zero/denial assertion is
+paired with a positive control on its own axis.
 
 Two schema truths asserted rather than assumed:
 - ABSENT tenant context yields an EMPTY SET on the tenant tables (the
@@ -67,6 +68,9 @@ T = ("svc_ingress", "svc_worker")  # the tenant-policy TO-list, alphabetical
 #: insert-pair — INSERT policy driven by an own-succeeds/foreign-refused pair
 #: door:<fn> — evaluated inside that SECURITY DEFINER body; "armed" doors
 #: move rows under it, the rest evaluate it over this world
+#: door-read:<fn> — SELECT driven by an allowed login through a definer
+#: maintenance — read or write driven as svc_maintenance, then rolled back
+#: unevaluated — retained policy without an exercised command in this module
 #: machinery — driven by a direct probe as the granted login
 #: auth — driven by the auth-plane tests (ingress inserts + sweep)
 POLICY_CENSUS = {
@@ -311,31 +315,31 @@ POLICY_CENSUS = {
         "audit_events",
         "SELECT",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "door-read:fn_activation_funnel",
     (
         "p_audit_retention_del",
         "audit_events",
         "DELETE",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "unevaluated",
     ("p_tenant", "daily_post_counts", "ALL", T): "matrix",
     (
         "p_maint_dpc",
         "daily_post_counts",
         "ALL",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "door-read:fn_health_publish_attempts",
     ("p_jobs", "jobs", "ALL", T): "matrix",
     ("p_claim_jobs", "jobs", "ALL", ("svc_claim",)): "door:fn_claim_job",
     ("p_clock_jobs", "jobs", "ALL", ("svc_clock",)): "door:fn_clock_tick",
-    ("p_maint_jobs", "jobs", "ALL", ("svc_maintenance",)): "door:fn_retention_batch",
+    ("p_maint_jobs", "jobs", "ALL", ("svc_maintenance",)): "maintenance",
     ("p_tenant", "channel_outbox", "ALL", T): "matrix",
     (
         "p_maint_outbox",
         "channel_outbox",
         "ALL",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "door-read:fn_health_outbox_pending",
     (
         "p_member_outbox",
         "channel_outbox",
@@ -348,7 +352,7 @@ POLICY_CENSUS = {
         "provider_operations",
         "ALL",
         ("svc_maintenance",),
-    ): "door:fn_retention_batch",
+    ): "maintenance",
     ("p_dedup", "command_dedup", "ALL", ("svc_ingress",)): "machinery",
     (
         "p_maint_dedup",
@@ -515,6 +519,18 @@ GOVERNANCE = {
     "oauth_credentials",
 }
 
+# These witnesses partition each affected policy's granted commands. An ALL
+# policy can have a read witness without claiming that its delete path runs.
+MAINTENANCE_COMMAND_COVERAGE = {
+    "p_audit_retention_sel": ({"SELECT"}, set()),
+    "p_audit_retention_del": (set(), {"DELETE"}),
+    "p_maint_dpc": ({"SELECT"}, {"DELETE"}),
+    "p_maint_jobs": ({"SELECT", "UPDATE"}, {"INSERT", "DELETE"}),
+    "p_maint_outbox": ({"SELECT"}, {"DELETE"}),
+    "p_maint_ops": ({"SELECT"}, {"DELETE"}),
+}
+
+
 #: Doors: name -> (permitted login, exercising call). One registry, so the
 #: pairing cannot drift; the catalog census asserts the keyset and grants.
 DOORS = {
@@ -556,7 +572,7 @@ DOORS = {
     ),
     "fn_retention_batch": (
         "svc_worker",
-        "SELECT * FROM fn_retention_batch('jobs_ok', interval '90 days', 5)",
+        "SELECT * FROM fn_retention_batch('rate_counters', interval '90 days', 5)",
     ),
     "fn_offboard_finalize": (
         "svc_worker",
@@ -944,8 +960,8 @@ def _seed_tenant(conn, name: str) -> dict:
 def _arm_world(conn, a: dict) -> None:
     """Rows that make the armed doors do observable work: a system job (also
     the p_jobs OR-IS-NULL pin), a slot-due ig_account for the clock, and a
-    retention-eligible succeeded job (updated_at is writable at INSERT — the
-    touch trigger is BEFORE UPDATE only)."""
+    succeeded job old enough to be a retention sentinel. The rate-counter
+    sweep must leave that job intact."""
     with conn.cursor() as cur:
         cur.execute("SET app.actor_kind = 'migration'")
         cur.execute(
@@ -1260,6 +1276,9 @@ class TestRuntimeTenantIsolationMatrix:
             "matrix-userplane",
             "insert-pair",
             "door",
+            "door-read",
+            "maintenance",
+            "unevaluated",
             "machinery",
             "auth",
         }
@@ -1271,12 +1290,153 @@ class TestRuntimeTenantIsolationMatrix:
         # unlink; the activation funnel's two reads; the admission
         # doors' two writes and their read of the waitlist; the identity mapping functions'
         # two reads; the receipt functions' nine; the redaction function's five.
-        assert len(by_kind["door"]) == 74
+        assert len(by_kind["door"]) == 68
+        assert len(by_kind["door-read"]) == 3
+        assert len(by_kind["maintenance"]) == 2
+        assert len(by_kind["unevaluated"]) == 1
         assert len(by_kind["auth"]) == 5
         # every door named in a disposition exists in the DOORS registry
         for row, disp in POLICY_CENSUS.items():
-            if disp.startswith("door:"):
+            if disp.startswith(("door:", "door-read:")):
                 assert disp.split(":", 1)[1] in DOORS, row
+
+
+class TestMaintenancePolicyWitnesses:
+    """Reads through runtime doors and isolated probes disclose their scope."""
+
+    def test_granted_maintenance_commands_have_an_explicit_coverage_status(
+        self, target
+    ):
+        affected = {
+            name: (table, command, roles, disposition)
+            for (name, table, command, roles), disposition in POLICY_CENSUS.items()
+            if name in MAINTENANCE_COMMAND_COVERAGE
+        }
+        assert set(affected) == set(MAINTENANCE_COMMAND_COVERAGE)
+        for name, (exercised, unevaluated) in MAINTENANCE_COMMAND_COVERAGE.items():
+            table, command, roles, disposition = affected[name]
+            assert roles == ("svc_maintenance",)
+            granted = {
+                row[0]
+                for row in _exec(
+                    target["owner_stream"],
+                    "SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) privilege WHERE has_table_privilege('svc_maintenance', %s, privilege)",
+                    params=(f"public.{table}",),
+                    fetch=True,
+                )
+            }
+            if command != "ALL":
+                granted &= {command}
+            assert exercised.isdisjoint(unevaluated), name
+            assert exercised | unevaluated == granted, (name, granted)
+            assert (disposition == "unevaluated") is (not exercised), name
+        retained = {
+            row[0]
+            for row, disposition in POLICY_CENSUS.items()
+            if disposition == "door:fn_retention_batch"
+        }
+        assert retained == {"p_maint_rate"}
+
+    def test_audit_select_runs_through_the_activation_door(self, target):
+        before = _exec(target["worker"], DOORS["fn_activation_funnel"][1], fetch=True)
+        assert before[-1][0] == 5 and before[-1][2] == 0
+        connection = psycopg2.connect(target["owner_stream"])
+        audit_id = None
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO audit_events (workspace_id, entity_kind, entity_id, from_state, to_state, actor_kind) VALUES (%s, 'post_intent', %s, 'awaiting_approval', 'approved', 'system') RETURNING id",
+                    (str(target["a"]["ws"]), str(target["a"]["intent"])),
+                )
+                audit_id = cursor.fetchone()[0]
+            connection.commit()
+            after = _exec(
+                target["worker"], DOORS["fn_activation_funnel"][1], fetch=True
+            )
+            assert after[-1][2] == before[-1][2] + 1
+        finally:
+            # Remove only this probe's sentinel as the seeding owner; this
+            # cleanup does not claim to exercise the maintenance DELETE policy.
+            try:
+                connection.rollback()
+                if audit_id is not None:
+                    with connection, connection.cursor() as cursor:
+                        cursor.execute(
+                            "DELETE FROM audit_events WHERE id=%s", (audit_id,)
+                        )
+            finally:
+                connection.close()
+
+    def test_cap_select_runs_through_the_posting_attempts_door(self, target):
+        expected = _exec(
+            target["owner_stream"],
+            "SELECT coalesce(sum(count),0), count(*) FROM daily_post_counts",
+            fetch=True,
+        )
+        assert expected[0][0] > 0 and expected[0][1] > 0
+        assert (
+            _exec(target["ingress"], DOORS["fn_health_publish_attempts"][1], fetch=True)
+            == expected
+        )
+
+    @pytest.mark.parametrize("login", LOGINS)
+    def test_outbox_select_runs_through_the_pending_door(self, target, login):
+        expected = _scalar(
+            target["owner_stream"],
+            "SELECT count(*) FROM channel_outbox WHERE state='pending'",
+        )
+        assert expected > 0
+        assert (
+            _scalar(_login_dsn(target, login), DOORS["fn_health_outbox_pending"][1])
+            == expected
+        )
+
+    def test_maintenance_probes_read_both_tenants_and_update_jobs_without_owner_bypass(
+        self, target
+    ):
+        before = _exec(
+            target["owner_stream"],
+            "SELECT id, updated_at FROM jobs ORDER BY id",
+            fetch=True,
+        )
+        connection = psycopg2.connect(target["owner_stream"])
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL ROLE svc_maintenance")
+                cursor.execute(
+                    "SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user"
+                )
+                assert cursor.fetchone() == ("svc_maintenance", False, False)
+                for table in ("jobs", "provider_operations"):
+                    cursor.execute(
+                        "SELECT relowner=current_user::regrole FROM pg_class WHERE oid=%s::regclass",
+                        (f"public.{table}",),
+                    )
+                    assert cursor.fetchone() == (False,)
+                    cursor.execute(
+                        f"SELECT DISTINCT workspace_id FROM public.{table} WHERE workspace_id=ANY(%s::uuid[])",
+                        ([str(target["a"]["ws"]), str(target["b"]["ws"])],),
+                    )
+                    assert {str(row[0]) for row in cursor.fetchall()} == {
+                        str(target["a"]["ws"]),
+                        str(target["b"]["ws"]),
+                    }
+                cursor.execute(
+                    "UPDATE jobs SET locked_by=locked_by WHERE workspace_id=%s RETURNING id",
+                    (str(target["a"]["ws"]),),
+                )
+                assert cursor.fetchall(), "maintenance UPDATE must touch a seeded job"
+        finally:
+            connection.rollback()
+            connection.close()
+        assert (
+            _exec(
+                target["owner_stream"],
+                "SELECT id, updated_at FROM jobs ORDER BY id",
+                fetch=True,
+            )
+            == before
+        )
 
 
 class TestAbsentContextAndConnectionReuse:
@@ -1370,17 +1530,33 @@ class TestDoorsAreExercisedAndExclusive:
         )
         assert plan_jobs >= 2, "the tick's enqueues must be visible in jobs"
 
-    def test_fn_retention_batch_reaps_the_aged_succeeded_job(self, target):
-        world = _exec(
+    def test_fn_retention_batch_reaps_only_aged_rate_counters(self, target):
+        jobs_before = _exec(
             target["owner_stream"],
-            "SELECT kind, lane, state, now() - updated_at > interval '90 days'"
-            " FROM jobs ORDER BY created_at",
+            "SELECT id, state, updated_at FROM jobs WHERE serialization_key LIKE 'old:%'",
             fetch=True,
         )
+        assert len(jobs_before) == 1
+        _exec(
+            target["owner_stream"],
+            "INSERT INTO rate_counters (scope, key, window_start, count) VALUES"
+            " ('ws_admission', 'retention-probe-old', now() - interval '365 days', 1),"
+            " ('ws_admission', 'retention-probe-recent', now(), 1)",
+        )
         reaped = _exec(target["worker"], DOORS["fn_retention_batch"][1], fetch=True)
-        assert reaped == [(1,)], (
-            f"exactly the year-old succeeded job should age out, got {reaped};"
-            f" jobs world before sweep: {world}"
+        assert reaped == [(1,)]
+        assert _exec(
+            target["owner_stream"],
+            "SELECT key FROM rate_counters WHERE scope = 'ws_admission' AND key LIKE 'retention-probe-%'",
+            fetch=True,
+        ) == [("retention-probe-recent",)]
+        assert (
+            _exec(
+                target["owner_stream"],
+                "SELECT id, state, updated_at FROM jobs WHERE serialization_key LIKE 'old:%'",
+                fetch=True,
+            )
+            == jobs_before
         )
 
     def test_fn_reconciler_sweep_finds_nothing_ambiguous_here(self, target):

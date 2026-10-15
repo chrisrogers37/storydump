@@ -389,8 +389,8 @@ def test_a_person_with_a_finished_story_is_erased_instead(world):
             cur.execute(
                 "INSERT INTO post_intents (workspace_id, ig_account_id,"
                 " media_item_id, provider_account_ref, approval_mode,"
-                " schedule_slot_at, state, published_via, approved_by_user_id)"
-                " VALUES (%s, %s, %s, 'acct-runbook-b', 'manual', now(), 'posted', 'legacy_backfill', %s)"
+                " schedule_slot_at, state, published_via, cap_consumed_on, approved_by_user_id)"
+                " VALUES (%s, %s, %s, 'acct-runbook-b', 'manual', now(), 'posted', 'manual', current_date, %s)"
                 " RETURNING id",
                 (chain["ws"], chain["iga"], media, who["user"]),
             )

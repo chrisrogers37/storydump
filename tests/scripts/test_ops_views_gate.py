@@ -748,8 +748,12 @@ def test_posture_shows_rls_drift_and_every_ledger_state(
 
             before = await read()
             assert before["ledger"] == "present"
-            assert [m["version"] for m in before["migrations"]] == [0]
-            assert before["migrations"][0]["status"] == "adopted"
+            from scripts.migration_runner import MIGRATIONS_DIR, discover_migrations
+
+            assert [m["version"] for m in before["migrations"]] == [
+                migration.version for migration in discover_migrations(MIGRATIONS_DIR)
+            ]
+            assert all(m["status"] == "adopted" for m in before["migrations"])
             tables = {r["table"]: r for r in before["rls"]}
             assert tables["post_locks"]["enabled"] is True
             assert "rate_counters" not in tables, (
