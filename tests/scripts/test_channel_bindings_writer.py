@@ -801,7 +801,7 @@ class TestAnAdminRemovesAGroup:
 
 
 class TestTheJoinPathThroughTheDoors:
-    """The Telegram join path on postgres:15, driven as a bare `svc_ingress`
+    """The Telegram join path on PostgreSQL, driven as a bare `svc_ingress`
     connection with no GUCs (the door sets its own): a linked person speaking
     in a bound group becomes a member; nothing else writes. Beside it the
     revoke, `remove_member`, in a real unit of work: its door checks its caller,

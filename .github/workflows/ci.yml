@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        image: postgres:17
         env:
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
@@ -137,8 +137,8 @@ jobs:
         run: |
           pytest tests/ -v --cov=src --cov=storydump_cli --cov-report=xml --cov-report=term-missing
 
-      # Test is a required check on main, and the upload gates nothing (no
-      # coverage threshold). `fail_ci_if_error: false` does not cover the
+      # The coverage upload gates nothing (no coverage threshold).
+      # `fail_ci_if_error: false` does not cover the
       # action itself crashing, for example on a TLS handshake failure to
       # Codecov. An outage at Codecov must not block every merge.
       - name: Upload coverage to Codecov
@@ -207,11 +207,11 @@ jobs:
     # `Test`, so it adds nothing to the wall-clock a person waits for, and a
     # gate that costs nothing is a gate nobody routes around.
     #
-    # REQUIRED: the `main` ruleset requires a pull request and every job in
-    # this workflow by name (Lint, Telegram ratchet, Test, Security
-    # Scan, Front End, Changelog Check). Renaming a job here strands every
-    # open PR on a check that never arrives, so a rename changes the ruleset
-    # in the same breath.
+    # scripts/pr_ready.sh expects all seven declared jobs by name: Lint,
+    # Telegram ratchet, Test, Security Scan, Front End, Changelog Check and
+    # Schema consistency. It checks that its list matches this workflow.
+    # GitHub rulesets govern merge policy; review that configuration when
+    # changing job names.
     #
     # `next build` is deliberately ABSENT: Vercel already builds every PR, so
     # duplicating it here buys nothing but minutes.

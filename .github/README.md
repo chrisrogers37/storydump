@@ -18,14 +18,14 @@ and push gate.
 **File**: `ci.yml`
 
 Runs on every push to `main`, `develop` and `feature/*`, and on every pull
-request into `main` or `develop`, six jobs:
+request into `main` or `develop`, seven jobs:
 
 - **Lint** — `ruff check .` and `ruff format . --check`, the whole repository
   (`ruff.toml` declares the scope; nothing is left unlinted by a directory list)
 - **Telegram ratchet** — `python scripts/telegram_ratchet.py`: the
   allowlist of modules that may reference Telegram (stdlib-only, no install)
 - **Test** — `pytest tests/ -v --cov=src --cov=storydump_cli` against a
-  PostgreSQL 15 service container, with `REQUIRE_TEST_DATABASE=1` so a database
+  PostgreSQL 17 service container, with `REQUIRE_TEST_DATABASE=1` so a database
   that fails to come up fails the run instead of skipping the tests it backs
 - **Security Scan** — pip-audit gates (a known-vulnerable pin in
   `requirements.txt` fails the job); bandit is advisory (`|| true` and
@@ -36,12 +36,16 @@ request into `main` or `develop`, six jobs:
   against the runtime dependencies fails the job
 - **Changelog Check** — pull requests only, `scripts/changelog_fragments.py
   check --base`: the fragment rule in `changelog.d/README.md`
+- **Schema consistency** — `python -m scripts.schema_consistency` compares the
+  catalog built from current schema code with the pinned schema-code base plus
+  its migration tail. Two independent disposable PostgreSQL 17 clusters keep
+  roles and memberships separate; catalog snapshots and differences are uploaded
+  as an artifact
 
-All jobs run on **GitHub's cloud runners** (`ubuntu-latest`) — safe for public
-repositories. The `main` ruleset requires a pull request and all six of these
-checks by name (Lint, Telegram ratchet, Test, Security Scan, Front End,
-Changelog Check), so GitHub refuses a merge until they are green. Renaming one
-of those jobs means updating the ruleset too.
+All jobs run on **GitHub's cloud runners** (`ubuntu-latest`). The local
+`scripts/pr_ready.sh` helper expects all seven declared jobs by name and checks
+that its list matches the workflow. GitHub rulesets govern merge policy; review
+that configuration when changing job names.
 
 ### Continuous Deployment (Railway Auto-Deploy)
 
