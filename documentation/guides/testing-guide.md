@@ -51,7 +51,7 @@ suite in Linux with FFmpeg installed; on macOS this container provides both:
 
 ```bash
 docker run --rm -v "$PWD:/workspace" -w /workspace python:3.10-bookworm bash -lc '
-  apt-get update && apt-get install -y ffmpeg libpq-dev gcc &&
+  apt-get update && apt-get install -y ffmpeg jq libpq-dev gcc &&
   python -m venv /tmp/storydump-tests &&
   . /tmp/storydump-tests/bin/activate &&
   pip install -r requirements.txt pytest-cov && pip install -e ".[cli]" &&
