@@ -536,3 +536,22 @@ def test_duplicate_foreign_key_names_keep_each_internal_trigger(catalog_db):
         )
         == 1
     )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("namespace", "definition"),
+    [
+        ("archive", "CREATE DOMAIN archive.parity_example AS text"),
+        ("runner", "CREATE TYPE runner.parity_example AS ENUM ('example')"),
+    ],
+)
+def test_standalone_types_in_relation_excluded_schemas_still_gate(
+    catalog_db, namespace, definition
+):
+    before = parity.schema_signature(catalog_db)
+    execute(catalog_db, definition)
+    assert any(
+        d.startswith(f"types {namespace}.parity_example:")
+        for d in parity.schema_diff(before, parity.schema_signature(catalog_db))
+    )
