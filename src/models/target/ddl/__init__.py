@@ -76,6 +76,7 @@ def build(conn: Connection) -> None:
     roles are created if missing) and must own the database.
     """
     with conn.begin():
+        conn.execute(text("SET LOCAL search_path = public, pg_temp"))
         found = contents(conn)
         if found:
             raise NotEmpty("the database is not empty: " + ", ".join(found))

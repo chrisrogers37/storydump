@@ -176,11 +176,11 @@ class Workspace(TargetBase):
 class WorkspaceMember(TargetBase):
     """Membership, and the structural home of ownership.
 
-    Exactly one owner at every commit, by two mechanisms that `identity_and_tenancy.py` installs
-    together: ``uq_members_one_owner`` is "at most one", and the deferred
-    constraint-trigger PAIR is "at least one" on every path — demotion, removal
-    and workspace creation alike. Only the index is a relation, so only the
-    index is visible to the parity gate and declared here.
+    Exactly one owner at every commit: ``uq_members_one_owner`` provides
+    "at most one", and the deferred constraint triggers in ``ddl/06_triggers.sql``
+    provide "at least one" on every path — demotion, removal and workspace
+    creation alike. The models declare the index; the catalog comparator
+    reads both the index and the triggers.
     """
 
     __tablename__ = "workspace_members"

@@ -281,7 +281,7 @@ whether the database-backed tests ran.
 ```yaml
 services:
   postgres:
-    image: postgres:15
+    image: postgres:17
     env:
       POSTGRES_USER: test_user
       POSTGRES_PASSWORD: test_password

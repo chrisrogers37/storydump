@@ -78,7 +78,7 @@ cp .env.example .env    # or: make env-example
 `.env.example` lists every variable the code reads, with what each one does.
 No variable is required to load settings; a process needs what it reads:
 
-- `TARGET_DATABASE_URL`: the database the API and the worker run against (the runtime login). The worker exits 2 without it; the API answers 503 on every data route.
+- `TARGET_DATABASE_URL`: each process's runtime connection string: `svc_ingress` for the API and `svc_worker` for the worker. The worker exits 2 without it; the API answers 503 on every data route.
 - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`: what `make create-db`, `make init-db` and the test harness connect with. No deployed process reads them.
 - `DATABASE_URL`: the database-owner login the migration runner applies the schema with. Locally `make init-db` builds it from the `DB_*` components.
 - `ENCRYPTION_KEY`: a Fernet key for the stored credentials, the same one on the API and the worker; neither starts without a valid one (the test suite needs one too).
@@ -105,6 +105,21 @@ roles. The builder creates the schema in one transaction and refuses an
 existing schema it does not recognize. `make reset-db` drops and rebuilds the
 local database.
 
+The builder creates `svc_ingress` and `svc_worker` without passwords. As the
+local database owner, set a password for each in `psql` (replace the owner and
+database placeholders with the `DB_USER` and `DB_NAME` you configured):
+
+```text
+psql 'postgresql://<owner>@localhost:5432/<database>'
+\password svc_ingress
+\password svc_worker
+\q
+```
+
+Use `svc_ingress` in `.env`'s `TARGET_DATABASE_URL` for the API, and give the
+worker its `svc_worker` URL when starting it below. Percent-encode reserved
+characters in URL passwords; the owner login stays in the `DB_*` settings.
+
 `scripts/migrations/000_initial.sql` is an empty base marker. Adoption records
 it without executing it; later migrations apply on top of that base. The
 runner refuses to execute an unrecorded `000`.
@@ -130,13 +145,14 @@ The `Procfile` names the two processes.
 
 ```bash
 # The API (the Procfile's `web` line): GET /health, /api/v1 (and /openapi.json under API_DOCS=1, never in production)
-export TARGET_DATABASE_URL=postgresql://<user>@localhost:5432/<database>   # the value in your .env
+export TARGET_DATABASE_URL='postgresql://svc_ingress:<password>@localhost:5432/<database>'
 uvicorn src.api.app:app --port 8000
 
 # The worker (the Procfile's `worker` line), in the foreground. `make run`
 # exports `.env` into the process; a bare `python -m src.main` does not read it
 # and refuses to boot without TARGET_DATABASE_URL in its environment.
-make run
+# A make command-line variable overrides the API URL loaded from .env.
+make run TARGET_DATABASE_URL='postgresql://svc_worker:<password>@localhost:5432/<database>'
 ```
 
 The web front end is `npm --prefix landing run dev` (http://localhost:3000); it
@@ -205,10 +221,9 @@ only sends.
 
 ### Running Tests
 
-The suite runs against a local PostgreSQL. Without one, the root suite's
-database tests skip and the gates under `tests/scripts/` ERROR at their first
-fixture — leave them out (`--ignore=tests/scripts`) for a no-database run. CI sets `REQUIRE_TEST_DATABASE=1` so a database
-that fails to come up is a failure, never a silent skip;
+The suite runs against a local PostgreSQL. Without one, database-backed tests
+in the root suite and under `tests/scripts/` skip. CI sets
+`REQUIRE_TEST_DATABASE=1` so a database that fails to come up is a failure;
 [`documentation/guides/testing-guide.md`](documentation/guides/testing-guide.md#giving-the-gates-a-server)
 has the throwaway-server recipe.
 

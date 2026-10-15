@@ -56,9 +56,9 @@ without an `ENCRYPTION_KEY` (or `ENCRYPTION_KEYS`) that is a Fernet key.
 **Option A: Local PostgreSQL (Recommended for Development)**
 
 ```bash
-# macOS — the 15 keg: CI's service container is postgres:15, and the DB gates
-# need its `psql` on the PATH (/opt/homebrew/opt/postgresql@15/bin; see
-# testing-guide.md)
+# macOS — PostgreSQL 15 is the compatibility target; CI uses postgres:17.
+# The DB gates need `psql` on the PATH
+# (/opt/homebrew/opt/postgresql@15/bin; see testing-guide.md).
 brew install postgresql@15
 brew services start postgresql@15
 
@@ -68,6 +68,13 @@ brew services start postgresql@15
 # make reset-db drops and rebuilds the local database.
 make create-db init-db
 ```
+
+Set passwords for `svc_ingress` and `svc_worker` through the local owner
+session, then configure their separate runtime URLs as shown in the
+[README database setup](../../README.md#3-database-setup). The API uses
+`svc_ingress`; start the worker with
+`make run TARGET_DATABASE_URL='postgresql://svc_worker:<password>@localhost:5432/storydump'`.
+The make command-line variable overrides the API URL in `.env`.
 
 **Option B: Connect to Neon (Shared Dev/Staging)**
 
@@ -203,8 +210,9 @@ DB_NAME=storydump
 DB_USER=storydump_user
 DB_PASSWORD=your_local_password
 
-# The runtime login (the API and the worker)
-TARGET_DATABASE_URL=postgresql://storydump_user:your_local_password@localhost:5432/storydump
+# The API runtime login; the worker receives its own svc_worker URL at startup.
+# Set each role's password as the owner and percent-encode URL passwords.
+TARGET_DATABASE_URL=postgresql://svc_ingress:your_api_password@localhost:5432/storydump
 # The owner login (the migration runner). Left commented, as in .env.example:
 # `make` exports this file into every target, and `make init-db` builds the
 # runner's URL from the DB_* components rather than trusting an ambient one.
