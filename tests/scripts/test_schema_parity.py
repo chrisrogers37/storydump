@@ -329,7 +329,7 @@ def test_extract_membership_scope_depends_on_member(role, member, grantor, compa
     snapshot = parity.extract(conn)
     normalized_member = parity.normalize_role(member, "owner_a")
     normalized_grantor = parity.normalize_role(grantor, "owner_a")
-    key = f"{role}->{normalized_member}@{normalized_grantor}"
+    key = f"{role}->{normalized_member}"
     expected = {
         "role": role,
         "member": normalized_member,
@@ -337,11 +337,92 @@ def test_extract_membership_scope_depends_on_member(role, member, grantor, compa
         "admin_option": False,
     }
     if compared:
-        assert snapshot["catalog"]["memberships"][key] == expected
+        assert snapshot["reported"]["membership_grants"] == [expected]
+        assert snapshot["catalog"]["memberships"][key] == {
+            k: v for k, v in expected.items() if k != "grantor"
+        }
         assert "memberships" not in snapshot["reported"]["outside_roles"]
     else:
         assert snapshot["catalog"]["memberships"] == {}
         assert snapshot["reported"]["outside_roles"]["memberships"] == [expected]
+
+
+def membership_snapshot(grants, version=170000):
+    class MembershipCursor(FakeCursor):
+        def execute(self, statement, parameters=None):
+            super().execute(statement, parameters)
+            if "FROM pg_auth_members" in statement:
+                self.result = copy.deepcopy(grants)
+
+    cursor = MembershipCursor(version)
+    conn = SimpleNamespace(
+        set_session=lambda **kwargs: None,
+        cursor=lambda **kwargs: cursor,
+        rollback=lambda: None,
+    )
+    extracted = parity.extract(conn)
+    snapshot = healthy_snapshot()
+    snapshot["catalog"]["memberships"] = extracted["catalog"]["memberships"]
+    snapshot["reported"] = extracted["reported"]
+    return snapshot
+
+
+def membership_grant(grantor, admin=False):
+    return {
+        "role": "svc_clock",
+        "member": "svc_worker",
+        "grantor": grantor,
+        "admin_option": admin,
+        "inherit_option": True,
+        "set_option": True,
+    }
+
+
+@pytest.mark.parametrize("version", [150000, 170000])
+def test_membership_grantor_is_reported_without_gating(version, capsys):
+    first = membership_snapshot([membership_grant("provider_owner_a")], version)
+    second = membership_snapshot([membership_grant("provider_owner_b")], version)
+    assert parity.print_comparison(first, second) == 0
+    output = capsys.readouterr().out
+    assert "membership_grants" in output
+    assert "provider_owner_a" in output and "provider_owner_b" in output
+    assert (
+        first["reported"]["membership_grants"]
+        != second["reported"]["membership_grants"]
+    )
+
+
+@pytest.mark.parametrize("grant_order", [(False, True), (True, False)])
+def test_multiple_membership_grantors_preserve_effective_admin_option(grant_order):
+    first = membership_snapshot([membership_grant("provider_owner_a")])
+    grants = [
+        membership_grant(f"provider_owner_{n}", admin)
+        for n, admin in enumerate(grant_order)
+    ]
+    second = membership_snapshot(grants)
+    assert second["catalog"]["memberships"] == {
+        "svc_clock->svc_worker": {
+            "role": "svc_clock",
+            "member": "svc_worker",
+            "admin_option": True,
+        }
+    }
+    assert len(second["reported"]["membership_grants"]) == 2
+    assert any(
+        "admin_option" in difference for difference in parity.schema_diff(first, second)
+    )
+
+
+def test_redundant_membership_grantors_do_not_gate():
+    first = membership_snapshot([membership_grant("provider_owner_a", True)])
+    second = membership_snapshot(
+        [
+            membership_grant("provider_owner_a", True),
+            membership_grant("provider_owner_b", False),
+        ]
+    )
+    assert parity.schema_diff(first, second) == []
+    assert len(second["reported"]["membership_grants"]) == 2
 
 
 @pytest.mark.parametrize("version", [150000, 160000, 170000])
@@ -642,16 +723,64 @@ def test_role_properties_and_membership_edges_gate(catalog_db):
 
 @pytest.mark.integration
 @pytest.mark.parametrize("member", ["svc_worker", "CURRENT_USER"])
-def test_predefined_role_memberships_held_by_scoped_roles_gate(catalog_db, member):
+@pytest.mark.parametrize("role", ["pg_execute_server_program", "neon_superuser"])
+def test_provider_and_predefined_memberships_held_by_scoped_roles_gate(
+    catalog_db, member, role
+):
+    if role == "neon_superuser":
+        execute(catalog_db, "CREATE ROLE neon_superuser")
     before = parity.schema_signature(catalog_db)
-    execute(catalog_db, f"GRANT pg_execute_server_program TO {member}")
+    execute(catalog_db, f"GRANT {role} TO {member}")
     try:
         after = parity.schema_signature(catalog_db)
         normalized_member = "<owner>" if member == "CURRENT_USER" else member
-        expected = f"memberships pg_execute_server_program->{normalized_member}@"
+        expected = f"memberships {role}->{normalized_member}:"
         assert any(d.startswith(expected) for d in parity.schema_diff(before, after))
     finally:
-        execute(catalog_db, f"REVOKE pg_execute_server_program FROM {member}")
+        execute(catalog_db, f"REVOKE {role} FROM {member}")
+        if role == "neon_superuser":
+            execute(catalog_db, "DROP ROLE neon_superuser")
+
+
+@pytest.mark.integration
+def test_membership_grantor_change_is_reported_on_real_postgres(catalog_db):
+    execute(
+        catalog_db,
+        "CREATE ROLE parity_grantor_a; CREATE ROLE parity_grantor_b; GRANT svc_clock TO parity_grantor_a, parity_grantor_b WITH ADMIN OPTION",
+    )
+    try:
+        execute(
+            catalog_db,
+            "SET ROLE parity_grantor_a; GRANT svc_clock TO svc_worker; RESET ROLE",
+        )
+        first = parity.schema_signature(catalog_db)
+        execute(
+            catalog_db,
+            "SET ROLE parity_grantor_a; REVOKE svc_clock FROM svc_worker; RESET ROLE; SET ROLE parity_grantor_b; GRANT svc_clock TO svc_worker; RESET ROLE",
+        )
+        second = parity.schema_signature(catalog_db)
+        assert parity.schema_diff(first, second) == []
+        assert (
+            first["reported"]["membership_grants"]
+            != second["reported"]["membership_grants"]
+        )
+        execute(
+            catalog_db,
+            "SET ROLE parity_grantor_a; GRANT svc_clock TO svc_worker WITH ADMIN OPTION; RESET ROLE",
+        )
+        administered = parity.schema_signature(catalog_db)
+        assert administered["catalog"]["memberships"]["svc_clock->svc_worker"][
+            "admin_option"
+        ]
+        assert any(
+            "svc_clock->svc_worker.admin_option" in difference
+            for difference in parity.schema_diff(second, administered)
+        )
+    finally:
+        execute(
+            catalog_db,
+            "REVOKE svc_clock FROM parity_grantor_a, parity_grantor_b CASCADE; DROP ROLE parity_grantor_a; DROP ROLE parity_grantor_b",
+        )
 
 
 @pytest.mark.integration

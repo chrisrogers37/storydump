@@ -213,6 +213,15 @@ production. No step here creates a branch or changes production automatically.
 The branch is the production-shaped rehearsal target, containing its real schema,
 legacy ledger, and archive snapshots. Protect it as production data.
 
+Build the schema-code reference on a matching Neon branch or an independent
+cluster with the same PostgreSQL major version, role attributes, and owner and
+provider membership edges as the rehearsal target. The parity comparison reports
+membership grantors, but compares effective role-to-member edges and whether
+those edges carry admin option; grantor names may differ. When a vanilla
+PostgreSQL reference does not model Neon provider memberships, adapt the
+disposable reference to match the target's effective memberships. Do not grant
+production roles new memberships or admin powers just to match that reference.
+
 Prepare an empty code database on an independent disposable cluster using the
 matching owner-role posture described above. Build and adopt it:
 
@@ -254,6 +263,31 @@ final zero-difference requirement.
 
 Run the owner-applied steps in order, after inspecting that initial report:
 
+Before applying 001, count rows for which either replacement CHECK expression
+is definitively false. PostgreSQL CHECK constraints accept `NULL`, so the query
+uses `IS FALSE` rather than counting every row for which the expression is not
+true. The block is read-only and does not change the database:
+
+```sql
+BEGIN READ ONLY;
+SELECT
+  (SELECT count(*) FROM public.post_intents
+   WHERE (state <> 'posted'
+          OR (published_via = 'manual' AND cap_consumed_on IS NOT NULL)
+          OR (published_via = 'dry_run' AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL)
+          OR (published_via = 'api' AND ig_container_id IS NOT NULL AND publish_step = 'effect_confirmed' AND cap_consumed_on IS NOT NULL)) IS FALSE)
+    AS ck_posted_complete_violations,
+  (SELECT count(*) FROM public.post_intents
+   WHERE (published_via IN ('api','manual','dry_run')) IS FALSE)
+    AS ck_intent_via_violations;
+COMMIT;
+```
+
+Both counts must be zero before continuing. If either is nonzero, stop before
+001 and have the database owner resolve the affected rows under the approved
+data-repair process, then repeat this preflight. Keep the query results with
+the branch identity and cutover record.
+
 ```sh
 python -m scripts.migration_runner --database-url "$CUTOVER_DSN" apply --manual 001
 psql "$CUTOVER_DSN" -X --set=ON_ERROR_STOP=1 \
@@ -272,6 +306,16 @@ Require the final command to exit zero and report zero differences before
 approving a production cutover. Inspect out-of-scope roles and other reported
 metadata as well. Save the initial and final reports with the branch identity
 and backup evidence; a rehearsal result describes that exact branch state.
+
+If validation fails after 001 commits, stop before 002. Migration 001 is already
+committed, including its ledger record and `NOT VALID` constraints; do not rename
+or repair the ledger to claim that 001 was undone. The database owner must
+resolve the violating rows, then rerun
+`psql "$CUTOVER_DSN" -X --set=ON_ERROR_STOP=1 --single-transaction
+--file=scripts/validate_catalog_constraints.sql`. Continue only after both
+validations commit. If the schema itself must be rolled back, use the approved
+backup recovery procedure and verify the restored database; do not simulate a
+rollback by editing migration history.
 
 ## Repeat on production
 

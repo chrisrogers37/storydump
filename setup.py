@@ -9,7 +9,10 @@ setup(
     author="Chris Rogers",
     packages=find_packages(),
     # Schema construction reads these files at runtime.
-    package_data={"src.models.target.ddl": ["*.sql"]},
+    package_data={
+        "src.models.target.ddl": ["*.sql"],
+        "scripts": ["migrations/*.sql", "migrations/adoption_manifest.json"],
+    },
     # Floors, not pins: `requirements.txt` holds the pins for a deploy, this
     # list holds the names a `pip install -e .` must resolve. Only the NAMES
     # have to agree, and `tests/test_dependency_declarations.py` holds them

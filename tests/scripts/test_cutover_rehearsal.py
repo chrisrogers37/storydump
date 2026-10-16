@@ -203,6 +203,55 @@ def documented_rollback_sql():
     return blocks[0]
 
 
+def documented_constraint_preflight_sql():
+    runbook = (
+        Path(__file__).resolve().parents[2]
+        / "documentation/operations/schema-cutover.md"
+    )
+    blocks = [
+        block
+        for block in re.findall(r"```sql\n(.*?)```", runbook.read_text(), re.S)
+        if "ck_posted_complete_violations" in block
+    ]
+    assert len(blocks) == 1, "the cutover runbook needs one constraint preflight"
+    return blocks[0]
+
+
+def test_documented_constraint_preflight_counts_false_checks_in_read_only_tx(
+    scratch_db,
+):
+    with psycopg2.connect(scratch_db) as conn, conn.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE public.post_intents ("
+            "state text, published_via text, cap_consumed_on timestamptz, "
+            "publish_step text, ig_container_id text)"
+        )
+        cur.execute(
+            "INSERT INTO public.post_intents VALUES "
+            "('posted', 'manual', now(), NULL, NULL), "
+            "('queued', 'legacy_backfill', NULL, NULL, NULL), "
+            "('posted', NULL, now(), NULL, NULL), "
+            "('posted', 'manual', now(), NULL, NULL), "
+            "('posted', 'manual', NULL, NULL, NULL)"
+        )
+    before_rows = fetch_one(scratch_db, "SELECT count(*) FROM public.post_intents")
+    sql = documented_constraint_preflight_sql()
+    with psycopg2.connect(scratch_db) as conn, conn.cursor() as cur:
+        statements = [
+            statement.strip() for statement in sql.split(";") if statement.strip()
+        ]
+        cur.execute(statements[0])
+        assert statements[0].upper() == "BEGIN READ ONLY"
+        cur.execute(statements[1])
+        assert cur.fetchone() == (1, 1)
+        cur.execute("SELECT current_setting('transaction_read_only')")
+        assert cur.fetchone() == ("on",)
+        cur.execute(statements[2])
+    assert (
+        fetch_one(scratch_db, "SELECT count(*) FROM public.post_intents") == before_rows
+    )
+
+
 def test_runbook_orders_neon_branch_rehearsal_before_production():
     runbook = (
         Path(__file__).resolve().parents[2]
@@ -233,11 +282,13 @@ def test_runbook_orders_neon_branch_rehearsal_before_production():
     assert branch_start < production_start
     branch = text[branch_start:production_start]
     assert 'CUTOVER_DSN="$CUTOVER_BRANCH_DSN"' in branch
+    preflight = branch.index("ck_posted_complete_violations")
     position = 0
     for command in (
         r"convert-ledger --confirm-legacy-ledger",
         r'--database-url "\$CUTOVER_DSN" apply\s*\n',
         r'parity --against "\$SCHEMA_CODE_DSN"',
+        r"ck_posted_complete_violations",
         r"apply --manual 001",
         r"validate_catalog_constraints\.sql",
         r"apply --manual 002 --confirm-archive-backup",
@@ -246,8 +297,14 @@ def test_runbook_orders_neon_branch_rehearsal_before_production():
         match = re.search(command, branch[position:])
         assert match, f"cutover command missing or out of order: {command}"
         position += match.end()
+    assert preflight < branch.index("apply --manual 001")
     assert "initial parity is diagnostic" in branch.lower()
     assert "zero differences" in branch.lower()
+    assert "Migration 001 is already" in branch
+    assert "do not rename" in branch and "repair the ledger" in branch
+    assert "membership grantors" in branch
+    assert "effective role-to-member edges" in branch
+    assert "Do not grant" in branch and "admin powers" in branch
     assert 'CUTOVER_DSN="$PRODUCTION_OWNER_DSN"' in text[production_start:]
     assert "Deploy only the fully integrated commit" in text[production_start:]
     assert "final parity reports zero differences" in text[production_start:]
